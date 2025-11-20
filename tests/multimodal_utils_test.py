@@ -233,11 +233,11 @@ class TestLlama4PostProcessing(unittest.TestCase):
     image_masks[1, 1] = 1
     # Total valid tokens = 8 + 16 = 24. This matches the mask slots.
 
-    # Case 1: Use the image_mask to filter for valid tiles.
-    merged = multimodal_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, image_masks)
+    # Case 1: Use the token_masks to filter for valid tiles.
+    merged = multimodal_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, token_masks=image_masks)
 
-    # Case 2: No image_mask, so all vision tokens are used in order.
-    merged_null = multimodal_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, None)
+    # Case 2: No token_masks, so all vision tokens are used in order.
+    merged_null = multimodal_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, token_masks=None)
 
     # The results should be different since one is masked and one is not.
     self.assertFalse(np.array_equal(merged, merged_null))

@@ -701,6 +701,10 @@ rope_interleave: True # RoPE with sin/cos interleaved vs concatenated
 rope_truncate: True # Floor lower bound and ceil upper bound for correction range
 rope_attention_scaling: False # Scale the rotary embedding output
 
+# MRoPE (Multi-dimensional RoPE) parameters for multimodal models
+use_mrope: False # Enable Multi-dimensional RoPE for Qwen3-Omni
+mrope_section: [24, 20, 20] # Dimensions for temporal, height, width in MRoPE
+
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
@@ -869,12 +873,17 @@ temperature_tuning: False
 
 # Multimodal flags
 use_multimodal: False
+use_audio: False
 freeze_vision_encoder_params: True
+freeze_audio_encoder_params: True
 dtype_mm: "float32"  # Data type for multimodal model's vision encoder
 remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding, can be multiple paths separated by comma, exp "/path/image1.jpg,/path/image2.jpg"
+audio_path: "" # Local audio path used for decoding, can be multiple paths separated by comma, exp "/path/audio1.wav,/path/audio2.wav"
+video_path: "" # Local video path used for decoding, can be multiple paths separated by comma, exp "/path/video1.mp4,/path/video2.mp4"
 image_placeholder: "<|image|>"
+audio_placeholder: "<|audio|>"
 posemb_type_for_vit: "learn"
 # max_num_images_per_example only applies for training when your image column is a list of images.
 # -1 means no limit, and will pad to the max possible number of images determined by sequence length.
@@ -903,6 +912,29 @@ out_hidden_size_for_vit: 512
 temporal_patch_size_for_vit: 2
 num_position_embeddings_for_vit: 1024
 deepstack_visual_indexes_for_vit: []
+
+# Qwen3-OmniMoe multimodal position encoding
+position_id_per_seconds: 25  # Temporal granularity for MRoPE (tokens per second)
+
+### Audio encoder configs (Qwen3-OmniMoe)
+d_model_for_audio: 256
+encoder_attention_heads_for_audio: 4
+encoder_ffn_dim_for_audio: 512
+encoder_layers_for_audio: 2
+attention_dropout_for_audio: 0.0
+activation_dropout_for_audio: 0.0
+activation_function_for_audio: "gelu"
+num_mel_bins_for_audio: 128
+max_source_positions_for_audio: 1500
+scale_embedding_for_audio: True
+n_window_for_audio: 50
+n_window_infer_for_audio: 800
+conv_chunksize_for_audio: 500
+downsample_hidden_size_for_audio: 256
+output_dim_for_audio: 512
+num_conv_layers_for_audio: 3
+max_timescale_for_audio: 10000.0
+max_sample_len_for_audio: 10000
 
 # Subslice shape in the form of "x,y,z" when using pathways (single controller). 
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.

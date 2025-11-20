@@ -109,7 +109,12 @@ def vision_sft_preprocessing_pipeline(
   )
   dataset = dataset.map(
       _input_pipeline_utils.prepare_text_for_image_fusion,
-      fn_kwargs={"column_name": text_columns[0], "model_name": config.model_name},
+      fn_kwargs={
+          "column_names": text_columns,
+          "model_name": config.model_name,
+          "spatial_merge_size": config.spatial_merge_size_for_vit,
+          "position_id_per_seconds": config.position_id_per_seconds,
+      },
   )
 
   dataset = _input_pipeline_utils.HFDataSource(

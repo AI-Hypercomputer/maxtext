@@ -1172,14 +1172,24 @@ class MultimodalGeneral(BaseModel):
 
   use_multimodal: bool = Field(False, description="Enable multimodal capabilities.")
   freeze_vision_encoder_params: bool = Field(True, description="Freeze the parameters of the vision encoder.")
+  freeze_audio_encoder_params: bool = Field(True, description="Freeze the parameters of the audio encoder.")
+  use_audio: bool = Field(False, description="Enable audio encoder for multimodal models.")
   image_size_for_vit: int = Field(896, description="Input image size for the Vision Transformer.")
   image_path: PathStr = Field("", description="Path to an image for decoding.")
+  audio_path: PathStr = Field("", description="Path to an audio file for decoding.")
+  video_path: PathStr = Field("", description="Path to a video file for decoding.")
+
   image_placeholder: str = Field("<|image|>", description="Placeholder string for images in text prompts.")
+  audio_placeholder: str = Field("<|audio|>", description="Placeholder string for audio in text prompts.")
   posemb_type_for_vit: str = Field("learn", description="Positional embedding type for the vision encoder.")
+  hidden_act_for_vit: str = Field("gelu", description="Activation function for the vision encoder.")
   max_num_images_per_example: int = Field(
       -1,
       description="Maximum number of images per example for training with image lists. -1 means no limit.",
   )
+  use_mrope: bool = Field(False, description="Enable Multi-dimensional RoPE for Qwen3-Omni models.")
+  mrope_section: list[int] = Field([24, 20, 20], description="Dimensions for temporal, height, width in MRoPE.")
+  position_id_per_seconds: int = Field(25, description="Temporal granularity for MRoPE (tokens per second).")
 
 
 class VisionTower(BaseModel):
@@ -1212,6 +1222,29 @@ class VisionProjector(BaseModel):
   projector_output_dim_for_vit: int = Field(4096, description="Output dimension for the vision projector.")
   pixel_shuffle_ratio_for_vit: float = Field(0.5, description="Pixel shuffle ratio for the Vision Transformer.")
   projector_dropout_for_vit: float = Field(0.0, description="Dropout rate for the vision projector.")
+
+
+class AudioEncoder(BaseModel):
+  """Configuration for the Audio Encoder in a multimodal model (e.g., Qwen3-OmniMoe)."""
+
+  d_model_for_audio: int = Field(256, description="Model dimension for the audio encoder.")
+  encoder_attention_heads_for_audio: int = Field(4, description="Number of attention heads in the audio encoder.")
+  encoder_ffn_dim_for_audio: int = Field(512, description="FFN dimension in the audio encoder.")
+  encoder_layers_for_audio: int = Field(2, description="Number of layers in the audio encoder.")
+  attention_dropout_for_audio: float = Field(0.0, description="Attention dropout rate for the audio encoder.")
+  activation_dropout_for_audio: float = Field(0.0, description="Activation dropout rate for the audio encoder.")
+  activation_function_for_audio: str = Field("gelu", description="Activation function for the audio encoder.")
+  num_mel_bins_for_audio: int = Field(128, description="Number of mel bins for audio features.")
+  max_source_positions_for_audio: int = Field(1500, description="Maximum source positions for audio.")
+  scale_embedding_for_audio: bool = Field(True, description="Whether to scale audio embeddings.")
+  n_window_for_audio: int = Field(50, description="Window size for audio processing.")
+  n_window_infer_for_audio: int = Field(800, description="Window size for audio inference.")
+  conv_chunksize_for_audio: int = Field(500, description="Chunk size for audio convolution.")
+  downsample_hidden_size_for_audio: int = Field(256, description="Hidden size for audio downsampling.")
+  output_dim_for_audio: int = Field(512, description="Output dimension for audio encoder.")
+  num_conv_layers_for_audio: int = Field(3, description="Number of convolutional layers for audio.")
+  max_timescale_for_audio: float = Field(10000.0, description="Maximum timescale for audio positional encoding.")
+  max_sample_len_for_audio: int = Field(10000, description="Maximum sample length for audio.")
 
 
 class Debug(BaseModel):
@@ -1507,6 +1540,7 @@ class MaxTextConfig(
     MultimodalGeneral,
     VisionTower,
     VisionProjector,
+    AudioEncoder,
     # Derived
     DerivedValues,
 ):
@@ -1850,7 +1884,7 @@ class MaxTextConfig(
       if self.decoder_block == DecoderBlockType.GPT_OSS and not self.sparse_matmul and self.capacity_factor != -1:
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
     if self.use_multimodal:
-      valid_mm_models = ("gemma3-4b", "gemma3-12b", "gemma3-27b", "llama4-17b-16e", "llama4-17b-128e")
+      valid_mm_models = ("gemma3-4b", "gemma3-12b", "gemma3-27b", "llama4-17b-16e", "llama4-17b-128e", "qwen3-omni-30b-a3b")
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
       if self.use_sft:

@@ -56,3 +56,31 @@ num_position_embeddings_for_vit: 2304
 deepstack_visual_indexes_for_vit: [8, 16, 24]
 
 use_multimodal: true
+use_audio: true
+# Audio Encoder Configuration (need to set use_audio=true to enable)
+# Based on https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_omni_moe/configuration_qwen3_omni_moe.py
+d_model_for_audio: 1280
+encoder_layers_for_audio: 32
+encoder_attention_heads_for_audio: 20
+encoder_ffn_dim_for_audio: 5120
+max_source_positions_for_audio: 1500
+num_mel_bins_for_audio: 128
+downsample_hidden_size_for_audio: 480
+output_dim_for_audio: 2048
+attention_dropout_for_audio: 0.0
+n_window_for_audio: 50
+n_window_infer_for_audio: 400
+conv_chunksize_for_audio: 500
+num_conv_layers_for_audio: 3
+max_timescale_for_audio: 10000.0
+max_sample_len_for_audio: 10000
+
+freeze_audio_encoder_params: false
+freeze_vision_encoder_params: false
+
+matmul_precision: "highest"
+
+# MRoPE Settings (Multi-dimensional RoPE for multimodal)
+use_mrope: true
+mrope_section: [24, 20, 20]
+image_placeholder: "<|image|>"

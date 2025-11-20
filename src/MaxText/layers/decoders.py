@@ -148,6 +148,8 @@ class DecoderLayer(nn.Module):
         ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
+        use_mrope=cfg.use_mrope,
+        mrope_section=cfg.mrope_section,
         model_mode=model_mode,
     )
 
@@ -557,6 +559,8 @@ class Decoder(nn.Module):
       image_embeddings=None,
       bidirectional_mask=None,
       image_masks=None,
+      audio_embeddings=None,
+      audio_mask=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
@@ -575,13 +579,25 @@ class Decoder(nn.Module):
       ]:
         y = multimodal_utils.merge_mm_embeddings(
             text_embeddings=y,
-            vision_embeddings=image_embeddings,
+            multimodal_embeddings=image_embeddings,
             mask=bidirectional_mask,
-            image_masks=image_masks,
+            token_masks=image_masks, 
         )
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       else:
         raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
+
+    # Merge the audio embeddings with the text embeddings for qwen3-omni models
+    if audio_embeddings is not None and cfg.use_audio:
+      if cfg.model_name in ["qwen3-omni-30b-a3b"]:
+        y = multimodal_utils.merge_mm_embeddings(
+            text_embeddings=y,
+            multimodal_embeddings=audio_embeddings,
+            mask=audio_mask,
+            token_masks=None,
+        )
+      else:
+        raise ValueError(f"Unsupported model_name for audio: {cfg.model_name}")
 
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
@@ -683,6 +699,30 @@ class Decoder(nn.Module):
 
     return logits
 
+  def _deepstack_process(self, hidden_states, bidirectional_mask, visual_embeds):
+    """Process deepstack visual embeddings by adding them to hidden states at visual token positions.
+
+    Args:
+      hidden_states: [batch, seq_len, hidden_dim] decoder hidden states
+      bidirectional_mask: [batch, bidirectional_mask] boolean mask 
+      visual_embeds: [batch, num_visual_tokens, hidden_dim] visual features from encoder layer
+
+    Returns:
+      Updated hidden_states with visual features added at visual positions
+    """
+    # Expand mask to [batch, seq_len, 1] for broadcasting
+    mask_expanded = bidirectional_mask[:, :, jnp.newaxis]
+    # Use cumsum to map each True position in mask to its index in visual_embeds
+    visual_token_idx = jnp.cumsum(bidirectional_mask, axis=1) - 1  # [batch, seq_len], 0-indexed
+
+    # Gather visual tokens: for each position, get the corresponding visual token
+    batch_idx = jnp.arange(hidden_states.shape[0])[:, jnp.newaxis]  # [batch, 1]
+    visual_embeds_scattered = visual_embeds[batch_idx, visual_token_idx, :]  # [batch, seq_len, hidden]
+
+    # Only add where mask is True: hidden_states += visual_embeds * mask
+    hidden_states = hidden_states + visual_embeds_scattered * mask_expanded
+    return hidden_states
+
   @nn.compact
   def __call__(
       self,
@@ -700,6 +740,9 @@ class Decoder(nn.Module):
       image_masks: None | jnp.ndarray = None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
+      audio_embeddings: None | jnp.ndarray = None,
+      audio_mask: None | jnp.ndarray = None,
+      deepstack_visual_embeds: None | list[jnp.ndarray] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -715,7 +758,12 @@ class Decoder(nn.Module):
         image_embeddings,
         bidirectional_mask,
         image_masks,
+        audio_embeddings,
+        audio_mask,
     )
+
+    # Capture embeddings after merge for debugging/comparison
+    self.sow('intermediates', 'embeddings_after_merge', y)
 
     policy = self.get_remat_policy()
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
@@ -830,6 +878,14 @@ class Decoder(nn.Module):
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
+          # Deepstack visual embedding injection is not supported with scan_layers=True
+          # Use scan_layers=False to enable deepstack
+          if deepstack_visual_embeds is not None and image_masks is not None:
+            raise NotImplementedError(
+                "Deepstack visual embedding injection requires scan_layers=False. "
+                "Set scan_layers=False in your config to use deepstack features."
+            )
+
           y, _ = self.scan_decoder_layers(
               cfg,
               RemattedBlockLayer,
@@ -907,6 +963,12 @@ class Decoder(nn.Module):
             )
             if kv_caches is not None and kv_cache is not None:
               kv_caches[lyr] = kv_cache
+
+            if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
+              visual_embeds = deepstack_visual_embeds[lyr]
+              # Use image_masks to identify visual token positions
+              if bidirectional_mask is not None and visual_embeds is not None:
+                y = self._deepstack_process(y, bidirectional_mask, visual_embeds)
 
     assert isinstance(y, jax.Array)
 
