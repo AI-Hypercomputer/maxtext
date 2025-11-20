@@ -28,6 +28,7 @@ RUN pip install keyring keyrings.google-artifactregistry-auth
 RUN pip install numba==0.61.2
 
 COPY tunix /tunix
+RUN pip uninstall -y google-tunix
 RUN pip install -e /tunix --no-cache-dir
 
 
@@ -49,6 +50,7 @@ RUN pip install -e /tpu-inference --no-cache-dir --pre \
     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
     --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
+RUN pip install --no-deps qwix==0.1.4
 
 RUN if [ "$MODE" = "post-training-experimental" ]; then \
     echo "MODE=post-training-experimental: Re-installing JAX/libtpu"; \
