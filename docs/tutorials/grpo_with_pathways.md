@@ -29,6 +29,50 @@ Furthermore, we use Pathways for [orchestration](https://cloud.google.com/ai-hyp
 Follow instructions in [Install MaxText](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/install_maxtext.md), but 
 recommend creating the virtual environment outside the `maxtext` directory.
 
+
+## Setup the following environment variables before running GRPO
+
+Setup following environment variables before running GRPO
+
+```bash
+# -- Model configuration --
+export HF_MODEL='llama3.1-70b-Instruct'
+export MODEL='llama3.1-70b'
+export TOKENIZER='meta-llama/Llama-3.1-70B-Instruct'
+export HF_TOKEN=<Hugging Face access token>
+
+# -- MaxText configuration --
+export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
+export RUN_NAME=llama-3-70b-grpo
+export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/0/items
+
+# -- Workload configuration --
+export WORKLOAD=${RUN_NAME}
+export TPU_TYPE='v5p-128'
+export TPU_CLUSTER=<cluster name>
+export PROJECT_ID=<GCP project ID>
+export ZONE=<zone name>
+```
+
+## Get your model checkpoint
+
+You can convert a Hugging Face checkpoint to MaxText format using the `src/MaxText/utils/ckpt_conversion/to_maxtext.py` script. This is useful if you have a pre-trained model from Hugging Face that you want to use with MaxText.
+
+First, ensure you have the necessary dependencies installed. Then, run the conversion script on a CPU machine. For large models, it is recommended to use the `--lazy_load_tensors` flag to reduce memory usage during conversion. \
+For example, converting a Llama3.1-70B model scanned checkpoint using `--lazy_load_tensors=true` will use around 200GB of RAM and completes in ~10 mins. This command will download the Hugging Face model and convert it to the MaxText format, saving it to the specified GCS bucket.
+
+```bash
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# using --lazy_load_tensors=true here will reduce the memory usage. eg, Llama3.1-70B conversion takes around 86GB of RAM
+python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
+    model_name=${HF_MODEL} \
+    hf_access_token=${HF_TOKEN} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME} \
+    scan_layers=true checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false \
+    skip_jax_distributed_system=true --lazy_load_tensors=true
+```
+
 ## Build and Upload MaxText Docker Image with Tunix, vLLM, tpu-inference dependencies
 
 ### Installing stable releases of tunix and vllm-tpu
@@ -45,11 +89,13 @@ You can also use `bash dependencies/scripts/docker_build_dependency_image.sh MOD
 ### Install from locally git cloned repo's
 
 You can also locally git clone [tunix](https://github.com/google/tunix), [tpu-inference](https://github.com/vllm-project/tpu-inference), [vllm](https://github.com/vllm-project/vllm.git) and then use the following command to build a docker image using them: 
-`bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training POST_TRAINING_SOURCE=local`
+```
+bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training POST_TRAINING_SOURCE=local
+```
 
 ### Upload the dependency docker image along with MaxText code
 ```
-bash docker_upload_runner.sh CLOUD_IMAGE_NAME=path/to/gcr.io
+bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME}
 ```
 
 ### Submit your jobs
@@ -57,16 +103,16 @@ bash docker_upload_runner.sh CLOUD_IMAGE_NAME=path/to/gcr.io
 Please create a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster), and you can submit the `train_rl.py` script via [XPK](https://github.com/AI-Hypercomputer/xpk)
 ```
 xpk workload create-pathways --workload $WORKLOAD \
---docker-image path/to/gcr.io:latest --cluster $TPU_CLUSTER \
+--docker-image <path/to/gcr.io> --cluster $TPU_CLUSTER \
 --tpu-type=$TPU_TYPE --num-slices=1  --zone=$ZONE \
 --project=$PROJECT_ID --priority=high \
---command "HF_TOKEN=$HF_TOKEN TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' # Llama3.1-70B-Instruct
+--command "TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  model_name=llama3.1-70b \
-  tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
-  load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
+  model_name=${MODEL} \
+  tokenizer_path=${TOKENIZER} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH} \
+  run_name=${RUN_NAME} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   hf_access_token=$HF_TOKEN"
 ```
 
