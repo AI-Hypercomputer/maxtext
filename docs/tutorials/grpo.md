@@ -31,6 +31,8 @@ recommend creating the virtual environment outside the `maxtext` directory.
 
 ## vLLM and tpu-inference installations
 
+### From PyPI releases
+
 Next, run the following bash script to get all the necessary installations inside the virtual environment (for e.g., `maxtext_venv`).
 This will take few minutes. Follow along the installation logs and look out for any issues!
 
@@ -40,6 +42,9 @@ bash ~/maxtext/src/MaxText/examples/install_tunix_vllm_requirement.sh
 
 Primarily, it installs `vllm-tpu` which is [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby providing TPU inference for vLLM, with unified JAX and PyTorch support.
 
+### From Github
+
+You can also locally git clone [tunix](https://github.com/google/tunix) and install using the instructions [here](https://github.com/google/tunix?tab=readme-ov-file#installation). Similarly install [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) from source following the instructions [here](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/#install-from-source)
 
 ## Run GRPO
 
