@@ -23,7 +23,7 @@ from jax.sharding import Mesh, NamedSharding
 import jax
 import jax.numpy as jnp
 
-from flax import nnx, linen as nn
+from flax import nnx
 
 from MaxText.common_types import (
     DecoderBlockType,
@@ -53,7 +53,7 @@ from MaxText.common_types import (
     EP_AS_CONTEXT,
     AttentionType,
 )
-from MaxText.sharding import maybe_shard_with_logical
+from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
@@ -1003,7 +1003,7 @@ class Attention(nnx.Module):
 
     inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
     inputs_kv = self._maybe_shard_with_logical(inputs_kv, input_axis_names)
-    qkv_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(input_axis_names))
+    qkv_sharding = create_sharding(self.mesh, input_axis_names)
 
     # apply projection.
     if self.config.fused_qkv:

@@ -19,7 +19,7 @@
 from functools import partial
 
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
@@ -32,7 +32,7 @@ from MaxText.layers.normalizations import rms_norm
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.sharding import maybe_shard_with_logical
+from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from MaxText.inference import page_manager
 from MaxText.common_types import MODEL_MODE_PREFILL
 
@@ -75,7 +75,7 @@ def self_attention_with_norm(
       mesh=mesh,
       shard_mode=cfg.shard_mode,
   )
-  lnx_sharding = NamedSharding(mesh, nn.logical_to_mesh_axes(logical_axis_names))
+  lnx_sharding = create_sharding(mesh, logical_axis_names)
   lnx = _maybe_shard_with_logical(lnx, logical_axis_names)
 
   attention_layer = attention_mla.mla_as_linen(
@@ -189,8 +189,8 @@ class DeepSeekDenseLayer(nn.Module):
       inputs = inputs[0]
 
     _maybe_shard_with_logical = partial(maybe_shard_with_logical, mesh=self.mesh, shard_mode=self.config.shard_mode)
-    lnx_out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(logical_axis_names))
-    mlp_intermediate_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(mlp_logical_axis_names))
+    lnx_out_sharding = create_sharding(self.mesh, logical_axis_names)
+    mlp_intermediate_sharding = create_sharding(self.mesh, mlp_logical_axis_names)
     inputs = _maybe_shard_with_logical(inputs, logical_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
@@ -273,8 +273,8 @@ class DeepSeekMoELayer(nn.Module):
       inputs = inputs[0]
 
     _maybe_shard_with_logical = partial(maybe_shard_with_logical, mesh=self.mesh, shard_mode=self.config.shard_mode)
-    lnx_out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(logical_axis_names))
-    lnx_intermediate_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(mlp_logical_axis_names))
+    lnx_out_sharding = create_sharding(self.mesh, logical_axis_names)
+    lnx_intermediate_sharding = create_sharding(self.mesh, mlp_logical_axis_names)
     inputs = _maybe_shard_with_logical(inputs, logical_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
