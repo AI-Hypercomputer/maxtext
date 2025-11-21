@@ -75,10 +75,10 @@ def from_config(
 
 
 def get_transformer_model(
-    config, mesh, quant, rngs: nnx.Rngs | None = None, model_mode: str = MODEL_MODE_TRAIN
+    config, mesh, quant, rngs: nnx.Rngs, model_mode: str = MODEL_MODE_TRAIN
 ) -> nn.Module:
   """Returns the transformer model based on the configuration."""
-  if rngs is not None:
+  if config.model_fsdp_ag_once:
     return models.ZeroOneTransformer(config, mesh, quant=quant, model_mode=model_mode, rngs=rngs)
   return models.Transformer(config, mesh, quant=quant, model_mode=model_mode, rngs=rngs)
 
@@ -94,8 +94,20 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
 
 def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
+  def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
+    if rng_key is None:
+      rng_key = jax.random.PRNGKey(config.init_weights_seed)
 
-  abstract_model = nnx.eval_shape(lambda: from_config(config, devices))
+    if model_mode == MODEL_MODE_TRAIN:
+      rngs = nnx.Rngs(params=rng_key, dropout=1)
+    else:
+      rngs = nnx.Rngs(params=rng_key)  # disable dropout RNG for inference
+
+    return from_config(config, devices, mesh, rngs=rngs, model_mode=model_mode)
+
+  _create_model_partial = partial(_create_model, mesh=mesh, model_mode=model_mode, rng_key=rng_key)
+
+  abstract_model = nnx.eval_shape(_create_model_partial)
   graphdef, abstract_state = nnx.split(abstract_model)
   specs = nnx.get_partition_spec(abstract_state)
 
