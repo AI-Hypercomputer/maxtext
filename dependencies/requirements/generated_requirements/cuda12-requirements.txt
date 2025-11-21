@@ -233,9 +233,9 @@ toml>=0.10.2
 tomlkit>=0.13.3
 toolz>=1.1.0
 tqdm>=4.67.1
-transformer-engine-cu12>=2.9.0
-transformer-engine-jax>=2.9.0
-transformer-engine>=2.9.0
+transformer-engine-cu12==2.7.0
+transformer-engine-jax==2.7.0
+transformer-engine==2.7.0
 transformers>=4.57.1
 treescope>=0.1.10
 typeguard>=2.13.3
