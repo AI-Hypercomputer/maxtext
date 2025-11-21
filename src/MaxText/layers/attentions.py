@@ -23,7 +23,7 @@ from jax.sharding import Mesh, NamedSharding
 import jax
 import jax.numpy as jnp
 
-from flax import nnx, linen as nn
+from flax import nnx
 
 from MaxText.common_types import (
     DecoderBlockType,
@@ -53,7 +53,7 @@ from MaxText.common_types import (
     EP_AS_CONTEXT,
     AttentionType,
 )
-from MaxText.sharding import maybe_shard_with_logical
+from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
@@ -1001,11 +1001,11 @@ class Attention(nnx.Module):
     if self.config.fused_qkv:
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
     else:
-      query_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.query_axis_names))
+      query_sharding = create_sharding(self.mesh, self.query_axis_names)
       query = self.query_projection(inputs_q, out_sharding=query_sharding)
-      key_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.key_axis_names))
+      key_sharding = create_sharding(self.mesh, self.key_axis_names)
       key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=key_sharding)
-      value_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.value_axis_names))
+      value_sharding = create_sharding(self.mesh, self.value_axis_names)
       value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=value_sharding)
 
     gate = None

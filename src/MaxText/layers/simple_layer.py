@@ -15,10 +15,11 @@
 """ Simple decoder layers for testing and debugging purposes."""
 
 from jax import numpy as jnp
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 
-from flax import nnx, linen as nn
+from flax import nnx
 from MaxText.common_types import Config, ShardMode
+from MaxText.sharding import create_sharding
 from MaxText.layers import quantizations, nnx_wrappers
 from MaxText.layers.initializers import variable_to_logically_partitioned
 
@@ -53,9 +54,7 @@ class SimpleDecoderLayer(nnx.Module):
 
     activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
     self.out_sharding = (
-        NamedSharding(self.mesh, nn.logical_to_mesh_axes(activation_axis_names))
-        if config.shard_mode == ShardMode.EXPLICIT
-        else None
+        create_sharding(self.mesh, activation_axis_names) if config.shard_mode == ShardMode.EXPLICIT else None
     )
 
   def __call__(
@@ -107,14 +106,10 @@ class SimpleMlpDecoderLayer(nnx.Module):
 
     activation_axes_names = ("activation_batch", "activation_norm_length", "activation_embed")
     self.activation_sharding = (
-        NamedSharding(mesh, nn.logical_to_mesh_axes(activation_axes_names))
-        if config.shard_mode == ShardMode.EXPLICIT
-        else None
+        create_sharding(mesh, activation_axes_names) if config.shard_mode == ShardMode.EXPLICIT else None
     )
     mlp_axes_names = ("activation_batch", "activation_norm_length", "activation_mlp")
-    self.mlp_sharding = (
-        NamedSharding(mesh, nn.logical_to_mesh_axes(mlp_axes_names)) if config.shard_mode == ShardMode.EXPLICIT else None
-    )
+    self.mlp_sharding = create_sharding(mesh, mlp_axes_names) if config.shard_mode == ShardMode.EXPLICIT else None
 
   def __call__(
       self,

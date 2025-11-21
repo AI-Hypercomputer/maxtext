@@ -113,6 +113,7 @@ class AotHloIdenticalTest(unittest.TestCase):
         "dataset_type=synthetic",
         "steps=1",
         "enable_checkpointing=False",
+        "log_config=False",
     ]
     if extra_args is not None:
       shared_args.extend(extra_args)
@@ -155,6 +156,7 @@ class AotHloIdenticalTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_default_hlo_match(self):
     self.assert_compile_and_real_match_hlo("default_run")
+    assert False
 
   @pytest.mark.tpu_only
   @pytest.mark.scheduled_only

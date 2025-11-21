@@ -32,6 +32,7 @@ from MaxText import common_types as ctypes
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.kernels import megablox as mblx
+from MaxText.sharding import logical_to_mesh_axes
 from MaxText.layers import attentions, linears, nnx_wrappers, quantizations
 from MaxText.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
 import numpy as np
@@ -917,19 +918,21 @@ class RoutedMoE(nnx.Module):
       batch_logical_axis = "activation_batch_no_exp"
 
     if self.get_tensor_transpose_parallelism_size() > 1:
-      input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))
-      w0_bias_pspec = nn.logical_to_mesh_axes(("exp", None))
-      w1_bias_pspec = nn.logical_to_mesh_axes(("exp", None))
-      wo_bias_pspec = nn.logical_to_mesh_axes(("exp", "activation_embed"))
+      input_partition_pspec = logical_to_mesh_axes(
+          (batch_logical_axis, "activation_norm_length", "activation_embed"), self.mesh
+      )
+      w0_bias_pspec = logical_to_mesh_axes(("exp", None), self.mesh)
+      w1_bias_pspec = logical_to_mesh_axes(("exp", None), self.mesh)
+      wo_bias_pspec = logical_to_mesh_axes(("exp", "activation_embed"), self.mesh)
     else:
-      input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
-      w0_bias_pspec = nn.logical_to_mesh_axes(("exp", "activation_mlp"))
-      w1_bias_pspec = nn.logical_to_mesh_axes(("exp", "activation_mlp"))
-      wo_bias_pspec = nn.logical_to_mesh_axes(("exp", "activation_embed"))
+      input_partition_pspec = logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None), self.mesh)
+      w0_bias_pspec = logical_to_mesh_axes(("exp", "activation_mlp"), self.mesh)
+      w1_bias_pspec = logical_to_mesh_axes(("exp", "activation_mlp"), self.mesh)
+      wo_bias_pspec = logical_to_mesh_axes(("exp", "activation_embed"), self.mesh)
 
-    gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+    gate_logits_pspec = logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None), self.mesh)
     if self.config.model_name.startswith("deepseek3"):
-      pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      pre_bias_logits_pspec = logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None), self.mesh)
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
@@ -941,19 +944,19 @@ class RoutedMoE(nnx.Module):
       quantization_rule = qpl.get_current_rule("gmm")
       if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
         # special sharding when using static scaling for weights in quantization with fsdp_shard_on_exp
-        w0_pspec = nn.logical_to_mesh_axes(self.wi_kernel_axes)
-        w1_pspec = nn.logical_to_mesh_axes(self.wi_kernel_axes)
-        wo_pspec = nn.logical_to_mesh_axes(self.wo_kernel_axes)
+        w0_pspec = logical_to_mesh_axes(self.wi_kernel_axes, self.mesh)
+        w1_pspec = logical_to_mesh_axes(self.wi_kernel_axes, self.mesh)
+        wo_pspec = logical_to_mesh_axes(self.wo_kernel_axes, self.mesh)
         weight_gather = True
       else:
         # special sharding for dsv3 to remove overhead between gmm/AG
-        w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-        w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-        wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+        w0_pspec = logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"), self.mesh)
+        w1_pspec = logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"), self.mesh)
+        wo_pspec = logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None), self.mesh)
     else:
-      w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+      w0_pspec = logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"), self.mesh)
+      w1_pspec = logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"), self.mesh)
+      wo_pspec = logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"), self.mesh)
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
@@ -976,7 +979,7 @@ class RoutedMoE(nnx.Module):
             wo_bias_pspec,
             None,
         ),
-        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))),
+        out_specs=(logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"), self.mesh)),
         check_vma=False,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
@@ -1073,14 +1076,17 @@ class RoutedMoE(nnx.Module):
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
+
       def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
-        if pspec_dim_axes is None: return []
+        if pspec_dim_axes is None:
+          return []
         axes = (pspec_dim_axes,) if isinstance(pspec_dim_axes, str) else pspec_dim_axes
         active = []
         for ax in axes:
           if ax and self.mesh.shape.get(ax, 1) > 1:
             active.append((ax, tensor_dim_index))
         return active
+
       wi_gather_axes = []
       wo_gather_axes = []
 
