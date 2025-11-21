@@ -33,7 +33,6 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ma
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from MaxText import max_utils
-from MaxText.gcloud_stub import is_decoupled
 from MaxText.common_types import (
     Array,
     AttentionType,
@@ -80,15 +79,8 @@ from MaxText.layers.initializers import variable_to_logically_partitioned
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.sharding import logical_to_mesh_axes, maybe_shard_with_name
 import numpy as np
-
-try:  # Optional tokamax kernels (decoupled environments may omit)
-  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
-  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
-  _TOKAMAX_AVAILABLE = True
-except ModuleNotFoundError:
-  tokamax_splash_kernel = None  # type: ignore
-  tokamax_splash_mask = None  # type: ignore
-  _TOKAMAX_AVAILABLE = False
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -1097,20 +1089,10 @@ class AttentionOp(nnx.Module):
         f" got {query.shape[0]=}/{devices_in_data_fsdp=}"
     )
 
-    # 1) If decoupled mode: always fallback (never use tokamax), print if requested.TODO(gulsumgudukbay) remove tokamax from decoupling logic)
-    # 2) If not decoupled: use tokamax only if required (config flag) AND kernel available.
-    use_tokamax = (not is_decoupled()) and self.config.use_tokamax_splash and tokamax_splash_kernel is not None
-    if self.config.use_tokamax_splash and not use_tokamax:
-      # Reasons: decoupled mode OR kernel missing
-      print(
-          f"[TOKAMAX FALLBACK] decoupled={is_decoupled()} tokamax_available={tokamax_splash_kernel is not None}; using standard splash attention.",
-          flush=True,
-      )
-
     # create_splash_attention config
     def create_sa_config(config, query, key, attn_logits_soft_cap):
-      if use_tokamax:
-        return tokamax_splash_kernel.SplashConfig(
+      if config.use_tokamax_splash:
+        sa_config = tokamax_splash_kernel.SplashConfig(
             block_q=min(global_block_q, query.shape[2]),
             block_kv=min(global_block_kv, key.shape[2]),
             block_kv_compute=min(global_block_kv_compute, key.shape[2]),
@@ -1139,24 +1121,26 @@ class AttentionOp(nnx.Module):
             else None,
             dq_reduction_steps=config.dq_reduction_steps if config.dq_reduction_steps > 0 else None,
         )
-      return splash_attention_kernel.BlockSizes(
-          block_q=min(global_block_q, query.shape[2]),
-          block_kv=min(global_block_kv, key.shape[2]),
-          block_kv_compute=min(global_block_kv_compute, key.shape[2]),
-          block_q_dkv=min(global_block_q_dkv, query.shape[2]),
-          block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
-          block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
-          block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
-          block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
-          use_fused_bwd_kernel=global_use_fused_bwd_kernel,
-          q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
-          k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
-          v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
-      )
+      else:
+        sa_config = splash_attention_kernel.BlockSizes(
+            block_q=min(global_block_q, query.shape[2]),
+            block_kv=min(global_block_kv, key.shape[2]),
+            block_kv_compute=min(global_block_kv_compute, key.shape[2]),
+            block_q_dkv=min(global_block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
+            block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
+            block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
+            use_fused_bwd_kernel=global_use_fused_bwd_kernel,
+            q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
+            k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
+            v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+        )
+      return sa_config
 
     sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
     mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
-    mask_module = tokamax_splash_mask if use_tokamax else splash_attention_mask
+    mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
     if self.attention_type == AttentionType.FULL:
       mask = mask_module.FullMask(mask_shape)
     else:
@@ -1183,7 +1167,7 @@ class AttentionOp(nnx.Module):
       mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
 
     max_logit_value = None
-    if use_tokamax:
+    if self.config.use_tokamax_splash:
       # Create mask
       single_head_mask = mask  # tokamax now just uses a single mask and assumes broadcast to all heads
       if self.config.use_max_logit_estimate > 0:
@@ -1315,34 +1299,27 @@ class AttentionOp(nnx.Module):
       else:
         decoder_segment_ids_tuple = None
 
-      if use_tokamax:
-        if self.config.use_tokamax_splash:
-          kernel = partial(splash_kernel, max_logit_value=max_logit_value)
-          attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
-              query, key, value, decoder_segment_ids_tuple, sinks
-          )
-        elif self.config.use_jax_splash:
-          materialized_mask = jnp.asarray(mask[:, :])
-          attention_output = jax_flash_attention.flash_attention_block_masked(
-              query,
-              key,
-              value,
-              decoder_segment_ids_tuple,
-              block_kv=self.config.sa_block_kv,
-              block_q=self.config.sa_block_q,
-              mask=materialized_mask,
-              mask_value=DEFAULT_MASK_VALUE,
-          )
-        else:
-          attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
-              query, key, value, decoder_segment_ids_tuple, sinks
-          )
-
+      if self.config.use_tokamax_splash:
+        kernel = partial(splash_kernel, max_logit_value=max_logit_value)
+        attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
+            query, key, value, decoder_segment_ids_tuple, sinks
+        )
+      elif self.config.use_jax_splash:
+        materialized_mask = jnp.asarray(mask[:, :])
+        attention_output = jax_flash_attention.flash_attention_block_masked(
+            query,
+            key,
+            value,
+            decoder_segment_ids_tuple,
+            block_kv=self.config.sa_block_kv,
+            block_q=self.config.sa_block_q,
+            mask=materialized_mask,
+            mask_value=DEFAULT_MASK_VALUE,
+        )
       else:
         attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
             query, key, value, decoder_segment_ids_tuple, sinks
         )
-
       return attention_output
 
     def _maybe_shard_with_pspec(inputs, pspec: jax.sharding.PartitionSpec | None):
@@ -1429,81 +1406,7 @@ class AttentionOp(nnx.Module):
       attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
       attn_mask = jnp.where((attn_mask >= DEFAULT_MASK_VALUE * 0.5), 0, 1).astype(jnp.uint8)
 
-  def cudnn_flash_attention(
-    self,
-    query: Array,
-    key: Array,
-    value: Array,
-    decoder_segment_ids: Array | None,
-    model_mode: str = MODEL_MODE_TRAIN,
-  ) -> Array:
-    """CUDNN Flash Attention with Transformer Engine.
-    1. Stable API, supports MHA, GQA, SWA, Packing and Context Parallelism
-    2. Context Parallelism currently only supports causal masking and no packing
-    """
-    # These imports are only meant to work in a GPU build.
-    # pylint: disable=import-outside-toplevel
-    from transformer_engine.jax.flax.transformer import DotProductAttention  # pytype: disable=import-error
-    from transformer_engine.jax.attention import SequenceDescriptor  # pytype: disable=import-error
-
-    _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
-
-    using_context_parallelism = self.mesh.shape["context"] > 1
-
-    # Initialize default attention configuration
-    sliding_window_size = None
-    mask_type = "padding_causal"
-    qkv_layout = "BSHD_BSHD_BSHD"  # Non-packed format: 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
-    max_segments_per_seq = 1  # max number of segments per sequence; for non-packed its 1
-
-    # Handle local sliding window attention if configured
-    if self.attention_type == AttentionType.LOCAL_SLIDING:
-      sliding_window_size = [self.sliding_window_size, 0]
-
-    # Handle packing configurations
-    if self.config.packing and self.config.dataset_type != "synthetic":
-      qkv_layout = "THD_THD_THD"  # Packed format: 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
-      if decoder_segment_ids is None:
-        decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=None)
-      # Create dummy SequenceDescriptor for lazy_init
-      dummy_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=dummy_segment_ids, segment_pos=None)
-      max_segments_per_seq = self.config.max_segments_per_seq
-    elif using_context_parallelism:
-      if self.attention_type == AttentionType.LOCAL_SLIDING:
-        raise AssertionError("Sliding window attention is not supported for context parallelism")
-      # Context parallelism without packing: only supports causal masking
-      attn_mask = None
-      dummy_attn_mask = None
-      mask_type = "causal"
-    else:
-      # Default case: no packing, no context parallelism
-      dummy_attn_mask = jnp.zeros((1, 1, 1, self.max_target_length, self.max_target_length), dtype=jnp.uint8)
-      attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
-      attn_mask = jnp.where((attn_mask >= DEFAULT_MASK_VALUE * 0.5), 0, 1).astype(jnp.uint8)
-
-    if is_decoupled():
-      dpa_layer = DotProductAttention(
-        head_dim=head_dim,
-        num_attention_heads=self.num_query_heads,
-        num_gqa_groups=self.num_kv_heads,
-        attn_mask_type=mask_type,  # 'no_mask', 'padding', 'causal', or 'padding_causal'
-        attn_bias_type="no_bias",  # 'no_bias', 'pre_scale_bias' or 'post_scale_bias'
-        attention_dropout=self.dropout_rate,
-        dropout_rng_name="aqt",
-        dtype=self.dtype,
-        float32_logits=self.float32_logits,
-        qkv_layout=qkv_layout,
-        scale_factor=1.0,
-        transpose_batch_sequence=False,
-        window_size=sliding_window_size,
-        context_parallel_causal_load_balanced=self.config.context_parallel_load_balance,
-        context_parallel_axis="context",
-        max_segments_per_seq=max_segments_per_seq,
-      )
-    else:
-      dpa_layer = DotProductAttention(
+    dpa_layer = DotProductAttention(
         head_dim=head_dim,
         num_attention_heads=self.num_query_heads,
         num_gqa_groups=self.num_kv_heads,
@@ -1521,15 +1424,15 @@ class AttentionOp(nnx.Module):
         context_parallel_axis="context",
         context_parallel_strategy=self.config.context_parallel_strategy,
         max_segments_per_seq=max_segments_per_seq,
-      )
+    )
 
     dpa_layer = nnx_wrappers.ToNNX(dpa_layer, rngs=self.rngs)
     dummy_query_prefill = jnp.zeros(
-      (1, self.max_target_length, self.num_query_heads, self.config.head_dim), dtype=self.dtype
+        (1, self.max_target_length, self.num_query_heads, self.config.head_dim), dtype=self.dtype
     )
     dummy_key_prefill = jnp.zeros((1, self.max_target_length, self.num_kv_heads, self.config.head_dim), dtype=self.dtype)
     dummy_value_prefill = jnp.zeros(
-      (1, self.max_target_length, self.num_kv_heads, self.config.head_dim), dtype=self.dtype
+        (1, self.max_target_length, self.num_kv_heads, self.config.head_dim), dtype=self.dtype
     )
 
     dpa_layer.lazy_init(dummy_query_prefill, dummy_key_prefill, dummy_value_prefill, sequence_descriptor=dummy_attn_mask)
@@ -1990,4 +1893,3 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
             self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
-

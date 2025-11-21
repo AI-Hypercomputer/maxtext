@@ -28,6 +28,7 @@ from typing import Any
 from etils import epath
 import flax
 import jax
+from pathlib import Path
 from contextlib import contextmanager
 from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec as P
@@ -36,7 +37,7 @@ import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
 import psutil
-from MaxText.gcloud_stub import writer, _TENSORBOARDX_AVAILABLE  # centralized optional tensorboardX stub
+from MaxText.gcloud_stub import writer, _TENSORBOARDX_AVAILABLE
 
 from MaxText import max_logging
 from MaxText.gcloud_stub import is_decoupled
@@ -140,11 +141,31 @@ def summarize_size_from_pytree(params):
 
 
 def initialize_summary_writer(tensorboard_dir, run_name):
-  summary_writer_path = os.path.join(tensorboard_dir, run_name)
   if jax.process_index() != 0:
     return None
+
   if not _TENSORBOARDX_AVAILABLE:
-    max_logging.log("tensorboardX unavailable (decoupled or not installed); using no-op SummaryWriter.")
+      max_logging.log("tensorboardX not available; using no-op SummaryWriter.")
+      return writer.SummaryWriter()
+
+  if is_decoupled():
+    # decoupled and tensorboardX is available -> write to repo-local 'local_tensorboard'
+    try:
+      repo_tb = Path(__file__).resolve().parents[2] / "local_tensorboard"
+      repo_tb.mkdir(parents=True, exist_ok=True)
+      summary_writer_path = str(repo_tb / run_name) if run_name else str(repo_tb)
+      max_logging.log(f"Decoupled: using local tensorboard dir {summary_writer_path}")
+      return writer.SummaryWriter(summary_writer_path)
+    except Exception as e:
+      max_logging.log(f"Decoupled: failed to use local tensorboard dir: {e}; using no-op SummaryWriter.")
+      return writer.SummaryWriter()
+
+  # Check if dir or run_name exists!
+  if not tensorboard_dir or not run_name:
+    max_logging.log("tensorboard_dir or run_name missing; using no-op SummaryWriter to avoid crash.")
+    return writer.SummaryWriter()
+
+  summary_writer_path = os.path.join(tensorboard_dir, run_name)
   return writer.SummaryWriter(summary_writer_path)
 
 

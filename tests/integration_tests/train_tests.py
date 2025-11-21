@@ -29,15 +29,16 @@ class TrainTests(unittest.TestCase):
   decoupled = is_decoupled()
   dev_count = jax.device_count()
   _base_output_directory = (
-    os.path.join(MAXTEXT_PKG_DIR, "..", "local_datasets", "gcloud_decoupled_test_logs")
+    os.path.join("local_datasets", "gcloud_decoupled_test_logs")
     if decoupled
     else "gs://runner-maxtext-logs"
   )
   dataset_path = (
-    os.path.join(MAXTEXT_PKG_DIR, "..", "local_datasets", "c4_en_dataset_minimal")
+    os.path.join("local_datasets", "c4_en_dataset_minimal")
     if decoupled
     else "gs://maxtext-dataset"
   )
+  
   # FSDP override logic for tensor-parallel=4 configs: provide an axis only when cleanly divisible.
   _fsdp_tp4_override = []
   if decoupled:
@@ -354,6 +355,8 @@ class TrainTests(unittest.TestCase):
       axis = next((int(a.split("=")[1]) for a in context_parallel if isinstance(a, str) and a.startswith("ici_context_parallelism=")), 1)
       fsdp = self.dev_count // axis if axis > 0 and self.dev_count % axis == 0 else self.dev_count
       context_parallel.append(f"ici_fsdp_parallelism={fsdp}")
+    print("Using dataset_path:", self.dataset_path)
+    print("Exists:", os.path.exists(self.dataset_path))
     train_main(context_parallel)
 
   @pytest.mark.integration_test

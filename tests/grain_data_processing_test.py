@@ -177,7 +177,7 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProc
       # Ensure GCS fuse mounted for cloud path usage
       mount_gcsfuse()
 
-    train_files_weighted = ";".join([f"{base_pattern}:0.3", f"{base_pattern}:0.7"])
+    train_files_weighted = ";".join([f"{base_pattern},0.3", f"{base_pattern},0.7"])
 
     self.config = pyconfig.initialize(
         [sys.argv[0], config_file],
