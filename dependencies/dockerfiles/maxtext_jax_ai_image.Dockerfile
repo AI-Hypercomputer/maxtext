@@ -53,7 +53,9 @@ RUN if [ "$DEVICE" = "tpu" ]; then \
   fi
 
 RUN if [ "$DEVICE" = "gpu" ]; then \
-        python3 -m pip install -U "jax[cuda12]==0.8.0"; \
+        python3 -m pip install -U \
+            "jax[cuda12]==0.8.0" \
+            "transformer_engine==0.7.2"; \
     fi
 
 ENV NVTE_CUDA_INCLUDE_DIR="/usr/local/cuda"
