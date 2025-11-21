@@ -145,7 +145,7 @@ For further reading, please refer to the [Qwix Read the Docs website](https://qw
 
 
 ## DeepSeek V3 Fine-tuning FP8 Recipe
-To improve performance of DeepSeek V3 fine-tuning, we developed a custom FP8 fine-tuning recipe optimized for FP8 throughput. By strategically applying 8-bit matrix multiplication and reducing memory overhead in key operations, this approach realized a speedup of 1.27x against bf16 baseline, with a theotrical headroom of 1.36x. The method prioritizes specific compute-intensive and bandwidth-heavy components while preserving training stability through fine grained scaling strategy.
+To improve the performance of DeepSeek V3 fine-tuning, we developed a custom recipe optimized for FP8 throughput. The method prioritizes specific compute-intensive and bandwidth-heavy components while preserving training stability through a fine-grained scaling strategy.
 
 ### Quantization Scope
 To realize these gains, the recipe employs a w8a8g8 (8-bit weights, activations and gradients) strategy targeting three primary areas:
@@ -156,10 +156,20 @@ To realize these gains, the recipe employs a w8a8g8 (8-bit weights, activations 
 
 * Communication: Specifically the weight All-Gathers.
 
-### Quantization Headroom
+### FP8 Recipe
+* Rounding: rounding to nearest even
+* Precision
+  * Activations and weights: e4m3fn
+  * Gradients:e5m2
+* Scaling granularity: per-axis
+* Scaling mode:
+  * static for weights and activations
+  * dynamic for gradients
 
-* Attention Projections & Megablox `gmm` kernel (High Operational Intensity): The Megablox `gmm` kernels and Attention Projections are highly compute-bound with high operational intensity. Because their runtime is dominated by the MXU with negligible VPU overhead, they effectively approach the theoretical 2x speedup limit (realizing ~1.9x).
-* Megablox `tgmm` kernel (Low Intensity): While the Megablox `tgmm` kernels are also compute-bound, they possess lower operational intensity due to a small reduction dimension (K=1024). This creates a lower roofline ceiling, capping the realized speedup at approximately 1.4x.
+### Convergence
+To validate this recipe, we utilized MaxText following the MLPerf Training framework by MLCommons to ensure a reproducible and standardized evaluation. Using the C4 dataset (loaded via TFDS) as the reference corpus, we tracked convergence by monitoring validation loss on a held-out split. This aligns with MLPerf’s time-to-quality principle, where the primary metric is the speed at which the model achieves target quality.
 
-### Note on Variance
-Please note that these performance gains are derived from the specific configurations of the DeepSeek V3 architecture. Realized FP8 benefits are highly sensitive to model parameters and hardware utilization; consequently, results will vary when this recipe is applied to other models.
+For this specific case, we derived our training duration from the MLPerf 405B benchmark, targeting roughly 2–3 billion tokens after resuming from a checkpoint. In our configuration, we executed 300 steps with a sequence length of 4096 and a global batch size of 2048, resulting in a total of approximately 2.5 billion tokens.
+
+### Performance Sensitivity
+Please note that the FP8 benefits are highly sensitive to model parameters, the efficiency of the BF16 baseline, and hardware utilization; consequently, results will vary when this recipe is applied to other models. Any variance in these factors shifts the ratio of compute-bound to memory-bound operations, directly altering the potential gains.
