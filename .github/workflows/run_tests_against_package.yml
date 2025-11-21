@@ -96,7 +96,7 @@ jobs:
         shell: bash
         run: |
           export NVTE_CUDA_INCLUDE_DIR="/usr/local/cuda"
-          export LD_LIBRARY_PATH="$(pwd)/.venv/lib/python3.12/site-packages/transformer_engine:$LD_LIBRARY_PATH"
+          export LD_LIBRARY_PATH="$(pwd)/.venv/lib/python3.12/site-packages:$LD_LIBRARY_PATH"
           if [ "${{ inputs.is_scheduled_run }}" == "true" ]; then
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
           else
