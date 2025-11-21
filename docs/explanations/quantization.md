@@ -143,7 +143,6 @@ Note that `use_qwix_quantization` is not set to `True`.
 
 For further reading, please refer to the [Qwix Read the Docs website](https://qwix.readthedocs.io/en/latest/get_started.html#).
 
-
 ## DeepSeek V3 Fine-tuning FP8 Recipe
 To improve the performance of DeepSeek V3 fine-tuning, we developed a custom recipe optimized for FP8 throughput. The method prioritizes specific compute-intensive and bandwidth-heavy components while preserving training stability through a fine-grained scaling strategy.
 
@@ -160,7 +159,7 @@ To realize these gains, the recipe employs a w8a8g8 (8-bit weights, activations 
 * Rounding: rounding to nearest even
 * Precision
   * Activations and weights: e4m3fn
-  * Gradients:e5m2
+  * Gradients: e5m2
 * Scaling granularity: per-axis
 * Scaling mode:
   * static for weights and activations
