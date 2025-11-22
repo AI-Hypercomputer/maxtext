@@ -448,7 +448,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           lambda **kwargs: utils_rl.check_answer(tmvp_config=trainer_config, **kwargs),
           lambda **kwargs: utils_rl.check_numbers(tmvp_config=trainer_config, **kwargs),
       ],
-      grpo_config=grpo_config,
+      algo_config=grpo_config,
   )
 
   # Before we train the model, let's evaluate the model on the test set so we can

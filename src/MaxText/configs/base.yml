@@ -319,7 +319,7 @@ record_internal_nn_metrics: 0
 
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
-base_output_directory: ""
+base_output_directory: "gs://mazumdera-test-bucket-europe-west4/rl-tuning/grpo/xfgu"
 
 # Multi-tier checkpointing is an experimental Orbax feature that: periodically saves to persistent storage(GCS bucket) dictated by `multi_tier_checkpointing_backup_interval_minutes` and,
 # saves to a local directory for smaller checkpoint intervals(local_checkpoint_period).
