@@ -135,7 +135,11 @@ jobs:
       image_type: ${{ matrix.image_type }}
       cloud_runner: linux-x86-a2-48-a100-4gpu
       pytest_marker: 'not cpu_only and not tpu_only and integration_test'
-      pytest_addopts: '--ignore=tests/sft_hooks_test.py'
+      pytest_addopts: >-
+        --ignore=tests/sft_hooks_test.py
+        && export NVTE_CUDA_INCLUDE_DIR="/usr/local/cuda" 
+        && export LD_LIBRARY_PATH="$(pwd)/.venv/lib/python3.12/site-packages:$LD_LIBRARY_PATH" 
+        && echo "LD_LIBRARY_PATH set for FFI registration"
       xla_python_client_mem_fraction: 0.65
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
