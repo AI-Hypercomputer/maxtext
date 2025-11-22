@@ -247,7 +247,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
         fi
         export NVTE_FRAMEWORK=jax
         if [[ -n "$JAX_VERSION" && "$JAX_VERSION" != "0.7.0" ]]; then
-            python3 -m uv pip install transformer-engine[jax]
+            python3 -m uv pip install 'transformer-engine[jax]'
         else
             python3 -m uv pip install git+https://github.com/NVIDIA/TransformerEngine.git@9d031f
         fi
@@ -271,7 +271,7 @@ elif [[ $MODE == "nightly" ]]; then
         fi
         # Install Transformer Engine
         export NVTE_FRAMEWORK=jax
-        python3 -m uv pip install https://github.com/NVIDIA/TransformerEngine/archive/9d031f.zip
+        python3 -m uv pip install 'transformer-engine[jax]'
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing nightly tensorboard plugin profile"
         python3 -m uv pip install tbp-nightly --upgrade
