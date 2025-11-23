@@ -475,6 +475,12 @@ def pre_process_image(image, model_name, config=None):
     return pre_process_gemma3_image(image)
   elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     return pre_process_llama4_image(image)
+  elif model_name.startswith("qwen3-omni"):
+    from MaxText.multimodal.qwen3_omni_processor import process_qwen3_omni_image  # pylint: disable=import-outside-toplevel
+
+    if config is None:
+      raise ValueError("config is required for qwen3-omni image preprocessing")
+    return process_qwen3_omni_image(image, config)
   else:
     raise ValueError(f"Model {model_name} does not support multimodal inference.")
 
@@ -589,7 +595,7 @@ def get_image_offsets(model_name, processor_output: PreprocessorOutput | None):
 
 
 def get_dummy_image_shape_for_init(
-    model_name, batch_size=1, num_image_per_sequence=1, num_tiles_per_image=LLAMA4_TILES_PAD_TO
+    model_name, config=None, batch_size=1, num_image_per_sequence=1, num_tiles_per_image=LLAMA4_TILES_PAD_TO
 ):
   """Return the shape of the dummy image for specific model's initialization."""
   image_shape = ()
@@ -610,12 +616,15 @@ def get_dummy_image_shape_for_init(
         LLAMA4_TILE_SIZE,
     )
   elif model_name.startswith("qwen3-omni-30b-a3b"):
+    # Use padded size from config (default 1568 = 56 * 28, divisible by patch_size * merge_size)
+    # This matches the target_spatial_size in PadOrTrimToMaxLength
+    max_image_size = config.max_image_size_for_vit if config else 1568
     image_shape = (
         batch_size,
         NUM_IMAGE_CHANNELS,
         QWEN3_TEMPORAL_PATCH_SIZE,
-        QWEN3_OMNI_IMAGE_SIZE,  # image_size_for_vit (height)
-        QWEN3_OMNI_IMAGE_SIZE,  # video_num_frames
+        max_image_size,  # Padded height
+        max_image_size,  # Padded width
     )
   return image_shape
 

@@ -78,7 +78,12 @@ class Qwen3OmniPreprocessorOutput(mm_utils.PreprocessorOutput):
 
 
 def smart_resize(
-    height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 14 * 14 * 4 * 1280
+    height: int,
+    width: int,
+    factor: int = 28,
+    min_pixels: int = 56 * 56,
+    max_pixels: int = 14 * 14 * 4 * 1280,
+    max_size: int = 1568,
 ):
   """Rescales the image so that the following conditions are met:
 
@@ -86,7 +91,9 @@ def smart_resize(
 
   2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
 
-  3. The aspect ratio of the image is maintained as closely as possible.
+  3. Neither dimension exceeds 'max_size'.
+
+  4. The aspect ratio of the image is maintained as closely as possible.
 
   """
   if max(height, width) / min(height, width) > MAX_RATIO:
@@ -103,6 +110,13 @@ def smart_resize(
     beta = math.sqrt(min_pixels / (height * width))
     h_bar = math.ceil(height * beta / factor) * factor
     w_bar = math.ceil(width * beta / factor) * factor
+
+  # Cap dimensions to max_size while maintaining aspect ratio and factor divisibility
+  if h_bar > max_size or w_bar > max_size:
+    scale = min(max_size / h_bar, max_size / w_bar)
+    h_bar = max(factor, math.floor(h_bar * scale / factor) * factor)
+    w_bar = max(factor, math.floor(w_bar * scale / factor) * factor)
+
   return h_bar, w_bar
 
 
@@ -136,6 +150,7 @@ def pre_process_qwen3_image(image: np.ndarray | list[np.ndarray], config):
         factor=IMAGE_FACTOR,
         min_pixels=MIN_PIXELS,
         max_pixels=MAX_PIXELS,
+        max_size=config.max_image_size_for_vit,
     )
     pil_img = pil_img.resize((resized_width_1, resized_height_1))
     resized_height_2, resized_width_2 = smart_resize(
@@ -144,6 +159,7 @@ def pre_process_qwen3_image(image: np.ndarray | list[np.ndarray], config):
         factor=patch_size * merge_size,
         min_pixels=MIN_PIXELS,
         max_pixels=MAX_PIXELS,
+        max_size=config.max_image_size_for_vit,
     )
     resized_img_pil = pil_img.resize((resized_width_2, resized_height_2), resample=resample_method)
     resized_img_np = np.array(resized_img_pil).astype(np.float32)
@@ -154,11 +170,10 @@ def pre_process_qwen3_image(image: np.ndarray | list[np.ndarray], config):
     # Convert to CHW format (from HWC)
     img_np = np.permute_dims(img_np, (2, 0, 1))  # Shape: (C, H, W)
 
-    # Add batch and temporal dimensions
-    # Shape becomes: (batch=1, in_channels=3, temporal=temporal_patch_size, height, width)
-    img_np = np.expand_dims(img_np, axis=0)  # Shape: (1, C, H, W)
-    img_np = np.expand_dims(img_np, axis=2)  # Shape: (1, C, 1, H, W)
-    img_np = np.repeat(img_np, temporal_patch_size, axis=2)  # Shape: (1, C, T, H, W)
+    # Add temporal dimension
+    # Shape becomes: (in_channels=3, temporal=temporal_patch_size, height, width)
+    img_np = np.expand_dims(img_np, axis=1)  # Shape: (C, 1, H, W)
+    img_np = np.repeat(img_np, temporal_patch_size, axis=1)  # Shape: (C, T, H, W)
 
     # Calculate grid dimensions in patches (will be computed by vision encoder)
     grid_t = temporal_patch_size // temporal_patch_size  # Always 1 for images
@@ -169,8 +184,13 @@ def pre_process_qwen3_image(image: np.ndarray | list[np.ndarray], config):
     images_out.append(img_np)
     grids_thw.append(img_grid_thw)
 
-  # Return (batch, channels, temporal, height, width) and grid info
-  return images_out[0], grids_thw
+  # Stack all images and grids along batch dimension
+  # pixel_values shape: (num_images, channels, temporal, height, width)
+  # grids_thw shape: (num_images, 3)
+  pixel_values = np.stack(images_out, axis=0)
+  grids_thw_array = np.stack(grids_thw, axis=0)
+
+  return pixel_values, grids_thw_array
 
 
 def calculate_video_frame_range(
@@ -999,30 +1019,107 @@ def pre_process_audio_qwen3_omni(audio_array):
   return audio_features, audio_features_mask
 
 
+def process_qwen3_omni_image(image, config):
+  """Process already-loaded image(s) for qwen3-omni model.
+
+  Args:
+    image: Single image (np.ndarray) or list of images. Images should already be loaded as numpy arrays.
+    config: Model configuration containing VIT parameters.
+
+  Returns:
+    Qwen3OmniPreprocessorOutput with processed pixel_values, pixel_grid_thw, and num_images.
+  """
+  processor_outputs = Qwen3OmniPreprocessorOutput()
+
+  # Handle single image or list of images
+  if isinstance(image, np.ndarray):
+    images = [image]
+  else:
+    images = image
+
+  pixel_values, pixel_grid_thw = pre_process_qwen3_image(images, config)
+  processor_outputs.pixel_values = pixel_values
+  processor_outputs.pixel_grid_thw = pixel_grid_thw
+  processor_outputs.num_images = len(images)
+
+  return processor_outputs
+
+
+def process_qwen3_omni_video(video_array, config):
+  """Process already-loaded video for qwen3-omni model.
+
+  Args:
+    video_array: Video frames as numpy array with shape (nframes, channel, height, width).
+    config: Model configuration containing VIT parameters.
+
+  Returns:
+    Qwen3OmniPreprocessorOutput with processed video_values, video_grid_thw, and num_videos.
+  """
+  processor_outputs = Qwen3OmniPreprocessorOutput()
+
+  video_processed, video_grid_thw = preprocess_video(video_array, config)
+  processor_outputs.video_values = video_processed
+  processor_outputs.video_grid_thw = video_grid_thw
+  processor_outputs.video_second_per_grid = np.asarray([config.temporal_patch_size_for_vit], dtype=np.float32)
+  processor_outputs.num_videos = 1
+
+  return processor_outputs
+
+
+def process_qwen3_omni_audio(audio_array):
+  """Process already-loaded audio for qwen3-omni model.
+
+  Args:
+    audio_array: Audio waveform as numpy array.
+
+  Returns:
+    Qwen3OmniPreprocessorOutput with processed audio_values and audio_mask.
+  """
+  processor_outputs = Qwen3OmniPreprocessorOutput()
+
+  audio_features, audio_mask = pre_process_audio_qwen3_omni(audio_array)
+  processor_outputs.audio_values = audio_features
+  processor_outputs.audio_mask = audio_mask
+  processor_outputs.num_audios = 1
+
+  return processor_outputs
+
+
 def preprocess_mm_data_qwen3_omni(config):
-  """Placeholder for multimodal data preprocessing."""
+  """Load and preprocess multimodal data for qwen3-omni model.
+
+  This function loads data from file paths specified in config and processes them.
+  For data pipeline usage, use the individual process_qwen3_omni_* functions instead.
+  """
   processor_outputs = Qwen3OmniPreprocessorOutput()
 
   if config.image_path:
+    # Load images from paths
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
-    pixel_values, pixel_grid_thw = pre_process_qwen3_image(images, config)
-    processor_outputs.pixel_values = pixel_values
-    processor_outputs.pixel_grid_thw = pixel_grid_thw
-    processor_outputs.num_images = len(images)
+    # Process using the new function
+    image_outputs = process_qwen3_omni_image(images, config)
+    processor_outputs.pixel_values = image_outputs.pixel_values
+    processor_outputs.pixel_grid_thw = image_outputs.pixel_grid_thw
+    processor_outputs.num_images = image_outputs.num_images
 
   if config.video_path:
+    # Load video from path
     video_array, _ = _read_video_decord(config.video_path)
-    video_processed, video_grid_thw = preprocess_video(video_array, config)
-    processor_outputs.video_values = video_processed
-    processor_outputs.video_grid_thw = video_grid_thw
-    processor_outputs.video_second_per_grid = np.asarray([config.temporal_patch_size_for_vit], dtype=np.float32)
-    processor_outputs.num_videos = 1  # Only one video for now.
+    # Process using the new function
+    video_outputs = process_qwen3_omni_video(video_array, config)
+    processor_outputs.video_values = video_outputs.video_values
+    processor_outputs.video_grid_thw = video_outputs.video_grid_thw
+    processor_outputs.video_second_per_grid = video_outputs.video_second_per_grid
+    processor_outputs.num_videos = video_outputs.num_videos
 
   if config.audio_path or (config.video_path and config.use_audio_in_video):
+    # Load audio from path
     audio_path = config.audio_path if config.audio_path else config.video_path
-    mt_audio = _load_audio(audio_path)
-    mt_audio, mt_audio_mask = pre_process_audio_qwen3_omni(mt_audio)
-    processor_outputs.audio_values = mt_audio
-    processor_outputs.audio_mask = mt_audio_mask
+    audio_array = _load_audio(audio_path)
+    # Process using the new function
+    audio_outputs = process_qwen3_omni_audio(audio_array)
+    processor_outputs.audio_values = audio_outputs.audio_values
+    processor_outputs.audio_mask = audio_outputs.audio_mask
+    processor_outputs.num_audios = audio_outputs.num_audios
 
   return processor_outputs

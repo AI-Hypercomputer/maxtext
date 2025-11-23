@@ -154,8 +154,13 @@ class HyperParameters:
 
   def __getattr__(self, attr: str) -> Any:
     """Provides attribute-style access to the final configuration dictionary."""
-    if attr in self._flat_config:
-      return self._flat_config[attr]
+    # Avoid infinite recursion by checking for private attributes first
+    if attr.startswith('_'):
+      raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'")
+    # Use object.__getattribute__ to avoid triggering __getattr__ recursively
+    flat_config = object.__getattribute__(self, '_flat_config')
+    if attr in flat_config:
+      return flat_config[attr]
     raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'")
 
   def __setattr__(self, attr: str, value: Any) -> None:

@@ -328,7 +328,7 @@ class MaxEngine(engine_api.Engine):
     @jax.jit
     def model_apply(_p, _rng):
       image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-          self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+          self.config.model_name, config=self.config, batch_size=self.config.micro_batch_size_to_train_on
       )
       audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
           self.config.model_name, config=self.config, batch_size=self.config.micro_batch_size_to_train_on

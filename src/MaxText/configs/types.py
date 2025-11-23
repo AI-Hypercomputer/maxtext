@@ -1175,6 +1175,7 @@ class MultimodalGeneral(BaseModel):
   freeze_audio_encoder_params: bool = Field(True, description="Freeze the parameters of the audio encoder.")
   use_audio: bool = Field(False, description="Enable audio encoder for multimodal models.")
   image_size_for_vit: int = Field(896, description="Input image size for the Vision Transformer.")
+  max_image_size_for_vit: int = Field(1568, description="Maximum spatial dimension for images after smart_resize (used for batching consistency in Qwen3-Omni).")
   image_path: PathStr = Field("", description="Path to an image for decoding.")
   audio_path: PathStr = Field("", description="Path to an audio file for decoding.")
   video_path: PathStr = Field("", description="Path to a video file for decoding.")

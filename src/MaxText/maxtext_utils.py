@@ -135,7 +135,7 @@ def get_shaped_batch(config):
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   if config.use_multimodal:
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
     shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32)
@@ -624,7 +624,7 @@ def calculate_tflops_training_per_device(config, log=True):
   if config.use_multimodal:
     # Add vision layers TFLOPs for multimodal models
     mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_vision_encoder_tflops(config)
-    if log:
+    if log and mm_total_tflops > 0:
       print(
           f"{config.model_name} vision layers per train step:\n",
           f"Total TFLOPs: {mm_total_tflops:.2f} \n",
@@ -636,7 +636,7 @@ def calculate_tflops_training_per_device(config, log=True):
     learnable_weight_tflops += mm_learnable_weight_tflops
     attention_tflops += mm_attention_tflops
 
-  if log:
+  if log and total_tflops > 0:
     print(
         "Per train step:\n",
         f"Total TFLOPs: {total_tflops:.2f} \n",
@@ -964,7 +964,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
         config.max_prefill_predict_length,
     )
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
     )
     audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
         config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
@@ -997,7 +997,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
   def init_kv_cache(model, config):
     input_shape = (config.micro_batch_size_to_train_on, 1)
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
     )
     audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
         config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on

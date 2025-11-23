@@ -79,7 +79,7 @@ def vision_sft_preprocessing_pipeline(
 
   dataset = dataset.map(
       _input_pipeline_utils.pre_process_image_sft,
-      fn_kwargs={"image_column": "images", "model_name": config.model_name},
+      fn_kwargs={"image_column": "images", "model_name": config.model_name, "config": config},
   )
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -110,7 +110,7 @@ def vision_sft_preprocessing_pipeline(
   dataset = dataset.map(
       _input_pipeline_utils.prepare_text_for_image_fusion,
       fn_kwargs={
-          "column_names": text_columns,
+          "column_name": text_columns[0],
           "model_name": config.model_name,
           "spatial_merge_size": config.spatial_merge_size_for_vit,
           "position_id_per_seconds": config.position_id_per_seconds,
@@ -141,11 +141,12 @@ def vision_sft_preprocessing_pipeline(
           pad_id,
           model_name=config.model_name,
           max_num_images_per_example=config.max_num_images_per_example,
+          config=config,
       )
   )
   operations.append(_input_pipeline_utils.ExtractImagesAndMasks())
   operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
-  operations.append(_input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
+  operations.append(_input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name, config=config))
   operations.append(_input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
   dummy_index_sampler = grain.IndexSampler(
       num_records=len(dataset),

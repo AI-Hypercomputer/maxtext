@@ -25,6 +25,7 @@ import tensorflow as tf
 from MaxText import max_logging
 from MaxText import tokenizer
 from MaxText import multimodal_utils
+from MaxText.multimodal import utils as mm_utils
 
 Features = dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -95,7 +96,7 @@ def merge_image_columns(example, image_columns, max_num_images_per_example):
   return example
 
 
-def pre_process_image_sft(example, image_column, model_name):
+def pre_process_image_sft(example, image_column, model_name, config):
   """pre-process image for multimodal SFT"""
 
   def _process_image_fn(image):
@@ -104,7 +105,7 @@ def pre_process_image_sft(example, image_column, model_name):
     else:
       image = np.array(multimodal_utils.convert_to_RGB(image))
 
-    image = multimodal_utils.pre_process_image(image, model_name)
+    image = multimodal_utils.pre_process_image(image, model_name, config)
     return image
 
   example[image_column] = _process_image_fn(example[image_column])
@@ -118,7 +119,7 @@ def prepare_text_for_image_fusion(example, column_name, model_name, spatial_merg
   the correct number of tokens based on the multimodal content dimensions.
 
   For Gemma3/Llama4: Uses processor_output (pixel_values, aspect_ratios).
-  For Qwen3-Omni: Uses grid dimensions (image_grid_thw, video_grid_thw, audio_seqlens).
+  For Qwen3-Omni: Uses grid dimensions (image_grid_thw, video_grid_thw, audio_lengths).
 
   Args:
     example: Data example dictionary.
@@ -130,7 +131,7 @@ def prepare_text_for_image_fusion(example, column_name, model_name, spatial_merg
   # Extract Qwen3-Omni specific parameters from example if present
   image_grid_thw = example.get("image_grid_thw", None)
   video_grid_thw = example.get("video_grid_thw", None)
-  audio_seqlens = example.get("audio_seqlens", None)
+  audio_lengths = example.get("audio_lengths", None)
   second_per_grids = example.get("second_per_grids", None)
 
   example[column_name] = multimodal_utils.prepare_text_for_image_fusion(
@@ -139,7 +140,7 @@ def prepare_text_for_image_fusion(example, column_name, model_name, spatial_merg
       processor_output=example.get("images", None),
       image_grid_thw=image_grid_thw,
       video_grid_thw=video_grid_thw,
-      audio_seqlens=audio_seqlens,
+      audio_lengths=audio_lengths,
       spatial_merge_size=spatial_merge_size,
       use_audio_in_video=example.get("use_audio_in_video", False),
       second_per_grids=second_per_grids,
@@ -233,12 +234,11 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
 def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
   """Tokenize a HuggingFace dataset"""
   for column_name in column_names:
-    if isinstance(example[column_name], list):
-      example[column_name] = [
-          hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"] for x in example[column_name]
-      ]
-    elif isinstance(example[column_name], str):
-      example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
+    # The tokenizer is called on a list of strings, and returns a list of lists of ints.
+    tokenized_output = hf_tokenizer(
+        example[column_name], truncation=truncation, max_length=max_length
+    )
+    example[column_name] = tokenized_output["input_ids"]
   return example
 
 
@@ -465,12 +465,14 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       model_name: str | None = None,
       add_true_length: bool = False,
       max_num_images_per_example: int = -1,
+      config=None,
   ):
     self.max_length = max_length
     self.pad_id = pad_id
     self.model_name = model_name
     self.add_true_length = add_true_length
     self.max_num_images_per_example = max_num_images_per_example
+    self.config = config
 
   def _pad_text(self, x: np.ndarray, max_length: int, pad_id: int) -> np.ndarray:
     pad_amount = max(max_length - x.shape[0], 0)
@@ -512,13 +514,51 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       - The dummy images used for padding are based on the image shape for initialization
         of this model (ignoring batch size).
     """
-    if not isinstance(preprocessed_image, multimodal_utils.PreprocessorOutput):
-      raise TypeError(f"Input must be multimodal_utils.PreprocessorOutput, but got {type(preprocessed_image)}")
+    #print(f"[DEBUG] _pad_image_and_mask called: model_name={self.model_name}")
+
+    if not isinstance(preprocessed_image, (multimodal_utils.PreprocessorOutput, mm_utils.PreprocessorOutput)):
+      raise TypeError(f"Input must be PreprocessorOutput, but got {type(preprocessed_image)}")
 
     if preprocessed_image.pixel_values is None:
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
 
-    # Determine the maximum number of images/masks allowed.
+    #print(f"[DEBUG] pixel_values shape before padding: {preprocessed_image.pixel_values.shape}")
+
+    # For Qwen3-Omni vision SFT: pad spatial dimensions only (not image count)
+    # Vision SFT data has exactly 1 image per example, so we don't need to pad the number of images
+    # We just need to ensure all images have consistent spatial dimensions for batching
+    if self.model_name and self.model_name.startswith("qwen3-omni"):
+      pixel_values = preprocessed_image.pixel_values
+      # pixel_values shape: (num_images, C, T, H, W)
+      if pixel_values is not None and pixel_values.ndim == 5:
+        # Pad to a fixed spatial size to ensure all examples can be batched
+        # Get the target size from config, or use default if config not provided
+        target_spatial_size = self.config.max_image_size_for_vit if self.config else 1568
+        num_images, _, _, H, W = pixel_values.shape
+
+        #print(f"[DEBUG] Spatial padding for Qwen3-Omni: num_images={num_images}, input_shape=({H}, {W}), target={target_spatial_size}")
+
+        if H > target_spatial_size or W > target_spatial_size:
+          raise ValueError(
+              f"Image size ({H}x{W}) exceeds maximum supported size ({target_spatial_size}x{target_spatial_size}). "
+              "Consider increasing max_image_size_for_vit in config or using smaller images."
+          )
+
+        # Pad spatial dimensions to fixed size
+        pad_h = target_spatial_size - H
+        pad_w = target_spatial_size - W
+
+        # Pad format: (before, after) for each dimension
+        # Dimensions: (num_images, C, T, H, W)
+        pad_width = ((0, 0), (0, 0), (0, 0), (0, pad_h), (0, pad_w))
+        preprocessed_image.pixel_values = np.pad(pixel_values, pad_width, mode='constant', constant_values=0)
+
+        #print(f"[DEBUG] After spatial padding: shape={preprocessed_image.pixel_values.shape}")
+
+        # For Qwen3-Omni vision SFT, support 1 image for now and skip the image count padding
+        return preprocessed_image
+
+    # For other models: calculate max_num_items and pad the number of images
     image_offsets = multimodal_utils.get_image_offsets(self.model_name, preprocessed_image)
     single_image_offset = image_offsets // preprocessed_image.pixel_values.shape[0]
 
@@ -526,6 +566,8 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     max_num_items = (self.max_length - 1) // single_image_offset
     if self.max_num_images_per_example > 0:
       max_num_items = min(self.max_num_images_per_example, max_num_items)
+
+    # print(f"[DEBUG] max_num_items={max_num_items}, image_offsets={image_offsets}, single_image_offset={single_image_offset}")
 
     image_tensor = preprocessed_image.pixel_values
     mask_tensor = preprocessed_image.pixel_mask
@@ -565,6 +607,8 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     if mask_tensor is not None:
       preprocessed_image.pixel_mask = _pad(mask_tensor)
 
+    print(f"[DEBUG] Final output shape after num_images padding: {preprocessed_image.pixel_values.shape}")
+
     return preprocessed_image
 
   def map(
@@ -574,7 +618,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     data_columns = list(element.keys())
     for data_column in data_columns:
       if data_column != "images":
-        if isinstance(element[data_column], multimodal_utils.PreprocessorOutput):
+        if isinstance(element[data_column], (multimodal_utils.PreprocessorOutput, mm_utils.PreprocessorOutput)):
           raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
 
         element[f"{data_column}_segmentation"] = element[data_column] != self.pad_id
@@ -614,7 +658,7 @@ class ExtractImagesAndMasks(grain.MapTransform):
     if preprocessed_image is None:
       return element
 
-    if not isinstance(preprocessed_image, multimodal_utils.PreprocessorOutput):
+    if not isinstance(preprocessed_image, (multimodal_utils.PreprocessorOutput, mm_utils.PreprocessorOutput)):
       raise TypeError(f"'images' must be of type PreprocessorOutput, but got {type(preprocessed_image)}")
 
     output = element.copy()
@@ -642,10 +686,11 @@ class FoldImagesIntoBatch(grain.MapTransform):
   """
 
   model_name: str | None = None
+  config: None = None
 
   def __post_init__(self):
     """Initializes the target shape after the dataclass is created."""
-    self.target_shape = multimodal_utils.get_dummy_image_shape_for_init(self.model_name)
+    self.target_shape = multimodal_utils.get_dummy_image_shape_for_init(self.model_name, config=self.config)
 
   def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Applies the folding transformation to the 'images' field if present."""
@@ -658,7 +703,9 @@ class FoldImagesIntoBatch(grain.MapTransform):
     # that needs to be folded into the batch dimension.
     if images.ndim > len(self.target_shape):
       # Compute the new shape by merging the batch and image count dimensions.
-      trailing_dims = self.target_shape[1:]
+      # Use actual trailing dimensions from the input, not the dummy shape,
+      # to account for spatial padding
+      trailing_dims = images.shape[2:]  # Skip batch and num_images dimensions
 
       # Reshape merges the leading dimensions (B, N) into one (-1) and
       # appends the correct trailing dimensions.
@@ -756,7 +803,7 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
         - {data_column}_segmentation: Attention mask (1=real, 0=padding)
         - image_grid_thw: Optional (num_images, 3) array
         - video_grid_thw: Optional (num_videos, 3) array
-        - audio_seqlens: Optional (num_audios,) array
+        - audio_lengths: Optional (num_audios,) array
         - second_per_grids: Optional (num_videos,) array
 
     Returns:
@@ -777,7 +824,7 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
     # Extract multimodal metadata (if present)
     image_grid_thw = element.get("image_grid_thw")
     video_grid_thw = element.get("video_grid_thw")
-    audio_seqlens = element.get("audio_seqlens")
+    audio_lengths = element.get("audio_lengths")
     second_per_grids = element.get("second_per_grids")
 
     # Convert metadata to JAX arrays if present
@@ -785,8 +832,8 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
       image_grid_thw = jnp.asarray(image_grid_thw)
     if video_grid_thw is not None:
       video_grid_thw = jnp.asarray(video_grid_thw)
-    if audio_seqlens is not None:
-      audio_seqlens = jnp.asarray(audio_seqlens)
+    if audio_lengths is not None:
+      audio_lengths = jnp.asarray(audio_lengths)
     if second_per_grids is not None:
       second_per_grids = jnp.asarray(second_per_grids)
 
@@ -797,7 +844,7 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
         video_grid_thw=video_grid_thw,
         attention_mask=attention_mask,
         use_audio_in_video=self.use_audio_in_video,
-        audio_seqlens=audio_seqlens,
+        audio_lengths=audio_lengths,
         second_per_grids=second_per_grids,
         spatial_merge_size=self.spatial_merge_size,
         position_id_per_seconds=self.position_id_per_seconds,
