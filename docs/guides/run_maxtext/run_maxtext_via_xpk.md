@@ -131,13 +131,13 @@ A recommended approach for running MaxText is to build your image from a **JAX A
     -   **For TPUs:**
 
         ```
-        bash docker_build_dependency_image.sh DEVICE=tpu MODE=jax_ai_image BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:jax0.5.2-rev2
+        bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=jax_ai_image BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:jax0.5.2-rev2
         ```
 
     -   **For GPUs:**
 
         ```
-        bash docker_build_dependency_image.sh DEVICE=gpu MODE=jax_ai_image BASEIMAGE=us-central1-docker.pkg.dev/deeplearning-images/jax-ai-image/gpu:jax0.5.1-cuda_dl25.02-rev1
+        bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=jax_ai_image BASEIMAGE=us-central1-docker.pkg.dev/deeplearning-images/jax-ai-image/gpu:jax0.5.1-cuda_dl25.02-rev1
         ```
 
 * * * * *
