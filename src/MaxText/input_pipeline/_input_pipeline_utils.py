@@ -66,13 +66,13 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
 ########## Functions used by HF pipeline
 
 
-def reformat_prompt(example, column, image_placeholder, model_name):
+def reformat_prompt(example, column, image_placeholder, video_placeholder, audio_placeholder, model_name):
   """reformat prompt for multimodal SFT"""
   if isinstance(example["images"], list):
     num_images = len(example["images"])
   else:
     num_images = 1
-  example[column] = multimodal_utils.reformat_prompt(example[column], image_placeholder, model_name, num_images)
+  example[column] = multimodal_utils.reformat_prompt(example[column], image_placeholder, video_placeholder, audio_placeholder, model_name, num_images)
   return example
 
 
@@ -111,7 +111,7 @@ def pre_process_image_sft(example, image_column, model_name):
   return example
 
 
-def prepare_text_for_image_fusion(example, column_name, model_name, spatial_merge_size=2, position_id_per_seconds=25):
+def prepare_text_for_image_fusion(example, column_name, model_name, spatial_merge_size=2, position_id_per_seconds=25, use_audio_in_video=False):
   """Prepare text for image fusion for multimodal SFT.
 
   This function expands special tokens (image/video/audio placeholders) into
@@ -141,7 +141,7 @@ def prepare_text_for_image_fusion(example, column_name, model_name, spatial_merg
       video_grid_thw=video_grid_thw,
       audio_seqlens=audio_seqlens,
       spatial_merge_size=spatial_merge_size,
-      use_audio_in_video=example.get("use_audio_in_video", False),
+      use_audio_in_video=use_audio_in_video,
       second_per_grids=second_per_grids,
       position_id_per_seconds=position_id_per_seconds,
   )

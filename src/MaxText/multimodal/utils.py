@@ -17,6 +17,7 @@
 import os
 from PIL import Image
 import numpy as np
+import jax
 from dataclasses import dataclass
 
 
@@ -35,12 +36,27 @@ class PreprocessorOutput:
                    the aspect ratio [ratio_h, ratio_w] of the processed image(s).
                    This is particularly relevant for models like Llama4 that handle
                    images by tiling.
+    video_grid_thw: An optional JAX array of shape (num_videos, 3) representing
+                   the temporal, height, and width of the video.
+    video_second_per_grid: An optional JAX array of shape (num_videos,) representing
+                   the temporal duration of the grid (used in audio and video mrope).
+    audio_lengths: An optional JAX array of shape (num_audios,) representing
+                   the length of the audio.
+    use_audio_in_video: A boolean indicating whether audio is interleaved with video.
+    num_images: An integer representing the number of images.
+    num_videos: An integer representing the number of videos.
   """
 
   pixel_values: None | np.ndarray = None
   pixel_mask: None | np.ndarray = None
   aspect_ratios: None | np.ndarray = None
+  video_grid_thw: None | np.ndarray = None
+  video_second_per_grid: None | np.ndarray = None
+  audio_lengths: None | np.ndarray = None
+  use_audio_in_video: bool = False
   num_images: int = 0
+  num_videos: int = 0
+  num_audios: int = 0
 
 
 def load_image_from_path(image_path):

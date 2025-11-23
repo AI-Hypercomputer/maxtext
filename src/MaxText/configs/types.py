@@ -1174,6 +1174,7 @@ class MultimodalGeneral(BaseModel):
   freeze_vision_encoder_params: bool = Field(True, description="Freeze the parameters of the vision encoder.")
   freeze_audio_encoder_params: bool = Field(True, description="Freeze the parameters of the audio encoder.")
   use_audio: bool = Field(False, description="Enable audio encoder for multimodal models.")
+  use_audio_in_video: bool = Field(False, description="Enable audio in video for multimodal models.")
   image_size_for_vit: int = Field(896, description="Input image size for the Vision Transformer.")
   image_path: PathStr = Field("", description="Path to an image for decoding.")
   audio_path: PathStr = Field("", description="Path to an audio file for decoding.")
@@ -1181,6 +1182,7 @@ class MultimodalGeneral(BaseModel):
 
   image_placeholder: str = Field("<|image|>", description="Placeholder string for images in text prompts.")
   audio_placeholder: str = Field("<|audio|>", description="Placeholder string for audio in text prompts.")
+  video_placeholder: str = Field("<|video|>", description="Placeholder string for video in text prompts.")
   posemb_type_for_vit: str = Field("learn", description="Positional embedding type for the vision encoder.")
   hidden_act_for_vit: str = Field("gelu", description="Activation function for the vision encoder.")
   max_num_images_per_example: int = Field(

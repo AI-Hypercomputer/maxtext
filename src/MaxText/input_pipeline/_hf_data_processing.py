@@ -69,6 +69,8 @@ def vision_sft_preprocessing_pipeline(
       fn_kwargs={
           "column": text_columns[0],
           "image_placeholder": config.image_placeholder,
+          "video_placeholder": config.video_placeholder,
+          "audio_placeholder": config.audio_placeholder,
           "model_name": config.model_name,
       },
   )
@@ -112,8 +114,10 @@ def vision_sft_preprocessing_pipeline(
       fn_kwargs={
           "column_names": text_columns,
           "model_name": config.model_name,
+          "config": config.spatial_merge_size_for_vit,
           "spatial_merge_size": config.spatial_merge_size_for_vit,
           "position_id_per_seconds": config.position_id_per_seconds,
+          "use_audio_in_video": config.use_audio_in_video,
       },
   )
 

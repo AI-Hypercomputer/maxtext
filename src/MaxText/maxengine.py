@@ -419,8 +419,8 @@ class MaxEngine(engine_api.Engine):
       mrope_deltas: jax.Array | None = None,
       images: jax.Array | None = None,
       image_masks: jax.Array | None = None,
+      videos: jax.Array | None = None,
       audio_values: jax.Array | None = None,
-      audio_masks: jax.Array | None = None,
       true_length: int,
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
@@ -448,7 +448,6 @@ class MaxEngine(engine_api.Engine):
       images: Optional input images for multimodal models.
       image_masks: Optional image masks for multimodal models with tiled images.
       audio_values: Optional input audio for multimodal models.
-      audio_masks: Optional audio masks for multimodal models (currently unused).
       true_length: The actual length of `padded_tokens` before padding.
       sampler: A callable for custom sampling logic (currently unused).
       rng: JAX random number generator key for sampling.
@@ -501,6 +500,15 @@ class MaxEngine(engine_api.Engine):
         # add batch dimension
         images = images[jnp.newaxis, ...]
         image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
+      elif images.ndim == 5:
+        # For Qwen3-Omni with temporal dimension: (num_images, C, T, H, W) -> (1, num_images, C, T, H, W)
+        images = images[jnp.newaxis, ...]
+        image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
+
+    if self.config.use_multimodal and videos is not None:
+      if videos.ndim == 5:
+        # For Qwen3-Omni videos: (num_videos, C, T, H, W) -> (1, num_videos, C, T, H, W)
+        videos = videos[jnp.newaxis, ...]
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -516,6 +524,7 @@ class MaxEngine(engine_api.Engine):
           positions,
           encoder_images=images,
           encoder_image_masks=image_masks,
+          encoder_videos=videos,
           encoder_audios=audio_values,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
@@ -599,8 +608,8 @@ class MaxEngine(engine_api.Engine):
       mrope_deltas: jax.Array | None = None,
       images: jax.Array | None = None,
       image_masks: jax.Array | None = None,
+      videos: jax.Array | None = None,
       audio_values: jax.Array | None = None,
-      audio_masks: jax.Array | None = None,
       true_length: int,
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
@@ -636,8 +645,8 @@ class MaxEngine(engine_api.Engine):
         mrope_deltas=mrope_deltas,
         images=images,
         image_masks=image_masks,
+        videos=videos,
         audio_values=audio_values,
-        audio_masks=audio_masks,
         sampler=sampler,
         true_length=true_length,
         page_state=self.page_state,  # Pass current page state

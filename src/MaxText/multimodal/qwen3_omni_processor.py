@@ -28,23 +28,24 @@ from dataclasses import dataclass
 
 from MaxText import max_logging
 from MaxText.multimodal import utils as mm_utils
+from MaxText.multimodal_utils import _get_feat_extract_output_lengths
 
 # Image constants.
 IMAGE_MEAN = 127.5
 IMAGE_STD = 127.5
-IMAGE_FACTOR = 28
-MIN_PIXELS = 4 * 28 * 28
-MAX_PIXELS = 16384 * 28 * 28
+IMAGE_FACTOR = 32
+MIN_PIXELS = 4 * 32 * 32
+MAX_PIXELS = 16384 * 32 * 32
 MAX_RATIO = 200
 
 # Video constants.
-VIDEO_MIN_PIXELS = 128 * 28 * 28
-VIDEO_MAX_PIXELS = 768 * 28 * 28
-VIDEO_TOTAL_PIXELS = 128000 * 28 * 28 * 0.9
+VIDEO_MIN_PIXELS = 128 * 32 * 32
+VIDEO_MAX_PIXELS = 384 * 32 * 32
+VIDEO_TOTAL_PIXELS = 128000 * 32 * 32 * 0.9
 FRAME_FACTOR = 2
-FPS = 2.0
+FPS = 1.0
 FPS_MIN_FRAMES = 4
-FPS_MAX_FRAMES = 768
+FPS_MAX_FRAMES = 384
 
 # Audio constants.
 SAMPLE_RATE = 16000
@@ -73,12 +74,12 @@ class Qwen3OmniPreprocessorOutput(mm_utils.PreprocessorOutput):
   # Audio attributes.
   num_audios: int = 0
   audio_values: None | np.ndarray = None
-  audio_mask: None | np.ndarray = None
   audio_lengths: None | np.ndarray = None
+  use_audio_in_video: bool = False
 
 
 def smart_resize(
-    height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 14 * 14 * 4 * 1280
+    height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 16 * 16 * 4 * 1280
 ):
   """Rescales the image so that the following conditions are met:
 
@@ -170,7 +171,11 @@ def pre_process_qwen3_image(image: np.ndarray | list[np.ndarray], config):
     grids_thw.append(img_grid_thw)
 
   # Return (batch, channels, temporal, height, width) and grid info
-  return images_out[0], grids_thw
+  # Concatenate all images along batch dimension: (num_images, C, T, H, W)
+  pixel_values = np.concatenate(images_out, axis=0) if images_out else None
+  # Convert grids_thw list to array: (num_images, 3)
+  grids_thw_array = np.stack(grids_thw, axis=0) if grids_thw else None
+  return pixel_values, grids_thw_array
 
 
 def calculate_video_frame_range(
@@ -991,38 +996,63 @@ def _load_audio(data_path: str) -> np.ndarray:
   return audio
 
 
-def pre_process_audio_qwen3_omni(audio_array):
+def pre_process_audio_qwen3_omni(audio_array, config):
   """Preprocess audio for Qwen3-Omni model."""
   audio_features = np.expand_dims(audio_array, axis=0)  # Add batch dimension
   audio_features = _np_extract_fbank_features(audio_features)
-  audio_features_mask = np.ones((audio_features.shape[0], audio_features.shape[2]), dtype=np.int32)
-  return audio_features, audio_features_mask
+
+  # Pad to make divisible by chunk_size
+  batch_size, num_mel_bins, audio_length = audio_features.shape
+  chunk_size = config.n_window_for_audio * 2
+  if audio_length % chunk_size != 0:
+    pad_length = chunk_size - (audio_length % chunk_size)
+    audio_features = np.pad(audio_features, ((0, 0), (0, 0), (0, pad_length)), mode='constant', constant_values=0)
+
+  return audio_features
 
 
-def preprocess_mm_data_qwen3_omni(config):
-  """Placeholder for multimodal data preprocessing."""
+def preprocess_mm_data_qwen3_omni(
+    config,
+    image_path: str | None = None,
+    video_path: str | None = None,
+    audio_path: str | None = None,
+):
+  """Preprocess multimodal data for Qwen3-Omni model.
+
+  Args:
+    config: Config object containing model-specific parameters (patch sizes, etc.)
+    image_path: Optional path to image file(s), comma-separated for multiple images
+    video_path: Optional path to video file
+    audio_path: Optional path to audio file
+
+  Returns:
+    Qwen3OmniPreprocessorOutput containing processed multimodal data
+  """
   processor_outputs = Qwen3OmniPreprocessorOutput()
 
-  if config.image_path:
-    images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
+  if image_path:
+    images = [mm_utils.load_image_from_path(p) for p in image_path.split(",")]
     pixel_values, pixel_grid_thw = pre_process_qwen3_image(images, config)
     processor_outputs.pixel_values = pixel_values
     processor_outputs.pixel_grid_thw = pixel_grid_thw
     processor_outputs.num_images = len(images)
 
-  if config.video_path:
-    video_array, _ = _read_video_decord(config.video_path)
+  if video_path:
+    video_array, _ = _read_video_decord(video_path)
     video_processed, video_grid_thw = preprocess_video(video_array, config)
     processor_outputs.video_values = video_processed
     processor_outputs.video_grid_thw = video_grid_thw
     processor_outputs.video_second_per_grid = np.asarray([config.temporal_patch_size_for_vit], dtype=np.float32)
     processor_outputs.num_videos = 1  # Only one video for now.
 
-  if config.audio_path or (config.video_path and config.use_audio_in_video):
-    audio_path = config.audio_path if config.audio_path else config.video_path
-    mt_audio = _load_audio(audio_path)
-    mt_audio, mt_audio_mask = pre_process_audio_qwen3_omni(mt_audio)
+  use_audio_in_video = config.use_audio_in_video
+  if audio_path or (video_path and use_audio_in_video):
+    audio_file = audio_path if audio_path else video_path
+    mt_audio = pre_process_audio_qwen3_omni(_load_audio(audio_file), config)
     processor_outputs.audio_values = mt_audio
-    processor_outputs.audio_mask = mt_audio_mask
+    processor_outputs.audio_lengths = np.array([mt_audio.shape[2]])
+    processor_outputs.use_audio_in_video = use_audio_in_video
+    if not processor_outputs.use_audio_in_video:
+      processor_outputs.num_audios = 1
 
   return processor_outputs

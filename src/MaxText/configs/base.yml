@@ -874,6 +874,7 @@ temperature_tuning: False
 # Multimodal flags
 use_multimodal: False
 use_audio: False
+use_audio_in_video: False
 freeze_vision_encoder_params: True
 freeze_audio_encoder_params: True
 dtype_mm: "float32"  # Data type for multimodal model's vision encoder
@@ -884,6 +885,7 @@ audio_path: "" # Local audio path used for decoding, can be multiple paths separ
 video_path: "" # Local video path used for decoding, can be multiple paths separated by comma, exp "/path/video1.mp4,/path/video2.mp4"
 image_placeholder: "<|image|>"
 audio_placeholder: "<|audio|>"
+video_placeholder: "<|video|>"
 posemb_type_for_vit: "learn"
 # max_num_images_per_example only applies for training when your image column is a list of images.
 # -1 means no limit, and will pad to the max possible number of images determined by sequence length.

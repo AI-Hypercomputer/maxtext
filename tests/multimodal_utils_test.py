@@ -271,5 +271,278 @@ class TestLlama4PostProcessing(unittest.TestCase):
     np.testing.assert_array_equal(merged_null[0, 0], text_embeddings[0, 0])
 
 
+class TestQwen3OmniTokenExpansion(unittest.TestCase):
+  """Test token expansion for Qwen3-Omni multimodal inputs"""
+
+  def test_image_expansion_single(self):
+    """Test single image token expansion"""
+    # Input: [text, image_token, text]
+    tokens = np.array([1, 2, multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN, 3, 4])
+
+    # Image grid: 1 frame, 4x4 spatial (after merge: 2x2 = 4 tokens)
+    image_grid_thw = np.array([[1, 4, 4]])
+
+    result = multimodal_utils.add_extra_tokens_for_qwen3_omni(
+        tokens=tokens,
+        image_grid_thw=image_grid_thw,
+        spatial_merge_size=2,
+        use_audio_in_video=False,
+    )
+
+    # Expected: [1, 2, img, img, img, img, 3, 4]
+    expected = np.array([1, 2, multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN, multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN,
+                        multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN, multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN, 3, 4])
+    np.testing.assert_array_equal(result, expected)
+
+  def test_video_expansion_no_audio(self):
+    """Test video token expansion without audio-in-video"""
+    # Input: [text, video_token, text]
+    tokens = np.array([1, multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN, 2])
+
+    # Video grid: 2 frames, 4x4 spatial (total: 2*4*4/4 = 8 tokens)
+    video_grid_thw = np.array([[2, 4, 4]])
+
+    result = multimodal_utils.add_extra_tokens_for_qwen3_omni(
+        tokens=tokens,
+        video_grid_thw=video_grid_thw,
+        spatial_merge_size=2,
+        use_audio_in_video=False,
+    )
+
+    # Expected: [1, vid, vid, vid, vid, vid, vid, vid, vid, 2]
+    expected_length = 1 + 8 + 1
+    self.assertEqual(len(result), expected_length)
+    self.assertEqual(result[0], 1)
+    self.assertEqual(result[-1], 2)
+    # All middle tokens should be VIDEO_TOKEN
+    self.assertTrue(np.all(result[1:9] == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN))
+
+  def test_audio_expansion_standalone(self):
+    """Test standalone audio token expansion"""
+    tokens = np.array([1, multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN, 2])
+    audio_lengths = np.array([5])
+
+    result = multimodal_utils.add_extra_tokens_for_qwen3_omni(
+        tokens=tokens,
+        audio_lengths=audio_lengths,
+        use_audio_in_video=False,
+    )
+
+    # Expected: [1, aud, aud, aud, aud, aud, 2]
+    expected = np.array([1, multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN, multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN,
+                        multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN, multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN,
+                        multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN, 2])
+    np.testing.assert_array_equal(result, expected)
+
+  def test_audio_in_video_interleaving(self):
+    """Test audio-in-video mode with temporal interleaving"""
+    # Input: [text, <vision_start>, <video_pad>, <vision_end>, text]
+    tokens = np.array([1, multimodal_utils.QWEN3_OMNI_VISION_START_TOKEN, multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN,
+                      multimodal_utils.QWEN3_OMNI_VISION_END_TOKEN, 2])
+
+    # Small video: 2 frames, 2x2 spatial (after merge 1x1 = 2 tokens total)
+    video_grid_thw = np.array([[2, 2, 2]])
+    audio_lengths = np.array([3])  # 3 audio tokens
+    second_per_grids = np.array([1.0])  # 1 second per grid
+
+    result = multimodal_utils.add_extra_tokens_for_qwen3_omni(
+        tokens=tokens,
+        video_grid_thw=video_grid_thw,
+        audio_lengths=audio_lengths,
+        spatial_merge_size=2,
+        use_audio_in_video=True,
+        second_per_grids=second_per_grids,
+        position_id_per_seconds=25,
+    )
+
+    # Check structure: [1, <vision_start>, <audio_start>, <interleaved>, <audio_end>, <vision_end>, 2]
+    self.assertEqual(result[0], 1)
+    self.assertEqual(result[1], multimodal_utils.QWEN3_OMNI_VISION_START_TOKEN)
+    self.assertEqual(result[2], multimodal_utils.QWEN3_OMNI_AUDIO_START_TOKEN)
+    self.assertEqual(result[-2], multimodal_utils.QWEN3_OMNI_VISION_END_TOKEN)
+    self.assertEqual(result[-1], 2)
+
+    # Check interleaved section contains both video and audio tokens
+    interleaved = result[3:-2]
+    has_video = np.any(interleaved == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN)
+    has_audio = np.any(interleaved == multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN)
+    self.assertTrue(has_video, "Interleaved section should contain video tokens")
+    self.assertTrue(has_audio, "Interleaved section should contain audio tokens")
+
+  def test_audio_in_video_multiple(self):
+    """Test audio-in-video mode with multiple videos"""
+    # Input: [text, <vision_start>, <video_pad>, <vision_end>, text, <vision_start>, <video_pad>, <vision_end>, text]
+    tokens = np.array([
+        1,
+        multimodal_utils.QWEN3_OMNI_VISION_START_TOKEN,
+        multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN,
+        multimodal_utils.QWEN3_OMNI_VISION_END_TOKEN,
+        2,
+        multimodal_utils.QWEN3_OMNI_VISION_START_TOKEN,
+        multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN,
+        multimodal_utils.QWEN3_OMNI_VISION_END_TOKEN,
+        3
+    ])
+
+    # Two videos: 2 frames each, 2x2 spatial (2 tokens each after merge)
+    video_grid_thw = np.array([[2, 2, 2], [2, 2, 2]])
+    audio_lengths = np.array([3, 4])  # Different audio lengths
+    second_per_grids = np.array([1.0, 1.5])  # Different temporal scales
+
+    result = multimodal_utils.add_extra_tokens_for_qwen3_omni(
+        tokens=tokens,
+        video_grid_thw=video_grid_thw,
+        audio_lengths=audio_lengths,
+        spatial_merge_size=2,
+        use_audio_in_video=True,
+        second_per_grids=second_per_grids,
+        position_id_per_seconds=25,
+    )
+
+    # Find the two vision_start tokens
+    vision_starts = np.where(result == multimodal_utils.QWEN3_OMNI_VISION_START_TOKEN)[0]
+    self.assertEqual(len(vision_starts), 2, "Should have 2 vision_start tokens")
+
+    # Find the two vision_end tokens
+    vision_ends = np.where(result == multimodal_utils.QWEN3_OMNI_VISION_END_TOKEN)[0]
+    self.assertEqual(len(vision_ends), 2, "Should have 2 vision_end tokens")
+
+    # Check first video section
+    first_section = result[vision_starts[0]:vision_ends[0]+1]
+    self.assertEqual(first_section[0], multimodal_utils.QWEN3_OMNI_VISION_START_TOKEN)
+    self.assertEqual(first_section[1], multimodal_utils.QWEN3_OMNI_AUDIO_START_TOKEN)
+    self.assertEqual(first_section[-1], multimodal_utils.QWEN3_OMNI_VISION_END_TOKEN)
+    has_video_1 = np.any(first_section == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN)
+    has_audio_1 = np.any(first_section == multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN)
+    self.assertTrue(has_video_1, "First video section should contain video tokens")
+    self.assertTrue(has_audio_1, "First video section should contain audio tokens")
+
+    # Check second video section
+    second_section = result[vision_starts[1]:vision_ends[1]+1]
+    self.assertEqual(second_section[0], multimodal_utils.QWEN3_OMNI_VISION_START_TOKEN)
+    self.assertEqual(second_section[1], multimodal_utils.QWEN3_OMNI_AUDIO_START_TOKEN)
+    self.assertEqual(second_section[-1], multimodal_utils.QWEN3_OMNI_VISION_END_TOKEN)
+    has_video_2 = np.any(second_section == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN)
+    has_audio_2 = np.any(second_section == multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN)
+    self.assertTrue(has_video_2, "Second video section should contain video tokens")
+    self.assertTrue(has_audio_2, "Second video section should contain audio tokens")
+
+  def test_batch_processing_2d(self):
+    """Test that 2D batched input is processed correctly"""
+    # Batch of 2 sequences
+    tokens = np.array([
+        [1, multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN, 2, 0],  # First sequence (padded)
+        [3, 4, multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN, 5],  # Second sequence
+    ])
+
+    # Both images same size: 1 frame, 4x4 spatial (4 tokens after merge)
+    image_grid_thw = np.array([[1, 4, 4], [1, 4, 4]])
+
+    result = multimodal_utils.add_extra_tokens_for_qwen3_omni(
+        tokens=tokens,
+        image_grid_thw=image_grid_thw,
+        spatial_merge_size=2,
+        use_audio_in_video=False,
+    )
+
+    # Result should be 2D
+    self.assertEqual(result.ndim, 2)
+    self.assertEqual(result.shape[0], 2)
+
+    # Check first sequence: [1, img, img, img, img, 2, 0, 0]
+    self.assertEqual(result[0, 0], 1)
+    self.assertTrue(np.all(result[0, 1:5] == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN))
+
+    # Check second sequence: [3, 4, img, img, img, img, 5, 0]
+    self.assertEqual(result[1, 0], 3)
+    self.assertEqual(result[1, 1], 4)
+    self.assertTrue(np.all(result[1, 2:6] == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN))
+
+  def test_1d_input_returns_1d(self):
+    """Test that 1D input returns 1D output"""
+    tokens = np.array([1, multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN, 2])
+    image_grid_thw = np.array([[1, 4, 4]])
+
+    result = multimodal_utils.add_extra_tokens_for_qwen3_omni(
+        tokens=tokens,
+        image_grid_thw=image_grid_thw,
+        spatial_merge_size=2,
+        use_audio_in_video=False,
+    )
+
+    # Result should be 1D
+    self.assertEqual(result.ndim, 1)
+
+  def test_no_multimodal_tokens(self):
+    """Test that text-only input passes through unchanged"""
+    tokens = np.array([1, 2, 3, 4, 5])
+
+    result = multimodal_utils.add_extra_tokens_for_qwen3_omni(
+        tokens=tokens,
+        use_audio_in_video=False,
+    )
+
+    np.testing.assert_array_equal(result, tokens)
+
+  def test_multiple_images(self):
+    """Test expansion of multiple image tokens"""
+    tokens = np.array([1, multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN, 2, multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN, 3])
+
+    # Two images with same dimensions
+    image_grid_thw = np.array([[1, 4, 4], [1, 4, 4]])
+
+    result = multimodal_utils.add_extra_tokens_for_qwen3_omni(
+        tokens=tokens,
+        image_grid_thw=image_grid_thw,
+        spatial_merge_size=2,
+        use_audio_in_video=False,
+    )
+
+    # Expected: [1, img*4, 2, img*4, 3]
+    expected_length = 1 + 4 + 1 + 4 + 1
+    self.assertEqual(len(result), expected_length)
+    self.assertEqual(result[0], 1)
+    self.assertEqual(result[5], 2)
+    self.assertEqual(result[-1], 3)
+
+  def test_videos_with_different_lengths(self):
+    """Test multiple videos with different dimensions (different lengths)"""
+    # Input: [text, video1, text, video2, text]
+    tokens = np.array([1, multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN, 2,
+                      multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN, 3])
+
+    # First video: 2 frames, 4x4 spatial -> 2*4*4/4 = 8 tokens
+    # Second video: 4 frames, 2x2 spatial -> 4*2*2/4 = 4 tokens (different!)
+    video_grid_thw = np.array([
+        [2, 4, 4],  # First video
+        [4, 2, 2],  # Second video (different dimensions)
+    ])
+
+    result = multimodal_utils.add_extra_tokens_for_qwen3_omni(
+        tokens=tokens,
+        video_grid_thw=video_grid_thw,
+        spatial_merge_size=2,
+        use_audio_in_video=False,
+    )
+
+    # Expected: [1, vid*8, 2, vid*4, 3]
+    expected_length = 1 + 8 + 1 + 4 + 1
+    self.assertEqual(len(result), expected_length,
+                     f"Expected length {expected_length}, got {len(result)}")
+
+    # Verify structure
+    self.assertEqual(result[0], 1)
+    self.assertEqual(result[9], 2)  # After 1 + 8 video tokens
+    self.assertEqual(result[-1], 3)
+
+    # Check first video has 8 tokens
+    first_video_tokens = result[1:9]
+    self.assertTrue(np.all(first_video_tokens == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN))
+
+    # Check second video has 4 tokens
+    second_video_tokens = result[10:14]
+    self.assertTrue(np.all(second_video_tokens == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN))
+
+
 if __name__ == "__main__":
   unittest.main()
