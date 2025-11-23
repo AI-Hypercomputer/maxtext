@@ -49,7 +49,7 @@ load_full_state_path: ""
 enable_checkpointing: True
 save_checkpoint_on_completion: True
 async_checkpointing: True
-checkpoint_period: 10_000
+checkpoint_period: 100
 max_num_checkpoints_to_keep: None
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
@@ -555,7 +555,7 @@ sft_train_on_completion_only: False
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
 dataset_type: tfds
 # for TFDS input pipeline (dataset_type=tfds)
-dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
+dataset_path: 'gs://tess-tpu-dataloading-us-central1/' # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 train_split: 'train'
