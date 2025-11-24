@@ -102,7 +102,7 @@ class PipelineParallelismTest(unittest.TestCase):
     init_pipeline_params = my_pipeline.init(
         jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
     )
-    partition_spec = my_pipeline.get_weight_sharding(
+    logical_partition_spec = my_pipeline.get_weight_sharding(
         inputs, inputs_position, inputs_segmentation, deterministic, model_mode
     )
 
@@ -115,16 +115,22 @@ class PipelineParallelismTest(unittest.TestCase):
         deterministic,
         model_mode,
         dummy_targets,
-        partition_spec=None,
+        logical_partition_spec=None,
     ):
       outputs = my_pipeline.apply(
-          params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, partition_spec=partition_spec
+          params,
+          inputs,
+          inputs_position,
+          inputs_segmentation,
+          deterministic,
+          model_mode,
+          logical_partition_spec=logical_partition_spec,
       )
       loss = jnp.linalg.norm(outputs - dummy_targets)
       return loss
 
     pipeline_parallelism_dummy_loss = functools.partial(
-        pipeline_parallelism_dummy_loss_extra, partition_spec=partition_spec
+        pipeline_parallelism_dummy_loss_extra, logical_partition_spec=logical_partition_spec
     )
 
     def regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
