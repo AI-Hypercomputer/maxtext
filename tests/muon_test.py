@@ -13,7 +13,8 @@
 # limitations under the License.
 
 
-"""
+""" 
+Test generated Muon dimension numbers match the hardcoded reference.
 python3 -m pytest -v --pyargs tests.muon_test -rP -s
 """
 
@@ -225,7 +226,7 @@ class MuonDimensionTest(parameterized.TestCase):
   )
   def test_model_integration(self, model_name, expected_output):
     """
-    Initializes the specified MaxText model and asserts that the calculated
+    Initializes the specified MaxText model and asserts that the generated
     Muon dimension numbers match the hardcoded reference.
     """
     actual_output = get_model_mdn(model_name, scan_layers=True)
