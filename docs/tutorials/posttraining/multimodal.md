@@ -1,6 +1,6 @@
 
 
-# Multimodal Support
+# Multimodal support
 
 This document provides a guide to use the multimodal functionalities in MaxText including:
 - **Checkpoint Conversion**: Convert a MaxText-compatible orbax checkpoint from HuggingFace.

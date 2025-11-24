@@ -1,4 +1,4 @@
-# MaxText and the JAX Ecosystem
+# MaxText and the JAX ecosystem
 
 MaxText is built on a curated stack of JAX libraries, each chosen for a specific purpose. This document provides an opinionated view on *why* MaxText uses the following key components of the JAX ecosystem:
 

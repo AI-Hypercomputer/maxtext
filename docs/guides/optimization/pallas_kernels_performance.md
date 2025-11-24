@@ -14,7 +14,7 @@
  limitations under the License.
 -->
 
-# Optimizing with Pallas Kernels
+# Optimizing with Pallas kernels
 
 New to Pallas? Start with the [official docs](https://docs.jax.dev/en/latest/pallas/index.html).
 

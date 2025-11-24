@@ -1,4 +1,4 @@
-# Benchmarking & Tuning Guide
+# Benchmarking & tuning guide
 
 This tutorial guides you through setting up benchmarks and performing performance tuning in MaxText, **focusing on key aspects** like how to set up benchmarks, choose the right config and tuning the benchmark performance.
 

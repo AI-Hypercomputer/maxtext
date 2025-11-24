@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# SFT Basics
+# SFT basics
 Supervised fine-tuning (SFT) is a process where a pre-trained large language model is fine-tuned on a labeled dataset to adapt the model to perform better on specific tasks.
 
 This tutorial demonstrates step-by-step instructions for setting up the environment and then training the model on a Hugging Face dataset using SFT.

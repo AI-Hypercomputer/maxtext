@@ -15,7 +15,7 @@
 -->
 
 (monitor-goodput)=
-# ML Goodput Measurement
+# ML Goodput measurement
 
 MaxText supports automatic measurement and upload of workload metrics such as Goodput, Badput Breakdown and Step Time Deviation using the ML Goodput Measurement library.
 

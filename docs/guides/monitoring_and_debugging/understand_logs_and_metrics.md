@@ -14,7 +14,7 @@
  limitations under the License.
 -->
 (understand-logs-and-metrics)=
-# Understand Logs and Metrics
+# Understand logs and metrics
 
 When you run a training job, MaxText produces detailed output logs. This guide shows you how to interpret these logs to understand your configuration and monitor performance.
 

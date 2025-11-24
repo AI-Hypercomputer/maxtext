@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Customizing TPU Configs
+# Customizing TPU configs
 
 ## Introduction
 

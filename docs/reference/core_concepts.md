@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Core Concepts
+# Core concepts
 
 ```{toctree}
 :maxdepth: 1

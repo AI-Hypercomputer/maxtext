@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Knowledge Distillation
+# Knowledge distillation
 
 ## Overview
 Knowledge Distillation is a compression technique that transfers knowledge from a larger (teacher) model to a smaller (student) model. This allows the smaller model to achieve performance levels closer to the larger one, but with significantly fewer parameters and computational resources.
