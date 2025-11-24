@@ -45,9 +45,9 @@ repos:
     rev: 2024.10.11
     hooks:
       - id: pytype
-        args:
-          - "--jobs=auto"
-          - "--keep-going"
+        # Disable the import-error check to avoid false positives on
+        # dependent libraries not installed in the pre-commit environment.
+        args: ["--jobs=auto", "--keep-going", "--disable=import-error"]
 
   - repo: https://github.com/google/pyink
     rev: 24.10.1
