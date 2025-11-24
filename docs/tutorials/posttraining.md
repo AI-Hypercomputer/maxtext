@@ -1,4 +1,4 @@
-# Post training
+# Post-training
 
 ```{toctree}
 :maxdepth: 1

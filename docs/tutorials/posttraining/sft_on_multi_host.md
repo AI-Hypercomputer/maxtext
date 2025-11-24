@@ -14,7 +14,7 @@
 # limitations under the License.
  -->
 
-# Supervised Fine-Tuning (SFT) on multi-host TPUs
+# SFT on multi-host TPUs
 Supervised fine-tuning (SFT) is a process where a pre-trained large language model is fine-tuned on a labeled dataset to adapt the model to perform better on specific tasks.
 
 This tutorial demonstrates step-by-step instructions for setting up the multi-host TPU environment and then training the model on the Hugging Face dataset using SFT. In this tutorial we use a multi-host TPU such as `v6e-256`.

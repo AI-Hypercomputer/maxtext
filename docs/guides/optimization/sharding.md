@@ -14,8 +14,8 @@
  limitations under the License.
  -->
 
-(sharding)=
-# Sharding
+(sharding_on_TPUs)=
+# Sharding on TPUs
 
 Choosing efficient sharding strategies is key to achieving good performance, especially at scale. In general there are other related knobs to optimize performance - you should make use of all your HBM (by tuning batch size and rematerialization policies), but here we discuss the various sharding strategies we support in maxtext.
 

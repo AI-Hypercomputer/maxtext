@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Via single host GPU
+# Via single-host GPU
 
 This is a short guide to run Maxtext on GPU. For this current set of instructions the GPUs used are A3-high. This is a single node 8 H100 instruction.
 

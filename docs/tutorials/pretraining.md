@@ -15,7 +15,7 @@
 -->
 
 (pretraining)=
-# Pretraining with real datasets
+# Pre-training
 
 In this tutorial, we introduce how to run pretraining with real datasets. While synthetic data is commonly used for benchmarking, we rely on real datasets to obtain meaningful weights. Currently, MaxText supports three dataset input pipelines: HuggingFace, Grain, and TensorFlow Datasets (TFDS). We will walk you through: setting up dataset, modifying the [dataset configs](https://github.com/AI-Hypercomputer/maxtext/blob/08d9f20329ab55b9b928543fedd28ad173e1cd97/src/MaxText/configs/base.yml#L486-L514) and [tokenizer configs](https://github.com/AI-Hypercomputer/maxtext/blob/08d9f20329ab55b9b928543fedd28ad173e1cd97/src/MaxText/configs/base.yml#L452-L455) for training, and optionally enabling evaluation.
 

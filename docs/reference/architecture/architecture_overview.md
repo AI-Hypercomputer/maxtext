@@ -153,7 +153,7 @@ This logical mesh abstraction enables the implementation of the standard paralle
 
 In MaxText, these strategies are implemented by annotating the model's PyTrees (the nested Python structures of arrays that hold the parameters and state) with sharding specifications. This is done using Flax's partitioning utilities, such as nn\_partitioning. These annotations provide requirements and hints to the compiler, telling it how each tensor should be distributed across the axes of the device mesh. The compiler then generates the appropriate collective communication operations (e.g., all-reduce, all-gather) needed to execute the parallel computation correctly and efficiently.
 
-For more information on sharding see [our sharding documentation](sharding).
+For more information on sharding see [our sharding documentation](sharding_on_TPUs).
 
 ### Hardware abstraction and performance via XLA
 

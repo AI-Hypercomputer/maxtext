@@ -19,6 +19,7 @@
 ```{toctree}
 :maxdepth: 1
 optimization/custom_model.md
+optimization/sharding.md
 optimization/pallas_kernels_performance.md
 optimization/benchmark_and_performance.md
 ```
