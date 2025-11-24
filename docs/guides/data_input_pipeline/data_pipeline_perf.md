@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Optimizing Pipeline Performance
+# Optimizing pipeline performance
 
 This guide explains how to set and verify the performance goal for your data input pipeline to maximize accelerator utilization.
 

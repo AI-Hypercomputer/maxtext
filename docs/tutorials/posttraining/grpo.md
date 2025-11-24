@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# GRPO Basics
+# GRPO basics
 
 This tutorial demonstrates step-by-step instructions for setting up the environment and then training the Llama3.1 8B-IT model on the GSM8K math reasoning benchmark using Group Relative Policy Optimization (GRPO). GRPO can enhance your model's problem-solving skills on mathematical word problems, coding problems, etc.
 

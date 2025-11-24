@@ -1,5 +1,5 @@
 
-# Optimized Models Tiering
+# Optimized models tiering
 
 For each of the TPU platforms listed below, we present a list of optimized models[^1] [^2] for pre-training. If you’re getting started with MaxText, or want to push performance, we recommend choosing a Gold model, with an accompanying pre-training recipe.
 

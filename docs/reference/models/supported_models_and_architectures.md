@@ -1,4 +1,4 @@
-# Supported Models List
+# Supported models list
 
 > **Purpose**: This page provides detailed, reference-style information about model families supported in MaxText. This page is a technical dictionary for quick lookup, reproducibility, and customization.
 

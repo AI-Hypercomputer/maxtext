@@ -1,4 +1,4 @@
-# Architecture Overview
+# Architecture overview
 
 ## The MaxText philosophy
 

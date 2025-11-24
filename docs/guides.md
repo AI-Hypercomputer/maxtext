@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# How-to Guides
+# How-to guides
 
 ```{toctree}
 :maxdepth: 1

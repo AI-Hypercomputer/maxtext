@@ -1,4 +1,4 @@
-# JAX, XLA, and Pallas Reference
+# JAX, XLA, and Pallas reference
 
 This document serves as a guide for MaxText users to understand the components at the core of MaxText. To move beyond basic model training and truly leverage the power of MaxText for ambitious research and production goals, a deep understanding of its foundational technology technologies — JAX, XLA, and Pallas — is crucial.
 

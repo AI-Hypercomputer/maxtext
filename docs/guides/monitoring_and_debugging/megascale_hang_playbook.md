@@ -1,4 +1,4 @@
-# Troubleshooting: Megascale Hangs
+# Troubleshooting: Megascale hangs
 
 Cloud TPU Multislice environments are composed of multiple TPU slices that communicate over the Data Center Network (DCN). Multislice workloads use Megascale collectives to communicate over DCN. This guide discusses how to identify and diagnose sources of performance issues such as slowness, hangs or errors in a multi-slice job driven by Megascale.
 

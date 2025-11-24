@@ -15,7 +15,7 @@
  -->
 
 
-# Monitoring and Debugging
+# Monitoring and debugging
 
 ```{toctree}
 :maxdepth: 1
