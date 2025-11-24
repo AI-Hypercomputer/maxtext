@@ -34,7 +34,7 @@ Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
 "Bug Tracker" = "https://github.com/AI-Hypercomputer/maxtext/issues"
 
 [tool.black]
-line-length = 80
+line-length = 122
 
 [tool.hatch.metadata]
 allow-direct-references = true
