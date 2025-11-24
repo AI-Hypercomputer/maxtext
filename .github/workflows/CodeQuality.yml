@@ -56,5 +56,4 @@ jobs:
       run: |
         git fetch origin "$GITHUB_BASE_REF":"$GITHUB_BASE_REF"
         git branch "$GITHUB_HEAD_REF"
-        . "$GITHUB_WORKSPACE"/venv/bin/activate
-        pre-commit run --from-ref "$GITHUB_BASE_REF" --to-ref "$GITHUB_HEAD_REF"
+        "$GITHUB_WORKSPACE"/venv/bin/pre-commit run --from-ref "$GITHUB_BASE_REF" --to-ref "$GITHUB_HEAD_REF"
