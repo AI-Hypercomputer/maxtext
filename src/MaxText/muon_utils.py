@@ -1,3 +1,24 @@
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+""" 
+To review the muon dimension number of a model:
+Example: python3 -m MaxText.muon_utils qwen3-4b True
+"""
+
+
 from optax.contrib import MuonDimensionNumbers as mdn
 from MaxText.maxtext_utils import get_abstract_param
 
@@ -14,11 +35,6 @@ import sys
 
 Transformer = models.transformer_as_linen
 
-
-""" 
-To review the muon dimension number of a model:
-Example: python3 -m MaxText.muon_utils qwen3-4b True
-"""
 
 def _is_path_contain_any(tuples, path):
   return any(x in path for x in tuples)
@@ -135,5 +151,5 @@ if __name__ == "__main__":
     print("Usage: python3 -m MaxText.muon_utils <model_name> <scan_layers:True/False>")
     sys.exit(1)
   model_name_arg = sys.argv[1]
-  scan_layers_arg = sys.argv[2].lower() == 'true'
+  scan_layers_arg = sys.argv[2].lower() == "true"
   get_model_mdn(model_name_arg, scan_layers_arg, verbose=True)
