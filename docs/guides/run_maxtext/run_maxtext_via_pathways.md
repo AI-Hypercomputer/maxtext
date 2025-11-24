@@ -33,16 +33,18 @@ Before you can run a MaxText workload, you must complete the following setup ste
 2.  **Create a GKE cluster** configured for Pathways.
 3.  **Build and upload a MaxText Docker image** to your project's Artifact Registry.
 
-    ```bash
-    # Step 1: Build the Docker image for a TPU device
-    # This image contains MaxText and its dependencies.
+    Step 1: Build the Docker image for a TPU device. This image contains MaxText and its dependencies.
+    ```shell
     bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=jax_ai_image BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+    ```
 
-    # Step 2: Configure Docker to authenticate with Google Cloud
+    Step 2: Configure Docker to authenticate with Google Cloud
+    ```shell
     gcloud auth configure-docker
+    ```
 
-    # Step 3: Upload the image to your project's registry
-    # Replace `$USER_runner` with your desired image name.
+    Step 3: Upload the image to your project's registry. Replace `$USER_runner` with your desired image name.
+    ```shell
     bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$USER_runner
     ```
 
@@ -125,9 +127,9 @@ xpk workload create-pathways \
 
 On the machine where you will run your Python script, open a **new terminal** and create a secure tunnel to the cluster's Pathways controller.
 
+This command forwards local port 29000 to the controller pod in the cluster. It runs in the background.
+
 ```bash
-# This command forwards local port 29000 to the controller pod in the cluster.
-# It runs in the background.
 kubectl port-forward \
   "$(kubectl get pods -o name | grep ${WORKLOAD_NAME}-pathways-head)" \
   29000:29000 &> /dev/null &
@@ -163,7 +165,7 @@ The output streams directly to your terminal, just as if you were running on a l
 *   **`kubectl port-forward` fails**:
     *   Confirm that the pod from Step 1 is running (`kubectl get pods`). The name should match `${WORKLOAD_NAME}-pathways-head-0`.
     *   Ensure you are authenticated with `kubectl` and have the correct context set for your GKE cluster.
-* Make sure you import pathwaysutils package and call `pathwaysutils.initialize()` in your script when running the workload
+* Make sure you import `pathwaysutils` package and call `pathwaysutils.initialize()` in your script when running the workload.
 
 ## More information
 

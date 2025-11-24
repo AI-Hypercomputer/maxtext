@@ -164,7 +164,7 @@ def should_prevent_cse_in_remat(config):
   return True
 
 
-def load_compiled(config, partial_train, state):
+def load_compiled(config, partial_train, state, execution_devices):
   """# Loading a serialized compiled train step function."""
 
   # Currently partial_train and state  are needed to reconstruct
@@ -187,7 +187,7 @@ def load_compiled(config, partial_train, state):
   shaped_input_args = (state, shaped_batch, example_rng)
   shaped_input_kwargs = {}
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
-  p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree)
+  p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree, execution_devices=execution_devices)
   return p_train_step
 
 

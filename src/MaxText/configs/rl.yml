@@ -97,7 +97,7 @@ train_fraction: 1.0
 
 eval_interval: 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 
-num_epochs: 1  # can potentially train for more epochs
+num_epoch: 1  # can potentially train for more epochs
 
 learning_rate: 3e-6
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.

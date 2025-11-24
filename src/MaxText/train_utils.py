@@ -91,10 +91,11 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":
-    print("Loading the compiled function...", flush=True)
+    max_logging.log("Loading the compiled function...")
+    execution_devices = model.mesh.devices.flatten().tolist()
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
-    print("Loaded compiled function!", flush=True)
+    p_train_step = maxtext_utils.load_compiled(config, functional_train, state, execution_devices)
+    max_logging.log("Loaded compiled function!")
   else:
     p_train_step = jax.jit(
         functional_train,

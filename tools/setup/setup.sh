@@ -220,9 +220,6 @@ fi
 if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ $DEVICE == "tpu" ]]; then
-        # TODO: Once tunix has support for GPUs, move it from here to requirements.txt
-        echo "Installing google-tunix for stable TPU environment"
-        python3 -m uv pip install 'google-tunix>=0.1.2'
         echo "Installing stable jax, jaxlib for tpu"
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
@@ -275,8 +272,6 @@ elif [[ $MODE == "nightly" ]]; then
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing nightly tensorboard plugin profile"
         python3 -m uv pip install tbp-nightly --upgrade
-        # Installing tunix
-        python3 -m uv pip install 'git+https://github.com/google/tunix.git'
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
         python3 -m uv pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/

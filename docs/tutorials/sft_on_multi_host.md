@@ -50,7 +50,7 @@ The `docker_upload_runner.sh` script uploads your Docker image to Artifact Regis
 Install XPK by following the instructions in the [official documentation](https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#installation-via-pip).
 
 ## 3. Create GKE cluster
-If you don't already have a GKE cluster, create one by following the [XPK cluster creation guide](https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#cluster-create). Ensure the cluster is Pathways-compatible when running SFT with Pathways.
+Use a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster).
 
 ## 4. Environment configuration
 ```bash
@@ -60,7 +60,7 @@ export CLUSTER_NAME=<Name of GKE Cluster>
 export ZONE=<GKE Cluster Zone>
 
 # -- Workload Configuration --
-export WORKLOAD_NAME=<Name of Workload> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
+export WORKLOAD_NAME=<Name of Workload> # e.g., sft-$(date +%s)
 export TPU_TYPE=<TPU Type> # e.g., v6e-256
 export TPU_SLICE=1
 export DOCKER_IMAGE="gcr.io/${PROJECT}/${DOCKER_IMAGE_NAME}"
@@ -102,21 +102,16 @@ If your model checkpoint is from Hugging Face, you need to run a conversion scri
 export MODEL_CHECKPOINT_PATH=${OUTPUT_PATH}/${WORKLOAD_NAME}/maxtext-checkpoint/0/items
 ```
 
-2. **Run the Conversion Script:** Execute the following command that downloads the specified Hugging Face model and converts its weights into the MaxText format. The conversion script only supports official versions of models from Hugging Face. To see the specific models and versions currently supported for conversion, please refer to the `HF_IDS` dictionary in the MaxText utility file [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/utils.py).
+2. **Run the Conversion Script:** Execute the following commands on a CPU machine that downloads the specified HuggingFace model and converts its weights into the MaxText format. This command will download the HuggingFace model and convert it to the MaxText format, saving it to the specified GCS bucket. The conversion script only supports official versions of models from HuggingFace. To see the specific models and versions currently supported for conversion, please refer to the `HF_IDS` dictionary in the MaxText utility file [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/utils.py).
 
 ```bash
 USE_ZARR3=<Flag to use zarr3> # True to run SFT with McJAX, False to run SFT with Pathways
 USE_OCDBT=<Flag to use ocdbt> # True to run SFT with McJAX, False to run SFT with Pathways
 
-xpk workload create \
---cluster=${CLUSTER_NAME} \
---project=${PROJECT} \
---zone=${ZONE} \
---docker-image=${DOCKER_IMAGE} \
---workload=ckpt-${WORKLOAD_NAME} \
---tpu-type=${TPU_TYPE} \
---num-slices=${TPU_SLICE} \
---command "python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml model_name=$MODEL_NAME hf_access_token=$HF_TOKEN base_output_directory=$OUTPUT_PATH/$WORKLOAD_NAME/maxtext-checkpoint scan_layers=True checkpoint_storage_use_zarr3=$USE_ZARR3 checkpoint_storage_use_ocdbt=$USE_OCDBT"
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# For large models, it is recommended to set `--lazy_load_tensors` flag to reduce memory usage during conversion
+python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml model_name=$MODEL_NAME hf_access_token=$HF_TOKEN base_output_directory=$OUTPUT_PATH/$WORKLOAD_NAME/maxtext-checkpoint scan_layers=True checkpoint_storage_use_zarr3=$USE_ZARR3 checkpoint_storage_use_ocdbt=$USE_OCDBT skip_jax_distributed_system=True --lazy_load_tensors=True
 ```
 
 ## 6. Submit workload on GKE cluster
