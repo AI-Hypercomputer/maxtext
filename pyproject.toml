@@ -33,6 +33,9 @@ cuda12 = ["dependencies/requirements/generated_requirements/cuda12-requirements.
 Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
 "Bug Tracker" = "https://github.com/AI-Hypercomputer/maxtext/issues"
 
+[tool.black]
+line-length = 80
+
 [tool.hatch.metadata]
 allow-direct-references = true
 

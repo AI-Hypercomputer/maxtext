@@ -14,25 +14,50 @@
 
 """Preprocessing for instruction dataset."""
 
-import datasets
 import json
 import os
+import pathlib
 import re
+
+import datasets
 
 from MaxText import max_logging
 
+_MAXTEXT_PACKAGE_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-def load_template_from_file(template_path):
+
+def load_template_from_file(template_path: str) -> dict | None:
   """Loads a template from a file."""
   template_config = None
+  if not os.path.isfile(template_path):
+    # Try resolving relative to package root
+    candidate_path = template_path
+    if candidate_path.startswith("src/MaxText/"):
+      candidate_path = candidate_path[len("src/MaxText/") :]
+    elif candidate_path.startswith("MaxText/"):
+      candidate_path = candidate_path[len("MaxText/") :]
+
+    resolved = _MAXTEXT_PACKAGE_ROOT / candidate_path
+    max_logging.log(
+        f"DEBUG: resolving path. Input: {template_path}, Package Root: "
+        f"{_MAXTEXT_PACKAGE_ROOT}, Resolved: {resolved}, "
+        f"Exists: {resolved.is_file()}"
+    )
+
+    if resolved.is_file():
+      template_path = str(resolved)
+
   if os.path.isfile(template_path) and template_path.endswith(".json"):
     with open(template_path, encoding="utf-8") as f:
       template_config = json.load(f)
+  else:
+    max_logging.log(f"ERROR: Could not find chat template file at: {template_path}")
+
   return template_config
 
 
-def get_template_placeholders(template):
-  """Dynamically extracts the format keys (placeholders) from a template string."""
+def get_template_placeholders(template: str) -> set[str]:
+  """Dynamically extracts format keys (placeholders) from a template string."""
   # Finds all names inside {...}
   return set(re.findall(r"(?<!{){([a-zA-Z0-9_]+)}(?!})", template))
 
@@ -44,7 +69,7 @@ def extract_reasoning_and_answer(text, separator):
   return reasoning, answer
 
 
-def map_qa_data_to_conversation(example, template_config):
+def map_qa_data_to_conversation(example: dict, template_config: dict) -> dict:
   """Maps question-answer pairs to conversational format."""
 
   # Initialize prompt and completion with fallback templates
@@ -57,7 +82,7 @@ def map_qa_data_to_conversation(example, template_config):
     if "PROMPT_TEMPLATE" in template_config:
       placeholders = get_template_placeholders(template_config["PROMPT_TEMPLATE"])
       if "question" not in placeholders:
-        max_logging.log("PROMPT_TEMPLATE has no 'question' placeholder. No template will be applied to prompt.")
+        max_logging.log("NO `question` in PROMPT_TEMPLATE. No template will be applied.")
       else:
         prompt = {
             "role": "user",
@@ -70,17 +95,21 @@ def map_qa_data_to_conversation(example, template_config):
     if "COMPLETION_TEMPLATE" in template_config:
       placeholders = get_template_placeholders(template_config["COMPLETION_TEMPLATE"])
       if "REASONING_ANSWER_SEPARATOR" in template_config:
-        reasoning, answer = extract_reasoning_and_answer(example["answer"], template_config["REASONING_ANSWER_SEPARATOR"])
+        reasoning, answer = extract_reasoning_and_answer(
+            example["answer"],
+            template_config["REASONING_ANSWER_SEPARATOR"],
+        )
         if "reasoning" not in placeholders or "answer" not in placeholders:
           max_logging.log(
-              "COMPLETION_TEMPLATE is missing 'reasoning' or 'answer' placeholder."
-              " No template will be applied to completion."
-              " Remove REASONING_ANSWER_SEPARATOR from template or update COMPLETION_TEMPLATE."
+              "COMPLETION_TEMPLATE is missing 'reasoning' or 'answer' "
+              "placeholder. No template will be applied to completion. Remove "
+              "REASONING_ANSWER_SEPARATOR from template or "
+              "update COMPLETION_TEMPLATE."
           )
         elif reasoning is None or answer is None:
           max_logging.log(
-              "REASONING_ANSWER_SEPARATOR is present in template but not found in answer."
-              " No template will be applied to completion."
+              "REASONING_ANSWER_SEPARATOR is present in template but not found "
+              "in answer. No template will be applied to completion."
               " Update REASONING_ANSWER_SEPARATOR in the template."
           )
         else:
@@ -97,7 +126,7 @@ def map_qa_data_to_conversation(example, template_config):
         )
         if "answer" not in placeholders:
           max_logging.log(
-              "COMPLETION_TEMPLATE is missing 'answer' placeholder. No template will be applied to completion."
+              "COMPLETION_TEMPLATE is missing 'answer' placeholder. " "No template will be applied to completion."
           )
         else:
           completion = {
@@ -105,16 +134,16 @@ def map_qa_data_to_conversation(example, template_config):
               "content": template_config["COMPLETION_TEMPLATE"].format(answer=example["answer"].strip()),
           }
     else:
-      max_logging.log("COMPLETION_TEMPLATE is empty. No template will be applied to completion.")
+      max_logging.log("COMPLETION_TEMPLATE is empty. No template will be applied.")
 
   example["messages"] = [prompt, completion]
   return example
 
 
 def convert_to_conversational_format(
-    dataset,
-    data_columns,
-    chat_template_path,
+    dataset: datasets.Dataset,
+    data_columns: list[str],
+    chat_template_path: str | None = None,
 ):
   """Converts instruction dataset to conversational format."""
   template_config = None
@@ -122,7 +151,14 @@ def convert_to_conversational_format(
     template_config = load_template_from_file(chat_template_path)
   if "question" in data_columns and "answer" in data_columns:
     dataset_features = datasets.Features(
-        {"messages": [{"content": datasets.Value(dtype="string"), "role": datasets.Value(dtype="string")}]}
+        {
+            "messages": [
+                {
+                    "content": datasets.Value(dtype="string"),
+                    "role": datasets.Value(dtype="string"),
+                }
+            ]
+        }
     )
     dataset = dataset.map(
         map_qa_data_to_conversation,

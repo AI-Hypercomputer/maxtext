@@ -16,20 +16,19 @@
 """ Utils that are only interesting for creating a model in MaxText. """
 
 from collections.abc import Sequence
+from functools import partial
 from typing import overload
 
-from flax import nnx
 import flax.linen as nn
 import jax
-from jax.sharding import Mesh, AxisType
-from MaxText import maxtext_utils
-from MaxText import pyconfig
-from MaxText.layers import quantizations
-from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
-from MaxText.layers import models
-from orbax import checkpoint as ocp
-from functools import partial
 from etils import epath
+from flax import nnx
+from jax.sharding import AxisType, Mesh
+from orbax import checkpoint as ocp
+
+from MaxText import maxtext_utils, pyconfig
+from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
+from MaxText.layers import models, quantizations
 
 
 @overload
@@ -94,7 +93,13 @@ def from_config(
   return model
 
 
-def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
+def get_transformer_model(
+    config,
+    mesh,
+    quant,
+    model_mode: str = MODEL_MODE_TRAIN,
+    rngs: nnx.Rngs | None = None,
+):
   """Returns the transformer model based on the configuration."""
   if config.model_fsdp_ag_once:
     if rngs is not None:
@@ -108,7 +113,12 @@ def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAI
       return models.transformer_as_linen(config, mesh, quant=quant, model_mode=model_mode)
 
 
-def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
+def create_model(
+    config,
+    mesh,
+    model_mode: str = MODEL_MODE_TRAIN,
+    rngs: nnx.Rngs | None = None,
+):
   """Instantiates and returns the model object, sharded across the mesh."""
   # Model definition
   quant = quantizations.configure_quantization(config)
@@ -120,7 +130,11 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
 def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
 
-  def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
+  def _create_model(
+      mesh: Mesh | None = None,
+      model_mode: str = MODEL_MODE_TRAIN,
+      rng_key: jax.Array | None = None,
+  ):
     if rng_key is None:
       rng_key = jax.random.PRNGKey(config.init_weights_seed)
 
@@ -179,7 +193,9 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
 
         is_nnx_checkpoint = True
         if (
-            "params" in metadata.item_metadata.tree.keys()
+            metadata is not None
+            and metadata.item_metadata is not None
+            and "params" in metadata.item_metadata.tree.keys()
             and "params" in metadata.item_metadata.tree.get("params", {}).keys()
         ):
           # structure of linen checkpoint: {'params': {'params': {'decoder': ...}}}

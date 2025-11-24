@@ -7,10 +7,10 @@ repos:
     hooks:
       - id: codespell
         args:
-          - '-w'
+          - "-w"
           - '--skip="*.txt,pylintrc,.*,src/MaxText/assets/*"'
-          - '-L ND,nd,sems,TE,ROUGE,rouge,astroid,ags,dout'
-          - '.'
+          - "-L ND,nd,sems,TE,ROUGE,rouge,astroid,ags,dout"
+          - "."
         additional_dependencies:
           - tomli
 
@@ -28,27 +28,38 @@ repos:
     hooks:
       - id: pylint
         args:
-          - '--disable=R0401,R0917,W0201,W0613'
+          - "--disable=R0401,R0917,W0201,W0613"
           - "--ignore-patterns='.pytype,.*pyi$'"
-          - 'benchmarks'
-          - 'end_to_end'
-          - 'src'
-          - 'tests'
+          - "benchmarks"
+          - "end_to_end"
+          - "src"
+          - "tests"
 
-  #  - repo: https://github.com/google/pytype
-  #    rev: 2024.10.11
-  #    hooks:
-  #      - id: pytype
-  #        args:
-  #          - '--jobs=auto'
-  #          - '--keep-going'
-  #          - 'src/MaxText/'
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ["--profile", "black", "--line-length", "122"]
+
+  - repo: https://github.com/google/pytype
+    rev: 2024.10.11
+    hooks:
+      - id: pytype
+        args:
+          - "--jobs=auto"
+          - "--keep-going"
 
   - repo: https://github.com/google/pyink
     rev: 24.10.1
     hooks:
       - id: pyink
         args:
-          - '--pyink-indentation=2'
-          - '--line-length=122'
-          - '--check'
+          - "--pyink-indentation=2"
+          - "--line-length=122"
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0 # Use a stable revision
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml

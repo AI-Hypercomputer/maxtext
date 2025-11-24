@@ -20,7 +20,7 @@ base_config: "base.yml"
 # ====== Hardware =====
 trainer_devices_fraction: 0.5
 sampler_devices_fraction: 0.5
-chips_per_vm: 4  # depends on hardware, for v5p this is 4
+chips_per_vm: 4 # depends on hardware, for v5p this is 4
 num_trainer_slices: -1
 num_samplers_slices: -1
 
@@ -45,8 +45,7 @@ grpo_beta: 0.08
 # Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
 # stable updates.
 grpo_epsilon: 0.2
-loss_algo: 'grpo' # grpo or gspo-token
-
+loss_algo: "grpo" # grpo or gspo-token
 
 # ====== Models ======
 # for MaxText
@@ -63,13 +62,14 @@ loss_algo: 'grpo' # grpo or gspo-token
 #   HF tokenizer_path: meta-llama/Llama-3.1-70B-Instruct
 
 # ====== MaxText configs ======
-weight_dtype: 'bfloat16'
-attention: 'dot_product'
-remat_policy: 'custom'
-decoder_layer_input: 'offload'
-query_proj: 'offload'
-key_proj: 'offload'
-value_proj: 'offload'
+base_output_directory: "/tmp/grpo_output"
+weight_dtype: "bfloat16"
+attention: "dot_product"
+remat_policy: "custom"
+decoder_layer_input: "offload"
+query_proj: "offload"
+key_proj: "offload"
+value_proj: "offload"
 checkpoint_storage_use_ocdbt: False # For Pathways
 checkpoint_storage_use_zarr3: False # For Pathways
 use_pathways: True
@@ -86,18 +86,18 @@ enable_tunix_perf_metrics: False
 batch_size: 1
 # Increase `batch_size` and `MAX_STEPS` for better results.
 # num_batches: 3738
-num_batches: 4  # 200
+num_batches: 4 # 200
 # A batch can be split into multiple micro batches for memory management
 # and/or async sampling and training.
 micro_batch_size: -1
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
-num_test_batches: 5  # 200
+num_test_batches: 5 # 200
 train_fraction: 1.0
 
-eval_interval: 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
+eval_interval: 10 # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 
-num_epoch: 1  # can potentially train for more epochs
+num_epoch: 1 # can potentially train for more epochs
 
 learning_rate: 3e-6
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.
@@ -130,7 +130,7 @@ eval_make_lst: False # If True, return a list of (question, answer, responses) d
 max_prefill_predict_length: 256
 max_target_length: 1024
 kv_cache_buffer: 256
-hbm_utilization_vllm: 0.72
+hbm_utilization_vllm: 0.4
 swap_space_vllm_gb: 2
 # Generation Configuration During Training
 # Important to keep a high-ish temperature for varied, diverse responses during
@@ -150,22 +150,22 @@ max_num_checkpoints_to_keep: 10
 reward_exact_format_match: 3.0
 reward_white_space_format_match: 1.5
 reward_partial_format_match: 0.5
-reward_ratio_guess_to_answer_high:  0.5
+reward_ratio_guess_to_answer_high: 0.5
 reward_ratio_guess_to_answer_low: 0.25
 penalty_incorrect_format: -0.5
 penalty_incorrect_answer: -1.0
 
 # ====== Special tokens/templates for GSM8K reasoning ======
-reasoning_start_token: '<reasoning>'
-reasoning_end_token: '</reasoning>'
-solution_start_token: '<answer>'
-solution_end_token: '</answer>'
-chat_template_path: 'src/MaxText/examples/chat_templates/gsm8k_rl.json'
+reasoning_start_token: "<reasoning>"
+reasoning_end_token: "</reasoning>"
+solution_start_token: "<answer>"
+solution_end_token: "</answer>"
+chat_template_path: "src/MaxText/examples/chat_templates/gsm8k_rl_llama3.json"
 skip_jax_distributed_system: True
 
 # # TODO(@mazumdera): fix this
 # Dataset Configuration
-dataset_name: 'gsm8k'
-train_split: 'train'
-eval_split: 'test'
-tokenizer_type: 'huggingface'
+dataset_name: "gsm8k"
+train_split: "train"
+eval_split: "test"
+tokenizer_type: "huggingface"
