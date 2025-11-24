@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Customizing TPU configs
+# Customizing model configs for TPUs
 
 ## Introduction
 
@@ -67,7 +67,7 @@ Use these general runtime configurations to improve your model's performance.
 (roofline-sharding)=
 ## Step 3. Choose efficient sharding strategies using Roofline Analysis
 
-To achieve good performance, it's often necessary to co-design the model's dimensions (like the MLP dimension) along with the sharding strategy. We have included examples for Trillium that demonstrate which sharding approaches work well for specific models. We recommend reading [](sharding) and Jax’s [scaling book](https://jax-ml.github.io/scaling-book/sharding/).
+To achieve good performance, it's often necessary to co-design the model's dimensions (like the MLP dimension) along with the sharding strategy. We have included examples for Trillium that demonstrate which sharding approaches work well for specific models. We recommend reading [](sharding_on_TPUs) and Jax’s [scaling book](https://jax-ml.github.io/scaling-book/sharding/).
 
 For the calculation below on Trillium, we will use Arithmetic Intensity (AI) of 5100 for 2 ICI links bandwidth bandwidth (1D with wrapound or 2D without wraparound) and 2500 for 4 ICI links bandwidth (2D with wraparound on both dimensions) over the ICI. The later bandwidth is particularly for Trillium v6e-256 (16x16) with wraparound connection.
 

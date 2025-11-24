@@ -1,4 +1,4 @@
-# MaxText Examples - Setting the Jupyter Lab or Google Colab and connect to the TPU runtime
+# Connect notebooks to TPUs
 
 This guide provides comprehensive instructions for setting up Jupyter Lab on TPU and connecting it to Google Colab for running MaxText examples.
 

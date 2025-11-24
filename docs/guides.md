@@ -21,8 +21,8 @@
 
 guides/install_maxtext.md
 guides/run_maxtext.md
+guides/optimization.md
 guides/data_input_pipeline.md
 guides/checkpointing_solutions.md
-guides/optimization.md
 guides/monitoring_and_debugging.md
 ```

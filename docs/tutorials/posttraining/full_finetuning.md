@@ -15,7 +15,7 @@
  -->
 
 (full-finetuning)=
-# Full fine-tuning (Llama3-7B)
+# Full fine-tuning on single-host TPU
 
 MaxText can perform pre-training and full finetuning. To perform full fine
 tuning, you need to pass the checkpoint to the training script.

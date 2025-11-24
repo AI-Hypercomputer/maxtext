@@ -91,6 +91,6 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
 
 
 * **Technical Explanations:**
-    * [Parallelism & Sharding](sharding)
+    * [Parallelism & Sharding](sharding_on_TPUs)
     * [Quantization Documentation](quantization)
     * [AOT Compilation Instructions](aot-compilation)

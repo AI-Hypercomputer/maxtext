@@ -1,4 +1,4 @@
-# Via localhost or single host VM
+# Via localhost or single-host VM
 
 ## Objective
 This guide provides comprehensive instructions for setting up MaxText on a local machine or single-host environment, covering everything from cloning the repo and dependency installation to building with Docker. By walking through the process of pre-training a small model, you will gain the foundational knowledge to run jobs on TPUs/GPUs.
