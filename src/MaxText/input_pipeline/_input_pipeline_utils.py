@@ -531,32 +531,45 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       pixel_values = preprocessed_image.pixel_values
       # pixel_values shape: (num_images, C, T, H, W)
       if pixel_values is not None and pixel_values.ndim == 5:
-        # Pad to a fixed spatial size to ensure all examples can be batched
-        # Get the target size from config, or use default if config not provided
-        target_spatial_size = self.config.max_image_size_for_vit if self.config else 1568
-        num_images, _, _, H, W = pixel_values.shape
+        # Determine if we're using fixed-size mode or dynamic mode
+        # Fixed-size mode: all images are already the same size (image_size_for_vit), no padding needed
+        # Dynamic mode: images have variable sizes up to max_image_size_for_vit, need padding
+        use_fixed_size = self.config.max_image_size_for_vit <= 0
 
-        #print(f"[DEBUG] Spatial padding for Qwen3-Omni: num_images={num_images}, input_shape=({H}, {W}), target={target_spatial_size}")
-
-        if H > target_spatial_size or W > target_spatial_size:
-          raise ValueError(
-              f"Image size ({H}x{W}) exceeds maximum supported size ({target_spatial_size}x{target_spatial_size}). "
-              "Consider increasing max_image_size_for_vit in config or using smaller images."
+        if use_fixed_size:
+          # Fixed-size mode: skip spatial padding since all images are already the same size
+          #print(f"[DEBUG] Fixed-size mode: skipping spatial padding for Qwen3-Omni")
+          return preprocessed_image
+        else:
+          # Dynamic mode: pad to max_image_size_for_vit (original behavior)
+          # Get the target size from config, or use default if config not provided
+          target_spatial_size = (
+              self.config.max_image_size_for_vit if self.config else 1568
           )
+          _, _, _, H, W = pixel_values.shape
 
-        # Pad spatial dimensions to fixed size
-        pad_h = target_spatial_size - H
-        pad_w = target_spatial_size - W
+          # print(f"[DEBUG] Spatial padding: input=({H}, {W}), target={target_spatial_size}")
 
-        # Pad format: (before, after) for each dimension
-        # Dimensions: (num_images, C, T, H, W)
-        pad_width = ((0, 0), (0, 0), (0, 0), (0, pad_h), (0, pad_w))
-        preprocessed_image.pixel_values = np.pad(pixel_values, pad_width, mode='constant', constant_values=0)
+          if H > target_spatial_size or W > target_spatial_size:
+            raise ValueError(
+                f"Image size ({H}x{W}) exceeds maximum supported size "
+                f"({target_spatial_size}x{target_spatial_size}). "
+                "Consider increasing max_image_size_for_vit in config."
+            )
 
-        #print(f"[DEBUG] After spatial padding: shape={preprocessed_image.pixel_values.shape}")
+          # Pad spatial dimensions to fixed size
+          pad_h = target_spatial_size - H
+          pad_w = target_spatial_size - W
 
-        # For Qwen3-Omni vision SFT, support 1 image for now and skip the image count padding
-        return preprocessed_image
+          # Pad format: (before, after) for each dimension
+          # Dimensions: (num_images, C, T, H, W)
+          pad_width = ((0, 0), (0, 0), (0, 0), (0, pad_h), (0, pad_w))
+          preprocessed_image.pixel_values = np.pad(pixel_values, pad_width, mode='constant', constant_values=0)
+
+          #print(f"[DEBUG] After spatial padding: shape={preprocessed_image.pixel_values.shape}")
+
+          # For Qwen3-Omni vision SFT, support 1 image for now and skip the image count padding
+          return preprocessed_image
 
     # For other models: calculate max_num_items and pad the number of images
     image_offsets = multimodal_utils.get_image_offsets(self.model_name, preprocessed_image)

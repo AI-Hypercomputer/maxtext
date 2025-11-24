@@ -77,6 +77,35 @@ class Qwen3OmniPreprocessorOutput(mm_utils.PreprocessorOutput):
   audio_lengths: None | np.ndarray = None
 
 
+def validate_image_size_divisibility(size: int, patch_size: int, merge_size: int, size_name: str = "image_size_for_vit"):
+  """Validates that image size is divisible by patch_size × spatial_merge_size.
+
+  The vision encoder requires image dimensions to be divisible by (patch_size × spatial_merge_size)
+  because:
+  1. Images are divided into patches of size patch_size × patch_size
+  2. Patches are then spatially merged in groups of merge_size × merge_size
+
+  Args:
+    size: The image size to validate
+    patch_size: Vision encoder patch size
+    merge_size: Spatial merge size
+    size_name: Name of the size parameter for error messages
+
+  Raises:
+    ValueError: If size is not divisible by patch_size × merge_size
+  """
+  factor = patch_size * merge_size
+  if size % factor != 0:
+    nearest_valid = (size // factor) * factor
+    next_valid = nearest_valid + factor
+    raise ValueError(
+        f"{size_name} must be divisible by (patch_size × spatial_merge_size) = {factor}. "
+        f"Got {size_name}={size}, which is not divisible by {factor}. "
+        f"Nearest valid values: {nearest_valid} or {next_valid}. "
+        f"(patch_size_for_vit={patch_size}, spatial_merge_size_for_vit={merge_size})"
+    )
+
+
 def smart_resize(
     height: int,
     width: int,
@@ -137,31 +166,47 @@ def pre_process_qwen3_image(image: np.ndarray | list[np.ndarray], config):
   temporal_patch_size = config.temporal_patch_size_for_vit
   resample_method = Image.BICUBIC
 
+  # Determine if we should use fixed-size mode or dynamic smart_resize mode
+  # Fixed-size mode: resize all images to exactly image_size_for_vit x image_size_for_vit
+  # Dynamic mode: use smart_resize with max_image_size_for_vit as the maximum dimension
+  use_fixed_size = config.max_image_size_for_vit <= 0
+
   images_in = [image] if isinstance(image, np.ndarray) else image
   images_out = []
   grids_thw = []
 
   for img in images_in:
     pil_img = Image.fromarray(img)
-    # Qwen3-Omni performs one resize during fetch_image and another resize before patchify.
-    resized_height_1, resized_width_1 = smart_resize(
-        height=img.shape[0],
-        width=img.shape[1],
-        factor=IMAGE_FACTOR,
-        min_pixels=MIN_PIXELS,
-        max_pixels=MAX_PIXELS,
-        max_size=config.max_image_size_for_vit,
-    )
-    pil_img = pil_img.resize((resized_width_1, resized_height_1))
-    resized_height_2, resized_width_2 = smart_resize(
-        height=resized_height_1,
-        width=resized_width_1,
-        factor=patch_size * merge_size,
-        min_pixels=MIN_PIXELS,
-        max_pixels=MAX_PIXELS,
-        max_size=config.max_image_size_for_vit,
-    )
-    resized_img_pil = pil_img.resize((resized_width_2, resized_height_2), resample=resample_method)
+
+    if use_fixed_size:
+      # Fixed-size mode: resize directly to image_size_for_vit x image_size_for_vit
+      # Validate that image_size_for_vit is divisible by patch_size * merge_size
+      validate_image_size_divisibility(config.image_size_for_vit, patch_size, merge_size)
+      fixed_size = config.image_size_for_vit
+      resized_img_pil = pil_img.resize((fixed_size, fixed_size), resample=resample_method)
+      resized_height_2, resized_width_2 = fixed_size, fixed_size
+    else:
+      # Dynamic mode: use smart_resize (original behavior)
+      # Qwen3-Omni performs one resize during fetch_image and another resize before patchify.
+      resized_height_1, resized_width_1 = smart_resize(
+          height=img.shape[0],
+          width=img.shape[1],
+          factor=IMAGE_FACTOR,
+          min_pixels=MIN_PIXELS,
+          max_pixels=MAX_PIXELS,
+          max_size=config.max_image_size_for_vit,
+      )
+      pil_img = pil_img.resize((resized_width_1, resized_height_1))
+      resized_height_2, resized_width_2 = smart_resize(
+          height=resized_height_1,
+          width=resized_width_1,
+          factor=patch_size * merge_size,
+          min_pixels=MIN_PIXELS,
+          max_pixels=MAX_PIXELS,
+          max_size=config.max_image_size_for_vit,
+      )
+      resized_img_pil = pil_img.resize((resized_width_2, resized_height_2), resample=resample_method)
+
     resized_img_np = np.array(resized_img_pil).astype(np.float32)
 
     # Normalize images

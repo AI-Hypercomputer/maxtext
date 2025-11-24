@@ -616,15 +616,23 @@ def get_dummy_image_shape_for_init(
         LLAMA4_TILE_SIZE,
     )
   elif model_name.startswith("qwen3-omni-30b-a3b"):
-    # Use padded size from config (default 1568 = 56 * 28, divisible by patch_size * merge_size)
-    # This matches the target_spatial_size in PadOrTrimToMaxLength
-    max_image_size = config.max_image_size_for_vit if config else 1568
+    # Determine the target image size based on fixed-size or dynamic mode
+    # Fixed-size mode: use image_size_for_vit (when max_image_size_for_vit <= 0)
+    # Dynamic mode: use max_image_size_for_vit for padding
+    # Note: image_size_for_vit is validated elsewhere to be divisible by patch_size × merge_size
+    if config and config.max_image_size_for_vit > 0:
+      # Dynamic mode: use padded size for variable-size images
+      target_size = config.max_image_size_for_vit
+    else:
+      # Fixed-size mode: all images are exactly image_size_for_vit
+      target_size = config.image_size_for_vit if config else 768
+
     image_shape = (
         batch_size,
         NUM_IMAGE_CHANNELS,
         QWEN3_TEMPORAL_PATCH_SIZE,
-        max_image_size,  # Padded height
-        max_image_size,  # Padded width
+        target_size,  # Height (padded in dynamic mode, fixed in fixed-size mode)
+        target_size,  # Width (padded in dynamic mode, fixed in fixed-size mode)
     )
   return image_shape
 
