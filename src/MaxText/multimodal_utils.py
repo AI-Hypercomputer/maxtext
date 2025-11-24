@@ -485,7 +485,7 @@ def pre_process_image(image, model_name, config=None):
     raise ValueError(f"Model {model_name} does not support multimodal inference.")
 
 
-def reformat_prompt(prompt, image_placeholder, model_name, num_images):
+def reformat_prompt(prompt, image_placeholder, video_placeholder, audio_placeholder, model_name, num_images, num_videos=0, num_audios=0):
   """Reformat prompt for different models."""
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     if image_placeholder in prompt:
@@ -507,13 +507,32 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images):
     )
     return formatted_prompt
   elif model_name in ["qwen3-omni-30b-a3b"]:
-    # Qwen3-Omni vision format: <|vision_start|><|image_pad|><|vision_end|>
+    # Qwen3-Omni placeholders
     qwen3_image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    qwen3_video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+    qwen3_audio_placeholder = "<|audio_start|><|audio_pad|><|audio_end|>"
+
+    # Replace common placeholders with Qwen3-Omni format BEFORE counting
     if image_placeholder in prompt:
       prompt = prompt.replace(image_placeholder, qwen3_image_placeholder)
+    if video_placeholder in prompt:
+      prompt = prompt.replace(video_placeholder, qwen3_video_placeholder)
+    if audio_placeholder in prompt:
+      prompt = prompt.replace(audio_placeholder, qwen3_audio_placeholder)
+
+    # Count existing placeholders (after replacement)
     image_placeholder_count = prompt.count(qwen3_image_placeholder)
+    video_placeholder_count = prompt.count(qwen3_video_placeholder)
+    audio_placeholder_count = prompt.count(qwen3_audio_placeholder)
+
+    # Add missing placeholders at the beginning
     if image_placeholder_count < num_images:
       prompt = qwen3_image_placeholder * (num_images - image_placeholder_count) + prompt
+    if video_placeholder_count < num_videos:
+      prompt = qwen3_video_placeholder * (num_videos - video_placeholder_count) + prompt
+    if audio_placeholder_count < num_audios:
+      prompt = qwen3_audio_placeholder * (num_audios - audio_placeholder_count) + prompt
+
     # Qwen chat template
     formatted_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
     return formatted_prompt
@@ -563,32 +582,63 @@ def get_image_offsets(model_name, processor_output: PreprocessorOutput | None):
   elif model_name.startswith("qwen3-omni"):
     # Calculate token expansion for Qwen3-Omni multimodal inputs
     if processor_output is None:
+      jax.debug.print("DEBUG get_image_offsets: processor_output is None")
       return 0
 
     total_offset = 0
     spatial_merge_size = 2  # Default for Qwen3-Omni
     merge_length = spatial_merge_size**2
+    jax.debug.print("DEBUG get_image_offsets: spatial_merge_size={s}, merge_length={m}", s=spatial_merge_size, m=merge_length)
 
     # Image tokens: <|image_pad|> expands to multiple image tokens
     if processor_output.pixel_grid_thw is not None:
       image_grid_thw = processor_output.pixel_grid_thw
+      jax.debug.print("DEBUG get_image_offsets: image_grid_thw shape={shape}, values={vals}", shape=image_grid_thw.shape, vals=image_grid_thw)
       for _i, grid in enumerate(image_grid_thw):
         num_image_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+        jax.debug.print("DEBUG get_image_offsets: image[{i}] grid={g}, num_tokens={n}, offset={o}", i=_i, g=grid, n=num_image_tokens, o=num_image_tokens - 1)
         total_offset += num_image_tokens - 1  # -1 for the original <|image_pad|> token
 
-    # Video tokens: <|video_pad|> expands to multiple video tokens
-    if processor_output.video_grid_thw is not None:
+    # Check if audio is interleaved with video
+    use_audio_in_video = getattr(processor_output, 'use_audio_in_video', False)
+    jax.debug.print("DEBUG get_image_offsets: use_audio_in_video={u}", u=use_audio_in_video)
+
+    # Video and Audio tokens: handle differently based on use_audio_in_video
+    if use_audio_in_video and processor_output.video_grid_thw is not None and processor_output.audio_lengths is not None:
+      # Audio-in-video mode: <|vision_start|><|video_pad|><|vision_end|> (3 tokens)
+      # becomes: <|vision_start|><|audio_start|> + video_tokens + audio_tokens + <|audio_end|><|vision_end|>
+      # Net increase: (4 + video_tokens + audio_tokens) - 3 = video_tokens + audio_tokens + 1
       video_grid_thw = processor_output.video_grid_thw
-      for _i, grid in enumerate(video_grid_thw):
-        num_video_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
-        total_offset += num_video_tokens - 1  # -1 for the original <|video_pad|> token
-
-    # Audio tokens: <|audio_pad|> expands based on audio_lengths
-    if processor_output.audio_lengths is not None:
       audio_lengths = processor_output.audio_lengths
-      for audio_len in audio_lengths:
-        total_offset += int(audio_len) - 1  # -1 for the original <|audio_pad|> token
+      jax.debug.print("DEBUG get_image_offsets: video_grid_thw shape={shape}, values={vals}", shape=video_grid_thw.shape, vals=video_grid_thw)
+      jax.debug.print("DEBUG get_image_offsets: audio_lengths={vals}", vals=audio_lengths)
 
+      for _i, (grid, audio_len) in enumerate(zip(video_grid_thw, audio_lengths)):
+        num_video_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+        jax.debug.print("DEBUG get_image_offsets: audio-in-video[{i}] video_grid={g}, num_video_tokens={v}, audio_len={a}, offset={o}",
+                       i=_i, g=grid, v=num_video_tokens, a=audio_len, o=num_video_tokens + int(audio_len) + 1)
+        # +1 because we replace 3 tokens with 4 special tokens + video + audio
+        total_offset += num_video_tokens + int(audio_len) + 1
+    else:
+      # Separate video and audio tokens
+      # Video tokens: <|video_pad|> expands to multiple video tokens
+      if processor_output.video_grid_thw is not None:
+        video_grid_thw = processor_output.video_grid_thw
+        jax.debug.print("DEBUG get_image_offsets: video_grid_thw shape={shape}, values={vals}", shape=video_grid_thw.shape, vals=video_grid_thw)
+        for _i, grid in enumerate(video_grid_thw):
+          num_video_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+          jax.debug.print("DEBUG get_image_offsets: video[{i}] grid={g}, num_tokens={n}, offset={o}", i=_i, g=grid, n=num_video_tokens, o=num_video_tokens - 1)
+          total_offset += num_video_tokens - 1  # -1 for the original <|video_pad|> token
+
+      # Audio tokens: <|audio_pad|> expands based on audio_lengths
+      if processor_output.audio_lengths is not None:
+        audio_lengths = processor_output.audio_lengths
+        jax.debug.print("DEBUG get_image_offsets: audio_lengths={vals}", vals=audio_lengths)
+        for idx, audio_len in enumerate(audio_lengths):
+          jax.debug.print("DEBUG get_image_offsets: audio[{i}] length={l}, offset={o}", i=idx, l=audio_len, o=int(audio_len) - 1)
+          total_offset += int(audio_len) - 1  # -1 for the original <|audio_pad|> token
+
+    jax.debug.print("DEBUG get_image_offsets: total_offset={t}", t=total_offset)
     return total_offset
   else:
     return 0
@@ -664,13 +714,7 @@ def prepare_text_for_image_fusion(
     texts,
     model_name,
     processor_output=None,
-    image_grid_thw=None,
-    video_grid_thw=None,
-    audio_lengths=None,
-    spatial_merge_size=2,
-    use_audio_in_video=False,
-    second_per_grids=None,
-    position_id_per_seconds=25,
+    config=None,
 ):
   """Prepare text tokens for multimodal fusion by expanding special tokens.
 
@@ -695,25 +739,15 @@ def prepare_text_for_image_fusion(
   elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     return add_extra_tokens_for_images_llama4(texts, processor_output)
   elif model_name.startswith("qwen3-omni"):
-    # Extract Qwen3-Omni specific parameters from processor_output if not provided
-    if image_grid_thw is None and processor_output is not None:
-      image_grid_thw = getattr(processor_output, "pixel_grid_thw", None)
-    if video_grid_thw is None and processor_output is not None:
-      video_grid_thw = getattr(processor_output, "video_grid_thw", None)
-    if audio_lengths is None and processor_output is not None:
-      audio_lengths = getattr(processor_output, "audio_lengths", None)
-    if second_per_grids is None and processor_output is not None:
-      second_per_grids = getattr(processor_output, "video_second_per_grid", None)
-
     return add_extra_tokens_for_qwen3_omni(
         tokens=texts,
-        image_grid_thw=image_grid_thw,
-        video_grid_thw=video_grid_thw,
-        audio_lengths=audio_lengths,
-        spatial_merge_size=spatial_merge_size,
-        use_audio_in_video=use_audio_in_video,
-        second_per_grids=second_per_grids,
-        position_id_per_seconds=position_id_per_seconds,
+        image_grid_thw=processor_output.pixel_grid_thw,
+        video_grid_thw=processor_output.video_grid_thw,
+        audio_lengths=processor_output.audio_lengths,
+        spatial_merge_size=config.spatial_merge_size_for_vit,
+        use_audio_in_video=config.use_audio_in_video,
+        second_per_grids=processor_output.video_second_per_grid,
+        position_id_per_seconds=config.position_id_per_seconds,
     )
   else:
     raise ValueError(f"Model {model_name} does not support multimodal inference.")
@@ -851,22 +885,20 @@ def add_extra_tokens_for_qwen3_omni(
     second_per_grids: np.ndarray | None = None,
     position_id_per_seconds: int = 25,
 ):
-  """Add extra tokens for Qwen3-Omni multimodal sequences.
+  """Expands placeholder tokens for Qwen3-Omni multimodal inputs.
 
-  Expands special tokens (<|image_pad|>, <|video_pad|>, <|audio_pad|>) into
-  the correct number of placeholder tokens based on grid dimensions and merge size.
-
-  For audio-in-video mode, interleaves audio and video tokens based on temporal ordering.
+  Follows HuggingFace processor implementation - processes each sample separately
+  and pads with zeros at the end.
 
   Args:
-    tokens: Input token sequence (1D array or list).
-    image_grid_thw: Image dimensions (num_images, 3) with [temporal, height, width].
-    video_grid_thw: Video dimensions (num_videos, 3) with [temporal, height, width].
-    audio_lengths: Pre-computed audio token counts (num_audios,).
-    spatial_merge_size: Number of patches merged spatially (e.g., 2 for 2x2→1).
-    use_audio_in_video: If True, interleave audio and video tokens.
-    second_per_grids: Time interval per temporal grid (num_videos,).
-    position_id_per_seconds: Temporal granularity (tokens per second).
+    tokens: Input token array (1D or 2D).
+    image_grid_thw: Image grid dimensions [T, H, W] for each image.
+    video_grid_thw: Video grid dimensions [T, H, W] for each video.
+    audio_lengths: Length of audio sequence for each audio.
+    spatial_merge_size: Spatial merge size for vision tokens.
+    use_audio_in_video: Whether to interleave audio tokens with video tokens.
+    second_per_grids: Seconds per grid for video temporal alignment.
+    position_id_per_seconds: Position IDs per second for temporal alignment.
 
   Returns:
     Expanded token sequence with correct number of image/video/audio tokens.
@@ -874,107 +906,126 @@ def add_extra_tokens_for_qwen3_omni(
   if not isinstance(tokens, np.ndarray):
     tokens = np.asarray(tokens)
 
-  tokens = tokens.flatten()  # Ensure 1D
-
-  # Merge lengths for computing number of tokens
   merge_length = spatial_merge_size**2
 
-  # Convert to list for easier manipulation
-  token_list = tokens.tolist()
-  new_tokens = []
+  # Handle both 1D and 2D
+  is_1d = tokens.ndim == 1
+  if is_1d:
+    tokens = np.expand_dims(tokens, axis=0)
 
-  image_idx = 0
-  video_idx = 0
-  audio_idx = 0
+  batch_size = tokens.shape[0]
+  processed_samples = []
 
-  i = 0
-  while i < len(token_list):
-    token = token_list[i]
+  for batch_idx in range(batch_size):
+    token_list = tokens[batch_idx].tolist()
 
-    # Handle image tokens
-    if token == QWEN3_OMNI_IMAGE_TOKEN and image_grid_thw is not None and image_idx < len(image_grid_thw):
-      grid = image_grid_thw[image_idx]
-      num_image_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
-      new_tokens.extend([QWEN3_OMNI_IMAGE_TOKEN] * num_image_tokens)
-      image_idx += 1
+    # Create iterators for grids/lengths
+    image_iter = iter(image_grid_thw) if image_grid_thw is not None else iter([])
+    video_iter = iter(video_grid_thw) if video_grid_thw is not None else iter([])
+    audio_iter = iter(audio_lengths) if audio_lengths is not None else iter([])
+    second_iter = iter(second_per_grids) if second_per_grids is not None else iter([])
 
-    # Handle audio-in-video: <|vision_start|><|video_pad|><|vision_end|>
-    elif (
-        use_audio_in_video
-        and token == QWEN3_OMNI_VISION_START_TOKEN
-        and i + 2 < len(token_list)
-        and token_list[i + 1] == QWEN3_OMNI_VIDEO_TOKEN
-        and token_list[i + 2] == QWEN3_OMNI_VISION_END_TOKEN
-        and video_grid_thw is not None
-        and video_idx < len(video_grid_thw)
-    ):
+    # Process tokens in order
+    new_tokens = []
+    i = 0
+    while i < len(token_list):
+      token = token_list[i]
 
-      if audio_lengths is None or audio_idx >= len(audio_lengths):
-        raise ValueError("audio_lengths required for audio-in-video mode")
-      if second_per_grids is None or video_idx >= len(second_per_grids):
-        raise ValueError("second_per_grids required for audio-in-video mode")
+      # Check for audio-in-video pattern: <|vision_start|><|video_pad|><|vision_end|>
+      if (
+          use_audio_in_video
+          and token == QWEN3_OMNI_VISION_START_TOKEN
+          and i + 2 < len(token_list)
+          and token_list[i + 1] == QWEN3_OMNI_VIDEO_TOKEN
+          and token_list[i + 2] == QWEN3_OMNI_VISION_END_TOKEN
+      ):
+        # Build interleaved sequence
+        audio_length = next(audio_iter)
+        curr_video_grid = next(video_iter)
+        second_per_grid = next(second_iter)
 
-      audio_length = audio_lengths[audio_idx]
-      audio_token_indices = np.arange(audio_length)
+        audio_token_indices = np.arange(audio_length)
 
-      curr_video_grid = video_grid_thw[video_idx]
-      height = curr_video_grid[1] // spatial_merge_size
-      width = curr_video_grid[2] // spatial_merge_size
-      num_frames = curr_video_grid[0]
+        height = curr_video_grid[1] // spatial_merge_size
+        width = curr_video_grid[2] // spatial_merge_size
+        num_frames = curr_video_grid[0]
 
-      video_token_indices = np.arange(num_frames).reshape(-1, 1, 1)
-      video_token_indices = np.broadcast_to(video_token_indices, (num_frames, height, width)).flatten()
-      video_token_indices = video_token_indices * second_per_grids[video_idx] * position_id_per_seconds
+        video_token_indices = np.arange(num_frames).reshape(-1, 1, 1)
+        video_token_indices = np.broadcast_to(video_token_indices, (num_frames, height, width)).flatten()
+        video_token_indices = video_token_indices * second_per_grid * position_id_per_seconds
 
-      new_tokens.append(QWEN3_OMNI_VISION_START_TOKEN)
-      new_tokens.append(QWEN3_OMNI_AUDIO_START_TOKEN)
+        # Build the replacement sequence
+        new_tokens.append(QWEN3_OMNI_VISION_START_TOKEN)
+        new_tokens.append(QWEN3_OMNI_AUDIO_START_TOKEN)
 
-      video_data_idx = 0
-      audio_data_idx = 0
+        video_data_idx = 0
+        audio_data_idx = 0
 
-      while video_data_idx < len(video_token_indices) and audio_data_idx < len(audio_token_indices):
-        if video_token_indices[video_data_idx] <= audio_token_indices[audio_data_idx]:
+        # Merge sort based on temporal position
+        while video_data_idx < len(video_token_indices) and audio_data_idx < len(audio_token_indices):
+          if video_token_indices[video_data_idx] <= audio_token_indices[audio_data_idx]:
+            new_tokens.append(QWEN3_OMNI_VIDEO_TOKEN)
+            video_data_idx += 1
+          else:
+            new_tokens.append(QWEN3_OMNI_AUDIO_TOKEN)
+            audio_data_idx += 1
+
+        # Append remaining tokens
+        while video_data_idx < len(video_token_indices):
           new_tokens.append(QWEN3_OMNI_VIDEO_TOKEN)
           video_data_idx += 1
-        else:
+
+        while audio_data_idx < len(audio_token_indices):
           new_tokens.append(QWEN3_OMNI_AUDIO_TOKEN)
           audio_data_idx += 1
 
-      while video_data_idx < len(video_token_indices):
-        new_tokens.append(QWEN3_OMNI_VIDEO_TOKEN)
-        video_data_idx += 1
+        new_tokens.append(QWEN3_OMNI_AUDIO_END_TOKEN)
+        new_tokens.append(QWEN3_OMNI_VISION_END_TOKEN)
 
-      while audio_data_idx < len(audio_token_indices):
-        new_tokens.append(QWEN3_OMNI_AUDIO_TOKEN)
-        audio_data_idx += 1
+        i += 3  # Skip the 3-token pattern
 
-      new_tokens.append(QWEN3_OMNI_AUDIO_END_TOKEN)
-      new_tokens.append(QWEN3_OMNI_VISION_END_TOKEN)
+      elif token == QWEN3_OMNI_IMAGE_TOKEN:
+        # Expand image token
+        grid = next(image_iter)
+        num_image_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+        new_tokens.extend([QWEN3_OMNI_IMAGE_TOKEN] * num_image_tokens)
+        i += 1
 
-      video_idx += 1
-      audio_idx += 1
-      i += 2
+      elif token == QWEN3_OMNI_VIDEO_TOKEN and not use_audio_in_video:
+        # Expand video token (non-audio-in-video mode)
+        grid = next(video_iter)
+        num_video_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+        new_tokens.extend([QWEN3_OMNI_VIDEO_TOKEN] * num_video_tokens)
+        i += 1
 
-    # Handle video tokens (without audio-in-video)
-    elif token == QWEN3_OMNI_VIDEO_TOKEN and video_grid_thw is not None and video_idx < len(video_grid_thw):
-      grid = video_grid_thw[video_idx]
-      num_video_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
-      new_tokens.extend([QWEN3_OMNI_VIDEO_TOKEN] * num_video_tokens)
-      video_idx += 1
+      elif token == QWEN3_OMNI_AUDIO_TOKEN and not use_audio_in_video:
+        # Expand audio token (standalone)
+        audio_length = next(audio_iter)
+        new_tokens.extend([QWEN3_OMNI_AUDIO_TOKEN] * int(audio_length))
+        i += 1
 
-    # Handle audio tokens (standalone, not in video)
-    elif token == QWEN3_OMNI_AUDIO_TOKEN and audio_lengths is not None and audio_idx < len(audio_lengths):
-      num_audio_tokens = int(audio_lengths[audio_idx])
-      new_tokens.extend([QWEN3_OMNI_AUDIO_TOKEN] * num_audio_tokens)
-      audio_idx += 1
+      else:
+        # Pass through unchanged
+        new_tokens.append(token)
+        i += 1
 
-    # All other tokens pass through unchanged
-    else:
-      new_tokens.append(token)
+    processed_samples.append(np.array(new_tokens, dtype=np.int32))
 
-    i += 1
+  # Pad all samples to max length with zeros
+  max_len = max(len(sample) for sample in processed_samples)
+  padded_samples = []
+  for sample in processed_samples:
+    if len(sample) < max_len:
+      pad_width = max_len - len(sample)
+      sample = np.pad(sample, (0, pad_width), mode='constant', constant_values=0)
+    padded_samples.append(sample)
 
-  return np.array(new_tokens, dtype=np.int32)
+  result = np.stack(padded_samples, axis=0)
+
+  if is_1d:
+    result = result[0]
+
+  return result
 
 
 def add_extra_tokens_for_images_gemma3(
@@ -1025,7 +1076,6 @@ def add_extra_tokens_for_images_gemma3(
       tokens=tokens,
       max_num_images=max_num_images,
   )
-
 
 def insert_sequence(
     tokens: np.ndarray,
@@ -1108,7 +1158,6 @@ def insert_sequence(
     new_tokens = np.squeeze(new_tokens)
   return new_tokens
 
-
 def _get_new_text_positions(
     *,
     offset_on: np.ndarray,
@@ -1132,7 +1181,6 @@ def _get_new_text_positions(
   # tokens.
   new_positions -= offset_by * offset_on
   return new_positions
-
 
 def merge_mm_embeddings(
     text_embeddings: np.ndarray | jnp.ndarray,
@@ -1208,7 +1256,6 @@ def merge_mm_embeddings(
       in_axes=(0, 0, 0, None if flat_token_masks_processed is None else 0),
   )(text_embeddings, flat_multimodal_embeddings, mask, flat_token_masks_processed)
 
-
 def _merge_mm_embeddings_inner(
     text_embeddings: jnp.ndarray,
     multimodal_embeddings: jnp.ndarray,
@@ -1239,10 +1286,6 @@ def _merge_mm_embeddings_inner(
 
   return merged
 
-
-# ==============================================================================
-# Qwen3-Omni Multimodal Position ID Utilities
-# ==============================================================================
 def _get_feat_extract_output_lengths(input_lengths: jax.Array) -> jax.Array:
   """Computes the output length of the audio encoder convolutional layers.
 
@@ -1260,7 +1303,6 @@ def _get_feat_extract_output_lengths(input_lengths: jax.Array) -> jax.Array:
   feat_lengths = (input_lengths_leave - 1) // 2 + 1
   output_lengths = ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
   return output_lengths
-
 
 def get_llm_pos_ids_for_vision(
     start_idx: int | jax.Array,
@@ -1321,7 +1363,6 @@ def get_llm_pos_ids_for_vision(
 
   return llm_pos_ids
 
-
 def get_chunked_index(token_indices: jax.Array, tokens_per_chunk: int, remove_index: int) -> list[tuple[int, int]]:
   """Splits token index list into chunks based on token value ranges.
 
@@ -1363,7 +1404,6 @@ def get_chunked_index(token_indices: jax.Array, tokens_per_chunk: int, remove_in
   chunks.append((start_idx, len(token_indices)))
 
   return chunks
-
 
 def get_rope_index(
     input_ids: jax.Array,
@@ -1412,6 +1452,13 @@ def get_rope_index(
   Raises:
     ValueError: If multimodal tokens are present but grid info is missing.
   """
+  # Handle both 1D and 2D inputs
+  is_1d = input_ids.ndim == 1
+  if is_1d:
+    input_ids = jnp.expand_dims(input_ids, axis=0)
+    if attention_mask is not None:
+      attention_mask = jnp.expand_dims(attention_mask, axis=0)
+
   batch_size, seq_len = input_ids.shape
 
   # Handle text-only case (no multimodal content)
@@ -1428,7 +1475,12 @@ def get_rope_index(
 
     # Calculate deltas for each sequence
     max_position_ids = jnp.max(position_ids, axis=(0, 2), keepdims=True).transpose(1, 0, 2)  # (batch, 1, 1)
-    mrope_position_deltas = max_position_ids.squeeze(-1) + 1 - jnp.sum(attention_mask, axis=-1, keepdims=True)
+    mrope_position_deltas = (max_position_ids.squeeze(-1) + 1 - jnp.sum(attention_mask, axis=-1, keepdims=True)).astype(jnp.int32)
+
+    # Remove batch dimension if input was 1D
+    if is_1d:
+      position_ids = position_ids[:, 0, :]  # (3, seq_len)
+      mrope_position_deltas = mrope_position_deltas[0]  # (1,)
 
     return position_ids, mrope_position_deltas
 
@@ -1616,6 +1668,11 @@ def get_rope_index(
     # Calculate delta for this sequence
     mrope_position_deltas.append(llm_positions.max().item() + 1 - len(valid_input_ids))
 
-  mrope_position_deltas = jnp.array(mrope_position_deltas).reshape(batch_size, 1)
+  mrope_position_deltas = jnp.array(mrope_position_deltas, dtype=jnp.int32).reshape(batch_size, 1)
+
+  # Remove batch dimension if input was 1D
+  if is_1d:
+    position_ids = position_ids[:, 0, :]  # (3, seq_len)
+    mrope_position_deltas = mrope_position_deltas[0]  # (1,)
 
   return position_ids, mrope_position_deltas

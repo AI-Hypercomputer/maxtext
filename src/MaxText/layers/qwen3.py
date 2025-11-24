@@ -1558,13 +1558,22 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
     """
     Args:
         hidden_states: Input visual tokens of shape (batch, in_channels, T*patch_size, H*patch_size, W*patch_size)
+                       or (batch, num_images, in_channels, T*patch_size, H*patch_size, W*patch_size)
         deterministic: Whether to use deterministic mode
 
     Returns:
         Tuple of:
         - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
-        - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
+        - deep_features: List of intermediate features
     """
+    # Handle 6D input: (B, N, C, T, H, W) -> (B*N, C, T, H, W)
+    original_shape = hidden_states.shape
+    if hidden_states.ndim == 6:
+      batch_size, num_images = original_shape[0], original_shape[1]
+      hidden_states = hidden_states.reshape(batch_size * num_images, *original_shape[2:])
+    else:
+      batch_size, num_images = original_shape[0], 1
+
     _, _, num_frames, height, width = hidden_states.shape
     num_frames = num_frames // self.config.temporal_patch_size_for_vit
     height = height // self.config.patch_size_for_vit
@@ -1590,6 +1599,8 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
       merger = getattr(self, merger_name)
       deep_feat = merger(h)
       deep_feats.append(deep_feat)
+      
+    jax.debug.print(f"deep_feats: {deep_feats[0].shape} {deep_feats[1].shape} {deep_feats[2].shape} {x.shape}")
 
     return x, deep_feats
 

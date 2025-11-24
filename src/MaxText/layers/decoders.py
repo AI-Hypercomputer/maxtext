@@ -587,8 +587,12 @@ class Decoder(nn.Module):
       else:
         raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
+    jax.debug.print("DEBUG layers.decoders.py: audio_embeddings is not None and cfg.use_audio={u}", u=audio_embeddings is not None and cfg.use_audio)
     # Merge the audio embeddings with the text embeddings for qwen3-omni models
     if audio_embeddings is not None and cfg.use_audio:
+      jax.debug.print("DEBUG layers.decoders.py: audio_embeddings shape={s}", s=audio_embeddings.shape)
+      jax.debug.print("DEBUG layers.decoders.py: audio_mask shape={s}", s=audio_mask.shape)
+      jax.debug.print("DEBUG layers.decoders.py: y shape={s}", s=y.shape)
       if cfg.model_name in ["qwen3-omni-30b-a3b"]:
         y = multimodal_utils.merge_mm_embeddings(
             text_embeddings=y,

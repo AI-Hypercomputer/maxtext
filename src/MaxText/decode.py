@@ -101,15 +101,36 @@ def main(argv: Sequence[str]) -> None:
   prefill_length = config.max_prefill_predict_length
   processor_outputs = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
-    processor_outputs = preprocessor.preprocess_mm_data(config)
+    processor_outputs = preprocessor.preprocess_mm_data(
+        model_name=config.model_name,
+        config=config,
+        image_path=config.image_path,
+        video_path=config.video_path,
+        audio_path=config.audio_path,
+    )
+
+    # Debug: Print processor outputs
+    if processor_outputs.video_values is not None:
+      jax.debug.print("DEBUG decode.py: processor_outputs.video_values shape={s}", s=processor_outputs.video_values.shape)
+    if processor_outputs.video_grid_thw is not None:
+      jax.debug.print("DEBUG decode.py: processor_outputs.video_grid_thw={v}", v=processor_outputs.video_grid_thw)
+    if processor_outputs.audio_values is not None:
+      jax.debug.print("DEBUG decode.py: processor_outputs.audio_values shape={s}", s=processor_outputs.audio_values.shape)
+
     image_offsets = multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_outputs)
+    jax.debug.print("DEBUG decode.py: image_offsets={o}, prefill_length before={b}", o=image_offsets, b=prefill_length)
 
     prefill_length -= image_offsets
+    jax.debug.print("DEBUG decode.py: prefill_length after={a}", a=prefill_length)
     text = multimodal_utils.reformat_prompt(
         text,
         image_placeholder=config.image_placeholder,
+        video_placeholder=config.video_placeholder,
+        audio_placeholder=config.audio_placeholder,
         model_name=config.model_name,
         num_images=processor_outputs.num_images,
+        num_videos=processor_outputs.num_videos,
+        num_audios=processor_outputs.num_audios,
     )
 
   metadata = engine.get_tokenizer()
@@ -120,11 +141,28 @@ def main(argv: Sequence[str]) -> None:
   except AttributeError as _:
     has_chat_template = False
   tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
+
+  position_ids = None
+  mrope_position_deltas = None
+
   if config.use_multimodal:
     tokens = multimodal_utils.prepare_text_for_image_fusion(
-        tokens, model_name=config.model_name, processor_output=processor_outputs
+        tokens, model_name=config.model_name, processor_output=processor_outputs, config=config
     )
     true_length += image_offsets
+
+    if config.use_mrope:
+      position_ids, mrope_position_deltas = multimodal_utils.get_rope_index(
+          input_ids=tokens,
+          image_grid_thw=processor_outputs.pixel_grid_thw,
+          video_grid_thw=processor_outputs.video_grid_thw,
+          attention_mask=jnp.ones_like(tokens),
+          use_audio_in_video=config.use_audio_in_video,
+          second_per_grids=processor_outputs.video_second_per_grid,
+          audio_lengths=processor_outputs.audio_lengths,
+          spatial_merge_size=config.spatial_merge_size_for_vit,
+          position_id_per_seconds=config.position_id_per_seconds,
+      )
 
   assert (
       true_length <= config.max_prefill_predict_length
@@ -146,14 +184,34 @@ def main(argv: Sequence[str]) -> None:
   # Prefill
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
+    # Debug: Print shapes before prefill
+    jax.debug.print("DEBUG decode.py: Before prefill - tokens shape={t}, true_length={l}", t=tokens.shape, l=true_length)
+    if config.use_multimodal:
+      jax.debug.print("DEBUG: pixel_values is None? {p}", p=(processor_outputs.pixel_values is None))
+      jax.debug.print("DEBUG: video_values is None? {v}", v=(processor_outputs.video_values is None))
+      if processor_outputs.pixel_values is not None:
+        jax.debug.print("DEBUG: pixel_values shape={s}", s=processor_outputs.pixel_values.shape)
+      if processor_outputs.video_values is not None:
+        jax.debug.print("DEBUG: video_values shape={s}", s=processor_outputs.video_values.shape)
+      if processor_outputs.video_values is not None:
+        jax.debug.print("DEBUG decode.py: Passing videos to prefill, shape={s}", s=processor_outputs.video_values.shape)
+      if processor_outputs.audio_values is not None:
+        jax.debug.print("DEBUG decode.py: Passing audio to prefill, shape={s}", s=processor_outputs.audio_values.shape)
+      if position_ids is not None:
+        jax.debug.print("DEBUG decode.py: position_ids shape={s}", s=position_ids.shape)
+      if mrope_position_deltas is not None:
+        jax.debug.print("DEBUG decode.py: mrope_position_deltas shape={s}", s=mrope_position_deltas.shape)
+
     with jax.profiler.StepTraceAnnotation("prefill", stream=i):
       prefill_result, first_token = engine.prefill(
           params=params,
           padded_tokens=tokens,
+          positions=position_ids,
+          mrope_deltas=mrope_position_deltas,
           images=processor_outputs.pixel_values if config.use_multimodal else None,
           image_masks=processor_outputs.pixel_mask if config.use_multimodal and "llama4" in config.model_name else None,
+          videos=processor_outputs.video_values if config.use_multimodal else None,
           audio_values=processor_outputs.audio_values if config.use_multimodal and config.use_audio else None,
-          audio_masks=processor_outputs.audio_mask if config.use_multimodal and config.use_audio else None,
           true_length=true_length,
           rng=rng_prefill,
           slot=i,

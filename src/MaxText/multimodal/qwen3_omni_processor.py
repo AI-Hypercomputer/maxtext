@@ -28,23 +28,24 @@ from dataclasses import dataclass
 
 from MaxText import max_logging
 from MaxText.multimodal import utils as mm_utils
+from MaxText.multimodal_utils import _get_feat_extract_output_lengths
 
 # Image constants.
 IMAGE_MEAN = 127.5
 IMAGE_STD = 127.5
-IMAGE_FACTOR = 28
-MIN_PIXELS = 4 * 28 * 28
-MAX_PIXELS = 16384 * 28 * 28
+IMAGE_FACTOR = 32
+MIN_PIXELS = 4 * 32 * 32
+MAX_PIXELS = 16384 * 32 * 32
 MAX_RATIO = 200
 
 # Video constants.
-VIDEO_MIN_PIXELS = 128 * 28 * 28
-VIDEO_MAX_PIXELS = 768 * 28 * 28
-VIDEO_TOTAL_PIXELS = 128000 * 28 * 28 * 0.9
+VIDEO_MIN_PIXELS = 128 * 32 * 32
+VIDEO_MAX_PIXELS = 384 * 32 * 32
+VIDEO_TOTAL_PIXELS = 128000 * 32 * 32 * 0.9
 FRAME_FACTOR = 2
-FPS = 2.0
+FPS = 1.0
 FPS_MIN_FRAMES = 4
-FPS_MAX_FRAMES = 768
+FPS_MAX_FRAMES = 384
 
 # Audio constants.
 SAMPLE_RATE = 16000
@@ -73,8 +74,8 @@ class Qwen3OmniPreprocessorOutput(mm_utils.PreprocessorOutput):
   # Audio attributes.
   num_audios: int = 0
   audio_values: None | np.ndarray = None
-  audio_mask: None | np.ndarray = None
   audio_lengths: None | np.ndarray = None
+  use_audio_in_video: bool = False
 
 
 def validate_image_size_divisibility(size: int, patch_size: int, merge_size: int, size_name: str = "image_size_for_vit"):
@@ -1056,12 +1057,19 @@ def _load_audio(data_path: str) -> np.ndarray:
   return audio
 
 
-def pre_process_audio_qwen3_omni(audio_array):
+def pre_process_audio_qwen3_omni(audio_array, config):
   """Preprocess audio for Qwen3-Omni model."""
   audio_features = np.expand_dims(audio_array, axis=0)  # Add batch dimension
   audio_features = _np_extract_fbank_features(audio_features)
-  audio_features_mask = np.ones((audio_features.shape[0], audio_features.shape[2]), dtype=np.int32)
-  return audio_features, audio_features_mask
+
+  # Pad to make divisible by chunk_size
+  batch_size, num_mel_bins, audio_length = audio_features.shape
+  chunk_size = config.n_window_for_audio * 2
+  if audio_length % chunk_size != 0:
+    pad_length = chunk_size - (audio_length % chunk_size)
+    audio_features = np.pad(audio_features, ((0, 0), (0, 0), (0, pad_length)), mode='constant', constant_values=0)
+
+  return audio_features
 
 
 def process_qwen3_omni_image(image, config):

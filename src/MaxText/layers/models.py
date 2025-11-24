@@ -119,6 +119,7 @@ class TransformerLinenPure(nn.Module):
       decoder_segment_ids=None,
       encoder_images: None | jnp.ndarray = None,
       encoder_image_masks: None | jnp.ndarray = None,
+      encoder_videos: None | jnp.ndarray = None,
       encoder_audios: None | jnp.ndarray = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
@@ -146,33 +147,74 @@ class TransformerLinenPure(nn.Module):
           f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
-    bidirectional_mask = None
+    # Process images
     image_embeddings = None
-    deepstack_visual_embeds = None
-    audio_embeddings = None
-
+    image_embeds_multiscale = None
+    image_mask = None
     if self.config.use_multimodal and encoder_images is not None:
       if self.config.deepstack_visual_indexes_for_vit:
-        image_embeddings, deepstack_visual_embeds = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
+        image_embeddings, image_embeds_multiscale = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
       else:
         image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
+        image_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
+        image_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
       elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
-        # Create bidirectional_mask for vision/video token merging
-        bidirectional_mask = (decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN) | \
-                            (decoder_input_tokens == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN)
-        # Create image/video mask for deepstack visual embedding injection
+        image_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
+
+    # Process videos
+    video_embeddings = None
+    video_embeds_multiscale = None
+    video_mask = None
+    if self.config.use_multimodal and encoder_videos is not None:
+      jax.debug.print("DEBUG models.py: encoder_videos shape={s}", s=encoder_videos.shape)
+      video_embeddings, video_embeds_multiscale = self.vision_encoder(input_images=encoder_videos, deterministic=not enable_dropout)
+      jax.debug.print("DEBUG models.py: video_embeddings shape={s}", s=video_embeddings.shape)
+      if video_embeds_multiscale is not None and len(video_embeds_multiscale) > 0:
+        jax.debug.print("DEBUG models.py: video_embeds_multiscale[0] shape={s}", s=video_embeds_multiscale[0].shape)
+
+      if self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+        video_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN
+        jax.debug.print("DEBUG models.py: video_mask shape={s}, num_True={n}", s=video_mask.shape, n=jnp.sum(video_mask))
+
+    # Combine image and video embeddings
+    bidirectional_mask = None
+    deepstack_visual_embeds = None
+    if image_mask is not None and video_mask is not None:
+      jax.debug.print("DEBUG models.py: Combining images and videos")
+      bidirectional_mask = image_mask | video_mask
+      jax.debug.print("DEBUG models.py: Before concat - image_embeddings shape={i}, video_embeddings shape={v}", i=image_embeddings.shape, v=video_embeddings.shape)
+      image_embeddings = jnp.concatenate([image_embeddings, video_embeddings], axis=1)
+      jax.debug.print("DEBUG models.py: After concat - image_embeddings shape={s}", s=image_embeddings.shape)
+      deepstack_visual_embeds = tuple(
+          jnp.concatenate([img_feat, vid_feat], axis=1)
+          for img_feat, vid_feat in zip(image_embeds_multiscale, video_embeds_multiscale)
+      )
+    elif image_mask is not None:
+      jax.debug.print("DEBUG models.py: Only images present")
+      bidirectional_mask = image_mask
+      deepstack_visual_embeds = image_embeds_multiscale
+    elif video_mask is not None:
+      jax.debug.print("DEBUG models.py: Only videos present")
+      bidirectional_mask = video_mask
+      image_embeddings = video_embeddings
+      deepstack_visual_embeds = video_embeds_multiscale
+      jax.debug.print("DEBUG models.py: video-only image_embeddings shape={s}", s=image_embeddings.shape)
+
+    # Process audio
+    audio_embeddings = None
     if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
+      jax.debug.print("DEBUG models.py: encoder_audios shape={s}", s=encoder_audios.shape)
       audio_embeddings = self.audio_encoder(input_audio=encoder_audios, deterministic=not enable_dropout)
+      jax.debug.print("DEBUG models.py: audio_embeddings shape={s}", s=audio_embeddings.shape)
 
     # Create audio mask for placeholder tokens (qwen3-omni models)
     audio_mask = None
     if audio_embeddings is not None and self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
       audio_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN
+      jax.debug.print("DEBUG models.py: audio_mask shape={s}, num_True={n}", s=audio_mask.shape, n=jnp.sum(audio_mask))
 
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.shared_embedding,
@@ -410,6 +452,7 @@ class Transformer(nnx.Module):
       cache=None,
       encoder_images: jax.Array | None = None,
       encoder_image_masks: jax.Array | None = None,
+      encoder_videos: jax.Array | None = None,
       encoder_audios: jax.Array | None = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
@@ -453,33 +496,76 @@ class Transformer(nnx.Module):
           f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
-    bidirectional_mask = None
+    # Process images
     image_embeddings = None
-    deepstack_visual_embeds = None
+    image_embeds_multiscale = None
+    image_mask = None
     if self.config.use_multimodal and encoder_images is not None:
       if self.config.deepstack_visual_indexes_for_vit:
-        image_embeddings, deepstack_visual_embeds = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
+        image_embeddings, image_embeds_multiscale = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
       else:
         image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
+        image_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
+        image_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
       elif self.config.decoder_block == DecoderBlockType.QWEN3_OMNI:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
+        image_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
       elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
-        bidirectional_mask = (decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN) | \
-                            (decoder_input_tokens == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN)
+        image_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
 
+    # Process videos
+    video_embeddings = None
+    video_embeds_multiscale = None
+    video_mask = None
+    if self.config.use_multimodal and encoder_videos is not None:
+      jax.debug.print("DEBUG models.py: encoder_videos shape={s}", s=encoder_videos.shape)
+      video_embeddings, video_embeds_multiscale = self.vision_encoder(input_images=encoder_videos, deterministic=not enable_dropout)
+      jax.debug.print("DEBUG models.py: video_embeddings shape={s}", s=video_embeddings.shape)
+      if video_embeds_multiscale is not None and len(video_embeds_multiscale) > 0:
+        jax.debug.print("DEBUG models.py: video_embeds_multiscale[0] shape={s}", s=video_embeds_multiscale[0].shape)
+
+      if self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+        video_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN
+        jax.debug.print("DEBUG models.py: video_mask shape={s}, num_True={n}", s=video_mask.shape, n=jnp.sum(video_mask))
+
+    # Combine image and video embeddings
+    bidirectional_mask = None
+    deepstack_visual_embeds = None
+    if image_mask is not None and video_mask is not None:
+      jax.debug.print("DEBUG models.py: Combining images and videos")
+      bidirectional_mask = image_mask | video_mask
+      jax.debug.print("DEBUG models.py: Before concat - image_embeddings shape={i}, video_embeddings shape={v}", i=image_embeddings.shape, v=video_embeddings.shape)
+      image_embeddings = jnp.concatenate([image_embeddings, video_embeddings], axis=1)
+      jax.debug.print("DEBUG models.py: After concat - image_embeddings shape={s}", s=image_embeddings.shape)
+      deepstack_visual_embeds = tuple(
+          jnp.concatenate([img_feat, vid_feat], axis=1)
+          for img_feat, vid_feat in zip(image_embeds_multiscale, video_embeds_multiscale)
+      )
+    elif image_mask is not None:
+      jax.debug.print("DEBUG models.py: Only images present")
+      bidirectional_mask = image_mask
+      deepstack_visual_embeds = image_embeds_multiscale
+    elif video_mask is not None:
+      jax.debug.print("DEBUG models.py: Only videos present")
+      bidirectional_mask = video_mask
+      image_embeddings = video_embeddings
+      deepstack_visual_embeds = video_embeds_multiscale
+      jax.debug.print("DEBUG models.py: video-only image_embeddings shape={s}", s=image_embeddings.shape)
+
+    # Process audio
     audio_embeddings = None
     if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
+      jax.debug.print("DEBUG models.py: encoder_audios shape={s}", s=encoder_audios.shape)
       audio_embeddings = self.audio_encoder(input_audio=encoder_audios, deterministic=not enable_dropout)
+      jax.debug.print("DEBUG models.py: audio_embeddings shape={s}", s=audio_embeddings.shape)
 
     # Create audio mask for placeholder tokens (qwen3-omni models)
     audio_mask = None
     if audio_embeddings is not None and self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
       audio_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN
+      jax.debug.print("DEBUG models.py: audio_mask shape={s}, num_True={n}", s=audio_mask.shape, n=jnp.sum(audio_mask))
 
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,

@@ -35,6 +35,7 @@ import numpy as np
 from dataclasses import dataclass, field
 
 from MaxText import max_utils, maxengine, pyconfig, multimodal_utils, max_logging
+from MaxText.multimodal import preprocessor
 
 # Set TF log level to avoid verbose startup messages.
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -92,6 +93,10 @@ class GenerationStream:
   tokens: np.ndarray
   true_length: int
   image: Optional[np.ndarray]
+  video: Optional[np.ndarray] = None
+  audio: Optional[np.ndarray] = None
+  position_ids: Optional[np.ndarray] = None
+  mrope_deltas: Optional[np.ndarray] = None
 
   # Output accumulators
   generated_ids: List[int] = field(default_factory=list)
@@ -182,6 +187,8 @@ class MaxTextGenerator:
       self,
       prompts: List[str],
       image_paths: Optional[List[Optional[str]]] = None,
+      video_paths: Optional[List[Optional[str]]] = None,
+      audio_paths: Optional[List[Optional[str]]] = None,
       max_tokens: int = None,
       logprobs: int = None,
       echo: bool = False,
@@ -197,6 +204,8 @@ class MaxTextGenerator:
     Args:
         prompts: A list of prompt strings.
         image_paths: An optional list of image paths, one for each prompt.
+        video_paths: An optional list of video paths, one for each prompt.
+        audio_paths: An optional list of audio paths, one for each prompt.
         max_tokens: The maximum number of tokens to generate.
         logprobs: The number of top log probabilities to return for each token.
         echo: Whether to include the prompt in the generated text.
@@ -211,20 +220,30 @@ class MaxTextGenerator:
     """
     if image_paths is None:
       image_paths = [None] * len(prompts)
+    if video_paths is None:
+      video_paths = [None] * len(prompts)
+    if audio_paths is None:
+      audio_paths = [None] * len(prompts)
     if len(prompts) != len(image_paths):
       raise ValueError("The number of prompts must equal the number of image paths.")
+    if len(prompts) != len(video_paths):
+      raise ValueError("The number of prompts must equal the number of video paths.")
+    if len(prompts) != len(audio_paths):
+      raise ValueError("The number of prompts must equal the number of audio paths.")
 
     all_results = []
     num_prompts = len(prompts)
     for i in range(0, num_prompts, self.batch_size):
       prompt_chunk = prompts[i : i + self.batch_size]
       image_chunk = image_paths[i : i + self.batch_size]
+      video_chunk = video_paths[i : i + self.batch_size]
+      audio_chunk = audio_paths[i : i + self.batch_size]
 
       # chunk_count = (i // self.batch_size) + 1
       # total_chunks = (num_prompts + self.batch_size - 1) // self.batch_size
 
       chunk_results = self._process_chunk(
-          prompt_chunk, image_chunk, max_tokens, logprobs, echo, stop, temperature, seed, top_k, top_p
+          prompt_chunk, image_chunk, video_chunk, audio_chunk, max_tokens, logprobs, echo, stop, temperature, seed, top_k, top_p
       )
       all_results.extend(chunk_results)
 
@@ -234,6 +253,8 @@ class MaxTextGenerator:
       self,
       prompts: List[str],
       image_paths: List[Optional[str]],
+      video_paths: List[Optional[str]],
+      audio_paths: List[Optional[str]],
       max_tokens: int,
       logprobs: int = None,
       echo: bool = False,
@@ -252,7 +273,7 @@ class MaxTextGenerator:
     initialize_start_time = time.time()
     # Reset the state to handle the new batch while reusing memory.
     self.decode_state = self._jitted_reset_state(self.decode_state)
-    streams, rng = self._initialize_streams_and_state(prompts, image_paths, seed)
+    streams, rng = self._initialize_streams_and_state(prompts, image_paths, video_paths, audio_paths, seed)
     initialize_end_time = time.time()
     self.logger.info(
         "Initialization complete in %.2f seconds. Max batch size: %d",
@@ -287,14 +308,22 @@ class MaxTextGenerator:
     self.logger.info("Processed %d prompts in %.2fs.", len(prompts), end_time - start_time)
     return completions
 
-  def _initialize_streams_and_state(self, prompts, image_paths, seed):
+  def _initialize_streams_and_state(self, prompts, image_paths, video_paths, audio_paths, seed):
     """Tokenizes inputs, sets up stream objects, and initializes the decode state."""
     prefill_length = getattr(self.config, "max_prefill_predict_length", 1024)
     streams = []
-    for prompt, image_path in zip(prompts, image_paths):
-      toks, tlen, imgs = self._preprocess_inputs(prompt, prefill_length, image_path)
-      assert tlen <= prefill_length, f"Input token length {tlen} is > {prefill_length}"
-      streams.append(GenerationStream(tokens=toks, true_length=tlen, image=imgs))
+    for prompt, image_path, video_path, audio_path in zip(prompts, image_paths, video_paths, audio_paths):
+      result = self._preprocess_inputs(prompt, prefill_length, image_path, video_path, audio_path)
+      assert result['true_length'] <= prefill_length, f"Input token length {result['true_length']} is > {prefill_length}"
+      streams.append(GenerationStream(
+          tokens=result['tokens'],
+          true_length=result['true_length'],
+          image=result['image'],
+          video=result['video'],
+          audio=result['audio'],
+          position_ids=result['position_ids'],
+          mrope_deltas=result['mrope_deltas'],
+      ))
 
     if seed is not None:
       rng = jax.random.PRNGKey(seed)
@@ -333,6 +362,10 @@ class MaxTextGenerator:
           padded_tokens=stream.tokens,
           true_length=stream.true_length,
           images=stream.image,
+          videos=stream.video,
+          audio_values=stream.audio,
+          positions=stream.position_ids,
+          mrope_deltas=stream.mrope_deltas,
           rng=rng_prefill,
           slot=i,
           return_prompt_logp=want_prompt_logp,
@@ -490,27 +523,78 @@ class MaxTextGenerator:
       )
     return completions
 
-  def _preprocess_inputs(self, text, prefill_length, image_path):
-    """Helper to preprocess a single text and optional image input."""
+  def _preprocess_inputs(self, text, prefill_length, image_path, video_path, audio_path):
+    """Helper to preprocess a single text and optional multimodal inputs."""
     processor_output = multimodal_utils.PreprocessorOutput()
-    images = None
-    if self.config.use_multimodal and image_path:
+
+    if self.config.use_multimodal and (image_path or video_path or audio_path):
+      processor_output = preprocessor.preprocess_mm_data(
+          model_name=self.config.model_name,
+          config=self.config,
+          image_path=image_path,
+          video_path=video_path,
+          audio_path=audio_path,
+      )
+
+      # Calculate image offsets
+      image_offsets = multimodal_utils.get_image_offsets(self.config.model_name, processor_output=processor_output)
+      prefill_length -= image_offsets
+
+      # Reformat prompt with correct placeholders
+      num_images = processor_output.num_images
+      num_videos = processor_output.num_videos
+      num_audios = processor_output.num_audios
+
       text = multimodal_utils.reformat_prompt(
-          text, image_placeholder=self.config.image_placeholder, model_name=self.config.model_name, num_images=1
+          text,
+          image_placeholder=self.config.image_placeholder,
+          video_placeholder=self.config.video_placeholder,
+          audio_placeholder=self.config.audio_placeholder,
+          model_name=self.config.model_name,
+          num_images=num_images,
+          num_videos=num_videos,
+          num_audios=num_audios,
       )
-      loaded_images = multimodal_utils.load_image_from_path(image_path)
-      processor_output = multimodal_utils.pre_process_image(loaded_images, model_name=self.config.model_name)
-      prefill_length -= multimodal_utils.get_image_offsets(self.config.model_name, processor_output=processor_output)
-      images = processor_output.pixel_values
 
+    # Tokenize
     tokens, true_length = self.tokenizer.encode(text, is_bos=not self.has_chat_template, prefill_lengths=[prefill_length])
-    if self.config.use_multimodal and image_path:
-      tokens = multimodal_utils.prepare_text_for_image_fusion(
-          tokens, model_name=self.config.model_name, processor_output=processor_output
-      )
-      true_length += multimodal_utils.get_image_offsets(self.config.model_name, processor_output=processor_output)
 
-    return tokens, true_length, images
+    position_ids = None
+    mrope_position_deltas = None
+
+    # Handle multimodal token fusion and MRoPE
+    if self.config.use_multimodal and (image_path or video_path or audio_path):
+      tokens = multimodal_utils.prepare_text_for_image_fusion(
+          tokens, model_name=self.config.model_name, processor_output=processor_output, config=self.config
+      )
+      true_length += image_offsets
+
+      # Compute MRoPE positions if needed (for Qwen3-Omni)
+      if self.config.use_mrope:
+        position_ids, mrope_position_deltas = multimodal_utils.get_rope_index(
+            input_ids=tokens,
+            image_grid_thw=processor_output.pixel_grid_thw,
+            video_grid_thw=processor_output.video_grid_thw,
+            attention_mask=jnp.ones_like(tokens),
+            use_audio_in_video=processor_output.use_audio_in_video,
+            audio_lengths=processor_output.audio_lengths,
+            second_per_grids=processor_output.video_second_per_grid,
+            spatial_merge_size=getattr(self.config, 'spatial_merge_size_for_vit', 2),
+            position_id_per_seconds=getattr(self.config, 'position_id_per_seconds', 25),
+        )
+
+    # Extract individual modality data
+    result = {
+        'tokens': tokens,
+        'true_length': true_length,
+        'image': processor_output.pixel_values,
+        'video': processor_output.video_values,
+        'audio': processor_output.audio_values,
+        'position_ids': position_ids,
+        'mrope_deltas': mrope_position_deltas,
+    }
+
+    return result
 
   def _validate_config(self, config):
     """Validates configuration."""
