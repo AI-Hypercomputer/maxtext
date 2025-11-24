@@ -96,7 +96,7 @@ try:
 
   # Apply the patch
   llama3.LlamaModel.__setattr__ = _patched_setattr
-  max_logging.log("Patched tpu_inference.models.jax.llama3.LlamaModel for Flax 0.12+ " "compatibility.")
+  max_logging.log("Patched tpu_inference.models.jax.llama3.LlamaModel for Flax 0.12+ compatibility.")
 except ImportError:
   pass  # tpu_inference not available or not needed
 except Exception as e:  # pylint: disable=broad-except
@@ -221,7 +221,7 @@ def setup_configs_and_devices(
       # Multiple hosts with Pathways - potentially split devices for
       # trainer and sampler based on trainer_devices_fraction and
       # sampler_devices_fraction.
-      max_logging.log(f"{num_vms} VMs detected, allocating trainer and sampler " "devices, and using Pathways.")
+      max_logging.log(f"{num_vms} VMs detected, allocating trainer and sampler devices, and using Pathways.")
       num_devices = len(devices)
       num_trainer_devices = int(num_devices * config.trainer_devices_fraction)
       num_sampler_devices = int(num_devices * config.sampler_devices_fraction)
@@ -435,11 +435,11 @@ def rl_train(
           top_p=trainer_config.decode_sampling_nucleus_p,
           top_k=trainer_config.decode_sampling_top_k,
           eos_tokens=eos_tokens,
+          rollout_vllm_model_version=trainer_config.tokenizer_path,
+          rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
+          rollout_vllm_tpu_backend_type="jax",
+          rollout_vllm_swap_space_size_gb=trainer_config.swap_space_vllm_gb,
       ),
-      rollout_vllm_model_version=trainer_config.tokenizer_path,
-      rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
-      rollout_vllm_tpu_backend_type="jax",
-      rollout_vllm_swap_space_size_gb=trainer_config.swap_space_vllm_gb,
   )
   grpo_config = GrpoConfig(
       num_generations=trainer_config.num_generations,
@@ -485,7 +485,7 @@ def rl_train(
           lambda **kwargs: utils_rl.check_answer(tmvp_config=trainer_config, **kwargs),
           lambda **kwargs: utils_rl.check_numbers(tmvp_config=trainer_config, **kwargs),
       ],
-      grpo_config=grpo_config,
+      algo_config=grpo_config,
   )
 
   # Before we train the model, let's evaluate the model on the test set so we
