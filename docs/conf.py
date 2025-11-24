@@ -62,5 +62,5 @@ myst_linkify_fuzzy_links = False
 exclude_patterns = [
     "guides/run_maxtext/run_maxtext_via_multihost_job.md",
     "guides/run_maxtext/run_maxtext_via_multihost_runner.md",
-    "explanations/llm_calculator.ipynb",
+    "reference/core_concepts/llm_calculator.ipynb",
 ]
