@@ -15,7 +15,7 @@
  -->
 
 (full-finetuning)=
-# Example: Full finetuning LLama3-7B model
+# Full Fine-Tuning (Llama3-7B)
 
 MaxText can perform pre-training and full finetuning. To perform full fine
 tuning, you need to pass the checkpoint to the training script.

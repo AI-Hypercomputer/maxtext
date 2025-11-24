@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Customize your model configs on TPU
+# Customizing TPU Configs
 
 ## Introduction
 

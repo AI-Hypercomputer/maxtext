@@ -59,7 +59,7 @@ In MaxText, the `gradient_accumulation_steps` config determines the number of mi
 
 GA reduces the size of activations in memory at any given moment, which is crucial for training with large batch sizes or when using sharding strategies like pipeline parallelism.
 
-![Illustration of gradient accumulation.](../_static/gradient_accum.png)
+![Illustration of gradient accumulation.](../../_static/gradient_accum.png)
 *Figure 1: Gradient accumulation tiles a global batch into smaller micro-batches.*
 
 
@@ -73,7 +73,7 @@ Vocabulary tiling avoids materializing the full logits tensor. Instead, it tiles
 
 In MaxText, the `num_vocab_tiling` configuration controls the number of tiles. This technique is especially advantageous for models with large vocabularies (e.g., Gemma and Llama), particularly when training with long sequence lengths. By preventing out-of-memory errors, vocabulary tiling can enable simpler sharding strategies (like FSDP) and unlock better computational performance.
 
-![Illustration of vocabulary tiling.](../_static/vocab_tiling.png)
+![Illustration of vocabulary tiling.](../../_static/vocab_tiling.png)
 *Figure 2: Vocabulary tiling processes hidden states in tiles to avoid generating the full logits tensor.*
 
 ### Other Tiling Methods

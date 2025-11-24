@@ -1,4 +1,5 @@
-# Checkpointing solutions
+(checkpointing_solutions)=
+# Checkpointing
 
 ```{toctree}
 :maxdepth: 1

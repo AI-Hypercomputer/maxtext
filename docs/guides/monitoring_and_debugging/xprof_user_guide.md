@@ -1,4 +1,5 @@
-# XProf for MaxText developers
+# Profiling with XProf
+
 
 
 ## Introduction to XProf

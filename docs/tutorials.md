@@ -40,10 +40,5 @@ You can also find other examples in the [MaxText repository](https://github.com/
 
 tutorials/first_run.md
 tutorials/pretraining.md
-tutorials/full_finetuning.md
-tutorials/how_to_run_colabs.md
-tutorials/grpo.md
-tutorials/sft.md
-tutorials/sft_on_multi_host.md
-tutorials/grpo_with_pathways.md
+tutorials/posttraining.md
 ```

@@ -1,6 +1,6 @@
 
 
-# Multimodal Support on MaxText
+# Multimodal Support
 
 This document provides a guide to use the multimodal functionalities in MaxText including:
 - **Checkpoint Conversion**: Convert a MaxText-compatible orbax checkpoint from HuggingFace.
@@ -19,7 +19,7 @@ Multimodal Large Language Models (LLMs) extend traditional text-only models by i
 - **Modality-Specific Encoders**: Modality-specific encoders will transform the preprocessed data into high-dimensional representations (e.g., vision transformers for images).
 - **Projection and Merge**: Projection layers will map these modality-specific embeddings into the shared embedding space of the language model, usually aligned with the dimension of text embeddings. These projected embeddings are then merged with text token embeddings, allowing the unified model to process and reason over multiple modalities simultaneously within a single coherent framework.
 
-![Illustration of multimodal MaxText.](../_static/multimodal_overview.png)
+![Illustration of multimodal MaxText.](../../_static/multimodal_overview.png)
 *Figure 1: Overview of multimodal dataflow in MaxText.*
 
 

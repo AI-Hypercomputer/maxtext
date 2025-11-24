@@ -1,4 +1,4 @@
-# Supported models & architectures
+# Supported Models List
 
 > **Purpose**: This page provides detailed, reference-style information about model families supported in MaxText. This page is a technical dictionary for quick lookup, reproducibility, and customization.
 
@@ -91,6 +91,6 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
 
 
 * **Technical Explanations:**
-    * [Parallelism & Sharding](../explanations/sharding.md)
-    * [Quantization Documentation](../explanations/quantization.md)
+    * [Parallelism & Sharding](sharding)
+    * [Quantization Documentation](quantization)
     * [AOT Compilation Instructions](aot-compilation)
