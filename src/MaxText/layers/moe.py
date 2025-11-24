@@ -18,6 +18,7 @@
 import enum
 import functools
 import math
+import random
 from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
@@ -860,7 +861,14 @@ class RoutedMoE(nnx.Module):
             if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
               raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
             rhs_inputs = kernel.qvalue
-          with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
+          if self.config.use_qwix_quantization:
+            # Use full contraction for QWIX quantization to allow quantization
+            # fusion (max reduce over contracting dimension).
+            tiling = (tiling[0], k, tiling[2])
+          with set_xla_metadata(
+              ragged_dot_tiling=",".join([str(t) for t in tiling]),
+              mosaic_fusion_group=f"{random.randint(0, 1000000000)}",
+          ):
             output = jax.lax.ragged_dot(
                 lhs=inputs,
                 rhs=rhs_inputs,
