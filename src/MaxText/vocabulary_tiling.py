@@ -99,7 +99,7 @@ def vocab_tiling_linen_loss(
   labels = _maybe_shard_with_name(labels, label_spec)
   segmentation = _maybe_shard_with_name(segmentation, label_spec)
   # TODO (chengnuojin) all gather only embedding table instead of all params after NNX module is enabled
-  gathered_params = all_gather_over_fsdp(params, param_spec, model.mesh, config.logical_axis_rules)
+  gathered_params = all_gather_over_fsdp(params, param_spec, model.mesh, config.logical_axis_rules, config.shard_mode)
 
   # Customized forward and backward maps for the embedding tiling
   @jax.custom_vjp

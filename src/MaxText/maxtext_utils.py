@@ -76,11 +76,11 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
   return sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
 
-def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules):
+def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, shard_mode):
   max_logging.log(
       "WARNING: Function maxtext_utils.all_gather_over_fsdp is deprecated. Please use sharding.all_gather_over_fsdp."
   )
-  return sharding.all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules)
+  return sharding.all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, shard_mode)
 
 
 def get_functional_train_with_signature(
