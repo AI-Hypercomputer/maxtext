@@ -54,7 +54,7 @@ completed step: 1, seconds: 0.287, TFLOP/s/device: 110.951, Tokens/s/device: 713
 ...
 completed step: 9, seconds: 1.010, TFLOP/s/device: 31.541, Tokens/s/device: 2027.424, total_weights: 7979, loss: 9.436
 ```
-The total weights is the number of real tokens processed in each step. More explanation can be found in [Understand Logs and Metrics](../guides/understand_logs_and_metrics.md) page.
+The total weights is the number of real tokens processed in each step. More explanation can be found in [Understand Logs and Metrics](understand-logs-and-metrics) page.
 
 **Evaluation config (optional)**:
 

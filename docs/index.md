@@ -100,10 +100,9 @@ Please join our [Discord Channel](https://discord.com/invite/2H9PhvTcDU) and if 
 :maxdepth: 2
 :hidden:
 
-explanations.md
+tutorials.md
 guides.md
 reference.md
-tutorials.md
 development.md
 release_notes.md
 ```

@@ -14,16 +14,16 @@
  limitations under the License.
  -->
 
-# Explanations
+
+# Monitoring and Debugging
 
 ```{toctree}
 :maxdepth: 1
-
-explanations/checkpoints.md
-explanations/alternatives.md
-explanations/jax_ai_libraries_chosen.md
-explanations/performance_metrics.md
-explanations/quantization.md
-explanations/sharding.md
-explanations/tiling.md
+monitoring_and_debugging/features_and_diagnostics.md
+monitoring_and_debugging/gcp_workload_observability.md
+monitoring_and_debugging/megascale_hang_playbook.md
+monitoring_and_debugging/monitor_goodput.md
+monitoring_and_debugging/understand_logs_and_metrics.md
+monitoring_and_debugging/use_vertex_ai_tensorboard.md
+monitoring_and_debugging/xprof_user_guide.md
 ```

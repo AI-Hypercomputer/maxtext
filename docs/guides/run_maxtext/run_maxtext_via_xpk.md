@@ -15,7 +15,7 @@
 -->
 
 (run-xpk)=
-# Running MaxText at scale with XPK
+# At Scale With XPK
 
 This guide provides the recommended workflow for running MaxText on Google Kubernetes Engine (GKE) using the **Accelerated Processing Kit (XPK)**. For a complete reference on XPK, please see the [official XPK repository](https://github.com/AI-Hypercomputer/xpk).
 

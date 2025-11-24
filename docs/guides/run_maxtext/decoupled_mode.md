@@ -15,7 +15,7 @@
 -->
 
 
-# Decoupled Mode (No Google Cloud Dependencies)
+# Via Decoupled Mode (No Google Cloud Dependencies)
 
 Set `DECOUPLE_GCLOUD=TRUE` to run MaxText tests and local development without any Google Cloud SDK, `gs://` buckets, JetStream, or Vertex AI integrations.
 

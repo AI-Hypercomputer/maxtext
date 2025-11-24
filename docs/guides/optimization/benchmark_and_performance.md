@@ -1,4 +1,4 @@
-# Benchmark and performance tuning
+# Benchmarking & Tuning Guide
 
 This tutorial guides you through setting up benchmarks and performing performance tuning in MaxText, **focusing on key aspects** like how to set up benchmarks, choose the right config and tuning the benchmark performance.
 
@@ -69,7 +69,7 @@ Different quantization recipes are available, including` "int8", "fp8", "fp8_ful
 
 For v6e and earlier generation TPUs, use the "int8" recipe. For v7x and later generation TPUs, use "fp8_full". GPUs should use “fp8_gpu” for NVIDIA and "nanoo_fp8" for AMD.
 
-See [](../explanations/quantization.md).
+See [](quantization).
 
 ### Choose sharding strategy
 

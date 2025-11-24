@@ -15,7 +15,7 @@
 -->
 
 (run-pathways)=
-# Running MaxText via Pathways
+# Via Pathways
 
 This guide provides a comprehensive walkthrough for running MaxText workloads on a Google Kubernetes Engine (GKE) cluster using Pathways. Pathways acts as a powerful orchestrator for large-scale JAX jobs on AI Hypercomputer infrastructure.
 

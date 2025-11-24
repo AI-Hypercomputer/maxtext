@@ -14,13 +14,11 @@
  limitations under the License.
  -->
 
-# Reference documentation
+# Optimization
 
 ```{toctree}
 :maxdepth: 1
-
-reference/performance_metrics.md
-reference/models.md
-reference/architecture.md
-reference/core_concepts.md
+optimization/custom_model.md
+optimization/pallas_kernels_performance.md
+optimization/benchmark_and_performance.md
 ```

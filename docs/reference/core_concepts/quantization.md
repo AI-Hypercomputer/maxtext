@@ -13,7 +13,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  -->
-
+(quantization)=
 # Quantization
 
 Quantization in deep learning is the process of reducing the precision of numbers used to represent a model's weights and/or activations. Instead of using higher-precision floating-point formats like 32-bit floats (`float32`) or 16-bit brain floats (`bfloat16`), quantization maps these values to lower-precision numerical formats, most commonly 8-bit integers (`int8`) or floats (`fp8`).

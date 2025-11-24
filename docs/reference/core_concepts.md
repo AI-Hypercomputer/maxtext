@@ -14,13 +14,16 @@
  limitations under the License.
  -->
 
-# Reference documentation
+# Core Concepts
 
 ```{toctree}
 :maxdepth: 1
 
-reference/performance_metrics.md
-reference/models.md
-reference/architecture.md
-reference/core_concepts.md
+core_concepts/checkpoints.md
+core_concepts/alternatives.md
+core_concepts/quantization.md
+core_concepts/sharding.md
+core_concepts/tiling.md
+core_concepts/jax_xla_and_pallas.md
+core_concepts/llm_calculator.ipynb
 ```
