@@ -123,7 +123,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
 
     # Preprocess muon_consistent_rms to be None or float
     if key == "muon_consistent_rms":
-      if value.lower() == "none":
+      if value in ["None", "none"]:
         new_value = None
       else:
         try:
