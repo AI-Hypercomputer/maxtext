@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# MaxText Release Notes
+# MaxText release notes
 
 ## PyPI Package
 

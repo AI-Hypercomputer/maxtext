@@ -14,12 +14,16 @@
  limitations under the License.
  -->
 
-# Tutorials
+
+# Monitoring and debugging
 
 ```{toctree}
 :maxdepth: 1
-
-tutorials/first_run.md
-tutorials/pretraining.md
-tutorials/post_training_index.md
+monitoring_and_debugging/features_and_diagnostics.md
+monitoring_and_debugging/gcp_workload_observability.md
+monitoring_and_debugging/megascale_hang_playbook.md
+monitoring_and_debugging/monitor_goodput.md
+monitoring_and_debugging/understand_logs_and_metrics.md
+monitoring_and_debugging/use_vertex_ai_tensorboard.md
+monitoring_and_debugging/xprof_user_guide.md
 ```

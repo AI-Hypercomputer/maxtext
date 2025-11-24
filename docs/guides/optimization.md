@@ -14,12 +14,12 @@
  limitations under the License.
  -->
 
-# Tutorials
+# Optimization
 
 ```{toctree}
 :maxdepth: 1
-
-tutorials/first_run.md
-tutorials/pretraining.md
-tutorials/post_training_index.md
+optimization/custom_model.md
+optimization/sharding.md
+optimization/pallas_kernels_performance.md
+optimization/benchmark_and_performance.md
 ```
