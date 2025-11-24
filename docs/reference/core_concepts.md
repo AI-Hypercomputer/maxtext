@@ -25,5 +25,4 @@ core_concepts/quantization.md
 core_concepts/sharding.md
 core_concepts/tiling.md
 core_concepts/jax_xla_and_pallas.md
-core_concepts/llm_calculator.ipynb
 ```
