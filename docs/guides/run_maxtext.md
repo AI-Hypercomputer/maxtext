@@ -1,4 +1,4 @@
-# Running MaxText
+# Run MaxText
 
 ```{toctree}
 :maxdepth: 1
