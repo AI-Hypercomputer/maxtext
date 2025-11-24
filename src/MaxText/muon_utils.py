@@ -15,8 +15,9 @@ import sys
 Transformer = models.transformer_as_linen
 
 
-"""Example:
-python3 -m MaxText.muon_utils qwen3-4b True
+""" 
+To review the muon dimension number of a model:
+Example: python3 -m MaxText.muon_utils qwen3-4b True
 """
 
 def _is_path_contain_any(tuples, path):
@@ -25,19 +26,28 @@ def _is_path_contain_any(tuples, path):
 
 def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   """
-  Determines Muon dimension numbers based on parameter path.
+  Determines Muon dimension numbers based on the parameter's hierarchical path.
+
+  This function defines the mapping from a parameter's logical path within the model
+  to its corresponding MuonDimensionNumbers (mdn). The strategy is applied in
+  a specific order to handle general cases and then more specific ones, allowing
+  for fall-through logic in nested structures.
 
   Strategy:
-  1. Filter out exclusions (Norms, Biases, Embeddings) -> None
-  2. Special weight
-    - Handle MoE specific shapes
-    - Handle Attention specific shapes: output proj, qkv proj
-  3. Default to standard 3D weight shape -> in=0, out=-1
+  1.  **Exclusions**: Parameters not suitable for Muon (e.g., scalars, biases,
+      embeddings, non-weight parameters) are explicitly returned as `None`.
+  2.  **MoE Block Specific Weights**: Handles weights within Mixture-of-Experts (MoE)
+      blocks that have a distinct dimension number pattern.
+  3.  **Self-Attention Specific Weights**: Handles weights within self-attention
+      mechanisms, such as output and QKV projections.
+  4.  **Standard Weights**: Default mapping for most other 3D weight shapes.
 
+  Args:
+    path: A tuple of strings representing the hierarchical path of the parameter.
 
-  TODO(shuningjin): improve comment, notation, example
-  assume scan (i.e., dim 1 is layer num L), should work with unscan (without L)
-  works for deepseek, llama2, gemma3
+  Returns:
+    An instance of `MuonDimensionNumbers` if a specific mapping is found,
+    `None` for excluded parameters, or a default `mdn` for standard weights.
   """
 
   # 1 Exclude parameters not suitable for Muon (scalar, embeddings, unembedding)
@@ -45,7 +55,7 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
     return None
 
   # 2 Special weight
-  # 2.1 MoE, [0, L, -2, -1]
+  # 2.1 MoE, [0, L, -2, -1], L (optional) is for layer when scan_layers=True
   if "MoeBlock_0" in path:
     # Exclude gate
     if _is_path_contain_any(("wi_0", "wi_1", "wo"), path):
@@ -67,7 +77,7 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
 
 
 def get_transform_tree(tree, path=()):
-  """recursion"""
+  """Extraction utility via recursion."""
   if isinstance(tree, dict):
     return {k: get_transform_tree(v, path + (k,)) for k, v in tree.items()}
   else:
@@ -75,7 +85,7 @@ def get_transform_tree(tree, path=()):
 
 
 def get_muon_weight_dimension_numbers(model, config, verbose=False):
-  """extract muon dimension number from model structure"""
+  """Extract muon dimension number from model structure."""
   # quickly get param structure without materialization
   abstract_param = get_abstract_param(model, config)
   # get muon dimension number from param
@@ -121,4 +131,9 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False):
 
 
 if __name__ == "__main__":
-  get_model_mdn(sys.argv[1], sys.argv[2], verbose=True)
+  if len(sys.argv) != 3:
+    print("Usage: python3 -m MaxText.muon_utils <model_name> <scan_layers:True/False>")
+    sys.exit(1)
+  model_name_arg = sys.argv[1]
+  scan_layers_arg = sys.argv[2].lower() == 'true'
+  get_model_mdn(model_name_arg, scan_layers_arg, verbose=True)
