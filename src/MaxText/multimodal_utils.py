@@ -721,14 +721,11 @@ def prepare_text_for_image_fusion(
   Args:
     texts: Input token sequence.
     model_name: Model name to determine processing logic.
-    processor_output: Preprocessor output for Gemma3/Llama4 (contains pixel_values, aspect_ratios).
-    image_grid_thw: Image dimensions for Qwen3-Omni (num_images, 3).
-    video_grid_thw: Video dimensions for Qwen3-Omni (num_videos, 3).
-    audio_lengths: Audio sequence lengths for Qwen3-Omni (num_audios,).
-    spatial_merge_size: Spatial merge size for Qwen3-Omni.
-    use_audio_in_video: Whether to interleave audio with video for Qwen3-Omni.
-    second_per_grids: Time per grid for Qwen3-Omni videos (num_videos,).
-    position_id_per_seconds: Temporal granularity for Qwen3-Omni.
+    processor_output: Preprocessor output containing multimodal metadata.
+                      - For Gemma3/Llama4: contains pixel_values, aspect_ratios.
+                      - For Qwen3-Omni: contains pixel_grid_thw, video_grid_thw, audio_lengths, video_second_per_grid.
+    config: Configuration object. If provided, extracts spatial_merge_size_for_vit,
+            use_audio_in_video, and position_id_per_seconds from it.
 
   Returns:
     Expanded token sequence with multimodal tokens inserted.
@@ -739,6 +736,9 @@ def prepare_text_for_image_fusion(
   elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     return add_extra_tokens_for_images_llama4(texts, processor_output)
   elif model_name.startswith("qwen3-omni"):
+    # Extract config-based parameters
+    assert config is not None, "Config must be provided for Qwen3-Omni image fusion."
+
     return add_extra_tokens_for_qwen3_omni(
         tokens=texts,
         image_grid_thw=processor_output.pixel_grid_thw,

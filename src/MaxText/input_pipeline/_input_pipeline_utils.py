@@ -112,39 +112,26 @@ def pre_process_image_sft(example, image_column, model_name, config):
   return example
 
 
-def prepare_text_for_image_fusion(example, column_name, model_name, spatial_merge_size=2, position_id_per_seconds=25, use_audio_in_video=False):
+def prepare_text_for_image_fusion(example, column_name, model_name, config):
   """Prepare text for image fusion for multimodal SFT.
 
   This function expands special tokens (image/video/audio placeholders) into
   the correct number of tokens based on the multimodal content dimensions.
 
   For Gemma3/Llama4: Uses processor_output (pixel_values, aspect_ratios).
-  For Qwen3-Omni: Uses grid dimensions (image_grid_thw, video_grid_thw, audio_lengths).
+  For Qwen3-Omni: Uses processor_output (pixel_grid_thw, video_grid_thw, audio_lengths, video_second_per_grid).
 
   Args:
     example: Data example dictionary.
     column_name: Name of the text column to process.
     model_name: Model name string.
-    spatial_merge_size: Number of patches merged spatially (from config.spatial_merge_size_for_vit).
-    position_id_per_seconds: Temporal granularity in tokens per second (from config.position_id_per_seconds).
+    config: Configuration object containing model parameters.
   """
-  # Extract Qwen3-Omni specific parameters from example if present
-  image_grid_thw = example.get("image_grid_thw", None)
-  video_grid_thw = example.get("video_grid_thw", None)
-  audio_lengths = example.get("audio_lengths", None)
-  second_per_grids = example.get("second_per_grids", None)
-
   example[column_name] = multimodal_utils.prepare_text_for_image_fusion(
       example[column_name],
       model_name,
       processor_output=example.get("images", None),
-      image_grid_thw=image_grid_thw,
-      video_grid_thw=video_grid_thw,
-      audio_lengths=audio_lengths,
-      spatial_merge_size=spatial_merge_size,
-      use_audio_in_video=use_audio_in_video,
-      second_per_grids=second_per_grids,
-      position_id_per_seconds=position_id_per_seconds,
+      config=config,
   )
   return example
 
