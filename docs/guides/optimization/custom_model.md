@@ -24,13 +24,15 @@ This document provides a guide to optimize and customize your LLM model configur
 
 To begin, identify your model's size, review open-source model configs, and establish the initial configurations for each block. You can use our [reference calculator (on Colab)](https://colab.research.google.com/github/AI-Hypercomputer/maxtext/blob/main/docs/explanations/llm_calculator.ipynb) to estimate parameters and FLOPs for dense, Mixtral-like Mixture of Experts (MoE), and DeepSeek-like MoE models to help you estimate the parameter count and FLOPs.
 
-Based on resources like [Language Modeling from Scratch](https://github.com/stanford-cs336/spring2025-lectures/blob/e9cb2488fdb53ea37f0e38924ec3a1701925cef3/nonexecutable/2025%20Lecture%203%20-%20architecture.pdf), we observe common architectural ratios for dense models, as shown below:
+Based on resources like [Language Modeling from Scratch](https://github.com/stanford-cs336/spring2025-lectures/blob/e9cb2488fdb53ea37f0e38924ec3a1701925cef3/nonexecutable/2025%20Lecture%203%20-%20architecture.pdf), common architectural ratios include:
+
+Dense models
 
 *   `mlp_dim / emb_dim`: 2.5-4
 *   `head_dim * num_query_heads / emb_dim`: 1-2
 *   `emb_dim / num_decoder_layers`: 100-200
 
-For MoE models,
+MoE models
 
 *   sparsity (`num_experts / num_experts_per_tok`): 4-32
 *   `moe_mlp_dim / emb_dim`: 0.3-3
@@ -39,16 +41,31 @@ For MoE models,
 
 ### Model configs
 
-To unlock peak performance on [TPUs](https://cloud.google.com/tpu/docs/system-architecture-tpu-vm), it is critical to keep the Matrix Multiply Unit (MXU) fully utilized. The MXU is the primary computational engine, with the Trillium chip specifically optimized for 256×256 matrix multiplications (earlier TPU versions, like v4/v5e/v5p, are optimized for 128×128 operations). Processing smaller matrix multiplications (e.g., two 128×128 operations on Trillium) will halve the efficiency compared to a single, fully-utilized 256×256 operation.
+To unlock peak performance on [TPUs](https://cloud.google.com/tpu/docs/system-architecture-tpu-vm), it is critical to keep the Matrix Multiply Unit (MXU) fully utilized. The MXU is the primary computational engine, with the [Trillium](https://docs.cloud.google.com/tpu/docs/v6e) and [Ironwood](https://docs.cloud.google.com/tpu/docs/tpu7x) chips specifically optimized for 256×256 matrix multiplications (earlier TPU versions, like [v4](https://docs.cloud.google.com/tpu/docs/v4)/[v5e](https://docs.cloud.google.com/tpu/docs/v5e)/[v5p](https://docs.cloud.google.com/tpu/docs/v5p), are optimized for 128×128 operations). Processing smaller matrix multiplications (e.g., two 128×128 operations on Trillium and Ironwood) will halve the efficiency compared to a single, fully-utilized 256×256 operation.
 
 Therefore, for optimal efficiency:
 
-*   Model and MLP Dimensions: Design your model's emb_dim and mlp_dim to be multiples of 256 (for Trillium) or 128 (for older TPUs).
-*   Self-Attention Head Dimension: Ensure your attention head_dim are also multiples of 256 (for Trillium) or 128 (for older TPUs).
+*   Model and MLP Dimensions: Design your model's emb_dim and mlp_dim to be multiples of 256 (for Trillium and Ironwood) or 128 (for older TPUs).
+*   Self-Attention Head Dimension: Ensure your attention head_dim are also multiples of 256 (for Trillium and Ironwood) or 128 (for older TPUs).
 
 Generally, larger multiples are more efficient. If achieving these specific multiples isn't possible, prioritize dimensions to a multiple of either 8 or 128 to help the XLA compiler optimize memory and computation.
 
 To achieve efficient memory usage on a TPU, configure your training with the largest batch size that fits within its memory limits (configure a rematerialization policy with offloading to achieve the best MFU). Each TPU core leverages internal 8×128 vector registers for highly optimized matrix multiplications. Therefore, for peak performance and to minimize padding, your batch size should ideally be a multiple of 128. If a multiple of 128 is not feasible, try a multiple of 8. For more detailed explanations, see this [performance guide](https://cloud.google.com/tpu/docs/performance-guide).
+
+### Ironwood
+
+Ironwood is engineered for cutting-edge, large-scale AI model training and inference. To unlock its full potential, the primary goal is to continuously supply data to its powerful TensorCores, preventing bottlenecks from memory or the Inter-Chip Interconnect (ICI).
+
+We have published optimized recipes for models like DeepSeek v3, GPT-OSS, Qwen3, and Llama3 on Ironwood, covering both BF16 and FP8 precision, available in this [guide](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/training/ironwood).
+
+Key strategies to maximize performance on Ironwood include:
+* Adopt FP8 Precision: Ironwood delivers 2x throughput with FP8 compared to BF16. Design models to use mixed-precision training, employing FP8 for weights and activations where possible to maximize computational speed.
+* Offload to SparseCores: Ironwood's enhanced SparseCores are crucial for efficiency. Offloading collective communication and data management to keep TensorCores focused on compute.
+* Leverage the dual-chiplet architecture: Each Ironwood chip contains two TensorCores with an ultra-fast interconnect (die-to-die, 6x faster than 1D ICI link).
+
+Given Ironwood's high compute power, communication bandwidth can easily become the limiting factor. To address this:
+* Enable SparseCore offloading for collectives: By setting the appropriate [XLA flags](https://github.com/AI-Hypercomputer/maxtext/blob/ed517cf80d9aa81f76e236c5516dacebfe39e96d/benchmarks/xla_flags_library.py#L70-L116), you can offload collective operations (like All-Reduce, All-Gather, etc.) to the SparseCores. These operations then run in parallel with the TensorCore computations, effectively hiding communication latency and improving Model Flop Utilization (MFU).
+* Optimize sharding strategies: Align your model distribution with the hardware topology. Choose sharding strategies (e.g., data, tensor, pipeline parallelism) that minimize data transfer over the ICI and maximize the overlap between computation and communication.
 
 ### Performance configs
 
@@ -58,18 +75,21 @@ Use these general runtime configurations to improve your model's performance.
 
 * **Flash Attention**. Use the largest possible block size to maximize throughput.
 
-* **Memory usage**. To free up memory with large models, use custom remat policy to offload layer activations (including inputs, query, key, value, out projections, etc) to the host CPU.
+* **Memory usage**. To free up memory with large models, use custom remat policy to offload layer activations (including inputs, attention, and MLP blocks) to the host CPU.
 
-* **Compiler flags**. XLA is the backend compiler for TPUs. Many critical performance settings can be controlled directly through XLA flags. We suggest beginning with the proven flags we have tested and provided [here](https://github.com/AI-Hypercomputer/maxtext/blob/02b6b8d2558f7dab7d2be024783977bdbb3ed251/benchmarks/xla_flags_library.py).
+* **Compiler flags**. XLA is the backend compiler for TPUs. Many critical performance settings can be controlled directly through XLA flags. We suggest beginning with the proven flags we have tested and provided [here](https://github.com/AI-Hypercomputer/maxtext/blob/b53bf3bef6b54b1d4939a4b700bc11fe149d1128/benchmarks/xla_flags_library.py).
 
 * **Benchmark**. For consistent speed tests, set `reuse_example_batch=1` to repeatedly use the same data batch, isolating computation speed from data loading. Or use on-the-fly generated data by setting `dataset_type=synthetic`.
 
-(roofline-sharding)=
 ## Step 3. Choose efficient sharding strategies using Roofline Analysis
 
-To achieve good performance, it's often necessary to co-design the model's dimensions (like the MLP dimension) along with the sharding strategy. We have included examples for Trillium that demonstrate which sharding approaches work well for specific models. We recommend reading [](sharding_on_TPUs) and Jax’s [scaling book](https://jax-ml.github.io/scaling-book/sharding/).
+To achieve good performance, it's often necessary to co-design the model's dimensions (like the MLP dimension) along with the sharding strategy. We have included examples for [v5p](https://docs.cloud.google.com/tpu/docs/v5p), [Trillium](https://docs.cloud.google.com/tpu/docs/v6e), and [Ironwood](https://docs.cloud.google.com/tpu/docs/tpu7x) that demonstrate which sharding approaches work well for specific models. We recommend reading [](sharding) and Jax’s [scaling book](https://jax-ml.github.io/scaling-book/sharding/).
 
-For the calculation below on Trillium, we will use Arithmetic Intensity (AI) of 5100 for 2 ICI links bandwidth bandwidth (1D with wrapound or 2D without wraparound) and 2500 for 4 ICI links bandwidth (2D with wraparound on both dimensions) over the ICI. The later bandwidth is particularly for Trillium v6e-256 (16x16) with wraparound connection.
+| TPU Type |  ICI Arithmetic Intensity |
+|---|---|
+| v5p | 2550 for 1D-ICI  |
+| Trillium | 5100 for 1D-ICI (1D with wrapound or 2D without wraparound) <br> 2550 for 2D-ICI (2D with wraparound on both dimensions), particularly for v6e-256 |
+| Ironwood | 12800 for 1D-ICI|
 
 ### Fully Sharded Data Parallelism (FSDP)
 
@@ -81,10 +101,21 @@ FSPD AI: `global batch / sparsity` (`sparsity = num_experts / num_experts_per_to
 
 **Example with a sparsity of 16**:
   * `global batch / sparsity > hardware AI`
-  * `global batch / 16 > 2500` (16x16 with wraparound)
+
+v5p:
+  * `global batch / 16 > 2550`
+  * `global batch > 40k` (in tokens)
+
+Trillium:
+  * `global batch / 16 > 2550` (16x16 with wraparound)
   * `global batch > 40k` (in tokens)
 
 We also need a single layer of weights to fit into memory which can be an issue for medium/large MoE models, e.g. DeepSeek has roughly 10B params per layer, which corresponds to 40GiB of bf16 weights and gradients, which will not fit into Trillium’s 32GiB of HBM. So the use of pure FSDP on Trillium is feasible for models with layers not exceeding roughly 5B parameters. For these larger models need Expert or Tensor Parallelism.
+
+Ironwood:
+  * `global batch / 16 > 12800`
+  * `global batch > 205k` (in tokens)
+
 
 #### Mix FSDP
 
@@ -94,10 +125,20 @@ The same AI as derived in the Pure FSDP section above still hold, we need `globa
 
 **Example with EP=16, FSDP=16, and sparsity=32**:
   * `pdb * EP / sparsity > hardware AI`
-  * `pdb * 16 / 32 > 5100`
-  * `pdb > 5100 * 32 / 16 = 10200` (in tokens)
 
-We need a per device batch of at least 10200 in this case.
+v5p:
+  * `pdb * 16 / 32 > 2550`
+  * `pdb > 2550 * 32 / 16 = 5k` (in tokens)
+
+Trillium:
+  * `pdb * 16 / 32 > 5100`
+  * `pdb > 5100 * 32 / 16 = 10k` (in tokens)
+
+Ironwood:
+  * `pdb * 16 / 32 > 12800`
+  * `pdb > 12800 * 32 / 16 = 26k` (in tokens)
+
+We need a per device batch of at least 5k for v5p, 10k for Trillium, and 26k for Ironwood in this case.
 
 ### Expert Parallelism (EP)
 
@@ -106,14 +147,20 @@ If pure FSDP doesn’t work either due to AI or to fit in layer weights, EP is g
 AI of 1D EP on ICI rings `= 4 * mlp_dim / EP`. Communication cost of all-to-all is roughly 1/4 of all-gather and reduce-scatter.
 
 **Example with EP=4**
+
+v5p:
+* `4 * M > 2550 * 4`
+* `M > 2.5k`
+
+Trillium:
 * `4 * M > 5100 * 4`
-* `M > 5,100 * 4 = 5,100`
+* `M > 5k`
 
-**Example with EP=16**
-* `4 * M > 5,100 * 16`
-* `M > 5,100 * 4 = 20,400`
+Ironwood:
+* `4 * M > 12800 * 4`
+* `M > 13k`
 
-These examples show that to use EP, we need a large enough mlp dimension.
+These examples show that to use EP, we need a large enough MLP dimension.
 
 It's important to note that this is only a roofline analysis. A nocap strategy with a high degree of EP introduces additional overhead - load balancing across expert groups becomes more challenging.
 
@@ -125,25 +172,70 @@ AI of TP: M / TP
 
 **Example with TP=4**
 * `M / TP > hardware AI`
+
+v5p:
+* `M / 4 > 2550`
+* `M > 10k`
+
+Trillium:
 * `M / 4 > 5100`
-* `M > 20400`
+* `M > 20k`
 
-We have seen in practice M should be even larger- ideally 40k+. This is what we use for Llama-405B (M=53k), and was used for a custom sparse 10T model (M=40k, 64 experts).
+We have seen in practice M should be even larger - ideally 40k+. This is what we use for Llama-405B (M=53k), and was used for a custom sparse 10T model (M=40k, 64 experts). TP=4 corresponds to a custom Trillium mesh, an 8x8 ring of 2x2 subrings (the TP communication operates on the 2x2 ring). This 2x2 ring performs well (near roofline), but the 8x8 rings perform poorly (0.5 x 1 axis). E.g. if we use FSDP=64, TP=4, the FSDP=64 communications will be slower than the hardware ICI roofline, so we prefer to use the full 16 axis when M is large enough.
 
-TP=4 corresponds to a custom Trillium mesh, an 8x8 ring of 2x2 subrings (the TP communication operates on the 2x2 ring). This 2x2 ring performs well (near roofline), but the 8x8 rings perform poorly (0.5 x 1 axis). E.g. if we use FSDP=64, TP=4, the FSDP=64 communications will be slower than the hardware ICI roofline, so we prefer to use the full 16 axis when M is large enough.
+Ironwood:
+* `M / 4 > 12800`
+* `M > 51k`
 
 **Example with TP=16**
 * `M / TP > hardware AI`
+
+v5p:
+* `M / 16 > 2550`
+* `M > 41k`
+
+Trillium:
 * `M / 16 > 5100`
-* `M > 81600`
+* `M > 82k`
 
 To use TP=16, we need M > 80k (ideally larger, 100k+). We have used this in a custom dense model (900B, M=131k), which performs very well even at 1k per device tokens (scaling to 25k+ with a reasonable global batch).
+
+### Pipeline Parallelism (PP)
+
+Pipeline Parallelism is advantageous when global batch size limits per device batch size, making Data Parallelism (DP) inefficient. PP is associated with small communication costs since it only needs to permute the small layer inputs.
+
+AI of PP: 3/2 * layers_per_pipeline_stage * M * num_experts_per_tok
+
+**Example with PP=16, layers_per_pipeline_stage=1, num_experts_per_tok=8**
+* `layers_per_pipeline_stage * M * num_experts_per_tok > hardware AI`
+
+v5p - PP over ICI:
+* `3 * M * 8 / 2 > 2550`
+* `M > 210`
+
+v5p - PP over DCN:
+* `3 * M * 8 / 2 > 73000`
+* `M > 6k`
+
+Trillium over ICI:
+* `3 * M * 8 / 2 > 5100`
+* `M > 420`
+
+Trillium over DCN:
+* `3 * M * 8 / 2 > 73000`
+* `M > 6k`
+
+Ironwood over ICI:
+* `3 * M * 8 / 2 > 12800`
+* `M > 1100`
+
+It is important to emphasize that this is a theoretical roofline analysis. Real-world performance will depend on the efficiency of the implementation and XLA compilation on the TPU. Refer to the [link](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/explanations/sharding.md#pp--fsdpdp) for specific challenges regarding PP + FSDP/DP.
 
 ## Step 4. Analyze experiments
 
 With your configs, begin experimenting to evaluate the model's performance. We strongly recommend capturing a profile by following these [instructions](https://docs.jax.dev/en/latest/profiling.html#). If you are using MaxText, this can be done by simply setting `profiler=xplane` in your configuration.
 
-After generating the profile, use a tool, like [xprof](https://github.com/openxla/xprof), [xprofiler](https://github.com/AI-Hypercomputer/cloud-diagnostics-xprof), or [tensorboard](https://github.com/tensorflow/tensorboard) to analyze the results. This example ([Profile TPU Programs](https://jax-ml.github.io/scaling-book/profiling/) can serve as your guide. A key principle for maximizing training throughput is to ensure you are fully utilizing the available HBM. Once you achieve satisfactory performance, you can proceed with full training runs. Continue to analyze your model and refine your configurations as needed.
+After generating the profile, use a tool, like [xprof](https://github.com/openxla/xprof), [xprofiler](https://github.com/AI-Hypercomputer/cloud-diagnostics-xprof), or [tensorboard](https://github.com/tensorflow/tensorboard) to analyze the results. This example ([Profile TPU Programs](https://jax-ml.github.io/scaling-book/profiling/)) can serve as your guide. A key principle for maximizing training throughput is to ensure you are fully utilizing the available HBM. Once you achieve satisfactory performance, you can proceed with full training runs. Continue to analyze your model and refine your configurations as needed.
 
 ## Example of dense model
 
@@ -209,4 +301,4 @@ Objective was to demonstrate achieving reasonable MFU on a low batch setting (2k
 | **Total Params** | 1.04E+13 |
 | **Active Params** | 3.76E+11 |
 | **MFU (1 pod Trillium)** | 34.5% |
-| **MFU(16 pods Trillium)** | 26.2% |
+| **MFU (16 pods Trillium)** | 26.2% |
