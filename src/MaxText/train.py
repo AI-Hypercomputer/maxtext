@@ -35,6 +35,7 @@ import jax
 import jax.numpy as jnp
 
 from flax import linen as nn
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
 from cloud_tpu_diagnostics import diagnostic
@@ -153,6 +154,8 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       total_loss = jnp.sum(xent)
   else:
     # Flax NNX model
+    graphdef, _, rest = nnx.split(model, nnx.Param, ...)
+    model = nnx.merge(graphdef, params, rest)
     logits = model(
         decoder_input_tokens=data["inputs"],
         decoder_positions=data["inputs_position"],
@@ -506,9 +509,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   tf.config.set_visible_devices([], "GPU")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-    )
+    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
   # or fill in here
   config = pyconfig.initialize(argv)
