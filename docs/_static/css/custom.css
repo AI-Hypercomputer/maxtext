@@ -1,0 +1,211 @@
+/* Base file modifications */
+body:has(.hero) .bd-sidebar-primary,
+body:has(.hero) .sidebar-toggle,
+body:has(.hero) .bd-sidebar-secondary {
+    display: none !important;
+}
+
+body:has(.hero) .prev-next-footer {
+    display: none;
+}
+
+body:has(.hero) .bd-article-container {
+    max-width: unset !important;
+}
+
+body:has(.hero) .bd-page-width {
+    max-width: unset !important;
+}
+
+body:has(.hero) .bd-article {
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+}
+
+body:has(.hero) .bd-container {
+    flex-direction: column;
+}
+
+body:has(.hero) .bd-article > section > h1 {
+    display: none;
+}
+
+@media (min-width: 960px) {
+    body:has(.hero) .bd-header-article {
+        justify-content: center;
+    }
+
+    body:has(.hero) .header-article-items,
+    body:has(.hero) .doc-body > section {
+        max-width: 80% !important;
+        align-self: center;
+        width: -moz-available;
+        width: -webkit-fill-available;
+        width: fill-available;
+    }
+
+    body:has(.hero) .doc-body > section.hero {
+        max-width: 90rem !important;
+    }
+
+    body:has(.hero) .doc-body > section.banner {
+        max-width: 80rem !important;
+    }
+}
+
+/* -------------- Page styles ---------------- */
+.doc-body {
+    display: flex;
+    flex-direction: column;
+}
+
+.hero {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: center;
+    background: black;
+    border-radius: 24px;
+    max-width: 90%;
+}
+
+.hero-image {
+    width: 100%;
+    border-radius: 24px 24px 0 0;
+}
+
+.hero-text {
+    display: flex;
+    max-width: 70%;
+    margin: 32px;
+}
+
+.hero-text h1 {
+    font: 700 52px 'Google Sans', 'Roboto', sans-serif;
+    color: white;
+}
+
+.hero-text h3 {
+    font: 400 20px 'Roboto', sans-serif;
+    color: #bdc1c6;
+}
+
+@media (max-width: 1240px) {
+    .hero {
+        max-width: 100%;
+    }
+    .hero-text h1 {
+        font-size: 42px;
+        margin: 24px;
+    }
+}
+
+.hero-cta {
+    display: flex;
+    flex-direction: row;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 20px;
+}
+
+.button-primary {
+    background: #1A73E8;
+    border-radius: 4px;
+    color: white;
+    font: 400 14px 'Google Sans', 'Roboto', sans-serif;
+    text-decoration: none;
+    padding: 9px 26px;
+    transition: background-color .2s, border .2s, box-shadow .2s;
+    width: max-content;
+}
+
+.button-primary:visited:hover {
+    color: white !important;
+}
+
+.button-primary:hover {
+    background-color: #1765cc;
+    color: white;
+    transition: background-color .2s, border .2s, box-shadow .2s;
+    box-shadow: 0 1px 2px 0 rgba(60,64,67,.3),0 1px 3px 1px rgba(60,64,67,.15);
+}
+
+.button-primary:active {
+    background-color: #185abc;
+    color: white;
+    box-shadow: 0 1px 2px 0 rgba(60,64,67,.3),0 2px 6px 2px rgba(60,64,67,.15);
+}
+
+.button-primary:visited {
+    color: white;
+    text-decoration: none;
+}
+
+.banner {
+    background: #E8F0FE;
+    border-radius: 24px;
+    margin-block: 80px 80px;
+    padding-inline: 50px;
+    padding-bottom: 24px;
+}
+
+.three-up {
+    display: grid;
+    grid: auto-flow / 1fr 1fr 1fr;
+    gap: 24px;
+    padding-inline: 60px;
+    margin-top: 20px;
+}
+
+.text-body {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding-left: 10px;
+    padding-right: 20px;
+}
+
+@media (max-width: 860px) {
+    .three-up {
+        grid: auto-flow / 1fr;
+        padding-inline: 0;
+    }
+
+    .three-up h3 {
+        margin-top: 8px;
+    }
+}
+
+html[data-theme="dark"] .text-body {
+    color: #bdc1c6 !important;
+}
+
+html[data-theme="dark"] .banner {
+    background-color: #22252c;
+}
+
+html[data-theme="dark"] .button-primary {
+    background-color: #8ab4f8;
+    color: #121212;
+}
+
+html[data-theme="dark"] .button-primary:hover {
+    background-color: #98bdf9;
+    color: #121212;
+}
+
+html[data-theme="dark"] .button-primary:active {
+    background-color: #aecbfa;
+    color: #121212;
+}
+
+html[data-theme="dark"] .button-primary:visited:hover {
+    color: #121212 !important;
+}
+
+.latest-news {
+    max-width: 90rem !important;
+    padding-inline: 50px;
+    padding-bottom: 24px;
+}
