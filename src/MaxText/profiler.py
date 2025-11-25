@@ -21,7 +21,10 @@ import shutil
 
 import jax
 
+from google_cloud_mldiagnostics import xprof
+
 from MaxText import max_logging
+from MaxText.managed_mldiagnostics import ManagedMLDiagnostics
 
 
 class Profiler:
@@ -40,6 +43,10 @@ class Profiler:
     self.finished_initial_profile_step = self._set_last_profiler_step(config.profiler_steps, config.steps)
     if config.profiler != "" and self.start_initial_profile_step >= config.steps:
       raise ValueError("Profiling requested but initial profiling step set past training final step")
+    self.prof = None  # managed mldiagnostics xprof collector.
+    self.managed_mldiagnostics = config.managed_mldiagnostics
+    if config.managed_mldiagnostics:
+      ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
 
   def maybe_activate_profiler(self, step, state):
     """Conditionally activates the profiler based on the current step.
@@ -56,6 +63,16 @@ class Profiler:
     nsys profiler becomes no-op when libcudart.so is not available on the system."""
     if self.profile_cleanly and blocking_object is not None:
       jax.block_until_ready(blocking_object)
+
+    if self.managed_mldiagnostics and self.mode == "xplane":
+      # Handle the special profiling logic for managed_mldiagnostics
+      if self.prof is None:
+        # Starts xprof collector.
+        # Only profiling on the first device, if not upload_all_profiler_results. None is for all devices.
+        self.prof = xprof(process_index_list=None if self.upload_all_profiler_results else [0])
+      self.prof.start()
+      return
+
     if not (self.upload_all_profiler_results or jax.process_index() == 0):
       return
     if self.mode != "":
@@ -84,6 +101,13 @@ class Profiler:
     The result is uploaded to the output bucket."""
     if self.profile_cleanly and blocking_object is not None:
       jax.block_until_ready(blocking_object)
+
+    if self.managed_mldiagnostics and self.mode == "xplane":
+      # Handle the special profileing logic for managed_mldiagnostics
+      if self.prof is not None:
+        self.prof.stop()
+      return
+
     if not (self.upload_all_profiler_results or jax.process_index() == 0):
       return
     if self.mode == "nsys":
