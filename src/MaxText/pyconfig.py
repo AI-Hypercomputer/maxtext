@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 from typing import Any
+import copy
 
 import jax
 import jax.numpy as jnp
@@ -150,6 +151,13 @@ class HyperParameters:
     final_dict["shard_mode"] = ShardMode(final_dict["shard_mode"])
 
     object.__setattr__(self, "_flat_config", final_dict)
+
+  def __deepcopy__(self, memo):
+    new_pydantic_config = copy.deepcopy(self._pydantic_config, memo)
+    return HyperParameters(new_pydantic_config)
+
+  def tree_flatten(self):
+    return (), self
 
   def __getattr__(self, attr: str) -> Any:
     """Provides attribute-style access to the final configuration dictionary."""
