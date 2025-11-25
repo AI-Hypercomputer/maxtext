@@ -23,8 +23,8 @@ freeze_vision_encoder_params: True
 learning_rate: 2.e-5
 
 # -------------- HF pipeline --------------
-dataset_type: hf
-hf_path: 'HuggingFaceM4/ChartQA'
+# dataset_type: hf
+# hf_path: 'HuggingFaceM4/ChartQA'
 train_split: 'train'
 hf_eval_split: 'val'
 train_data_columns: ['query', 'label']  # the first column is prompt, second column is completion

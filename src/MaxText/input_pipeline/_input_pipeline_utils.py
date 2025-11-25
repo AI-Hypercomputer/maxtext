@@ -168,6 +168,96 @@ def is_conversational(features, data_columns):
   return False
 
 
+@dataclasses.dataclass
+class MergeImageColumns(grain.MapTransform):
+  """Merge multiple image columns into a single 'images' column."""
+
+  image_columns: list
+  max_num_images_per_example: int
+
+  def map(self, element):
+    return merge_image_columns(element, self.image_columns, self.max_num_images_per_example)
+
+
+@dataclasses.dataclass
+class ReformatPrompt(grain.MapTransform):
+  """Reformat prompt for multimodal SFT."""
+
+  column: str
+  image_placeholder: str
+  video_placeholder: str
+  audio_placeholder: str
+  model_name: str
+
+  def map(self, element):
+    return reformat_prompt(
+        element,
+        self.column,
+        self.image_placeholder,
+        self.video_placeholder,
+        self.audio_placeholder,
+        self.model_name,
+    )
+
+
+@dataclasses.dataclass
+class ReformatResponse(grain.MapTransform):
+  """Reformat response for multimodal SFT."""
+
+  column: str
+  model_name: str
+
+  def map(self, element):
+    return reformat_response(element, self.column, self.model_name)
+
+
+@dataclasses.dataclass
+class PreProcessImageSFT(grain.MapTransform):
+  """Preprocess images for multimodal SFT."""
+
+  image_column: str
+  model_name: str
+  config: object
+
+  def map(self, element):
+    return pre_process_image_sft(element, self.image_column, self.model_name, self.config)
+
+
+@dataclasses.dataclass
+class PrepareTextForImageFusion(grain.MapTransform):
+  """Prepare text for image fusion."""
+
+  column_name: str
+  model_name: str
+  config: object
+
+  def map(self, element):
+    return prepare_text_for_image_fusion(element, self.column_name, self.model_name, self.config)
+
+
+@dataclasses.dataclass
+class DecodeParquetImages(grain.MapTransform):
+  """Decode parquet image dicts to PIL Images."""
+
+  image_column: str
+
+  def map(self, element):
+    """Decode image bytes from parquet format to PIL Images."""
+    from PIL import Image
+    import io
+
+    def decode_image(img):
+      if isinstance(img, dict) and 'bytes' in img:
+        return Image.open(io.BytesIO(img['bytes']))
+      return img
+
+    if isinstance(element[self.image_column], list):
+      element[self.image_column] = [decode_image(img) for img in element[self.image_column]]
+    else:
+      element[self.image_column] = decode_image(element[self.image_column])
+    return element
+
+
 def apply_chat_template(example, tokenizer_model, data_column_name):
   """Formats conversational data by applying the tokenizer's chat template
   and identifying prompt/completion segments.

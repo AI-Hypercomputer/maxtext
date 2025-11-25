@@ -28,7 +28,7 @@ python3 -m MaxText.sft_trainer MaxText/configs/sft-vision-chartqa.yml \
     per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
     steps=${STEPS} max_target_length=1024 checkpoint_period=100 \
     attention=dot_product scan_layers=false enable_checkpointing=false \
-    hf_path=parquet hf_train_files=gs://aireenmei-multipod/dataset/hf/chartqa/train-*
+    dataset_type=grain grain_file_type=parquet grain_train_files=gs://aireenmei-multipod/dataset/hf/chartqa/train-*
  
     #scan_layers=False load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH}
 

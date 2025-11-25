@@ -175,6 +175,154 @@ def pretrain_preprocessing_pipeline(
   return dataset
 
 
+def vision_sft_preprocessing_pipeline(
+    dataset,
+    config,
+    text_columns,
+    image_column,
+    grain_worker_count,
+    grain_per_worker_buffer_size,
+):
+  """Use grain to pre-process the dataset and return iterators for multimodal SFT fine-tuning"""
+  assert len(text_columns) == 2, f"Need two text_columns for query and response, received {text_columns=}"
+
+  if config.grain_file_type == "arrayrecord":
+    # Parse and normalize features from arrayrecord
+    data_columns = text_columns + ([image_column] if isinstance(image_column, str) else image_column)
+    dataset = dataset.map(_input_pipeline_utils.ParseFeatures(data_columns, tokenize=False))
+    dataset = dataset.map(_input_pipeline_utils.NormalizeFeatures(data_columns, tokenize=False))
+  elif config.grain_file_type == "parquet":
+    # Decode parquet images from dict format to PIL Images
+    if isinstance(image_column, list):
+      for col in image_column:
+        dataset = dataset.map(_input_pipeline_utils.DecodeParquetImages(image_column=col))
+    else:
+      dataset = dataset.map(_input_pipeline_utils.DecodeParquetImages(image_column=image_column))
+
+  # If multiple image columns are provided, merge them into a single 'images' column
+  if isinstance(image_column, list):
+    dataset = dataset.map(
+        _input_pipeline_utils.MergeImageColumns(
+            image_columns=image_column,
+            max_num_images_per_example=config.max_num_images_per_example,
+        )
+    )
+
+  # Rename image column to 'images' if it's not already
+  if image_column != "images":
+    dataset = dataset.map(_input_pipeline_utils.Rekey({"images": image_column}))
+    image_column = "images"
+
+  # Reformat prompt and response
+  dataset = dataset.map(
+      _input_pipeline_utils.ReformatPrompt(
+          column=text_columns[0],
+          image_placeholder=config.image_placeholder,
+          video_placeholder=config.video_placeholder,
+          audio_placeholder=config.audio_placeholder,
+          model_name=config.model_name,
+      )
+  )
+  dataset = dataset.map(
+      _input_pipeline_utils.ReformatResponse(
+          column=text_columns[1],
+          model_name=config.model_name,
+      )
+  )
+
+  # Preprocess images
+  dataset = dataset.map(
+      _input_pipeline_utils.PreProcessImageSFT(
+          image_column=image_column,
+          model_name=config.model_name,
+          config=config,
+      )
+  )
+
+  # Tokenize
+  tokenizer_model = tokenizer.build_tokenizer(
+      config.tokenizer_path,
+      config.tokenizer_type,
+      config.add_bos,
+      config.add_eos,
+      config.hf_access_token,
+      config.dataset_type,
+  )
+  if tokenizer_model.pad_id is not None:
+    pad_id = tokenizer_model.pad_id
+  elif tokenizer_model.unk_id is not None:
+    pad_id = tokenizer_model.unk_id
+  else:
+    pad_id = -1
+
+  dataset = dataset.map(
+      _grain_tokenizer.TokenizeAndTrim(
+          feature_names=text_columns,
+          sequence_length=config.max_target_length,
+          tokenizer=tokenizer_model,
+      )
+  )
+
+  # Prepare text for image fusion
+  dataset = dataset.map(
+      _input_pipeline_utils.PrepareTextForImageFusion(
+          column_name=text_columns[0],
+          model_name=config.model_name,
+          config=config,
+      )
+  )
+
+  # SFT prompt masking
+  dataset = dataset.map(
+      _input_pipeline_utils.SFTPromptMaskingVision(
+          query_column=text_columns[0],
+          response_column=text_columns[1],
+          max_target_length=config.max_target_length,
+          unk_id=pad_id,
+      )
+  )
+
+  # Pad or trim to max length
+  dataset = dataset.map(
+      _input_pipeline_utils.PadOrTrimToMaxLength(
+          config.max_target_length,
+          pad_id,
+          model_name=config.model_name,
+          max_num_images_per_example=config.max_num_images_per_example,
+          config=config,
+      )
+  )
+
+  # Extract images and masks
+  dataset = dataset.map(_input_pipeline_utils.ExtractImagesAndMasks())
+
+  # Batch
+  batch_size = config.global_batch_size_to_load // jax.process_count()
+  batch_fn = functools.partial(grain.experimental.batch_and_pad, batch_size=batch_size, pad_value=pad_id)
+  dataset = dataset.batch(batch_size, batch_fn=batch_fn)
+
+  # Fold images into batch
+  dataset = dataset.map(
+      _input_pipeline_utils.FoldImagesIntoBatch(
+          model_name=config.model_name,
+          config=config,
+      )
+  )
+
+  # Shift data for teacher-forced training
+  dataset = dataset.map(_input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
+
+  # Prefetch
+  dataset = dataset.mp_prefetch(
+      grain.MultiprocessingOptions(
+          num_workers=grain_worker_count,
+          per_worker_buffer_size=grain_per_worker_buffer_size,
+      )
+  )
+
+  return dataset
+
+
 def dpo_preprocessing_pipeline(
     dataset,
     config,
@@ -247,6 +395,15 @@ def make_grain_train_iterator(
           grain_worker_count=config.grain_worker_count,
           grain_per_worker_buffer_size=config.grain_per_worker_buffer_size,
       )
+    elif config.use_multimodal:
+      train_dataloader = vision_sft_preprocessing_pipeline(
+          train_ds,
+          config,
+          text_columns=config.train_data_columns,
+          image_column=config.train_image_column,
+          grain_worker_count=config.grain_worker_count,
+          grain_per_worker_buffer_size=config.grain_per_worker_buffer_size,
+      )
     else:
       train_dataloader = pretrain_preprocessing_pipeline(
           train_ds,
@@ -274,10 +431,19 @@ def make_grain_train_iterator(
     )
     if config.use_dpo:
       preprocessing_fn = functools.partial(
-          pretrain_preprocessing_pipeline,
+          dpo_preprocessing_pipeline,
           config=config,
           data_columns=config.train_data_columns,
           tokenize=config.tokenize_train_data,
+          grain_worker_count=config.grain_worker_count,
+          grain_per_worker_buffer_size=config.grain_per_worker_buffer_size,
+      )
+    elif config.use_multimodal:
+      preprocessing_fn = functools.partial(
+          vision_sft_preprocessing_pipeline,
+          config=config,
+          text_columns=config.train_data_columns,
+          image_column=config.train_image_column,
           grain_worker_count=config.grain_worker_count,
           grain_per_worker_buffer_size=config.grain_per_worker_buffer_size,
       )
@@ -338,6 +504,15 @@ def make_grain_eval_iterator(
           grain_worker_count=config.grain_worker_count_eval,
           grain_per_worker_buffer_size=config.grain_per_worker_buffer_size_eval,
       )
+    elif config.use_multimodal:
+      eval_dataloader = vision_sft_preprocessing_pipeline(
+          eval_ds,
+          config,
+          text_columns=config.eval_data_columns,
+          image_column=config.eval_image_column,
+          grain_worker_count=config.grain_worker_count_eval,
+          grain_per_worker_buffer_size=config.grain_per_worker_buffer_size_eval,
+      )
     else:
       eval_dataloader = pretrain_preprocessing_pipeline(
           eval_ds,
@@ -366,6 +541,15 @@ def make_grain_eval_iterator(
           config=config,
           data_columns=config.eval_data_columns,
           tokenize=config.tokenize_eval_data,
+          grain_worker_count=config.grain_worker_count_eval,
+          grain_per_worker_buffer_size=config.grain_per_worker_buffer_size_eval,
+      )
+    elif config.use_multimodal:
+      preprocessing_fn = functools.partial(
+          vision_sft_preprocessing_pipeline,
+          config=config,
+          text_columns=config.eval_data_columns,
+          image_column=config.eval_image_column,
           grain_worker_count=config.grain_worker_count_eval,
           grain_per_worker_buffer_size=config.grain_per_worker_buffer_size_eval,
       )
