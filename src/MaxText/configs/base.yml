@@ -725,6 +725,7 @@ mscale: 1.0
 rope_interleave: True # RoPE with sin/cos interleaved vs concatenated
 rope_truncate: True # Floor lower bound and ceil upper bound for correction range
 rope_attention_scaling: False # Scale the rotary embedding output
+rope_use_rotation_matrix: False # Whether to use rotation matrix for YaRN.
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.

@@ -766,6 +766,7 @@ class Attention(nnx.Module):
           interleave=self.config.rope_interleave,
           truncate=self.config.rope_truncate,
           attention_scaling=self.config.rope_attention_scaling,
+          use_rotation_matrix=self.config.rope_use_rotation_matrix,
           rngs=self.rngs,
       )
     elif self.is_qwen3_next:

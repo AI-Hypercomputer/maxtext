@@ -995,7 +995,9 @@ class YarnRope(BaseModel):
   rope_interleave: bool = Field(True, description="Whether RoPE sin/cos are interleaved vs concatenated.")
   rope_truncate: bool = Field(True, description="Whether to floor/ceil the correction range for YaRN.")
   rope_attention_scaling: bool = Field(
-      False, description="Scale the rotary embedding output. Used by some models like gpt-oss."
+      False, description="Scale the rotary embedding output. Used by some models like gpt-oss.")
+  rope_use_rotation_matrix: bool = Field(
+      False, description="Whether to use a rotation matrix for YaRN. Can only be use with interleave=True"
   )
 
 
