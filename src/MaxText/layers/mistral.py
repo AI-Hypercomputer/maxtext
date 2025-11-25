@@ -136,7 +136,7 @@ class MistralDecoderLayer(nnx.Module):
       attention_metadata=None,
   ):
     cfg = self.config
-    
+
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
