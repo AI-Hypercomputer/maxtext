@@ -52,3 +52,10 @@ repos:
           - '--pyink-indentation=2'
           - '--line-length=122'
           - '--check'
+
+  - repo: https://github.com/executablebooks/mdformat
+    rev: 0.7.22
+    hooks:
+      - id: mdformat
+        additional_dependencies: [mdformat-myst, mdformat-ruff]
+        files: (docs/.)
