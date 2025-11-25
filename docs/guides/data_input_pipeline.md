@@ -40,7 +40,11 @@ In MaxText, this is best supported by the ArrayRecord format using the Grain inp
 * **Uneven completion**: Data indices are distributed evenly among hosts. Without packing, the data imbalance between hosts will be at most one batch. To handle the final steps where some hosts run out of data, you can enable the `generate_padding_batch_train`/`generate_padding_batch_eval` flag in `src/MaxText/config/base.yml` or through command line arguments. This directs hosts to generate empty "padding" batches until the training or evaluation steps are met.
 
 ```{note}
-When sequence packing is enabled, the difference in the number of packed examples per host can be larger. The `generate_padding_batch_train`/`generate_padding_batch_eval` flag still solves this. However, as more hosts begin generating padding, you will observe a decrease in `total_weights` and a slower change in the training loss. If all hosts exhaust their data before the target step count is reached, both `total_weights` and loss will drop to 0.
+When sequence packing is enabled, the difference in the number of packed examples per host can be larger. The `generate_padding_batch_train`/`generate_padding_batch_eval` flag still solves this.
+
+However, as more hosts begin generating padding, you will observe a decrease in `total_weights` and a slower change in the training loss.
+
+If all hosts exhaust their data before the target step count is reached, both `total_weights` and loss will drop to 0.
 ```
 
 ### Sequential access dataset
