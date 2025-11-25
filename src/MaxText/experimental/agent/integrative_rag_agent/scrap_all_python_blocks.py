@@ -88,6 +88,9 @@ def scrape_github_repository(owner, repo, path, all_scraped_blocks, all_full_cod
       token (str, optional): A GitHub Personal Access Token for authentication.
   """
   api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+  # Example: targeting a specific commit hash
+  # commit_sha = "YOUR_SPECIFIC_COMMIT_HASH_HERE" # e.g. "a1b2c3d..."
+  # api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={commit_sha}"
   headers = {"Accept": "application/vnd.github.v3+json"}
 
   if token:
@@ -167,7 +170,7 @@ def main():
       print(f"\n--- Blocks from: {file_path} ---")
       if blocks:
         for i, block in enumerate(blocks):
-          print(f"--- Block {i + 1} ---\n{block}\n")
+          # print(f"--- Block {i + 1} ---\n{block}\n")
           total_blocks += 1
       else:
         print("No blocks found in this file.")
@@ -179,7 +182,7 @@ def main():
   if full_codes:
     for file_path, source in full_codes.items():
       print(f"\n--- Source from: {file_path} ---\n")
-      print(source)
+      # print(source)
   else:
     print("No full source code was scraped.")
 
