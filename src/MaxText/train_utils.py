@@ -33,7 +33,8 @@ def create_training_tools(config, model, mesh):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-  tx = optimizers.get_optimizer(config, learning_rate_schedule)
+  # pass in model for muon
+  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_multi_tier_checkpointing:
     checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(

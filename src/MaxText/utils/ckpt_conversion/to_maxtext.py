@@ -66,7 +66,6 @@ import jax
 import psutil
 from flax.training import train_state
 import flax.linen as nn
-from flax.linen import partitioning as nn_partitioning
 from transformers import AutoConfig, AutoModelForCausalLM
 from tqdm import tqdm
 from huggingface_hub import hf_hub_download, list_repo_files
@@ -445,8 +444,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   # Get abstract model structure (name, shape) without materializing the weights to save memory
-  with maxtext_model_flax.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
 
   abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
   # Standardize abstract tree for later unflattening
