@@ -70,8 +70,7 @@ def transformer_as_linen(
       A constructed Transformer model compatible with the specified framework (Linen or NNX).
   """
   rngs = rngs or nnx.Rngs(
-    params=jax.random.PRNGKey(config.init_weights_seed), 
-    dropout=jax.random.PRNGKey(config.init_dropouts_seed)
+      params=jax.random.PRNGKey(config.init_weights_seed), dropout=jax.random.PRNGKey(config.init_dropouts_seed)
   )
   return TransformerLinen(
       Transformer,
@@ -88,6 +87,7 @@ def transformer_as_linen(
       name=name,
       rngs=rngs,
   )
+
 
 class TransformerLinen(nnx_wrappers.ToLinen):
   """Transformer model as a linen module."""
@@ -330,7 +330,6 @@ class Transformer(nnx.Module):
     return logits
 
 
-
 def zero_one_transformer_as_linen(
     config: Config,
     mesh: Mesh,
@@ -389,6 +388,7 @@ class ZeroOneTransformer(nnx.Module):
   network communication, which can improve training speed if sufficient memory is
   available.
   """
+
   # Possible model_mode values can be found in MaxText.common_types.
   # We generally use MaxText.common_types.MODEL_MODE_TRAIN or
   # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
@@ -405,8 +405,7 @@ class ZeroOneTransformer(nnx.Module):
     batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(config=self.config, model_mode=self.model_mode)
     self.shape = (batch_size, sequence_length, self.config.emb_dim)
 
-    self.model =  Transformer(config=config, mesh=mesh, quant=quant, model_mode=model_mode,rngs=self.rngs)
-
+    self.model = Transformer(config=config, mesh=mesh, quant=quant, model_mode=model_mode, rngs=self.rngs)
 
   def __call__(
       self,
@@ -451,24 +450,26 @@ class ZeroOneTransformer(nnx.Module):
       Logits from the Transformer model.
     """
 
-    state = nnx.state(self.model)
-    sharded_state = all_gather_over_fsdp(
-      state, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
+    graphdef, state = nnx.split(self.model)
+    if partition_spec is None:
+      partition_spec = nnx.get_partition_spec(state)
+    gathered_state = all_gather_over_fsdp(
+        state, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
     )
-    nnx.update(self.model,sharded_state)
+    gathered_model = nnx.merge(graphdef, gathered_state)
 
-    return self.model(
-      decoder_input_tokens=decoder_input_tokens,
-      decoder_positions=decoder_positions,
-      decoder_segment_ids=decoder_segment_ids,
-      encoder_images=encoder_images,
-      encoder_image_masks=encoder_image_masks,
-      enable_dropout=enable_dropout,
-      model_mode=model_mode,
-      previous_chunk=previous_chunk,
-      true_length=true_length,
-      slot=slot,
-      page_state=page_state,
-      decoder_target_tokens=decoder_target_tokens,
-      decoder_target_mask=decoder_target_mask,
-  )
+    return gathered_model(
+        decoder_input_tokens=decoder_input_tokens,
+        decoder_positions=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        encoder_images=encoder_images,
+        encoder_image_masks=encoder_image_masks,
+        enable_dropout=enable_dropout,
+        model_mode=model_mode,
+        previous_chunk=previous_chunk,
+        true_length=true_length,
+        slot=slot,
+        page_state=page_state,
+        decoder_target_tokens=decoder_target_tokens,
+        decoder_target_mask=decoder_target_mask,
+    )
