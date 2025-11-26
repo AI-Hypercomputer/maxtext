@@ -60,7 +60,7 @@ myst_linkify_fuzzy_links = False
 
 # Remove specific documents from ToC
 exclude_patterns = [
-    "guides/run_maxtext/run_maxtext_via_multihost_job.md",
-    "guides/run_maxtext/run_maxtext_via_multihost_runner.md",
+    "run_maxtext/run_maxtext_via_multihost_job.md",
+    "run_maxtext/run_maxtext_via_multihost_runner.md",
     "reference/core_concepts/llm_calculator.ipynb",
 ]

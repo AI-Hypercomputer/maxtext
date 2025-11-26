@@ -19,8 +19,6 @@
 ```{toctree}
 :maxdepth: 1
 
-guides/install_maxtext.md
-guides/run_maxtext.md
 guides/optimization.md
 guides/data_input_pipeline.md
 guides/checkpointing_solutions.md

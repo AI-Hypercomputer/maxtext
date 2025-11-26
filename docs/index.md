@@ -100,7 +100,9 @@ Please join our [Discord Channel](https://discord.com/invite/2H9PhvTcDU) and if 
 :maxdepth: 2
 :hidden:
 
+install_maxtext.md
 tutorials.md
+run_maxtext.md
 guides.md
 reference.md
 development.md
