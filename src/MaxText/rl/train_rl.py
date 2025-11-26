@@ -457,14 +457,14 @@ def rl_train(
       from tunix.perf import metrics as perf_metrics  # pylint: disable=import-outside-toplevel
 
       max_logging.log(
-          "enable_tunix_perf_metrics is True and tunix.perf modules " "are available, enabling Tunix-managed metrics."
+          "enable_tunix_perf_metrics is True and tunix.perf modules are available, enabling Tunix-managed metrics."
       )
       perf_config = perf_metrics.PerfMetricsConfig()
       perf_config.custom_export_fn = perf_export.PerfMetricsExport.create_metrics_export_fn(cluster_config)
       rl_cluster_kwargs["perf_config"] = perf_config
     except ImportError:
       max_logging.log(
-          "enable_tunix_perf_metrics is True but tunix.perf modules " "are NOT available, skipping Tunix-managed metrics."
+          "enable_tunix_perf_metrics is True but tunix.perf modules are NOT available, skipping Tunix-managed metrics."
       )
 
   with nn_partitioning.axis_rules(trainer_config.logical_axis_rules):

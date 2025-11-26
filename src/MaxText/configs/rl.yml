@@ -160,7 +160,7 @@ reasoning_start_token: "<reasoning>"
 reasoning_end_token: "</reasoning>"
 solution_start_token: "<answer>"
 solution_end_token: "</answer>"
-chat_template_path: "src/MaxText/examples/chat_templates/gsm8k_rl_llama3.json"
+chat_template_path: "src/MaxText/examples/chat_templates/gsm8k_rl.json"
 skip_jax_distributed_system: True
 
 # # TODO(@mazumdera): fix this

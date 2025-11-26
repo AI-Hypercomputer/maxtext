@@ -1,4 +1,3 @@
 {
-  "SYSTEM_PROMPT": "You are given a problem. Think about the problem and provide your reasoning. Place it between {reasoning_start_token} and {reasoning_end_token}. Then, provide the final answer (i.e., just one numerical value) between {solution_start_token} and {solution_end_token}.",
-  "TEMPLATE": "<start_of_turn>user\n{system_prompt}\n\n{question}<end_of_turn>\n<start_of_turn>model"
+  "SYSTEM_PROMPT": "Respond in the following format:<reasoning>...</reasoning><answer>...</answer>"
 }
