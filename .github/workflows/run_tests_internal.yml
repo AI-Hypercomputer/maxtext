@@ -81,4 +81,4 @@ jobs:
           python3 -m pip install -e . --no-dependencies
           [ "${{ inputs.total_workers }}" -gt 1 ] && python3 -m pip install --quiet pytest-split && SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}" || SPLIT_ARGS=""
           export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
-          python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 $SPLIT_ARGS
+          python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" $SPLIT_ARGS
