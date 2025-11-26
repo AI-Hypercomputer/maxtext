@@ -522,7 +522,6 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: Command-line arguments.
   """
-  print("argv: ", argv, "\n")
   pathwaysutils.initialize()
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 

@@ -126,7 +126,7 @@ def map_qa_data_to_conversation(example: dict, template_config: dict) -> dict:
         )
         if "answer" not in placeholders:
           max_logging.log(
-              "COMPLETION_TEMPLATE is missing 'answer' placeholder. " "No template will be applied to completion."
+              "COMPLETION_TEMPLATE is missing 'answer' placeholder. No template will be applied to completion."
           )
         else:
           completion = {
