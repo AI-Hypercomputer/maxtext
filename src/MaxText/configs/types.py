@@ -848,6 +848,9 @@ class GrainDataset(BaseModel):
 
   grain_train_files: PathStr = Field("", description="Path to Grain training files.")
   grain_eval_files: PathStr = Field("", description="Path to Grain evaluation files.")
+  grain_train_mixture_config_path: PathStr = Field(
+      "", description="Path to a JSON file specifying the mixture weights for Grain training data."
+  )
   grain_file_type: str = Field("arrayrecord", description="File type for Grain data.")
   grain_worker_count: int = Field(1, description="Number of workers for Grain data loading.")
   grain_per_worker_buffer_size: int = Field(
