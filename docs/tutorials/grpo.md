@@ -20,7 +20,7 @@ This tutorial demonstrates step-by-step instructions for setting up the environm
 
 GRPO is an RL algorithm designed to enhance the reasoning abilities of LLMs. It is a variant of Proximal Policy Optimization (PPO) that reduces memory usage by eliminating the need for a separate value function model. GRPO works by generating multiple responses for a given prompt, evaluating these responses using a reward model, and then calculating a relative advantage based on the group's performance to update the policy.
 
-We use Tunix as the library for GRPO.
+We use Tunix as the library for GRPO/GSPO.
 And we use vLLM as the library for efficient model inference and generation.
 
 In this tutorial we use a single host TPUVM such as `v6e-8/v5p-8`. Let's get started!
@@ -112,3 +112,22 @@ The overview of the what this run will do is as follows:
 2. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
 3. Train the policy model using GRPO.
 4. Evaluate the policy model's performance on GSM8K math reasoning benchmark after the post-training with GRPO.
+
+GSPO (Group Sequence Policy Optimization)
+MaxText can also run the GSPO variant by setting `loss_algo=gspo-token` when invoking `train_rl.py` (or when constructing the pyconfig argv list). 
+
+## Run GSPO
+
+Finally, run the command
+
+```
+python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+  model_name=llama3.1-8b \
+  tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
+  load_parameters_path=gs://path/to/checkpoint/0/items \
+  run_name=$WORKLOAD \
+  base_output_directory=$OUTPUT_PATH \
+  hf_access_token=$HF_TOKEN \
+  loss_algo=gspo-token
+```
+
