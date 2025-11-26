@@ -41,18 +41,6 @@ repos:
       - id: isort
         args: ["--profile", "black", "--line-length", "122"]
 
-  - repo: local
-    hooks:
-      - id: pytype
-        name: pytype
-        entry: pytype
-        language: python
-        types: [python]
-        additional_dependencies: ["pytype==2024.10.11"]
-        # Disable the import-error check to avoid false positives on
-        # dependent libraries not installed in the pre-commit environment.
-        args: ["--jobs=auto", "--keep-going", "--disable=import-error"]
-
   - repo: https://github.com/google/pyink
     rev: 24.10.1
     hooks:
