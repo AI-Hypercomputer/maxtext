@@ -26,4 +26,5 @@ explanations/performance_metrics.md
 explanations/quantization.md
 explanations/sharding.md
 explanations/tiling.md
+explanations/moe_configuration.md
 ```
