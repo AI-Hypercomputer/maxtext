@@ -15,13 +15,6 @@
     - python
     - text
 
-# - id: pytype
-#   name: Pytype
-#   description: A static type analyzer for Python code.
-#   entry: pytype
-#   language: system
-#   types: [ python ]
-
 - id: pylint
   name: pylint
   description: Checks for errors, enforces a coding standard, looks for code smells.

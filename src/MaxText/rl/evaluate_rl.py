@@ -13,14 +13,16 @@
 # limitations under the License.
 
 # pylint: disable=bare-except, consider-using-generator
-"""
-RL Evaluation Module.
-"""
+"""RL Evaluation Module."""
+import re
+
+import grain
 from tqdm.auto import tqdm
+from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
+from MaxText import max_logging, pyconfig
 from MaxText.rl import utils_rl
-from MaxText import max_logging
 
 # ## Evaluate
 # We evaluate it in two ways:
@@ -44,18 +46,18 @@ from MaxText import max_logging
 
 
 def generate_responses(
-    tmvp_config,
-    prompts,
-    rl_cluster,
-    num_passes=1,
+    tmvp_config: pyconfig.HyperParameters,
+    prompts: list[str],
+    rl_cluster: rl_cluster_lib.RLCluster,
+    num_passes: int = 1,
 ):
   """
   Generate responses for a batch of prompts across potentially multiple passes.
 
   Args:
-      tmvp_config: Configuration object
-      prompts: List of prompts to generate responses for
-      rl_cluster: Model cluster for generation
+      tmvp_config: A HyperParameters object.
+      prompts: List of prompts to generate responses.
+      rl_cluster: An RLCluster object.
       num_passes: Number of generation passes
 
   Returns:
@@ -64,14 +66,23 @@ def generate_responses(
   multiple_call_responses = [[] for _ in range(len(prompts))]
   eval_strategy = tmvp_config.generation_configs[tmvp_config.eval_sampling_strategy]
 
+  # Extract EOS tokens from the tokenizer to ensure generation stops correctly
+  model_tokenizer = rl_cluster.tokenizer
+  eos_tokens = [model_tokenizer.eos_token_id]
+  if model_tokenizer.convert_tokens_to_ids("<|eot_id|>") is not None:
+    eos_tokens.append(model_tokenizer.convert_tokens_to_ids("<|eot_id|>"))
+  if model_tokenizer.convert_tokens_to_ids("<|eom_id|>") is not None:
+    eos_tokens.append(model_tokenizer.convert_tokens_to_ids("<|eom_id|>"))
+
   for p in range(num_passes):
     responses = rl_cluster.rollout.generate(
         prompts,
         rollout_config=RolloutConfig(
-            max_tokens_to_generate=tmvp_config.max_target_length - tmvp_config.max_prefill_predict_length,
+            max_tokens_to_generate=(tmvp_config.max_target_length - tmvp_config.max_prefill_predict_length),
             temperature=eval_strategy["eval_temperature"],
             top_k=eval_strategy["eval_top_k"],
             top_p=eval_strategy["eval_top_p"],
+            eos_tokens=eos_tokens,
         ),
     )
     responses = responses.text
@@ -85,7 +96,12 @@ def generate_responses(
   return multiple_call_responses
 
 
-def score_responses(tmvp_config, question, responses, answer):
+def score_responses(
+    tmvp_config: pyconfig.HyperParameters,
+    question: str,
+    responses: list[str],
+    answer: str,
+) -> tuple[bool, bool, bool]:
   """
   Score a set of responses for a single question.
 
@@ -105,8 +121,9 @@ def score_responses(tmvp_config, question, responses, answer):
     max_logging.log("========================================")
     max_logging.log(f"Evaluation Question: {question}")
     max_logging.log(f"Evaluation Answer: {answer}")
-    max_logging.log(f"Evaluation Responses: {responses}")
-    max_logging.log("========================================")
+    max_logging.log(f"Evaluation Responses (raw): {responses}")
+
+  # SYSTEM_PROMPT is now correctly formatted using the template_config
 
   is_correct = False
   is_partially_correct = False
@@ -121,16 +138,29 @@ def score_responses(tmvp_config, question, responses, answer):
 
     # Check exact correctness
     try:
-      if float(extracted_response.strip()) == float(answer.strip()):
-        is_correct = True
+      # Clean answer and extracted response: remove anything that isn't a digit,
+      # dot, or minus, handling standard commas and other potential noise
+      clean_answer = re.sub(r"[^\d.-]", "", str(answer))
+      clean_extracted = re.sub(r"[^\d.-]", "", str(extracted_response)) if extracted_response else ""
 
-      # Check partial correctness (within 10%)
-      ratio = float(extracted_response.strip()) / float(answer.strip())
-      if 0.9 <= ratio <= 1.1:
-        is_partially_correct = True
+      # Basic check if it looks like a number before float conversion to avoid
+      # exception logs for non-numbers. Allowing for one dot and optional minus
+      # sign is better than isdigit().
+      if re.match(r"^-?\d+(\.\d+)?$", clean_extracted) and re.match(r"^-?\d+(\.\d+)?$", clean_answer):
+        if float(clean_extracted) == float(clean_answer):
+          is_correct = True
+
+        # Check partial correctness (within 10%)
+        if float(clean_answer) != 0:
+          ratio = float(clean_extracted) / float(clean_answer)
+          if 0.9 <= ratio <= 1.1:
+            is_partially_correct = True
     except Exception as e:
       if tmvp_config.debug["rl"]:
         max_logging.log(f"Evaluation Exception: {e}")
+        max_logging.log(
+            f"Debug: answer='{answer}', cleaned='" f"{clean_answer if 'clean_answer' in locals() else 'N/A'}'"
+        )
         max_logging.log("SKIPPED")
 
     # Check format correctness
@@ -145,13 +175,13 @@ def score_responses(tmvp_config, question, responses, answer):
 
 
 def evaluate(
-    tmvp_config,
-    dataset,
-    rl_cluster,
-    num_passes=1,
-    corr_lst=False,
-    make_lst=False,
-):
+    tmvp_config: pyconfig.HyperParameters,
+    dataset: grain.MapDataset,
+    rl_cluster: rl_cluster_lib.RLCluster,
+    num_passes: int = 1,
+    corr_lst: bool = False,
+    make_lst: bool = False,
+) -> tuple[tuple[int, int, float, float, float], list[tuple[str, str, list[str]]]]:
   """
   Computes accuracy and percentage of outputs matching the format.
 
@@ -187,7 +217,11 @@ def evaluate(
 
     # Score each question-answer pair
     for question, responses, answer in zip(questions, multiple_call_responses, answers):
-      is_correct, is_partially_correct, has_correct_format = score_responses(
+      (
+          is_correct,
+          is_partially_correct,
+          has_correct_format,
+      ) = score_responses(
           tmvp_config=tmvp_config,
           question=question,
           responses=responses,
@@ -218,6 +252,7 @@ def evaluate(
             f"{partially_corr / total * 100=}, {corr_format / total * 100=}"
         )
 
+  # # TODO: Define a class for to return values.
   # Prepare return values
   to_return = (
       corr,

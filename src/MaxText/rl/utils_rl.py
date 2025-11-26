@@ -15,50 +15,75 @@
 # pylint: disable=bare-except, consider-using-generator, chained-comparison
 """RL Utils Module."""
 import re
+
 import optax
-from MaxText import max_logging
+
+from MaxText import max_logging, pyconfig
 
 
 # Let's define a RegEx for checking whether the format matches.
-#
-def get_match_format_regex(tmvp_config):
+def get_match_format_regex(tmvp_config: pyconfig.HyperParameters) -> re.Pattern:
   """Returns a compiled regex to extract the answer from a completion."""
   match_format = re.compile(
       (
-          r"^[\s]{0,}"
-          rf"{tmvp_config.reasoning_start_token}.+?{tmvp_config.reasoning_end_token}.*?"
-          rf"{tmvp_config.solution_start_token}(.+?){tmvp_config.solution_end_token}"
-          r"[\s]{0,}$"
+          rf"{re.escape(tmvp_config.reasoning_start_token)}"
+          r"(?P<reasoning_content>.*?)"
+          rf"{re.escape(tmvp_config.reasoning_end_token)}.*?"
+          rf"{re.escape(tmvp_config.solution_start_token)}"
+          r"(?P<answer_content>.*?)"
+          rf"{re.escape(tmvp_config.solution_end_token)}"
       ),
       flags=re.MULTILINE | re.DOTALL,
   )
   if tmvp_config.debug["rl"]:
     match_format.search(
         f"{tmvp_config.reasoning_start_token}Let me"
-        f" think!{tmvp_config.reasoning_end_token}{tmvp_config.solution_start_token}2{tmvp_config.solution_end_token}",
+        f" think!{tmvp_config.reasoning_end_token}"
+        f"{tmvp_config.solution_start_token}2{tmvp_config.solution_end_token}",
     )
   return match_format
 
 
-def match_format_exactly(prompts, completions, tmvp_config, **kargs):
-  """
-  Give the model a reward of tmvp_config.reward_exact_format_match points if the format matches exactly.
+def match_format_exactly(
+    prompts: list[str],
+    completions: list[str],
+    tmvp_config: pyconfig.HyperParameters,
+    **kargs,
+) -> list[float]:
+  """Give the model a reward for the format matches exactly.
+
+  Args:
+      prompts: List of prompts.
+      completions: List of completions.
+      tmvp_config: A HyperParameters object.
+  Returns:
+      List of scores.
   """
   scores = []
   match_format = get_match_format_regex(tmvp_config)
   for completion in completions:
     score = 0
     response = completion
-    # Match if format is seen exactly!
     if match_format.search(response) is not None:
       score += tmvp_config.reward_exact_format_match
     scores.append(score)
   return scores
 
 
-def match_format_approximately(prompts, completions, tmvp_config, **kargs):
-  """
-  We also reward the model if the format of the output matches partially.
+def match_format_approximately(
+    prompts: list[str],
+    completions: list[str],
+    tmvp_config: pyconfig.HyperParameters,
+    **kargs,
+) -> list[float]:
+  """Give the model a reward for output matches partially.
+
+  Args:
+      prompts: List of prompts.
+      completions: List of completions.
+      tmvp_config: A HyperParameters object.
+  Returns:
+      List of scores.
   """
   scores = []
 
@@ -90,11 +115,23 @@ def match_format_approximately(prompts, completions, tmvp_config, **kargs):
   return scores
 
 
-def check_answer(prompts, completions, answer, tmvp_config, **kargs):
-  """
-  Reward the model if the answer is correct. A reward is also given if the answer
-  does not match exactly, i.e., based on how close the answer is to the correct
-  value.
+def check_answer(
+    prompts: list[str],
+    completions: list[str],
+    answer: list[str],
+    tmvp_config: pyconfig.HyperParameters,
+    **kargs,
+) -> list[float]:
+  """Give the model a reward if completed answer is correct.
+
+  The reward value based on how close it is to the answer.
+  Args:
+      prompts: List of prompts.
+      completions: List of completions.
+      answer: List of correct answers.
+      tmvp_config: A HyperParameters object.
+  Returns:
+      List of scores.
   """
   match_format = get_match_format_regex(tmvp_config)
   extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
@@ -115,28 +152,39 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
       # We also reward it if the answer is close via ratios!
       # Ie if the answer is within some range, reward it!
       try:
-        ratio = float(guess) / float(true_answer)
+        clean_guess = guess.replace(",", "").strip()
+        clean_answer = true_answer.replace(",", "").strip()
+        ratio = float(clean_guess) / float(clean_answer)
         if ratio >= 0.9 and ratio <= 1.1:
           score += tmvp_config.reward_ratio_guess_to_answer_high
         elif ratio >= 0.8 and ratio <= 1.2:
           score += tmvp_config.reward_ratio_guess_to_answer_low
         else:
-          score += tmvp_config.penalty_incorrect_answer  # Penalize wrong answers
+          score += tmvp_config.penalty_incorrect_answer
       except:
-        score += tmvp_config.penalty_incorrect_format  # Penalize
+        score += tmvp_config.penalty_incorrect_format
     scores.append(score)
   return scores
 
 
 # Sometimes, the text between `<answer>` and `</answer>` might not be one
-# number; it can be a sentence. So, we extract the number and compare the answer.
+# number; it can be a sentence. So, we extract the number and compare the answer
+# #TODO: improve the extraction part maybe by dataset, reference:
+# https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/gsm8k.py#L52.
+def get_match_numbers_regex(
+    tmvp_config: pyconfig.HyperParameters,
+) -> re.Pattern:
+  """Returns a compiled regex to extract a number from a string.
 
-
-def get_match_numbers_regex(tmvp_config):
-  """Returns a compiled regex to extract the answer from a completion."""
-  match_numbers = re.compile(rf"{tmvp_config.solution_start_token}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL)
+  Args:
+      tmvp_config: A HyperParameters object.
+  Returns:
+      A compiled regex pattern.
+  """
+  # Matches numbers with optional decimal part, avoiding just "."
+  match_numbers = re.compile(r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", flags=re.MULTILINE | re.DOTALL)
   if tmvp_config.debug["rl"]:
-    match_numbers.findall(f"{tmvp_config.solution_start_token}  0.34  {tmvp_config.solution_end_token}")
+    match_numbers.findall(f"  0.34  {tmvp_config.solution_end_token}")
   return match_numbers
 
 
@@ -145,26 +193,38 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
   Reward the model if the answer is correct.
   """
   question = kargs["question"]
-
+  extracted_responses = []
   match_numbers = get_match_numbers_regex(tmvp_config)
-  extracted_responses = [guess.group(1) if (guess := match_numbers.search(c)) is not None else None for c in completions]
+
+  for c in completions:
+    # Use findall to get all numbers, then take the last one, assuming the final
+    # number is the answer from the model.
+    all_guesses = match_numbers.findall(c)
+    print(c, all_guesses)
+
+    if all_guesses:
+      extracted_responses.append(all_guesses[-1])
+    else:
+      extracted_responses.append(None)
 
   scores = []
   if tmvp_config.debug["rl"]:
-    max_logging.log("START ============================")
-    max_logging.log(f"Question: {question[0]}")
-    max_logging.log(f"Answer: {answer[0]}")
-    max_logging.log(f"Response: {completions[0]}")
-    max_logging.log(f"Extracted: {extracted_responses[0]}")
-    max_logging.log("END ==============================")
+    max_logging.log(
+        f"""START ============================
+Question: {question[0]}
+Answer: {answer[0]}
+Response: {completions[0]}
+Extracted: {extracted_responses[0]}
+END =============================="""
+    )
   for guess, true_answer in zip(extracted_responses, answer):
     if guess is None:
       scores.append(0)
       continue
     # Convert to numbers
     try:
-      true_answer = float(true_answer.strip())
-      guess = float(guess.strip())
+      true_answer = float(true_answer.replace(",", "").strip())
+      guess = float(guess.replace(",", "").strip())
       scores.append(1.5 if guess == true_answer else 0.0)
     except:
       scores.append(0)
@@ -185,9 +245,9 @@ def get_optimizer(tmvp_config, max_train_steps):
       learning_rate=optax.schedules.warmup_cosine_decay_schedule(
           init_value=0.0,
           peak_value=tmvp_config.learning_rate,
-          # Linearly increase learning rate from 0. to learning_rate in the first
-          # warmup_steps_fraction training steps, and then gradually decrease the
-          # learning rate to 0 using cosine scheduler.
+          # Linearly increase learning rate from 0. to learning_rate in the
+          # first warmup_steps_fraction training steps, and then gradually
+          # decrease the learning rate to 0 using cosine scheduler.
           warmup_steps=int(tmvp_config.warmup_steps_fraction * max_train_steps),
           decay_steps=max_train_steps,
           end_value=0.0,

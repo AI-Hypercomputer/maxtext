@@ -1,2 +1,2 @@
 -r requirements.txt
-google-tunix
+google-tunix>=0.1.4
