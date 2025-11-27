@@ -8,7 +8,7 @@ path = "src/MaxText/__init__.py"
 [project]
 name = "maxtext"
 description = "MaxText is a simple, performant and scalable Jax LLM!"
-dynamic = ["version", "optional-dependencies"]
+dynamic = ["dependencies", "optional-dependencies", "version"]
 requires-python = ">=3.12"
 readme = "README.md"
 license = "Apache-2.0"
@@ -23,7 +23,9 @@ classifiers = [
     "Environment :: GPU :: NVIDIA CUDA :: 12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = []
+
+[tool.hatch.metadata.hooks.requirements_txt]
+files = ["dependencies/requirements/generated_requirements/tpu-requirements.txt"]
 
 [tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
 tpu = ["dependencies/requirements/generated_requirements/tpu-requirements.txt"]
@@ -38,9 +40,6 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/MaxText", "src/install_maxtext_extra_deps"]
-
-[tool.hatch.build.targets.wheel.hooks.custom]
-path = "build_hooks.py"
 
 [project.scripts]
 install_maxtext_github_deps = "install_maxtext_extra_deps.install_github_deps:main"
