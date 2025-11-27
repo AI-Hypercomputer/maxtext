@@ -26,8 +26,22 @@ And we use vLLM as the library for efficient model inference and generation.
 In this tutorial we use a single host TPUVM such as `v6e-8/v5p-8`. Let's get started!
 
 ## Create virtual environment and Install MaxText dependencies
-Follow instructions in [Install MaxText](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/install_maxtext.md), but 
-recommend creating the virtual environment outside the `maxtext` directory.
+If you have already completed the [MaxText installation](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/install_maxtext.md), you can skip to the next section for vLLM and tpu-inference installations. Otherwise, please install MaxText using the following commands before proceeding.
+```bash
+# 1. Clone the repository
+git clone https://github.com/AI-Hypercomputer/maxtext.git
+cd maxtext
+
+# 2. Create virtual environment
+export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
+pip install uv
+uv venv --python 3.12 --seed $VENV_NAME
+source $VENV_NAME/bin/activate
+
+# 3. Install dependencies in editable mode
+uv pip install -e .[tpu] --resolution=lowest
+install_maxtext_github_deps
+```
 
 ## vLLM and tpu-inference installations
 

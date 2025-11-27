@@ -82,8 +82,20 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
 ```
 
 ## Build and Upload MaxText Docker Image with Tunix, vLLM, tpu-inference dependencies
+Before building the Docker image, authenticate to [Google Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/docker/authentication#gcloud-helper) for permission to push your images and other access.
+```bash
+# Authenticate your user account for gcloud CLI access
+gcloud auth login
+# Configure application default credentials for Docker and other tools
+gcloud auth application-default login
+# Configure Docker credentials and test your access
+gcloud auth configure-docker
+docker run hello-world
+```
 
-### Installing stable releases of tunix and vllm-tpu
+You can install the required dependencies using either of the following two options:
+
+### Option 1: Installing stable releases of tunix and vllm-tpu
 Run the following bash script to create a docker image with all the dependencies of MaxText, Tunix, vLLM and tpu-inference installed.
 
 In addition to MaxText dependencies, primarily, it installs `vllm-tpu` which is [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby providing TPU inference for vLLM, with unified JAX and PyTorch support.
@@ -92,9 +104,9 @@ In addition to MaxText dependencies, primarily, it installs `vllm-tpu` which is 
 bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training
 ```
 
-You can also use `bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training-experimental` to try out new features via experimental dependencies such as improved pathwaysutils resharding API
+You can also use `bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training-experimental` to try out new features via experimental dependencies such as improved pathwaysutils resharding API.
 
-### Install from locally git cloned repo's
+### Option 2: Install from locally git cloned repositories
 
 You can also locally git clone [tunix](https://github.com/google/tunix), [tpu-inference](https://github.com/vllm-project/tpu-inference), [vllm](https://github.com/vllm-project/vllm.git) and then use the following command to build a docker image using them: 
 ```
@@ -106,7 +118,7 @@ bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training PO
 bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME}
 ```
 
-### Submit your jobs
+## Submit your jobs
 
 Please create a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster), and you can submit the `train_rl.py` script via [XPK](https://github.com/AI-Hypercomputer/xpk)
 ```
@@ -123,10 +135,3 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   hf_access_token=$HF_TOKEN"
 ```
-
-The overview of the demo script ~/maxtext/src/MaxText/examples/grpo_llama3_1_70b_demo_pw.py` is as follows:
-
-1. We load a policy model and a reference model. Both are copies of `Llama3.1-70b-Instruct`.
-2. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
-3. Train the policy model using GRPO with potentially different meshes for trainer and rollout depending on the parameters `TRAINER_DEVICES_FRACTION` and `SAMPLER_DEVICES_FRACTION`. If we set both of these to `1.0`, the entire (same) mesh will be used for both trainer and rollout. If we set say `TRAINER_DEVICES_FRACTION=0.5` and `SAMPLER_DEVICES_FRACTION=0.5`, the first half of the devices will be used for trainer and the second half will be used for rollout
-4. Evaluate the policy model's performance on GSM8K math reasoning benchmark after the post-training with GRPO.

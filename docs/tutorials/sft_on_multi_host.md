@@ -33,10 +33,20 @@ cd maxtext
 ```
 
 ### 1.2. Build MaxText Docker image
+Before building the Docker image, authenticate to [Google Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/docker/authentication#gcloud-helper) for permission to push your images and other access.
+```bash
+# Authenticate your user account for gcloud CLI access
+gcloud auth login
+# Configure application default credentials for Docker and other tools
+gcloud auth application-default login
+# Configure Docker credentials and test your access
+gcloud auth configure-docker
+docker run hello-world
+```
+Then run the following command to create a local Docker image named `maxtext_base_image`.
 ```bash
 bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training
 ```
-This creates a local Docker image named `maxtext_base_image`.
 
 ### 1.3. Upload the Docker image to Artifact Registry
 ```bash
