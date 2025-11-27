@@ -11,13 +11,11 @@ STEPS=20
 PRE_TRAINED_MODEL_TOKENIZER=src/MaxText/assets/qwen3-tokenizer
 
 # SFT with HF pipeline
-python3 -m MaxText.sft_trainer MaxText/configs/sft-vision-chartqa.yml \
+python3 -m MaxText.sft_trainer MaxText/configs/sft-video-mme.yml \
     run_name=${RUN_NAME} base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     model_name=${PRE_TRAINED_MODEL} \
-    dataset_type=hf tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \
+    tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \
     tokenizer_type=huggingface \
-    use_multimodal=true \
-    use_audio=false \
     megablox=true \
     sparse_matmul=true \
     ici_tensor_parallelism=1 \
@@ -29,8 +27,9 @@ python3 -m MaxText.sft_trainer MaxText/configs/sft-vision-chartqa.yml \
     steps=${STEPS} max_target_length=1024 checkpoint_period=100 \
     attention=dot_product scan_layers=false enable_checkpointing=false \
     dataset_type=grain grain_file_type=parquet \
-    grain_train_files=gs://aireenmei-multipod/dataset/hf/chartqa/train-* \
-    grain_worker_count=2
+    grain_train_files=gs://aireenmei-us-central1/maxtext-dataset/hf/video_mme_videos/test-00000-of-00001.parquet \
+    video_path=/tmp/gcsfuse/maxtext-dataset/hf/video_mme_videos/data \
+    grain_worker_count=1
  
     #scan_layers=False load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH}
 

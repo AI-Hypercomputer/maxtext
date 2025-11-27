@@ -26,6 +26,8 @@ from MaxText import max_logging
 from MaxText import tokenizer
 from MaxText import multimodal_utils
 from MaxText.multimodal import utils as mm_utils
+from typing import Any, Dict
+from MaxText.multimodal import preprocessor
 
 Features = dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -69,11 +71,26 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
 
 def reformat_prompt(example, column, image_placeholder, video_placeholder, audio_placeholder, model_name):
   """reformat prompt for multimodal SFT"""
-  if isinstance(example["images"], list):
-    num_images = len(example["images"])
-  else:
-    num_images = 1
-  example[column] = multimodal_utils.reformat_prompt(example[column], image_placeholder, video_placeholder, audio_placeholder, model_name, num_images)
+  # Extract num_images, num_videos, num_audios from preprocessed data
+  num_images = 0
+  num_videos = 0
+  num_audios = 0
+
+  if "images" in example:
+    # Check if this is a PreprocessorOutput object (after preprocessing)
+    if isinstance(example["images"], (multimodal_utils.PreprocessorOutput, mm_utils.PreprocessorOutput)):
+      num_images = example["images"].num_images
+      num_videos = getattr(example["images"], "num_videos", 0)
+      num_audios = getattr(example["images"], "num_audios", 0)
+    # Otherwise count from raw image data
+    elif isinstance(example["images"], list):
+      num_images = len(example["images"])
+    else:
+      num_images = 1
+
+  example[column] = multimodal_utils.reformat_prompt(example[column], image_placeholder,
+                                                     video_placeholder, audio_placeholder,
+                                                     model_name, num_images, num_videos, num_audios)
   return example
 
 
@@ -93,22 +110,6 @@ def merge_image_columns(example, image_columns, max_num_images_per_example):
       images.append(example[col])
 
   example["images"] = images[:max_num_images_per_example] if max_num_images_per_example > 0 else images
-  return example
-
-
-def pre_process_image_sft(example, image_column, model_name, config):
-  """pre-process image for multimodal SFT"""
-
-  def _process_image_fn(image):
-    if isinstance(image, list):
-      image = [np.array(multimodal_utils.convert_to_RGB(img)) for img in image]
-    else:
-      image = np.array(multimodal_utils.convert_to_RGB(image))
-
-    image = multimodal_utils.pre_process_image(image, model_name, config)
-    return image
-
-  example[image_column] = _process_image_fn(example[image_column])
   return example
 
 
@@ -212,15 +213,61 @@ class ReformatResponse(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class PreProcessImageSFT(grain.MapTransform):
-  """Preprocess images for multimodal SFT."""
+class PreProcessMultiModalSFT(grain.MapTransform):
+  """Preprocess multimodal data for SFT."""
 
-  image_column: str
+  image_column: str | None
+  video_column: str | None
+  audio_column: str | None
   model_name: str
-  config: object
+  config: Any
 
-  def map(self, element):
-    return pre_process_image_sft(element, self.image_column, self.model_name, self.config)
+  def map(self, features: Dict[str, Any]) -> Dict[str, Any]:
+    image_data = features.get(self.image_column) if self.image_column else None
+    image_path = None
+    if self.image_column and self.config.image_path and self.image_column in features and image_data is None:
+      image_id = features[self.image_column]
+      if isinstance(image_id, bytes):
+        image_id = image_id.decode("utf-8")
+      if image_id:
+        if isinstance(image_id, (list, np.ndarray)):
+          image_id = image_id[0]
+        image_path = f"{self.config.image_path}/{image_id}.jpg"
+
+    video_path = None
+    if self.config.video_path and self.video_column and self.video_column in features:
+      video_id = features[self.video_column]
+      if isinstance(video_id, bytes):
+        video_id = video_id.decode("utf-8")
+      if video_id:
+        if isinstance(video_id, (list, np.ndarray)):
+          video_id = video_id[0]
+        video_path = f"{self.config.video_path}/{video_id}.mp4"
+
+    audio_path = None
+    if self.audio_column and self.config.audio_path and self.audio_column in features:
+      audio_id = features[self.audio_column]
+      if isinstance(audio_id, bytes):
+        audio_id = audio_id.decode("utf-8")
+      if audio_id:
+        if isinstance(audio_id, (list, np.ndarray)):
+          audio_id = audio_id[0]
+        audio_path = f"{self.config.audio_path}/{audio_id}.wav"
+
+    if image_data is None and not video_path and not audio_path:
+      return features
+
+    processor_outputs = preprocessor.preprocess_mm_data(
+        config=self.config,
+        images=image_data,
+        image_path=image_path,
+        video_path=video_path,
+        audio_path=audio_path,
+    )
+
+    features["images"] = processor_outputs
+
+    return features
 
 
 @dataclasses.dataclass
@@ -455,6 +502,25 @@ class HFDataSource(grain.RandomAccessDataSource):
 
 
 ########## Functions used by Grain pipeline
+
+
+@dataclasses.dataclass
+class ConcatTextColumns(grain.MapTransform):
+  """Concatenate 3 text columns: join 2nd column (list of strings) and concat to 1st column."""
+
+  def __init__(self, text_columns):
+    self.text_columns = text_columns
+
+  def map(self, element):
+    # Join 2nd column (list of strings) with spaces
+    if isinstance(element[self.text_columns[1]], list):
+      joined_text = " ".join(element[self.text_columns[1]])
+    else:
+      joined_text = str(element[self.text_columns[1]])
+
+    # Concatenate to the end of 1st column
+    element[self.text_columns[0]] = str(element[self.text_columns[0]]) + " " + joined_text
+    return element
 
 
 @dataclasses.dataclass
@@ -721,7 +787,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         if self.model_name is None:
           raise ValueError("model_name must be provided when padding images")
 
-        element["images"] = self._pad_image_and_mask(element["images"])
+        # element["images"] = self._pad_image_and_mask(element["images"])
 
       elif "true_length" not in key:
         element[key] = self._pad_text(element[key], self.max_length, self.pad_id)
@@ -730,12 +796,11 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
 @dataclasses.dataclass
 class ExtractImagesAndMasks(grain.MapTransform):
-  """Extracts images and masks from a PreprocessorOutput object.
+  """Extracts images, videos, audio and masks from a PreprocessorOutput object.
 
-  This transform is used in multi-modal data pipelines to extract the image
-  tensors and their corresponding masks from a PreprocessorOutput object.
-  The extracted images and masks are then added to the data element under
-  the keys 'images' and 'image_masks', respectively.
+  This transform is used in multi-modal data pipelines to extract the image,
+  video, and audio tensors and their corresponding metadata from a PreprocessorOutput object.
+  The extracted data is then added to the data element under appropriate keys.
 
   If the 'images' key is not present in the input element, the transform
   returns the element unchanged.
@@ -743,17 +808,28 @@ class ExtractImagesAndMasks(grain.MapTransform):
 
   def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Applies the extraction transformation to the 'images' field if present."""
-    preprocessed_image = element.get("images")
-    if preprocessed_image is None:
+    preprocessed_data = element.get("images")
+    if preprocessed_data is None:
       return element
 
-    if not isinstance(preprocessed_image, (multimodal_utils.PreprocessorOutput, mm_utils.PreprocessorOutput)):
-      raise TypeError(f"'images' must be of type PreprocessorOutput, but got {type(preprocessed_image)}")
+    if not isinstance(preprocessed_data, (multimodal_utils.PreprocessorOutput, mm_utils.PreprocessorOutput)):
+      raise TypeError(f"'images' must be of type PreprocessorOutput, but got {type(preprocessed_data)}")
 
     output = element.copy()
-    output["images"] = preprocessed_image.pixel_values
-    if preprocessed_image.pixel_mask is not None:
-      output["image_masks"] = preprocessed_image.pixel_mask
+
+    # Extract image data
+    if preprocessed_data.pixel_values is not None:
+      output["images"] = preprocessed_data.pixel_values
+    if preprocessed_data.pixel_mask is not None:
+      output["image_masks"] = preprocessed_data.pixel_mask
+
+    # Extract video data (for Qwen3-Omni and other multimodal models)
+    if hasattr(preprocessed_data, "video_values") and preprocessed_data.video_values is not None:
+      output["videos"] = preprocessed_data.video_values
+
+    # Extract audio data
+    if hasattr(preprocessed_data, "audio_values") and preprocessed_data.audio_values is not None:
+      output["audios"] = preprocessed_data.audio_values
 
     return output
 

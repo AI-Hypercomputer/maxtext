@@ -529,7 +529,6 @@ class MaxTextGenerator:
 
     if self.config.use_multimodal and (image_path or video_path or audio_path):
       processor_output = preprocessor.preprocess_mm_data(
-          model_name=self.config.model_name,
           config=self.config,
           image_path=image_path,
           video_path=video_path,

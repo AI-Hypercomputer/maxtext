@@ -102,7 +102,6 @@ def main(argv: Sequence[str]) -> None:
   processor_outputs = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
     processor_outputs = preprocessor.preprocess_mm_data(
-        model_name=config.model_name,
         config=config,
         image_path=config.image_path,
         video_path=config.video_path,

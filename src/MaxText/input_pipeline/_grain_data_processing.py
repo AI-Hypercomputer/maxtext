@@ -180,15 +180,28 @@ def vision_sft_preprocessing_pipeline(
     config,
     text_columns,
     image_column,
+    video_column,
+    audio_column,
     grain_worker_count,
     grain_per_worker_buffer_size,
 ):
   """Use grain to pre-process the dataset and return iterators for multimodal SFT fine-tuning"""
+
+  # Handle 3 text columns: join 2nd column (list of strings) and concat to 1st column
+  if len(text_columns) == 3:
+    dataset = dataset.map(_input_pipeline_utils.ConcatTextColumns(text_columns))
+    # Use only 1st and 3rd columns going forward
+    text_columns = [text_columns[0], text_columns[2]]
+
   assert len(text_columns) == 2, f"Need two text_columns for query and response, received {text_columns=}"
 
   if config.grain_file_type == "arrayrecord":
     # Parse and normalize features from arrayrecord
     data_columns = text_columns + ([image_column] if isinstance(image_column, str) else image_column)
+    if video_column:
+      data_columns.append(video_column)
+    if audio_column:
+      data_columns.append(audio_column)
     dataset = dataset.map(_input_pipeline_utils.ParseFeatures(data_columns, tokenize=False))
     dataset = dataset.map(_input_pipeline_utils.NormalizeFeatures(data_columns, tokenize=False))
   elif config.grain_file_type == "parquet":
@@ -196,7 +209,7 @@ def vision_sft_preprocessing_pipeline(
     if isinstance(image_column, list):
       for col in image_column:
         dataset = dataset.map(_input_pipeline_utils.DecodeParquetImages(image_column=col))
-    else:
+    elif image_column:
       dataset = dataset.map(_input_pipeline_utils.DecodeParquetImages(image_column=image_column))
 
   # If multiple image columns are provided, merge them into a single 'images' column
@@ -207,13 +220,22 @@ def vision_sft_preprocessing_pipeline(
             max_num_images_per_example=config.max_num_images_per_example,
         )
     )
-
+    image_column = "images"
   # Rename image column to 'images' if it's not already
-  if image_column != "images":
+  elif image_column and image_column != "images":
     dataset = dataset.map(_input_pipeline_utils.Rekey({"images": image_column}))
     image_column = "images"
 
-  # Reformat prompt and response
+  dataset = dataset.map(
+      _input_pipeline_utils.PreProcessMultiModalSFT(
+          image_column=image_column,
+          video_column=video_column,
+          audio_column=audio_column,
+          model_name=config.model_name,
+          config=config,
+      )
+  )
+
   dataset = dataset.map(
       _input_pipeline_utils.ReformatPrompt(
           column=text_columns[0],
@@ -227,15 +249,6 @@ def vision_sft_preprocessing_pipeline(
       _input_pipeline_utils.ReformatResponse(
           column=text_columns[1],
           model_name=config.model_name,
-      )
-  )
-
-  # Preprocess images
-  dataset = dataset.map(
-      _input_pipeline_utils.PreProcessImageSFT(
-          image_column=image_column,
-          model_name=config.model_name,
-          config=config,
       )
   )
 
@@ -401,6 +414,8 @@ def make_grain_train_iterator(
           config,
           text_columns=config.train_data_columns,
           image_column=config.train_image_column,
+          video_column=config.train_video_column,
+          audio_column=config.train_audio_column,
           grain_worker_count=config.grain_worker_count,
           grain_per_worker_buffer_size=config.grain_per_worker_buffer_size,
       )
@@ -444,6 +459,8 @@ def make_grain_train_iterator(
           config=config,
           text_columns=config.train_data_columns,
           image_column=config.train_image_column,
+          video_column=config.train_video_column,
+          audio_column=config.train_audio_column,
           grain_worker_count=config.grain_worker_count,
           grain_per_worker_buffer_size=config.grain_per_worker_buffer_size,
       )
@@ -510,6 +527,8 @@ def make_grain_eval_iterator(
           config,
           text_columns=config.eval_data_columns,
           image_column=config.eval_image_column,
+          video_column=config.eval_video_column,
+          audio_column=config.eval_audio_column,
           grain_worker_count=config.grain_worker_count_eval,
           grain_per_worker_buffer_size=config.grain_per_worker_buffer_size_eval,
       )
@@ -550,6 +569,8 @@ def make_grain_eval_iterator(
           config=config,
           text_columns=config.eval_data_columns,
           image_column=config.eval_image_column,
+          video_column=config.eval_video_column,
+          audio_column=config.eval_audio_column,
           grain_worker_count=config.grain_worker_count_eval,
           grain_per_worker_buffer_size=config.grain_per_worker_buffer_size_eval,
       )
