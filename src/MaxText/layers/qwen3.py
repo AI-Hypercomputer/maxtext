@@ -770,6 +770,11 @@ class Qwen3NextScannableBlock(nnx.Module):
           page_state,
           slot,
       )
+    
+    if cfg.scan_layers:
+      return x, None
+    else:
+      return x
 
     # The output of the block is the carry for the next scan iteration.
     return x, None
