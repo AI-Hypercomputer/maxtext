@@ -20,7 +20,7 @@ from flax import linen as nn
 from collections.abc import Iterable
 
 import jax
-from jax.sharding import PartitionSpec as P, NamedSharding, reshard
+from jax.sharding import PartitionSpec as P, NamedSharding, reshard, Mesh
 
 import optax
 
@@ -38,6 +38,8 @@ def maybe_shard_with_name(inputs, named_sharding, shard_mode):
   In auto shardmode, this function hints inputs follow given named_sharding.
   In explicit shardmode, this function enforces inputs following named_sharding.
   """
+  if inputs is None:
+    return None
   if shard_mode == ShardMode.EXPLICIT:
     return reshard(inputs, named_sharding)
   else:
@@ -48,8 +50,40 @@ def maybe_shard_with_logical(inputs, logical_axes, mesh, shard_mode):
   """
   A wrapper of maybe_shard_with_name when logical axes are inputs
   """
+  if inputs is None:
+    return inputs
   named_sharding = NamedSharding(mesh, nn.logical_to_mesh_axes(logical_axes))
   return maybe_shard_with_name(inputs, named_sharding, shard_mode)
+
+
+def remove_size_one_mesh_axis(spec, mesh) -> P:
+  """
+  Removes mesh axes from a PartitionSpec (P) where the axis size is 1.
+
+  This is a common optimization to simplify sharding by excluding redundant axes.
+  Copied from jax._src.core:
+  https://github.com/jax-ml/jax/blob/db65f4548d10493613ee4155fd463a17ab5680ddc/jax/_src/core.py#L2139-L2148
+  """
+  new_spec = []  # type: ignore
+  for s in spec:
+    if s is None:
+      new_spec.append(s)  # type: ignore
+    elif isinstance(s, tuple):
+      new_spec.append(tuple(i for i in s if mesh.shape[i] != 1))
+    else:
+      new_spec.append(None if mesh.shape[s] == 1 else s)  # type: ignore
+  return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
+
+
+def logical_to_mesh_axes(logical_names: tuple[str, ...], mesh: Mesh):
+  """Remove size one mesh axes given logical names."""
+  tensor_spec = nn.logical_to_mesh_axes(logical_names)
+  return remove_size_one_mesh_axis(tensor_spec, mesh)
+
+
+def create_sharding(logical_names: tuple[str, ...], mesh: Mesh):
+  """Create NamedSharding with given logical names."""
+  return NamedSharding(mesh, logical_to_mesh_axes(logical_names, mesh))
 
 
 def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):

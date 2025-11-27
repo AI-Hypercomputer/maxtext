@@ -727,6 +727,8 @@ class GptOssYarnTest(unittest.TestCase):
         "num_attention_heads": float("inf"),
     }
     self.pt_config = SimpleNamespace(**pt_config)
+    devices_array = maxtext_utils.create_device_mesh(self.config)
+    self.mesh = Mesh(devices_array, self.config.mesh_axes)
 
   def test_yarn(self):
     """Validates the JAX Yarn RoPE implementation against the HF reference."""
@@ -738,6 +740,7 @@ class GptOssYarnTest(unittest.TestCase):
     model_jax = embeddings.YarnRotaryEmbedding(
         max_position_embeddings=self.config.max_position_embeddings,
         original_max_position_embeddings=self.config.original_max_position_embeddings,
+        mesh=self.mesh,
         beta_fast=self.config.beta_fast,
         beta_slow=self.config.beta_slow,
         rope_theta=self.config.rope_max_timescale,
