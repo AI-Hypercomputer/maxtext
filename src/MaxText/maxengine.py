@@ -330,6 +330,9 @@ class MaxEngine(engine_api.Engine):
       image_shape = multimodal_utils.get_dummy_image_shape_for_init(
           self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
       )
+      audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
+          self.config.model_name, config=self.config, batch_size=self.config.micro_batch_size_to_train_on
+      )
       return self.model.apply(
           _p | {"aqt": {}},
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
@@ -339,6 +342,7 @@ class MaxEngine(engine_api.Engine):
           encoder_image_masks=jnp.ones(image_shape[:2], dtype=jnp.int32)
           if self.config.use_multimodal and "llama4" in self.config.model_name
           else None,
+          encoder_audios=jnp.ones(audio_shape, dtype=jnp.float32) if self.config.use_audio else None,
           decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           enable_dropout=False,
           model_mode=MODEL_MODE_PREFILL,
@@ -413,6 +417,8 @@ class MaxEngine(engine_api.Engine):
       padded_tokens: jax.Array,
       images: jax.Array | None = None,
       image_masks: jax.Array | None = None,
+      audio_values: jax.Array | None = None,
+      audio_masks: jax.Array | None = None,
       true_length: int,
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
@@ -438,6 +444,9 @@ class MaxEngine(engine_api.Engine):
         tokens of a previously processed chunk. Used for chunked prefilling.
       padded_tokens: The input token sequence, padded to a fixed length.
       images: Optional input images for multimodal models.
+      image_masks: Optional image masks for multimodal models with tiled images.
+      audio_values: Optional input audio for multimodal models.
+      audio_masks: Optional audio masks for multimodal models (currently unused).
       true_length: The actual length of `padded_tokens` before padding.
       sampler: A callable for custom sampling logic (currently unused).
       rng: JAX random number generator key for sampling.
@@ -500,6 +509,7 @@ class MaxEngine(engine_api.Engine):
           positions,
           encoder_images=images,
           encoder_image_masks=image_masks,
+          encoder_audios=audio_values,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=MODEL_MODE_PREFILL,
@@ -575,6 +585,8 @@ class MaxEngine(engine_api.Engine):
       padded_tokens: jax.Array,
       images: jax.Array | None = None,
       image_masks: jax.Array | None = None,
+      audio_values: jax.Array | None = None,
+      audio_masks: jax.Array | None = None,
       true_length: int,
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
@@ -608,6 +620,8 @@ class MaxEngine(engine_api.Engine):
         padded_tokens=padded_tokens,
         images=images,
         image_masks=image_masks,
+        audio_values=audio_values,
+        audio_masks=audio_masks,
         sampler=sampler,
         true_length=true_length,
         page_state=self.page_state,  # Pass current page state
@@ -1543,11 +1557,18 @@ class MaxEngine(engine_api.Engine):
           ),
           dtype=jnp.int32,
       )
+      dummy_audio = jnp.ones(
+          multimodal_utils.get_dummy_audio_shape_for_init(
+              self.config.model_name, config=self.config, batch_size=self.config.micro_batch_size_to_train_on
+          ),
+          dtype=jnp.float32,
+      )
       _, cache = self.model.apply(
           abstract_params,
           x,
           x,
           encoder_images=dummy_image if self.config.use_multimodal else None,
+          encoder_audios=dummy_audio if self.config.use_audio else None,
           enable_dropout=False,
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": rng},
