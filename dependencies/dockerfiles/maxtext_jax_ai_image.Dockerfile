@@ -31,25 +31,20 @@ ARG DEVICE
 ENV DEVICE=$DEVICE
 
 RUN if [ "$DEVICE" = "tpu" ] && ([ "$JAX_AI_IMAGE_BASEIMAGE" = "us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:jax0.4.37-rev1" ] || [ "$JAX_AI_IMAGE_BASEIMAGE" = "us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:jax0.4.35-rev1" ]); then \
-        python3 -m pip install --no-cache-dir --upgrade jax[tpu]; fi
+        uv pip install --no-cache-dir --upgrade 'jax[tpu]'; fi
 
 # Install Maxtext requirements with Jax AI Image
 RUN apt-get update && apt-get install --yes && apt-get install --yes dnsutils
 # TODO(bvandermoon, parambole): Remove this when it's added to JAX AI Image
-RUN pip install google-cloud-monitoring
+RUN uv pip install google-cloud-monitoring
 
 # Install requirements file that was generated with pipreqs for JSS 0.6.1 using:
 # pipreqs --savepath requirements_with_jax_stable_stack_0_6_1_pipreqs.txt
 # Otherwise use general requirements_with_jax_ai_image.txt
 RUN if [ "$DEVICE" = "tpu" ] && [ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:jax0.6.1-rev1" ]; then \
-        python3 -m pip install -r /deps/dependencies/requirements/requirements_with_jax_stable_stack_0_6_1_pipreqs.txt; \
+        uv pip install -r /deps/dependencies/requirements/requirements_with_jax_stable_stack_0_6_1_pipreqs.txt; \
   else \
-        python3 -m pip install -r /deps/dependencies/requirements/requirements_with_jax_ai_image.txt; \
-  fi
-
-# Install google-tunix for TPU devices, skip for GPU
-RUN if [ "$DEVICE" = "tpu" ]; then \
-        python3 -m pip install 'google-tunix>=0.1.2'; \
+        uv pip install -r /deps/dependencies/requirements/requirements_with_jax_ai_image.txt; \
   fi
 
 # Temporarily downgrade to JAX=0.7.2 for GPU images

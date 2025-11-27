@@ -36,15 +36,25 @@ jobs:
   build_and_upload:
     name: Build and upload maxtext package (${{ inputs.device_name }})
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
-    container: python:3.12.3-slim-bullseye
+    container: ghcr.io/astral-sh/uv:debian-slim
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@v5
+
+      - name: Install uv and set the Python version
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Set venv
+        run: uv venv --python 3.12 "$GITHUB_WORKSPACE"/venv
+
       - name: Install build tools
-        run: |
-          python -m pip install --upgrade pip build uv
+        run: . "$GITHUB_WORKSPACE"/venv/bin/activate && uv pip install -U build
+
       - name: Build maxtext wheel
-        run: |
-          uv build --wheel
+        run: . "$GITHUB_WORKSPACE"/venv/bin/activate && uv build --wheel
+
       - name: Upload the built maxtext wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

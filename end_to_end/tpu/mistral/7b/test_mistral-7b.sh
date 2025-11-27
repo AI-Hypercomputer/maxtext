@@ -11,7 +11,7 @@
 set -ex
 
 # Installing torch for deps in forward_pass_logit_checker.py
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 MODEL_VARIATION='7b'
 
@@ -22,7 +22,7 @@ if [ -z "${BASE_OUTPUT_PATH}" ]; then
 fi
 
 # Download checkpoint
-python3 -m pip install torch
+uv pip install torch
 gcloud storage cp -r gs://maxtext-external/mistral-7B-v0.1 /tmp
 
 # Convert it to MaxText(orbax) format - scanned ckpt

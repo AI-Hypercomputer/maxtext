@@ -94,7 +94,7 @@ jobs:
 
       - name: 'Checkout repository'
         # downloads the code to be analyzed
-        uses: 'actions/checkout@v5'
+        uses: actions/checkout@v5
 
       - name: 'Run Gemini pull request review'
         # reviews code with detailed set of instructions for the Gemini 

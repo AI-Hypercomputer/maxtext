@@ -20,7 +20,7 @@ export DATASET_PATH=gs://maxtext-dataset
 export ASYNC_CHECKPOINTING=false
 
 # We install torch CPU because the checkpoint conversion script MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt does not need a TPU/GPU
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # We define a var for the path to the Meta checkpoint. Non-Googlers please remember to update the source `META_CHECKPOINT_PATH` to the GCS bucket where you have your Meta checkpoint
 export META_CHECKPOINT_PATH=gs://maxtext-llama/llama2-7b/meta-ckpt

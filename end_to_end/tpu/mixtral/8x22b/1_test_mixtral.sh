@@ -19,7 +19,7 @@ if [ -z "${BASE_OUTPUT_PATH}" ]; then
 fi
 
 # Download checkpoint
-python3 -m pip install torch
+uv pip install torch
 MODEL_NAME="Mixtral-8x22B-Instruct-v0.1"
 
 PARAM_DIR="$HOME/tempdisk"
