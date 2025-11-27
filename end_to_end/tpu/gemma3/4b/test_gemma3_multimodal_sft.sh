@@ -24,7 +24,7 @@ SCAN_LAYERS=false
 SFT_STEPS=10
 
 # Installing torch for deps in forward_pass_logit_checker.py
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # After downloading checkpoints, copy them to GCS bucket at $MODEL_BUCKET \
 # Non-Googlers please remember to point these variables to GCS buckets that you own, this script uses internal buckets for testing.

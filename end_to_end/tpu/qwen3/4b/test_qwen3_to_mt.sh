@@ -20,7 +20,7 @@ HF_GOLDEN_MODEL='Qwen/Qwen3-4B'
 TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"'/qwen3-tokenizer'
 
 # Installing torch for deps in forward_pass_logit_checker.py
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
 # Non-Googlers please remember to use separate GCS paths for uploading model weights from kaggle ($CHKPT_BUCKET) and MaxText compatible weights ($MODEL_BUCKET).
