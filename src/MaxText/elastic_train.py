@@ -124,6 +124,8 @@ def elastic_handler(
         learning_rate_schedule,
         data_iterator,
         _,
+        _,
+        _,
         state,
     ) = setup_train_loop(config, recorder, elastic_manager.good_devices)
 
@@ -177,6 +179,8 @@ def train_loop(config, elastic_manager, recorder, state=None):
       mesh,
       learning_rate_schedule,
       data_iterator,
+      _,
+      _,
       _,
       state,
   ) = setup_train_loop(config, recorder)

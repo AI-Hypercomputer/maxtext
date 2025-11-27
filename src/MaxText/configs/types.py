@@ -1381,6 +1381,11 @@ class DerivedValues(BaseModel):
       description="The total size of context parallelism, derived from ICI and DCN values.",
   )
 
+  num_target_devices: None | int = Field(
+      None,
+      description="The number of devices computed from topology in train_compile or jax.devices() in train",
+  )
+
   global_batch_size_to_train_on: None | int = Field(
       None,
       description="The total batch size for training across all devices. Derived from `per_device_batch_size` and data"
@@ -1643,9 +1648,9 @@ class MaxTextConfig(
       else:
         return len(jax.devices())
 
-    num_devices = 1  # Default for validation when JAX is not initialized
+    self.num_target_devices = 1  # Default for validation when JAX is not initialized
     try:
-      num_devices = get_num_target_devices()
+      self.num_target_devices = get_num_target_devices()
     except (RuntimeError, IndexError):
       logger.warning("JAX device system not available for config validation. Assuming 1 device.")
 
@@ -1682,7 +1687,10 @@ class MaxTextConfig(
         self.global_batch_size_to_train_on,
         self.micro_batch_size_to_train_on,
     ) = calculate_global_batch_sizes(
-        self.per_device_batch_size, self.expansion_factor_real_data, num_devices, self.gradient_accumulation_steps
+        self.per_device_batch_size,
+        self.expansion_factor_real_data,
+        self.num_target_devices,
+        self.gradient_accumulation_steps,
     )
 
     # Calculate final evaluation batch sizes.
@@ -1690,7 +1698,9 @@ class MaxTextConfig(
         self.global_batch_size_to_load_eval,
         self.global_batch_size_to_eval_on,
         self.micro_batch_size_to_eval_on,
-    ) = calculate_global_batch_sizes(self.eval_per_device_batch_size, self.expansion_factor_real_data, num_devices, 1)
+    ) = calculate_global_batch_sizes(
+        self.eval_per_device_batch_size, self.expansion_factor_real_data, self.num_target_devices, 1
+    )
 
     # Calculate ramp-up batch size parameters if enabled.
     if self.enable_rampup_batch_size:
@@ -1699,7 +1709,10 @@ class MaxTextConfig(
           _,
           _,
       ) = calculate_global_batch_sizes(
-          self.per_device_batch_size_start, self.expansion_factor_real_data, num_devices, self.gradient_accumulation_steps
+          self.per_device_batch_size_start,
+          self.expansion_factor_real_data,
+          self.num_target_devices,
+          self.gradient_accumulation_steps,
       )
       (
           self.global_batch_size_to_load_increment,
@@ -1708,7 +1721,7 @@ class MaxTextConfig(
       ) = calculate_global_batch_sizes(
           self.per_device_batch_size_increment,
           self.expansion_factor_real_data,
-          num_devices,
+          self.num_target_devices,
           self.gradient_accumulation_steps,
       )
       diff_batch_size = self.global_batch_size_to_load - self.global_batch_size_to_load_start
