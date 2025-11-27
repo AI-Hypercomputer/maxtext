@@ -55,10 +55,10 @@ def log_debug_event(request_id: str, event_type: str, content: dict):
     return
   try:
     log_entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "request_id": request_id,
-        "event": event_type,
-        "content": content,
+      "timestamp": datetime.now(timezone.utc).isoformat(),
+      "request_id": request_id,
+      "event": event_type,
+      "content": content,
     }
     with open(DEBUG_LOG_FILE, "a", encoding="utf8") as f:
       json.dump(log_entry, f)
@@ -219,10 +219,10 @@ def to_openai_logprobs(lp_obj: Any, llm: MaxTextGenerator, want_top: bool = True
     top_logprobs = [({tok: lp} if lp is not None else None) for tok, lp in zip(token_strings, token_logprobs)]
 
   return LogProbsPayload(
-      tokens=token_strings,
-      token_logprobs=token_logprobs,
-      top_logprobs=top_logprobs,
-      text_offset=text_offset,
+    tokens=token_strings,
+    token_logprobs=token_logprobs,
+    top_logprobs=top_logprobs,
+    text_offset=text_offset,
   )
 
 
@@ -248,9 +248,9 @@ def count_tokens(s: str, llm: MaxTextGenerator) -> int:
 
 
 def apply_stops_to_text_and_logprobs(
-    text: str,
-    logprobs_payload: Optional[LogProbsPayload],
-    stop: Optional[Union[str, List[str]]],
+  text: str,
+  logprobs_payload: Optional[LogProbsPayload],
+  stop: Optional[Union[str, List[str]]],
 ) -> tuple[str, Optional[LogProbsPayload], Optional[str]]:
   """
   Truncates the generated text and corresponding logprobs at the first occurrence
@@ -290,12 +290,12 @@ def apply_stops_to_text_and_logprobs(
     truncate_at_index = bisect.bisect_left(logprobs_payload.text_offset, first_stop_index)
 
     new_logprobs = LogProbsPayload(
-        tokens=logprobs_payload.tokens[:truncate_at_index],
-        token_logprobs=logprobs_payload.token_logprobs[:truncate_at_index],
-        top_logprobs=logprobs_payload.top_logprobs[:truncate_at_index]
-        if logprobs_payload.top_logprobs is not None
-        else None,
-        text_offset=logprobs_payload.text_offset[:truncate_at_index],
+      tokens=logprobs_payload.tokens[:truncate_at_index],
+      token_logprobs=logprobs_payload.token_logprobs[:truncate_at_index],
+      top_logprobs=logprobs_payload.top_logprobs[:truncate_at_index]
+      if logprobs_payload.top_logprobs is not None
+      else None,
+      text_offset=logprobs_payload.text_offset[:truncate_at_index],
     )
     return new_text, new_logprobs, "stop"
 

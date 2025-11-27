@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Test suite for validating MaxText YAML configurations against Pydantic models. 
+Test suite for validating MaxText YAML configurations against Pydantic models.
 
 This test suite uses explicit, hardcoded lists of configuration files grouped
 by model family (e.g., gemma, llama) to test them directly against the Pydantic
 `MaxTextConfig` model. It avoids programmatic file discovery and the complex
 `pyconfig.initialize` function to provide fast, targeted feedback on validation
-errors like "Extra inputs are not permitted." 
+errors like "Extra inputs are not permitted."
 """
 
 import os
@@ -112,15 +112,15 @@ def run_config_validation(config_file_path: str):
 # --- Test Group 1: Base and Top-Level Configs ---
 
 BASE_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "base.yml"),
-    os.path.join(CONFIGS_DIR, "dpo.yml"),
-    os.path.join(CONFIGS_DIR, "gpu_smoke_test.yml"),
-    os.path.join(CONFIGS_DIR, "rl.yml"),
-    os.path.join(CONFIGS_DIR, "rl_mt_jt.yml"),
-    os.path.join(CONFIGS_DIR, "sft.yml"),
-    os.path.join(CONFIGS_DIR, "sft-vision-chartqa.yml"),
-    os.path.join(CONFIGS_DIR, "sft-vision-slidevqa.yml"),
-    os.path.join(CONFIGS_DIR, "tpu_smoke_test.yml"),
+  os.path.join(CONFIGS_DIR, "base.yml"),
+  os.path.join(CONFIGS_DIR, "dpo.yml"),
+  os.path.join(CONFIGS_DIR, "gpu_smoke_test.yml"),
+  os.path.join(CONFIGS_DIR, "rl.yml"),
+  os.path.join(CONFIGS_DIR, "rl_mt_jt.yml"),
+  os.path.join(CONFIGS_DIR, "sft.yml"),
+  os.path.join(CONFIGS_DIR, "sft-vision-chartqa.yml"),
+  os.path.join(CONFIGS_DIR, "sft-vision-slidevqa.yml"),
+  os.path.join(CONFIGS_DIR, "tpu_smoke_test.yml"),
 ]
 
 
@@ -132,14 +132,14 @@ def test_base_configs(config_file):
 # --- Test Group 2: Gemma Model Family ---
 
 GEMMA_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "gemma-2b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gemma-7b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gemma2-2b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gemma2-9b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gemma2-27b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gemma3-4b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gemma3-12b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gemma3-27b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gemma-2b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gemma-7b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gemma2-2b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gemma2-9b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gemma2-27b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gemma3-4b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gemma3-12b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gemma3-27b.yml"),
 ]
 
 
@@ -151,23 +151,23 @@ def test_gemma_configs(config_file):
 # --- Test Group 3: Llama Model Family ---
 
 LLAMA_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "gpu", "llama2_7b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "llama2_70b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "llama3_8b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "llama3_70b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "llama3.1_405b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama2-7b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama2-13b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama2-70b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama3-8b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama3-70b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama3-405b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama3.1-8b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama3.1-70b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama3.1-405b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama3.3-70b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama4-17b-16e.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama4-17b-128e.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpu", "llama2_7b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpu", "llama2_70b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpu", "llama3_8b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpu", "llama3_70b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpu", "llama3.1_405b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama2-7b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama2-13b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama2-70b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama3-8b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama3-70b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama3-405b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama3.1-8b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama3.1-70b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama3.1-405b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama3.3-70b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama4-17b-16e.yml"),
+  os.path.join(CONFIGS_DIR, "models", "llama4-17b-128e.yml"),
 ]
 
 
@@ -179,12 +179,12 @@ def test_llama_configs(config_file):
 # --- Test Group 4: GPT Model Family ---
 
 GPT_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "gpt3-52k.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpt3-6b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpt3-22b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpt3-175b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpt-oss-20b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpt-oss-120b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpt3-52k.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpt3-6b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpt3-22b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpt3-175b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpt-oss-20b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpt-oss-120b.yml"),
 ]
 
 
@@ -196,11 +196,11 @@ def test_gpt_configs(config_file):
 # --- Test Group 5: DeepSeek Model Family ---
 
 DEEPSEEK_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "deepseek2-16b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "deepseek2-236b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "deepseek3-tiny.yml"),
-    os.path.join(CONFIGS_DIR, "models", "deepseek3-test.yml"),
-    os.path.join(CONFIGS_DIR, "models", "deepseek3-671b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "deepseek2-16b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "deepseek2-236b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "deepseek3-tiny.yml"),
+  os.path.join(CONFIGS_DIR, "models", "deepseek3-test.yml"),
+  os.path.join(CONFIGS_DIR, "models", "deepseek3-671b.yml"),
 ]
 
 
@@ -212,12 +212,12 @@ def test_deepseek_configs(config_file):
 # --- Test Group 6: Mistral & Mixtral Model Family ---
 
 MISTRAL_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "mistral-7b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "mixtral-8x7b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "mixtral-8x22b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "mixtral_8x1b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "mixtral_8x2b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "mixtral_8x7b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "mistral-7b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "mixtral-8x7b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "mixtral-8x22b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpu", "mixtral_8x1b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpu", "mixtral_8x2b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "gpu", "mixtral_8x7b.yml"),
 ]
 
 
@@ -229,17 +229,17 @@ def test_mistral_configs(config_file):
 # --- Test Group 7: Qwen Model Family ---
 
 QWEN_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "qwen3-0.6b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "qwen3-4b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "qwen3-4b-thinking-2507.yml"),
-    os.path.join(CONFIGS_DIR, "models", "qwen3-8b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "qwen3-14b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "qwen3-32b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "qwen3-235b-a22b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "qwen3-30b-a3b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "qwen3-480b-a35b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "qwen3-next-80b-a3b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "qwen3-omni-30b-a3b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "qwen3-0.6b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "qwen3-4b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "qwen3-4b-thinking-2507.yml"),
+  os.path.join(CONFIGS_DIR, "models", "qwen3-8b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "qwen3-14b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "qwen3-32b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "qwen3-235b-a22b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "qwen3-30b-a3b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "qwen3-480b-a35b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "qwen3-next-80b-a3b.yml"),
+  os.path.join(CONFIGS_DIR, "models", "qwen3-omni-30b-a3b.yml"),
 ]
 
 
@@ -251,7 +251,7 @@ def test_qwen_configs(config_file):
 # --- Test Group 8: Kimi Model Family ---
 
 KIMI_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "kimi-k2-1t.yml"),
+  os.path.join(CONFIGS_DIR, "models", "kimi-k2-1t.yml"),
 ]
 
 
@@ -263,31 +263,31 @@ def test_kimi_configs(config_file):
 # --- Test Group 9: Inference-specific Configs ---
 
 INFERENCE_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "inference.yml"),
-    os.path.join(CONFIGS_DIR, "inference_jetstream.yml"),
-    os.path.join(CONFIGS_DIR, "v5e", "llama2_70b_v5e-16.yml"),
-    os.path.join(CONFIGS_DIR, "v5e", "llama3_70b_v5e-16.yml"),
-    os.path.join(CONFIGS_DIR, "v5e", "llama3_405b_v5e-64.yml"),
-    os.path.join(CONFIGS_DIR, "v6e", "inference", "llama4_maverick_v6e-64.yml"),
-    os.path.join(
-        MAXTEXT_REPO_ROOT,
-        "src",
-        "MaxText",
-        "inference",
-        "configs",
-        "multi_host",
-        "disaggregation",
-        "llama3_405b_v6e-16-16.yml",
-    ),
-    os.path.join(
-        MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "configs", "multi_host", "interleaved", "llama2_70b_v5e-16.yml"
-    ),
-    os.path.join(
-        MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "configs", "multi_host", "interleaved", "llama3_70b_v5e-16.yml"
-    ),
-    os.path.join(
-        MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "configs", "multi_host", "interleaved", "llama3_405b_v5e-64.yml"
-    ),
+  os.path.join(CONFIGS_DIR, "inference.yml"),
+  os.path.join(CONFIGS_DIR, "inference_jetstream.yml"),
+  os.path.join(CONFIGS_DIR, "v5e", "llama2_70b_v5e-16.yml"),
+  os.path.join(CONFIGS_DIR, "v5e", "llama3_70b_v5e-16.yml"),
+  os.path.join(CONFIGS_DIR, "v5e", "llama3_405b_v5e-64.yml"),
+  os.path.join(CONFIGS_DIR, "v6e", "inference", "llama4_maverick_v6e-64.yml"),
+  os.path.join(
+    MAXTEXT_REPO_ROOT,
+    "src",
+    "MaxText",
+    "inference",
+    "configs",
+    "multi_host",
+    "disaggregation",
+    "llama3_405b_v6e-16-16.yml",
+  ),
+  os.path.join(
+    MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "configs", "multi_host", "interleaved", "llama2_70b_v5e-16.yml"
+  ),
+  os.path.join(
+    MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "configs", "multi_host", "interleaved", "llama3_70b_v5e-16.yml"
+  ),
+  os.path.join(
+    MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "configs", "multi_host", "interleaved", "llama3_405b_v5e-64.yml"
+  ),
 ]
 
 

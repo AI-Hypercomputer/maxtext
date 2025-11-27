@@ -107,12 +107,12 @@ class MaxTextDecoderModel(nnx.Module):
     self.logits: jax.Array | None = None
 
   def __call__(
-      self,
-      kv_caches: list[jax.Array],
-      input_ids: jax.Array,
-      attention_metadata: AttentionMetadata,
-      *args,
-      **kwargs,
+    self,
+    kv_caches: list[jax.Array],
+    input_ids: jax.Array,
+    attention_metadata: AttentionMetadata,
+    *args,
+    **kwargs,
   ) -> tuple[list[jax.Array], jax.Array, list[jax.Array]]:
     """Performs a forward pass through the decoder model.
 
@@ -145,12 +145,12 @@ class MaxTextDecoderModel(nnx.Module):
     # Store any auxiliary hidden states that may be required by specific models
     aux_hidden_states = []
     logits, hidden, kv_caches = self.model(
-        decoder_input_tokens=input_ids,
-        decoder_positions=input_positions,
-        kv_caches=kv_caches,
-        attention_metadata=attention_metadata,
-        model_mode=self.model_mode,
-        **kwargs,
+      decoder_input_tokens=input_ids,
+      decoder_positions=input_positions,
+      kv_caches=kv_caches,
+      attention_metadata=attention_metadata,
+      model_mode=self.model_mode,
+      **kwargs,
     )
     if hidden.ndim > 1:
       hidden = jnp.squeeze(hidden, axis=0)
@@ -182,7 +182,7 @@ class MaxTextDecoderModel(nnx.Module):
       rng_key: A JAX random key for model initialization.
     """
     self.model, _ = model_creation_utils.create_nnx_model(
-        self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
+      self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
     )
 
 
@@ -209,7 +209,7 @@ class MaxTextForCausalLM(nnx.Module):
     self.is_text_generation_model = True
 
   def __call__(
-      self, kv_caches: list[jax.Array], input_ids: jax.Array, attention_metadata: AttentionMetadata, *args, **kwargs
+    self, kv_caches: list[jax.Array], input_ids: jax.Array, attention_metadata: AttentionMetadata, *args, **kwargs
   ) -> tuple[list[jax.Array], jax.Array]:
     """Performs a forward pass through the causal language model.
 

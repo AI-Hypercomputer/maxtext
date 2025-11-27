@@ -36,15 +36,15 @@ class RampupBatchManager:
     diff_batch_size = config.per_device_batch_size - config.per_device_batch_size_start
     if diff_batch_size <= 0:
       raise ValueError(
-          "per_device_batch_size must be greater than per_device_batch_size_start. "
-          f"get batch size is {config.per_device_batch_size} and "
-          f"batch size start is {config.per_device_batch_size_start}."
+        "per_device_batch_size must be greater than per_device_batch_size_start. "
+        f"get batch size is {config.per_device_batch_size} and "
+        f"batch size start is {config.per_device_batch_size_start}."
       )
     if diff_batch_size % config.per_device_batch_size_increment:
       raise ValueError(
-          "Expect rampup batch size change divisible by batch size increment."
-          f"Got per_device_batch_size={config.per_device_batch_size} and "
-          f"per_device_batch_size_start={config.per_device_batch_size_start}."
+        "Expect rampup batch size change divisible by batch size increment."
+        f"Got per_device_batch_size={config.per_device_batch_size} and "
+        f"per_device_batch_size_start={config.per_device_batch_size_start}."
       )
 
   def _init_values(self, config):

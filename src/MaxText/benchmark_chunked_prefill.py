@@ -34,7 +34,6 @@ Configuration options like `use_chunked_prefill`, `prefill_chunk_size`,
 `inference_microbenchmark_prefix_cache_entries_num` control the benchmark behavior.
 """
 
-
 import datetime
 import functools
 import os
@@ -80,7 +79,7 @@ def _run_benchmark_loop(func_to_benchmark: Callable[[], Any], iters: int, label:
     result = func_to_benchmark()
     jax.block_until_ready(result)
     end = datetime.datetime.now()
-    print(f"  Warmup iteration {i+1} time: {end - start}")
+    print(f"  Warmup iteration {i + 1} time: {end - start}")
 
   print(f"\nStarting benchmark for {label}...")
   total_time = datetime.timedelta()
@@ -91,7 +90,7 @@ def _run_benchmark_loop(func_to_benchmark: Callable[[], Any], iters: int, label:
     end = datetime.datetime.now()
     iter_time = end - start
     total_time += iter_time
-    print(f"  Benchmark iteration {i+1} time: {iter_time}")
+    print(f"  Benchmark iteration {i + 1} time: {iter_time}")
 
   average_time = total_time / iters
   print(f"\nAverage time taken for {label} over {iters} iterations: {average_time}")
@@ -99,9 +98,9 @@ def _run_benchmark_loop(func_to_benchmark: Callable[[], Any], iters: int, label:
 
 
 def benchmark_chunked_prefill(
-    engine: maxengine.MaxEngine,
-    params: Any,
-    chunked_tokens_list: list[chunked_prefill.ChunkedTokens],
+  engine: maxengine.MaxEngine,
+  params: Any,
+  chunked_tokens_list: list[chunked_prefill.ChunkedTokens],
 ):
   """Benchmarks chunked prefill without prefix caching.
 
@@ -117,9 +116,9 @@ def benchmark_chunked_prefill(
 
   def run_chunked_prefill_utility():
     prefill_result, _ = chunked_prefill.do_chunked_prefill(
-        prefill_engine=engine,
-        prefill_params=params,
-        chunked_tokens_list=chunked_tokens_list,
+      prefill_engine=engine,
+      prefill_params=params,
+      chunked_tokens_list=chunked_tokens_list,
     )
     return prefill_result
 
@@ -129,11 +128,11 @@ def benchmark_chunked_prefill(
 
 
 def fill_prefix_cache(
-    prefix_cache_inst: prefix_cache.PrefixCache,
-    prefix: Any,
-    cache_num: int,
-    hit_tokens: jax.Array,
-    padded_length: int,
+  prefix_cache_inst: prefix_cache.PrefixCache,
+  prefix: Any,
+  cache_num: int,
+  hit_tokens: jax.Array,
+  padded_length: int,
 ) -> None:
   """Fill prefix cache to a specified number of entries.
 
@@ -167,10 +166,10 @@ def fill_prefix_cache(
     # Create the final Value object for the dummy entry, associating
     # the copied prefix with the *dummy* key.
     dummy_value_with_key = prefix_cache.Value(
-        prefix=copy_prefix(),
-        true_length=true_length,
-        padded_length=padded_length,
-        tokens=dummy_key,  # Use the dummy key here
+      prefix=copy_prefix(),
+      true_length=true_length,
+      padded_length=padded_length,
+      tokens=dummy_key,  # Use the dummy key here
     )
 
     # Save the dummy entry to the cache
@@ -182,10 +181,10 @@ def fill_prefix_cache(
   print("Adding the target entry with key length ", len(key_to_hit), "...", sep="")
 
   value_to_hit = prefix_cache.Value(
-      prefix=copy_prefix(),
-      true_length=true_length,
-      padded_length=padded_length,
-      tokens=key_to_hit,
+    prefix=copy_prefix(),
+    true_length=true_length,
+    padded_length=padded_length,
+    tokens=key_to_hit,
   )
   prefix_cache_inst.save(key_to_hit, value_to_hit)
   jax.effects_barrier()
@@ -193,13 +192,13 @@ def fill_prefix_cache(
 
 
 def create_prefix_cache(
-    engine: maxengine.MaxEngine,
-    params: Any,
-    tokens: jax.Array,
-    chunked_tokens_list: list[chunked_prefill.ChunkedTokens],
-    prefix_caching_hbm_byte: int,
-    prefix_caching_dram_byte: int,
-    max_prefill_length: int,
+  engine: maxengine.MaxEngine,
+  params: Any,
+  tokens: jax.Array,
+  chunked_tokens_list: list[chunked_prefill.ChunkedTokens],
+  prefix_caching_hbm_byte: int,
+  prefix_caching_dram_byte: int,
+  max_prefill_length: int,
 ) -> prefix_cache.PrefixCache:
   """Creates and populates a prefix cache.
 
@@ -220,37 +219,37 @@ def create_prefix_cache(
 
   # Run chunked prefill to get the initial prefix
   prefill_result, _ = chunked_prefill.do_chunked_prefill(
-      prefill_engine=engine,
-      prefill_params=params,
-      chunked_tokens_list=chunked_tokens_list,
+    prefill_engine=engine,
+    prefill_params=params,
+    chunked_tokens_list=chunked_tokens_list,
   )
 
   prefix_cache_inst = prefix_cache.PrefixCache(prefix_caching_hbm_byte, prefix_caching_dram_byte)
   # Fill cache to the max dram size
   prefill_result_cache_byte_size = jax.tree.reduce(
-      lambda acc, array: acc + array.nbytes,
-      prefill_result["cache"],
-      0,
+    lambda acc, array: acc + array.nbytes,
+    prefill_result["cache"],
+    0,
   )
   cache_entries_num = prefix_caching_dram_byte // prefill_result_cache_byte_size
   fill_prefix_cache(
-      prefix_cache_inst,
-      prefill_result["cache"],
-      cache_entries_num,
-      tokens,
-      max_prefill_length,
+    prefix_cache_inst,
+    prefill_result["cache"],
+    cache_entries_num,
+    tokens,
+    max_prefill_length,
   )
   return prefix_cache_inst
 
 
 def benchmark_prefix_cache_loop(
-    engine: maxengine.MaxEngine,
-    params: Any,
-    tokens: jax.Array,
-    chunked_tokens_list: list[chunked_prefill.ChunkedTokens],
-    prefix_cache_inst: prefix_cache.PrefixCache,
-    chunk_size: int,
-    run_time: list[int],
+  engine: maxengine.MaxEngine,
+  params: Any,
+  tokens: jax.Array,
+  chunked_tokens_list: list[chunked_prefill.ChunkedTokens],
+  prefix_cache_inst: prefix_cache.PrefixCache,
+  chunk_size: int,
+  run_time: list[int],
 ):
   """Benchmarks chunked prefill with prefix caching.
 
@@ -279,25 +278,24 @@ def benchmark_prefix_cache_loop(
 
     # Perform chunked prefill on remaining tokens
     prefill_result, _ = chunked_prefill.do_chunked_prefill(
-        prefill_engine=engine,
-        prefill_params=params,
-        chunked_tokens_list=chunked_tokens_list[cache_hit_chunk:],  # Pass only the remaining chunks
-        existing_prefix=existing_prefix if cache_hit_chunk > 0 else None,  # Pass existing prefix if hit
+      prefill_engine=engine,
+      prefill_params=params,
+      chunked_tokens_list=chunked_tokens_list[cache_hit_chunk:],  # Pass only the remaining chunks
+      existing_prefix=existing_prefix if cache_hit_chunk > 0 else None,  # Pass existing prefix if hit
     )
 
     # Simulate save to cache
     if need_save:
-
       # Assume save will happen
       run_time[0] += 1
       prefix_cache_inst.save(
-          tuple(tokens_list + [run_time[0]]),  # Prevent key existed.
-          prefix_cache.Value(
-              prefix=_copy(prefill_result["cache"]),
-              true_length=len(tokens_list),
-              padded_length=len(tokens_list),
-              tokens=tuple(tokens_list),
-          ),
+        tuple(tokens_list + [run_time[0]]),  # Prevent key existed.
+        prefix_cache.Value(
+          prefix=_copy(prefill_result["cache"]),
+          true_length=len(tokens_list),
+          padded_length=len(tokens_list),
+          tokens=tuple(tokens_list),
+        ),
       )
 
     return prefill_result
@@ -306,22 +304,22 @@ def benchmark_prefix_cache_loop(
     for need_save in [True, False]:
       label = f"prefix caching (hit_chunks={cache_hit_chunk}, save={need_save})"
       benchmark_func = functools.partial(
-          run_chunked_prefill_with_prefix_caching,
-          cache_hit_chunk=cache_hit_chunk,
-          need_save=need_save,
+        run_chunked_prefill_with_prefix_caching,
+        cache_hit_chunk=cache_hit_chunk,
+        need_save=need_save,
       )
       _run_benchmark_loop(benchmark_func, _BENCHMARK_ITERS, label)
 
 
 def benchmark_prefix_cache(
-    engine: maxengine.MaxEngine,
-    params: Any,
-    tokens: jax.Array,
-    chunked_tokens_list: list[chunked_prefill.ChunkedTokens],
-    prefix_caching_hbm_byte: int,
-    prefix_caching_dram_byte: int,
-    chunk_size: int,
-    max_prefill_length: int,
+  engine: maxengine.MaxEngine,
+  params: Any,
+  tokens: jax.Array,
+  chunked_tokens_list: list[chunked_prefill.ChunkedTokens],
+  prefix_caching_hbm_byte: int,
+  prefix_caching_dram_byte: int,
+  chunk_size: int,
+  max_prefill_length: int,
 ):
   """Benchmarks chunked prefill with prefix caching.
 
@@ -343,13 +341,13 @@ def benchmark_prefix_cache(
   print("\n--- Starting Prefix Cache Benchmark ---")
 
   prefix_cache_inst = create_prefix_cache(
-      engine,
-      params,
-      tokens,
-      chunked_tokens_list,
-      prefix_caching_hbm_byte,
-      prefix_caching_dram_byte,
-      max_prefill_length,
+    engine,
+    params,
+    tokens,
+    chunked_tokens_list,
+    prefix_caching_hbm_byte,
+    prefix_caching_dram_byte,
+    max_prefill_length,
   )
 
   run_time = [0]
@@ -398,51 +396,51 @@ def prepare_setting(argv: Sequence[str]):
   tokens, _ = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[max_prefill_length])
 
   chunked_tokens_list = chunked_prefill.gen_chunked_padded_tokens(
-      tokens=tokens,
-      chunk_size=chunk_size,
-      tokenizer=tokenizer_model,
-      jax_padding=True,
+    tokens=tokens,
+    chunk_size=chunk_size,
+    tokenizer=tokenizer_model,
+    jax_padding=True,
   )
 
   return (
-      engine,
-      params,
-      tokens,
-      chunked_tokens_list,
-      prefix_caching_hbm_byte,
-      prefix_caching_dram_byte,
-      chunk_size,
-      max_prefill_length,
+    engine,
+    params,
+    tokens,
+    chunked_tokens_list,
+    prefix_caching_hbm_byte,
+    prefix_caching_dram_byte,
+    chunk_size,
+    max_prefill_length,
   )
 
 
 def main(argv: Sequence[str]) -> None:
   (
-      engine,
-      params,
-      tokens,
-      chunked_tokens_list,
-      prefix_caching_hbm_byte,
-      prefix_caching_dram_byte,
-      chunk_size,
-      max_prefill_length,
+    engine,
+    params,
+    tokens,
+    chunked_tokens_list,
+    prefix_caching_hbm_byte,
+    prefix_caching_dram_byte,
+    chunk_size,
+    max_prefill_length,
   ) = prepare_setting(argv)
 
   benchmark_chunked_prefill(
-      engine,
-      params,
-      chunked_tokens_list,
+    engine,
+    params,
+    chunked_tokens_list,
   )
 
   benchmark_prefix_cache(
-      engine,
-      params,
-      tokens,
-      chunked_tokens_list,
-      prefix_caching_hbm_byte,
-      prefix_caching_dram_byte,
-      chunk_size,
-      max_prefill_length,
+    engine,
+    params,
+    tokens,
+    chunked_tokens_list,
+    prefix_caching_hbm_byte,
+    prefix_caching_dram_byte,
+    chunk_size,
+    max_prefill_length,
   )
 
 

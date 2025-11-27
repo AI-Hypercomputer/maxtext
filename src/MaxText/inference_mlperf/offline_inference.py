@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Offline inference for mlperf """
+"""Offline inference for mlperf"""
 
 from collections import defaultdict
 from typing import Any, Callable
@@ -61,7 +61,6 @@ class EventCounter:
 
 
 class JetThread(threading.Thread):
-
   def run(self):
     try:
       super().run()
@@ -88,12 +87,12 @@ class PrefillHelper:
       raise ValueError(f"Invalid type: {self._type}")
 
   def aot_compile(
-      self,
-      max_length: int,
-      params: Params,
-      params_layout: layout.Format,
-      decode_state_layout: layout.Format,
-      decode_state_shape: jax.ShapeDtypeStruct,
+    self,
+    max_length: int,
+    params: Params,
+    params_layout: layout.Format,
+    decode_state_layout: layout.Format,
+    decode_state_shape: jax.ShapeDtypeStruct,
   ) -> None:
     """Ahead-of-Time compile"""
     if max_length > 4096:
@@ -122,41 +121,41 @@ class PrefillHelper:
       assert self._type == "dummy", f"type: {self._type}"
 
   def process(
-      self,
-      model_params: Params,
-      decode_state: DecodeState,
-      decode_slot: int,
-      input_id: int,
-      input_tokens_padded: jax.Array,
-      input_true_length: int,
-      max_length: int,
-      prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
-      rng: PRNGKeyType,
+    self,
+    model_params: Params,
+    decode_state: DecodeState,
+    decode_slot: int,
+    input_id: int,
+    input_tokens_padded: jax.Array,
+    input_true_length: int,
+    max_length: int,
+    prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
+    rng: PRNGKeyType,
   ) -> None:
     """Prefill helper process runner"""
     padded_length = len(input_tokens_padded)
     if self._type == "default":
       first_token, decode_state = self._processor.process(
-          model_params, decode_state, decode_slot, input_tokens_padded, input_true_length, rng
+        model_params, decode_state, decode_slot, input_tokens_padded, input_true_length, rng
       )
       prefill_done([(first_token, decode_slot)], [input_id], decode_state)
     elif self._type == "batch":
       if padded_length == max_length:
         # fallback to default mode
         first_token, decode_state = self._processor.process(
-            model_params, decode_state, decode_slot, input_tokens_padded, input_true_length, rng
+          model_params, decode_state, decode_slot, input_tokens_padded, input_true_length, rng
         )
         prefill_done([(first_token, decode_slot)], [input_id], decode_state)
       else:
         self._batch_processor.process(
-            model_params=model_params,
-            decode_state=decode_state,
-            decode_slot=decode_slot,
-            input_id=input_id,
-            input_prompt=input_tokens_padded[:input_true_length],
-            input_padding=padded_length,
-            capacity=max_length,
-            prefill_done=prefill_done,
+          model_params=model_params,
+          decode_state=decode_state,
+          decode_slot=decode_slot,
+          input_id=input_id,
+          input_prompt=input_tokens_padded[:input_true_length],
+          input_padding=padded_length,
+          capacity=max_length,
+          prefill_done=prefill_done,
         )
     else:
       assert self._type == "dummy", f"type: {self._type}"
@@ -164,10 +163,10 @@ class PrefillHelper:
       prefill_done([(123, decode_slot)], [input_id], decode_state)
 
   def finalize(
-      self,
-      model_params: Params,
-      decode_state: DecodeState,
-      prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
+    self,
+    model_params: Params,
+    decode_state: DecodeState,
+    prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
   ) -> None:
     """Finalize helper process"""
     if self._type == "default":
@@ -222,27 +221,27 @@ class OfflineInference:
   def warmup(self, max_length, warmup_samples):
     """Warmup (cache, AoT compile, batch_inference)"""
     self._cached_generate, self.params, self._decode_state_executable = self.engine.aot_compile(
-        self.params, pass_rng_shape=False
+      self.params, pass_rng_shape=False
     )
 
     self.init_decode_state()
 
     self.prefill.aot_compile(
-        max_length,
-        self.params,
-        self.engine.param_layouts,
-        self.engine.decode_state_layouts,
-        self.engine.decode_state_shapes,
+      max_length,
+      self.params,
+      self.engine.param_layouts,
+      self.engine.decode_state_layouts,
+      self.engine.decode_state_shapes,
     )
 
     self.batch_inference(warmup_samples, desc="warmup")
 
   def batch_inference_with_callback(
-      self,
-      data: list[InputData],
-      emit_first_token: Callable[[str, int], bool],
-      emit_token: Callable[[str, int], bool],
-      desc: str,
+    self,
+    data: list[InputData],
+    emit_first_token: Callable[[str, int], bool],
+    emit_token: Callable[[str, int], bool],
+    desc: str,
   ):
     """callback is a function that takes id and token. It will be called once per output
 
@@ -275,11 +274,11 @@ class OfflineInference:
       if self.dummy:
         log.info("Dummy generate")
         res = engine_api.ResultTokens(
-            data=np.array([[123, 1, dummy_length]] * self.batch_size),
-            tokens_idx=(0, 0),
-            valid_idx=(0, 0),
-            length_idx=(0, 0),
-            samples_per_slot=(0, 0),
+          data=np.array([[123, 1, dummy_length]] * self.batch_size),
+          tokens_idx=(0, 0),
+          valid_idx=(0, 0),
+          length_idx=(0, 0),
+          samples_per_slot=(0, 0),
         )
         dummy_length += 1
         self.decode_state, result_tokens = self.decode_state, res
@@ -336,10 +335,10 @@ class OfflineInference:
           break
 
     detokenize_thread = JetThread(
-        target=functools.partial(
-            detokenize,
-        ),
-        name="detokenize",
+      target=functools.partial(
+        detokenize,
+      ),
+      name="detokenize",
     )
 
     counter.input = len(data)
@@ -354,15 +353,15 @@ class OfflineInference:
 
       # Do prefill when there are free slots
       self.prefill.process(
-          self.params,
-          self.decode_state,
-          slot,
-          int(row.id),
-          row.tokens,
-          row.true_length,
-          self.max_prefill_length,
-          prefill_done,
-          rng,
+        self.params,
+        self.decode_state,
+        slot,
+        int(row.id),
+        row.tokens,
+        row.true_length,
+        self.max_prefill_length,
+        prefill_done,
+        rng,
       )
     self.prefill.finalize(self.params, self.decode_state, prefill_done)
 
@@ -372,11 +371,11 @@ class OfflineInference:
     self.live = False
     detokenize_thread.join()
     log.info(
-        "summary-%s-prefills-%d-decodes-%d-detokens-%d completed.",
-        desc,
-        counter.prefill,
-        counter.decode,
-        counter.detokenize,
+      "summary-%s-prefills-%d-decodes-%d-detokens-%d completed.",
+      desc,
+      counter.prefill,
+      counter.decode,
+      counter.detokenize,
     )
 
   def batch_inference(self, data: list[InputData], desc="") -> dict[str, list[int]]:
