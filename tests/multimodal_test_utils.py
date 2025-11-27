@@ -64,11 +64,11 @@ def assert_all_close_jax_torch(jax_tensor, torch_tensor, rtol, atol, error_msg="
       error_msg: Optional error message prefix
   """
   np.testing.assert_allclose(
-      torch_tensor.numpy(),
-      np.array(jax_tensor),
-      rtol=rtol,
-      atol=atol,
-      err_msg=error_msg,
+    torch_tensor.numpy(),
+    np.array(jax_tensor),
+    rtol=rtol,
+    atol=atol,
+    err_msg=error_msg,
   )
 
 
@@ -230,7 +230,7 @@ def copy_encoder_weights(torch_encoder, jax_encoder):
 
   # Copy positional embeddings
   jax_encoder.positional_embedding.positional_embedding.value = jnp.array(
-      torch_encoder.positional_embedding.positional_embedding.detach().cpu().numpy()
+    torch_encoder.positional_embedding.positional_embedding.detach().cpu().numpy()
   )
 
   # Copy encoder layers
@@ -270,14 +270,14 @@ def copy_audio_model(torch_model, maxtext_model, config):
   copy_linear_weights(torch_model.conv_out, maxtext_model.conv_out)
 
   maxtext_model.positional_embedding.positional_embedding.value = jnp.array(
-      torch_model.positional_embedding.positional_embedding.detach().cpu().numpy()
+    torch_model.positional_embedding.positional_embedding.detach().cpu().numpy()
   )
 
   copy_layernorm_weights(torch_model.ln_post, maxtext_model.layernorm_post)
 
   for torch_layer, maxtext_layer in zip(
-      torch_model.layers,
-      [getattr(maxtext_model.audio_encoder, f"layers_{i}") for i in range(config.encoder_layers_for_audio)],
+    torch_model.layers,
+    [getattr(maxtext_model.audio_encoder, f"layers_{i}") for i in range(config.encoder_layers_for_audio)],
   ):
     copy_maxtext_encoder_layer_weights(torch_layer, maxtext_layer)
 
@@ -288,8 +288,8 @@ def copy_audio_model(torch_model, maxtext_model, config):
 def copy_maxtext_encoder_weights(torch_encoder, maxtext_encoder):
   # Copy weights for each encoder layer
   for torch_layer, maxtext_layer in zip(
-      torch_encoder.layers,
-      [getattr(maxtext_encoder, f"layers_{i}") for i in range(len(torch_encoder.layers))],
+    torch_encoder.layers,
+    [getattr(maxtext_encoder, f"layers_{i}") for i in range(len(torch_encoder.layers))],
   ):
     copy_maxtext_encoder_layer_weights(torch_layer, maxtext_layer)
 
@@ -380,10 +380,10 @@ def create_block_diagonal_attention_mask(cu_seqlens, dtype):
   """
   total_seq_len = cu_seqlens[-1].item()
   attention_mask = torch.full(
-      [1, 1, total_seq_len, total_seq_len],
-      torch.finfo(dtype).min,
-      device=cu_seqlens.device,
-      dtype=dtype,
+    [1, 1, total_seq_len, total_seq_len],
+    torch.finfo(dtype).min,
+    device=cu_seqlens.device,
+    dtype=dtype,
   )
 
   # Create blocks: allow attention within each sequence boundary

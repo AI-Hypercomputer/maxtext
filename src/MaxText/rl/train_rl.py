@@ -113,44 +113,44 @@ def get_dataset(model_tokenizer, tmvp_config, data_dir, split="train") -> grain.
     os.makedirs(data_dir)
 
   data = tfds.data_source(
-      tmvp_config.dataset_name,
-      split=split,
-      data_dir=data_dir,
-      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
-      download=True,
+    tmvp_config.dataset_name,
+    split=split,
+    data_dir=data_dir,
+    builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
+    download=True,
   )
 
   template_config = load_template_from_file(tmvp_config.chat_template_path)
   loaded_dataset = (
-      grain.MapDataset.source(data)
-      .shuffle(seed=tmvp_config.data_shuffle_seed)
-      .map(
-          lambda x: {
-              # passed to model forward pass
-              "prompts": model_tokenizer.apply_chat_template(
-                  [
-                      {
-                          "role": "user",
-                          "content": template_config["TEMPLATE"].format(
-                              system_prompt=template_config["SYSTEM_PROMPT"].format(
-                                  reasoning_start_token=tmvp_config.reasoning_start_token,
-                                  reasoning_end_token=tmvp_config.reasoning_end_token,
-                                  solution_start_token=tmvp_config.solution_start_token,
-                                  solution_end_token=tmvp_config.solution_end_token,
-                              ),
-                              question=x["question"].decode("utf-8"),
-                          ),
-                      },
-                  ],
-                  tokenize=False,
-                  add_generation_prompt=True,
+    grain.MapDataset.source(data)
+    .shuffle(seed=tmvp_config.data_shuffle_seed)
+    .map(
+      lambda x: {
+        # passed to model forward pass
+        "prompts": model_tokenizer.apply_chat_template(
+          [
+            {
+              "role": "user",
+              "content": template_config["TEMPLATE"].format(
+                system_prompt=template_config["SYSTEM_PROMPT"].format(
+                  reasoning_start_token=tmvp_config.reasoning_start_token,
+                  reasoning_end_token=tmvp_config.reasoning_end_token,
+                  solution_start_token=tmvp_config.solution_start_token,
+                  solution_end_token=tmvp_config.solution_end_token,
+                ),
+                question=x["question"].decode("utf-8"),
               ),
-              # passed to reward functions
-              "question": x["question"].decode("utf-8"),
-              # passed to reward functions
-              "answer": utils_rl.extract_hash_answer(x["answer"].decode("utf-8")),
-          }
-      )
+            },
+          ],
+          tokenize=False,
+          add_generation_prompt=True,
+        ),
+        # passed to reward functions
+        "question": x["question"].decode("utf-8"),
+        # passed to reward functions
+        "answer": utils_rl.extract_hash_answer(x["answer"].decode("utf-8")),
+      }
+    )
   )
   return loaded_dataset
 
@@ -198,16 +198,16 @@ def setup_configs_and_devices(argv: Sequence[str]):
       sampler_devices.extend(devices_by_slice[slice_indices[i]])
 
     trainer_config = pyconfig.initialize(
-        argv,
-        num_slices=config.num_trainer_slices,
-        ici_fsdp_parallelism=len(trainer_devices) // config.num_trainer_slices,
-        dcn_data_parallelism=config.num_trainer_slices,
+      argv,
+      num_slices=config.num_trainer_slices,
+      ici_fsdp_parallelism=len(trainer_devices) // config.num_trainer_slices,
+      dcn_data_parallelism=config.num_trainer_slices,
     )
     sampler_config = pyconfig.initialize(
-        argv,
-        num_slices=config.num_samplers_slices,
-        ici_fsdp_parallelism=len(sampler_devices) // config.num_samplers_slices,
-        dcn_data_parallelism=config.num_samplers_slices,
+      argv,
+      num_slices=config.num_samplers_slices,
+      ici_fsdp_parallelism=len(sampler_devices) // config.num_samplers_slices,
+      dcn_data_parallelism=config.num_samplers_slices,
     )
   else:
     raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
@@ -235,10 +235,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   # Number of training steps.
   max_train_steps = int(
-      trainer_config.num_batches
-      * trainer_config.num_iterations
-      * trainer_config.train_fraction
-      * trainer_config.num_epoch
+    trainer_config.num_batches * trainer_config.num_iterations * trainer_config.train_fraction * trainer_config.num_epoch
   )
 
   # ====== Data ======
@@ -256,7 +253,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   # Load datasets
   dataset = get_dataset(model_tokenizer, trainer_config, train_data_dir, trainer_config.train_split).batch(
-      trainer_config.batch_size
+    trainer_config.batch_size
   )[: trainer_config.num_batches]
 
   if trainer_config.train_fraction == 1.0:
@@ -266,7 +263,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     train_dataset = train_dataset.repeat(trainer_config.num_epoch)
 
   test_dataset = get_dataset(model_tokenizer, trainer_config, test_data_dir, trainer_config.eval_split).batch(
-      trainer_config.batch_size
+    trainer_config.batch_size
   )[: trainer_config.num_test_batches]
 
   # Let's see how one batch of the dataset looks like!
@@ -290,7 +287,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     _maxtext_state_flatten = nnx.state(reference_model).flat_state()
     maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
     max_logging.log(
-        f"maxtext_state_flatten[base.token_embedder.embedding].value=\
+      f"maxtext_state_flatten[base.token_embedder.embedding].value=\
           {maxtext_state_flatten['base.token_embedder.embedding'].value}"
     )
 
@@ -310,7 +307,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   # Setup checkpointing
   checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=trainer_config.checkpoint_period, max_to_keep=trainer_config.max_num_checkpoints_to_keep
+    save_interval_steps=trainer_config.checkpoint_period, max_to_keep=trainer_config.max_num_checkpoints_to_keep
   )
 
   # Set up micro batching
@@ -319,64 +316,64 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   # Setup metrics logging
   max_logging.log(f"Tensorboard logs directory: {trainer_config.tensorboard_dir}")
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-      log_dir=trainer_config.tensorboard_dir, flush_every_n_steps=trainer_config.log_period
+    log_dir=trainer_config.tensorboard_dir, flush_every_n_steps=trainer_config.log_period
   )
 
   profiler_options = None
   if trainer_config.profiler == "xplane":
     profiler_options = profiler.ProfilerOptions(
-        log_dir=trainer_config.tensorboard_dir,
-        skip_first_n_steps=trainer_config.skip_first_n_steps_for_profiler,
-        profiler_steps=trainer_config.profiler_steps,
-        set_profile_options=False,
+      log_dir=trainer_config.tensorboard_dir,
+      skip_first_n_steps=trainer_config.skip_first_n_steps_for_profiler,
+      profiler_steps=trainer_config.profiler_steps,
+      set_profile_options=False,
     )
 
   # RL Cluster config
   # Note that we use vLLM as the rollout engine.
   # and we are using Tensor Parallelism for rollout
   cluster_config = rl_cluster_lib.ClusterConfig(
-      role_to_mesh={
-          rl_cluster_lib.Role.ACTOR: actor_mesh,
-          rl_cluster_lib.Role.REFERENCE: reference_mesh,
-          rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
-      },
-      rollout_engine="vllm",
-      offload_to_cpu=False,
-      training_config=rl_cluster_lib.RLTrainingConfig(
-          actor_optimizer=optimizer,
-          eval_every_n_steps=trainer_config.eval_interval,
-          max_steps=max_train_steps,
-          # Micro batching
-          mini_batch_size=trainer_config.batch_size,
-          train_micro_batch_size=micro_batch_size,
-          rollout_micro_batch_size=micro_batch_size,
-          # Metrics logging
-          metrics_logging_options=metrics_logging_options,
-          # Profiling
-          profiler_options=profiler_options,
-          # Checkpoint saving
-          checkpoint_root_directory=trainer_config.checkpoint_dir,
-          checkpointing_options=checkpointing_options,
-      ),
-      rollout_config=base_rollout.RolloutConfig(
-          max_tokens_to_generate=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
-          max_prompt_length=trainer_config.max_prefill_predict_length,
-          kv_cache_size=trainer_config.max_target_length + trainer_config.kv_cache_buffer,
-          temperature=trainer_config.decode_sampling_temperature,
-          top_p=trainer_config.decode_sampling_nucleus_p,
-          top_k=trainer_config.decode_sampling_top_k,
-          rollout_vllm_model_version=trainer_config.tokenizer_path,
-          rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
-          rollout_vllm_tpu_backend_type="jax",
-          rollout_vllm_swap_space_size_gb=trainer_config.swap_space_vllm_gb,
-      ),
+    role_to_mesh={
+      rl_cluster_lib.Role.ACTOR: actor_mesh,
+      rl_cluster_lib.Role.REFERENCE: reference_mesh,
+      rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+    },
+    rollout_engine="vllm",
+    offload_to_cpu=False,
+    training_config=rl_cluster_lib.RLTrainingConfig(
+      actor_optimizer=optimizer,
+      eval_every_n_steps=trainer_config.eval_interval,
+      max_steps=max_train_steps,
+      # Micro batching
+      mini_batch_size=trainer_config.batch_size,
+      train_micro_batch_size=micro_batch_size,
+      rollout_micro_batch_size=micro_batch_size,
+      # Metrics logging
+      metrics_logging_options=metrics_logging_options,
+      # Profiling
+      profiler_options=profiler_options,
+      # Checkpoint saving
+      checkpoint_root_directory=trainer_config.checkpoint_dir,
+      checkpointing_options=checkpointing_options,
+    ),
+    rollout_config=base_rollout.RolloutConfig(
+      max_tokens_to_generate=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
+      max_prompt_length=trainer_config.max_prefill_predict_length,
+      kv_cache_size=trainer_config.max_target_length + trainer_config.kv_cache_buffer,
+      temperature=trainer_config.decode_sampling_temperature,
+      top_p=trainer_config.decode_sampling_nucleus_p,
+      top_k=trainer_config.decode_sampling_top_k,
+      rollout_vllm_model_version=trainer_config.tokenizer_path,
+      rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
+      rollout_vllm_tpu_backend_type="jax",
+      rollout_vllm_swap_space_size_gb=trainer_config.swap_space_vllm_gb,
+    ),
   )
   grpo_config = GrpoConfig(
-      num_generations=trainer_config.num_generations,
-      num_iterations=trainer_config.num_iterations,
-      beta=trainer_config.grpo_beta,
-      epsilon=trainer_config.grpo_epsilon,
-      loss_algo=trainer_config.loss_algo,
+    num_generations=trainer_config.num_generations,
+    num_iterations=trainer_config.num_iterations,
+    beta=trainer_config.grpo_beta,
+    epsilon=trainer_config.grpo_epsilon,
+    loss_algo=trainer_config.loss_algo,
   )
 
   # Create RL cluster
@@ -388,49 +385,49 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       from tunix.perf import metrics as perf_metrics  # pylint: disable=import-outside-toplevel
 
       max_logging.log(
-          "enable_tunix_perf_metrics is True and tunix.perf modules are available, enabling Tunix-managed metrics."
+        "enable_tunix_perf_metrics is True and tunix.perf modules are available, enabling Tunix-managed metrics."
       )
       perf_config = perf_metrics.PerfMetricsConfig()
       perf_config.custom_export_fn = perf_export.PerfMetricsExport.create_metrics_export_fn(cluster_config)
       rl_cluster_kwargs["perf_config"] = perf_config
     except ImportError:
       max_logging.log(
-          "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
+        "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
       )
   with nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
     rl_cluster = rl_cluster_lib.RLCluster(
-        actor=actor_model,
-        reference=reference_model,
-        tokenizer=model_tokenizer,
-        cluster_config=cluster_config,
-        **rl_cluster_kwargs,
+      actor=actor_model,
+      reference=reference_model,
+      tokenizer=model_tokenizer,
+      cluster_config=cluster_config,
+      **rl_cluster_kwargs,
     )
 
   # Create GRPO trainer
   max_logging.log("Setting up GRPO trainer...")
   rl_trainer = GrpoLearner(
-      rl_cluster=rl_cluster,
-      reward_fns=[  # type: ignore
-          lambda **kwargs: utils_rl.match_format_exactly(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.match_format_approximately(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.check_answer(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.check_numbers(tmvp_config=trainer_config, **kwargs),
-      ],
-      algo_config=grpo_config,
+    rl_cluster=rl_cluster,
+    reward_fns=[  # type: ignore
+      lambda **kwargs: utils_rl.match_format_exactly(tmvp_config=trainer_config, **kwargs),
+      lambda **kwargs: utils_rl.match_format_approximately(tmvp_config=trainer_config, **kwargs),
+      lambda **kwargs: utils_rl.check_answer(tmvp_config=trainer_config, **kwargs),
+      lambda **kwargs: utils_rl.check_numbers(tmvp_config=trainer_config, **kwargs),
+    ],
+    algo_config=grpo_config,
   )
 
   # Before we train the model, let's evaluate the model on the test set so we can
   # see the improvement post training.
   #
   (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
-      trainer_config,
-      test_dataset,
-      rl_cluster=rl_cluster,
-      num_passes=trainer_config.num_eval_passes,
-      corr_lst=trainer_config.eval_corr_lst,
-      make_lst=trainer_config.eval_make_lst,
+    trainer_config,
+    test_dataset,
+    rl_cluster=rl_cluster,
+    num_passes=trainer_config.num_eval_passes,
+    corr_lst=trainer_config.eval_corr_lst,
+    make_lst=trainer_config.eval_make_lst,
   )
-  max_logging.log(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  max_logging.log(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%, {format_accuracy=}%")
 
   # Start training
 
@@ -443,14 +440,14 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   # Let's evaluate our model!
   (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
-      trainer_config,
-      test_dataset,
-      rl_cluster=rl_cluster,
-      num_passes=trainer_config.num_eval_passes,
-      corr_lst=trainer_config.eval_corr_lst,
-      make_lst=trainer_config.eval_make_lst,
+    trainer_config,
+    test_dataset,
+    rl_cluster=rl_cluster,
+    num_passes=trainer_config.num_eval_passes,
+    corr_lst=trainer_config.eval_corr_lst,
+    make_lst=trainer_config.eval_make_lst,
   )
-  max_logging.log(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  max_logging.log(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%, {format_accuracy=}%")
 
 
 def main(argv: Sequence[str]) -> None:

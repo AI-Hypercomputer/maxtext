@@ -31,6 +31,7 @@ The key functions in this script are:
 By automating this search, the script helps to efficiently find the most
 performant and memory-efficient training configurations.
 """
+
 import os
 import sys
 import contextlib
@@ -55,10 +56,10 @@ def generate_priority_list(config, provided_tensor_names):
     A sorted list of tensor names.
   """
   keys = {
-      (True, 1): ["context", "qkv_proj", "mlpwi", "mlpwo", "out_proj"],
-      (True, 2): ["context", "qkv_proj", "mlpwi_0", "mlpwi_1", "mlpwo", "out_proj"],
-      (False, 1): ["context", "query_proj", "key_proj", "value_proj", "mlpwi", "mlpwo", "out_proj"],
-      (False, 2): ["context", "query_proj", "key_proj", "value_proj", "mlpwi_0", "mlpwi_1", "mlpwo", "out_proj"],
+    (True, 1): ["context", "qkv_proj", "mlpwi", "mlpwo", "out_proj"],
+    (True, 2): ["context", "qkv_proj", "mlpwi_0", "mlpwi_1", "mlpwo", "out_proj"],
+    (False, 1): ["context", "query_proj", "key_proj", "value_proj", "mlpwi", "mlpwo", "out_proj"],
+    (False, 2): ["context", "query_proj", "key_proj", "value_proj", "mlpwi_0", "mlpwi_1", "mlpwo", "out_proj"],
   }
   sort_tensor_names = sorted(keys[config.fused_mlp, len(config.mlp_activations)], key=lambda x: tensor_score(x, config))
   return [key for key in sort_tensor_names if key not in provided_tensor_names]
@@ -81,31 +82,31 @@ def tensor_score(tensor_name: str, config) -> tuple:
     A tuple representing the score.
   """
   tensor_score_map = {
-      "context": (
-          -config.max_target_length,
-          -config.num_query_heads * config.head_dim,
-      ),
-      "mlpwi_0": (-config.emb_dim, -config.mlp_dim),
-      "mlpwi_1": (-config.emb_dim, -config.mlp_dim),
-      "mlpwo": (-config.mlp_dim, -config.emb_dim),
-      "query_proj": (
-          -config.emb_dim,
-          -config.num_query_heads * config.head_dim,
-      ),
-      "key_proj": (-config.emb_dim, -config.num_kv_heads * config.head_dim),
-      "value_proj": (
-          -config.emb_dim,
-          -config.num_kv_heads * config.head_dim,
-      ),
-      "out_proj": (
-          -config.num_query_heads * config.head_dim,
-          -config.emb_dim,
-      ),
-      "qkv_proj": (
-          -config.emb_dim,
-          -(config.num_query_heads + 2 * config.num_kv_heads) * config.head_dim,
-      ),
-      "mlpwi": (-config.emb_dim, -config.mlp_dim),
+    "context": (
+      -config.max_target_length,
+      -config.num_query_heads * config.head_dim,
+    ),
+    "mlpwi_0": (-config.emb_dim, -config.mlp_dim),
+    "mlpwi_1": (-config.emb_dim, -config.mlp_dim),
+    "mlpwo": (-config.mlp_dim, -config.emb_dim),
+    "query_proj": (
+      -config.emb_dim,
+      -config.num_query_heads * config.head_dim,
+    ),
+    "key_proj": (-config.emb_dim, -config.num_kv_heads * config.head_dim),
+    "value_proj": (
+      -config.emb_dim,
+      -config.num_kv_heads * config.head_dim,
+    ),
+    "out_proj": (
+      -config.num_query_heads * config.head_dim,
+      -config.emb_dim,
+    ),
+    "qkv_proj": (
+      -config.emb_dim,
+      -(config.num_query_heads + 2 * config.num_kv_heads) * config.head_dim,
+    ),
+    "mlpwi": (-config.emb_dim, -config.mlp_dim),
   }
   return tensor_score_map[tensor_name]
 
@@ -246,10 +247,10 @@ def is_oom(base_argv, policy: dict, pdb: int) -> bool:
 
 
 def search_policy_only(
-    tensor_names,
-    base_argv,
-    pdb,
-    init_policy: dict = None,
+  tensor_names,
+  base_argv,
+  pdb,
+  init_policy: dict = None,
 ) -> dict:
   """
   Finds the "lightest" remat policy that fits in memory for a *fixed* batch size.
@@ -290,10 +291,10 @@ def search_policy_only(
 
 
 def search(
-    tensor_names,
-    base_argv,
-    init_policy: dict = None,
-    max_pdb: int = 256,
+  tensor_names,
+  base_argv,
+  init_policy: dict = None,
+  max_pdb: int = 256,
 ) -> list[tuple[int, dict]]:
   """
   Performs the core search algorithm to find the Pareto frontier points.
@@ -390,16 +391,16 @@ def find_remat_policy_tensor_names(base_argv):
       A list of tensor names that were passed as flags.
   """
   full_tensor_list = [
-      "context",
-      "query_proj",
-      "key_proj",
-      "value_proj",
-      "mlpwi_0",
-      "mlpwi_1",
-      "mlpwo",
-      "out_proj",
-      "qkv_proj",
-      "mlpwi",
+    "context",
+    "query_proj",
+    "key_proj",
+    "value_proj",
+    "mlpwi_0",
+    "mlpwi_1",
+    "mlpwo",
+    "out_proj",
+    "qkv_proj",
+    "mlpwi",
   ]
   provided_tensor_names = []
   for tensor_name in full_tensor_list:
@@ -415,7 +416,7 @@ def main(argv_list: Sequence[str]) -> None:
   """
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["LIBTPU_INIT_ARGS"] = (
-      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   )
   print("Starting batch size and remat policy search...", flush=True)
 

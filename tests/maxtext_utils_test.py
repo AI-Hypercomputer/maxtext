@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the common MaxText utilities """
+"""Tests for the common MaxText utilities"""
 
 from typing import Any
 from collections.abc import Callable
@@ -62,8 +62,8 @@ class TestGradientClipping(unittest.TestCase):
     expected_clipped_grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, 1.0)
 
     raw_grads[maxtext_utils.OVERWRITE_WITH_GRADIENT] = {
-        "amax_history_wi_0": jnp.array([3.0, -4.0]),
-        "scale_wi_0": jnp.array([13.2, -4.4]),
+      "amax_history_wi_0": jnp.array([3.0, -4.0]),
+      "scale_wi_0": jnp.array([13.2, -4.4]),
     }
     clipped_grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, 1.0)
 
@@ -81,12 +81,12 @@ class TestNestedValueRetrieval(unittest.TestCase):
 
   def setUp(self):
     self.test_dict = {
-        "level1": {
-            "level2": {
-                "key": 0.1,
-            }
-        },
-        "empty_level": {},
+      "level1": {
+        "level2": {
+          "key": 0.1,
+        }
+      },
+      "empty_level": {},
     }
 
   def test_valid_nested_key(self):
@@ -121,14 +121,18 @@ class MaxUtilsInitState(unittest.TestCase):
 
   def test_init_train_state(self):
     state = train_state.TrainState(
-        step=0, apply_fn=self.model.apply, params=self.params, tx=None, opt_state={}  # type: ignore
+      step=0,
+      apply_fn=self.model.apply,
+      params=self.params,
+      tx=None,
+      opt_state={},  # type: ignore
     )
     self.assertEqual(state.tx, None)
     self.assertEqual(state.step, 0)
     self.assertEqual(state.opt_state, {})
     self.assertEqual(state.apply_fn, self.model.apply)
     self.assertEqual(
-        max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
+      max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
     )
 
   def test_init_decode_state(self):
@@ -142,8 +146,8 @@ class MaxUtilsInitState(unittest.TestCase):
     self.assertEqual(decode_state.opt_state, {})
     self.assertEqual(decode_state.step, 0)
     self.assertEqual(
-        max_utils.calculate_num_params_from_pytree(decode_state.params),
-        max_utils.calculate_num_params_from_pytree(self.params),
+      max_utils.calculate_num_params_from_pytree(decode_state.params),
+      max_utils.calculate_num_params_from_pytree(self.params),
     )
 
   def test_init_training_state(self):
@@ -152,7 +156,7 @@ class MaxUtilsInitState(unittest.TestCase):
     self.assertEqual(state.tx, self.tx)
     self.assertNotEqual(state.opt_state, {})
     self.assertEqual(
-        max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
+      max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
     )
 
 
@@ -177,7 +181,7 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
 
   def setUp(self):
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
     )
     self.model = ModelWithMultipleCollections()
     self.key1, self.key2, self.key3 = random.split(random.key(0), num=3)
@@ -196,8 +200,8 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
       self.assertIsNone(state_under_test.tx)
       self.assertEqual(state_under_test.opt_state, {})
     self.assertEqual(
-        max_utils.calculate_num_params_from_pytree(state_under_test.params),
-        max_utils.calculate_num_params_from_pytree(self.params),
+      max_utils.calculate_num_params_from_pytree(state_under_test.params),
+      max_utils.calculate_num_params_from_pytree(self.params),
     )
     self.assertEqual(len(self.params), len(state_under_test.params))
     self.assertIn("special_variables", state_under_test.params)
@@ -215,7 +219,7 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
 
   def setUp(self):
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
     )
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
@@ -248,10 +252,10 @@ class MaxUtilsPpAsDp(unittest.TestCase):
   def test_stage_removed(self):
     input_rules = (("layers", "stage"),)
     expected_transform = (
-        (
-            "layers",
-            (),
-        ),
+      (
+        "layers",
+        (),
+      ),
     )
     transformed_rules = sharding.logical_axis_rules_pp_act_as_dp(input_rules)
     self.assertEqual(transformed_rules, expected_transform)
@@ -259,14 +263,14 @@ class MaxUtilsPpAsDp(unittest.TestCase):
   def multiple_rules(self):
     """test multiple rules"""
     input_rules = (
-        ("activation_batch", ("data", "fsdp")),
-        ("layers", "stage"),
-        ("experts", "expert"),
+      ("activation_batch", ("data", "fsdp")),
+      ("layers", "stage"),
+      ("experts", "expert"),
     )
     expected_transform = (
-        ("activation_batch", ("stage", "data", "fsdp")),
-        ("layers", ()),
-        ("experts", "expert"),
+      ("activation_batch", ("stage", "data", "fsdp")),
+      ("layers", ()),
+      ("experts", "expert"),
     )
     transformed_rules = sharding.logical_axis_rules_pp_act_as_dp(input_rules)
     self.assertEqual(transformed_rules, expected_transform)
@@ -385,8 +389,8 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
       sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, sharded_pspec))
       unsharded_param = jnp.ones((8, 8, 2, 2))
       params = {
-          "sharded_layer": sharded_param,
-          "unsharded_layer": unsharded_param,
+        "sharded_layer": sharded_param,
+        "unsharded_layer": unsharded_param,
       }
 
       with self.assertRaises(AssertionError):
@@ -418,8 +422,8 @@ class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
       sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(self.mesh, sharded_pspec))
       unsharded_param = jnp.ones((8, 8, 2, 2))
       params = {
-          "sharded_layer": sharded_param,
-          "unsharded_layer": unsharded_param,
+        "sharded_layer": sharded_param,
+        "unsharded_layer": unsharded_param,
       }
       self.assertIsNotNone(get_formatted_sharding_annotations(params, self.mesh))
 
@@ -513,11 +517,11 @@ class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
     # Step start1+2 would predict pos 7 (padding) — must NOT be scored for seg1.
 
     out = inference_utils.prompt_logprobs_from_packed_prefill(
-        logits=logits,
-        input_tokens=input_tokens,
-        decoder_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        true_lengths=true_lengths,
+      logits=logits,
+      input_tokens=input_tokens,
+      decoder_positions=decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      true_lengths=true_lengths,
     )
     out_np = np.asarray(out)
 
@@ -570,7 +574,7 @@ class TestSamplingFunctions(unittest.TestCase):
 
     for r in rngs:
       token = inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=10, nucleus_topp=nucleus_topp, temperature=1.0, rng=r
+        self.logits, topk=10, nucleus_topp=nucleus_topp, temperature=1.0, rng=r
       )
       self.assertIn(token.item(), top_p_indices)
 
@@ -586,7 +590,7 @@ class TestSamplingFunctions(unittest.TestCase):
 
     for r in rngs:
       token = inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=topk, nucleus_topp=nucleus_topp, temperature=1.0, rng=r
+        self.logits, topk=topk, nucleus_topp=nucleus_topp, temperature=1.0, rng=r
       )
       self.assertIn(token.item(), valid_indices)
 
@@ -598,7 +602,7 @@ class TestSamplingFunctions(unittest.TestCase):
 
     for r in rngs:
       token = inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=10, nucleus_topp=1.0, temperature=low_temp, rng=r
+        self.logits, topk=10, nucleus_topp=1.0, temperature=low_temp, rng=r
       )
       self.assertEqual(token.item(), greedy_token_index)
 
@@ -639,8 +643,8 @@ class TestCalculateBytesFromPytree(unittest.TestCase):
   def test_bytes_from_pytree_arrays(self):
     """Tests byte calculation with standard JAX and NumPy arrays."""
     params = {
-        "a": jnp.zeros((2, 3), jnp.float32),  # 2 * 3 * 4 = 24 bytes
-        "b": np.zeros((5,), np.int32),  # 5 * 4 = 20 bytes
+      "a": jnp.zeros((2, 3), jnp.float32),  # 2 * 3 * 4 = 24 bytes
+      "b": np.zeros((5,), np.int32),  # 5 * 4 = 20 bytes
     }
     expected_total_bytes = 44
     self.assertEqual(max_utils.calculate_bytes_from_pytree(params), expected_total_bytes)
@@ -656,10 +660,10 @@ class TestCalculateBytesFromPytree(unittest.TestCase):
   def test_bytes_from_pytree_mixed_and_none(self):
     """Tests a heterogeneous pytree with mixed types including None and scalars."""
     params = {
-        "a": None,  # 0 bytes
-        "b": 3,  # 8 bytes (int64)
-        "c": 1.0,  # 8 bytes (float64)
-        "d": jax.ShapeDtypeStruct((4,), jnp.int8),  # 4 * 1 = 4 bytes
+      "a": None,  # 0 bytes
+      "b": 3,  # 8 bytes (int64)
+      "c": 1.0,  # 8 bytes (float64)
+      "d": jax.ShapeDtypeStruct((4,), jnp.int8),  # 4 * 1 = 4 bytes
     }
     expected_total_bytes = 20
     self.assertEqual(max_utils.calculate_bytes_from_pytree(params), expected_total_bytes)

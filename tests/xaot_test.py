@@ -54,10 +54,10 @@ class CompileThenLoadTest(unittest.TestCase):
     num_devices = len(devices)
     device_kind = devices[0].device_kind
     device_info = {
-        "TPU v4": ("v4", 2 * num_devices),
-        "TPU v5 lite": ("v5e", num_devices),
-        "TPU v5": ("v5p", 2 * num_devices),
-        "TPU v6": ("v6e", num_devices),
+      "TPU v4": ("v4", 2 * num_devices),
+      "TPU v5 lite": ("v5e", num_devices),
+      "TPU v5": ("v5p", 2 * num_devices),
+      "TPU v6": ("v6e", num_devices),
     }
 
     prefix, topology_devices = next((v for k, v in device_info.items() if k in device_kind), (None, None))
@@ -74,12 +74,12 @@ class CompileThenLoadTest(unittest.TestCase):
 
     # Common arguments derived from your request
     shared_args = [
-        "global_parameter_scale=1",
-        "per_device_batch_size=4",
-        "steps=1",
-        "learning_rate=1e-3",
-        "dataset_type=synthetic",
-        "enable_checkpointing=False",
+      "global_parameter_scale=1",
+      "per_device_batch_size=4",
+      "steps=1",
+      "learning_rate=1e-3",
+      "dataset_type=synthetic",
+      "enable_checkpointing=False",
     ]
 
     if extra_args:
@@ -89,13 +89,13 @@ class CompileThenLoadTest(unittest.TestCase):
     topology = self.get_device_user_facing_name()
 
     compile_specific_args = [
-        f"compile_topology={topology}",
-        "compile_topology_num_slices=1",
-        f"compiled_trainstep_file={self.pickle_file}",
+      f"compile_topology={topology}",
+      "compile_topology_num_slices=1",
+      f"compiled_trainstep_file={self.pickle_file}",
     ]
 
     compile_argv = (
-        (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")) + tuple(shared_args) + tuple(compile_specific_args)
+      (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")) + tuple(shared_args) + tuple(compile_specific_args)
     )
 
     print(f"\n--- Starting Compilation Step for {test_name} ---")
@@ -107,13 +107,13 @@ class CompileThenLoadTest(unittest.TestCase):
     assert os.path.exists(self.pickle_file), f"Compilation failed: {self.pickle_file} was not created."
 
     load_specific_args = [
-        "base_output_directory=gs://runner-maxtext-logs",
-        f"run_name=compile_then_load_{test_name}",
-        f"compiled_trainstep_file={self.pickle_file}",
+      "base_output_directory=gs://runner-maxtext-logs",
+      f"run_name=compile_then_load_{test_name}",
+      f"compiled_trainstep_file={self.pickle_file}",
     ]
 
     train_argv = (
-        (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")) + tuple(shared_args) + tuple(load_specific_args)
+      (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")) + tuple(shared_args) + tuple(load_specific_args)
     )
 
     print(f"\n--- Starting Load/Train Step for {test_name} ---")
