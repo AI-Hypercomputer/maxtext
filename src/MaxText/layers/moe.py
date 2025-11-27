@@ -792,7 +792,7 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
-    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments):
+    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes):
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -830,7 +830,7 @@ class RoutedMoE(nnx.Module):
               rhs_quantize_dtype=rhs_quantize_dtype,
               use_qwix_quantization=self.config.use_qwix_quantization,
               use_tokamax_backend=self.config.use_tokamax_gmm,
-              is_fsdp_shard_on_exp=self.config.fsdp_shard_on_exp,
+              weight_gather_axes=weight_gather_axes,
           )
         else:
           output = tokamax.ragged_dot(
@@ -853,7 +853,7 @@ class RoutedMoE(nnx.Module):
               rhs_quantize_dtype=rhs_quantize_dtype,
               use_qwix_quantization=self.config.use_qwix_quantization,
               use_tokamax_backend=self.config.use_tokamax_gmm,
-              is_fsdp_shard_on_exp=self.config.fsdp_shard_on_exp,
+              weight_gather_axes=weight_gather_axes,
           )
         else:
           rhs_inputs = kernel
@@ -1069,7 +1069,25 @@ class RoutedMoE(nnx.Module):
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
+      def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
+        if pspec_dim_axes is None: return []
+        axes = (pspec_dim_axes,) if isinstance(pspec_dim_axes, str) else pspec_dim_axes
+        active = []
+        for ax in axes:
+          if ax and self.mesh.shape.get(ax, 1) > 1:
+            active.append((ax, tensor_dim_index))
+        return active
+      wi_gather_axes = []
+      wo_gather_axes = []
 
+      if self.config.fsdp_shard_on_exp and self.config.quantization:
+        # wi [Experts, In, Hidden] -> Gather Exp(0) and Hidden(2)
+        wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
+        wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
+
+        # wo [Experts, Hidden, Out] -> Gather Exp(0) and Hidden(1)
+        wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
+        wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
       gmm_fn = functools.partial(
           gmm,
           group_sizes=group_sizes,
@@ -1097,14 +1115,14 @@ class RoutedMoE(nnx.Module):
           self.config.wo_tile_drhs_embed_dim,
           self.config.wo_tile_drhs_mlp_dim,
       )
-      layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size)
+      layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
 
-      layer_w1 = gmm_fn(x, w1, tiling=wi_tile_size)
+      layer_w1 = gmm_fn(x, w1, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       if self.config.mlp_bias:
@@ -1112,7 +1130,7 @@ class RoutedMoE(nnx.Module):
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
 
-      intermediate_output = gmm_fn(intermediate_layer, wo, tiling=wo_tile_size)
+      intermediate_output = gmm_fn(intermediate_layer, wo, tiling=wo_tile_size, weight_gather_axes=wo_gather_axes)
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
       if self.config.mlp_bias:
