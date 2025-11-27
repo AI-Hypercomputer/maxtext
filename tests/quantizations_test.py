@@ -23,16 +23,14 @@ import numpy as np
 import jax
 from jax import numpy as jnp
 from jax import random, lax
-from jax.sharding import Mesh
 
 from flax import linen as nn
-
+from flax import nnx
 from aqt.jax.v2 import aqt_tensor
 
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
 from MaxText.layers import quantizations
-from MaxText import maxtext_utils
 from MaxText import model_creation_utils
 from MaxText.kernels.megablox import gmm
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -193,32 +191,24 @@ class QuantizationTest(unittest.TestCase):
                 "mlp": {
                     "wi_0": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
                         }
                     },
                     "wi_1": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
                         }
                     },
                     "wo": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
                         }
                     },
                 },
                 "self_attention": {
                     "key": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
                         }
                     }
                 },
@@ -246,8 +236,6 @@ class QuantTest(unittest.TestCase):
 
   def setUp(self):
     self.cfg = self.init_pyconfig()
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
     self.inputs = jnp.ones((4, 16))
     self.rng = jax.random.PRNGKey(0)
     self.rtol = 5e-1
@@ -307,8 +295,8 @@ class QuantTest(unittest.TestCase):
   def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
     """Run forward pass and backward pass for quantized model and compare with base model."""
     cfg = self.init_pyconfig(quantization=quant)
-    model = model_creation_utils.create_model(self.cfg, self.mesh)
-    qt_model = model_creation_utils.create_model(cfg, self.mesh)
+    model = model_creation_utils.from_config(self.cfg)
+    qt_model = model_creation_utils.from_config(cfg)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
     var = model.init(

@@ -28,16 +28,16 @@ Initializer = Callable[[PRNGKey, Shape, DType], Array]
 InitializerAxis = int | tuple[int, ...]
 NdInitializer = Callable[[PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array]
 
-default_embed_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
+default_embed_init = nnx.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
 
-default_bias_init = jax.nn.initializers.constant(0.0)
+default_bias_init = nnx.initializers.constant(0.0)
 
 
 def nd_dense_init(scale, mode, distribution):
   """Creates a variance-scaling initializer with dynamic in/out axes.
 
   This function is a factory that returns an initializer function. The returned
-  function is a wrapper around `jax.nn.initializers.variance_scaling` that
+  function is a wrapper around `nnx.initializers.variance_scaling` that
   allows the `in_axis` and `out_axis` to be specified at call time, rather
   than at creation time.
 
@@ -53,7 +53,7 @@ def nd_dense_init(scale, mode, distribution):
 
   def init_fn(key, shape, dtype, in_axis, out_axis):
     """Initializes an array using variance scaling with specified axes."""
-    fn = jax.nn.initializers.variance_scaling(scale, mode, distribution, in_axis, out_axis)
+    fn = nnx.initializers.variance_scaling(scale, mode, distribution, in_axis, out_axis)
     return fn(key, shape, dtype)
 
   return init_fn

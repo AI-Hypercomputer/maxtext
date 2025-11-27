@@ -241,7 +241,16 @@ class ToNNX(Module):
     if rngs is None:
       rngs = self.to_nnx__rngs
     if isinstance(rngs, nnx.Rngs):
-      _rngs = {name: stream() for name, stream in rngs.items()}
+      # Extract RNG keys without calling stream() to avoid TraceContextError
+      # nnx.Rngs.items() yields (name, RngStream) pairs
+      # Each RngStream has a .key.value attribute containing the JAX PRNGKey
+      _rngs = {}
+      for name, stream in rngs.items():
+        if hasattr(stream, "key") and hasattr(stream.key, "value"):
+          _rngs[name] = stream.key.value
+    elif isinstance(rngs, dict):
+      # Allow passing RNG dict directly
+      _rngs = rngs
     elif isinstance(rngs, jax.Array):
       _rngs = {"params": rngs}
     else:
