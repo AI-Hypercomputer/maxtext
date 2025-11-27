@@ -708,7 +708,9 @@ class Qwen3NextScannableBlock(nnx.Module):
     # Loop over the number of sub-layers that make up one repeating pattern.
     for i in range(cfg.inhomogeneous_layer_cycle_interval):
       layer = getattr(self, f"layer_{i}")
-      x = layer(
+      # The second return value is kv_cache, which we ignore here because
+      # it is not passed as a carry in scannable layers.
+      x, _ = layer(
           x,
           decoder_segment_ids,
           decoder_positions,
@@ -802,6 +804,9 @@ class Qwen3NextDecoderLayer(nnx.Module):
       kv_cache: None | jnp.ndarray = None,
       attention_metadata: None | dict[str, Any] = None,
   ):
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
     residual = inputs
 
     # First LayerNorm, applied before the attention block.
@@ -1001,6 +1006,9 @@ class Qwen3DecoderLayer(AttentionWithNorm):
       kv_cache: None | jnp.ndarray = None,
       attention_metadata: None | dict[str, Any] = None,
   ):
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
     hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
         inputs,
         decoder_segment_ids,
@@ -1065,6 +1073,9 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       kv_cache: None | jnp.ndarray = None,
       attention_metadata: None | dict[str, Any] = None,
   ):
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
     hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
         inputs,
         decoder_segment_ids,
