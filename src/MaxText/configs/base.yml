@@ -179,7 +179,9 @@ load_balance_loss_weight: 0.01 # weight for the load balance loss
 use_random_routing: False # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: True # whether to use a custom sort vjp for sparse matmul ops
 use_ring_of_experts: False # whether to use ring of experts for sparse matmul expert parallelism
-# Tunable tiling dimensions used for MLP GMM, includes Tokamax ragged_dot and Megablox
+# Tunable tiling dimensions used for MLP GMM
+# Megablox/JAX Ragged Dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
+# Tokamax Ragged Dot - supports all 18 configs
 wi_tile_fwd_batch_seq: 512
 wi_tile_fwd_embed_dim: 1024
 wi_tile_fwd_mlp_dim: 1024
