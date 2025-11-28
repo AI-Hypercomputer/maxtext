@@ -43,7 +43,7 @@ from flax.linen import partitioning
 
 
 from MaxText import max_utils
-from MaxText.sharding import maybe_shard_with_name
+from MaxText.sharding import maybe_shard_with_name, logical_to_mesh_axes
 from MaxText.common_types import (
     DEFAULT_MASK_VALUE,
     BATCH,
@@ -950,10 +950,10 @@ class AttentionOp(nnx.Module):
     q_for_gqa = q.squeeze(axis=1)
 
     # Define logical axis names - clearer and avoids repeated calls.
-    b = nn.logical_to_mesh_axes(self.ragged_lengths_names)
-    bsnd = nn.logical_to_mesh_axes(self.cache_logical_axis_names)
-    bnd = nn.logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS, CACHE_KV))
-    bn = nn.logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS))
+    b = logical_to_mesh_axes(self.ragged_lengths_names, self.mesh)
+    bsnd = logical_to_mesh_axes(self.cache_logical_axis_names, self.mesh)
+    bnd = logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS, CACHE_KV), self.mesh)
+    bn = logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS), self.mesh)
 
     @functools.partial(
         jax.shard_map,
@@ -1006,8 +1006,8 @@ class AttentionOp(nnx.Module):
     """Ragged Attention."""
     if isinstance(query, KVTensor):
       raise TypeError("Ragged attention does not currently support quantized tensors.")
-    b = nn.logical_to_mesh_axes(self.ragged_lengths_names)
-    bsnd = nn.logical_to_mesh_axes(self.cache_logical_axis_names)
+    b = logical_to_mesh_axes(self.ragged_lengths_names, self.mesh)
+    bsnd = logical_to_mesh_axes(self.cache_logical_axis_names, self.mesh)
 
     @functools.partial(
         jax.shard_map,
@@ -1050,23 +1050,23 @@ class AttentionOp(nnx.Module):
     value = jnp.transpose(value, axes=(0, 2, 1, 3))
     segment_axis_names_q = None
     segment_axis_names_kv = None
-    sink_axis_names = nn.logical_to_mesh_axes((HEAD,))
+    sink_axis_names = logical_to_mesh_axes((HEAD,), self.mesh)
     if decoder_segment_ids is not None:
       if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-        segment_axis_names_q = nn.logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH))
-        segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH_NO_EXP, KV_LENGTH))
+        segment_axis_names_q = logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH), self.mesh)
+        segment_axis_names_kv = logical_to_mesh_axes((BATCH_NO_EXP, KV_LENGTH), self.mesh)
       else:
-        segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, Q_LENGTH_NO_EXP))
-        segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
+        segment_axis_names_q = logical_to_mesh_axes((BATCH, Q_LENGTH_NO_EXP), self.mesh)
+        segment_axis_names_kv = logical_to_mesh_axes((BATCH, KV_LENGTH), self.mesh)
 
     if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
-      axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q_ep)
-      axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv_ep)
+      axis_names_splash_kernel = logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep, self.mesh)
+      axis_names_q = logical_to_mesh_axes(self.flash_axis_names_q_ep, self.mesh)
+      axis_names_kv = logical_to_mesh_axes(self.flash_axis_names_kv_ep, self.mesh)
     else:
-      axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
-      axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
-      axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
+      axis_names_splash_kernel = logical_to_mesh_axes(self.flash_axis_names_splash_kernel, self.mesh)
+      axis_names_q = logical_to_mesh_axes(self.flash_axis_names_q, self.mesh)
+      axis_names_kv = logical_to_mesh_axes(self.flash_axis_names_kv, self.mesh)
 
     global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
     global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
@@ -1197,9 +1197,9 @@ class AttentionOp(nnx.Module):
       shard_head_size = np.prod(logical_axis_rules_head)
       splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
       if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-        segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH,))
+        segment_axis_names_splash_kernel = logical_to_mesh_axes((Q_LENGTH,), self.mesh)
       else:
-        segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
+        segment_axis_names_splash_kernel = logical_to_mesh_axes((Q_LENGTH_NO_EXP,), self.mesh)
     else:
       # Create multi-head mask
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
