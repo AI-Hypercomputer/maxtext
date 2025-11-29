@@ -43,7 +43,7 @@ Multi-tier checkpointing stores checkpoints across multiple tiers of storage:
 
 To run workloads with Multi-Tier Checkpointing (MTC), you need a Google Kubernetes Engine (GKE) cluster with the necessary drivers and features enabled. You can create a properly configured cluster using the **XPK** or by setting it up manually with `gcloud` commands following [Google Cloud Checkpointing Documentation](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing).
 
-The [xpk script](https://github.com/AI-Hypercomputer/xpk/blob/develop/xpk.py) provides a streamlined way to create a GKE cluster with all the required MTC settings. The key flags used are:
+The [xpk script](https://github.com/AI-Hypercomputer/xpk/blob/main/xpk.py) provides a streamlined way to create a GKE cluster with all the required MTC settings. The key flags used are:
 
 | Flag | Description |
 | :--- | :--- |

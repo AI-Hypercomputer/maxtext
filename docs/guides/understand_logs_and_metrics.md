@@ -174,7 +174,7 @@ This log shows that each of the four TPUs has `95.74 GB` of available High Bandw
 ### 3.3. Model TFLOP per device
 
 The **model FLOPs** are the floating point operations to perform model computation. For training, the computation includes a single forward and backward pass.
-- In MaxText, we estimate model FLOPs by summing operations in matrix multiplications (matmuls); see [calculate_tflops_training_per_device](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/maxtext_utils.py#L480).
+- In MaxText, we estimate model FLOPs by summing operations in matrix multiplications (matmuls); see [calculate_tflops_training_per_device](../../src/MaxText/maxtext_utils.py#L480).
 - The number of model FLOPs is dependent on model architecture, input size (batch size, sequence length), and gradient accumulation steps. It does not include optimization operations.
 - We break down the FLOPs into two parts:
   - "Learnable weight FLOPs" are matmuls between activations and learnable weights. Specifically, this occurs in embedding, feed forward networks, attention-related projections, and unembedding.
