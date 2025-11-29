@@ -72,6 +72,9 @@ from MaxText.train_utils import validate_train_config
 from MaxText.metric_logger import record_activation_metrics
 # pylint: disable=too-many-positional-arguments
 
+from jax.experimental.fused import fused
+import optax
+from optax._src.transform import ScaleByAdamState
 
 def get_first_step(state):
   return int(state.step)
@@ -302,7 +305,150 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
         )
     )
-  new_state = state.apply_gradients(grads=grads)
+  if config.adamw_fused_memory_host_offload:
+    adam_state_available = False
+    current_step = None
+    current_mu = None
+    current_nu = None
+    # Get learning rate for current step
+    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+    current_lr = learning_rate_schedule(state.step)
+
+    # Check for single Adam state (from optax.scale_by_adam)
+    if hasattr(state.opt_state, 'count') and hasattr(state.opt_state, 'mu') and hasattr(state.opt_state, 'nu'):
+      adam_state_available = True
+      current_step = state.opt_state.count + 1
+      current_mu = state.opt_state.mu
+      current_nu = state.opt_state.nu
+      adam_state_is_single = True
+    else:
+      # Check for composed optimizer state - extract the Adam component
+      # optax.adamw typically has structure: (EmptyState, ScaleByAdamState, EmptyState)
+      for i, state_component in enumerate(state.opt_state):
+        if hasattr(state_component, 'count') and hasattr(state_component, 'mu') and hasattr(state_component, 'nu'):
+          # Found Adam state in composed optimizer
+          adam_state_available = True
+          current_step = state_component.count + 1
+          current_mu = state_component.mu
+          current_nu = state_component.nu
+          adam_state_is_single = False
+          break
+      # If no Adam state found, adam_state_available remains False and we'll use apply_gradients()
+
+    if adam_state_available:
+      # Use fused AdamW implementation
+      # Get learning rate for current step - recreate schedule from config
+      learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+      current_lr = learning_rate_schedule(state.step)
+
+    # Extract AdamW hyperparameters from config
+    b1 = config.adam_b1
+    b2 = config.adam_b2
+    eps = config.adam_eps
+    eps_root = config.adam_eps_root
+    weight_decay = config.adam_weight_decay
+    mu_dtype=config.mu_dtype
+
+    @fused(out_spaces=(jax.memory.Space.Device, jax.memory.Space.Host, jax.memory.Space.Host))
+    def adamw_update_all(param, grad, mu, nu, step, lr):
+      """Complete AdamW update - returns (new_param, new_mu, new_nu)
+
+      Returns:
+        tuple: (new_param, new_mu, new_nu) where:
+          - new_param: Updated parameter (device memory)
+          - new_mu: Updated first moment (host memory)
+          - new_nu: Updated second moment (host memory)
+      """
+      if param is None or grad is None:
+        return param, mu, nu
+
+      # Bias correction factors
+      bias_correction1 = 1.0 - b1 ** step
+      bias_correction2 = 1.0 - b2 ** step
+
+      # Update momentum terms
+      new_mu = b1 * mu + (1.0 - b1) * grad
+      new_nu = b2 * nu + (1.0 - b2) * jnp.square(grad)
+
+      # Bias corrected moments
+      mu_hat = new_mu / bias_correction1
+      nu_hat = new_nu / bias_correction2
+
+      # Compute AdamW update direction
+      adam_update = mu_hat / (jnp.sqrt(nu_hat + eps_root) + eps)
+
+      # Add weight decay
+      if weight_decay > 0.0:
+        adam_update = adam_update + weight_decay * param
+
+      # Apply learning rate and negate for gradient descent
+      updates = -lr * adam_update
+
+      # Apply updates: new_param = param + updates
+      new_param = param + updates
+
+      return new_param, new_mu, new_nu
+
+    # Define leaf checker: treat AdamW output 3-tuples as single leaves
+    def is_adamw_output_leaf(node):
+        """Tell JAX to treat our 3-tuples as single leaves, not PyTree containers"""
+        return isinstance(node, tuple) and len(node) == 3
+
+    print(" Applying single fused AdamW function with optimal performance...")
+
+    # Apply single fused function using is_leaf to preserve tuple structure
+    all_results = jax.tree_util.tree_map(
+        lambda param, grad, mu, nu: adamw_update_all(param, grad, mu, nu, current_step, current_lr),
+        state.params, grads, current_mu, current_nu,
+        is_leaf=is_adamw_output_leaf  # KEY: Treat 3-tuples as leaves!
+    )
+
+    print("¨ Extracting outputs using is_leaf approach...")
+
+    # Extract outputs using is_leaf - now tuples are treated as single values!
+    new_params = jax.tree_util.tree_map(
+        lambda tuple_leaf: tuple_leaf[0],  # Extract new_param (device memory)
+        all_results,
+        is_leaf=is_adamw_output_leaf
+    )
+
+    new_mu = jax.tree_util.tree_map(
+        lambda tuple_leaf: tuple_leaf[1],  # Extract new_mu (host memory)
+        all_results,
+        is_leaf=is_adamw_output_leaf
+    )
+
+    new_nu = jax.tree_util.tree_map(
+        lambda tuple_leaf: tuple_leaf[2],  # Extract new_nu (host memory)
+        all_results,
+        is_leaf=is_adamw_output_leaf
+    )
+
+    print("Successfully extracted all outputs from single fused function!")
+
+    # Reconstruct final optimizer state
+    new_adam_state = optax.ScaleByAdamState(count=current_step, mu=new_mu, nu=new_nu)
+
+    # Handle composed optimizer state structure
+    if adam_state_is_single:
+      # Single Adam state
+      new_opt_state = new_adam_state
+    else:
+      # Composed state - rebuild with new Adam state
+      new_opt_state = tuple(
+          new_adam_state if (hasattr(state_comp, 'count') and hasattr(state_comp, 'mu') and hasattr(state_comp, 'nu'))
+          else state_comp
+          for state_comp in state.opt_state
+      )
+
+    # Create new state
+    new_state = state.replace(
+      params=new_params,
+      opt_state=new_opt_state
+    )
+  else:
+    # Fall back to original apply_gradients approach when Adam state is not available
+    new_state = state.apply_gradients(grads=grads)
 
   scalar_metrics = {
       "learning/loss": loss,

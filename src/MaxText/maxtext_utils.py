@@ -916,7 +916,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
             state_mesh_shardings.opt_state,
         )
     )
-  if is_training and config.optimizer_memory_host_offload:
+  if is_training and (config.optimizer_memory_host_offload or config.adamw_fused_memory_host_offload):
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
     state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state)
   if is_training and config.parameter_memory_host_offload:
