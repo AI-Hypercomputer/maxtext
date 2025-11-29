@@ -78,6 +78,11 @@ class QuantizationType(str, Enum):
   FP8_NANO_V2 = "fp8_nanoo"
   FP8_GPU = "fp8_gpu"
   FP8_FULL = "fp8_full"
+  TE = "te_noscaling"
+  TE_FP8_DS = "te_fp8_delayedscaling"
+  TE_FP8_CS = "te_fp8_currentscaling"
+  TE_MXFP8 = "te_mxfp8"
+  TE_NVFP4 = "te_nvfp4"
 
 
 class KvQuantAxis(str, Enum):
@@ -1841,7 +1846,8 @@ class MaxTextConfig(
         self.data_sharding[0].insert(0, "stage")
 
       # Add sharding for FP8 amax history when using pipeline parallelism.
-      if self.quantization and "fp8" in self.quantization:
+      if self.quantization and self.quantization in (
+        "fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling"):
         self.logical_axis_rules.append(["aqt_amax_history", ("stage",)])
 
     self.model_fsdp_ag_once = self.pipeline_fsdp_ag_once  # Backward compatibility alias
@@ -1875,7 +1881,8 @@ class MaxTextConfig(
       raise ValueError("`sliding_window_size` must be an integer > 0 for 'local_sliding' attention.")
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
-    if self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu") and self.gradient_accumulation_steps > 1:
+    if (self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
+        and self.gradient_accumulation_steps > 1):
       raise ValueError("FP8 quantization is not compatible with gradient accumulation.")
     if self.num_experts > 1:
       is_fully_moe = (
