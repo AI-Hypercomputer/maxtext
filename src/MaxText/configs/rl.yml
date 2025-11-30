@@ -23,6 +23,10 @@ sampler_devices_fraction: 0.5
 chips_per_vm: 4  # depends on hardware, for v5p this is 4
 num_trainer_slices: -1
 num_samplers_slices: -1
+# Only specify rollout_data_parallelism when you would like to use more than one model
+# replicas in rollout. If not specified, rollout_tensor_parallelism will be auto-determined.
+rollout_data_parallelism: -1
+rollout_tensor_parallelism: -1
 
 # ====== Reproducibility ======
 data_shuffle_seed: 42
@@ -83,13 +87,13 @@ debug:
 enable_tunix_perf_metrics: False
 
 # ====== Training ======
-batch_size: 1
+batch_size: 8
 # Increase `batch_size` and `MAX_STEPS` for better results.
 # num_batches: 3738
 num_batches: 4  # 200
 # A batch can be split into multiple micro batches for memory management
 # and/or async sampling and training.
-micro_batch_size: -1
+micro_batch_size: 8
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200
@@ -130,7 +134,7 @@ eval_make_lst: False # If True, return a list of (question, answer, responses) d
 max_prefill_predict_length: 256
 max_target_length: 1024
 kv_cache_buffer: 256
-hbm_utilization_vllm: 0.72
+hbm_utilization_vllm: 0.6
 swap_space_vllm_gb: 2
 # Generation Configuration During Training
 # Important to keep a high-ish temperature for varied, diverse responses during
