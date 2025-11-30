@@ -23,6 +23,10 @@ sampler_devices_fraction: 0.5
 chips_per_vm: 4  # depends on hardware, for v5p this is 4
 num_trainer_slices: -1
 num_samplers_slices: -1
+# Only specify rollout_data_parallelism when you would like to use more than one model
+# replicas in rollout. If not specified, rollout_tensor_parallelism will be auto-determined.
+rollout_data_parallelism: -1
+rollout_tensor_parallelism: -1
 
 # ====== Reproducibility ======
 data_shuffle_seed: 42
