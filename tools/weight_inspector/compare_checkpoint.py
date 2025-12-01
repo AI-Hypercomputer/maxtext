@@ -18,7 +18,7 @@ r"""This is to inspect/analyze two checkpoint weights with the same structure to
 
 Usage:
 
-python3 -m tools/weight_inspector/compare_checkpoint.py --lhs /model-left/runner_direct_1/checkpoints/0/items --rhs /model-right/runner_direct_1/checkpoints/0/items
+python tools/weight_inspector/compare_checkpoint.py --lhs /model-left/runner_direct_1/checkpoints/0/items --rhs /model-right/runner_direct_1/checkpoints/0/items
 
 """
 
@@ -143,7 +143,7 @@ if __name__ == "__main__":
   parser.add_argument("--rhs", type=str, required=True)
 
   args = parser.parse_args()
-  are_checkpoints_same = compare_quantized_checkpoints(args.lhs, args.rhg)
+  are_checkpoints_same = compare_quantized_checkpoints(args.lhs, args.rhs)
   print(f"\nComparison result: {are_checkpoints_same}")
 
 

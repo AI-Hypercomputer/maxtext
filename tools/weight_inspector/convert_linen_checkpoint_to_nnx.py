@@ -17,7 +17,7 @@ r"""This is to convert checkpoint weight from linen to nnx structure.
 
 Usage:
 
-python -m tools/weight_inspector/convert_linen_checkpoint_to_nnx.py --source_path="/original-model/runner_direct_1/checkpoints/14/"  --output_path="/converted-model/runner_direct_1/checkpoints/14/"
+python tools/weight_inspector/convert_linen_checkpoint_to_nnx.py --source_path="/original-model/runner_direct_1/checkpoints/14/"  --output_path="/converted-model/runner_direct_1/checkpoints/14/"
 
 """
 
@@ -61,8 +61,8 @@ def main(args):
     output_path = epath.Path(args.output_path)
 
     print(f"--- Converting Checkpoint ---")
-    print(f"  Source (V1 - main): {source_path}")
-    print(f"  Output (V2 - modelspy format): {output_path}")
+    print(f"  Source: {source_path}")
+    print(f"  Output: {output_path}")
 
     restored_main = load_full_checkpoint(source_path)
     if restored_main is None:
