@@ -101,7 +101,7 @@ def get_maxtext_model(config, devices=None):
   # Please ensure that you pass the full path ending in `/0/items` for load_parameters_path to train_rl.py i.e.,
   # load_parameters_path=/path/to/your/output/directory/0/items
   """
-  model, mesh = model_creation_utils.create_nnx_model(config, 
+  model, mesh = model_creation_utils.create_nnx_model(config,
                                                       devices=devices,
                                                       model_mode="train")
   with mesh:
@@ -350,8 +350,8 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       try:
         rollout_additional_config = json.loads(trainer_config.vllm_additional_config)
       except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse additional_config JSON: {e}")
-    
+        raise ValueError(f"Failed to parse additional_config JSON: {e}") from e
+
     max_logging.log(f"Parsed additional config: {rollout_additional_config}")
 
   # RL Cluster config
@@ -423,7 +423,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       max_logging.log(
           "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
       )
-  # with nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
+
   rl_cluster = rl_cluster_lib.RLCluster(
       actor=actor_model,
       reference=reference_model,
