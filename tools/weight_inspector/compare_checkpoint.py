@@ -33,7 +33,7 @@ def load_params_from_path(checkpoint_dir: str) -> Dict[str, Any] | None:
 
   if not checkpoint_dir:
     raise ValueError("checkpoint_dir must be provided.")
-  print(f"Loading quantized params checkpoint from: {checkpoint_dir}")
+  print(f"Loading params checkpoint from: {checkpoint_dir}")
   orbax_checkpointer = ocp.PyTreeCheckpointer()
   try:
     restored_object = orbax_checkpointer.restore(checkpoint_dir)
@@ -51,7 +51,7 @@ def get_tree_paths(tree: Any) -> Set[str]:
     flat_with_path, _ = jax.tree_util.tree_flatten_with_path(tree)
     return {jax.tree_util.keystr(p) for p, _ in flat_with_path}
 
-def compare_quantized_checkpoints(left_path: str, right_path: str, rtol: float = 1e-3, atol: float = 1e-3) -> bool:
+def compare_checkpoints(left_path: str, right_path: str, rtol: float = 1e-3, atol: float = 1e-3) -> bool:
     print(f"\n--- Comparing Checkpoints ---")
     print(f"  Left checkpoint path: {left_path}")
     print(f"  Right checkpoint path: {right_path}")
@@ -143,7 +143,7 @@ if __name__ == "__main__":
   parser.add_argument("--rhs", type=str, required=True)
 
   args = parser.parse_args()
-  are_checkpoints_same = compare_quantized_checkpoints(args.lhs, args.rhs)
+  are_checkpoints_same = compare_checkpoints(args.lhs, args.rhs)
   print(f"\nComparison result: {are_checkpoints_same}")
 
 
