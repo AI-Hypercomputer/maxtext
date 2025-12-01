@@ -48,6 +48,7 @@ from typing import Sequence
 import collections
 import grain
 import jax
+import json
 import os
 import pathwaysutils
 import tensorflow_datasets as tfds
@@ -70,6 +71,7 @@ os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 from MaxText import max_logging, max_utils, maxtext_utils, pyconfig
 from MaxText import model_creation_utils
+from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from MaxText.rl.evaluate_rl import evaluate
 from MaxText.rl import utils_rl
@@ -93,7 +95,8 @@ def get_maxtext_model(config, devices=None):
   """
   model, mesh = model_creation_utils.create_nnx_model(config, devices=devices)
   with jax.set_mesh(mesh):
-    tunix_model = TunixMaxTextAdapter(base_model=model)
+    use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
+    tunix_model = TunixMaxTextAdapter(base_model=model, use_no_op_mappings=use_no_op_mappings)
     tunix_model.config = None
   return tunix_model, mesh
 
@@ -312,7 +315,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
     max_logging.log(
         f"maxtext_state_flatten[base.token_embedder.embedding].value=\
-          {maxtext_state_flatten['base.token_embedder.embedding'].value}"
+          {maxtext_state_flatten['base.token_embedder.embedding'][...]}"
     )
 
   # TODO: @mazumdera: change this to use lora
@@ -351,6 +354,21 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
         profiler_steps=trainer_config.profiler_steps,
         set_profile_options=False,
     )
+
+  # Parse vllm_additional_config
+  rollout_additional_config = None
+  if trainer_config.vllm_additional_config:
+    if isinstance(trainer_config.vllm_additional_config, dict):
+      # It's already parsed into a dict
+      rollout_additional_config = trainer_config.vllm_additional_config
+    elif isinstance(trainer_config.vllm_additional_config, str):
+      # It's a string, so we need to parse it
+      try:
+        rollout_additional_config = json.loads(trainer_config.vllm_additional_config)
+      except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse additional_config JSON: {e}") from e
+
+    max_logging.log(f"Parsed additional config: {rollout_additional_config}")
 
   # RL Cluster config
   # Note that we use vLLM as the rollout engine.
@@ -394,6 +412,9 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
           rollout_vllm_tpu_backend_type="jax",
           rollout_vllm_swap_space_size_gb=trainer_config.swap_space_vllm_gb,
+          rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
+          rollout_vllm_additional_config=rollout_additional_config,
+          rollout_vllm_init_with_random_weights=True,
           **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
       ),
   )
@@ -423,7 +444,12 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       max_logging.log(
           "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
       )
-  with nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
+
+  vllm_config_path = epath.Path(MAXTEXT_PKG_DIR) / "configs" / "vllm.yml"
+  argv_list = ["", str(vllm_config_path), "log_config=False"]
+  vllm_config = pyconfig.initialize(argv_list)
+
+  with nn_partitioning.axis_rules(vllm_config.logical_axis_rules):
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=actor_model,
         reference=reference_model,

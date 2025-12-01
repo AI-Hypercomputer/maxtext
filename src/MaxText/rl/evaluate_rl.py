@@ -121,13 +121,16 @@ def score_responses(tmvp_config, question, responses, answer):
 
     # Check exact correctness
     try:
-      if float(extracted_response.strip()) == float(answer.strip()):
-        is_correct = True
+      # Remove ',' and '$' then convert to float
+      val_extracted = float(extracted_response.replace(",", "").replace("$", "").strip())
+      val_answer = float(answer.replace(",", "").replace("$", "").strip())
+      is_correct = val_extracted == val_answer
 
       # Check partial correctness (within 10%)
-      ratio = float(extracted_response.strip()) / float(answer.strip())
+      ratio = val_extracted / val_answer
       if 0.9 <= ratio <= 1.1:
         is_partially_correct = True
+
     except Exception as e:
       if tmvp_config.debug["rl"]:
         max_logging.log(f"Evaluation Exception: {e}")
