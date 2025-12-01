@@ -957,3 +957,5 @@ use_tokamax_gmm: false
 use_tokamax_splash: false
 
 tp_ag_in_fp8: false # when true explicitly casts into fp8 before performing TP actiavtion all gathers (but not the reduce scatter).
+
+reshape_out_proj: false

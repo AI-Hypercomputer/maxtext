@@ -527,6 +527,7 @@ class Attention(nnx.Module):
     )
 
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
+    # query is [batch, sequence, model]
     """Initializes the query, key, value, and output projections."""
     if self.config.fused_qkv:
       self.qkv_proj = self.init_qkv_w(inputs_shape=inputs_q_shape)
@@ -534,6 +535,8 @@ class Attention(nnx.Module):
       self.query = self.init_query_w(inputs_q_shape=inputs_q_shape)
       self.key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
       self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
+    # rawr here is def out
+    # output_dim=embed
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
@@ -665,13 +668,23 @@ class Attention(nnx.Module):
     return query, key, value
 
   def init_out_w(self, output_dim: int) -> nnx.Module:
+    # output_dim is really n_output_features=model
+    # rawr here is init_out_w
     """out projection"""
-    in_features = (self.num_query_heads, self.head_dim)
-    out_features = output_dim
-    out_kernel_axis = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
-    )
-    axis = (-2, -1)
+    if self.config.reshape_out_proj:
+      in_features = (self.num_query_heads * self.head_dim)
+      out_features = output_dim
+      out_kernel_axis = (
+          (None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads_and_head_dim", "embed")
+      )
+      axis = (-1)
+    else:
+      in_features = (self.num_query_heads, self.head_dim)
+      out_features = output_dim
+      out_kernel_axis = (
+          (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
+      )
+      axis = (-2, -1)
 
     if self.is_qwen3_next:
       in_features = self.num_query_heads * self.head_dim
@@ -694,8 +707,15 @@ class Attention(nnx.Module):
     )
 
   def out_projection(self, out: Array, out_sharding: NamedSharding | None = None) -> Array:
+    # out is batch, sequence, heads, head_dim
     """out projection"""
-    return self.out(out, out_sharding=out_sharding)
+    if self.config.reshape_out_proj:
+      # reshape the last two axis to a single one:
+      out_reshape = out.reshape(out.shape[0], out.shape[1], -1)
+      out = self.out(out_reshape, out_sharding=out_sharding)
+      return out
+    else:
+      return self.out(out, out_sharding=out_sharding)
 
   def convert_dense_general_inputs_shape(
       self,

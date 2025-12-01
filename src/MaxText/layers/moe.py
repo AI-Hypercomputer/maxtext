@@ -1073,7 +1073,9 @@ class RoutedMoE(nnx.Module):
           x = qpl.quantize(x, qtype=jnp.float8_e4m3fn, scale_dtype=jnp.float32, calibration_method="absmax", channelwise_axes=[0])
         x = jax.lax.all_gather(x, axis_name="tensor", axis=1, tiled=True)
         if self.config.tp_ag_in_fp8:
-          x =qarray.dequantize(x)
+          # Currently get errors passing in fp8 dtype directly to megablox, can work with amanda on fixing
+          # This wastefully dequantizes only be to quantized again before megablox
+          x = qarray.dequantize(x)
           x = x.astype(jnp.bfloat16)
         print(f"x shape and dtype after TP AG {x=}")
         
