@@ -21,13 +21,13 @@ Usage:
 python tools/weight_inspector/compare_checkpoint.py --lhs /model-left/runner_direct_1/checkpoints/0/items --rhs /model-right/runner_direct_1/checkpoints/0/items
 
 """
-
 import argparse
 import jax
 import orbax.checkpoint as ocp
 from typing import Any, Dict, Set
 import pprint
 import numpy as np
+import jax.tree_util
 
 def load_params_from_path(checkpoint_dir: str) -> Dict[str, Any] | None:
 
@@ -91,41 +91,56 @@ def compare_checkpoints(left_path: str, right_path: str, rtol: float = 1e-3, ato
         left_values = map_left[key]
         right_values = map_right[key]
 
-        if type(left_values) is not type(right_values):
-            print(f"❌ Type mismatch at {key}: {type(left_values)} vs {type(right_values)}")
-            all_equal = False
-            continue
+        is_left_array = isinstance(left_values, (jax.Array, np.ndarray))
+        is_right_array = isinstance(right_values, (jax.Array, np.ndarray))
 
-        if isinstance(left_values, jax.Array):
-            if left_values.shape != right_values.shape:
-                print(f"❌ Shape mismatch at {key}: {left_values.shape} vs {right_values.shape}")
+        if is_left_array and is_right_array:
+            try:
+                # Normalize both to numpy arrays on CPU
+                left_cpu = np.array(jax.device_get(left_values))
+                right_cpu = np.array(jax.device_get(right_values))
+            except Exception as e:
+                print(f"❌ Error during array conversion at {key}: {e}")
                 all_equal = False; continue
-            if left_values.dtype != right_values.dtype:
-                print(f"❌ Dtype mismatch at {key}: {left_values.dtype} vs {right_values.dtype}")
+
+            if left_cpu.shape != right_cpu.shape:
+                print(f"❌ Shape mismatch at {key}: {left_cpu.shape} vs {right_cpu.shape}")
                 all_equal = False; continue
+
+            # Basic dtype compatibility check
+            if left_cpu.dtype != right_cpu.dtype:
+                 print(f"⚠️ Dtype mismatch at {key}: {left_cpu.dtype} vs {right_cpu.dtype}. Attempting numerical comparison.")
 
             try:
-                left_cpu = jax.device_get(left_values)
-                right_cpu = jax.device_get(right_values)
+                if not np.allclose(left_cpu, right_cpu, rtol=rtol, atol=atol):
+                    print(f"❌ Numerical difference in Array at {key} ({left_cpu.dtype} vs {right_cpu.dtype}).")
+                    diff = np.abs(left_cpu - right_cpu)
+                    print(f"      Max diff: {np.max(diff)}, Mean diff: {np.mean(diff)}")
+                    all_equal = False
+            except TypeError as e:
+                 print(f"❌ TypeError during np.allclose at {key} ({left_cpu.dtype} vs {right_cpu.dtype}): {e}")
+                 all_equal = False
             except Exception as e:
-                print(f"❌ Error during jax.device_get at {key}: {e}")
-                all_equal = False; continue
+                 print(f"❌ Error during np.allclose at {key}: {e}")
+                 all_equal = False
 
-            if not np.allclose(left_cpu, right_cpu, rtol=rtol, atol=atol):
-                print(f"❌ Numerical difference in JAX Array at {key}.")
-                diff = np.abs(left_cpu - right_cpu)
-                print(f"      Max diff: {np.max(diff)}, Mean diff: {np.mean(diff)}")
-                all_equal = False
+        elif is_left_array != is_right_array:
+            print(f"❌ Type mismatch at {key}: {type(left_values)} vs {type(right_values)}")
+            all_equal = False
         elif isinstance(left_values, dict):
-            if left_values != right_values:
+             if not isinstance(right_values, dict) or left_values != right_values:
                 print(f"❌ Dict difference at {key}:")
                 pprint.pprint(f"    Left: {left_values}", width=120)
                 pprint.pprint(f"    Right: {right_values}", width=120)
                 all_equal = False
         elif left_values != right_values:
             try:
-                if np.isscalar(left_values) and np.isscalar(right_values) and np.allclose(np.array(left_values), np.array(right_values), rtol=rtol, atol=atol):
-                    continue
+                # Scalar numerical comparison
+                if np.isscalar(left_values) and np.isscalar(right_values) and \
+                   isinstance(left_values, (int, float, np.number)) and \
+                   isinstance(right_values, (int, float, np.number)):
+                    if np.isclose(float(left_values), float(right_values), rtol=rtol, atol=atol):
+                        continue
             except (TypeError, ValueError):
                 pass
             print(f"❌ Value difference at {key}: {left_values} vs {right_values}")
@@ -141,10 +156,9 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--lhs", type=str, required=True)
   parser.add_argument("--rhs", type=str, required=True)
+  parser.add_argument("--rtol", type=float, default=1e-3, help="Relative tolerance for numerical comparison.")
+  parser.add_argument("--atol", type=float, default=1e-3, help="Absolute tolerance for numerical comparison.")
 
   args = parser.parse_args()
-  are_checkpoints_same = compare_checkpoints(args.lhs, args.rhs)
+  are_checkpoints_same = compare_checkpoints(args.lhs, args.rhs, rtol=args.rtol, atol=args.atol)
   print(f"\nComparison result: {are_checkpoints_same}")
-
-
-
