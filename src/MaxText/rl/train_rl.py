@@ -54,6 +54,7 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import grain
 from etils import epath
+import json
 
 from vllm.outputs import PoolingRequestOutput  # pylint: disable=unused-import
 import jax
@@ -100,9 +101,16 @@ def get_maxtext_model(config, devices=None):
   # Please ensure that you pass the full path ending in `/0/items` for load_parameters_path to train_rl.py i.e.,
   # load_parameters_path=/path/to/your/output/directory/0/items
   """
-  model, mesh = model_creation_utils.create_nnx_model(config, devices=devices)
+  model, mesh = model_creation_utils.create_nnx_model(config, 
+                                                      devices=devices,
+                                                      model_mode="train")
   with mesh:
-    tunix_model = TunixMaxTextAdapter(base_model=model)
+    if "maxtext_config" in config.vllm_additional_config:
+      use_standalone_mappings = False
+    else:
+      use_standalone_mappings = True
+    tunix_model = TunixMaxTextAdapter(base_model=model,
+                                      use_standalone_mappings=use_standalone_mappings)
     tunix_model.config = None
   return tunix_model, mesh
 
@@ -331,6 +339,21 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
         set_profile_options=False,
     )
 
+  # Parse vllm_additional_config
+  rollout_additional_config = None
+  if trainer_config.vllm_additional_config:
+    if isinstance(trainer_config.vllm_additional_config, dict):
+      # It's already parsed into a dict
+      rollout_additional_config = trainer_config.vllm_additional_config
+    elif isinstance(trainer_config.vllm_additional_config, str):
+      # It's a string, so we need to parse it
+      try:
+        rollout_additional_config = json.loads(trainer_config.vllm_additional_config)
+      except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse additional_config JSON: {e}")
+    
+    max_logging.log(f"Parsed additional config: {rollout_additional_config}")
+
   # RL Cluster config
   # Note that we use vLLM as the rollout engine.
   # and we are using Tensor Parallelism for rollout
@@ -369,6 +392,9 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
           rollout_vllm_tpu_backend_type="jax",
           rollout_vllm_swap_space_size_gb=trainer_config.swap_space_vllm_gb,
+          rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
+          rollout_vllm_additional_config=rollout_additional_config,
+          rollout_vllm_init_with_random_weights=False
       ),
   )
   grpo_config = GrpoConfig(
@@ -397,14 +423,14 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       max_logging.log(
           "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
       )
-  with nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
-    rl_cluster = rl_cluster_lib.RLCluster(
-        actor=actor_model,
-        reference=reference_model,
-        tokenizer=model_tokenizer,
-        cluster_config=cluster_config,
-        **rl_cluster_kwargs,
-    )
+  # with nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
+  rl_cluster = rl_cluster_lib.RLCluster(
+      actor=actor_model,
+      reference=reference_model,
+      tokenizer=model_tokenizer,
+      cluster_config=cluster_config,
+      **rl_cluster_kwargs,
+  )
 
   # Create GRPO trainer
   max_logging.log("Setting up GRPO trainer...")

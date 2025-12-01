@@ -1272,6 +1272,9 @@ class VLLM(BaseModel):
   kv_cache_buffer: int = Field(256, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, description="Swap space in GB for vLLM.")
+  vllm_additional_config: dict[str, Any] = Field(default_factory=dict, 
+                                                 description="Additional vLLM config options.")
+  vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
 
 
 class GRPO(BaseModel):
