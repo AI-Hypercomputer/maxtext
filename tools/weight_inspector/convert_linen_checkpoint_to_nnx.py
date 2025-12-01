@@ -17,7 +17,7 @@ r"""This is to convert checkpoint weight from linen to nnx structure.
 
 Usage:
 
-python -m tools/weight_inspector/convert_checkpoint.py --source_path="/original-model/runner_direct_1/checkpoints/14/"  --output_path="/converted-model/runner_direct_1/checkpoints/14/"
+python -m tools/weight_inspector/convert_linen_checkpoint_to_nnx.py --source_path="/original-model/runner_direct_1/checkpoints/14/"  --output_path="/converted-model/runner_direct_1/checkpoints/14/"
 
 """
 
