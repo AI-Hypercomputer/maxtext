@@ -42,7 +42,7 @@ MOUNT_PATH=$MOUNT_PATH \
 3. Set `dataset_type=grain`, `grain_file_type={arrayrecord|parquet}`, `grain_train_files` to match the file pattern on the mounted local path.
 4. Tune `grain_worker_count` for performance. This parameter controls the number of child processes used by Grain (more details in [behind_the_scenes](https://google-grain.readthedocs.io/en/latest/behind_the_scenes.html), [grain_pool.py](https://github.com/google/grain/blob/main/grain/_src/python/grain_pool.py)). If you use a large number of workers, check your config for gcsfuse in [setup_gcsfuse.sh](https://github.com/google/maxtext/blob/main/tools/setup/setup_gcsfuse.sh) to avoid gcsfuse throttling.
 
-5. For multi-source blending, you can specify multiple data sources with their respective weights using semicolon (;) as a separator and a comma (,) for weights. The weights will be automatically normalized to sum to 1.0. For example:
+5. ArrayRecord Only: For multi-source blending, you can specify multiple data sources with their respective weights using semicolon (;) as a separator and a comma (,) for weights. The weights will be automatically normalized to sum to 1.0. For example:
 ```
 # Blend two data sources with 30% from first source and 70% from second source
 grain_train_files=/tmp/gcsfuse/dataset1.array_record*,0.3;/tmp/gcsfuse/dataset2.array_record*,0.7
@@ -50,7 +50,49 @@ grain_train_files=/tmp/gcsfuse/dataset1.array_record*,0.3;/tmp/gcsfuse/dataset2.
 # Blend three data sources with equal weights (will be normalized to 0.33 each)
 grain_train_files=/tmp/gcsfuse/dataset1.array_record*,1;/tmp/gcsfuse/dataset2.array_record*,1;/tmp/gcsfuse/dataset3.array_record*,1
 ```
-Note: When using multiple data sources, only the ArrayRecord format is supported.
+**Advanced usage**: updating the data mixture when resuming training from a checkpoint. To use this feature, define the data mixture and name the datasets in a JSON file, and set the `grain_train_mixture_config_path` flag to point to this file. When resuming from a checkpoint, you can provide a new JSON file with an updated mixture. This allows for dynamic adjustment of data sources and their weights.
+
+For example, you can start a training run with a `grain_mixture.json` file:
+```json
+{
+  "ds1":
+    {
+      "path": "gs://path/to/dataset1.array_record*",
+      "weight": 0.4
+    },
+  "ds2":
+    {
+      "path": "gs://path/to/dataset2.array_record*",
+      "weight": 0.6
+    }
+}
+```
+
+Then, you can resume the training run with a different mixture in `grain_mixture2.json`, which adds a new dataset:
+```json
+{
+  "ds1":
+    {
+      "path": "gs://path/to/dataset1.array_record*",
+      "weight": 0.5
+    },
+  "ds2":
+    {
+      "path": "gs://path/to/dataset2.array_record*",
+      "weight": 0.3
+    },
+  "ds3":
+    {
+      "path": "gs://path/to/dataset3.array_record*",
+      "weight": 0.2
+    }
+}
+```
+
+Similarly, you can remove datasets or change weights in the mixture. Grain will correctly handle the state of the data iterators.
+```{note}
+Packing and multi-process prefetching (mp_prefetch) operations rely on buffers. When a data mixture is updated, these buffers cannot be recovered, leading to discarded unused elements and thus minor skipping in the training data.
+```
 
 6. Example command:
 ```sh

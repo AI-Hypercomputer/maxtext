@@ -18,6 +18,7 @@
 import enum
 import functools
 import math
+import random
 from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
@@ -860,7 +861,14 @@ class RoutedMoE(nnx.Module):
             if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
               raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
             rhs_inputs = kernel.qvalue
-          with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
+          if self.config.use_qwix_quantization:
+            # Use full contraction for QWIX quantization to allow quantization
+            # fusion (max reduce over contracting dimension).
+            tiling = (tiling[0], k, tiling[2])
+          with set_xla_metadata(
+              ragged_dot_tiling=",".join([str(t) for t in tiling]),
+              mosaic_fusion_group=f"{random.randint(0, 1000000000)}",
+          ):
             output = jax.lax.ragged_dot(
                 lhs=inputs,
                 rhs=rhs_inputs,
@@ -1028,12 +1036,7 @@ class RoutedMoE(nnx.Module):
             # This would result in num_expert_shards * input_size * experts_per_shard assignments. However, if
             # experts_per_shard > num_experts_per_tok we cannot assign more than num_experts_per_tok to all of the inputs.
             max_local_experts_per_tok = min(local_expert_size, self.config.num_experts_per_tok)
-            buffer_size = int(
-                num_expert_parallelism
-                * self.config.per_device_batch_size
-                * self.config.max_target_length
-                * max_local_experts_per_tok
-            )
+            buffer_size = int(num_expert_parallelism * batch_size * sequence_length * max_local_experts_per_tok)
             output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
 
             x = jax.lax.ragged_all_to_all(

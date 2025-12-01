@@ -23,6 +23,8 @@ from MaxText import maxtext_utils
 from MaxText import sharding
 from MaxText import optimizers
 from MaxText.dpo_utils import _merge_dpo_state
+from MaxText.data_loader import create_dataloader
+from MaxText.rampup_batch import create_rampup_manager
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.utils.goodput_utils import GoodputEvent
 from MaxText.utils.goodput_utils import maybe_record_goodput
@@ -167,6 +169,8 @@ def setup_train_loop(config, recorder, devices=None):
     mesh:
     learning_rate_schedule:
     data_iterator:
+    data_loader:
+    rampup_manager: the class managing rampup batch sizes
     state: the initialized train state
   """
 
@@ -177,6 +181,8 @@ def setup_train_loop(config, recorder, devices=None):
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
+    rampup_manager = create_rampup_manager(config, checkpoint_manager)
+    data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
     context_parallel_size = mesh.shape["context"]
     # Check if context parallelism is being used with sequence packing
     if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
@@ -245,6 +251,8 @@ def setup_train_loop(config, recorder, devices=None):
       mesh,
       learning_rate_schedule,
       data_iterator,
+      data_loader,
+      rampup_manager,
       eval_data_iterator,
       state,
   )
