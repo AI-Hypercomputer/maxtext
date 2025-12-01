@@ -34,9 +34,6 @@ Check out our [Read The Docs site](https://maxtext.readthedocs.io/en/latest/) or
 
 See our installation guide to [install MaxText with pip](https://maxtext.readthedocs.io/en/latest/guides/install_maxtext.html).
 
-## Decoupled mode
-See our guide on running MaxText in decoupled mode, without any GCP dependencies in [Decoupled Mode Guide](https://maxtext.readthedocs.io/en/latest/guides/run_maxtext/decoupled_mode.html).
-
 ## 🔥 Latest news 🔥
 
 * \[September 26, 2025\] Vocabulary tiling ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/2242)) is now supported in MaxText! Adjust config `num_vocab_tiling` to unlock more efficient memory usage.
