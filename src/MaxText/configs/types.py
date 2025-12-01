@@ -19,7 +19,7 @@
 from enum import Enum
 from math import prod
 from tempfile import gettempdir
-from typing import Any, NewType, Literal
+from typing import Any, NewType, Literal, Optional
 import datetime
 import logging
 import math
@@ -61,6 +61,10 @@ class MatmulPrecision(str, Enum):
   DEFAULT = "default"
   HIGH = "high"
   HIGHEST = "highest"
+  # same as default
+  BFLOAT16 = "bfloat16"
+  # same as highest
+  FLOAT32 = "float32"
 
 
 class QuantizationType(str, Enum):
@@ -337,9 +341,17 @@ class Quantization(BaseModel):
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
-  quantization_calibration_method: str = Field(
+  weight_quantization_calibration_method: str = Field(
       "absmax",
-      description="Quantization calibration method used for weights and activations.",
+      description="Quantization calibration method used for weights.",
+  )
+  act_quantization_calibration_method: str = Field(
+      "absmax",
+      description="Quantization calibration method used for activations.",
+  )
+  bwd_quantization_calibration_method: str = Field(
+      "absmax",
+      description="Quantization calibration method used for gradients.",
   )
 
 
@@ -543,9 +555,24 @@ class MoEKernels(BaseModel):
 
   megablox: bool = Field(True, description="Whether to use Megablox kernels for MoE.")
   sparse_matmul: bool = Field(True, description="Whether to use sparse matmul kernels for MoE.")
-  tile_batch_seq: int = Field(512, description="Tunable tiling dimension for batch/sequence in Megablox.")
-  tile_embed_dim: int = Field(1024, description="Tunable tiling dimension for embedding in Megablox.")
-  tile_mlp_dim: int = Field(1024, description="Tunable tiling dimension for MLP in Megablox.")
+  wi_tile_fwd_batch_seq: int = Field(512, description="forward pass tiling dimension for batch/sequence in GMM for wi.")
+  wi_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wi.")
+  wi_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wi.")
+  wi_tile_dlhs_batch_seq: int = Field(512, description="bwd pass dlhs tiling dimension for batch/sequence in GMM for wi.")
+  wi_tile_dlhs_embed_dim: int = Field(1024, description="bwd pass dlhs tiling dimension for embedding in GMM for wi.")
+  wi_tile_dlhs_mlp_dim: int = Field(1024, description="bwd pass dlhs tiling dimension for MLP in GMM for wi.")
+  wi_tile_drhs_batch_seq: int = Field(512, description="bwd pass drhs tiling dimension for batch/sequence in GMM for wi.")
+  wi_tile_drhs_embed_dim: int = Field(1024, description="bwd pass drhs tiling dimension for embedding in GMM for wi.")
+  wi_tile_drhs_mlp_dim: int = Field(1024, description="bwd pass drhs tiling dimension for MLP in GMM for wi.")
+  wo_tile_fwd_batch_seq: int = Field(512, description="forward pass tiling dimension for batch/sequence in GMM for wo.")
+  wo_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wo.")
+  wo_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wo.")
+  wo_tile_dlhs_batch_seq: int = Field(512, description="bwd pass dlhs tiling dimension for batch/sequence in GMM for wo.")
+  wo_tile_dlhs_embed_dim: int = Field(1024, description="bwd pass dlhs tiling dimension for embedding in GMM for wo.")
+  wo_tile_dlhs_mlp_dim: int = Field(1024, description="bwd pass dlhs tiling dimension for MLP in GMM for wo.")
+  wo_tile_drhs_batch_seq: int = Field(512, description="bwd pass drhs tiling dimension for batch/sequence in GMM for wo.")
+  wo_tile_drhs_embed_dim: int = Field(1024, description="bwd pass drhs tiling dimension for embedding in GMM for wo.")
+  wo_tile_drhs_mlp_dim: int = Field(1024, description="bwd pass drhs tiling dimension for MLP in GMM for wo.")
 
 
 class DeepSeekMoE(BaseModel):
@@ -810,9 +837,9 @@ class HfDataset(BaseModel):
 
   hf_path: str = Field("", description="Path or name of the Hugging Face dataset.")
   hf_data_dir: PathStr = Field("", description="Data directory for the HF dataset.")
-  hf_train_files: str = Field("", description="Files for the HF training split.")
+  hf_train_files: Optional[str] = Field(None, description="Files for the HF training split.")
   hf_eval_split: str = Field("", description="Name of the HF evaluation split.")
-  hf_eval_files: str = Field("", description="Files for the HF evaluation split.")
+  hf_eval_files: Optional[str] = Field(None, description="Files for the HF evaluation split.")
   hf_access_token: None | str = Field(None, description="Hugging Face API access token.")
 
 
@@ -821,6 +848,9 @@ class GrainDataset(BaseModel):
 
   grain_train_files: PathStr = Field("", description="Path to Grain training files.")
   grain_eval_files: PathStr = Field("", description="Path to Grain evaluation files.")
+  grain_train_mixture_config_path: PathStr = Field(
+      "", description="Path to a JSON file specifying the mixture weights for Grain training data."
+  )
   grain_file_type: str = Field("arrayrecord", description="File type for Grain data.")
   grain_worker_count: int = Field(1, description="Number of workers for Grain data loading.")
   grain_per_worker_buffer_size: int = Field(
@@ -829,6 +859,15 @@ class GrainDataset(BaseModel):
   grain_worker_count_eval: int = Field(1, description="Number of workers for Grain eval data loading.")
   grain_per_worker_buffer_size_eval: int = Field(
       1, description="Buffer size for each worker for Grain data loading during evaluation."
+  )
+  grain_num_threads: int = Field(16, description="Number of threads for Grain ReadOptions during training.")
+  grain_prefetch_buffer_size: int = Field(500, description="Prefetch buffer size for Grain ReadOptions during training.")
+  grain_num_threads_eval: int = Field(16, description="Number of threads for Grain ReadOptions during evaluation.")
+  grain_prefetch_buffer_size_eval: int = Field(
+      500, description="Prefetch buffer size for Grain ReadOptions during evaluation."
+  )
+  grain_data_source_max_workers: int = Field(
+      16, description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources."
   )
 
 
@@ -1223,6 +1262,8 @@ class RLHardware(BaseModel):
   sampler_devices_fraction: float = Field(0.5, description="Fraction of devices to use for the sampler.")
   chips_per_vm: int = Field(4, description="Number of accelerator chips per VM.")
   use_pathways: bool = Field(True, description="Whether to use Pathways for multihost orchestration.")
+  num_trainer_slices: int = Field(-1, description="Number of slices for the trainer.")
+  num_samplers_slices: int = Field(-1, description="Number of slices for the samplers.")
 
 
 class VLLM(BaseModel):
@@ -1340,6 +1381,11 @@ class DerivedValues(BaseModel):
       description="The total size of context parallelism, derived from ICI and DCN values.",
   )
 
+  num_target_devices: None | int = Field(
+      None,
+      description="The number of devices computed from topology in train_compile or jax.devices() in train",
+  )
+
   global_batch_size_to_train_on: None | int = Field(
       None,
       description="The total batch size for training across all devices. Derived from `per_device_batch_size` and data"
@@ -1394,7 +1440,6 @@ class DerivedValues(BaseModel):
       None, description="Increment for global batch size during rampup."
   )
   rampup_samples_per_increment_to_load: None | float = Field(None, description="Samples per increment for rampup.")
-  tile_fwd_batch_seq: None | int = Field(None, description="Legacy alias for tile_batch_seq.")
 
 
 # ----------------------------------------------------------------------------
@@ -1603,9 +1648,9 @@ class MaxTextConfig(
       else:
         return len(jax.devices())
 
-    num_devices = 1  # Default for validation when JAX is not initialized
+    self.num_target_devices = 1  # Default for validation when JAX is not initialized
     try:
-      num_devices = get_num_target_devices()
+      self.num_target_devices = get_num_target_devices()
     except (RuntimeError, IndexError):
       logger.warning("JAX device system not available for config validation. Assuming 1 device.")
 
@@ -1642,7 +1687,10 @@ class MaxTextConfig(
         self.global_batch_size_to_train_on,
         self.micro_batch_size_to_train_on,
     ) = calculate_global_batch_sizes(
-        self.per_device_batch_size, self.expansion_factor_real_data, num_devices, self.gradient_accumulation_steps
+        self.per_device_batch_size,
+        self.expansion_factor_real_data,
+        self.num_target_devices,
+        self.gradient_accumulation_steps,
     )
 
     # Calculate final evaluation batch sizes.
@@ -1650,7 +1698,9 @@ class MaxTextConfig(
         self.global_batch_size_to_load_eval,
         self.global_batch_size_to_eval_on,
         self.micro_batch_size_to_eval_on,
-    ) = calculate_global_batch_sizes(self.eval_per_device_batch_size, self.expansion_factor_real_data, num_devices, 1)
+    ) = calculate_global_batch_sizes(
+        self.eval_per_device_batch_size, self.expansion_factor_real_data, self.num_target_devices, 1
+    )
 
     # Calculate ramp-up batch size parameters if enabled.
     if self.enable_rampup_batch_size:
@@ -1659,7 +1709,10 @@ class MaxTextConfig(
           _,
           _,
       ) = calculate_global_batch_sizes(
-          self.per_device_batch_size_start, self.expansion_factor_real_data, num_devices, self.gradient_accumulation_steps
+          self.per_device_batch_size_start,
+          self.expansion_factor_real_data,
+          self.num_target_devices,
+          self.gradient_accumulation_steps,
       )
       (
           self.global_batch_size_to_load_increment,
@@ -1668,7 +1721,7 @@ class MaxTextConfig(
       ) = calculate_global_batch_sizes(
           self.per_device_batch_size_increment,
           self.expansion_factor_real_data,
-          num_devices,
+          self.num_target_devices,
           self.gradient_accumulation_steps,
       )
       diff_batch_size = self.global_batch_size_to_load - self.global_batch_size_to_load_start
@@ -1715,7 +1768,6 @@ class MaxTextConfig(
     if self.expert_shard_attention_option == "context":
       cp_size *= self.ici_expert_parallelism * self.dcn_expert_parallelism
     self.context_parallel_size = cp_size
-    self.tile_fwd_batch_seq = self.tile_batch_seq  # Legacy alias.
     if self.pipeline_parallel_layers == -1:
       if self.decoder_block == DecoderBlockType.DEEPSEEK:
         moe_layers = self.num_decoder_layers - self.first_num_dense_layers

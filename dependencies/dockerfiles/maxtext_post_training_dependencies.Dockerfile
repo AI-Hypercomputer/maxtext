@@ -30,6 +30,8 @@ RUN pip install numba==0.61.2
 # Install vLLM for Jax and TPUs
 RUN pip install vllm-tpu
 
+RUN pip install --no-deps qwix==0.1.4
+
 RUN if [ "$MODE" = "post-training-experimental" ]; then \
     pip uninstall -y jax jaxlib libtpu && \
     pip install --pre -U jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ && \

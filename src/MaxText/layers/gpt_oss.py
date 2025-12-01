@@ -145,6 +145,8 @@ class GptOssDecoderLayer(nnx.Module):
       previous_chunk=None,
       page_state=None,
       slot=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     cfg = self.config
 
@@ -154,13 +156,15 @@ class GptOssDecoderLayer(nnx.Module):
     lnx = self.pre_self_attention_layer_norm(inputs)
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
-    attention_lnx = self.GptOssAttention(
+    attention_lnx, kv_cache = self.GptOssAttention(
         lnx,
         lnx,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
 
     attention_lnx = nn.with_logical_constraint(
@@ -201,7 +205,7 @@ class GptOssDecoderLayer(nnx.Module):
     if cfg.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
 
 GptOssDecoderLayerToLinen = nnx_wrappers.to_linen_class(

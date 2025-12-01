@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 from typing import Any
+import copy
 
 import jax
 import jax.numpy as jnp
@@ -97,11 +98,6 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   pydantic_kwargs = {}
   valid_fields = types.MaxTextConfig.model_fields.keys()
 
-  # This is a workaround for tests that use `dataset_type='hf'` but do not
-  # specify `tokenizer_type='huggingface'`, which they should.
-  if raw_keys.get("dataset_type") == "hf" and "tokenizer_type" not in raw_keys:
-    raw_keys["tokenizer_type"] = "huggingface"
-
   for key, value in raw_keys.items():
     if key not in valid_fields:
       logger.warning("Ignoring invalid/unsupported field from YAML/CLI: %s", repr(key))
@@ -119,7 +115,11 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
       if key == "data_sharding" and isinstance(new_value, list) and new_value and isinstance(new_value[0], str):
         new_value = [new_value]
 
-    if key in ("run_name", "hf_train_files", "hf_eval_files") and new_value is None:
+    # An empty value provided in the configuration is treated as None
+    if key in ("hf_train_files", "hf_eval_files") and new_value == "":
+      new_value = None
+
+    if key == "run_name" and new_value is None:
       new_value = ""
 
     pydantic_kwargs[key] = new_value
@@ -151,6 +151,13 @@ class HyperParameters:
     final_dict["shard_mode"] = ShardMode(final_dict["shard_mode"])
 
     object.__setattr__(self, "_flat_config", final_dict)
+
+  def __deepcopy__(self, memo):
+    new_pydantic_config = copy.deepcopy(self._pydantic_config, memo)
+    return HyperParameters(new_pydantic_config)
+
+  def tree_flatten(self):
+    return (), self
 
   def __getattr__(self, attr: str) -> Any:
     """Provides attribute-style access to the final configuration dictionary."""

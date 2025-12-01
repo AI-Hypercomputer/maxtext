@@ -129,6 +129,8 @@ class GemmaDecoderLayer(nnx.Module):
       page_manager=None,
       page_state=None,
       slot=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
@@ -137,13 +139,15 @@ class GemmaDecoderLayer(nnx.Module):
 
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
-    attention_lnx = self.self_attention(
+    attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
@@ -177,7 +181,7 @@ class GemmaDecoderLayer(nnx.Module):
     if self.config.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
 
 GemmaDecoderLayerToLinen = nnx_wrappers.to_linen_class(

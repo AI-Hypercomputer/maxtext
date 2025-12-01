@@ -279,19 +279,34 @@ class LazyTensor:
 
 
 class LazyTensorHandler(type_handlers.NumpyHandler):
-  """Custom Orbax handler for LazyTensor to avoid typestr collision with np.ndarray."""
+  """
+  Custom Orbax handler for LazyTensor.
 
-  def typestr(self):
-    return "LazyTensor"
+  It masquerades as a standard NumpyHandler so that the resulting checkpoint
+  has the standard 'array_metadatas' structure and can be loaded by
+  standard MaxText instances.
+  """
+
+  async def serialize(self, value, *args, **kwargs):
+    # MATERIALIZE: Trigger the lazy load (__array__) explicitly before saving.
+    # This ensures the parent NumpyHandler receives a real np.ndarray.
+    if hasattr(value, "__array__"):
+      value = np.array(value)
+
+    return await super().serialize(value, *args, **kwargs)
 
 
 # Register LazyTensor with the custom handler.
 # It's safe to register this globally even if eager loading is used.
-type_handlers.register_type_handler(LazyTensor, LazyTensorHandler())
+type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=True)
 
 
 def _build_multi_axis_stacked_tensor(
-    hf_source_keys: List[List[str]], tensor_getter_fn: Callable[[str], np.ndarray], hook_fns: Any
+    hf_source_keys: List[List[str]],
+    tensor_getter_fn: Callable[[str], np.ndarray],
+    hook_fns: Any,
+    target_shape: tuple,
+    config,
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along two axes (experts and layers).
 
@@ -303,18 +318,24 @@ def _build_multi_axis_stacked_tensor(
                       Outer list iterates experts, inner list iterates layers.
       tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
       hook_fns: The hook function(s) to apply to each individual weight.
+      target_shape: The final shape of the target MaxText tensor.
+      config: The MaxText pyconfig object.
 
   Returns:
       The final, assembled NumPy array for the MaxText parameter.
   """
   all_expert_tensors = []
+  # The hook function needs the shape of an individual slice, not the full stacked tensor.
+  # For multi-axis stacking (experts, layers, ...), the slice shape is target_shape[2:]
+  mt_slice_shape = target_shape[2:]
+
   # Outer loop iterates through experts
   for layer_keys_for_expert in hf_source_keys:
     layer_tensors_for_expert = []
     # Inner loop iterates through layers for the current expert
     for hf_key_single in layer_keys_for_expert:
       hf_tensor_numpy = tensor_getter_fn(hf_key_single)
-      processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, None, hook_fns)
+      processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
       layer_tensors_for_expert.append(processed_hf_tensor)
     all_expert_tensors.append(np.stack(layer_tensors_for_expert, axis=0))
   return np.stack(all_expert_tensors, axis=0)
@@ -514,7 +535,14 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
       # Stacked mapping
       if isinstance(hf_source_keys_or_key[0], list):
         # Case 2: Multi-Axis Stacked
-        load_fn = partial(_build_multi_axis_stacked_tensor, hf_source_keys_or_key, tensor_getter, hook_fn)
+        load_fn = partial(
+            _build_multi_axis_stacked_tensor,
+            hf_source_keys_or_key,
+            tensor_getter,
+            hook_fn,
+            mt_target_shape_final,
+            config,
+        )
       else:
         # Case 3: Single-Axis Stacked
         load_fn = partial(

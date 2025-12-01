@@ -28,27 +28,18 @@ RUN pip install keyring keyrings.google-artifactregistry-auth
 RUN pip install numba==0.61.2
 
 COPY tunix /tunix
+RUN pip uninstall -y google-tunix
 RUN pip install -e /tunix --no-cache-dir
 
 
 COPY vllm /vllm
-RUN VLLM_TARGET_DEVICE="tpu" pip install -e /vllm --no-cache-dir --pre \
-    --extra-index-url https://pypi.org/simple/ \
-    --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
-    --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
-    --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
-    --find-links https://storage.googleapis.com/libtpu-wheels/index.html \
-    --find-links https://storage.googleapis.com/libtpu-releases/index.html \
-    --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html \
-    --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html 
+RUN VLLM_TARGET_DEVICE="tpu" pip install -e /vllm --no-cache-dir
 
 
 COPY tpu-inference /tpu-inference
-RUN pip install -e /tpu-inference --no-cache-dir --pre \
-    --extra-index-url https://pypi.org/simple/ \
-    --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
-    --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
+RUN pip install -e /tpu-inference --no-cache-dir
 
+RUN pip install --no-deps qwix==0.1.4
 
 RUN if [ "$MODE" = "post-training-experimental" ]; then \
     echo "MODE=post-training-experimental: Re-installing JAX/libtpu"; \

@@ -17,6 +17,7 @@
 # Core Architectural Parameters
 decoder_block: "qwen3_moe"
 base_emb_dim: 4096
+base_mlp_dim: 1536
 base_num_query_heads: 64
 base_num_kv_heads: 4
 base_num_decoder_layers: 94

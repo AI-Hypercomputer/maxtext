@@ -18,6 +18,8 @@ import glob
 from pathlib import Path
 import functools
 import ml_collections
+from concurrent import futures
+import json
 
 import jax
 
@@ -53,26 +55,89 @@ def get_datasets(
     dataloading_host_index,
     dataloading_host_count,
     grain_worker_count,
+    grain_num_threads,
+    grain_prefetch_buffer_size,
+    grain_data_source_max_workers,
+    mixture_config_path=None,
 ):
   """Load dataset from array_record files for using with grain"""
   if data_file_type == "arrayrecord":
-    if ";" in data_file_pattern:
+    # Helper function to find files, create data source, and wrap in MapDataset
+    def create_dataset_from_pattern(pattern):
+      files = find_data_files(pattern)
+      source = grain.ArrayRecordDataSource(files)
+      return grain.MapDataset.source(source)
+
+    # Handle mixture config with named datasets, allows flexibility in recovering checkpoints
+    if mixture_config_path:
+      with open(mixture_config_path, "r", encoding="utf-8") as f:
+        mixture_config = json.load(f)
+
+      paths = [config["path"] for config in mixture_config.values()]
+      weights = [float(config["weight"]) for config in mixture_config.values()]
+
+      executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
+      dataset_list = list(executor.map(create_dataset_from_pattern, paths))
+      executor.shutdown(wait=True)
+
+      datasets_dict = dict(zip(mixture_config.keys(), dataset_list))
+
+      for name, ds in datasets_dict.items():
+        if shuffle:
+          ds = ds.shuffle(seed=shuffle_seed)
+        ds = ds.repeat(num_epoch)
+        ds = ds[dataloading_host_index::dataloading_host_count]  # sharding
+        ds = ds.to_iter_dataset()
+        datasets_dict[name] = ds
+
+      # Normalize weights
+      total_weight = sum(weights)
+      weights_dict = {name: weight / total_weight for name, weight in zip(mixture_config.keys(), weights)}
+
+      dataset = grain.IterDataset.mix(datasets_dict, weights_dict)
+      return dataset
+    elif ";" in data_file_pattern:
       data_file_patterns, weights = zip(*[pattern.split(",") for pattern in data_file_pattern.split(";")])
       assert len(data_file_patterns) == len(weights), "Number of data file patterns and weights must match"
       weights = [float(weight) for weight in weights]
       weights = [round(weight / sum(weights), 4) for weight in weights]
-      dataset_list = [
-          grain.MapDataset.source(grain.ArrayRecordDataSource(find_data_files(pattern))) for pattern in data_file_patterns
-      ]
-      dataset = grain.MapDataset.mix(dataset_list, weights)
+
+      # Parallelize file finding (globbing), data source creation, and dataset wrapping
+      # File finding and source creation are I/O-bound operations that release the GIL
+      executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
+      dataset_list = list(executor.map(create_dataset_from_pattern, data_file_patterns))
+      executor.shutdown(wait=True)
+
+      # Apply shuffle, repeat, sharding, and conversion to IterDataset to each dataset before mixing
+      for d, _ in enumerate(dataset_list):
+        if shuffle:
+          dataset_list[d] = dataset_list[d].shuffle(seed=shuffle_seed)
+        dataset_list[d] = dataset_list[d].repeat(num_epoch)
+        dataset_list[d] = dataset_list[d][dataloading_host_index::dataloading_host_count]  # sharding
+        dataset_list[d] = dataset_list[d].to_iter_dataset(
+            read_options=grain.ReadOptions(
+                num_threads=grain_num_threads,
+                prefetch_buffer_size=grain_prefetch_buffer_size,
+            )
+        )
+      # Use IterDataset.mix instead of MapDataset.mix in order to have per-mixture component checkpoints
+      # for supporting changing the mixture after checkpointing
+      dataset = grain.IterDataset.mix(dataset_list, weights)
+      return dataset
     else:
-      data_files = find_data_files(data_file_pattern)
-      dataset = grain.MapDataset.source(grain.ArrayRecordDataSource(data_files))
-    if shuffle:
-      dataset = dataset.shuffle(seed=shuffle_seed)
-    dataset = dataset.repeat(num_epoch)
-    dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
-    dataset = dataset.to_iter_dataset()
+      # Single pattern case - no need for parallelization
+      dataset = create_dataset_from_pattern(data_file_pattern)
+      if shuffle:
+        dataset = dataset.shuffle(seed=shuffle_seed)
+      dataset = dataset.repeat(num_epoch)
+      dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
+      dataset = dataset.to_iter_dataset(
+          read_options=grain.ReadOptions(
+              num_threads=grain_num_threads,
+              prefetch_buffer_size=grain_prefetch_buffer_size,
+          )
+      )
+      return dataset
   elif data_file_type == "parquet":
     data_files = find_data_files(data_file_pattern)
     dataset = grain.MapDataset.source(data_files)
@@ -88,10 +153,9 @@ def get_datasets(
     dataset = dataset.map(grain.experimental.ParquetIterDataset)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=len(dataset))
     dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=100, seed=shuffle_seed)
+    return dataset
   else:
     raise ValueError(f"grain pipeline supports (arrayrecord, parquet) as grain_file_type, but got {data_file_type}")
-
-  return dataset
 
 
 def pretrain_preprocessing_pipeline(
@@ -237,6 +301,10 @@ def make_grain_train_iterator(
         dataloading_host_index=process_indices.index(jax.process_index()),
         dataloading_host_count=len(process_indices),
         grain_worker_count=config.grain_worker_count,
+        grain_num_threads=config.grain_num_threads,
+        grain_prefetch_buffer_size=config.grain_prefetch_buffer_size,
+        grain_data_source_max_workers=config.grain_data_source_max_workers,
+        mixture_config_path=config.grain_train_mixture_config_path,
     )
     if config.use_dpo:
       train_dataloader = dpo_preprocessing_pipeline(
@@ -271,6 +339,9 @@ def make_grain_train_iterator(
         shuffle_seed=config.data_shuffle_seed,
         num_epoch=config.num_epoch,
         grain_worker_count=config.grain_worker_count,
+        grain_num_threads=config.grain_num_threads,
+        grain_prefetch_buffer_size=config.grain_prefetch_buffer_size,
+        grain_data_source_max_workers=config.grain_data_source_max_workers,
     )
     if config.use_dpo:
       preprocessing_fn = functools.partial(
@@ -328,6 +399,9 @@ def make_grain_eval_iterator(
         dataloading_host_index=process_indices.index(jax.process_index()),
         dataloading_host_count=len(process_indices),
         grain_worker_count=config.grain_worker_count_eval,
+        grain_num_threads=config.grain_num_threads_eval,
+        grain_prefetch_buffer_size=config.grain_prefetch_buffer_size_eval,
+        grain_data_source_max_workers=config.grain_data_source_max_workers,
     )
     if config.use_dpo:
       eval_dataloader = dpo_preprocessing_pipeline(
@@ -359,6 +433,9 @@ def make_grain_eval_iterator(
         shuffle_seed=config.data_shuffle_seed,
         num_epoch=1,
         grain_worker_count=config.grain_worker_count_eval,
+        grain_num_threads=config.grain_num_threads_eval,
+        grain_prefetch_buffer_size=config.grain_prefetch_buffer_size_eval,
+        grain_data_source_max_workers=config.grain_data_source_max_workers,
     )
     if config.use_dpo:
       preprocessing_fn = functools.partial(
