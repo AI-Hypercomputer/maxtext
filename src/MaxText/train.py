@@ -515,6 +515,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
   validate_train_config(config)
+  max_utils.save_device_information(config)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   # update explicit sharding-supported config
   if config.shard_mode == ShardMode.EXPLICIT:
