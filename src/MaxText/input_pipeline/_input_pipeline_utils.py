@@ -118,7 +118,6 @@ def prepare_text_for_image_fusion(example, column_name, model_name):
   )
   return example
 
-
 def combine_columns(example, columns, data_column):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
   assert len(columns) > 1
@@ -681,3 +680,106 @@ class ShiftData(grain.MapTransform):
 
   def map(self, element):
     return shift_and_refine(element, ignored_ids=self.ignored_ids, axis=self.axis)
+
+
+@dataclasses.dataclass
+class ComputeQwen3OmniPositions(grain.MapTransform):
+  """Computes 3D position IDs for Qwen3-Omni multimodal sequences.
+
+  This transform replaces the standard 1D sequential positions with 3D
+  positions (temporal, height, width) for multimodal models like Qwen3-Omni.
+
+  For text-only sequences, all 3 dimensions receive the same sequential values.
+  For multimodal sequences with vision/audio, vision tokens get true 3D positions
+  and text tokens continue sequentially from max(vision_pos) + 1.
+
+  The actual position computation is delegated to multimodal_utils.get_rope_index(),
+  which can be tested and modified independently.
+  """
+
+  def __init__(
+      self,
+      data_column: str = "inputs",
+      spatial_merge_size: int = 2,
+      position_id_per_seconds: int = 25,
+      use_audio_in_video: bool = False,
+  ):
+    """Initialize the Qwen3-Omni position computation transform.
+
+    Args:
+      data_column: Name of the data column to compute positions for (default: "inputs").
+      spatial_merge_size: Number of patches merged spatially (e.g., 2 for 2x2→1).
+      position_id_per_seconds: Temporal granularity (tokens per second, typically 25).
+      use_audio_in_video: If True, audio tokens are interleaved with video tokens.
+    """
+    self.data_column = data_column
+    self.spatial_merge_size = spatial_merge_size
+    self.position_id_per_seconds = position_id_per_seconds
+    self.use_audio_in_video = use_audio_in_video
+
+  def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Compute 3D position IDs for the batch element.
+
+    Args:
+      element: Dictionary containing:
+        - {data_column}: Token IDs with shape (batch, seq_len)
+        - {data_column}_segmentation: Attention mask (1=real, 0=padding)
+        - image_grid_thw: Optional (num_images, 3) array
+        - video_grid_thw: Optional (num_videos, 3) array
+        - audio_lengths: Optional (num_audios,) array
+        - second_per_grids: Optional (num_videos,) array
+
+    Returns:
+      element with {data_column}_position updated to shape (3, batch, seq_len)
+      for 3D positions (always 3D, even for text-only sequences).
+    """
+    import jax.numpy as jnp
+
+    # Extract inputs and metadata
+    input_ids = element[self.data_column]
+    attention_mask = element.get(f"{self.data_column}_segmentation")
+
+    # Convert to JAX arrays if needed
+    input_ids = jnp.asarray(input_ids)
+    if attention_mask is not None:
+      attention_mask = jnp.asarray(attention_mask)
+
+    # Extract multimodal metadata (if present)
+    image_grid_thw = element.get("image_grid_thw")
+    video_grid_thw = element.get("video_grid_thw")
+    audio_lengths = element.get("audio_lengths")
+    second_per_grids = element.get("second_per_grids")
+
+    # Convert metadata to JAX arrays if present
+    if image_grid_thw is not None:
+      image_grid_thw = jnp.asarray(image_grid_thw)
+    if video_grid_thw is not None:
+      video_grid_thw = jnp.asarray(video_grid_thw)
+    if audio_lengths is not None:
+      audio_lengths = jnp.asarray(audio_lengths)
+    if second_per_grids is not None:
+      second_per_grids = jnp.asarray(second_per_grids)
+
+    # Call the standalone get_rope_index function from multimodal_utils
+    position_ids, mrope_position_deltas = multimodal_utils.get_rope_index(
+        input_ids=input_ids,
+        image_grid_thw=image_grid_thw,
+        video_grid_thw=video_grid_thw,
+        attention_mask=attention_mask,
+        use_audio_in_video=self.use_audio_in_video,
+        audio_lengths=audio_lengths,
+        second_per_grids=second_per_grids,
+        spatial_merge_size=self.spatial_merge_size,
+        position_id_per_seconds=self.position_id_per_seconds,
+    )
+
+    # Convert back to numpy for grain pipeline
+    position_ids = np.asarray(position_ids)
+    mrope_position_deltas = np.asarray(mrope_position_deltas)
+
+    # Update element with 3D positions
+    # Shape: (3, batch, seq_len) for multimodal, or (batch, seq_len) for text-only
+    element[f"{self.data_column}_position"] = position_ids
+    element[f"{self.data_column}_mrope_deltas"] = mrope_position_deltas
+
+    return element
