@@ -167,6 +167,7 @@ class DecoderLayer(nn.Module):
     else:
       attention_lnx = _maybe_shard_with_logical(attention_lnx, logical_axis_names)
 
+    # MLP block.
     mlp_lnx = linears.mlp_block(
         in_features=lnx.shape[-1],
         intermediate_dim=cfg.mlp_dim,
@@ -252,136 +253,9 @@ class SequentialBlockDecoderLayers(nn.Module):
           page_state=page_state,
       )
       if self.config.scan_layers:
-        inputs = inputs[0]
+        inputs = inputs[0]  #  When scan_layers is True the decoder layers return (outputs, None).
     if self.config.scan_layers:
       return inputs, None  # pytype: disable=bad-return-type
-    else:
-      return inputs
-
-
-class SequentialNNXWrapper(nnx.Module):
-  """Wrapper that creates sequential decoder layers for pipeline stages.
-
-  This wrapper matches the decoder layer signature expected by Pipeline.
-  """
-
-  def __init__(
-      self,
-      decoder_layer_class: type,
-      num_decoder_layers: int,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      rngs: nnx.Rngs,
-      quant: None | Quant = None,
-  ):
-    """Initialize wrapper with sequential decoder layers.
-
-    Args:
-      decoder_layer_class: NNX decoder layer class to instantiate
-      num_decoder_layers: Number of layers to create
-      config: Model configuration
-      mesh: Device mesh
-      model_mode: 'train', 'eval', etc.
-      rngs: RNG state
-      quant: Quantization config
-    """
-    self.sequential = SequentialBlockNNXDecoderLayers(
-        decoder_layer_class=decoder_layer_class,
-        num_decoder_layers=num_decoder_layers,
-        config=config,
-        mesh=mesh,
-        model_mode=model_mode,
-        rngs=rngs,
-        quant=quant
-    )
-
-  def __call__(self, *args, **kwargs):
-    """Forward pass through sequential layers."""
-    return self.sequential(*args, **kwargs)
-
-
-class SequentialBlockNNXDecoderLayers(nnx.Module):
-  """Sequential unscanned series of NNX decoder layers."""
-
-  def __init__(
-      self,
-      decoder_layer_class: type,
-      num_decoder_layers: int,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      rngs: nnx.Rngs,
-      quant: None | Quant = None,
-  ):
-    """Initialize multiple NNX decoder layer instances.
-
-    Args:
-      decoder_layer_class: The NNX decoder layer class to instantiate
-      num_decoder_layers: Number of decoder layers to create
-      config: Model configuration
-      mesh: Device mesh for sharding
-      model_mode: 'train', 'eval', etc.
-      rngs: RNG state for initialization
-      quant: Quantization configuration
-    """
-    self.config = config
-    self.num_decoder_layers = num_decoder_layers
-
-    # Store layer instances as attributes for NNX pytree tracking.
-    for lyr in range(num_decoder_layers):
-      layer = decoder_layer_class(
-          config=config,
-          mesh=mesh,
-          model_mode=model_mode,
-          rngs=rngs,
-          quant=quant,
-      )
-      setattr(self, f'layer_{lyr}', layer)
-
-  def __call__(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic: bool,
-      model_mode,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
-  ) -> jnp.ndarray:
-    """Sequentially apply all decoder layers.
-
-    Args:
-      inputs: Input tensor
-      decoder_segment_ids: Segment IDs for attention masking
-      decoder_positions: Position indices
-      deterministic: Whether to use deterministic mode (no dropout)
-      model_mode: 'train', 'eval', etc.
-      slot: Optional slot index for paged attention
-      page_state: Optional page state for paged attention
-
-    Returns:
-      Output tensor after all layers, or (output, None) if scan_layers is True
-    """
-    # Iterate over layer attributes (layer_0, layer_1, ...)
-    for lyr in range(self.num_decoder_layers):
-      layer = getattr(self, f'layer_{lyr}')
-      outputs = layer(
-          inputs,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          slot=slot,
-          page_state=page_state,
-      )
-      if self.config.scan_layers:
-        inputs = outputs[0]
-      else:
-        inputs = outputs
-
-    if self.config.scan_layers:
-      return inputs, None
     else:
       return inputs
 
@@ -399,14 +273,10 @@ class Decoder(nn.Module):
     self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
-      nnx_decoder_classes = self.get_nnx_decoder_layers()
-      if nnx_decoder_classes is not None:
-        pipeline_stage_module = self.get_pipeline_stage_module(nnx_decoder_classes, use_nnx=True)
-      else:
-        pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer, use_nnx=False)
+      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
-      self.pipeline_module = pipeline.create_pipeline(
-          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy, use_nnx=(nnx_decoder_classes is not None)
+      self.pipeline_module = pipeline.Pipeline(
+          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
       )
 
   def minimal_policy(self, with_context=False):
@@ -432,11 +302,13 @@ class Decoder(nn.Module):
     cfg = self.config
     if cfg.remat_policy != "none":
       if cfg.remat_policy in ("minimal_with_context", "minimal_flash"):
+        # save all
         if cfg.remat_policy == "minimal_flash":
           max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
           max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
         policy = self.minimal_policy(with_context=True)
       elif cfg.remat_policy == "minimal":
+        # save all except context
         policy = self.minimal_policy()
       elif cfg.remat_policy == "save_dot_with_context_except_mlp":
         policy = jax.checkpoint_policies.save_only_these_names(
@@ -479,6 +351,7 @@ class Decoder(nn.Module):
             offload_dst="pinned_host",
         )
       elif cfg.remat_policy == "minimal_offloaded":
+        # offload all except context
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=[],
             names_which_can_be_offloaded=[
@@ -539,7 +412,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.GEMMA3:
         return [gemma3.Gemma3DecoderLayerToLinen]
       case DecoderBlockType.GPT3:
-        return [gpt3.Gpt3DecoderLayerToLinen]
+        return [gpt3.Gpt3DecoderLayer]
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlockToLinen] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayerToLinen]
       case DecoderBlockType.QWEN3:
@@ -558,78 +431,30 @@ class Decoder(nn.Module):
         # Default case to handle any unknown decoder block types.
         raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def get_nnx_decoder_layers(self):
-    """Retrieves pure NNX decoder layer classes (without Linen wrappers) for pipeline parallelism.
-
-    Returns:
-        A list containing one or more NNX Module classes for the decoder.
-    """
-    match self.config.decoder_block:
-      case DecoderBlockType.DEFAULT:
-        return None
-      case DecoderBlockType.LLAMA2:
-        return [llama2.LlamaDecoderLayer]
-      case DecoderBlockType.MISTRAL:
-        return [mistral.MistralDecoderLayer] if hasattr(mistral, 'MistralDecoderLayer') else None
-      case DecoderBlockType.MIXTRAL:
-        return [mixtral.MixtralDecoderLayer] if hasattr(mixtral, 'MixtralDecoderLayer') else None
-      case DecoderBlockType.DEEPSEEK:
-        if self.config.use_batch_split_schedule:
-          return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
-        else:
-          return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
-      case DecoderBlockType.GEMMA:
-        return [gemma.GemmaDecoderLayer] if hasattr(gemma, 'GemmaDecoderLayer') else None
-      case DecoderBlockType.GEMMA2:
-        return [gemma2.Gemma2DecoderLayer] if hasattr(gemma2, 'Gemma2DecoderLayer') else None
-      case DecoderBlockType.GEMMA3:
-        return [gemma3.Gemma3DecoderLayer] if hasattr(gemma3, 'Gemma3DecoderLayer') else None
-      case DecoderBlockType.GPT3:
-        return [gpt3.Gpt3DecoderLayer]
-      case DecoderBlockType.GPT_OSS:
-        if self.config.scan_layers:
-          return [gpt_oss.GptOssScannableBlock] if hasattr(gpt_oss, 'GptOssScannableBlock') else None
-        else:
-          return [gpt_oss.GptOssDecoderLayer] if hasattr(gpt_oss, 'GptOssDecoderLayer') else None
-      case DecoderBlockType.QWEN3:
-        return [qwen3.Qwen3DecoderLayer] if hasattr(qwen3, 'Qwen3DecoderLayer') else None
-      case DecoderBlockType.QWEN3_MOE:
-        return [qwen3.Qwen3MoeDecoderLayer] if hasattr(qwen3, 'Qwen3MoeDecoderLayer') else None
-      case DecoderBlockType.QWEN3_NEXT:
-        if self.config.scan_layers:
-          return [qwen3.Qwen3NextScannableBlock] if hasattr(qwen3, 'Qwen3NextScannableBlock') else None
-        else:
-          return [qwen3.Qwen3NextDecoderLayer] if hasattr(qwen3, 'Qwen3NextDecoderLayer') else None
-      case DecoderBlockType.SIMPLE:
-        return [simple_layer.SimpleDecoderLayer]
-      case DecoderBlockType.SIMPLE_MLP:
-        return [simple_layer.SimpleMlpDecoderLayer]
-      case DecoderBlockType.LLAMA4:
-        if self.config.scan_layers:
-          return [llama4.Llama4ScannableBlock] if hasattr(llama4, 'Llama4ScannableBlock') else None
-        else:
-          return [llama4.Llama4DecoderLayer] if hasattr(llama4, 'Llama4DecoderLayer') else None
-      case _:
-        return None
-
   def set_remat_policy(self, block_layers, policy):
     """Set remat policy"""
     RemattedBlockLayers = []
     for block_layer in block_layers:
       if self.config.parameter_memory_host_offload:
+        # Define parameter movement with mesh-based sharding
         def move_to_device(variables):
           """Move parameters to device with proper sharding."""
+
           def map_fn(path, value):
+            max_logging.log(f"models.py: Moving parameter {path} to device")
             return jax.device_put(value, max_utils.device_space())
+
           return jax.tree_util.tree_map_with_path(map_fn, variables)
 
+        # Transform layer class before remat
         block_layer = nn.map_variables(block_layer, ["params"], move_to_device, mutable=True)
 
+      # Apply remat policy to layer
       layer = nn.remat(
           block_layer,
           prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
           policy=policy,
-          static_argnums=(4, 5),
+          static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
       )
       RemattedBlockLayers.append(layer)
     return RemattedBlockLayers
@@ -685,38 +510,17 @@ class Decoder(nn.Module):
         config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs  # pytype: disable=wrong-keyword-args
     )
 
-  def get_pipeline_stage_module(self, decoder_blocks, use_nnx=False):
-    """get pipeline stage module
-
-    Args:
-      decoder_blocks: List of decoder layer classes (either Linen or NNX)
-      use_nnx: If True, decoder_blocks are NNX classes and should be passed to Pipeline
-               without instantiation. Pipeline will handle NNX instantiation with proper rngs.
-    """
+  def get_pipeline_stage_module(self, decoder_blocks):
+    """get pipeline stage module"""
 
     def get_layer_to_pipeline(blocks, cfg):
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-        return blocks[1]
+        return blocks[1]  # return the sparse block
       else:
         return blocks[0]
 
     cfg = self.config
     base_stage = get_layer_to_pipeline(decoder_blocks, cfg)
-
-    if use_nnx:
-      if cfg.num_layers_per_pipeline_stage == 1:
-        return base_stage
-      else:
-        return lambda config, mesh, model_mode, rngs, quant=None: SequentialNNXWrapper(
-            decoder_layer_class=base_stage,
-            num_decoder_layers=cfg.num_layers_per_pipeline_stage,
-            config=config,
-            mesh=mesh,
-            model_mode=model_mode,
-            rngs=rngs,
-            quant=quant
-        )
-
     if cfg.set_remat_policy_on_layers_per_stage:
       policy = self.get_remat_policy()
       base_stage = self.set_remat_policy([base_stage], policy)[0]
@@ -759,6 +563,7 @@ class Decoder(nn.Module):
 
     y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
+    # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
       if cfg.model_name in [
           "gemma3-4b",
@@ -793,7 +598,7 @@ class Decoder(nn.Module):
           name="position_embedder",
           config=cfg,
           mesh=self.mesh,
-      )(decoder_positions.astype("int32"), model_mode=model_mode)
+      )(decoder_positions, model_mode=model_mode)
     return y
 
   @nn.compact
@@ -839,7 +644,9 @@ class Decoder(nn.Module):
           ),
       )
 
+    # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
+      # Use the transpose of embedding matrix for logit transform.
       if isinstance(shared_embedding, nnx.Module):
         embedding_table = shared_embedding.embedding.value
       else:
@@ -850,6 +657,7 @@ class Decoder(nn.Module):
       logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config, out_sharding)
 
       if self.config.normalize_embedding_logits:
+        # Correctly normalize pre-softmax logits for this shared case.
         logits = logits / jnp.sqrt(y.shape[-1])
       if cfg.final_logits_soft_cap:
         logits = logits / cfg.final_logits_soft_cap
@@ -911,6 +719,7 @@ class Decoder(nn.Module):
 
     policy = self.get_remat_policy()
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
+    # scan does not support kwargs in layer call, passing broadcast_args as positional arg
     broadcast_args = (
         decoder_segment_ids,
         decoder_positions,
@@ -923,7 +732,7 @@ class Decoder(nn.Module):
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
         )
       else:
-        partition_spec = None
+        partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
         assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
         dense_layer = RemattedBlockLayers[0]
@@ -931,6 +740,7 @@ class Decoder(nn.Module):
         num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
         num_moe_layers_outside_pp = num_moe_layers - self.config.pipeline_parallel_layers
         logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
+        # We chose not to pipeline the dense layers, only sparse for SPMD.
         with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
           y, _ = self.scan_decoder_layers(
               cfg,
@@ -952,7 +762,7 @@ class Decoder(nn.Module):
                 model_mode=model_mode,
             )(y, *broadcast_args)
         y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
-      else:
+      else:  # Not DeepSeek
         y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
@@ -1040,6 +850,7 @@ class Decoder(nn.Module):
           layer_prefixes = ["dense_layers", "moe_layers"]
           num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
           num_layers_list = [cfg.first_num_dense_layers, num_moe_layers]
+          # Iterate over the two layer groups (dense and MoE) and apply layer transformation
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
               kv_cache = kv_caches[index] if kv_caches is not None else None
@@ -1065,6 +876,7 @@ class Decoder(nn.Module):
             layer_kwargs = {}
             layer_call_kwargs = {}
             if cfg.decoder_block == DecoderBlockType.GEMMA3:
+              # Gemma3 uses both global and sliding window attention depending on the layer index.
               layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
               layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
             if cfg.decoder_block == DecoderBlockType.LLAMA4:
@@ -1098,14 +910,19 @@ class Decoder(nn.Module):
 
     assert isinstance(y, jax.Array)
 
+    # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     hidden_state = y
 
+    # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
+    # Instead, we keep track on the hidden states, which has smaller size compared to full logits
     if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow("intermediates", "hidden_states", hidden_state)
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
+    # The API of the Decoder is now a tuple, providing both the main output
+    # and the raw hidden state needed for auxiliary tasks.
     return logits, hidden_state, kv_caches
 
   def _apply_gemma3_scanned_blocks(
@@ -1125,6 +942,7 @@ class Decoder(nn.Module):
     cfg = self.config
     mesh = self.mesh
 
+    # Define the repeating pattern length and calculate how many full blocks to scan
     attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
     scan_length = cfg.num_decoder_layers // attention_pattern_length
 
@@ -1134,6 +952,7 @@ class Decoder(nn.Module):
     layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
     layer_kwargs = {"num_of_layers": attention_pattern_length}
 
+    # Apply the main scan over the full blocks
     if scan_length > 0:
       broadcast_args = (
           decoder_segment_ids,
@@ -1152,8 +971,10 @@ class Decoder(nn.Module):
           **layer_kwargs,
       )(y, *broadcast_args, **layer_call_kwargs)
 
+    # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
     if num_remaining_layers > 0:
+      # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
       rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
       layer = RemattedGemma3Block(
           config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
