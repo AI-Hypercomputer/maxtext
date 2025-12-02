@@ -21,5 +21,5 @@
 
 tutorials/first_run.md
 tutorials/pretraining.md
-tutorials/posttraining.md
+tutorials/post_training_index.md
 ```
