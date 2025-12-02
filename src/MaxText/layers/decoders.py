@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""""Module for decoder layers."""
+"""Module for decoder layers"""
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -34,6 +34,7 @@ from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.inference import page_manager
 from MaxText.layers import linears
+from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
 from MaxText import maxtext_utils
@@ -472,7 +473,6 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
-        DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
@@ -481,6 +481,10 @@ class Decoder(nn.Module):
       return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
+    elif self.config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+      return functools.partial(
+          normalizations.Qwen3NextRMSNormLinen, num_features=num_features, shard_mode=self.config.shard_mode
+      )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -884,29 +888,56 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
-            if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
-              layer_kwargs = {"layer_idx": lyr}
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
-            kv_cache = kv_caches[lyr] if kv_caches is not None else None
-            y, kv_cache = layer(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-                previous_chunk=previous_chunk,
-                page_state=page_state,
-                slot=slot,
-                kv_cache=kv_cache,
-                attention_metadata=attention_metadata,
-                **layer_call_kwargs,
-            )
-            if kv_caches is not None and kv_cache is not None:
-              kv_caches[lyr] = kv_cache
+            if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+              layer_kwargs = {"layer_idx": lyr}
+              cache_dict = kv_caches[lyr] if kv_caches is not None else None
+              qwen3_cache = qwen3.Qwen3NextLayerCache(
+                  kv_cache=cache_dict.get('kv_cache') if cache_dict else None,
+                  conv_state=cache_dict.get('conv_state') if cache_dict else None,
+                  recurrent_state=cache_dict.get('recurrent_state') if cache_dict else None,
+              )
+              y, updated_qwen3_cache = layer(
+                  y,
+                  decoder_segment_ids,
+                  decoder_positions,
+                  deterministic,
+                  model_mode,
+                  previous_chunk=previous_chunk,
+                  page_state=page_state,
+                  slot=slot,
+                  cache=qwen3_cache,
+                  attention_metadata=attention_metadata,
+                  **layer_call_kwargs,
+              )
+              if kv_caches is not None and updated_qwen3_cache is not None:
+                kv_caches[lyr] = {
+                    "kv_cache": updated_qwen3_cache.kv_cache,
+                    "conv_state": updated_qwen3_cache.conv_state,
+                    "recurrent_state": updated_qwen3_cache.recurrent_state,
+                }
+            else:
+              kv_cache = kv_caches[lyr] if kv_caches is not None else None
+              y, kv_cache = layer(
+                  y,
+                  decoder_segment_ids,
+                  decoder_positions,
+                  deterministic,
+                  model_mode,
+                  previous_chunk=previous_chunk,
+                  page_state=page_state,
+                  slot=slot,
+                  kv_cache=kv_cache,
+                  attention_metadata=attention_metadata,
+                  **layer_call_kwargs,
+              )
+              if kv_caches is not None and kv_cache is not None:
+                kv_caches[lyr] = kv_cache
+
 
     assert isinstance(y, jax.Array)
 

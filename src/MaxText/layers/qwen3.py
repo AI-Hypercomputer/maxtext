@@ -43,6 +43,30 @@ from MaxText.layers.attentions import Attention
 from MaxText.layers.linears import DenseGeneral, MlpBlock
 from MaxText.layers.moe import RoutedMoE
 
+import flax.struct
+from typing import Optional, Dict, Any
+import jax.numpy as jnp
+
+Array = jnp.ndarray
+
+@flax.struct.dataclass
+class Qwen3NextLayerCache:
+  """Cache for a single Qwen3NextDecoderLayer.
+
+  Attributes:
+    kv_cache: Standard Key/Value cache for full attention.
+      Optional, used only in Qwen3NextFullAttention layers.
+      Should contain 'k' and 'v' arrays.
+    conv_state: State for the causal convolution in GatedDeltaNet.
+      Optional, used only in Qwen3NextGatedDeltaNet layers.
+      Shape: (B, conv_dim, conv_kernel_size - 1)
+    recurrent_state: State for the gated delta rule in GatedDeltaNet.
+      Optional, used only in Qwen3NextGatedDeltaNet layers.
+      Shape: (B, H_v, D_k, D_v)
+  """
+  kv_cache: Optional[Dict[str, Array]] = None
+  conv_state: Optional[Array] = None
+  recurrent_state: Optional[Array] = None
 
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
@@ -281,6 +305,119 @@ def jax_chunk_gated_delta_rule(
 
   return core_attn_out, final_state if output_final_state else None
 
+def jax_causal_conv1d_update(x, conv_state, weight, bias):
+  """Single-step update for causal 1D convolution.
+
+  Args:
+    x: Input tensor. Shape (B, C, 1)
+    conv_state: Previous convolution state. Shape (B, C, K-1)
+    weight: Convolution weights. Shape (C, 1, K)
+    bias: Convolution bias. Shape (C,) or None
+
+  Returns:
+    out: Output tensor. Shape (B, C, 1)
+    new_conv_state: Updated convolution state. Shape (B, C, K-1)
+  """
+  # hidden_states_new: (B, C, K)
+  hidden_states_new = jnp.concatenate([conv_state, x], axis=-1)
+
+  # Update conv_state for the next step
+  # new_conv_state: (B, C, K-1)
+  new_conv_state = hidden_states_new[:, :, 1:]
+
+  # Perform convolution. nnx.Conv/lax.conv_general_dilated expects (N, C, W) input.
+  # We have (B, C, K). The kernel is (O, I, W), which is (C, 1, K) for depthwise.
+  # To use lax.conv_general_dilated, kernel should be (C, 1, K)
+  # Input (B, C, K), Kernel (C, 1, K), feature_group_count=C
+  out = jax.lax.conv_general_dilated(
+      lhs=hidden_states_new,
+      rhs=weight,
+      window_strides=(1,),
+      padding='VALID',
+      feature_group_count=x.shape[1], # Depthwise
+      dimension_numbers=('NCH', 'OIW', 'NCH')
+  )
+
+  if bias is not None:
+    out = out + bias.reshape(1, -1, 1)
+
+  out = jax.nn.silu(out)
+
+  return out, new_conv_state
+
+
+def jax_recurrent_gated_delta_rule(
+    query: Array,
+    key: Array,
+    value: Array,
+    g: Array,
+    beta: Array,
+    initial_state: Array,
+    use_qk_norm_in_gdn: bool = False,
+) -> tuple[Array, Array]:
+  """Single-step update for the Gated Delta Rule.
+
+  Args:
+    query: Query tensor for the current step. Shape (B, H_v, D_k)
+    key: Key tensor for the current step. Shape (B, H_v, D_k)
+    value: Value tensor for the current step. Shape (B, H_v, D_v)
+    g: Log decay tensor for the current step. Shape (B, H_v)
+    beta: Gate tensor for the current step. Shape (B, H_v)
+    initial_state: Previous recurrent state. Shape (B, H_v, D_k, D_v)
+    use_qk_norm_in_gdn: Whether to apply L2 normalization to query and key.
+
+  Returns:
+    core_attn_out: Output tensor for the current step. Shape (B, H_v, D_v)
+    new_recurrent_state: Updated recurrent state. Shape (B, H_v, D_k, D_v)
+  """
+  initial_dtype = query.dtype
+  if use_qk_norm_in_gdn:
+    query = l2norm(query, dim=-1, eps=1e-6)
+    key = l2norm(key, dim=-1, eps=1e-6)
+
+  query = query.astype(jnp.float32)
+  key = key.astype(jnp.float32)
+  value = value.astype(jnp.float32)
+  beta = beta.astype(jnp.float32)
+  g = g.astype(jnp.float32)
+  initial_state = initial_state.astype(jnp.float32)
+
+  scale = jax.lax.rsqrt(jnp.array(query.shape[-1]).astype(jnp.float32))
+  query = query * scale
+
+  # g_t: (B, H_v, 1, 1)
+  g_t = jnp.exp(g)[:, :, jnp.newaxis, jnp.newaxis]
+  # beta_t: (B, H_v, 1)
+  beta_t = beta[:, :, jnp.newaxis]
+
+  # Update recurrent state with decay
+  # last_recurrent_state: (B, H_v, D_k, D_v)
+  last_recurrent_state = initial_state * g_t
+
+  # key_t: (B, H_v, D_k, 1)
+  key_t = key[:, :, :, jnp.newaxis]
+  # value_t: (B, H_v, D_v)
+
+  # Calculate memory component
+  # kv_mem: (B, H_v, D_v)
+  kv_mem = jnp.sum(last_recurrent_state * key_t, axis=-2)
+
+  # Calculate delta
+  # delta: (B, H_v, D_v)
+  delta = (value - kv_mem) * beta_t
+
+  # Update recurrent state with new information
+  # new_recurrent_state: (B, H_v, D_k, D_v)
+  new_recurrent_state = last_recurrent_state + key_t * delta[:, :, jnp.newaxis, :]
+
+  # Calculate output
+  # query_t: (B, H_v, 1, D_k)
+  query_t = query[:, :, jnp.newaxis, :]
+  # core_attn_out: (B, H_v, D_v)
+  core_attn_out = jnp.sum(new_recurrent_state * query_t, axis=-1)
+
+  return core_attn_out.astype(initial_dtype), new_recurrent_state.astype(initial_dtype)
+
 
 class Qwen3NextGatedDeltaNet(nnx.Module):
   """
@@ -324,6 +461,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     self.value_dim = self.head_v_dim * self.num_v_heads
     conv_dim = self.key_dim * 2 + self.value_dim
     conv_kernel_size = cfg.gdn_conv_kernel_dim
+    self.v_heads_per_k_head = self.num_v_heads // self.num_k_heads
 
     # Submodule instantiations
     self.in_proj_qkvz = linears.DenseGeneral(
@@ -380,34 +518,107 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         rngs=rngs,
     )
 
-  def __call__(self, hidden_states: Array) -> Array:
+  def __call__(
+      self, 
+      hidden_states: Array, 
+      cache: Optional[Qwen3NextLayerCache] = None, 
+      model_mode: str = "train"
+  ) -> tuple[Array, Optional[Qwen3NextLayerCache]]:
+    # hidden_states: (B, S, E)
     cfg = self.config
+    batch, seq_len, _ = hidden_states.shape
 
     # =========================================================================
     # STEP A: Input Projections
     # =========================================================================
-    # hidden_states shape: (B, S, E)
-    # qkvz shape: (B, S, 2*key_dim + 2*value_dim)
+    # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
     qkvz = self.in_proj_qkvz(hidden_states)
-    # ba shape: (B, S, 2*H_v)
+    # ba: (B, S, 2 * H_v)
     ba = self.in_proj_ba(hidden_states)
 
-    # q shape: (B, S, key_dim), k shape: (B, S, key_dim), v shape: (B, S, value_dim), z shape: (B, S, value_dim)
-    q, k, v, z = jnp.split(qkvz, [self.key_dim, 2 * self.key_dim, 2 * self.key_dim + self.value_dim], axis=-1)
-    # b shape: (B, S, H_v), a shape: (B, S, H_v)
-    b, a = jnp.split(ba, [self.num_v_heads], axis=-1)
+    # QKVZ Reshaping and Splitting
+    # Per-K_head group dim: 2 * D_k + 2 * D_v * V_per_K
+    new_shape_qkvz = (
+        batch,
+        seq_len,
+        self.num_k_heads,  # H_k
+        2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
+    )
+    # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
+    mixed_qkvz = qkvz.reshape(new_shape_qkvz)
+
+    split_indices_qkvz = [
+        self.head_k_dim,  # D_k
+        2 * self.head_k_dim,  # 2 * D_k
+        2 * self.head_k_dim + (self.v_heads_per_k_head * self.head_v_dim),  # 2 * D_k + V_per_K * D_v
+    ]
+    # query: (B, S, H_k, D_k)
+    # key: (B, S, H_k, D_k)
+    # value_raw: (B, S, H_k, V_per_K * D_v)
+    # z_raw: (B, S, H_k, V_per_K * D_v)
+    query, key, value_raw, z_raw = jnp.split(mixed_qkvz, split_indices_qkvz, axis=3)
+
+    # value: (B, S, H_v, D_v)
+    value = value_raw.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+    # z: (B, S, H_v, D_v)
+    z = z_raw.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+
+    # BA Reshaping and Splitting
+    new_shape_ba = (
+        batch,
+        seq_len,
+        self.num_k_heads,  # H_k
+        2 * self.v_heads_per_k_head,
+    )
+    # mixed_ba: (B, S, H_k, 2 * V_per_K)
+    mixed_ba = ba.reshape(new_shape_ba)
+
+    split_indices_ba = [self.v_heads_per_k_head]
+    # b_raw: (B, S, H_k, V_per_K)
+    # a_raw: (B, S, H_k, V_per_K)
+    b_raw, a_raw = jnp.split(mixed_ba, split_indices_ba, axis=3)
+
+    # b: (B, S, H_v)
+    b = b_raw.reshape(batch, seq_len, self.num_v_heads)
+    # a: (B, S, H_v)
+    a = a_raw.reshape(batch, seq_len, self.num_v_heads)
+
+    # Flatten head dimensions for concatenation before conv
+    # q: (B, S, K_dim)
+    q = query.reshape(batch, seq_len, -1)
+    # k: (B, S, K_dim)
+    k = key.reshape(batch, seq_len, -1)
+    # v: (B, S, V_dim)
+    v = value.reshape(batch, seq_len, -1)
 
     # =========================================================================
     # STEP B: 1D Convolution
     # =========================================================================
-    # qkv shape: (B, S, conv_dim)
+    # conv_dim = 2 * K_dim + V_dim
+    # qkv: (B, S, 2 * K_dim + V_dim)
     qkv = jnp.concatenate([q, k, v], axis=-1)
 
-    # TODO(parambole): Implement caching logic for conv_state and recurrent_state
+    new_conv_state = None
+    if model_mode == 'decode' and cache is not None and cache.conv_state is not None:
+      qkv_transposed = jnp.transpose(qkv, (0, 2, 1)) # (B, C, S=1)
+      conv_out_transposed, new_conv_state = jax_causal_conv1d_update(
+        qkv_transposed, cache.conv_state, self.conv1d.kernel.value, self.conv1d.bias.value if self.conv1d.use_bias else None
+      )
+      conv_out = jnp.transpose(conv_out_transposed, (0, 2, 1)) # (B, S=1, C)
+    else:
+      # Input to conv_layer should be (B, S, C)
+      # qkv_conv shape: (B, S, conv_dim)
+      conv_out = self.conv1d(qkv)
+      if model_mode == 'prefill' and cache is not None:
+        # Extract the last K-1 elements from qkv to populate the conv_state for the first decode step
+        kernel_size = self.conv1d.kernel_size[0]
+        # qkv shape is (B, S, C)
+        # We need the last K-1 time steps of the input to the conv
+        new_conv_state = qkv[:, seq_len - (kernel_size - 1):, :]
+        # Transpose to (B, C, K-1)
+        new_conv_state = jnp.transpose(new_conv_state, (0, 2, 1))
 
-    # Input to conv_layer should be (B, S, C)
-    # qkv_conv shape: (B, S, conv_dim)
-    qkv_conv = jax.nn.silu(self.conv1d(qkv).astype(jnp.float32)).astype(cfg.dtype)
+    qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(cfg.dtype)
     # q_conv shape: (B, S, key_dim), k_conv shape: (B, S, key_dim), v_conv shape: (B, S, value_dim)
     q_conv, k_conv, v_conv = jnp.split(qkv_conv, [self.key_dim, 2 * self.key_dim], axis=-1)
 
@@ -441,22 +652,41 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # This case might occur if key/query heads are more than value heads.
       pass  # No repeating needed for query/key in this case
 
-    # TODO(parambole): Pass and update cache state for jax_chunk_gated_delta_rule
-    # core_attn_out shape: (B, S, H_v, D_v)
-    core_attn_out, _ = jax_chunk_gated_delta_rule(
-        query, key, value, g, beta, chunk_size=cfg.gdn_chunk_size, use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn
-    )
+    new_recurrent_state = None
+    if model_mode == 'decode' and cache is not None and cache.recurrent_state is not None:
+      # Squeeze seq_len dimension for single-step update
+      q_t = query[:, 0] # (B, H_v, D_k)
+      k_t = key[:, 0] # (B, H_v, D_k)
+      v_t = value[:, 0] # (B, H_v, D_v)
+      g_t = g[:, 0] # (B, H_v)
+      beta_t = beta[:, 0] # (B, H_v)
+      core_attn_out, new_recurrent_state = jax_recurrent_gated_delta_rule(
+        q_t, k_t, v_t, g_t, beta_t, cache.recurrent_state
+      )
+      core_attn_out = jnp.expand_dims(core_attn_out, axis=1) # (B, S=1, H_v, D_v)
+    else:
+      initial_state = cache.recurrent_state if cache else None
+      core_attn_out, final_recurrent_state = jax_chunk_gated_delta_rule(
+        query, 
+        key, 
+        value, 
+        g, 
+        beta, 
+        chunk_size=cfg.gdn_chunk_size, 
+        initial_state=initial_state, 
+        use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn
+      )
+      if model_mode == 'prefill' and cache is not None:
+        new_recurrent_state = final_recurrent_state
 
     # =========================================================================
     # STEP D: Final Output Stage
     # =========================================================================
+
     # The normalization and gating is applied per-head on the value dimension.
-    # We first reshape the `z` tensor to match the multi-head structure of `core_attn_out`.
-    # z shape from (B, S, value_dim) -> (B, S, H_v, D_v)
-    z_reshaped = z.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
 
     # Apply the norm and gate. Output shape: (B, S, H_v, D_v)
-    gated_output_reshaped = self.norm(core_attn_out, z_reshaped)
+    gated_output_reshaped = self.norm(core_attn_out, z)
 
     # Reshape back to a single feature dimension for the final projection.
     # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
@@ -465,7 +695,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output)
 
-    return output
+    updated_cache = None
+    if cache:
+      updated_cache = cache.replace(
+        conv_state=new_conv_state if new_conv_state is not None else cache.conv_state,
+        recurrent_state=new_recurrent_state if new_recurrent_state is not None else cache.recurrent_state
+      )
+    return output, updated_cache
 
 
 class Qwen3NextFullAttention(nnx.Module):
@@ -506,9 +742,9 @@ class Qwen3NextFullAttention(nnx.Module):
     cfg = self.config
 
     scaling_factor = self.config.head_dim**-0.5
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
-    inputs_q_shape = (cfg.per_device_batch_size, cfg.max_target_length, cfg.emb_dim)
-    inputs_kv_shape = (cfg.per_device_batch_size, cfg.max_target_length, cfg.emb_dim)
     self.attention = attentions.Attention(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
@@ -517,8 +753,8 @@ class Qwen3NextFullAttention(nnx.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
-        inputs_q_shape=inputs_q_shape,
-        inputs_kv_shape=inputs_kv_shape,
+        inputs_q_shape=dummy_inputs_shape,
+        inputs_kv_shape=dummy_inputs_shape,
         out_axis_names=(BATCH, LENGTH_NO_EXP, EMBED),
         mesh=self.mesh,
         dtype=cfg.dtype,
@@ -540,20 +776,25 @@ class Qwen3NextFullAttention(nnx.Module):
       decoder_positions: None | jnp.ndarray,
       deterministic: bool,
       model_mode: str,
-      kv_cache: None | jnp.ndarray = None,
+      cache: Optional[Qwen3NextLayerCache] = None,
       attention_metadata: None | dict[str, Any] = None,
   ):
-    attention_output, kv_cache = self.attention(
+    attention_output, new_kv_cache = self.attention(
         inputs_q=inputs,
         inputs_kv=inputs,
         inputs_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
-        kv_cache=kv_cache,
+        kv_cache=cache.kv_cache if cache else None,
         attention_metadata=attention_metadata,
     )
-    return attention_output, kv_cache
+    if cache:
+      updated_cache = cache.replace(kv_cache=new_kv_cache)
+      return attention_output, updated_cache
+    else:
+      return attention_output, None
+
 
 
 class Qwen3NextSparseMoeBlock(nnx.Module):
@@ -708,7 +949,7 @@ class Qwen3NextScannableBlock(nnx.Module):
     # Loop over the number of sub-layers that make up one repeating pattern.
     for i in range(cfg.inhomogeneous_layer_cycle_interval):
       layer = getattr(self, f"layer_{i}")
-      x = layer(
+      x, _ = layer(
           x,
           decoder_segment_ids,
           decoder_positions,
@@ -718,7 +959,6 @@ class Qwen3NextScannableBlock(nnx.Module):
           page_state,
           slot,
       )
-
     # The output of the block is the carry for the next scan iteration.
     return x, None
 
@@ -799,7 +1039,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
-      kv_cache: None | jnp.ndarray = None,
+      cache: Optional[Qwen3NextLayerCache] = None,
       attention_metadata: None | dict[str, Any] = None,
   ):
     residual = inputs
@@ -808,19 +1048,24 @@ class Qwen3NextDecoderLayer(nnx.Module):
     hidden_states = self.input_layernorm(inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
+    updated_cache = None
     # Conditionally apply either the Linear Attention or Full Attention block.
     if isinstance(self.attention, Qwen3NextFullAttention):
-      attention_output, kv_cache = cast(Qwen3NextFullAttention, self.attention)(
+      attention_output, updated_cache = cast(Qwen3NextFullAttention, self.attention)(
           hidden_states,
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
-          kv_cache=kv_cache,
+          cache=cache,
           attention_metadata=attention_metadata,
       )
     elif isinstance(self.attention, Qwen3NextGatedDeltaNet):
-      attention_output = cast(Qwen3NextGatedDeltaNet, self.attention)(hidden_states)
+      attention_output, updated_cache = cast(Qwen3NextGatedDeltaNet, self.attention)(
+          hidden_states,
+          cache=cache,
+          model_mode=model_mode
+      )
     else:
       raise TypeError(f"Unexpected type for self.attention: {type(self.attention)}")
 
@@ -850,7 +1095,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
         self.activation_axis_names,
     )
 
-    return layer_output, kv_cache
+    return layer_output, updated_cache
 
 
 # -----------------------------------------
