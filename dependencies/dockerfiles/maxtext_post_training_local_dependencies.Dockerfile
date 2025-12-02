@@ -17,7 +17,7 @@ FROM ${BASEIMAGE}
 ARG MODE
 ENV MODE=$MODE
 
-RUN echo "Installing GRPO dependencies (vLLM, tpu-inference) with MODE=${MODE}"
+RUN echo "Installing Post-Training dependencies (tunix, vLLM, tpu-inference) with MODE=${MODE}"
 RUN pip uninstall -y jax jaxlib libtpu
 
 RUN pip install aiohttp==3.12.15
