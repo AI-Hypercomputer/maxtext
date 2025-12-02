@@ -22,6 +22,7 @@ and sets up the model configuration for a Pathways-based run.
 import os
 
 import args_helper as helper
+from benchmarks.benchmark_utils import get_xpk_path
 
 from benchmarks import maxtext_trillium_model_configs as model_configs
 from benchmarks import maxtext_xpk_runner as mxr
@@ -37,7 +38,7 @@ def main():
       device_type="v6e-256",
   )
 
-  xpk_path = "xpk"
+  xpk_path = get_xpk_path()
 
   # Handle command line arguments using args_helper
   should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=xpk_path)
