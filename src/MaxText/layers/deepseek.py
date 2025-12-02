@@ -99,7 +99,7 @@ def self_attention_with_norm(
       model_mode=model_mode,
   )
 
-  attention_lnx = attention_layer(
+  attention_lnx, _ = attention_layer(
       lnx,
       lnx,
       decoder_positions,
@@ -127,7 +127,7 @@ def self_attention_with_norm(
   return hidden_states, intermediate_inputs
 
 
-def post_process(cfg, layer_output, sow):
+def post_process(cfg, layer_output, sow, kv_cache=None):
   """postprocessing."""
   if cfg.record_internal_nn_metrics:
     sow("intermediates", "activation_mean", jnp.mean(layer_output))
@@ -141,7 +141,7 @@ def post_process(cfg, layer_output, sow):
   if cfg.scan_layers:
     return layer_output, None
   else:
-    return layer_output
+    return layer_output, kv_cache
 
 
 class DeepSeekDenseLayer(nn.Module):
@@ -163,6 +163,8 @@ class DeepSeekDenseLayer(nn.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     cfg = self.config
     if model_mode == MODEL_MODE_PREFILL:
@@ -230,6 +232,8 @@ class DeepSeekMoELayer(nn.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     cfg = self.config
     if model_mode == MODEL_MODE_PREFILL:

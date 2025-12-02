@@ -20,7 +20,7 @@ import jax.numpy as jnp
 from jax.experimental import checkify
 
 from MaxText import exceptions
-from MaxText import max_logging
+from MaxText.sharding import get_input_data_sharding, maybe_shard_with_name
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     maybe_record_goodput,
@@ -42,6 +42,7 @@ class DataLoader:
     else:
       self.data_iterator = data_iterator
     self.last_batch = None
+    self.input_data_shardings = get_input_data_sharding(config, mesh)
 
   def update_data_iterator(self):
     """Update to the next data iterator in the list, if applicable."""
@@ -49,8 +50,8 @@ class DataLoader:
       self.data_iterator_index = (self.data_iterator_index + 1) % len(self.data_iterator_list)
       self.data_iterator = self.data_iterator_list[self.data_iterator_index]
 
-  def load_next_batch(self):
-    """Loads the next batch. Can keep reusing the same batch for performance reasons."""
+  def load_next_batch_pre_sharding(self):
+    """Loads the next batch w/o sharding. Can keep reusing the same batch for performance reasons."""
     with maybe_record_goodput(self.goodput_recorder, GoodputEvent.DATA_LOADING):
       try:
         if self.config.reuse_example_batch and self.last_batch:
@@ -66,6 +67,14 @@ class DataLoader:
         else:
           raise exceptions.StopTraining(f"`load_next_batch()` failed with {type(e)} exception: ({e}).")
     return self.last_batch
+
+  def load_next_batch(self, *args, **kwargs):
+    """Loads the next batch with sharding hint"""
+    return maybe_shard_with_name(
+        self.load_next_batch_pre_sharding(),
+        self.input_data_shardings,
+        self.config.shard_mode,
+    )
 
   def check_example_batch(self):
     if self.config.max_checkify:
@@ -90,22 +99,11 @@ class RampUpDataLoader(DataLoader):
     # Call parent constructor
     super().__init__(config, mesh, data_iterator, goodput_recorder)
 
-    # Get ramp-up parameters from config, with safe defaults
-    self.global_batch_size_end = config.global_batch_size_to_load
-    self.global_batch_size_start = config.global_batch_size_to_load_start
-    self.increment = config.global_batch_size_to_load_increment
-    self.samples_per_increment = config.rampup_samples_per_increment_to_load
-
-    # Check if ramp-up is active
-    self.rampup_active = self.global_batch_size_start < self.global_batch_size_end
-
-    # State for tracking ramp-up
-    self.accum_samples = 0
-    self.global_batch_size_current = self.global_batch_size_start
+    self.rampup_active = True
     self.batch_buffer = None
     self.buffer_start = 0
 
-  def load_next_batch(self):
+  def load_next_batch(self, *args, rampup_manager=None, **kwargs):
     """
     Updates the batch size based on the schedule and then loads the next
     batch using the parent method.
@@ -114,68 +112,56 @@ class RampUpDataLoader(DataLoader):
     if not self.rampup_active:
       return super().load_next_batch()
 
-    # If in rampup phase, we use batch buffer to save data
-    # Check if it's time to increment the batch size
-    is_time_to_increment = self.accum_samples >= self.samples_per_increment
+    slice_start, slice_end = self.buffer_start, self.buffer_start + rampup_manager.global_batch_size_current
 
-    if is_time_to_increment:
-      # Update current batch size and refresh accumulate samples
-      max_logging.log(
-          f"Global batch size increments from {self.global_batch_size_current}"
-          f" to {self.global_batch_size_current + self.increment}"
-      )
-      self.global_batch_size_current += self.increment
-      self.accum_samples = 0
-      self.rampup_active = self.global_batch_size_current < self.global_batch_size_end
-
-    self.accum_samples += self.global_batch_size_current
-    slice_start, slice_end = self.buffer_start, self.buffer_start + self.global_batch_size_current
-
-    # Load new batch if batch_buffer is None or slice overpast the buffer end
+    # Load new batch if batch_buffer is None
     if self.batch_buffer is None:
-      self.batch_buffer = super().load_next_batch()
-      slice_start, slice_end = 0, self.global_batch_size_current
+      self.batch_buffer = super().load_next_batch_pre_sharding()
+      slice_start, slice_end = 0, rampup_manager.global_batch_size_current
 
-    if slice_end > self.global_batch_size_end:
-      old_buffer, self.batch_buffer = self.batch_buffer, super().load_next_batch()
+    # If the slice end overpast batch end we collect new batch data
+    if slice_end > rampup_manager.global_batch_size_end:
+      old_buffer, self.batch_buffer = self.batch_buffer, super().load_next_batch_pre_sharding()
 
       # self.global_batch_size_end is batch_buffer size
       def _slice_and_concat(old_data, new_data):
         sliced_old_data = jax.lax.dynamic_slice_in_dim(
             old_data,
             slice_start,
-            self.global_batch_size_end - slice_start,
+            rampup_manager.global_batch_size_end - slice_start,
             axis=0,
         )
         sliced_new_data = jax.lax.dynamic_slice_in_dim(
             new_data,
             0,
-            slice_end - self.global_batch_size_end,
+            slice_end - rampup_manager.global_batch_size_end,
             axis=0,
         )
         return jax.lax.concatenate((sliced_old_data, sliced_new_data), dimension=0)
 
-      self.buffer_start = slice_end - self.global_batch_size_end
-      return jax.tree.map(_slice_and_concat, old_buffer, self.batch_buffer)
+      self.buffer_start = slice_end - rampup_manager.global_batch_size_end
+      output = jax.tree.map(_slice_and_concat, old_buffer, self.batch_buffer)
     else:
 
       def _slice(data):
         return jax.lax.dynamic_slice_in_dim(
             data,
             slice_start,
-            self.global_batch_size_current,
+            rampup_manager.global_batch_size_current,
             axis=0,
         )
 
       self.buffer_start = slice_end
-      return jax.tree.map(_slice, self.batch_buffer)
+      output = jax.tree.map(_slice, self.batch_buffer)
+    self.rampup_active = rampup_manager.update()
+    return maybe_shard_with_name(output, self.input_data_shardings, self.config.shard_mode)
 
 
-def create_dataloader(config, mesh, data_iterator, goodput_recorder):
+def create_dataloader(config, mesh, data_iterator, goodput_recorder, rampup_manager):
   """
   Create the dataloader
   """
-  if config.enable_rampup_batch_size:
+  if rampup_manager and rampup_manager.num_accum_samples < config.global_rampup_samples:
     return RampUpDataLoader(config, mesh, data_iterator, goodput_recorder)
   else:
     return DataLoader(config, mesh, data_iterator, goodput_recorder)

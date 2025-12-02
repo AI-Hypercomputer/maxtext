@@ -669,10 +669,10 @@ def get_quantization_rule(config: Config):
           weight_qtype=jnp.float8_e4m3fn,
           act_qtype=jnp.float8_e4m3fn,
           bwd_qtype=jnp.float8_e5m2,
-          weight_calibration_method=config.quantization_calibration_method,
-          act_calibration_method=config.quantization_calibration_method,
-          bwd_calibration_method=config.quantization_calibration_method,
-          op_names=("dot_general", "gmm"),
+          weight_calibration_method=config.weight_quantization_calibration_method,
+          act_calibration_method=config.act_quantization_calibration_method,
+          bwd_calibration_method=config.bwd_quantization_calibration_method,
+          op_names=("dot_general", "gmm", "ragged_dot"),
       )
     case "fp8_gpu":
       return qwix.QtRule(

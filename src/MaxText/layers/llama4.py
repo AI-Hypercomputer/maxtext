@@ -448,6 +448,8 @@ class Llama4DecoderLayer(nnx.Module):
       slot: None | int = None,
       page_state: None | page_manager.PageState = None,
       previous_chunk=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     cfg = self.config
     assert cfg.num_experts >= 1, "Expected the Llama4 config to have `num_experts > 1`."
@@ -459,7 +461,7 @@ class Llama4DecoderLayer(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
     # Self-attention block
-    attention_lnx = self.self_attention(
+    attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
@@ -469,6 +471,8 @@ class Llama4DecoderLayer(nnx.Module):
         slot=slot,
         page_state=page_state,
         previous_chunk=previous_chunk,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
@@ -499,7 +503,7 @@ class Llama4DecoderLayer(nnx.Module):
     if cfg.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
 
 Llama4DecoderLayerToLinen = nnx_wrappers.to_linen_class(
@@ -654,7 +658,7 @@ class Llama4VisionEncoderLayer(nnx.Module):
   ):
     residual = hidden_states
     hidden_states = self.input_layer_norm(hidden_states)
-    hidden_states = self.self_attention_vision(
+    hidden_states, _ = self.self_attention_vision(
         inputs_q=hidden_states,
         inputs_kv=hidden_states,
         deterministic=deterministic,

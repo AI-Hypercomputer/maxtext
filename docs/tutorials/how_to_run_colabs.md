@@ -59,7 +59,7 @@ Upload notebooks or mount your GitHub repo
 2. Try:
    - `sft_qwen3_demo.ipynb`
    - `sft_llama3_demo.ipynb`
-   - `grpo_llama3_demo.ipynb`
+   - `rl_llama3_demo.ipynb` (GRPO/GSPO training)
 
 
 > ⚡ **Tip:** If Colab disconnects, re-enable TPU and re-run setup cells. Save checkpoints to GCS or Drive.
@@ -125,22 +125,25 @@ Use the link for Jupyter Lab as a link for "Connect to a local runtime" in Colla
 - **`sft_qwen3_demo.ipynb`** → Qwen3-0.6B SFT training and evaluation on [OpenAI's GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k)
 - **`sft_llama3_demo.ipynb`** → Llama3.1-8B SFT training on [Hugging Face ultrachat_200k dataset](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k)
 
-### GRPO Training
+### Reinforcement Learning (GRPO/GSPO) Training
 
-- **`grpo_llama3_1_8b_demo.ipynb`** → GRPO training on math dataset (Colab/notebook)
+- **`rl_llama3_demo.ipynb`** → GRPO/GSPO training on math dataset (Colab/notebook)
 
-#### GRPO Colab Usage
+#### GRPO/GSPO Colab Usage
 
-For interactive GRPO training in Google Colab or Jupyter:
+For interactive GRPO or GSPO training in Google Colab or Jupyter:
 
-1. **Open** `src/MaxText/examples/grpo_llama3_1_8b_demo.ipynb`
+1. **Open** `src/MaxText/examples/rl_llama3_demo.ipynb`
 2. **Enable TPU runtime** (Runtime → Change runtime type → TPU)
-3. **Run cells** to train Llama3.1-8B with GRPO on GSM8K dataset
+3. **Set `LOSS_ALGO`** to `"grpo"` for GRPO or `"gspo-token"` for GSPO
+4. **Run cells** to train Llama3.1-8B with GRPO or GSPO on GSM8K dataset
 
-#### GRPO Python Script Usage - local runs
+> **Note:** GRPO (Group Relative Policy Optimization) optimizes each token, while GSPO (Group Sequence Policy Optimization) optimizes the whole sequence. The difference is controlled by the `loss_algo` parameter.
+
+#### GRPO/GSPO Python Script Usage - local runs
 
 ```bash
-# Llama3.1-8B-Instruct
+# Llama3.1-8B-Instruct with GRPO (default)
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   --model_name=llama3.1-8b \
   --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
@@ -148,6 +151,16 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   --run_name=$WORKLOAD \
   --base_output_directory=$OUTPUT_PATH \
   --hf_access_token=$HF_TOKEN
+
+# Llama3.1-8B-Instruct with GSPO
+python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+  --model_name=llama3.1-8b \
+  --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint/0/items \
+  --run_name=$WORKLOAD \
+  --base_output_directory=$OUTPUT_PATH \
+  --hf_access_token=$HF_TOKEN \
+  --loss_algo=gspo-token
 
 # Qwen2.5-7B
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
@@ -158,7 +171,10 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   --base_output_directory=$OUTPUT_PATH \
   --hf_access_token=$HF_TOKEN
 ```
-#### GRPO Python Script Usage - cluster runs
+
+> **Note:** To use GSPO instead of GRPO, add `--loss_algo=gspo-token` to the command. GRPO optimizes each token, while GSPO optimizes the whole sequence.
+
+#### GRPO/GSPO Python Script Usage - cluster runs
 
 For running on clusters, please refer to `maxtext/docs/tutorials/grpo_with_pathways.md`
 

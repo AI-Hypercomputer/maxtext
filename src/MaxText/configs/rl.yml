@@ -21,6 +21,8 @@ base_config: "base.yml"
 trainer_devices_fraction: 0.5
 sampler_devices_fraction: 0.5
 chips_per_vm: 4  # depends on hardware, for v5p this is 4
+num_trainer_slices: -1
+num_samplers_slices: -1
 
 # ====== Reproducibility ======
 data_shuffle_seed: 42
@@ -95,7 +97,7 @@ train_fraction: 1.0
 
 eval_interval: 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 
-num_epochs: 1  # can potentially train for more epochs
+num_epoch: 1  # can potentially train for more epochs
 
 learning_rate: 3e-6
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.

@@ -16,7 +16,7 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import cast
+from typing import Any, cast
 
 import jax
 import jax.nn
@@ -540,16 +540,20 @@ class Qwen3NextFullAttention(nnx.Module):
       decoder_positions: None | jnp.ndarray,
       deterministic: bool,
       model_mode: str,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
-    attention_output = self.attention(
+    attention_output, kv_cache = self.attention(
         inputs_q=inputs,
         inputs_kv=inputs,
         inputs_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
-    return attention_output
+    return attention_output, kv_cache
 
 
 class Qwen3NextSparseMoeBlock(nnx.Module):
@@ -795,6 +799,8 @@ class Qwen3NextDecoderLayer(nnx.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
     residual = inputs
 
@@ -804,12 +810,14 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # Conditionally apply either the Linear Attention or Full Attention block.
     if isinstance(self.attention, Qwen3NextFullAttention):
-      attention_output = cast(Qwen3NextFullAttention, self.attention)(
+      attention_output, kv_cache = cast(Qwen3NextFullAttention, self.attention)(
           hidden_states,
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
       )
     elif isinstance(self.attention, Qwen3NextGatedDeltaNet):
       attention_output = cast(Qwen3NextGatedDeltaNet, self.attention)(hidden_states)
@@ -842,7 +850,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
         self.activation_axis_names,
     )
 
-    return layer_output
+    return layer_output, kv_cache
 
 
 # -----------------------------------------
@@ -922,6 +930,8 @@ class AttentionWithNorm(nnx.Module):
       decoder_positions: None | jnp.ndarray,
       deterministic: bool,
       model_mode: str,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
     """Applies self-attention with pre and post-layer normalization."""
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
@@ -930,13 +940,15 @@ class AttentionWithNorm(nnx.Module):
     lnx = self.pre_self_attention_layer_norm(inputs)
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
     # Self attention
-    attention_lnx = self.self_attention(
+    attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     # Residual connection after attention
@@ -944,7 +956,7 @@ class AttentionWithNorm(nnx.Module):
     # Post attention norm
     hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
-    return hidden_states, intermediate_inputs
+    return hidden_states, intermediate_inputs, kv_cache
 
 
 # -----------------------------------------
@@ -986,9 +998,17 @@ class Qwen3DecoderLayer(AttentionWithNorm):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
-    hidden_states, intermediate_inputs = self.apply_attention_with_norm(
-        inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode
+    hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
+        inputs,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
 
     mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
@@ -1000,7 +1020,7 @@ class Qwen3DecoderLayer(AttentionWithNorm):
     if self.config.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
 
 # -----------------------------------------
@@ -1042,9 +1062,17 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
-    hidden_states, intermediate_inputs = self.apply_attention_with_norm(
-        inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode
+    hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
+        inputs,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
 
     mlp_lnx, load_balance_loss = self.moe_block(hidden_states)
@@ -1058,7 +1086,7 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
     if self.config.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
 
 class Qwen3OmniMoeVisionPatchMerger(nnx.Module):
@@ -1391,7 +1419,7 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
         "height": height,
         "width": width,
     }
-    output = self.attn(
+    output, _ = self.attn(
         inputs_q=hidden_states,
         inputs_kv=hidden_states,
         deterministic=deterministic,

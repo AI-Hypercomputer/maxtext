@@ -24,10 +24,10 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 from jax.sharding import Mesh
-from jax.experimental import mesh_utils
 
 from MaxText import maxtext_utils
 from MaxText import pyconfig
+from MaxText.maxtext_utils import create_device_mesh
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.sft import hooks
 
@@ -40,13 +40,10 @@ class SFTHooksTest(unittest.TestCase):
         [os.path.join(MAXTEXT_PKG_DIR, "sft.hooks"), os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
         per_device_batch_size=1,
         run_name="test",
-        mesh_axes=["data"],
-        logical_axis_rules=[["batch", "data"]],
         base_output_directory="test",
         skip_jax_distributed_system=True,
     )
-    mesh_shape_1d = (len(jax.devices()),)
-    self.mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
+    self.mesh = Mesh(create_device_mesh(self.config), self.config.mesh_axes)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(self.config)
 
     self.training_hooks = hooks.SFTTrainingHooks(self.config, self.mesh, learning_rate_schedule, goodput_recorder=None)

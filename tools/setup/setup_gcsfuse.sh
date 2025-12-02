@@ -42,12 +42,24 @@ if [[ -d ${MOUNT_PATH} ]]; then
 fi
 
 mkdir -p $MOUNT_PATH
+MAXTEXT_VERSION=$(pip list | grep '^MaxText ' | awk '{print $2}')
+if [[ -z "$MAXTEXT_VERSION" ]]; then
+  MAXTEXT_VERSION="unknown"
+fi
+GRAIN_VERSION=$(pip list | grep '^grain ' | awk '{print $2}')
+if [[ -z "$GRAIN_VERSION" ]]; then
+  GRAIN_VERSION="unknown"
+fi
+
+APP_NAME="maxtext-gcsfuse/maxtext-$MAXTEXT_VERSION/grain-$GRAIN_VERSION"
+
+
 
 # see https://cloud.google.com/storage/docs/gcsfuse-cli for all configurable options of gcsfuse CLI
 TIMESTAMP=$(date +%Y%m%d-%H%M)
 gcsfuse -o ro --implicit-dirs --log-severity=debug \
         --type-cache-max-size-mb=-1 --stat-cache-max-size-mb=-1 --kernel-list-cache-ttl-secs=-1 --metadata-cache-ttl-secs=-1 \
-        --log-file=$HOME/gcsfuse_$TIMESTAMP.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
+        --log-file=$HOME/gcsfuse_$TIMESTAMP.json --app-name=$APP_NAME "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
 
 # Use ls to prefill the metadata cache: https://cloud.google.com/storage/docs/cloud-storage-fuse/performance#improve-first-time-reads
 if [[ ! -z ${FILE_PATH} ]] ; then 

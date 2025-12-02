@@ -889,6 +889,51 @@ class Attention(nnx.Module):
     )
     return [prefill_kv_cache, ar_kv_cache]
 
+  def forward_serve_vllm(
+      self,
+      query: Array,
+      key: Array,
+      value: Array,
+      rpa_kv_cache: list[Array] | None = None,
+      rpa_metadata: dict[str, Any] | None = None,
+  ) -> tuple[list[Array], Array]:
+    """Forward function for vLLM serving with RPA attention."""
+    try:
+      # pylint: disable=import-outside-toplevel
+      # pytype: disable=import-error
+      from tpu_inference.layers.jax.attention_interface import sharded_ragged_paged_attention as rpa_ops
+    except ImportError as e:
+      raise ImportError(
+          "vLLM RPA attention ops require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
+      ) from e
+
+    if self.config.attention_sink:
+      raise NotImplementedError("Attention sink is not supported in MaxText vLLM RPA attention.")
+
+    if rpa_kv_cache is None or rpa_metadata is None:
+      raise ValueError("kv_cache and attention_metadata must be provided when using vLLM.")
+
+    query = query.reshape(-1, query.shape[2], query.shape[3])
+    key = key.reshape(-1, key.shape[2], key.shape[3])
+    value = value.reshape(-1, value.shape[2], value.shape[3])
+
+    attention_chunk_size = self.config.chunk_attn_window_size if self.config.chunk_attn_window_size > 0 else None
+    q_scale, k_scale, v_scale = None, None, None
+
+    md = rpa_metadata
+
+    output, kv_cache = rpa_ops(1.0, self.mesh, attention_chunk_size, q_scale, k_scale, v_scale)(
+        query,
+        key,
+        value,
+        rpa_kv_cache,
+        md.seq_lens,
+        md.block_tables,
+        md.query_start_loc,
+        md.request_distribution,
+    )
+    return kv_cache, output
+
   def __call__(
       self,
       inputs_q: Array,
@@ -904,6 +949,8 @@ class Attention(nnx.Module):
       page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Any = None,
       rope_kwargs: dict | None = None,
+      kv_cache: Optional[Array] = None,
+      attention_metadata: Optional[dict[str, Any]] = None,
   ):
     """Applies Attention on the input data.
 
@@ -931,6 +978,8 @@ class Attention(nnx.Module):
       slot: The batch slot index for paged attention.
       page_state: The current state of the paged attention manager.
       bidirectional_mask: A mask for bidirectional attention, used in multimodal models.
+      kv_cache: Optional KV cache input, used when invoking from vLLM.
+      attention_metadata: Optional mapping to store attention metadata, used when invoking from vLLM.
 
     Returns:
       output of shape `[batch, length, q_features]`.
@@ -1026,6 +1075,15 @@ class Attention(nnx.Module):
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
+
+    elif self.config.attention == "vllm_rpa" and model_mode != MODEL_MODE_TRAIN:
+      batch, seq_len, num_heads, head_dim = query.shape
+      updated_kv, attn_out = self.forward_serve_vllm(
+          query, key, value, rpa_kv_cache=kv_cache, rpa_metadata=attention_metadata
+      )
+      out = attn_out.reshape(batch, seq_len, num_heads, head_dim)
+      kv_cache = updated_kv
+
     else:
       cached_values = [None, None]
       if model_mode != MODEL_MODE_TRAIN:
@@ -1054,4 +1112,4 @@ class Attention(nnx.Module):
       out = self._maybe_shard_with_logical(out, self.decode_out_axis_names)
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
-    return out
+    return out, kv_cache

@@ -65,6 +65,8 @@ def train_loop(config, recorder, state=None):
       mesh,
       learning_rate_schedule,
       data_iterator,
+      _,
+      _,
       eval_data_iterator,
       state,
   ) = setup_train_loop(config, recorder)

@@ -189,6 +189,8 @@ class Gemma3DecoderLayer(nnx.Module):
       page_state=None,
       slot=None,
       bidirectional_mask=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
@@ -198,7 +200,7 @@ class Gemma3DecoderLayer(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
     # Self-attention block
-    attention_lnx = self.self_attention(
+    attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
@@ -206,6 +208,8 @@ class Gemma3DecoderLayer(nnx.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         bidirectional_mask=bidirectional_mask,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
     if cfg.use_post_attn_norm:
       attention_lnx = self.post_self_attention_norm(attention_lnx)
@@ -240,7 +244,7 @@ class Gemma3DecoderLayer(nnx.Module):
     if cfg.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
 
 Gemma3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
@@ -378,7 +382,7 @@ class MlpBlockViT(nnx.Module):
         matmul_precision=self.config.matmul_precision,
         rngs=self.rngs,
     )
-    self.Dropout_0 = nnx.Dropout(rate=self.config.dropout_rate)
+    self.Dropout_0 = Dropout(rate=self.config.dropout_rate, rngs=self.rngs)
     self.Dense_1 = DenseGeneral(
         in_features_shape=self.config.intermediate_size_for_vit,
         out_features_shape=self.config.hidden_size_for_vit,
@@ -448,12 +452,12 @@ class Encoder1DBlock(nnx.Module):
         config=self.config,
         rngs=self.rngs,
     )
-    self.Dropout_0 = nnx.Dropout(self.config.dropout_rate, rngs=self.rngs)
+    self.Dropout_0 = Dropout(rate=self.config.dropout_rate, rngs=self.rngs)
 
   def __call__(self, x: jax.Array, deterministic: bool = False) -> jax.Array:
     y = self.LayerNorm_0(x)
 
-    y = self.MultiHeadDotProductAttention_0(inputs_q=y, inputs_kv=y, deterministic=deterministic)
+    y, _ = self.MultiHeadDotProductAttention_0(inputs_q=y, inputs_kv=y, deterministic=deterministic)
     y = self.Dropout_0(y, deterministic=deterministic)
     x = x + y
 
@@ -630,7 +634,7 @@ class Gemma3VisionEncoderLayer(nnx.Module):
         width=self.config.hidden_size_for_vit,
         dtype=self.config.dtype_mm,
     )
-    self.Dropout_0 = nnx.Dropout(self.config.dropout_rate, rngs=self.rngs)
+    self.Dropout_0 = Dropout(rate=self.config.dropout_rate, rngs=self.rngs)
     self.Transformer = Encoder(
         config=self.config,
         mesh=self.mesh,

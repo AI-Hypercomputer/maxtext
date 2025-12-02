@@ -52,6 +52,12 @@ RUN if [ "$DEVICE" = "tpu" ]; then \
         python3 -m pip install 'google-tunix>=0.1.2'; \
   fi
 
+# Temporarily downgrade to JAX=0.7.2 for GPU images
+RUN if [ "$DEVICE" = "gpu" ]; then \
+      python3 -m pip install -U "jax[cuda12]==0.8.1"; \
+      python3 -m pip install -U "transformer-engine-cu12" "transformer-engine-jax" "transformer-engine"; \
+    fi
+
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
 

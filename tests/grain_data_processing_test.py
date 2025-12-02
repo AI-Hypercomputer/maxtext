@@ -19,6 +19,7 @@ import sys
 import os.path
 import tempfile
 import unittest
+import json
 
 import jax
 from jax.sharding import Mesh
@@ -114,8 +115,8 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProc
     temp_dir = tempfile.gettempdir()
     # We use the same dataset for testing, but you can use different datasets by changing the file patterns.
     grain_train_files = [
-        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*,0.3",
-        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*,0.7",
+        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0000*,0.3",
+        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0001*,0.7",
     ]
     grain_train_files = ";".join(grain_train_files)
     self.config = pyconfig.initialize(
@@ -128,6 +129,44 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProc
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
         grain_train_files=grain_train_files,
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
+        enable_checkpointing=False,
+    )
+    self.mesh_shape_1d = (len(jax.devices()),)
+    self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
+    self.process_indices = input_pipeline_interface.get_process_loading_real_data(
+        self.config.data_sharding,
+        self.config.global_batch_size_to_load,
+        self.config.global_batch_size_to_train_on,
+        self.config.max_target_length,
+        self.mesh,
+    )
+    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+
+
+class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessingTest):
+
+  def setUp(self):
+    super().setUp()
+    temp_dir = tempfile.gettempdir()
+    mixture_config = {
+        "ds1": {"path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0000*", "weight": 0.3},
+        "ds2": {"path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0001*", "weight": 0.7},
+    }
+    self.mixture_config_path = os.path.join(temp_dir, "mixture_config.json")
+    with open(self.mixture_config_path, "w", encoding="utf-8") as f:
+      json.dump(mixture_config, f)
+
+    self.config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        per_device_batch_size=1,
+        run_name="test",
+        mesh_axes=["data"],
+        logical_axis_rules=[["batch", "data"]],
+        data_sharding=["data"],
+        base_output_directory="gs://max-experiments/",
+        dataset_type="grain",
+        grain_train_mixture_config_path=self.mixture_config_path,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
         enable_checkpointing=False,
     )

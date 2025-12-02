@@ -15,19 +15,26 @@
 """Smoke test for MoE using ragged_dot."""
 
 import os
-import unittest
-from tempfile import gettempdir
+import tempfile
 
 from absl.testing import absltest
+from absl.testing import parameterized
+from MaxText import globals as maxtext_globals
+from MaxText import train
 
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.train import main as train_main
+train_main = train.main
+MAXTEXT_PKG_DIR = maxtext_globals.MAXTEXT_PKG_DIR
+gettempdir = tempfile.gettempdir
 
 
-class Train(unittest.TestCase):
+class Train(parameterized.TestCase):
   """Smoke test for MoE using ragged_dot in G3 only."""
 
-  def test_tiny_config(self):
+  @parameterized.named_parameters(
+      {"testcase_name": "not_quantized", "quantization": ""},
+      {"testcase_name": "fp8_full", "quantization": "fp8_full"},
+  )
+  def test_tiny_config(self, quantization: str):
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     train_main(
@@ -52,6 +59,8 @@ class Train(unittest.TestCase):
             "sparse_matmul=True",
             # Enable ragged_dot.
             "megablox=False",
+            f'quantization="{quantization}"',
+            "use_qwix_quantization=True",
             "per_device_batch_size=2",
             "max_target_length=1024",
             "dataset_type=synthetic",

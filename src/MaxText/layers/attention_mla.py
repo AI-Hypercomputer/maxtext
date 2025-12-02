@@ -672,7 +672,9 @@ class MLA(Attention):
       page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Optional[Any] = None,
       rope_kwargs: dict | None = None,
-  ) -> Array:
+      kv_cache: Optional[Array] = None,
+      attention_metadata: Optional[dict[str, Any]] = None,
+  ) -> tuple[Array, Optional[Array]]:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 
     Args:
@@ -686,6 +688,8 @@ class MLA(Attention):
       slot: The batch slot index for paged attention.
       page_state: The current state of the paged attention manager.
       bidirectional_mask: A mask for bidirectional attention, used in multimodal models.
+      kv_cache: Optional key-value cache used when serving models with vLLM.
+      attention_metadata: Optional attention-related metadata used when serving models with vLLM.
 
     Returns:
       A tensor of shape [batch, length, embed_dim] containing the
@@ -726,4 +730,4 @@ class MLA(Attention):
 
     out = self.out_projection(out)
     out = checkpoint_name(out, "out_proj")
-    return out
+    return out, kv_cache

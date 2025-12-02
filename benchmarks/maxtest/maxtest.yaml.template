@@ -42,7 +42,7 @@ spec:
           _sigterm() (kill -SIGTERM $! 2>/dev/null;);
           trap _sigterm SIGTERM;
 
-          (export TPU_STDERR_LOG_LEVEL=0 && export TPU_MIN_LOG_LEVEL=0 && export TF_CPP_MIN_LOG_LEVEL=0 && python3 -m benchmarks.benchmark_runner healthscan --device_type=$TPU_ACCELERATOR_TYPE --base_output_directory=gke-healthscan-output --num_steps=5) & PID=$1;
+          (export TPU_STDERR_LOG_LEVEL=0 && export TPU_MIN_LOG_LEVEL=0 && export TF_CPP_MIN_LOG_LEVEL=0 && echo LIBTPU_INIT_ARGS='$LIBTPU_ARGS' && export LIBTPU_INIT_ARGS='$LIBTPU_ARGS' && python3 -m benchmarks.benchmark_runner healthscan --device_type=$TPU_ACCELERATOR_TYPE --base_output_directory=gke-healthscan-output --num_steps=5) & PID=$1;
 
           while kill -0 $PID 2>/dev/null;
               do sleep 5;
