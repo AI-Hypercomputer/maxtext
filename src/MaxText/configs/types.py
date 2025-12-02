@@ -525,6 +525,7 @@ class MoEGeneral(BaseModel):
   num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
   load_balance_loss_weight: NonNegativeFloat = Field(0.01, description="Weight for the load balancing auxiliary loss.")
+  expert_balance: bool = Field(False, description="Whether to use expert balancing.")
   use_custom_sort_vjp: bool = Field(True, description="Whether to use a custom sort VJP for sparse matmul ops.")
   use_ring_of_experts: bool = Field(
       False, description="Whether to use Ring of Experts for sparse matmul expert parallelism."
