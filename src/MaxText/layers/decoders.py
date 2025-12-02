@@ -627,7 +627,6 @@ class Decoder(nnx.Module):
           return partial_wrapper
     rngs = nnx.Rngs(0)
     nnx.split_rngs(rngs, splits=length)
-    breakpoint()
     layers = nnx.vmap(
         create_real_nnx_layer, # lambda r: decoder_layer(cfg, mesh=mesh, quant=self.quant, rngs=r),
         in_axes=0, out_axes=0
@@ -671,7 +670,7 @@ class Decoder(nnx.Module):
             return rematted_step(carry, params_slice)        # --- Execute jax.lax.scan ---
         
         final_carry, (new_params_stack, stacked_layer_outs) = jax.lax.scan(
-            scan_body,
+            rematted_step,
             init=x_in,
             xs=params_stack,
             length=length
@@ -681,7 +680,6 @@ class Decoder(nnx.Module):
         nnx.update(layers, new_params_stack)
 
         return final_carry, stacked_layer_outs
-    breakpoint()
     """
     init_carry = kwargs.pop('inputs')
     scan_fn = jax.lax.scan(
