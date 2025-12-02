@@ -599,29 +599,7 @@ class Decoder(nnx.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
   def scan_decoder_layers(self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, **kwargs):
-    """scan decoder layers, calls `flax.linen.transforms.scan`"""
-    # initializing = self.is_mutable_collection("params")
-    # params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
-    cache_spec = 0
-    """
-    scan_fn = nn.scan(
-        decoder_layer,
-        variable_axes={
-            "params": params_spec,
-            "cache": cache_spec,
-            "intermediates": 0,
-            "aqt": 0,
-            "_overwrite_with_gradient": 0,
-        },
-        split_rngs={
-            "params": True,
-            "dropout": cfg.enable_dropout,
-        },
-        in_axes=in_axes_tuple,
-        length=length,
-        metadata_params={nn.PARTITION_NAME: metadata_axis_name},
-    )
-    """
+
     def create_real_nnx_layer(r):
       # A. Call the factory.
       # This returns the 'CheckpointToLinenPartial' object seen in the error.
@@ -657,11 +635,6 @@ class Decoder(nnx.Module):
     
     graph_def, params_stack = nnx.split(layers)
 
-    # 2. Capture Configuration (The Partial Behavior)
-    # The 'kwargs' here (config, mesh, model_mode) are static context for the layers.
-    # We capture them in this scope so the inner function can use them.
-    static_context = kwargs
-
     # 3. Define the Runner (The "Partial")
     # FIX: Accept *args to handle positional arguments (segment_ids, positions, etc.)
     def scan_runner(x_in, *args, **dynamic_kwargs):
@@ -692,16 +665,11 @@ class Decoder(nnx.Module):
             # Return (next_carry, scan_output)
             return new_carry, (new_params_slice, layer_out)
 
-        # --- Apply Gradient Checkpointing ---
-        # This is the magic line that fixes OOM. 
-        # It tells JAX: "Don't save activations; recompute them during backprop."
-        # prevent_cse=True is standard for remat to ensure re-computation happens.
         rematted_step = jax.checkpoint(forward_single_step, prevent_cse=True)
 
-        # --- The Scan Body ---
         def scan_body(carry, params_slice):
-            # Call the checkpointed function
             return rematted_step(carry, params_slice)        # --- Execute jax.lax.scan ---
+        
         final_carry, (new_params_stack, stacked_layer_outs) = jax.lax.scan(
             scan_body,
             init=x_in,
