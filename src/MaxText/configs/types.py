@@ -860,6 +860,7 @@ class GrainDataset(BaseModel):
   grain_per_worker_buffer_size_eval: int = Field(
       1, description="Buffer size for each worker for Grain data loading during evaluation."
   )
+  grain_ram_budget_mb: int = Field(1024, description="RAM budget (MB) for auto-tuning worker count.")
   grain_num_threads: int = Field(16, description="Number of threads for Grain ReadOptions during training.")
   grain_prefetch_buffer_size: int = Field(500, description="Prefetch buffer size for Grain ReadOptions during training.")
   grain_num_threads_eval: int = Field(16, description="Number of threads for Grain ReadOptions during evaluation.")
