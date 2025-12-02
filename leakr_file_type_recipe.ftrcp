@@ -1,0 +1,14 @@
+# proto-file: testing/leakr/proto/leakr.proto
+# proto-message: FileTypeRecipe
+
+name: "MaxText Filetype Recipes"
+desc: "Copybara leakr checks, used by copy.bara.sky."
+
+file_config:{
+  name: "local_datasets directory"
+  desc: "Do not scan files in the local_datasets directory."
+  pattern: ".*\\/local_datasets\\/.*"
+  compression: COMPRESSION_NONE
+  scan_mode: SCAN_SKIP
+  file_group: FG_PLAIN_TEXT_GENERIC
+}
