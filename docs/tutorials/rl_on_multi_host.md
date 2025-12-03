@@ -14,33 +14,28 @@
  limitations under the License.
  -->
 
-# Try GRPO with Pathways!
+# Reinforcement Learning on Multi-Host TPUs
 
-This tutorial demonstrates step-by-step instructions for setting up the environment and then training the Llama3.1 70B-IT model on the GSM8K math reasoning benchmark using Group Relative Policy Optimization (GRPO). GRPO can enhance your model's problem-solving skills on mathematical word problems, coding problems, etc.
+This tutorial demonstrates step-by-step instructions for setting up the environment and then training the Llama3.1 70B-IT model on the GSM8K math reasoning dataset using [Pathways for orchestration](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro) on multi-host TPU-VMs such as `v5p-128`.
 
-GRPO is an RL algorithm designed to enhance the reasoning abilities of LLMs. It is a variant of Proximal Policy Optimization (PPO) that reduces memory usage by eliminating the need for a separate value function model. GRPO works by generating multiple responses for a given prompt, evaluating these responses using a reward model, and then calculating a relative advantage based on the group's performance to update the policy.
+We utilize two RL algorithms, implemented via the Tunix library, to enhance the model's reasoning capabilities:
 
-GSPO support
-Some workloads prefer Group Sequence Policy Optimization (GSPO), which uses the same infrastructure but a different loss.  
-To switch from GRPO to GSPO, add the following override when invoking `train_rl.py` (or when building the `pyconfig` argv list):  
-```
-loss_algo=gspo-token
-```
-No other changes are required—the rest of this tutorial applies equally to GSPO runs.
+* **Group Relative Policy Optimization (GRPO)**: GRPO is an RL algorithm designed to enhance the reasoning abilities of LLMs. It is a variant of Proximal Policy Optimization (PPO) that reduces memory usage by eliminating the need for a separate value function model. GRPO works by generating multiple responses for a given prompt, evaluating these responses using a reward model, and then calculating a relative advantage based on the group's performance to update the policy.
 
-We use Tunix as the library for GRPO. 
-And we use vLLM as the library for efficient model inference and generation.
+* **Group Sequence Policy Optimization (GSPO)**: GSPO is an RL algorithm that improves training efficiency and performance of LLMs by using sequence-level importance ratios and operations. GSPO defines the importance ratio based on sequence likelihood and performs sequence-level clipping, rewarding, and optimization.
 
-Furthermore, we use Pathways for [orchestration](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro). Using Pathways, you can also run GRPO in a disaggregated mode where the trainer and the samplers are running on separate mesh. Try out the following recipe `v5p-64`. You can submit jobs to a Pathways enabled GKE cluster.
+For efficient model inference and response generation during this process, we rely on the vLLM library.
+
+Let's get started!
 
 ## Create virtual environment and Install MaxText dependencies
 Follow instructions in [Install MaxText](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/install_maxtext.md), but 
 recommend creating the virtual environment outside the `maxtext` directory.
 
 
-## Setup the following environment variables before running GRPO
+## Setup environment variables
 
-Setup following environment variables before running GRPO
+Setup following environment variables:
 
 ```bash
 # -- Model configuration --
@@ -118,9 +113,11 @@ bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training PO
 bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME}
 ```
 
-## Submit your jobs
+## Submit your RL workload via Pathways
 
-Please create a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster), and you can submit the `train_rl.py` script via [XPK](https://github.com/AI-Hypercomputer/xpk)
+Please create a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster), and you can submit the `train_rl.py` script via [XPK](https://github.com/AI-Hypercomputer/xpk).
+
+### Submit GRPO workload
 ```
 xpk workload create-pathways --workload $WORKLOAD \
 --docker-image <path/to/gcr.io> --cluster $TPU_CLUSTER \
@@ -134,4 +131,21 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   hf_access_token=$HF_TOKEN"
+```
+
+### Submit GSPO workload
+```
+xpk workload create-pathways --workload $WORKLOAD \
+--docker-image <path/to/gcr.io> --cluster $TPU_CLUSTER \
+--tpu-type=$TPU_TYPE --num-slices=1  --zone=$ZONE \
+--project=$PROJECT_ID --priority=high \
+--command "TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
+python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+  model_name=${MODEL} \
+  tokenizer_path=${TOKENIZER} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH} \
+  run_name=${RUN_NAME} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+  hf_access_token=$HF_TOKEN \
+  loss_algo=gspo-token"
 ```

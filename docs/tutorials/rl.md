@@ -14,19 +14,22 @@
  limitations under the License.
  -->
 
-# Try GRPO
+# Reinforcement Learning on Single-Host TPUs
 
-This tutorial demonstrates step-by-step instructions for setting up the environment and then training the Llama3.1 8B-IT model on the GSM8K math reasoning benchmark using Group Relative Policy Optimization (GRPO). GRPO can enhance your model's problem-solving skills on mathematical word problems, coding problems, etc.
+This tutorial demonstrates step-by-step instructions for setting up the environment and then training the Llama3.1 8B-IT model on the GSM8K math reasoning dataset using a single host TPU-VM such as `v6e-8/v5p-8`.
 
-GRPO is an RL algorithm designed to enhance the reasoning abilities of LLMs. It is a variant of Proximal Policy Optimization (PPO) that reduces memory usage by eliminating the need for a separate value function model. GRPO works by generating multiple responses for a given prompt, evaluating these responses using a reward model, and then calculating a relative advantage based on the group's performance to update the policy.
+We utilize two RL algorithms, implemented via the Tunix library, to enhance the model's reasoning capabilities:
 
-We use Tunix as the library for GRPO/GSPO.
-And we use vLLM as the library for efficient model inference and generation.
+* **Group Relative Policy Optimization (GRPO)**: GRPO is an RL algorithm designed to enhance the reasoning abilities of LLMs. It is a variant of Proximal Policy Optimization (PPO) that reduces memory usage by eliminating the need for a separate value function model. GRPO works by generating multiple responses for a given prompt, evaluating these responses using a reward model, and then calculating a relative advantage based on the group's performance to update the policy.
 
-In this tutorial we use a single host TPUVM such as `v6e-8/v5p-8`. Let's get started!
+* **Group Sequence Policy Optimization (GSPO)**: GSPO is an RL algorithm that improves training efficiency and performance of LLMs by using sequence-level importance ratios and operations. GSPO defines the importance ratio based on sequence likelihood and performs sequence-level clipping, rewarding, and optimization.
+
+For efficient model inference and response generation during this process, we rely on the vLLM library.
+
+Let's get started!
 
 ## Create virtual environment and Install MaxText dependencies
-If you have already completed the [MaxText installation](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/install_maxtext.md), you can skip to the next section for vLLM and tpu-inference installations. Otherwise, please install MaxText using the following commands before proceeding.
+If you have already completed the [MaxText installation](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/install_maxtext.md), you can skip to the next section for post-training dependencies installations. Otherwise, please install `MaxText` using the following commands before proceeding.
 ```bash
 # 1. Clone the repository
 git clone https://github.com/AI-Hypercomputer/maxtext.git
@@ -43,7 +46,7 @@ uv pip install -e .[tpu] --resolution=lowest
 install_maxtext_github_deps
 ```
 
-## vLLM and tpu-inference installations
+## Install Post-Training dependencies
 
 ### From PyPI releases
 
@@ -58,11 +61,11 @@ Primarily, it installs `vllm-tpu` which is [vllm](https://github.com/vllm-projec
 
 ### From Github
 
-You can also locally git clone [tunix](https://github.com/google/tunix) and install using the instructions [here](https://github.com/google/tunix?tab=readme-ov-file#installation). Similarly install [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) from source following the instructions [here](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/#install-from-source)
+You can also locally git clone [tunix](https://github.com/google/tunix) and install using the instructions [here](https://github.com/google/tunix?tab=readme-ov-file#installation). Similarly install [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) from source following the instructions [here](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/#install-from-source).
 
-## Setup the following environment variables before running GRPO
+## Setup environment variables
 
-Setup following environment variables before running GRPO
+Setup following environment variables before running GRPO/GSPO:
 
 ```bash
 # -- Model configuration --
@@ -82,7 +85,7 @@ export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/0/items
 
 You can convert a Hugging Face checkpoint to MaxText format using the `src/MaxText/utils/ckpt_conversion/to_maxtext.py` script. This is useful if you have a pre-trained model from Hugging Face that you want to use with MaxText.
 
-First, ensure you have the necessary dependencies installed. Then, run the conversion script on a CPU machine. For large models, it is recommended to use the --lazy_load_tensors flag to reduce memory usage during conversion. This command will download the Hugging Face model and convert it to the MaxText format, saving it to the specified GCS bucket.
+First, ensure you have the necessary dependencies installed. Then, run the conversion script on a CPU machine. For large models, it is recommended to use the `--lazy_load_tensors` flag to reduce memory usage during conversion. This command will download the Hugging Face model and convert it to the MaxText format, saving it to the specified GCS bucket.
 
 ```bash
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -108,7 +111,7 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
 
 ## Run GRPO
 
-Finally, run the command
+Run the following command for GRPO:
 
 ```
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
@@ -120,19 +123,16 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   hf_access_token=${HF_TOKEN}
 ```
 
-The overview of the what this run will do is as follows:
+The overview of what this run will do is as follows:
 
 1. We load a policy model and a reference model. Both are copies of `Llama3.1-8b-Instruct`.
 2. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
 3. Train the policy model using GRPO.
-4. Evaluate the policy model's performance on GSM8K math reasoning benchmark after the post-training with GRPO.
-
-GSPO (Group Sequence Policy Optimization)
-MaxText can also run the GSPO variant by setting `loss_algo=gspo-token` when invoking `train_rl.py` (or when constructing the pyconfig argv list). 
+4. Evaluate the policy model's performance on GSM8K math reasoning benchmark after the post-training with GRPO. 
 
 ## Run GSPO
 
-Finally, run the command
+Run the following command for GSPO:
 
 ```
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
@@ -144,4 +144,11 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   hf_access_token=$HF_TOKEN \
   loss_algo=gspo-token
 ```
+
+The overview of what this run will do is as follows:
+
+1. We load a policy model and a reference model. Both are copies of `Llama3.1-8b-Instruct`.
+2. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
+3. Train the policy model using GSPO.
+4. Evaluate the policy model's performance on GSM8K math reasoning benchmark after the post-training with GSPO. 
 

@@ -78,10 +78,9 @@ Check out these getting started guides:
 * Supervised Fine Tuning (SFT)
   * [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/sft.html)
   * [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/sft_on_multi_host.html)
-* Group Relative & Group Sequence Policy Optimization (GRPO & GSPO)
-  * [GRPO on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/grpo.html)
-  * [GRPO on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/grpo_with_pathways.html) 
-  * [GSPO](https://maxtext.readthedocs.io/en/latest/tutorials/grpo.html#run-gspo) (pass `loss_algo=gspo-token` to run GSPO)
+* Reinforcement Learning (RL)
+  * [RL on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/rl.html)
+  * [RL on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/rl_on_multi_host.html)
 
 ### Model library
 

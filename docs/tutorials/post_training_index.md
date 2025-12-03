@@ -18,14 +18,14 @@ MaxText was co-designed with key Google led innovations to provide a unified pos
 
 ## Supported techniques & models
 
-- **SFT (Supervised Fine-Tuning)** [(link)](https://maxtext.readthedocs.io/en/latest/tutorials/sft.html)
-    - Supports all MaxText models
-- **Multimodal SFT** [(link)](https://maxtext.readthedocs.io/en/latest/guides/multimodal.html)
-- **GRPO (Group Relative Policy Optimization)** [(link)](https://maxtext.readthedocs.io/en/latest/tutorials/grpo.html)
-    - Llama 3.1 8B
-    - Llama 3.1 70B
-- **GSPO-token**
-    - Coming soon
+- **SFT (Supervised Fine-Tuning)**
+  * [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/sft.html)
+  * [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/sft_on_multi_host.html)
+- **Multimodal SFT**
+  * [Multimodal Support](https://maxtext.readthedocs.io/en/latest/guides/multimodal.html)
+- **Reinforcement Learning (RL)**
+  * [RL on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/rl.html)
+  * [RL on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/rl_on_multi_host.html)
 
 ## Step by step RL
 
@@ -58,8 +58,8 @@ Start your Post-Training journey through quick experimentation with our [Google 
 
 full_finetuning.md
 how_to_run_colabs.md
-grpo.md
+rl.md
 sft.md
 sft_on_multi_host.md
-grpo_with_pathways.md
+rl_on_multi_host.md
 ```
