@@ -106,7 +106,17 @@ def search_similar_dependency(depend, base_path, project_root):
 
   # llm call
   dep_file_path, dep_comp_name = depend.split("#")
-  module_code, _, embedding = get_code_embedding(base_path + dep_file_path, project_root, dep_comp_name)
+  # Check if the path is already a URL.
+  if dep_file_path.startswith(("http://", "https://")):
+    full_url = dep_file_path
+  elif "github.com" in dep_file_path:
+    # Handle cases where it might be 'github.com/...' without protocol
+    clean_path = dep_file_path.lstrip("/")
+    full_url = f"https://{clean_path}"
+  else:
+    full_url = base_path + dep_file_path
+    
+  module_code, _, embedding = get_code_embedding(full_url, project_root, dep_comp_name)
   if module_code is None:
     return None, None
 
@@ -279,7 +289,7 @@ def load_status(file_path: str) -> Status:
 
 
 # --- Main Component Dependency Analysis ---
-def sort_and_search_dependency(base_path, file_path, module, filter_mode: str = "standard"):
+def sort_and_search_dependency(base_path, file_path, module, filter_mode: str = "standard", project_root=None):
   """
   Analyzes component dependencies starting from an entry module and returns a
   topologically sorted list of all required components and their code.
@@ -300,7 +310,11 @@ def sort_and_search_dependency(base_path, file_path, module, filter_mode: str = 
   if save_dependency_list:
     with open(dependency_list_file, "a", encoding="utf-8"):
       pass
-  project_root = file_path.split(os.path.sep)[0]
+  if project_root is None:
+    project_root = file_path.split(os.path.sep)[0]
+    logger.info("Auto detected project root %s", project_root)
+  else:
+    logger.info("Using project root %s", project_root)
 
   if os.path.exists(progress_status_file):
     (
@@ -325,11 +339,23 @@ def sort_and_search_dependency(base_path, file_path, module, filter_mode: str = 
     jax_dependencies_list = []
   while q:
     relative_file_path, comp_name = q.popleft()
+    if "http" in relative_file_path:
+      logger.info(f"DEBUG: Found URL in queue: {relative_file_path}")
+      pdb.set_trace()
     if "." in comp_name:
       comp_name, sub_comp_name = comp_name.split(".")
     else:
       sub_comp_name = None
-    file_url = base_path + relative_file_path
+
+    if relative_file_path.startswith(("http://", "https://")):
+      file_url = relative_file_path
+    elif "github.com" in relative_file_path:
+      # Fix cases like '/github.com/...' which are absolute but lack protocol
+      clean_path = relative_file_path.lstrip("/")
+      file_url = f"https://{clean_path}"
+    else:
+      file_url = base_path + relative_file_path
+      
     comp_id = f"{relative_file_path}#{comp_name}"
 
     if comp_id in processed_components:
@@ -359,6 +385,11 @@ def sort_and_search_dependency(base_path, file_path, module, filter_mode: str = 
     else:
       logger.info("%s. already in file_analysis_cache", comp_id)
 
+    if file_analysis_cache[comp_id] is None:
+      logger.warning(f"SKIPPING {comp_id}: Analysis failed (returned None). Likely a system library or invalid path.")
+      processed_components.add(comp_id)
+      continue
+      
     processed_comp_ids = list(map(lambda x: x["comp_id"], files_to_convert))
     analysis = copy.deepcopy(file_analysis_cache[comp_id])
     if comp_name in analysis["component_dependencies"]:
@@ -503,6 +534,12 @@ def arg_parser():
            "'aggressive': (Fast) Removes all non-core architecture. "
            "'none': Disables the filter completely. This is super slow."
   )
+  parser.add_argument(
+      "--project_root",
+      type=str,
+      default=None,
+      help="Manually override the project root. Pass an empty string '' for flat repos like DETR.",
+  )
   args = parser.parse_args()
   return args
 
@@ -513,7 +550,8 @@ def main():
   base_path = args.base_path
   entry_file_path = args.entry_file_path
   entry_module = args.entry_module
-
+  project_root = args.project_root
+  
   logger.info("Starting analysis from: %s in %s", entry_module, entry_file_path)
   filter_mode = args.filter_mode
   if filter_mode == "standard":
@@ -531,7 +569,7 @@ def main():
     logger.info("LLM dependency filter is DISABLED. Using full dependency list.")
     
   logger.info("-" * 60)
-  sort_and_search_dependency(base_path, entry_file_path, entry_module, filter_mode)
+  sort_and_search_dependency(base_path, entry_file_path, entry_module, filter_mode=args.filter_mode, project_root=args.project_root)
 
 
 if __name__ == "__main__":
