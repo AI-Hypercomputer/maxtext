@@ -56,6 +56,15 @@ split_python_cache_file = "Cache/split_python_cache.json"
 if enable_cache:
   os.makedirs("Cache", exist_ok=True)
 
+COMMON_LIBRARIES = {
+  "torch", "torchvision", "numpy", "scipy", "jax", "flax", "tensorflow",
+  "math", "os", "sys", "collections", "typing", "argparse", "time", "json",
+  "logging", "copy", "hashlib", "pdb", "tempfile", "requests", "abc", "enum",
+  "pathlib", "re", "subprocess", "warnings", "pil", "cv2", "matplotlib", 
+  "dataclasses", "functools", "itertools", "random", "shutil", "unittest",
+  "inspect", "pickle", "ast", "types", "contextlib"
+}
+
 
 class ReferenceVisitor(ast.NodeVisitor):
     """
@@ -222,10 +231,12 @@ class DependencyAnalyzer:
       try:
           path_parts = logical_path.split('/')
           
-          root_index = len(path_parts) - 1 - path_parts[::-1].index(self.project_root)
-          self.package_path = "/".join(path_parts[root_index:])
+          if not self.project_root:
+            self.package_path = logical_path
+          else:
+              root_index = len(path_parts) - 1 - path_parts[::-1].index(self.project_root)
+              self.package_path = "/".join(path_parts[root_index:])
       except (IndexError, ValueError):
-
           print(f"Warning: Could not find project_root '{self.project_root}' in path '{logical_path}'. Using fallback path.")
           self.package_path = logical_path.split('/')[-1]
 
@@ -259,10 +270,27 @@ class DependencyAnalyzer:
     Returns:
         dict[str, str]: Mapping of imported names to "file.py#name" anchors.
     """
-    path_form, path_imports = path.removeprefix("from ").replace(".", os.path.sep).split(" import ")
     import_dict = {}
-    for pkg in path_imports.split(","):
-      import_dict[pkg.strip()] = path_form + ".py#" + pkg.strip()
+
+    # CASE 1: "from X import Y"
+    if " import " in path:
+      try:
+        path_form, path_imports = path.removeprefix("from ").replace(".", os.path.sep).split(" import ")
+        for pkg in path_imports.split(","):
+          import_dict[pkg.strip()] = path_form + ".py#" + pkg.strip()
+      except ValueError:
+        # Fallback if splitting fails unexpectedly
+        pass
+      
+    elif path.startswith("import "):
+        # e.g., "import util.misc"
+        pkg = path.replace("import ", "").strip()
+        # Convert dots to slashes for the file path: "util.misc" -> "util/misc.py"
+        file_path = pkg.replace(".", os.path.sep) + ".py"
+        # Map the top-level name. e.g. "util" -> "util/misc.py#util" 
+        # (This is a heuristic; strict mapping requires more context, but this prevents crashes)
+        import_dict[pkg] = f"{file_path}#{pkg}"
+        
     return import_dict
 
   def analyze(self):
@@ -307,7 +335,7 @@ class DependencyAnalyzer:
           absimports = get_absolute_imports(scode, self.file_path, project_root=self.project_root)
           if absimports is not None:
             for absimport in absimports.split("\n"):
-              if absimport.startswith("from " + self.project_root):
+              if not self.project_root or absimport.startswith("from " + self.project_root):
                 self.git_dependencies.update(self.convert_package_to_path(absimport))
 
         for node in self.conditional_imports:
@@ -686,23 +714,46 @@ def get_modules_from_file_ast_fixed(file_url: str, module_name: str) -> Tuple[Op
     Uses Python's AST for reliable parsing of classes, functions, and type aliases.
     """
     logger.info("AST_FIX: Analyzing '%s' for module '%s'", file_url, module_name)
+    full_file_code = None
     
-    try:
-        raw_url = file_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-        response = requests.get(raw_url)
-        response.raise_for_status()
-        full_file_code = response.text
-    except requests.exceptions.RequestException as e:
-        logger.error("AST_FIX: Failed to download %s. Error: %s", file_url, e)
-        # Try as a package (__init__.py) as a fallback
+    if os.path.exists(file_url):
+        # Case 1: Local File
         try:
-            init_url = file_url.replace(".py", "/__init__.py")
-            raw_init_url = init_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-            response = requests.get(raw_init_url)
+            with open(file_url, "r", encoding="utf-8") as f:
+                full_file_code = f.read()
+        except Exception as e:
+            logger.error("AST_FIX: Failed to read local file %s. Error: %s", file_url, e)
+            return None, None
+
+    elif file_url.startswith(("http://", "https://")):
+        # Case 2: Remote URL
+        try:
+            raw_url = file_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+            response = requests.get(raw_url)
             response.raise_for_status()
             full_file_code = response.text
-        except requests.exceptions.RequestException:
-             raise FileNotFoundError(f"Could not download {file_url} or its __init__.py")
+        except requests.exceptions.RequestException as e:
+            logger.error("AST_FIX: Failed to download %s. Error: %s", file_url, e)
+            # Try as a package (__init__.py) as a fallback
+            try:
+                if file_url.endswith(".py"):
+                    init_url = file_url.replace(".py", "/__init__.py")
+                else:
+                    init_url = file_url.rstrip('/') + "/__init__.py"
+                
+                raw_init_url = init_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+                response = requests.get(raw_init_url)
+                response.raise_for_status()
+                full_file_code = response.text
+            except requests.exceptions.RequestException:
+                 logger.error("AST_FIX: Could not download %s or its __init__.py", file_url)
+                 return None, None
+    else:
+        logger.error("AST_FIX: File not found locally and invalid URL scheme: %s", file_url)
+        return None, None
+
+    if not full_file_code:
+        return None, None
 
     try:
         tree = ast.parse(full_file_code)
@@ -749,13 +800,10 @@ def _download_file_content(file_url: str) -> Tuple[Optional[str], str]:
         logger.info(f"Failed to download {file_url}. Trying __init__.py fallback. Error: {e}")
         # Try as a package (__init__.py) as a fallback
         try:
-            # --- THIS IS THE FIX ---
-            # Construct the __init__.py URL from the original file_url
             if file_url.endswith(".py"):
                 init_url = file_url.replace(".py", "/__init__.py")
             else:
                 init_url = file_url.rstrip('/') + "/__init__.py"
-            # --- END FIX ---
                 
             raw_init_url = init_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
             response = requests.get(raw_init_url)
@@ -781,11 +829,12 @@ def get_modules_from_file_robust(
   try:
     # 1. Determine paths
     if file_path.startswith(('http://', 'https://', 'github.com')):
+      file_name_part = file_path.split('/')[-1].replace('.py', '')
+      if file_name_part in COMMON_LIBRARIES:
+          logger.warning(f"ROBUST_FETCH: Skipping likely library file: {file_path}")
+          return None, None
       
-      # --- THIS IS THE FIX ---
-      # It now returns (content, actual_url)
       full_file_code, actual_url_downloaded = _download_file_content(file_path) 
-      # --- END FIX ---
 
       with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py') as tmp:
         tmp.write(full_file_code)
@@ -793,10 +842,7 @@ def get_modules_from_file_robust(
       
       analyzer_path = temp_file_path             
       
-      # --- THIS IS THE FIX ---
-      # Pass the URL that was *actually downloaded* for the path logic
       original_path_for_analyzer = actual_url_downloaded 
-      # --- END FIX ---
       
     elif os.path.exists(file_path):
       # ... (local file logic is fine) ...
@@ -823,28 +869,14 @@ def get_modules_from_file_robust(
     return module_code, full_file_code
 
   except FileNotFoundError as e:
-    logger.error("ROBUST_FETCH: Unable to find or download %s. Error: %s", file_path, e)
+    logger.warning("ROBUST_FETCH: Skipping %s, likely a library file. Message: %s", file_path, e)
     return None, None
   except Exception as e:
     logger.info("ROBUST_FETCH: Module '%s' is not defined in %s (it is likely imported). Error: %s", module, file_path, e)
     return None, full_file_code
   finally:
-    # 5. Clean up the temporary file
     if temp_file_path and os.path.exists(temp_file_path):
       os.remove(temp_file_path)
-      
-# def get_modules_in_order(file_path, module=None, project_root="transformers", add_external_dependencies=True):
-#   """Return the dependency-sorted structure for `file_path`.
-
-#   If `module` is provided, returns a structure filtered to that component.
-#   """
-#   print('+------ get modules in order ----------+')
-#   logger.info("\n--- Analyzing '%s' and creating structured output for module %s ---\n", file_path, module)
-#   analyzer = DependencyAnalyzer(file_path, project_root, add_external_dependencies=add_external_dependencies)
-#   analyzer.get_sorted_structure()
-#   if module is None:
-#     return analyzer.sorted_structure
-#   return analyzer.get_structure_for_module(module=module)
 
 
 def get_modules_in_order_fixed(file_path: str, module: Optional[str] = None, project_root: str = "transformers", add_external_dependencies: bool = True) -> Optional[List[Dict[str, Any]]]:
@@ -855,36 +887,21 @@ def get_modules_in_order_fixed(file_path: str, module: Optional[str] = None, pro
   If `module` is provided, returns a structure filtered to that component.
   """
   logger.info("\n--- ROBUST get_modules_in_order: Analyzing '%s' for module %s ---\n", file_path, module)
-  
   temp_file_path: Optional[str] = None
-  
   try:
-    # 1. Determine paths
     if file_path.startswith(('http://', 'https://', 'github.com')):
-      
-      # --- THIS IS THE FIX ---
-      # Get both the content AND the actual URL that was successfully downloaded
       full_file_code, actual_url_downloaded = _download_file_content(file_path) 
-      # --- END FIX ---
-      
       with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py') as tmp:
         tmp.write(full_file_code)
         temp_file_path = tmp.name
-      
       analyzer_path = temp_file_path
-      
-      # --- THIS IS THE FIX ---
-      # Use the *actual downloaded path* for the analyzer's logic
       original_path_for_analyzer = actual_url_downloaded
-      # --- END FIX ---
-
     elif os.path.exists(file_path):
       # Local file logic (this is fine)
       analyzer_path = file_path
       original_path_for_analyzer = file_path
     else:
       raise FileNotFoundError(f"File not found locally and is not a URL: {file_path}")
-      
     # 2. Proceed with analysis
     analyzer = DependencyAnalyzer(
         analyzer_path, 
@@ -892,9 +909,7 @@ def get_modules_in_order_fixed(file_path: str, module: Optional[str] = None, pro
         add_external_dependencies=add_external_dependencies,
         original_path=original_path_for_analyzer # This is now the CORRECT path
     )
-    
     analyzer.get_sorted_structure()
-    
     # 3. Return the sorted structure
     if module is None:
       return analyzer.sorted_structure
@@ -958,7 +973,7 @@ def main():
   parser = parse_args()
   args = parser.parse_args()
   filepath = args.filepath
-  result = get_modules_in_order_fixed(filepath)
+  result = get_modules_in_order_fixed(filepath, module=args.module, project_root=args.project_root)
 
   save_results_in_file(result, filename=filepath.split(os.path.sep)[-1])
   print("--- Sorted Modules (Topological Order) ---")

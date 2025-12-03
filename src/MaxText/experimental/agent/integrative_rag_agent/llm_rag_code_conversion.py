@@ -84,6 +84,12 @@ def arg_parser():
       default="https://github.com/huggingface/transformers/blob/6ce8f0537537455806ab7bfd39b59ad37803ead9/src/",
       help="Base directory for source files. Should point to the root of the Transformer repo repo.",
   )
+  parser.add_argument(
+      "--output-directory",
+      type=str,
+      default="generated_code",
+      help="Base directory where generated JAX code will be saved."
+  )
   return parser.parse_args()
 
 
@@ -92,7 +98,7 @@ args = arg_parser()
 destination_source_url = args.destination_source_url
 
 module_list_path = files_order_file_format.format(module_name=args.module_name)
-destination_directory = os.path.join("generated_code", args.module_name)
+destination_directory = os.path.join(args.output_directory, args.module_name)
 
 
 def get_exisiting_jax_modules():
@@ -169,61 +175,6 @@ def find_appropriate_file_name(module_description):
 
   return file_name, existing_files
 
-
-# def get_modules_from_file_ast_fixed(file_url: str, module_name: str) -> Tuple[Optional[str], Optional[str]]:
-#     """
-#     A robust function to fetch a Python file from a URL, find a specific
-#     component, and return its source code along with the full file content.
-#     Uses Python's AST for reliable parsing of classes, functions, and type aliases.
-#     """
-#     logger.info("AST_FIX: Analyzing '%s' for module '%s'", file_url, module_name)
-    
-#     try:
-#         raw_url = file_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-#         response = requests.get(raw_url)
-#         response.raise_for_status()
-#         full_file_code = response.text
-#     except requests.exceptions.RequestException as e:
-#         logger.error("AST_FIX: Failed to download %s. Error: %s", file_url, e)
-#         # Try as a package (__init__.py) as a fallback
-#         try:
-#             init_url = file_url.replace(".py", "/__init__.py")
-#             raw_init_url = init_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-#             response = requests.get(raw_init_url)
-#             response.raise_for_status()
-#             full_file_code = response.text
-#         except requests.exceptions.RequestException:
-#              raise FileNotFoundError(f"Could not download {file_url} or its __init__.py")
-
-#     try:
-#         tree = ast.parse(full_file_code)
-#         target_node = None
-
-#         # Walk the tree to find the specific class, function, or assignment node
-#         for node in ast.walk(tree):
-#             node_name = ""
-#             if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == module_name:
-#                 target_node = node
-#                 break
-#             elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == module_name:
-#                 target_node = node
-#                 break
-#             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == module_name:
-#                 target_node = node
-#                 break
-        
-#         if target_node:
-#             module_code = ast.get_source_segment(full_file_code, target_node)
-#             logger.info("AST_FIX: Successfully found and extracted module '%s'.", module_name)
-#             return module_code, full_file_code
-#         else:
-#             logger.error("AST_FIX: Unable to find module '%s' in file %s.", module_name, file_url)
-#             return None, full_file_code
-
-#     except SyntaxError as e:
-#         logger.error("AST_FIX: Syntax error parsing file %s: %s", file_url, e)
-#         return None, None
-      
 def convert_given_file(module, jax_modules) -> None | dict:
   """Convert a single Transformer component into a JAX module using the LLM.
 
@@ -243,8 +194,25 @@ def convert_given_file(module, jax_modules) -> None | dict:
       description, or None if generation did not produce a detectable module.
   """
   maxtext_blocks_code = read_code_blocks(maxtext_code_block, args.number_of_maxtext_blocks)
-  full_url = "/".join([destination_source_url.rstrip('/'), module["filepath"]])
-  module_code, file_code = get_modules_from_file_ast_fixed(full_url, module_name=module["comp_name"])
+
+  if module["filepath"].startswith(("http://", "https://")):
+    full_url = module["filepath"]
+  elif "github.com" in module["filepath"]:
+    clean_path = module["filepath"].lstrip("/")
+    full_url = f"https://{clean_path}"
+  else:
+    full_url = "/".join([destination_source_url.rstrip('/'), module["filepath"]])
+
+  logger.info("Converting %s", module["comp_name"])
+  try:
+    module_code, file_code = get_modules_from_file_ast_fixed(full_url, module_name=module["comp_name"])
+  except Exception as e:
+    logger.warning(f"SKIPPING {module['comp_name']}: Could not fetch source code. Reason: {e}")
+    return None
+  if module_code is None:
+    logger.warning(f"SKIPPING {module['comp_name']}: module_code not found in file.")
+    return None
+
   prompt = CODE_CONVERSION
   if module_code is not None:
     prompt = prompt.replace("<CODE_BLOCK>", module_code)
@@ -311,7 +279,6 @@ def convert_all_modules():
       json.dump(new_modules, f, indent=4)
     with open(processed_module_file, "wt", encoding="utf-8") as f:
       json.dump(processed_module, f, indent=4)
-
   logger.info("Conversion finish Check at %s´ and %s", new_module_file, processed_module_file)
 
 
