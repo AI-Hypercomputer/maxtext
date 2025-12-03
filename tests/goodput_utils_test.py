@@ -53,16 +53,27 @@ class GoodputUtilsTest(unittest.TestCase):
     mock_record_job_start_time.assert_called()
     mock_record_job_end_time.assert_called()
 
-  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_step_deviation_uploader")
+    class TestException(BaseException):
+      pass
+
+    mock_record_job_start_time.reset_mock()
+    mock_record_job_end_time.reset_mock()
+    with self.assertRaises(TestException):
+      with maybe_record_goodput(recorder, GoodputEvent.JOB):
+        mock_record_job_start_time.assert_called_once()
+        raise TestException()
+
+    mock_record_job_start_time.assert_called_once()
+    mock_record_job_end_time.assert_not_called()
+
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_goodput_uploader")
   @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_goodput_uploader")
-  def test_monitor_goodput(self, mock_start_goodput_uploader, mock_start_step_deviation_uploader):
+  def test_monitor_goodput(self, mock_start_goodput_uploader, mock_stop_goodput_uploader):
     mock_start_goodput_uploader.return_value = mock.MagicMock()
-    mock_start_step_deviation_uploader.return_value = mock.MagicMock()
 
-    maybe_monitor_goodput(self.config)
-
-    mock_start_goodput_uploader.assert_called()
-    mock_start_step_deviation_uploader.assert_called()
+    with maybe_monitor_goodput(self.config):
+      mock_start_goodput_uploader.assert_called()
+    mock_stop_goodput_uploader.assert_called()
 
 
 if __name__ == "__main__":

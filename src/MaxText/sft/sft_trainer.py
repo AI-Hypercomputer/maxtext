@@ -184,20 +184,14 @@ def main(argv: Sequence[str]) -> None:
     argv: Command-line arguments.
   """
   pathwaysutils.initialize()
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-    )
 
   mt_config = pyconfig.initialize(argv)
   max_utils.print_system_information()
 
-  maybe_monitor_goodput(mt_config)
   goodput_recorder = create_goodput_recorder(mt_config)
 
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB):
+  with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB), maybe_monitor_goodput(mt_config):
     train(mt_config, goodput_recorder)
 
 

@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 from typing import Any
+import copy
 
 import jax
 import jax.numpy as jnp
@@ -45,6 +46,22 @@ def yaml_key_to_env_key(s: str) -> str:
 def resolve_config_path(param: str) -> str:
   """Resolve config path to auto rewrite to use new src folder."""
   return param if os.path.isfile(param) else os.path.join("src", param)
+
+
+def _merge_logical_axis_rules(base_rules, new_rules):
+  """Merges two lists of logical_axis_rules. Rules in new_rules override all rules
+  with the same name in base_rules."""
+  if not new_rules:
+    return base_rules
+
+  new_rule_keys = {rule[0] for rule in new_rules}
+
+  # Filter old rules to exclude any that will be replaced.
+  updated_rules = [rule for rule in base_rules if rule[0] not in new_rule_keys]
+
+  # Add all the new rules.
+  updated_rules.extend(new_rules)
+  return updated_rules
 
 
 def _load_config(config_name: str) -> omegaconf.DictConfig:
@@ -81,11 +98,6 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   pydantic_kwargs = {}
   valid_fields = types.MaxTextConfig.model_fields.keys()
 
-  # This is a workaround for tests that use `dataset_type='hf'` but do not
-  # specify `tokenizer_type='huggingface'`, which they should.
-  if raw_keys.get("dataset_type") == "hf" and "tokenizer_type" not in raw_keys:
-    raw_keys["tokenizer_type"] = "huggingface"
-
   for key, value in raw_keys.items():
     if key not in valid_fields:
       logger.warning("Ignoring invalid/unsupported field from YAML/CLI: %s", repr(key))
@@ -103,7 +115,11 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
       if key == "data_sharding" and isinstance(new_value, list) and new_value and isinstance(new_value[0], str):
         new_value = [new_value]
 
-    if key in ("run_name", "hf_train_files", "hf_eval_files") and new_value is None:
+    # An empty value provided in the configuration is treated as None
+    if key in ("hf_train_files", "hf_eval_files") and new_value == "":
+      new_value = None
+
+    if key == "run_name" and new_value is None:
       new_value = ""
 
     pydantic_kwargs[key] = new_value
@@ -135,6 +151,13 @@ class HyperParameters:
     final_dict["shard_mode"] = ShardMode(final_dict["shard_mode"])
 
     object.__setattr__(self, "_flat_config", final_dict)
+
+  def __deepcopy__(self, memo):
+    new_pydantic_config = copy.deepcopy(self._pydantic_config, memo)
+    return HyperParameters(new_pydantic_config)
+
+  def tree_flatten(self):
+    return (), self
 
   def __getattr__(self, attr: str) -> Any:
     """Provides attribute-style access to the final configuration dictionary."""
@@ -185,13 +208,38 @@ def initialize(argv: list[str], **kwargs) -> HyperParameters:
       logger.warning("Model config for '%s' not found at %s", model_name, model_config_path)
 
       # 4. Final merge (base, model, then overrides)
-  final_config = omegaconf.OmegaConf.merge(base_yml_config, model_cfg, overrides_cfg)
+  model_cfg_oc = omegaconf.OmegaConf.create(model_cfg)
+
+  # 4. Manually merge logical_axis_rules to avoid OmegaConf's list replacement behavior.
+  base_rules_oc = base_yml_config.get("logical_axis_rules", [])
+  model_rules_oc = model_cfg_oc.get("logical_axis_rules", [])
+  overrides_rules_oc = overrides_cfg.get("logical_axis_rules", [])
+
+  base_rules = omegaconf.OmegaConf.to_container(base_rules_oc, resolve=True) if base_rules_oc else []
+  model_rules = omegaconf.OmegaConf.to_container(model_rules_oc, resolve=True) if model_rules_oc else []
+  overrides_rules = omegaconf.OmegaConf.to_container(overrides_rules_oc, resolve=True) if overrides_rules_oc else []
+
+  merged_rules = _merge_logical_axis_rules(base_rules, model_rules)
+  merged_rules = _merge_logical_axis_rules(merged_rules, overrides_rules)
+
+  # Remove the rules from the original configs before the main merge
+  if "logical_axis_rules" in base_yml_config:
+    del base_yml_config["logical_axis_rules"]
+  if "logical_axis_rules" in model_cfg_oc:
+    del model_cfg_oc["logical_axis_rules"]
+  if "logical_axis_rules" in overrides_cfg:
+    del overrides_cfg["logical_axis_rules"]
+
+  # 5. Final merge for all other keys
+  final_config = omegaconf.OmegaConf.merge(base_yml_config, model_cfg_oc, overrides_cfg)
+  final_config["logical_axis_rules"] = merged_rules
+
   raw_keys_dict = omegaconf.OmegaConf.to_container(final_config, resolve=True)
 
-  # 5. Handle environment variable overrides
-  cli_keys = set(omegaconf.OmegaConf.to_container(cli_cfg, resolve=True).keys())
-  kwargs_keys = set(kwargs.keys())
-  for k in list(raw_keys_dict.keys()):
+  # 6. Handle environment variable overrides
+  cli_keys = frozenset(omegaconf.OmegaConf.to_container(cli_cfg, resolve=True).keys())
+  kwargs_keys = frozenset(kwargs.keys())
+  for k in tuple(raw_keys_dict.keys()):
     env_key = yaml_key_to_env_key(k)
     if env_key in os.environ:
       if k in cli_keys or k in kwargs_keys:

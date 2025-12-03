@@ -87,6 +87,8 @@ class DecoderLayer(nn.Module):
       previous_chunk=None,
       slot: None | int = None,
       page_state: None | page_manager.PageState = None,
+      kv_cache: jax.Array | None = None,
+      attention_metadata: dict[str, Any] | None = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -149,13 +151,15 @@ class DecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = attention_layer(
+    attention_lnx, kv_cache = attention_layer(
         lnx,
         lnx,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
 
     if model_mode == MODEL_MODE_PREFILL:
@@ -209,7 +213,10 @@ class DecoderLayer(nn.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    return layer_output, None if cfg.scan_layers else layer_output
+    if cfg.scan_layers:
+      return layer_output, None
+    else:
+      return layer_output, kv_cache
 
 
 class SequentialBlockDecoderLayers(nn.Module):
@@ -405,7 +412,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.GEMMA3:
         return [gemma3.Gemma3DecoderLayerToLinen]
       case DecoderBlockType.GPT3:
-        return [gpt3.Gpt3DecoderLayer]
+        return [gpt3.Gpt3DecoderLayerToLinen]
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlockToLinen] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayerToLinen]
       case DecoderBlockType.QWEN3:
@@ -558,7 +565,14 @@ class Decoder(nn.Module):
 
     # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
-      if cfg.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b", "llama4-17b-16e", "llama4-17b-128e"]:
+      if cfg.model_name in [
+          "gemma3-4b",
+          "gemma3-12b",
+          "gemma3-27b",
+          "llama4-17b-16e",
+          "llama4-17b-128e",
+          "qwen3-omni-30b-a3b",
+      ]:
         y = multimodal_utils.merge_mm_embeddings(
             text_embeddings=y,
             vision_embeddings=image_embeddings,
@@ -584,11 +598,11 @@ class Decoder(nn.Module):
           name="position_embedder",
           config=cfg,
           mesh=self.mesh,
-      )(decoder_positions, model_mode=model_mode)
+      )(decoder_positions.astype("int32"), model_mode=model_mode)
     return y
 
   @nn.compact
-  def _apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode):
+  def apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
@@ -684,6 +698,8 @@ class Decoder(nn.Module):
       bidirectional_mask: None | Any = None,
       image_embeddings: None | jnp.ndarray = None,
       image_masks: None | jnp.ndarray = None,
+      kv_caches: list[jax.Array] | None = None,
+      attention_metadata=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -837,7 +853,8 @@ class Decoder(nn.Module):
           # Iterate over the two layer groups (dense and MoE) and apply layer transformation
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
-              y = layer(
+              kv_cache = kv_caches[index] if kv_caches is not None else None
+              y, kv_cache = layer(
                   config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
               )(
                   y,
@@ -848,7 +865,11 @@ class Decoder(nn.Module):
                   previous_chunk=previous_chunk,
                   page_state=page_state,
                   slot=slot,
+                  kv_cache=kv_cache,
+                  attention_metadata=attention_metadata,
               )
+              if kv_caches is not None and kv_cache is not None:
+                kv_caches[index] = kv_cache
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
@@ -870,7 +891,8 @@ class Decoder(nn.Module):
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
-            y = layer(
+            kv_cache = kv_caches[lyr] if kv_caches is not None else None
+            y, kv_cache = layer(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
@@ -879,8 +901,12 @@ class Decoder(nn.Module):
                 previous_chunk=previous_chunk,
                 page_state=page_state,
                 slot=slot,
+                kv_cache=kv_cache,
+                attention_metadata=attention_metadata,
                 **layer_call_kwargs,
             )
+            if kv_caches is not None and kv_cache is not None:
+              kv_caches[lyr] = kv_cache
 
     assert isinstance(y, jax.Array)
 
@@ -893,11 +919,11 @@ class Decoder(nn.Module):
       logits = None
       self.sow("intermediates", "hidden_states", hidden_state)
     else:
-      logits = self._apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+      logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.
-    return logits, hidden_state
+    return logits, hidden_state, kv_caches
 
   def _apply_gemma3_scanned_blocks(
       self,
@@ -950,10 +976,9 @@ class Decoder(nn.Module):
     if num_remaining_layers > 0:
       # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
       rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
-      # pytype: disable=wrong-keyword-args
       layer = RemattedGemma3Block(
           config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
-      )
+      )  # pytype: disable=wrong-keyword-args
       y, _ = layer(
           y,
           decoder_segment_ids,

@@ -65,6 +65,8 @@ def train_loop(config, recorder, state=None):
       mesh,
       learning_rate_schedule,
       data_iterator,
+      _,
+      _,
       eval_data_iterator,
       state,
   ) = setup_train_loop(config, recorder)
@@ -168,9 +170,8 @@ def main(argv: Sequence[str]) -> None:
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
 
-  maybe_monitor_goodput(config)
   recorder = create_goodput_recorder(config)
-  with maybe_record_goodput(recorder, GoodputEvent.JOB):
+  with maybe_record_goodput(recorder, GoodputEvent.JOB), maybe_monitor_goodput(config):
     train_loop(config, recorder)
 
 

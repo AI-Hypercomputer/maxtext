@@ -53,7 +53,6 @@ from MaxText import pyconfig
 from MaxText import sharding
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.common_types import ShardMode
-from MaxText.data_loader import create_dataloader
 from MaxText.globals import EPS
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
@@ -228,7 +227,12 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     rng2: A new rng key that can be used in future calls.
 
   """
-  reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
+  reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = (
+      [],
+      [],
+      [],
+      loss_fn,
+  )
   if config.use_dpo:
     state, reference_params = _split_dpo_state(state)
     state_mesh_shardings, reference_params_sharding = _split_dpo_state(state_mesh_shardings)
@@ -252,7 +256,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if config.optimizer_memory_host_offload:
       if config.use_dpo:
         reference_params = jax.device_put(
-            reference_params, max_utils.with_memory_kind(reference_params_sharding, "device")
+            reference_params,
+            max_utils.with_memory_kind(reference_params_sharding, "device"),
         )
         extra_dpo_args = [reference_params]
     if config.shard_optimizer_over_data:
@@ -260,7 +265,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
 
-  raw_grads = jax.tree_util.tree_map(lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x, raw_grads)
+  raw_grads = jax.tree_util.tree_map(
+      lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
+      raw_grads,
+  )
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
@@ -274,7 +282,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     state = state.replace(
         opt_state=jax.device_put(
             state.opt_state,
-            jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
+            jax.tree_util.tree_map(
+                lambda x: x.with_memory_kind(kind="device"),
+                state_mesh_shardings.opt_state,
+            ),
         )
     )
   # Move all parameters to device before optimizer update
@@ -365,6 +376,8 @@ def train_loop(config, recorder, state=None):
       mesh,
       learning_rate_schedule,
       data_iterator,
+      data_loader,
+      rampup_manager,
       eval_data_iterator,
       state,
   ) = train_utils.setup_train_loop(config, recorder)
@@ -378,20 +391,28 @@ def train_loop(config, recorder, state=None):
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
+      config,
+      model,
+      mesh,
+      state,
+      state_mesh_shardings,
+      train_step,
+      eval_step,
+      eval_data_iterator,
+      params_shardings,
   )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data:
       state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
-    compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
-    compiled_stats = compiled.memory_analysis()
-    max_utils.print_compiled_memory_stats(compiled_stats)
+    if config.compiled_trainstep_file == "":  # compile only when there is no pre-compiled file loaded
+      compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
+      compiled_stats = compiled.memory_analysis()
+      max_utils.print_compiled_memory_stats(compiled_stats)
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-  data_loader = create_dataloader(config, mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
@@ -403,7 +424,7 @@ def train_loop(config, recorder, state=None):
       prof.maybe_activate_profiler(step, state)
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        example_batch = data_loader.load_next_batch()
+        example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
         # Reshard data from loaded sharding to performant activation sharding
         example_batch = sharding.maybe_shard_with_name(
             example_batch,
@@ -502,8 +523,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  # Goodput configurations
-  maybe_monitor_goodput(config)
+  # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
 
   # Stack traces configurations
@@ -524,6 +544,7 @@ def run(config, recorder, diagnostic_config):
       diagnostic.diagnose(diagnostic_config),
       maybe_record_goodput(recorder, GoodputEvent.JOB),
       max_utils.maybe_get_transformer_engine_context(config),
+      maybe_monitor_goodput(config),
   ):
     train_loop(config, recorder)
 
