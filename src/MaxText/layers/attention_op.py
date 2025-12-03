@@ -1372,7 +1372,7 @@ class AttentionOp(nnx.Module):
       dummy_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
       dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=dummy_segment_ids, segment_pos=None)
       max_segments_per_seq = self.config.max_segments_per_seq
-    elif using_context_parallelism and self.config.dataset_type != "synthetic":
+    elif using_context_parallelism or self.config.dataset_type == "synthetic":
       if self.attention_type == AttentionType.LOCAL_SLIDING:
         raise AssertionError("Sliding window attention is not supported for context parallelism")
       # Context parallelism without packing: only supports causal masking
