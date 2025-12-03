@@ -61,6 +61,9 @@ class SimpleDecoderLayer(nnx.Module):
   def __call__(
       self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
   ):
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
     if self.config.scan_layers:
       return jnp.dot(inputs, self.weights.astype(inputs.dtype), out_sharding=self.out_sharding), None
     return jnp.dot(inputs, self.weights.astype(inputs.dtype), out_sharding=self.out_sharding)
@@ -124,6 +127,9 @@ class SimpleMlpDecoderLayer(nnx.Module):
       page_state=None,
       slot=0,
   ):
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
     intermediate = jnp.dot(inputs, self.ff_1.astype(inputs.dtype), out_sharding=self.mlp_sharding)
     output = jnp.dot(intermediate, self.ff_2.astype(inputs.dtype), out_sharding=self.activation_sharding)
     if self.config.scan_layers:

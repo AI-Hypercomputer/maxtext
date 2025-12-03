@@ -13,18 +13,16 @@
 # limitations under the License.
 
 """
-GRPO Trainer
+RL Trainer
 
 This module provides a unified `rl_train` function that consolidates the common
 RL training logic. It handles model loading, reward function setup, dataset
 processing, and training orchestration. By default, we run Group Relative Policy Optimization (GRPO) on 
-GSM8K math reasoning benchmark. GRPO can enhance your model's problem-solving skills on mathematical word problems,
-coding problems, etc. 
+GSM8K math reasoning benchmark. The script is also flexible enough to run Group Sequence Policy Optimization (GSPO).
 
-Usage:
-  Usage Examples:
+Usage Examples:
 
-# Llama3.1-8B-Instruct
+# GRPO on Llama3.1-8B-Instruct
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   model_name=llama3.1-8b \
   tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
@@ -33,49 +31,43 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   base_output_directory=$OUTPUT_PATH \
   hf_access_token=$HF_TOKEN
 
-# Llama3.1-70B-Instruct
+# GSPO on Llama3.1-70B-Instruct
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   model_name=llama3.1-70b \
   tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
   load_parameters_path=gs://path/to/checkpoint/0/items \
   run_name=$WORKLOAD \
   base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN
+  hf_access_token=$HF_TOKEN \
+  loss_algo=gspo-token
 
 """
 
 from typing import Sequence
-import os
-from pprint import pprint
+
 import collections
+import grain
+import jax
+import os
+import pathwaysutils
+import tensorflow_datasets as tfds
 
 from absl import app
+from etils import epath
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
-import grain
-from etils import epath
-
-from vllm.outputs import PoolingRequestOutput  # pylint: disable=unused-import
-import jax
 from jax.sharding import Mesh
 from orbax import checkpoint as ocp
-import tensorflow_datasets as tfds
+from pprint import pprint
+from transformers import AutoTokenizer
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
-
-
-from transformers import AutoTokenizer
-
-
-import pathwaysutils
-
-pathwaysutils.initialize()
+from vllm.outputs import PoolingRequestOutput  # pylint: disable=unused-import
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
-
 
 from MaxText import max_logging, max_utils, maxtext_utils, pyconfig
 from MaxText import model_creation_utils
@@ -225,7 +217,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
-  max_logging.log("Starting GRPO Training")
+  max_logging.log("Starting RL Training")
   max_logging.log(f"Ensuring TensorBoard log directory exists: {trainer_config.tensorboard_dir}")
   if not epath.Path(trainer_config.tensorboard_dir).exists():
     epath.Path(trainer_config.tensorboard_dir).mkdir(parents=True, exist_ok=True)
@@ -406,8 +398,8 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
         **rl_cluster_kwargs,
     )
 
-  # Create GRPO trainer
-  max_logging.log("Setting up GRPO trainer...")
+  # Create RL trainer
+  max_logging.log("Setting up RL trainer...")
   rl_trainer = GrpoLearner(
       rl_cluster=rl_cluster,
       reward_fns=[  # type: ignore
@@ -430,16 +422,16 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       corr_lst=trainer_config.eval_corr_lst,
       make_lst=trainer_config.eval_make_lst,
   )
-  max_logging.log(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  max_logging.log(f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
   # Start training
 
-  max_logging.log("Starting GRPO training...")
+  max_logging.log("Starting RL training...")
 
   with reference_mesh, nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
     rl_trainer.train(train_dataset)
 
-  max_logging.log("GRPO Training Completed Successfully!")
+  max_logging.log("RL Training Completed Successfully!")
 
   # Let's evaluate our model!
   (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
@@ -450,7 +442,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       corr_lst=trainer_config.eval_corr_lst,
       make_lst=trainer_config.eval_make_lst,
   )
-  max_logging.log(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  max_logging.log(f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
 
 def main(argv: Sequence[str]) -> None:

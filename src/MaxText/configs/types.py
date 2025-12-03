@@ -1169,6 +1169,13 @@ class Metrics(BaseModel):
   )
 
 
+class ManagedMLDiagnostics(BaseModel):
+  """Configuration for managed mldiagnostics."""
+
+  managed_mldiagnostics: bool = Field(False, description="Enable managed mldiagnostics.")
+  managed_mldiagnostics_run_group: str = Field("", description="Name used to group multiple runs.")
+
+
 class Goodput(BaseModel):
   """Configuration for goodput monitoring."""
 
@@ -1428,6 +1435,10 @@ class DerivedValues(BaseModel):
       None,
       description="The full path to the tensorboard directory, derived from `run_name`.",
   )
+  managed_mldiagnostics_dir: None | str = Field(
+      None,
+      description="The full path to the managed mldiagnostics directory, derived from `run_name`.",
+  )
 
   rampup_end_step: None | int = Field(None, description="The step at which the batch size ramp-up phase concludes.")
   tensors_on_device: None | list[str] = Field(
@@ -1543,6 +1554,7 @@ class MaxTextConfig(
     Goodput,
     GcpMonitoring,
     Tensorboard,
+    ManagedMLDiagnostics,
     # Multimodal
     MultimodalGeneral,
     VisionTower,
@@ -1588,6 +1600,8 @@ class MaxTextConfig(
       self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
       self.metrics_dir = os.path.join(output_dir, "metrics", "")
       self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
+      # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
+      self.managed_mldiagnostics_dir = os.path.join(output_dir, "managed-mldiagnostics")
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = None, None, None
 

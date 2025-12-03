@@ -18,7 +18,7 @@
 
 import functools
 import dataclasses
-from typing import Literal
+from typing import Literal, List, Tuple
 import jax
 import jax.numpy as jnp
 from MaxText.kernels.megablox import backend
@@ -41,7 +41,7 @@ def gmm(
     rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
     use_qwix_quantization: bool = False,
     use_tokamax_backend: bool = False,
-    is_fsdp_shard_on_exp: bool = False,
+    weight_gather_axes: List[Tuple[str, int]] | None = None,
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -75,7 +75,7 @@ def gmm(
       interpret,
       quantization_rule,
       use_tokamax_backend,
-      is_fsdp_shard_on_exp,
+      weight_gather_axes,
   )
 
 
@@ -91,7 +91,7 @@ def _gmm_fwd(
     interpret: bool = False,
     quantization_rule: qwix.QtRule | None = None,
     use_tokamax_backend: bool = False,
-    is_fsdp_shard_on_exp: bool = False,
+    weight_gather_axes: List[Tuple[str, int]] | None = None,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -128,10 +128,11 @@ def _gmm_fwd(
       if (
           quantization_rule.weight_calibration_method.startswith("fixed")
           and isinstance(rhs, qpl.QArray)
-          and is_fsdp_shard_on_exp
       ):
-        rhs_qvalue = jax.lax.all_gather(rhs.qvalue, "fsdp", axis=0, tiled=True)
-        rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
+        if weight_gather_axes:
+          for axis_name, axis_idx in weight_gather_axes:
+            rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)
+            rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
     out = tokamax_backend.gmm(
         lhs=lhs,
         rhs=rhs,
@@ -167,7 +168,7 @@ def _gmm_bwd(
     interpret: bool,
     quantization_rule: qwix.QtRule | None,
     use_tokamax_backend: bool,
-    is_fsdp_shard_on_exp: bool,
+    weight_gather_axes: List[Tuple[str, int]] | None,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -241,8 +242,10 @@ def _gmm_bwd(
         num_actual_groups=num_actual_groups,
         interpret=interpret,
     )
-    if quantization_rule and quantization_rule.bwd_qtype and is_fsdp_shard_on_exp:
-      drhs = jax.lax.psum_scatter(drhs, "fsdp", scatter_dimension=0, tiled=True)
+    if quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
+      # Scatter back in reverse order of gather
+      for axis_name, axis_idx in reversed(weight_gather_axes):
+        drhs = jax.lax.psum_scatter(drhs, axis_name, scatter_dimension=axis_idx, tiled=True)
   else:
     dlhs = backend.gmm(
         dlhs_dout,

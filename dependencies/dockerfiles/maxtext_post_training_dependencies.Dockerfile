@@ -18,7 +18,7 @@ ARG MODE
 
 ENV MODE=$MODE
 
-RUN echo "Installing Post-Training dependencies (vLLM, tpu-common, tunix) with MODE=${MODE}"
+RUN echo "Installing Post-Training dependencies (vLLM, tpu-inference, tunix) with MODE=${MODE}"
 
 # Uninstall existing jax to avoid conflicts
 RUN pip uninstall -y jax jaxlib libtpu
