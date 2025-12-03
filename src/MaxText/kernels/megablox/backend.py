@@ -522,7 +522,7 @@ def gmm(
   }
   call_gmm = qpl.pallas_call(
       kernel,
-      out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
+      out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type, vma=set(["fsdp"])),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
           in_specs=[
@@ -775,7 +775,7 @@ def tgmm(
   }
   call_gmm = qpl.pallas_call(
       kernel,
-      out_shape=jax.ShapeDtypeStruct((num_actual_groups, k, n), preferred_element_type),
+      out_shape=jax.ShapeDtypeStruct((num_actual_groups, k, n), preferred_element_type, vma=set()),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
           in_specs=[
