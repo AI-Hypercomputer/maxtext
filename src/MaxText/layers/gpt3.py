@@ -74,6 +74,7 @@ class Gpt3LayerNorm(nnx.Module):
         self.scale_init(rngs.params(), (num_features,), self.weight_dtype),
         sharding=self.kernel_axes,
     )
+
     if self.use_bias:
       self.bias = nnx.Param(
           initializers.default_bias_init(rngs.params(), (num_features,), self.weight_dtype), sharding=self.kernel_axes
