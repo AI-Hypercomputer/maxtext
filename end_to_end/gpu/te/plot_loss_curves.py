@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Plot loss curves from training logs """
+"""Plot loss curves from training logs"""
 
 # Usage: python plot_loss_curves.py logdir
 
@@ -31,7 +31,7 @@ def parse_loss_data(file_path):
   Returns a list of tuples with the extracted values.
   """
   pattern = re.compile(
-      r"completed step: (\d+), seconds: ([\d.]+), TFLOP/s/device: ([\d.]+), Tokens/s/device: ([\d.]+), total_weights: (\d+), loss: ([\d.]+)"  # pylint: disable=line-too-long
+    r"completed step: (\d+), seconds: ([\d.]+), TFLOP/s/device: ([\d.]+), Tokens/s/device: ([\d.]+), total_weights: (\d+), loss: ([\d.]+)"  # pylint: disable=line-too-long
   )
   results = []
   with open(file_path, "r", encoding="utf-8") as f:
@@ -55,9 +55,7 @@ def main(args):
 
   logdir = parsed_args.logdir
   log_files = [
-      os.path.join(logdir, f)
-      for f in os.listdir(logdir)
-      if os.path.isfile(os.path.join(logdir, f)) and f.endswith(".log")
+    os.path.join(logdir, f) for f in os.listdir(logdir) if os.path.isfile(os.path.join(logdir, f)) and f.endswith(".log")
   ]
 
   # Extract parallelism configs from filenames
@@ -81,11 +79,11 @@ def main(args):
       steps = [item[0] for item in data]
       losses = [item[5] for item in data]
       plt.plot(
-          steps,
-          losses,
-          marker="",
-          linestyle="-",
-          label=os.path.basename(log_file),
+        steps,
+        losses,
+        marker="",
+        linestyle="-",
+        label=os.path.basename(log_file),
       )
     plt.legend()
     plt.xlabel("Step")

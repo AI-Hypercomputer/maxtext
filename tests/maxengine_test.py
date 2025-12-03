@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the maxengine """
+"""Tests for the maxengine"""
 
 import functools
 import pytest
@@ -48,21 +48,21 @@ class MaxEngineTest(unittest.TestCase):
   def init_pyconfig(self, **kwargs):
     """init pyconfig"""
     init_kwargs = {
-        "per_device_batch_size": 1.0,
-        "run_name": "test",
-        "enable_checkpointing": False,
-        "base_num_decoder_layers": 2,
-        "attention": "dot_product",
-        "max_target_length": 16,
-        "base_emb_dim": 256,
-        "base_num_query_heads": 2,
-        "base_num_kv_heads": 2,
-        "max_prefill_predict_length": 4,
-        "return_log_prob": True,
+      "per_device_batch_size": 1.0,
+      "run_name": "test",
+      "enable_checkpointing": False,
+      "base_num_decoder_layers": 2,
+      "attention": "dot_product",
+      "max_target_length": 16,
+      "base_emb_dim": 256,
+      "base_num_query_heads": 2,
+      "base_num_kv_heads": 2,
+      "max_prefill_predict_length": 4,
+      "return_log_prob": True,
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **init_kwargs,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **init_kwargs,
     )
     return config
 
@@ -72,31 +72,31 @@ class MaxEngineTest(unittest.TestCase):
 
     decoder_segment_ids = jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     decoder_positions = jnp.stack(
-        [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
+      [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
     )
 
     return ids, decoder_segment_ids, decoder_positions
 
   def test_stack_and_unstack_prefill_cache(self):
     config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        enable_checkpointing=False,
-        stack_prefill_result_cache=True,
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      stack_prefill_result_cache=True,
     )
     engine = MaxEngine(config, jax.devices())
     num_layers = engine.config.num_decoder_layers
     input_d = {
-        "decoder": {},
+      "decoder": {},
     }
     for i in range(num_layers):
       input_d["decoder"][f"layers_{i}"] = {
-          "a": jnp.ones((1, 10)),
-          "b": jnp.ones((1, 9)),
+        "a": jnp.ones((1, 10)),
+        "b": jnp.ones((1, 9)),
       }
 
     expected_stacked = {
-        "a": jnp.ones((num_layers, 1, 10)),
-        "b": jnp.ones((num_layers, 1, 9)),
+      "a": jnp.ones((num_layers, 1, 10)),
+      "b": jnp.ones((num_layers, 1, 9)),
     }
     # pylint: disable=protected-access
     got_stacked = engine._maybe_stack_prefill_result_cache(input_d)
@@ -114,17 +114,17 @@ class MaxEngineTest(unittest.TestCase):
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     transformer_vars = model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
+      {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+      ids,
+      decoder_positions,
+      decoder_segment_ids,
+      enable_dropout=False,
     )
     input_tokens = jnp.array([1, 306, 5360, 304, 0, 0, 0, 0])
     true_length = 4
     engine = MaxEngine(self.cfg, jax.devices())
     prefill_result, first_token = engine.prefill(
-        params=transformer_vars, padded_tokens=input_tokens, true_length=true_length
+      params=transformer_vars, padded_tokens=input_tokens, true_length=true_length
     )
 
     self.assertEqual(prefill_result["generated_tokens"], jnp.array([0]))
@@ -142,11 +142,11 @@ class MaxEngineTest(unittest.TestCase):
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     transformer_vars = model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
+      {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+      ids,
+      decoder_positions,
+      decoder_segment_ids,
+      enable_dropout=False,
     )
     input_tokens = jnp.array([1, 306, 5360, 304])
     engine = MaxEngine(self.cfg, jax.devices())
@@ -191,56 +191,56 @@ class MaxEngineTest(unittest.TestCase):
         return jnp.array_equal(x, y)
 
     model_config_args = {
-        "max_target_length": prefill_length * 4,
-        "max_prefill_predict_length": prefill_length * 2,
-        "model_call_mode": "inference",
-        "capacity_factor": -1,
-        "decoder_block": "mistral",
-        "scan_layers": False,
-        "per_device_batch_size": 1.0,
+      "max_target_length": prefill_length * 4,
+      "max_prefill_predict_length": prefill_length * 2,
+      "model_call_mode": "inference",
+      "capacity_factor": -1,
+      "decoder_block": "mistral",
+      "scan_layers": False,
+      "per_device_batch_size": 1.0,
     }
 
     # Model without chunked prefill
     config = self.init_pyconfig(
-        use_chunked_prefill=False,
-        **model_config_args,
+      use_chunked_prefill=False,
+      **model_config_args,
     )
     engine = MaxEngine(config)
     params = engine.load_params()
     expected_prefill_result, expected_first_token = engine.prefill(
-        params=params,
-        padded_tokens=padding_tokens,
-        true_length=true_length,
+      params=params,
+      padded_tokens=padding_tokens,
+      true_length=true_length,
     )
 
     # Model with chunked prefill
     config = self.init_pyconfig(
-        use_chunked_prefill=True,
-        **model_config_args,
+      use_chunked_prefill=True,
+      **model_config_args,
     )
     engine = MaxEngine(config)
     params = engine.load_params()
 
     # One chunk
     one_chunk_prefill_result, one_chunk_first_token = engine.prefill(
-        params=params,
-        padded_tokens=padding_tokens,
-        true_length=true_length,
+      params=params,
+      padded_tokens=padding_tokens,
+      true_length=true_length,
     )
 
     assert jax.tree.all(
-        jax.tree.map(
-            functools.partial(array_equal_valid_tokens, compare_length=true_length),
-            one_chunk_prefill_result,
-            expected_prefill_result,
-        )
+      jax.tree.map(
+        functools.partial(array_equal_valid_tokens, compare_length=true_length),
+        one_chunk_prefill_result,
+        expected_prefill_result,
+      )
     )
     assert jax.tree.all(
-        jax.tree.map(
-            functools.partial(array_equal_valid_tokens, compare_length=true_length),
-            one_chunk_first_token,
-            expected_first_token,
-        )
+      jax.tree.map(
+        functools.partial(array_equal_valid_tokens, compare_length=true_length),
+        one_chunk_first_token,
+        expected_first_token,
+      )
     )
 
     # Two chunks
@@ -249,52 +249,52 @@ class MaxEngineTest(unittest.TestCase):
     existing_prefix = None
 
     two_chunk_prefill_result, two_chunk_first_token = engine.prefill(
-        params=params,
-        existing_prefix=existing_prefix,
-        padded_tokens=padding_tokens[:4],
-        true_length=4,
+      params=params,
+      existing_prefix=existing_prefix,
+      padded_tokens=padding_tokens[:4],
+      true_length=4,
     )
 
     existing_prefix = maxengine.ExistingPrefix(
-        cache=two_chunk_prefill_result["cache"], common_prefix_tokens=padding_tokens[:4]
+      cache=two_chunk_prefill_result["cache"], common_prefix_tokens=padding_tokens[:4]
     )
     two_chunk_prefill_result, two_chunk_first_token = engine.prefill(
-        params=params,
-        existing_prefix=existing_prefix,
-        padded_tokens=padding_tokens[4:],
-        true_length=3,
+      params=params,
+      existing_prefix=existing_prefix,
+      padded_tokens=padding_tokens[4:],
+      true_length=3,
     )
 
     # Delete extra contents only used in chunked prefill
     assert two_chunk_prefill_result is not None
 
     assert jax.tree.all(
-        jax.tree.map(
-            functools.partial(array_equal_valid_tokens, compare_length=true_length),
-            one_chunk_prefill_result,
-            two_chunk_prefill_result,
-        )
+      jax.tree.map(
+        functools.partial(array_equal_valid_tokens, compare_length=true_length),
+        one_chunk_prefill_result,
+        two_chunk_prefill_result,
+      )
     )
     assert jax.tree.all(
-        jax.tree.map(
-            functools.partial(array_equal_valid_tokens, compare_length=true_length),
-            one_chunk_first_token,
-            two_chunk_first_token,
-        )
+      jax.tree.map(
+        functools.partial(array_equal_valid_tokens, compare_length=true_length),
+        one_chunk_first_token,
+        two_chunk_first_token,
+      )
     )
     assert jax.tree.all(
-        jax.tree.map(
-            functools.partial(array_equal_valid_tokens, compare_length=true_length),
-            expected_prefill_result,
-            two_chunk_prefill_result,
-        )
+      jax.tree.map(
+        functools.partial(array_equal_valid_tokens, compare_length=true_length),
+        expected_prefill_result,
+        two_chunk_prefill_result,
+      )
     )
     assert jax.tree.all(
-        jax.tree.map(
-            functools.partial(array_equal_valid_tokens, compare_length=true_length),
-            expected_first_token,
-            two_chunk_first_token,
-        )
+      jax.tree.map(
+        functools.partial(array_equal_valid_tokens, compare_length=true_length),
+        expected_first_token,
+        two_chunk_first_token,
+      )
     )
 
 

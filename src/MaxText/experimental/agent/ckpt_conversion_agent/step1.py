@@ -15,6 +15,7 @@
 """
 main script to execute the multi-agent workflow for model-specific mappings generation
 """
+
 import argparse
 
 from MaxText.experimental.agent.ckpt_conversion_agent.analysis import AnalysisAgent
@@ -26,7 +27,7 @@ if __name__ == "__main__":
 
   parser.add_argument("--target_model", type=str, required=True, help='The name of the target model (e.g., "GEMMA3").')
   parser.add_argument(
-      "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
+    "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
   )
   parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
   args = parser.parse_args()

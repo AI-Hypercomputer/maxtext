@@ -46,9 +46,9 @@ def main(argv: Sequence[str]) -> None:
 
 
 def validate_config(config):
-  assert (
-      config.load_full_state_path == ""
-  ), "Operation on full states not supported! Convert to parameter checkpoint first."
+  assert config.load_full_state_path == "", (
+    "Operation on full states not supported! Convert to parameter checkpoint first."
+  )
 
 
 if __name__ == "__main__":

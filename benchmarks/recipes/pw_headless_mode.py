@@ -37,21 +37,21 @@ def main() -> int:
 
   # Run workloads in the following slice configurations
   wl_config = mxr.WorkloadConfig(
-      model=None,
-      num_slices=num_slices,
-      device_type=cluster_config.device_type,
-      base_output_directory=base_output_directory,
-      max_restarts=0,
-      libtpu_type=None,
-      libtpu_nightly_version="",
-      base_docker_image="",
-      pathways_config=pathways_config,
-      xpk_path=xpk_path,
+    model=None,
+    num_slices=num_slices,
+    device_type=cluster_config.device_type,
+    base_output_directory=base_output_directory,
+    max_restarts=0,
+    libtpu_type=None,
+    libtpu_nightly_version="",
+    base_docker_image="",
+    pathways_config=pathways_config,
+    xpk_path=xpk_path,
   )
   command, name = mxr.generate_xpk_workload_cmd(
-      cluster_config=cluster_config,
-      wl_config=wl_config,
-      workload_name=headless_workload_name,
+    cluster_config=cluster_config,
+    wl_config=wl_config,
+    workload_name=headless_workload_name,
   )
 
   print(f"Name of the workload is: {name} \n")

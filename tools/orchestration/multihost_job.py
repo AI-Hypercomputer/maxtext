@@ -37,6 +37,7 @@ Common issues:
   You must have local write permissions to BUCKET_NAME. The allocated TPUVMs must also have read permissions to this
   bucket, which is granted through service account roles, such as Storage Object Admin.
 """
+
 import argparse
 import sys
 import subprocess
@@ -277,42 +278,42 @@ def main(raw_args=None) -> None:
   parser.add_argument("--VERSION", type=str, default="tpu-ubuntu2204-base", help="The runtime version of the TPU")
   parser.add_argument("--NUM_SLICES", type=int, default=2, help="The number of slices to run the job on")
   parser.add_argument(
-      "--SCRIPT_DIR",
-      type=str,
-      default=os.getcwd(),
-      help="The local location of the directory to copy to the TPUs and run the main command from. \
+    "--SCRIPT_DIR",
+    type=str,
+    default=os.getcwd(),
+    help="The local location of the directory to copy to the TPUs and run the main command from. \
                         Defaults to current working directory.",
   )
   parser.add_argument(
-      "--COMMAND",
-      type=str,
-      default=None,
-      required=True,
-      help="Main command to run on each TPU. \
+    "--COMMAND",
+    type=str,
+    default=None,
+    required=True,
+    help="Main command to run on each TPU. \
                         This command is run from a copied version of SCRIPT_DIR on each TPU worker. \
                         You must include your dependency installations here, \
                         e.g. --COMMAND='bash setup.sh && python3 train.py'",
   )
   parser.add_argument("--BUCKET_NAME", type=str, default=None, required=True, help="Name of GCS bucket, e.g. my-bucket")
   parser.add_argument(
-      "--BUCKET_DIR", type=str, default="", help="Directory within the GCS bucket, can be None, e.g. my-dir"
+    "--BUCKET_DIR", type=str, default="", help="Directory within the GCS bucket, can be None, e.g. my-dir"
   )
   parser.add_argument("--PROJECT", type=str, default=None, help="GCE project name, defaults to gcloud config project")
   parser.add_argument(
-      "--ZONE", type=str, default=None, help="GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone"
+    "--ZONE", type=str, default=None, help="GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone"
   )
   parser.add_argument(
-      "--RUN_NAME", type=str, default=None, help="Run name used for temporary files, defaults to timestamp."
+    "--RUN_NAME", type=str, default=None, help="Run name used for temporary files, defaults to timestamp."
   )
   parser.add_argument(
-      "--CQR_EXTRA_ARGS",
-      type=str,
-      default=None,
-      help='Additional arguments to be passed verbatim to the CQR request, e.g. \
+    "--CQR_EXTRA_ARGS",
+    type=str,
+    default=None,
+    help='Additional arguments to be passed verbatim to the CQR request, e.g. \
                       --CQR_EXTRA_ARGS="--reserved --service-account=my-service-account-email-address',
   )
   parser.add_argument(
-      "--ENABLE_AUTOCHECKPOINT", type=str2bool, default=False, help="Whether to enable the Autocheckpoint feature"
+    "--ENABLE_AUTOCHECKPOINT", type=str2bool, default=False, help="Whether to enable the Autocheckpoint feature"
   )
   args = parser.parse_args(raw_args)
 
@@ -371,19 +372,19 @@ def main(raw_args=None) -> None:
   print(f"Your job is being logged, follow it here:\n{google_cloud_logging_url(args.RUN_NAME, args.PROJECT)}\n")
 
   print(
-      f"To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:"
-      f"\n{google_cloud_logging_single_host_url(args.RUN_NAME, args.PROJECT)}\n"
+    f"To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:"
+    f"\n{google_cloud_logging_single_host_url(args.RUN_NAME, args.PROJECT)}\n"
   )
 
   print(
-      f"When your job is finished, the main command log is in the GCS bucket here:"
-      f"\n{gcs_bucket_url(args.BUCKET_NAME, bucket_dir, args.PROJECT)}\n"
+    f"When your job is finished, the main command log is in the GCS bucket here:"
+    f"\n{gcs_bucket_url(args.BUCKET_NAME, bucket_dir, args.PROJECT)}\n"
   )
 
   print("View the status of the created TPUs via: ")
   print(
-      f"gcloud alpha compute tpus queued-resources list "
-      f"--filter={args.RUN_NAME} --zone={args.ZONE} --project={args.PROJECT}\n"
+    f"gcloud alpha compute tpus queued-resources list "
+    f"--filter={args.RUN_NAME} --zone={args.ZONE} --project={args.PROJECT}\n"
   )
   return 0
 

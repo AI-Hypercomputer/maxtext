@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Used to perf benchmarks between Pathways and McJax."""
+
 import os
 import sys
 
@@ -27,17 +28,17 @@ def main() -> int:
   """Main program entry point"""
   user_configs.USER_CONFIG.headless = False
   should_continue = helper.handle_cmd_args(
-      user_configs.USER_CONFIG.cluster_config, helper.DELETE, xpk_path=user_configs.USER_CONFIG.xpk_path
+    user_configs.USER_CONFIG.cluster_config, helper.DELETE, xpk_path=user_configs.USER_CONFIG.xpk_path
   )
 
   if not should_continue:
     return 0
 
   return_code = generate_and_run_workloads(
-      user_configs.USER_CONFIG,
-      user_configs.USER_CONFIG.num_slices_list,
-      user_configs.USER_CONFIG.benchmark_steps,
-      user_configs.USER_CONFIG.priority,
+    user_configs.USER_CONFIG,
+    user_configs.USER_CONFIG.num_slices_list,
+    user_configs.USER_CONFIG.benchmark_steps,
+    user_configs.USER_CONFIG.priority,
   )
 
   return return_code

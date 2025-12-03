@@ -13,10 +13,11 @@
 # limitations under the License.
 
 """
-This file defines the `GemeiniAgent` class, which acts as an interface for interacting 
-with the Google Gemini model. It handles model initialization, configuration, and robust 
-API calls with retry mechanisms. Please add your API key and chosen model name in .env file. 
+This file defines the `GemeiniAgent` class, which acts as an interface for interacting
+with the Google Gemini model. It handles model initialization, configuration, and robust
+API calls with retry mechanisms. Please add your API key and chosen model name in .env file.
 """
+
 import logging
 import os
 import time
@@ -46,8 +47,8 @@ class GeminiAgent:
   TEMPERATURE = 0.1
   MAX_OUTPUT_TOKENS = 50000
   generation_config = genai.GenerationConfig(
-      temperature=TEMPERATURE,
-      max_output_tokens=MAX_OUTPUT_TOKENS,
+    temperature=TEMPERATURE,
+    max_output_tokens=MAX_OUTPUT_TOKENS,
   )
 
   def __init__(self, system_instruction):
@@ -58,11 +59,11 @@ class GeminiAgent:
         system_instruction (str): The system prompt to guide the model's behavior.
     """
     self.client = genai.GenerativeModel(
-        os.environ["Model"], generation_config=self.generation_config, system_instruction=system_instruction
+      os.environ["Model"], generation_config=self.generation_config, system_instruction=system_instruction
     )
 
   @backoff.on_exception(
-      backoff.expo, (DeadlineExceeded, InternalServerError, RetryError, ValueError, TypeError), max_tries=5
+    backoff.expo, (DeadlineExceeded, InternalServerError, RetryError, ValueError, TypeError), max_tries=5
   )
   def __call__(self, memory_list):
     """

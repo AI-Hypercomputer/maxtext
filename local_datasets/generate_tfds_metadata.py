@@ -27,6 +27,7 @@ This script creates a tiny TFDS builder and outputs the ``dataset_info.json`` an
 After running, you can point TFDS to ``--root`` and load with
 ``dataset_name='c4/en:3.1.0'``.
 """
+
 from __future__ import annotations
 import os
 import argparse
@@ -82,11 +83,11 @@ def write_metadata(root: str, version_dir: str, dataset_version: str, force: boo
 
     def _info(self) -> tfds.core.DatasetInfo:  # type: ignore[override]
       info = tfds.core.DatasetInfo(
-          builder=self,
-          description="Local minimal C4 English subset.",
-          features=tfds.features.FeaturesDict({"text": tfds.features.Text()}),
-          homepage="https://www.tensorflow.org/datasets/catalog/c4",
-          citation="",
+        builder=self,
+        description="Local minimal C4 English subset.",
+        features=tfds.features.FeaturesDict({"text": tfds.features.Text()}),
+        homepage="https://www.tensorflow.org/datasets/catalog/c4",
+        citation="",
       )
       info.set_splits({"train": train_split, "validation": val_split})
       return info
@@ -112,24 +113,24 @@ def main() -> None:
   """CLI entry point for generating TFDS metadata."""
   ap = argparse.ArgumentParser()
   ap.add_argument(
-      "--root",
-      required=True,
-      help="Root directory containing c4/en/<version> shards",
+    "--root",
+    required=True,
+    help="Root directory containing c4/en/<version> shards",
   )
   ap.add_argument(
-      "--version",
-      default="3.1.0",
-      help="Target version to expose via TFDS",
+    "--version",
+    default="3.1.0",
+    help="Target version to expose via TFDS",
   )
   ap.add_argument(
-      "--source-version",
-      default="3.0.1",
-      help="Existing version directory with shards",
+    "--source-version",
+    default="3.0.1",
+    help="Existing version directory with shards",
   )
   ap.add_argument(
-      "--force",
-      action="store_true",
-      help="Overwrite existing dataset_info.json if present",
+    "--force",
+    action="store_true",
+    help="Overwrite existing dataset_info.json if present",
   )
   args = ap.parse_args()
 

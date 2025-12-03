@@ -46,35 +46,35 @@ def run_checkpoint_compatibility(hardware, attention_type):
 
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   grain_command = [
-      "grain_worker_count=0",
-      "grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
+    "grain_worker_count=0",
+    "grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
   ]
 
   # Run training using grain input pipeline
   train_main(
-      get_checkpointing_command(
-          run_date,
-          hardware=hardware,
-          steps=1,
-          metrics_file=os.path.join(MAXTEXT_REPO_ROOT, "run_1_metrics.txt"),
-          attention_type=attention_type,
-          dataset_type="grain",
-          dataset_path="/tmp/gcsfuse",
-      )
-      + grain_command
+    get_checkpointing_command(
+      run_date,
+      hardware=hardware,
+      steps=1,
+      metrics_file=os.path.join(MAXTEXT_REPO_ROOT, "run_1_metrics.txt"),
+      attention_type=attention_type,
+      dataset_type="grain",
+      dataset_path="/tmp/gcsfuse",
+    )
+    + grain_command
   )
 
   # Resume training using tfds input pipeline
   train_main(
-      get_checkpointing_command(
-          run_date,
-          hardware=hardware,
-          steps=2,
-          metrics_file=os.path.join(MAXTEXT_REPO_ROOT, "run_2_metrics.txt"),
-          attention_type=attention_type,
-          dataset_type="tfds",
-          dataset_path="/tmp/gcsfuse",
-      )
+    get_checkpointing_command(
+      run_date,
+      hardware=hardware,
+      steps=2,
+      metrics_file=os.path.join(MAXTEXT_REPO_ROOT, "run_2_metrics.txt"),
+      attention_type=attention_type,
+      dataset_type="tfds",
+      dataset_path="/tmp/gcsfuse",
+    )
   )
 
   check_start_step(os.path.join(MAXTEXT_REPO_ROOT, "run_2_metrics.txt"), 1.0)

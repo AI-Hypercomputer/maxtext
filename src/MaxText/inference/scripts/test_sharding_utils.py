@@ -47,19 +47,19 @@ class ShardingTests(unittest.TestCase):
     sD, sK, sW, sF, sE = 1, 1, 1, 1, 1
 
     result = calculate_matmul_resources(
-        activations_shape=activations_shape_2d,
-        weights_shape=weights_shape_2d,
-        ici_bandwidth=ici_bandwidth_val,
-        peak_flops=peak_flops_val,
-        sD=sD,
-        sK=sK,
-        sW=sW,
-        sF=sF,
-        sE=sE,
-        activation_size_bytes=activation_size_bytes_val,
-        weight_size_bytes=weight_size_bytes_val,
-        ici_latency=ici_latency_val,
-        debug=False,
+      activations_shape=activations_shape_2d,
+      weights_shape=weights_shape_2d,
+      ici_bandwidth=ici_bandwidth_val,
+      peak_flops=peak_flops_val,
+      sD=sD,
+      sK=sK,
+      sW=sW,
+      sF=sF,
+      sE=sE,
+      activation_size_bytes=activation_size_bytes_val,
+      weight_size_bytes=weight_size_bytes_val,
+      ici_latency=ici_latency_val,
+      debug=False,
     )
 
     # Expected FLOPs
@@ -88,32 +88,32 @@ class ShardingTests(unittest.TestCase):
     sD, sK, sW, sE = 1, 1, 1, 1
 
     result = calculate_matmul_resources(
-        activations_shape=activations_shape_2d,
-        weights_shape=weights_shape_2d,  # (K, F)
-        ici_bandwidth=ici_bandwidth_val,
-        peak_flops=peak_flops_val,
-        sD=sD,
-        sK=sK,
-        sW=sW,
-        sF=sF,
-        sE=sE,
-        activation_size_bytes=activation_size_bytes_val,
-        weight_size_bytes=weight_size_bytes_val,
-        ici_latency=ici_latency_val,
-        debug=False,
+      activations_shape=activations_shape_2d,
+      weights_shape=weights_shape_2d,  # (K, F)
+      ici_bandwidth=ici_bandwidth_val,
+      peak_flops=peak_flops_val,
+      sD=sD,
+      sK=sK,
+      sW=sW,
+      sF=sF,
+      sE=sE,
+      activation_size_bytes=activation_size_bytes_val,
+      weight_size_bytes=weight_size_bytes_val,
+      ici_latency=ici_latency_val,
+      debug=False,
     )
 
     # Expected FLOPs
     expected_t_flops = (2.0 * M * K * (F / sF)) / peak_flops_val
-    assert (
-        abs(result["t_flops"] - expected_t_flops) < TOLERANCE
-    ), f"FLOPs mismatch: got {result['t_flops']}, expected {expected_t_flops}"
+    assert abs(result["t_flops"] - expected_t_flops) < TOLERANCE, (
+      f"FLOPs mismatch: got {result['t_flops']}, expected {expected_t_flops}"
+    )
 
     # Expected comms
     expected_t_comms = 0.0
-    assert (
-        abs(result["t_comms"] - expected_t_comms) < TOLERANCE
-    ), f"Comms mismatch: got {result['t_comms']}, expected {expected_t_comms}"
+    assert abs(result["t_comms"] - expected_t_comms) < TOLERANCE, (
+      f"Comms mismatch: got {result['t_comms']}, expected {expected_t_comms}"
+    )
 
     # Expected Memory per TPU
     # Activations
@@ -124,9 +124,9 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output = M * (F / sF) * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output
-    assert (
-        abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
-    ), f"Memory mismatch: got {result['memory_per_TPU_bytes']}, expected {expected_memory_per_TPU}"
+    assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE, (
+      f"Memory mismatch: got {result['memory_per_TPU_bytes']}, expected {expected_memory_per_TPU}"
+    )
 
   def test_data_parallelism_sD(self):
     """Tests sharding on the M dimension of activations (sD)."""
@@ -134,19 +134,19 @@ class ShardingTests(unittest.TestCase):
     sK, sW, sF, sE = 1, 1, 1, 1
 
     result = calculate_matmul_resources(
-        activations_shape=activations_shape_2d,
-        weights_shape=weights_shape_2d,
-        ici_bandwidth=ici_bandwidth_val,
-        peak_flops=peak_flops_val,
-        sD=sD,
-        sK=sK,
-        sW=sW,
-        sF=sF,
-        sE=sE,
-        activation_size_bytes=activation_size_bytes_val,
-        weight_size_bytes=weight_size_bytes_val,
-        ici_latency=ici_latency_val,
-        debug=False,
+      activations_shape=activations_shape_2d,
+      weights_shape=weights_shape_2d,
+      ici_bandwidth=ici_bandwidth_val,
+      peak_flops=peak_flops_val,
+      sD=sD,
+      sK=sK,
+      sW=sW,
+      sF=sF,
+      sE=sE,
+      activation_size_bytes=activation_size_bytes_val,
+      weight_size_bytes=weight_size_bytes_val,
+      ici_latency=ici_latency_val,
+      debug=False,
     )
 
     # Expected FLOPs:
@@ -177,19 +177,19 @@ class ShardingTests(unittest.TestCase):
     sD, sW, sF, sE = 1, 1, 1, 1
 
     result = calculate_matmul_resources(
-        activations_shape=activations_shape_2d,
-        weights_shape=weights_shape_2d,
-        ici_bandwidth=ici_bandwidth_val,
-        peak_flops=peak_flops_val,
-        sD=sD,
-        sK=sK,
-        sW=sW,
-        sF=sF,
-        sE=sE,
-        activation_size_bytes=activation_size_bytes_val,
-        weight_size_bytes=weight_size_bytes_val,
-        ici_latency=ici_latency_val,
-        debug=False,
+      activations_shape=activations_shape_2d,
+      weights_shape=weights_shape_2d,
+      ici_bandwidth=ici_bandwidth_val,
+      peak_flops=peak_flops_val,
+      sD=sD,
+      sK=sK,
+      sW=sW,
+      sF=sF,
+      sE=sE,
+      activation_size_bytes=activation_size_bytes_val,
+      weight_size_bytes=weight_size_bytes_val,
+      ici_latency=ici_latency_val,
+      debug=False,
     )
 
     # Expected FLOPs
@@ -223,19 +223,19 @@ class ShardingTests(unittest.TestCase):
     sD, sK, sF, sE = 1, 1, 1, 1
 
     result = calculate_matmul_resources(
-        activations_shape=activations_shape_2d,
-        weights_shape=weights_shape_2d,
-        ici_bandwidth=ici_bandwidth_val,
-        peak_flops=peak_flops_val,
-        sD=sD,
-        sK=sK,
-        sW=sW,
-        sF=sF,
-        sE=sE,
-        activation_size_bytes=activation_size_bytes_val,
-        weight_size_bytes=weight_size_bytes_val,
-        ici_latency=ici_latency_val,
-        debug=False,
+      activations_shape=activations_shape_2d,
+      weights_shape=weights_shape_2d,
+      ici_bandwidth=ici_bandwidth_val,
+      peak_flops=peak_flops_val,
+      sD=sD,
+      sK=sK,
+      sW=sW,
+      sF=sF,
+      sE=sE,
+      activation_size_bytes=activation_size_bytes_val,
+      weight_size_bytes=weight_size_bytes_val,
+      ici_latency=ici_latency_val,
+      debug=False,
     )
 
     # Expected FLOPs
@@ -271,19 +271,19 @@ class ShardingTests(unittest.TestCase):
     sD, sF, sE = 1, 1, 1
 
     result = calculate_matmul_resources(
-        activations_shape=activations_shape_2d,
-        weights_shape=weights_shape_2d,
-        ici_bandwidth=ici_bandwidth_val,
-        peak_flops=peak_flops_val,
-        sD=sD,
-        sK=sK,
-        sW=sW,
-        sF=sF,
-        sE=sE,
-        activation_size_bytes=activation_size_bytes_val,
-        weight_size_bytes=weight_size_bytes_val,
-        ici_latency=ici_latency_val,
-        debug=False,
+      activations_shape=activations_shape_2d,
+      weights_shape=weights_shape_2d,
+      ici_bandwidth=ici_bandwidth_val,
+      peak_flops=peak_flops_val,
+      sD=sD,
+      sK=sK,
+      sW=sW,
+      sF=sF,
+      sE=sE,
+      activation_size_bytes=activation_size_bytes_val,
+      weight_size_bytes=weight_size_bytes_val,
+      ici_latency=ici_latency_val,
+      debug=False,
     )
 
     # Expected FLOPs
@@ -315,36 +315,36 @@ class ShardingTests(unittest.TestCase):
     all_gather_axes = ["F"]
 
     result = calculate_matmul_resources(
-        activations_shape=activations_shape_2d,
-        weights_shape=weights_shape_2d,  # (K, F)
-        ici_bandwidth=ici_bandwidth_val,
-        peak_flops=peak_flops_val,
-        sD=sD,
-        sK=sK,
-        sW=sW,
-        sF=sF,
-        sE=sE,
-        activation_size_bytes=activation_size_bytes_val,
-        weight_size_bytes=weight_size_bytes_val,
-        ici_latency=ici_latency_val,
-        all_gather_axes=all_gather_axes,
-        debug=False,
+      activations_shape=activations_shape_2d,
+      weights_shape=weights_shape_2d,  # (K, F)
+      ici_bandwidth=ici_bandwidth_val,
+      peak_flops=peak_flops_val,
+      sD=sD,
+      sK=sK,
+      sW=sW,
+      sF=sF,
+      sE=sE,
+      activation_size_bytes=activation_size_bytes_val,
+      weight_size_bytes=weight_size_bytes_val,
+      ici_latency=ici_latency_val,
+      all_gather_axes=all_gather_axes,
+      debug=False,
     )
 
     # Expected FLOPs
     expected_t_flops = (2.0 * M * K * (F / sF)) / peak_flops_val
-    assert (
-        abs(result["t_flops"] - expected_t_flops) < TOLERANCE
-    ), f"FLOPs mismatch: got {result['t_flops']}, expected {expected_t_flops}"
+    assert abs(result["t_flops"] - expected_t_flops) < TOLERANCE, (
+      f"FLOPs mismatch: got {result['t_flops']}, expected {expected_t_flops}"
+    )
 
     # Expected comms
     # per TPU
     local_output_bytes_for_gather = M * (F / sF) * max(activation_size_bytes_val, weight_size_bytes_val)
     # t_comms
     expected_t_comms = latency_bound_comms(local_output_bytes_for_gather / ici_bandwidth_val, ici_latency_val) * (sF - 1)
-    assert (
-        abs(result["t_comms"] - expected_t_comms) < TOLERANCE
-    ), f"Comms mismatch: got {result['t_comms']}, expected {expected_t_comms}"
+    assert abs(result["t_comms"] - expected_t_comms) < TOLERANCE, (
+      f"Comms mismatch: got {result['t_comms']}, expected {expected_t_comms}"
+    )
 
     # Expected Memory per TPU:
     # Activations
@@ -355,9 +355,9 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output_gathered = M * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output_gathered
-    assert (
-        abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
-    ), f"Memory mismatch: got {result['memory_per_TPU_bytes']}, expected {expected_memory_per_TPU}"
+    assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE, (
+      f"Memory mismatch: got {result['memory_per_TPU_bytes']}, expected {expected_memory_per_TPU}"
+    )
 
   def test_expert_parallelism_sE(self):
     """Tests expert parallelism sharding on the G dimension (sE)."""
@@ -367,19 +367,19 @@ class ShardingTests(unittest.TestCase):
     sD, sK, sW, sF = 1, 1, 1, 1
 
     result = calculate_matmul_resources(
-        activations_shape=activations_shape_2d,
-        weights_shape=weights_shape_3d,
-        ici_bandwidth=ici_bandwidth_val,
-        peak_flops=peak_flops_val,
-        sD=sD,
-        sK=sK,
-        sW=sW,
-        sF=sF,
-        sE=sE,
-        activation_size_bytes=activation_size_bytes_val,
-        weight_size_bytes=weight_size_bytes_val,
-        ici_latency=ici_latency_val,
-        debug=False,
+      activations_shape=activations_shape_2d,
+      weights_shape=weights_shape_3d,
+      ici_bandwidth=ici_bandwidth_val,
+      peak_flops=peak_flops_val,
+      sD=sD,
+      sK=sK,
+      sW=sW,
+      sF=sF,
+      sE=sE,
+      activation_size_bytes=activation_size_bytes_val,
+      weight_size_bytes=weight_size_bytes_val,
+      ici_latency=ici_latency_val,
+      debug=False,
     )
 
     # Expected FLOPs
@@ -412,19 +412,19 @@ class ShardingTests(unittest.TestCase):
     sF, sE = 1, 1
 
     result = calculate_matmul_resources(
-        activations_shape=activations_shape_2d,
-        weights_shape=weights_shape_2d,
-        ici_bandwidth=ici_bandwidth_val,
-        peak_flops=peak_flops_val,
-        sD=sD,
-        sK=sK,
-        sW=sW,
-        sF=sF,
-        sE=sE,
-        activation_size_bytes=activation_size_bytes_val,
-        weight_size_bytes=weight_size_bytes_val,
-        ici_latency=ici_latency_val,
-        debug=False,
+      activations_shape=activations_shape_2d,
+      weights_shape=weights_shape_2d,
+      ici_bandwidth=ici_bandwidth_val,
+      peak_flops=peak_flops_val,
+      sD=sD,
+      sK=sK,
+      sW=sW,
+      sF=sF,
+      sE=sE,
+      activation_size_bytes=activation_size_bytes_val,
+      weight_size_bytes=weight_size_bytes_val,
+      ici_latency=ici_latency_val,
+      debug=False,
     )
 
     # Expected FLOPs
@@ -456,20 +456,20 @@ class ShardingTests(unittest.TestCase):
     all_gather_axes = ["D"]
 
     result = calculate_matmul_resources(
-        activations_shape=activations_shape_2d,
-        weights_shape=weights_shape_2d,
-        ici_bandwidth=ici_bandwidth_val,
-        peak_flops=peak_flops_val,
-        sD=sD,
-        sK=sK,
-        sW=sW,
-        sF=sF,
-        sE=sE,
-        activation_size_bytes=activation_size_bytes_val,
-        weight_size_bytes=weight_size_bytes_val,
-        ici_latency=ici_latency_val,
-        all_gather_axes=all_gather_axes,
-        debug=False,
+      activations_shape=activations_shape_2d,
+      weights_shape=weights_shape_2d,
+      ici_bandwidth=ici_bandwidth_val,
+      peak_flops=peak_flops_val,
+      sD=sD,
+      sK=sK,
+      sW=sW,
+      sF=sF,
+      sE=sE,
+      activation_size_bytes=activation_size_bytes_val,
+      weight_size_bytes=weight_size_bytes_val,
+      ici_latency=ici_latency_val,
+      all_gather_axes=all_gather_axes,
+      debug=False,
     )
 
     # Expected FLOPs
