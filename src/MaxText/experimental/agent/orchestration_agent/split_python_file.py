@@ -271,26 +271,33 @@ class DependencyAnalyzer:
         dict[str, str]: Mapping of imported names to "file.py#name" anchors.
     """
     import_dict = {}
-
-    # CASE 1: "from X import Y"
-    if " import " in path:
+    def parse_alias(pkg_str):
+      pkg_str = pkg_str.strip()
+      if " as " in pkg_str:
+        name, alias = pkg_str.split(" as ")
+        return name.strip(), alias.strip()
+      return pkg_str, pkg_str
+    
+    # "from X import Y" (e.g. from torch import nn)
+    if " import " in path and not path.startswith("import"):
       try:
         path_form, path_imports = path.removeprefix("from ").replace(".", os.path.sep).split(" import ")
         for pkg in path_imports.split(","):
-          import_dict[pkg.strip()] = path_form + ".py#" + pkg.strip()
+          real_name, alias = parse_alias(pkg)
+          # Key is the ALIAS (e.g. 'nn'), Value is the path to the real file
+          import_dict[alias] = path_form + ".py#" + real_name
       except ValueError:
-        # Fallback if splitting fails unexpectedly
         pass
       
+    # CASE 2: "import X" (e.g. import torch.nn.functional as F)
     elif path.startswith("import "):
-        # e.g., "import util.misc"
-        pkg = path.replace("import ", "").strip()
-        # Convert dots to slashes for the file path: "util.misc" -> "util/misc.py"
-        file_path = pkg.replace(".", os.path.sep) + ".py"
-        # Map the top-level name. e.g. "util" -> "util/misc.py#util" 
-        # (This is a heuristic; strict mapping requires more context, but this prevents crashes)
-        import_dict[pkg] = f"{file_path}#{pkg}"
-        
+      clean_path = path.replace("import ", "").strip()
+      for pkg in clean_path.split(","):
+        real_name, alias = parse_alias(pkg)
+        # Use REAL name for the file path (torch.nn.functional -> torch/nn/functional.py)
+        file_path = real_name.replace(".", os.path.sep) + ".py"
+        # Use ALIAS for the dictionary key (F)
+        import_dict[alias] = f"{file_path}#{real_name}"
     return import_dict
 
   def analyze(self):
@@ -335,17 +342,14 @@ class DependencyAnalyzer:
           absimports = get_absolute_imports(scode, self.file_path, project_root=self.project_root)
           if absimports is not None:
             for absimport in absimports.split("\n"):
-              if not self.project_root or absimport.startswith("from " + self.project_root):
-                self.git_dependencies.update(self.convert_package_to_path(absimport))
-
+              self.git_dependencies.update(self.convert_package_to_path(absimport))
         for node in self.conditional_imports:
           for snode in node[1].body:
             scode = ast.get_source_segment(self.source_code, snode)
             absimports = get_absolute_imports(scode, self.file_path, project_root=self.project_root)
             if absimports is not None:
               for absimport in absimports.split("\n"):
-                if absimport.startswith("from " + self.project_root):
-                  self.git_dependencies.update(self.convert_package_to_path(absimport))
+                self.git_dependencies.update(self.convert_package_to_path(absimport))
 
       # --- Pass 2: Find dependencies and build graph ---
       self.defined_names = set(self.definitions.keys()).union(set(self.git_dependencies.keys()))
@@ -869,7 +873,7 @@ def get_modules_from_file_robust(
     return module_code, full_file_code
 
   except FileNotFoundError as e:
-    logger.warning("ROBUST_FETCH: Skipping %s, likely a library file. Message: %s", file_path, e)
+    logger.info("ROBUST_FETCH: Skipping %s, likely a library file. Message: %s", file_path, e)
     return None, None
   except Exception as e:
     logger.info("ROBUST_FETCH: Module '%s' is not defined in %s (it is likely imported). Error: %s", module, file_path, e)
@@ -890,6 +894,10 @@ def get_modules_in_order_fixed(file_path: str, module: Optional[str] = None, pro
   temp_file_path: Optional[str] = None
   try:
     if file_path.startswith(('http://', 'https://', 'github.com')):
+      file_name_part = file_path.split('/')[-1].replace('.py', '')
+      if file_name_part in COMMON_LIBRARIES:
+          logger.info(f"ROBUST_FETCH: Skipping likely library file: {file_path}")
+          return None, None
       full_file_code, actual_url_downloaded = _download_file_content(file_path) 
       with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py') as tmp:
         tmp.write(full_file_code)
