@@ -1,0 +1,24 @@
+[
+    {
+        "comp_id": "/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeForCausalLM",
+        "filepath": "/transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeForCausalLM",
+        "Dependencies": [
+            "/github.com/huggingface/transformers/blob/main/src/transformers/cache_utils.py#Cache",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/generation.py#GenerationMixin",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/modeling_outputs.py#MoeModelOutputWithPast",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeModel",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#load_balancing_loss_func",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/processing_utils.py#Unpack",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#TransformersKwargs",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#auto_docstring",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#can_return_tuple",
+            "torch.py#nn.Linear",
+            "typing.py#Optional",
+            "typing.py#Union"
+        ],
+        "JaxDependencies": {}
+    }
+]

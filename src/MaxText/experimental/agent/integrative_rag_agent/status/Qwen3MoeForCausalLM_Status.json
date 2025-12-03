@@ -1,0 +1,103 @@
+{
+    "data": {
+        "q": [],
+        "processed_components": [
+            "/github.com/huggingface/transformers/blob/main/src/transformers/processing_utils.py#Unpack",
+            "typing.py#Optional",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/cache_utils.py#Cache",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#auto_docstring",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/modeling_outputs.py#MoeModelOutputWithPast",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#load_balancing_loss_func",
+            "typing.py#Union",
+            "torch.py#nn.Linear",
+            "/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeForCausalLM",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeModel",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/generation.py#GenerationMixin",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#TransformersKwargs",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+            "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#can_return_tuple"
+        ],
+        "processed_count": 2,
+        "file_analysis_cache": {
+            "/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeForCausalLM": {
+                "sorted_modules": {
+                    "Qwen3MoeForCausalLM": "\n\n@auto_docstring\nclass Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):\n    _tied_weights_keys = {\"lm_head.weight\": \"model.embed_tokens.weight\"}\n    _tp_plan = {\"lm_head\": \"colwise_rep\"}\n    _pp_plan = {\"lm_head\": ([\"hidden_states\"], [\"logits\"])}\n\n    def __init__(self, config):\n        super().__init__(config)\n        self.model = Qwen3MoeModel(config)\n        self.vocab_size = config.vocab_size\n        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)\n        self.router_aux_loss_coef = config.router_aux_loss_coef\n        self.num_experts = config.num_experts\n        self.num_experts_per_tok = config.num_experts_per_tok\n\n        # Initialize weights and apply final processing\n        self.post_init()\n\n    @can_return_tuple\n    @auto_docstring\n    def forward(\n        self,\n        input_ids: Optional[torch.LongTensor] = None,\n        attention_mask: Optional[torch.Tensor] = None,\n        position_ids: Optional[torch.LongTensor] = None,\n        past_key_values: Optional[Cache] = None,\n        inputs_embeds: Optional[torch.FloatTensor] = None,\n        labels: Optional[torch.LongTensor] = None,\n        use_cache: Optional[bool] = None,\n        output_router_logits: Optional[bool] = None,\n        cache_position: Optional[torch.LongTensor] = None,\n        logits_to_keep: Union[int, torch.Tensor] = 0,\n        **kwargs: Unpack[TransformersKwargs],\n    ) -> MoeCausalLMOutputWithPast:\n        r\"\"\"\n        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):\n            Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,\n            config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored\n            (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.\n\n        Example:\n\n        ```python\n        >>> from transformers import AutoTokenizer, Qwen3MoeForCausalLM\n\n        >>> model = Qwen3MoeForCausalLM.from_pretrained(\"Qwen/Qwen3-MoE-15B-A2B\")\n        >>> tokenizer = AutoTokenizer.from_pretrained(\"Qwen/Qwen3-MoE-15B-A2B\")\n\n        >>> prompt = \"Hey, are you conscious? Can you talk to me?\"\n        >>> inputs = tokenizer(prompt, return_tensors=\"pt\")\n\n        >>> # Generate\n        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)\n        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]\n        \"Hey, are you conscious? Can you talk to me?\\nI'm not conscious, but I can talk to you.\"\n        ```\"\"\"\n\n        output_router_logits = (\n            output_router_logits if output_router_logits is not None else self.config.output_router_logits\n        )\n\n        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)\n        outputs: MoeModelOutputWithPast = self.model(\n            input_ids=input_ids,\n            attention_mask=attention_mask,\n            position_ids=position_ids,\n            past_key_values=past_key_values,\n            inputs_embeds=inputs_embeds,\n            use_cache=use_cache,\n            output_router_logits=output_router_logits,\n            cache_position=cache_position,\n            **kwargs,\n        )\n\n        hidden_states = outputs.last_hidden_state\n        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss\n        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep\n        logits = self.lm_head(hidden_states[:, slice_indices, :])\n\n        loss = None\n        if labels is not None:\n            loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)\n\n        aux_loss = None\n        if output_router_logits:\n            aux_loss = load_balancing_loss_func(\n                outputs.router_logits,\n                self.num_experts,\n                self.num_experts_per_tok,\n                attention_mask,\n            )\n            if labels is not None:\n                loss += self.router_aux_loss_coef * aux_loss.to(loss.device)  # make sure to reside in the same device\n\n        return MoeCausalLMOutputWithPast(\n            loss=loss,\n            aux_loss=aux_loss,\n            logits=logits,\n            past_key_values=outputs.past_key_values,\n            hidden_states=outputs.hidden_states,\n            attentions=outputs.attentions,\n            router_logits=outputs.router_logits,\n        )"
+                },
+                "component_dependencies": {
+                    "Qwen3MoeForCausalLM": [
+                        "/github.com/huggingface/transformers/blob/main/src/transformers/cache_utils.py#Cache",
+                        "/github.com/huggingface/transformers/blob/main/src/transformers/generation.py#GenerationMixin",
+                        "/github.com/huggingface/transformers/blob/main/src/transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
+                        "/github.com/huggingface/transformers/blob/main/src/transformers/modeling_outputs.py#MoeModelOutputWithPast",
+                        "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeModel",
+                        "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+                        "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#load_balancing_loss_func",
+                        "/github.com/huggingface/transformers/blob/main/src/transformers/processing_utils.py#Unpack",
+                        "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#TransformersKwargs",
+                        "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#auto_docstring",
+                        "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#can_return_tuple",
+                        "torch.py#nn.Linear",
+                        "typing.py#Optional",
+                        "typing.py#Union"
+                    ]
+                },
+                "warning": null
+            }
+        },
+        "files_to_convert": [
+            {
+                "comp_id": "/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeForCausalLM",
+                "filepath": "/transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+                "comp_name": "Qwen3MoeForCausalLM",
+                "Dependencies": [
+                    "/github.com/huggingface/transformers/blob/main/src/transformers/cache_utils.py#Cache",
+                    "/github.com/huggingface/transformers/blob/main/src/transformers/generation.py#GenerationMixin",
+                    "/github.com/huggingface/transformers/blob/main/src/transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
+                    "/github.com/huggingface/transformers/blob/main/src/transformers/modeling_outputs.py#MoeModelOutputWithPast",
+                    "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeModel",
+                    "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+                    "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#load_balancing_loss_func",
+                    "/github.com/huggingface/transformers/blob/main/src/transformers/processing_utils.py#Unpack",
+                    "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#TransformersKwargs",
+                    "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#auto_docstring",
+                    "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#can_return_tuple",
+                    "torch.py#nn.Linear",
+                    "typing.py#Optional",
+                    "typing.py#Union"
+                ],
+                "JaxDependencies": {}
+            }
+        ],
+        "original_dependencies": {
+            "Qwen3MoeForCausalLM": [
+                "/github.com/huggingface/transformers/blob/main/src/transformers/cache_utils.py#Cache",
+                "/github.com/huggingface/transformers/blob/main/src/transformers/generation.py#GenerationMixin",
+                "/github.com/huggingface/transformers/blob/main/src/transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
+                "/github.com/huggingface/transformers/blob/main/src/transformers/modeling_outputs.py#MoeModelOutputWithPast",
+                "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeModel",
+                "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+                "/github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#load_balancing_loss_func",
+                "/github.com/huggingface/transformers/blob/main/src/transformers/processing_utils.py#Unpack",
+                "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#TransformersKwargs",
+                "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#auto_docstring",
+                "/github.com/huggingface/transformers/blob/main/src/transformers/utils.py#can_return_tuple",
+                "torch.py#nn.Linear",
+                "typing.py#Optional",
+                "typing.py#Union"
+            ]
+        },
+        "jax_found_dependencies": {},
+        "jax_dependencies_list": []
+    },
+    "metadata": {
+        "q": "<class 'collections.deque'>",
+        "processed_components": "<class 'set'>",
+        "processed_count": "<class 'int'>",
+        "file_analysis_cache": "<class 'dict'>",
+        "files_to_convert": "<class 'list'>",
+        "original_dependencies": "<class 'dict'>",
+        "jax_found_dependencies": "<class 'collections.defaultdict'>",
+        "jax_dependencies_list": "<class 'list'>"
+    }
+}
