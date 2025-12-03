@@ -74,7 +74,7 @@ See [](quantization).
 ### Choose sharding strategy
 
 Sharding is crucial for optimizing model performance. MaxText offers various sharding strategies and hybrid options, including FSDP, TP, EP, CP, and PP, which can be configured through your MaxText settings.
-
+[This document](sharding_on_TPUs) illustrates in detail how sharding works in maxtext and chooses the right sharding config for your workload.
 [This document](sharding_on_TPUs) illustrates in detail how sharding works in maxtext and chooses the write sharding config for your workload.
 
 ### Performance tuning on custom Pallas call
