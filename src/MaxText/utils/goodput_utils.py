@@ -46,20 +46,20 @@ def maybe_monitor_goodput(config):
       config.enable_gcp_step_deviation_metrics = False
 
     gcp_options = monitoring.GCPOptions(
-        enable_gcp_goodput_metrics=config.enable_gcp_goodput_metrics,
-        enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
+      enable_gcp_goodput_metrics=config.enable_gcp_goodput_metrics,
+      enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
     )
     goodput_monitor = monitoring.GoodputMonitor(
-        job_name=config.run_name,
-        logger_name=f"goodput_{config.run_name}",
-        tensorboard_dir=config.tensorboard_dir,
-        upload_interval=config.goodput_upload_interval_seconds,
-        monitoring_enabled=True,
-        pathway_enabled=config.enable_pathways_goodput,
-        include_badput_breakdown=True,
-        include_step_deviation=config.monitor_step_time_deviation,
-        step_deviation_interval_seconds=config.step_deviation_interval_seconds,
-        gcp_options=gcp_options,
+      job_name=config.run_name,
+      logger_name=f"goodput_{config.run_name}",
+      tensorboard_dir=config.tensorboard_dir,
+      upload_interval=config.goodput_upload_interval_seconds,
+      monitoring_enabled=True,
+      pathway_enabled=config.enable_pathways_goodput,
+      include_badput_breakdown=True,
+      include_step_deviation=config.monitor_step_time_deviation,
+      step_deviation_interval_seconds=config.step_deviation_interval_seconds,
+      gcp_options=gcp_options,
     )
     goodput_monitor.start_goodput_uploader()
     max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")

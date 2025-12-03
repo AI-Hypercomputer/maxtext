@@ -31,10 +31,10 @@ from benchmarks.xpk_configs import XpkClusterConfig
 def main():
   # V6e cluster config
   cluster_config = XpkClusterConfig(
-      cluster_name="v6e-256-cluster",
-      project="tpu-project",
-      zone="us-east5-b",
-      device_type="v6e-256",
+    cluster_name="v6e-256-cluster",
+    project="tpu-project",
+    zone="us-east5-b",
+    device_type="v6e-256",
   )
 
   xpk_path = "xpk"
@@ -48,20 +48,20 @@ def main():
   # Configure test images
   user = os.environ["USER"]
   region = "-".join(cluster_config.zone.split("-")[:-1])
-  proxy_image = f"us-docker.pkg.dev/cloud-tpu-v2-images/pathways/gke/{user}/" "proxy_server:latest"
-  server_image = f"us-docker.pkg.dev/cloud-tpu-v2-images/pathways/gke/{user}/" "server:latest"
+  proxy_image = f"us-docker.pkg.dev/cloud-tpu-v2-images/pathways/gke/{user}/proxy_server:latest"
+  server_image = f"us-docker.pkg.dev/cloud-tpu-v2-images/pathways/gke/{user}/server:latest"
   colocated_python_image = f"gcr.io/{cluster_config.project}/{user}/colocated_python_sidecar_latest:latest"
   runner = f"gcr.io/{cluster_config.project}/{user}_latest:latest"
   base_output_directory = f"gs://{user}-{region}/{user}"
 
   list_of_models = [
-      model_configs.default_basic_1,
+    model_configs.default_basic_1,
   ]
   pathways_config = mxr.PathwaysConfig(
-      server_image=server_image,
-      proxy_server_image=proxy_image,
-      runner_image=runner,
-      colocated_python_sidecar_image=colocated_python_image,
+    server_image=server_image,
+    proxy_server_image=proxy_image,
+    runner_image=runner,
+    colocated_python_sidecar_image=colocated_python_image,
   )
   num_slices_list = [1]
 
@@ -71,22 +71,22 @@ def main():
   for model in list_of_models:
     # Run workloads on the below clusters
     for cluster_config in [
-        cluster_config,
+      cluster_config,
     ]:
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:
         wl_config = mxr.WorkloadConfig(
-            model=model,
-            num_slices=num_slices,
-            device_type=cluster_config.device_type,
-            base_output_directory=base_output_directory,
-            max_restarts=0,
-            libtpu_type=None,
-            libtpu_nightly_version="",
-            base_docker_image="",
-            pathways_config=pathways_config,
-            xpk_path=xpk_path,
-            num_steps=1000000,
+          model=model,
+          num_slices=num_slices,
+          device_type=cluster_config.device_type,
+          base_output_directory=base_output_directory,
+          max_restarts=0,
+          libtpu_type=None,
+          libtpu_nightly_version="",
+          base_docker_image="",
+          pathways_config=pathways_config,
+          xpk_path=xpk_path,
+          num_steps=1000000,
         )
         command, name = mxr.generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
 

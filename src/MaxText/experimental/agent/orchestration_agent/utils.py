@@ -252,13 +252,13 @@ def remove_local_imports(source_code, filepath=None):
 
 
 def _process_node(
-    basemodule: str,
-    i: int,
-    line: str,
-    lines: list[str],
-    new_lines: list[str],
-    node: ast.Import | ast.ImportFrom,
-    removed_imports: list[ast.Import | ast.ImportFrom],
+  basemodule: str,
+  i: int,
+  line: str,
+  lines: list[str],
+  new_lines: list[str],
+  node: ast.Import | ast.ImportFrom,
+  removed_imports: list[ast.Import | ast.ImportFrom],
 ) -> int:
   """Process node in order to remove local imports. Private, for use by `remove_local_imports`."""
   # Detect multi-line import (parenthesis)
@@ -428,7 +428,7 @@ def resolve_complex_import(module_path_base_url, importPackage, base_url, curren
   # Check for a package (directory with __init__.py)
   potential_pkg_init_url = url_join(module_path_base_url, "__init__.py")
   if check_if_file_exists(potential_pkg_init_url)[0] and (
-      base_url in ("", "./") or potential_pkg_init_url.startswith(base_url)
+    base_url in ("", "./") or potential_pkg_init_url.startswith(base_url)
   ):
     has_module = have_module(importPackage, potential_pkg_init_url)
     if has_module:
@@ -437,7 +437,7 @@ def resolve_complex_import(module_path_base_url, importPackage, base_url, curren
       # The package exists, but the import is not in __init__. It could be a submodule.
       potential_file_in_pkg_url = url_join(module_path_base_url, f"{importPackage}.py")
       if check_if_file_exists(potential_file_in_pkg_url)[0] and (
-          base_url in ("", "./") or potential_file_in_pkg_url.startswith(base_url)
+        base_url in ("", "./") or potential_file_in_pkg_url.startswith(base_url)
       ):
         return potential_file_in_pkg_url
 
@@ -514,16 +514,16 @@ def get_absolute_imports(import_line, file_url, project_root="transformers"):
   packages_and_aliases = [pkg.split(" as ") if " as " in pkg else (pkg, None) for pkg in " ".join(parts[3:]).split(",")]
   packages_and_aliases = [(pkg, "") if alies is None else (pkg, " as " + alies) for pkg, alies in packages_and_aliases]
   packages = [
-      (resolve_import_path(file_url, module_rest, level, base_url, pkg.strip()), pkg, alies)
-      for pkg, alies in packages_and_aliases
+    (resolve_import_path(file_url, module_rest, level, base_url, pkg.strip()), pkg, alies)
+    for pkg, alies in packages_and_aliases
   ]
   packages = [
-      "from "
-      + import_path.removeprefix(base_url).removesuffix(".py").replace(os.path.sep, ".")
-      + " import "
-      + pkg.strip()
-      + alies
-      for import_path, pkg, alies in packages
-      if import_path is not None
+    "from "
+    + import_path.removeprefix(base_url).removesuffix(".py").replace(os.path.sep, ".")
+    + " import "
+    + pkg.strip()
+    + alies
+    for import_path, pkg, alies in packages
+    if import_path is not None
   ]
   return "\n".join(packages) if packages else None

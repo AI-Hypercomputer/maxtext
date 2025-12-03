@@ -96,10 +96,10 @@ def pytest_collection_modifyitems(config, items):
 
 def pytest_configure(config):
   for m in [
-      "gpu_only: tests that require GPU hardware",
-      "tpu_only: tests that require TPU hardware",
-      "external_serving: JetStream / serving / decode server components",
-      "external_training: goodput integrations",
-      "decoupled: marked on tests that are not skipped due to GCP deps, when DECOUPLE_GCLOUD=TRUE",
+    "gpu_only: tests that require GPU hardware",
+    "tpu_only: tests that require TPU hardware",
+    "external_serving: JetStream / serving / decode server components",
+    "external_training: goodput integrations",
+    "decoupled: marked on tests that are not skipped due to GCP deps, when DECOUPLE_GCLOUD=TRUE",
   ]:
     config.addinivalue_line("markers", m)

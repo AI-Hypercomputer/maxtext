@@ -17,8 +17,8 @@ This file contains the prompt templates used by the code generation agent.
 """
 
 CodeGeneration = {
-    # pylint: disable=line-too-long
-    "SystemPrompt": """You are an expert machine learning engineer with deep knowledge of PyTorch, NumPy, and JAX (including libraries such as Flax and Optax).
+  # pylint: disable=line-too-long
+  "SystemPrompt": """You are an expert machine learning engineer with deep knowledge of PyTorch, NumPy, and JAX (including libraries such as Flax and Optax).
 
     Your task:
     - Convert code written in PyTorch, NumPy, or similar frameworks into functionally equivalent JAX code using appropriate JAX libraries (jax.numpy, Flax, Optax, etc.).
@@ -33,7 +33,7 @@ CodeGeneration = {
     - Return `<NOCHANGE>` if:
       - The provided code is purely generic Python (i.e., no PyTorch/NumPy/JAX operations to convert).              
     """,
-    "CODE": """Convert the following Python code to JAX. If it contains PyTorch, NumPy, or other convertible 
+  "CODE": """Convert the following Python code to JAX. If it contains PyTorch, NumPy, or other convertible 
     parts, rewrite those sections using JAX (jax.numpy, Flax, Optax). Assume that all helper methods, 
     modules, and dependencies used in the code are already converted to JAX and available. 
     Do not modify or add import statements unless they already exist.

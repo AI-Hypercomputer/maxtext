@@ -14,6 +14,7 @@
 
 # pytype: skip-file
 """Pydantic-based configuration management for MaxText."""
+
 import logging
 import os
 import sys
@@ -144,7 +145,7 @@ class HyperParameters:
     final_dict["grad_dtype"] = jnp.dtype(final_dict["grad_dtype"])
     final_dict["weight_dtype"] = jnp.dtype(final_dict["weight_dtype"])
     final_dict["mu_dtype"] = (
-        final_dict["weight_dtype"] if not final_dict["mu_dtype"] else jnp.dtype(final_dict["mu_dtype"])
+      final_dict["weight_dtype"] if not final_dict["mu_dtype"] else jnp.dtype(final_dict["mu_dtype"])
     )
 
     final_dict["logical_axis_rules"] = _lists_to_tuples(final_dict["logical_axis_rules"])
@@ -247,7 +248,7 @@ def initialize(argv: list[str], **kwargs) -> HyperParameters:
     if env_key in os.environ:
       if k in cli_keys or k in kwargs_keys:
         raise ValueError(
-            f"Key '{k}' is overridden by both CLI/kwargs and environment variable '{env_key}'. This is not allowed."
+          f"Key '{k}' is overridden by both CLI/kwargs and environment variable '{env_key}'. This is not allowed."
         )
 
       new_proposal = os.environ.get(env_key)

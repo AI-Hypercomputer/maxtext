@@ -26,6 +26,7 @@ Example Invocations:
 2. Get info for another model:
    python get_model_info.py --model-id "Qwen/Qwen3-235B-A22B-Thinking-2507-FP8"
 """
+
 import argparse
 from transformers import AutoConfig
 
@@ -68,7 +69,7 @@ def parse_args():
   """
   parser = argparse.ArgumentParser(description="Get model info from HuggingFace model id")
   parser.add_argument(
-      "--model-id", type=str, default="Qwen/Qwen3-235B-A22B-Thinking-2507-FP8", help="HuggingFace model id"
+    "--model-id", type=str, default="Qwen/Qwen3-235B-A22B-Thinking-2507-FP8", help="HuggingFace model id"
   )
   return parser.parse_args()
 

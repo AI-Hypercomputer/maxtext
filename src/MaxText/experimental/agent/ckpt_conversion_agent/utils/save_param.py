@@ -35,7 +35,6 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 
 
 def main(parsed_args: argparse.Namespace, unknown_pyconfig_args: List[str]) -> None:
-
   # step 1: get shape and naming of mt checkpoint
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -46,9 +45,9 @@ def main(parsed_args: argparse.Namespace, unknown_pyconfig_args: List[str]) -> N
   print(pyconfig_argv)
 
   config = pyconfig.initialize(pyconfig_argv)
-  assert (
-      config.load_full_state_path == ""
-  ), "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
+  assert config.load_full_state_path == "", (
+    "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
+  )
   max_utils.print_system_information()
 
   engine = maxengine.MaxEngine(config)
@@ -76,7 +75,7 @@ def main(parsed_args: argparse.Namespace, unknown_pyconfig_args: List[str]) -> N
       # Add other key types if necessary, e.g., jax.tree_util.GetAttrKey
       else:
         max_logging.log(
-            f"Warning: Path tuple {path_tuple} contains unhandled key type '{type(p_entry)}'. Skipping this part of path."
+          f"Warning: Path tuple {path_tuple} contains unhandled key type '{type(p_entry)}'. Skipping this part of path."
         )
         # Decide how to handle this: skip, raise error, or use a placeholder
         key_parts.append(f"__unhandled_key_type_{type(p_entry).__name__}__")
@@ -97,7 +96,7 @@ def main(parsed_args: argparse.Namespace, unknown_pyconfig_args: List[str]) -> N
 
   if not config.base_output_directory:
     output_directory = os.path.join(
-        MAXTEXT_PKG_DIR, "experimental", "agent", "ckpt_conversion_agent", "context", config.model_name
+      MAXTEXT_PKG_DIR, "experimental", "agent", "ckpt_conversion_agent", "context", config.model_name
     )
   else:
     output_directory = config.base_output_directory
@@ -120,9 +119,9 @@ def main(parsed_args: argparse.Namespace, unknown_pyconfig_args: List[str]) -> N
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Get HF and MaxText checkpoints parameter names and shapes.")
   parser.add_argument(
-      "--hf_model_config",
-      type=str,
-      default="google/gemma-2-2b",
+    "--hf_model_config",
+    type=str,
+    default="google/gemma-2-2b",
   )
 
   main(*parser.parse_known_args())

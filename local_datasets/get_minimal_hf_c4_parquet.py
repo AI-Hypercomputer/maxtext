@@ -70,7 +70,7 @@ def write_parquet(path: Path, rows: list[str], force: bool = False) -> None:
   rows = [r.strip() for r in rows if isinstance(r, str) and r.strip()]
   table = pa.Table.from_pydict({"text": rows})
   pq.write_table(table, path, compression="ZSTD")
-  print(f"[write] {path} rows={len(rows)} size_kib={path.stat().st_size/1024:.1f}")
+  print(f"[write] {path} rows={len(rows)} size_kib={path.stat().st_size / 1024:.1f}")
 
 
 def sample_tfrecord(path: Path, cap: int) -> list[str]:
@@ -88,20 +88,20 @@ def sample_tfrecord(path: Path, cap: int) -> list[str]:
 def main() -> None:
   """CLI entry point to generate tiny Parquet files from minimal C4 TFRecords."""
   parser = argparse.ArgumentParser(
-      description="Minimal C4 TFRecord -> parquet generator",
+    description="Minimal C4 TFRecord -> parquet generator",
   )
   parser.add_argument("--version", default="3.0.1")
   parser.add_argument("--train-rows", type=int, default=800)
   parser.add_argument("--val-rows", type=int, default=160)
   parser.add_argument(
-      "--output-dir",
-      default=str(SCRIPT_DIR / "c4_en_dataset_minimal" / "hf" / "c4"),
+    "--output-dir",
+    default=str(SCRIPT_DIR / "c4_en_dataset_minimal" / "hf" / "c4"),
   )
   parser.add_argument(
-      "--force",
-      action="store_true",
-      default=False,
-      help="Force overwrite existing parquet files",
+    "--force",
+    action="store_true",
+    default=False,
+    help="Force overwrite existing parquet files",
   )
   args = parser.parse_args()
 
@@ -118,10 +118,10 @@ def main() -> None:
     return
 
   client = Minio(
-      MINIO_ENDPOINT,
-      access_key=MINIO_ACCESS_KEY,
-      secret_key=MINIO_SECRET_KEY,
-      secure=MINIO_SECURE,
+    MINIO_ENDPOINT,
+    access_key=MINIO_ACCESS_KEY,
+    secret_key=MINIO_SECRET_KEY,
+    secure=MINIO_SECURE,
   )
   if not client.bucket_exists(BUCKET):
     print("Bucket missing; abort.")
@@ -147,7 +147,7 @@ def main() -> None:
     print("Validation 00000-of shard not found; abort.")
     return
   print(
-      f"Using train object {train_obj.object_name} and validation object " f"{val_obj.object_name}.",
+    f"Using train object {train_obj.object_name} and validation object {val_obj.object_name}.",
   )
 
   tmp_train = out_dir.parent / "_tmp_train"

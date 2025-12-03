@@ -34,6 +34,7 @@ Dependencies:
 Limitations:
     Records are copied verbatim; compression is not applied.
 """
+
 from __future__ import annotations
 import os
 import argparse
