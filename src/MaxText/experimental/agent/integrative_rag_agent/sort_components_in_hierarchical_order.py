@@ -106,16 +106,24 @@ def search_similar_dependency(depend, base_path, project_root):
 
   # llm call
   dep_file_path, dep_comp_name = depend.split("#")
-  # Check if the path is already a URL.
+  # 1. Handle HTTP URLs
   if dep_file_path.startswith(("http://", "https://")):
     full_url = dep_file_path
   elif "github.com" in dep_file_path:
-    # Handle cases where it might be 'github.com/...' without protocol
     clean_path = dep_file_path.lstrip("/")
     full_url = f"https://{clean_path}"
-  else:
-    full_url = base_path + dep_file_path
     
+  # 2. Handle Local Paths
+  else:
+    clean_dep_path = dep_file_path.lstrip("/") 
+    if base_path and clean_dep_path.startswith(base_path.lstrip("./").rstrip("/")):
+      full_url = clean_dep_path
+    else:
+      if base_path.startswith(("http", "https")):
+        full_url = base_path.rstrip("/") + "/" + clean_dep_path
+      else:
+        full_url = os.path.join(base_path, clean_dep_path)
+        
   module_code, _, embedding = get_code_embedding(full_url, project_root, dep_comp_name)
   if module_code is None:
     return None, None
@@ -339,9 +347,8 @@ def sort_and_search_dependency(base_path, file_path, module, filter_mode: str = 
     jax_dependencies_list = []
   while q:
     relative_file_path, comp_name = q.popleft()
-    if "http" in relative_file_path:
-      logger.info(f"DEBUG: Found URL in queue: {relative_file_path}")
-      pdb.set_trace()
+    # if "http" in relative_file_path:
+    #   logger.info(f"DEBUG: Found URL in queue: {relative_file_path}")
     if "." in comp_name:
       comp_name, sub_comp_name = comp_name.split(".")
     else:
@@ -350,11 +357,15 @@ def sort_and_search_dependency(base_path, file_path, module, filter_mode: str = 
     if relative_file_path.startswith(("http://", "https://")):
       file_url = relative_file_path
     elif "github.com" in relative_file_path:
-      # Fix cases like '/github.com/...' which are absolute but lack protocol
       clean_path = relative_file_path.lstrip("/")
       file_url = f"https://{clean_path}"
     else:
-      file_url = base_path + relative_file_path
+      clean_base = base_path.rstrip(os.path.sep)
+      clean_rel = relative_file_path.lstrip(os.path.sep)
+      if clean_base and clean_rel.startswith(clean_base):
+        file_url = clean_rel
+      else:
+        file_url = os.path.join(base_path, relative_file_path)
       
     comp_id = f"{relative_file_path}#{comp_name}"
 
@@ -368,13 +379,13 @@ def sort_and_search_dependency(base_path, file_path, module, filter_mode: str = 
       logger.info("---> Analyzing file: %s", comp_id)
       try:
         file_analysis_cache[comp_id] = get_file_components(
-            file_url, module=comp_name, project_root=project_root, add_external_dependencies=True
+            file_url, module=None, project_root=project_root, add_external_dependencies=True
         )
       except FileNotFoundError:
         try:
           file_url, comp_name = file_url.replace(".py", "/" + comp_name + ".py"), sub_comp_name
           file_analysis_cache[comp_id] = get_file_components(
-              file_url, module=comp_name, project_root=project_root, add_external_dependencies=True
+              file_url, module=None, project_root=project_root, add_external_dependencies=True
           )
         except Exception as e:
           logger.error("Could not analyze file with subcompnenet %s. Error: %s", file_url, e)

@@ -922,7 +922,6 @@ def get_modules_in_order_fixed(file_path: str, module: Optional[str] = None, pro
     if module is None:
       return analyzer.sorted_structure
     return analyzer.get_structure_for_module(module=module)
-
   except FileNotFoundError as e:
     logger.error("ROBUST: Analysis failed because file could not be found or downloaded: %s", e)
     return None

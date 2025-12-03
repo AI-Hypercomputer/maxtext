@@ -201,7 +201,16 @@ def convert_given_file(module, jax_modules) -> None | dict:
     clean_path = module["filepath"].lstrip("/")
     full_url = f"https://{clean_path}"
   else:
-    full_url = "/".join([destination_source_url.rstrip('/'), module["filepath"]])
+    base = destination_source_url.rstrip(os.path.sep).rstrip('/')
+    rel = module["filepath"].lstrip(os.path.sep).lstrip('/')
+    if base and rel.startswith(base):
+      full_url = rel
+    else:
+      # Check if base is a URL or local path for correct joining
+      if base.startswith(("http:", "https:")):
+        full_url = f"{base}/{rel}"
+      else:
+        full_url = os.path.join(base, rel)
 
   logger.info("Converting %s", module["comp_name"])
   try:

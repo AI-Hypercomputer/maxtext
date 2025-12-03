@@ -147,8 +147,13 @@ def get_code_embedding(file_path, project_root, comp_name, db_path="dataset/embe
       return module_code, json.loads(code_description), pickle.loads(embedding)
 
   # If not cached, compute and store
-  module_code, full_source_code = get_modules_from_file_robust(file_path, module=comp_name, add_external_dependencies=True)
-  
+  module_code, full_source_code = get_modules_from_file_robust(
+    file_path, 
+    module=comp_name, 
+    project_root=project_root, # <--- ADD THIS LINE
+    add_external_dependencies=True
+  )
+
   # module_code, full_source_code = get_modules_from_file(
   #     file_path, module=comp_name, project_root=project_root, add_external_dependencies=True
   # )
@@ -184,7 +189,7 @@ def get_code_description_with_gemini(code_block, full_code_context, user_prompt=
       None | dict: A dictionary containing the structured analysis, or an error message and return `None`.
   """
   llm_agent = GeminiAgent(system_instruction=Description_Prompt)
-  for _ in range(5):
+  for _ in range(2):
     resp = None
     try:
       resp = llm_agent(user_prompt.replace("{code_block}", code_block).replace("{full_code_context}", full_code_context))
