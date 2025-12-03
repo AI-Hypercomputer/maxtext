@@ -19,8 +19,10 @@ import jax.numpy as jnp
 
 from etils import epath
 from flax import nnx
+import flax.linen as nn
 from jax.sharding import Mesh
 from MaxText import model_creation_utils
+from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import MAXTEXT_PKG_DIR
@@ -106,6 +108,20 @@ class MaxTextDecoderModel(nnx.Module):
     self.model: nnx.Module | None = None
     self.logits: jax.Array | None = None
 
+    # Handle dummy weight loading during initialization
+    if vllm_config.load_config.load_format == "dummy":
+      if self.maxtext_config.load_parameters_path is not None:
+        max_logging.log(
+            "Warning: load_parameters_path is set when using dummy load format. Checkpoint loading will be skipped."
+        )
+        self.maxtext_config.load_parameters_path = None
+
+      with self.mesh:
+        self.load_weights(rng_key)
+
+    elif self.maxtext_config.load_parameters_path is None:
+      max_logging.log("Warning: No load_parameters_path provided. The model will be initialized with random weights.")
+
   def __call__(
       self,
       kv_caches: list[jax.Array],
@@ -142,16 +158,17 @@ class MaxTextDecoderModel(nnx.Module):
     if input_positions.ndim < 2:
       input_positions = jnp.expand_dims(input_positions, axis=0)
 
-    # Store any auxiliary hidden states that may be required by specific models
-    aux_hidden_states = []
-    logits, hidden, kv_caches = self.model(
-        decoder_input_tokens=input_ids,
-        decoder_positions=input_positions,
-        kv_caches=kv_caches,
-        attention_metadata=attention_metadata,
-        model_mode=self.model_mode,
-        **kwargs,
-    )
+    with nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+      aux_hidden_states = []
+      logits, hidden, kv_caches = self.model(
+          decoder_input_tokens=input_ids,
+          decoder_positions=input_positions,
+          kv_caches=kv_caches,
+          attention_metadata=attention_metadata,
+          model_mode=self.model_mode,
+          **kwargs,
+      )
+
     if hidden.ndim > 1:
       hidden = jnp.squeeze(hidden, axis=0)
       logits = jnp.squeeze(logits, axis=0)
@@ -172,8 +189,9 @@ class MaxTextDecoderModel(nnx.Module):
     if self.logits is not None:
       return self.logits
 
-    embeddings = self.model.token_embedder
-    return self.model.decoder.apply_output_head(embeddings, hidden_states, True, self.model_mode)
+    with nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+      embeddings = self.model.token_embedder
+      return self.model.decoder.apply_output_head(embeddings, hidden_states, True, self.model_mode)
 
   def load_weights(self, rng_key: jax.Array) -> None:
     """Loads model parameters on the provided mesh.
@@ -226,7 +244,8 @@ class MaxTextForCausalLM(nnx.Module):
         - hidden: The hidden states.
         - aux_hidden_states: A list of auxiliary hidden states.
     """
-    kv_caches, hidden, aux_hidden_states = self.model(kv_caches, input_ids, attention_metadata, *args, **kwargs)
+    with self.mesh:
+      kv_caches, hidden, aux_hidden_states = self.model(kv_caches, input_ids, attention_metadata, *args, **kwargs)
     return kv_caches, hidden, aux_hidden_states
 
   def forward(self, *args, **kwargs):
@@ -247,7 +266,20 @@ class MaxTextForCausalLM(nnx.Module):
     Returns:
       A JAX array representing the input embeddings.
     """
-    return self.model.model.token_embedder.embedding
+    with self.mesh:
+      return self.model.model.token_embedder.embedding
+
+  def embed_input_ids(self, input_ids: jax.Array) -> jax.Array:
+    """Embeds the input token IDs using the model's token embedder.
+
+    Args:
+      input_ids: A JAX array of input token IDs.
+
+    Returns:
+      A JAX array of embedded input tokens.
+    """
+    with self.mesh:
+      return self.model.model.token_embedder(input_ids)
 
   def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
     """Computes the logits from the hidden states using the underlying decoder model.
@@ -258,7 +290,8 @@ class MaxTextForCausalLM(nnx.Module):
     Returns:
       A JAX array of logits.
     """
-    return self.model.compute_logits(hidden_states)
+    with self.mesh:
+      return self.model.compute_logits(hidden_states)
 
   def load_weights(self, rng_key: jax.Array) -> None:
     """Loads model weights using the underlying decoder model.
@@ -266,4 +299,5 @@ class MaxTextForCausalLM(nnx.Module):
     Args:
       rng_key: A JAX random key for model initialization.
     """
-    self.model.load_weights(rng_key)
+    with self.mesh:
+      self.model.load_weights(rng_key)
