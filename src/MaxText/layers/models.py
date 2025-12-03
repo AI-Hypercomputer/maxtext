@@ -32,7 +32,7 @@ from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.decoders import Decoder
 from MaxText.layers.embeddings import Embed, embed_as_linen
-from MaxText.layers.encoders import VisionEncoder
+from MaxText.layers.encoders import VisionEncoder, vision_encoder_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.multi_token_prediction import MultiTokenPredictionBlock
 from MaxText.sharding import all_gather_over_fsdp
@@ -85,7 +85,7 @@ class TransformerLinenPure(nn.Module):
         config=cfg,
         mesh=self.mesh,
     )
-    self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
+    self.vision_encoder = vision_encoder_as_linen(config=cfg, mesh=mesh) if cfg.use_multimodal else None
     self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
@@ -304,7 +304,7 @@ class Transformer(nnx.Module):
         config=cfg,
         rngs=rngs,
     )
-    self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
+    self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh, rngs=rngs) if cfg.use_multimodal else None
 
     decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
