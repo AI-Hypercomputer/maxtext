@@ -41,6 +41,7 @@ logical_axis_rules: [
                       ['activation_kv_batch_no_exp', ['data']],
                       ['activation_kv_head_dim', ['model']],
                       ['activation_vocab', ['model']],
+                      ['activation_embed', ['model']],
                       ['activation_exp', ['expert']],
                       ['decode_batch', ['data', 'expert']],
                       ['mlp', ['model']],
@@ -56,6 +57,13 @@ logical_axis_rules: [
                       ['cache_heads', ['model']],
                       ['exp', ['expert']],
                       ['paged_kv_heads', ['model']],
+                      ['autoregressive', ['model']],
+                      ['tensor', ['model']],
+                      ['tensor_transpose', ['model']],
+                      ['fsdp', ['data']],
+                      ['fsdp_transpose', ['data']],
+                      ['sequence', ['model']],
+                      ['context', ['model']],
                     ]
 data_sharding: [['data', 'model', 'expert']]
 input_data_sharding_logical_axes: ['activation_embed_and_logits_batch']
