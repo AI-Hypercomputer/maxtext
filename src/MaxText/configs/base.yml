@@ -597,8 +597,10 @@ grain_train_mixture_config_path: '' # Path to a JSON file specifying the mixture
 grain_file_type: 'arrayrecord' # arrayrecord or parquet
 grain_worker_count: 1 # Set to -1 to enable auto-tuning: automatically determines optimal worker count. See https://google-grain.readthedocs.io/en/latest/_autosummary/grain.experimental.pick_performance_config.html
 grain_per_worker_buffer_size: 1
-# num_threads and prefetch_buffer_size are per-worker per-dataset. Used in ReadOptions (https://google-grain.readthedocs.io/en/latest/tutorials/data_loader_tutorial.html#per-worker-readoptions)
+# num_threads and prefetch_buffer_size are per-worker per-dataset. 
+# When using array_records, they are used in ReadOptions (https://google-grain.readthedocs.io/en/latest/tutorials/data_loader_tutorial.html#per-worker-readoptions)
 # The default value matches that in the Grain package. If mixing multiple data sources, consider lowering these values to reduce memory usage.
+# When using parquet, grain_num_threads is the number of files to read and interleave in parallel
 grain_num_threads: 16
 grain_prefetch_buffer_size: 500
 grain_worker_count_eval: 1
