@@ -381,7 +381,7 @@ class Decoder(nnx.Module):
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
-          self.layers = self.scan_decoder_layers(
+          self.weights, self.layers = self.scan_decoder_layers(
               config,
               RemattedBlockLayer,
               scan_length,
@@ -687,7 +687,7 @@ class Decoder(nnx.Module):
         xs=inputs
     )
     """
-    return scan_runner
+    return layers, scan_runner
     """
     return scan_fn(
         config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs  # pytype: disable=wrong-keyword-args

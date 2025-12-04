@@ -344,14 +344,14 @@ class Transformer(nnx.Module):
       )
     else:
       dummy_attention_metadata = None
-
+    """
     self.decoder.lazy_init(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=dummy_decoder_input_tokens,
         decoder_positions=dummy_decoder_positions,
         attention_metadata=dummy_attention_metadata,
     )
-
+    """
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
       # Get the list of layer blueprints for the current model.

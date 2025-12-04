@@ -903,7 +903,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)
-
+  breakpoint()
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
