@@ -1,0 +1,12 @@
+[
+    {
+        "comp_id": "self_attention.py#SelfAttention",
+        "filepath": "self_attention.py",
+        "comp_name": "SelfAttention",
+        "Dependencies": [
+            "torch.py#torch.matmul",
+            "torch.py#torch.softmax"
+        ],
+        "JaxDependencies": {}
+    }
+]

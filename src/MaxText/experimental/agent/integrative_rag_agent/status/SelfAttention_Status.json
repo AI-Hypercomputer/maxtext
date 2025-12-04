@@ -1,0 +1,55 @@
+{
+    "data": {
+        "q": [],
+        "processed_components": [
+            "torch.py#torch.matmul",
+            "self_attention.py#SelfAttention",
+            "torch.py#torch.softmax"
+        ],
+        "processed_count": 2,
+        "file_analysis_cache": {
+            "self_attention.py#SelfAttention": {
+                "sorted_modules": {
+                    "SelfAttention": "\nclass SelfAttention(nn.Module):\n    def __init__(self, embed_size, heads):\n        super(SelfAttention, self).__init__()\n        self.embed_size = embed_size\n        self.heads = heads\n        self.head_dim = embed_size // heads\n\n        assert (\n            self.head_dim * heads == embed_size\n        ), \"embed_size needs to be divisible by heads\"\n\n        # FIX: Input to Linear layers is embed_size, not head_dim\n        self.values = nn.Linear(self.embed_size, self.embed_size, bias=False)\n        self.keys = nn.Linear(self.embed_size, self.embed_size, bias=False)\n        self.queries = nn.Linear(self.embed_size, self.embed_size, bias=False)\n        \n        self.fc_out = nn.Linear(heads * self.head_dim, embed_size)\n\n    def forward(self, values, keys, query, mask):\n        # FIX: Get the batch size (N) and sequence lengths correctly\n        N = query.shape[0]\n        value_len, key_len, query_len = values.shape[1], keys.shape[1], query.shape[1]\n\n        # Project the input embeddings\n        values = self.values(values)\n        keys = self.keys(keys)\n        queries = self.queries(query)\n\n        # Split the embedding into self.heads pieces\n        # Reshape: (N, Seq_Len, Heads, Head_Dim)\n        values = values.reshape(N, value_len, self.heads, self.head_dim)\n        keys = keys.reshape(N, key_len, self.heads, self.head_dim)\n        queries = queries.reshape(N, query_len, self.heads, self.head_dim)\n\n        # Transpose to bring Heads dimension forward for parallel multiplication\n        # New shape: (N, Heads, Seq_Len, Head_Dim)\n        values = values.transpose(1, 2)\n        keys = keys.transpose(1, 2)\n        queries = queries.transpose(1, 2)\n\n        # Calculate Energy (Scaled Dot-Product Attention)\n        # Shape: (N, Heads, Query_Len, Head_Dim) * (N, Heads, Head_Dim, Key_Len) \n        # Result: (N, Heads, Query_Len, Key_Len)\n        energy = torch.matmul(queries, keys.transpose(-2, -1))\n\n        # Scale the energy\n        energy = energy / (self.head_dim ** 0.5)\n\n        # Apply Mask (if provided)\n        if mask is not None:\n            # mask shape should broadcast to (N, 1, 1, Key_Len) or similar\n            # We fill masked elements with a very low value so Softmax makes them 0\n            energy = energy.masked_fill(mask == 0, float(\"-1e20\"))\n\n        # Normalize energy to probabilities\n        attention = torch.softmax(energy, dim=3)\n\n        # Apply attention to values\n        # (N, Heads, Query_Len, Key_Len) * (N, Heads, Value_Len, Head_Dim) \n        # Result: (N, Heads, Query_Len, Head_Dim)\n        out = torch.matmul(attention, values)\n\n        # Reshape back to original dimensions\n        # Swap Heads and Query_Len back: (N, Query_Len, Heads, Head_Dim)\n        out = out.transpose(1, 2).contiguous()\n        \n        # Flatten the last two dimensions: (N, Query_Len, Embed_Size)\n        out = out.reshape(N, query_len, self.heads * self.head_dim)\n\n        # Final linear layer\n        out = self.fc_out(out)\n\n        return out"
+                },
+                "component_dependencies": {
+                    "SelfAttention": [
+                        "torch.py#torch.matmul",
+                        "torch.py#torch.softmax"
+                    ]
+                },
+                "warning": null
+            }
+        },
+        "files_to_convert": [
+            {
+                "comp_id": "self_attention.py#SelfAttention",
+                "filepath": "self_attention.py",
+                "comp_name": "SelfAttention",
+                "Dependencies": [
+                    "torch.py#torch.matmul",
+                    "torch.py#torch.softmax"
+                ],
+                "JaxDependencies": {}
+            }
+        ],
+        "original_dependencies": {
+            "SelfAttention": [
+                "torch.py#torch.matmul",
+                "torch.py#torch.softmax"
+            ]
+        },
+        "jax_found_dependencies": {},
+        "jax_dependencies_list": []
+    },
+    "metadata": {
+        "q": "<class 'collections.deque'>",
+        "processed_components": "<class 'set'>",
+        "processed_count": "<class 'int'>",
+        "file_analysis_cache": "<class 'dict'>",
+        "files_to_convert": "<class 'list'>",
+        "original_dependencies": "<class 'dict'>",
+        "jax_found_dependencies": "<class 'collections.defaultdict'>",
+        "jax_dependencies_list": "<class 'list'>"
+    }
+}

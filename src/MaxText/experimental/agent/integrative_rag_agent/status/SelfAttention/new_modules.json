@@ -1,0 +1,96 @@
+{
+    "generated_code.SelfAttention.layers.SelfAttention": {
+        "module_type": "multi_head_self_attention",
+        "purpose": "Implements a standard multi-head self-attention mechanism using scaled dot-product attention.",
+        "input": {
+            "shape": "Takes three tensors: query [batch_size, query_len, embed_size], key [batch_size, key_len, embed_size], and value [batch_size, value_len, embed_size], plus an optional mask.",
+            "dtype": "jnp.ndarray"
+        },
+        "processing_steps": [
+            "Initializes dense projection layers for query, key, value, and output in the `setup` method.",
+            "In the forward pass, projects the input query, key, and value tensors.",
+            "Reshapes and transposes the projected tensors to separate the attention heads.",
+            "Calculates scaled dot-product attention scores between queries and keys.",
+            "Applies an optional mask to the attention scores.",
+            "Normalizes scores using softmax to get attention weights.",
+            "Computes the weighted sum of values using the attention weights.",
+            "Reshapes the result and passes it through a final dense layer."
+        ],
+        "output": {
+            "shape": "[batch_size, query_len, embed_size]"
+        },
+        "dependencies": [
+            "flax.linen.Module",
+            "maxtext.layers.linears",
+            "jax",
+            "jax.numpy"
+        ],
+        "parameters": {
+            "embed_size": "The embedding dimension of the input and output.",
+            "heads": "The number of attention heads."
+        },
+        "notes": [
+            "The `embed_size` must be divisible by the number of `heads`.",
+            "The projection layers for Q, K, V are created without bias.",
+            "The mask is applied by setting masked positions to a large negative value (-1e20) before the softmax operation."
+        ],
+        "methods": {
+            "setup": {
+                "purpose": "Initializes the dense projection layers for query, key, value, and the final output.",
+                "input": {
+                    "shape": "N/A",
+                    "dtype": "N/A"
+                },
+                "processing_steps": [
+                    "Calculate the dimension of each attention head (`head_dim`).",
+                    "Assert that `embed_size` is divisible by `heads`.",
+                    "Initialize dense layers for `values`, `keys`, and `queries` projections using `linears.dense_general`.",
+                    "Initialize the final output dense layer `fc_out` using `linears.dense_general`."
+                ],
+                "output": {
+                    "shape": "N/A"
+                },
+                "dependencies": [
+                    "maxtext.layers.linears.dense_general"
+                ],
+                "notes": [
+                    "This method is called automatically by Flax during module initialization."
+                ]
+            },
+            "__call__": {
+                "purpose": "Performs the forward pass of the self-attention mechanism.",
+                "input": {
+                    "shape": "values: [N, value_len, embed_size], keys: [N, key_len, embed_size], query: [N, query_len, embed_size], mask: Optional broadcastable array.",
+                    "dtype": "jnp.ndarray"
+                },
+                "processing_steps": [
+                    "Apply linear projections to input `values`, `keys`, and `query`.",
+                    "Reshape projected tensors to split into multiple heads: [N, Seq_Len, Heads, Head_Dim].",
+                    "Transpose tensors to bring the `Heads` dimension forward: [N, Heads, Seq_Len, Head_Dim].",
+                    "Compute attention scores (`energy`) via matrix multiplication of queries and transposed keys.",
+                    "Scale the energy by the square root of `head_dim`.",
+                    "Apply the optional mask if it is not None.",
+                    "Apply softmax to the energy to get attention probabilities.",
+                    "Compute the output by matrix multiplying attention probabilities with values.",
+                    "Transpose and reshape the output back to [N, query_len, embed_size].",
+                    "Apply the final linear output layer (`fc_out`)."
+                ],
+                "output": {
+                    "shape": "[N, query_len, embed_size]"
+                },
+                "dependencies": [
+                    "jnp.reshape",
+                    "jnp.transpose",
+                    "jnp.matmul",
+                    "jnp.swapaxes",
+                    "jnp.sqrt",
+                    "jnp.where",
+                    "jax.nn.softmax"
+                ],
+                "notes": [
+                    "This method implements the core scaled dot-product attention logic."
+                ]
+            }
+        }
+    }
+}
