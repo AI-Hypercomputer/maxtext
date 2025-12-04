@@ -19,13 +19,13 @@ MaxText was co-designed with key Google led innovations to provide a unified pos
 ## Supported techniques & models
 
 - **SFT (Supervised Fine-Tuning)**
-  * [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/sft.html)
-  * [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/sft_on_multi_host.html)
+  * [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft.html)
+  * [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html)
 - **Multimodal SFT**
-  * [Multimodal Support](https://maxtext.readthedocs.io/en/latest/guides/multimodal.html)
+  * [Multimodal Support](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/multimodal.html)
 - **Reinforcement Learning (RL)**
-  * [RL on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/rl.html)
-  * [RL on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/rl_on_multi_host.html)
+  * [RL on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl.html)
+  * [RL on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html)
 
 ## Step by step RL
 
@@ -49,7 +49,7 @@ Pathways supercharges RL with:
 
 ## Getting started
 
-Start your Post-Training journey through quick experimentation with our [Google Colabs](https://maxtext.readthedocs.io/en/latest/tutorials/how_to_run_colabs.html) or our Production level tutorials for [SFT](https://maxtext.readthedocs.io/en/latest/tutorials/sft_on_multi_host.html) and [GRPO](https://maxtext.readthedocs.io/en/latest/tutorials/grpo_with_pathways.html).
+Start your Post-Training journey through quick experimentation with our [Google Colabs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/how_to_run_colabs.html) or our Production level tutorials for [SFT](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html) and [RL](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html).
 
 ## More tutorials
 
