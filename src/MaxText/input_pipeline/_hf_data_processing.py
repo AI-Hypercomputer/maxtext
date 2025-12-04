@@ -440,5 +440,6 @@ def make_hf_eval_iterator(
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
         chat_template_path=config.chat_template_path,
+        max_sequences_per_bin=config.max_segments_per_seq,
     )
   return eval_iter
