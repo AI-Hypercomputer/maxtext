@@ -109,6 +109,18 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
       ],
+      "te_noscaling": [  # tests base config with te_noscaling i.e. BF16
+          None,
+          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          "base_output_directory=gs://runner-maxtext-logs",
+          "run_name=runner_test",
+          "dataset_path=gs://maxtext-dataset",
+          "quantization=te_noscaling",
+          "steps=2",
+          "enable_checkpointing=False",
+          "enable_goodput_recording=False",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+      ],
       "te_fp8_delayedscaling": [  # tests base config with te_fp8_delayedscaling
           None,
           os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
@@ -233,6 +245,11 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_gpu_nanoo_fp8(self):
     train_main(TrainTests.CONFIGS["nanoo_fp8"] + ["attention=dot_product"])
+
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_noscaling(self):
+    train_main(TrainTests.CONFIGS["te_noscaling"] + ["attention=cudnn_flash_te"])
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.integration_test

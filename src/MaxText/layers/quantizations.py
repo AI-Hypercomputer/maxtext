@@ -748,6 +748,7 @@ class TransformerEngineQuantization(Quantization):
     from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     RECIPES = {
+        "te_noscaling": None,
         "te_fp8_delayedscaling": recipe.DelayedScaling,
         "te_fp8_currentscaling": recipe.Float8CurrentScaling,
         "te_mxfp8": recipe.MXFP8BlockScaling,
@@ -755,7 +756,9 @@ class TransformerEngineQuantization(Quantization):
     }
     if recipe_name not in RECIPES:
       raise ValueError(f"Invalid TransformerEngine recipe: {recipe_name}")
-    return RECIPES[recipe_name]()
+
+    te_recipe = RECIPES[recipe_name]
+    return te_recipe() if te_recipe is not None else None
 
   def get_block_size(self):
     """Get the block size for quantization for recipes that require blocks.
