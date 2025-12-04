@@ -56,10 +56,12 @@ Start your Post-Training journey through quick experimentation with our [Google 
 ```{toctree}
 :maxdepth: 1
 
-full_finetuning.md
-how_to_run_colabs.md
-rl.md
-sft.md
-sft_on_multi_host.md
-rl_on_multi_host.md
+posttraining/how_to_run_colabs.md
+posttraining/sft.md
+posttraining/sft_on_multi_host.md
+posttraining/rl.md
+posttraining/rl_on_multi_host.md
+posttraining/knowledge_distillation.md
+posttraining/multimodal.md
+posttraining/full_finetuning.md
 ```

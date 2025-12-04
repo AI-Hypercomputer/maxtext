@@ -1,7 +1,7 @@
 ```{include} ../CONTRIBUTING.md
 ```
 
-## Contributing documentation
+## Contribute to documentation
 
 The MaxText documentation website is built using [Sphinx](https://www.sphinx-doc.org) and [MyST](https://myst-parser.readthedocs.io/en/latest/). Documents are written in [MyST Markdown syntax](https://myst-parser.readthedocs.io/en/latest/syntax/typography.html#syntax-core).
 
