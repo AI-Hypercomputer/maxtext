@@ -852,6 +852,10 @@ class DatasetGeneral(BaseModel):
       True,
       description="Whether to pack multiple short examples into a single sequence.",
   )
+  grain_packing_type: Literal["first_fit", "concat_then_split"] = Field(
+      "first_fit",
+      description="Packing type when using Grain pipeline. 'first_fit' or 'concat_then_split'.",
+  )
   max_segments_per_seq: int = Field(
       32,
       description="Maximum number of segments that can be packed into a single sequence.",
