@@ -957,6 +957,10 @@ class AdamW(BaseModel):
       "",
       description="Data type for 'mu' (first moment) in AdamW. Inherits from weight_dtype if empty.",
   )
+  adamw_fused_memory_host_offload: bool = Field(
+      False,
+      description="Use fused AdamW with memory host offloading.",
+  )
 
 
 class PositionalEmbedding(BaseModel):

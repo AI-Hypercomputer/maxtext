@@ -705,6 +705,8 @@ mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inher
 # Setting nu_dtype is not yet supported by optax, instead nu_dtype is always inherited from weights.
 # See b/399961932 for more.
 
+adamw_fused_memory_host_offload: False # Use fused AdamW with memory host offloading.
+
 # Stack trace parameters
 collect_stack_trace: False
 stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
