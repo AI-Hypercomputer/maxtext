@@ -1,6 +1,6 @@
-# Post training
+# Post-training
 
-## What is MaxText post training?
+## What is MaxText post-training?
 
 MaxText provides performance and scalable LLM and VLM post-training, across a variety of techniques like SFT and GRPO.
 
