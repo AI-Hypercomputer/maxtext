@@ -14,6 +14,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../..'))
 sys.path.append(project_root)
 
+# Force JAX to use strict float32 for matmuls (simulating PyTorch behavior)
+jax.config.update("jax_default_matmul_precision", "float32")
+
 from generated_code.SelfAttention.layers import SelfAttention as SelfAttentionJAX
 from examples.level2_pytorch_module.self_attention import SelfAttention as SelfAttentionPT
 
