@@ -15,69 +15,59 @@
 """Attentions Ops Layers."""
 import dataclasses
 import functools
-from typing import Any, Callable, Optional, Tuple
 from functools import partial
 import math
-
-import numpy as np
-
-import jax
-from jax import lax
-from jax.ad_checkpoint import checkpoint_name
-from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
-from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
-from jax.experimental import pallas as pl
-from jax.sharding import Mesh, NamedSharding
-import jax.numpy as jnp
-
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
-
+from typing import Any, Callable, Optional, Tuple
 
 from flax import linen as nn
 from flax import nnx
 from flax.linen import partitioning
-
-
+import jax
+from jax import lax
+from jax.ad_checkpoint import checkpoint_name
+from jax.experimental import pallas as pl
+from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
+from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding
 from MaxText import max_utils
-from MaxText.sharding import maybe_shard_with_name
 from MaxText.common_types import (
-    DEFAULT_MASK_VALUE,
+    Array,
+    AttentionType,
+    AxisIdxes,
+    AxisNames,
     BATCH,
     BATCH_NO_EXP,
-    HEAD,
-    KV_LENGTH,
-    PREFILL_LENGTH,
-    D_KV,
-    CACHE_BATCH_PREFILL,
-    CACHE_SEQUENCE,
-    AxisNames,
     CACHE_BATCH,
+    CACHE_BATCH_PREFILL,
     CACHE_HEADS,
-    CACHE_SCALE_BATCH,
     CACHE_KV,
-    CACHE_SCALE_SEQUENCE,
+    CACHE_SCALE_BATCH,
     CACHE_SCALE_HEADS,
     CACHE_SCALE_KV,
-    AxisIdxes,
+    CACHE_SCALE_SEQUENCE,
+    CACHE_SEQUENCE,
+    Config,
+    DECODE_BATCH,
+    DECODE_LENGTH,
+    DECODING_ACTIVE_SEQUENCE_INDICATOR,
+    DEFAULT_MASK_VALUE,
+    DType,
+    D_KV,
+    EP_AS_CONTEXT,
+    EP_AS_FSDP,
+    HEAD,
+    KV_LENGTH,
     LENGTH,
     LENGTH_NO_EXP,
-    DType,
-    Config,
-    Array,
+    MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_PREFILL,
+    MODEL_MODE_TRAIN,
+    PREFILL_LENGTH,
     Q_LENGTH,
     Q_LENGTH_NO_EXP,
-    DECODE_LENGTH,
-    DECODE_BATCH,
-    MODEL_MODE_AUTOREGRESSIVE,
-    DECODING_ACTIVE_SEQUENCE_INDICATOR,
-    MODEL_MODE_TRAIN,
-    MODEL_MODE_PREFILL,
-    EP_AS_CONTEXT,
-    AttentionType,
 )
 from MaxText.inference import page_manager
 from MaxText.inference.kvcache import KVQuant, KVTensor
@@ -86,6 +76,11 @@ from MaxText.kernels.ragged_attention import ragged_mha
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import variable_to_logically_partitioned
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.sharding import maybe_shard_with_name
+from MaxText.kernels import jax_flash_attention
+import numpy as np
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -1200,6 +1195,17 @@ class AttentionOp(nnx.Module):
         segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH,))
       else:
         segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
+    elif (
+        self.config.use_jax_splash
+        and self.config.expert_shard_attention_option == EP_AS_FSDP
+    ):
+      if self.config.use_max_logit_estimate > 0:
+        sa_config = dataclasses.replace(
+            sa_config, max_logit_const=self.config.use_max_logit_estimate
+        )
+      segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((
+          Q_LENGTH_NO_EXP,
+      ))
     else:
       # Create multi-head mask
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
@@ -1295,6 +1301,18 @@ class AttentionOp(nnx.Module):
         attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
             query, key, value, decoder_segment_ids_tuple, sinks
         )
+      elif self.config.use_jax_splash:
+        materialized_mask = jnp.asarray(mask[:, :])
+        attention_output = jax_flash_attention.flash_attention_block_masked(
+            query,
+            key,
+            value,
+            decoder_segment_ids_tuple,
+            block_kv=self.config.sa_block_kv,
+            block_q=self.config.sa_block_q,
+            mask=materialized_mask,
+            mask_value=DEFAULT_MASK_VALUE,
+        )
       else:
         attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
             query, key, value, decoder_segment_ids_tuple, sinks
@@ -1321,7 +1339,7 @@ class AttentionOp(nnx.Module):
         value,
         decoder_segment_ids_q,
         decoder_segment_ids_kv,
-        splash_kernel,
+        None if self.config.use_jax_splash else splash_kernel,
         cp_size,
         load_balanced_context_parallel,
         sinks,
