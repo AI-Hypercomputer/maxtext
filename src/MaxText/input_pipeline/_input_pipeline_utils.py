@@ -390,6 +390,16 @@ class NormalizeFeatures(grain.MapTransform):
 
 
 @dataclasses.dataclass
+class KeepFeatures(grain.MapTransform):
+
+  def __init__(self, feature_names):
+    self.feature_names = feature_names
+
+  def map(self, element):
+    return {k: v for k, v in element.items() if k in self.feature_names}
+
+
+@dataclasses.dataclass
 class Rekey(grain.MapTransform):
   """Rename keys according to a mapping dict"""
 
