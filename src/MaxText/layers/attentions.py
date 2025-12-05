@@ -423,7 +423,7 @@ class Attention(nnx.Module):
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
         self.init_kv_caches(inputs_kv_shape=inputs_kv_shape)
-        if self.model_mode != MODEL_MODE_TRAIN and base_kv_cache
+        if self.model_mode != MODEL_MODE_TRAIN and base_kv_cache and config.attention != "vllm_rpa"
         else None
     )
 

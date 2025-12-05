@@ -147,7 +147,10 @@ class VllmWeightMapping:
       return STANDALONE_VLLM_WEIGHT_MAPPING[self.model_name].to_hf_hook_fns()
 
     model_family = self.model_name.split("-")[0]
-    return VLLM_HOOK_FNS[model_family]()
+    if model_family in VLLM_HOOK_FNS:
+      return VLLM_HOOK_FNS[model_family]()
+    else:
+      return {}
 
   def lora_to_hf_mappings(self):
     if self.use_standalone_mappings:
