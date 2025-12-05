@@ -23,4 +23,5 @@ guides/optimization.md
 guides/data_input_pipeline.md
 guides/checkpointing_solutions.md
 guides/monitoring_and_debugging.md
+guides/run_python_notebook.md
 ```
