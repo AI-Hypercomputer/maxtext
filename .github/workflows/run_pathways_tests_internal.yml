@@ -64,7 +64,7 @@ jobs:
         JAX_BACKEND_TARGET: "grpc://localhost:29000"
       options: ${{ inputs.container_resource_option }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run
         run: |
           if [ "${{ inputs.is_scheduled_run }}" = "true" ]; then
@@ -72,8 +72,14 @@ jobs:
           else
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
           fi
-          python3 -m pip install -e . --no-dependencies &&
-          python3 -m pip uninstall -y libtpu &&
+          if ! command -v uv; then
+            python3 -m pip install -U pip
+            python3 -m pip install uv
+          fi
+          [ -d "$GITHUB_WORKSPACE"/venv ] || uv venv --python 3.12 "$GITHUB_WORKSPACE"/venv
+          . "$GITHUB_WORKSPACE"/venv/bin/activate
+          uv pip install --no-deps -e . &&
+          if uv pip show libtpu; then uv pip uninstall libtpu; fi
           # TODO(b/454659463): Enable test_default_hlo_match after volume mount is supported.
           python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0
     

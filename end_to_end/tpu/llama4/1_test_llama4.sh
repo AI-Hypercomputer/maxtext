@@ -27,7 +27,7 @@ if [ -z "${MODEL_VARIATION}" ]; then
     echo "MODEL_VARIATION is not set, using MODEL_VARIATION = ${MODEL_VARIATION}"
 fi
 
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Step 1:
 # After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \

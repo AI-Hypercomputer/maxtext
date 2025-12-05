@@ -13,7 +13,7 @@
 set -ex
 
 # Installing torch for deps in forward_pass_logit_checker.py
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 MODEL_VARIATION='8x7b'
 
