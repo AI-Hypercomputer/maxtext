@@ -29,6 +29,7 @@ from MaxText import max_utils
 from MaxText import pyconfig_deprecated
 from MaxText.common_types import DecoderBlockType, ShardMode
 from MaxText.configs import types
+from MaxText.configs.types import MaxTextConfig
 from MaxText.inference_utils import str2bool
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   for key, value in raw_keys.items():
     if key not in valid_fields:
       logger.warning("Ignoring invalid/unsupported field from YAML/CLI: %s", repr(key))
-      continue
+      raise ValueError(f"{key!r} not in {", ".join(map(repr, valid_fields))}.")
 
     new_value = value
     if isinstance(new_value, str) and new_value.lower() == "none":
@@ -179,6 +180,21 @@ class HyperParameters:
 
 def initialize(argv: list[str], **kwargs) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
+  pydantic_config = initialize_pydantic(argv, **kwargs)
+  config = HyperParameters(pydantic_config)
+
+  if config.log_config:
+    for k, v in sorted(config.get_keys().items()):
+      if k != "hf_access_token":
+        logger.info("Config param %s: %s", k, v)
+
+  return config
+
+
+def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
+  """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
+  Returns pydantic MaxTextConfig class whereas `initialize` returns the og `HyperParameters`
+  """
   # 1. Load base and inherited configs from file(s)
   config_path = resolve_config_path(argv[1])
   base_yml_config = _load_config(config_path)
@@ -287,9 +303,9 @@ def initialize(argv: list[str], **kwargs) -> HyperParameters:
       if k not in KEYS_NO_LOGGING:
         logger.info("Config param %s: %s", k, v)
 
-  return config
+  return pydantic_config
 
 
 # Shim for backward compatibility with pyconfig_deprecated_test.py
 validate_and_update_keys = pyconfig_deprecated.validate_and_update_keys
-__all__ = ["initialize"]
+__all__ = ["initialize", "initialize_pydantic"]
