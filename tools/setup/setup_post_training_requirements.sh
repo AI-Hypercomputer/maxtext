@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This script installs the dependencies for running GRPO with MaxText+Tunix+vLLM on TPUs
+# This script installs the dependencies for running post-training with MaxText+Tunix+vLLM on TPUs
 
 set -e
 set -x
