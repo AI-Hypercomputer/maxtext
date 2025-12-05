@@ -312,6 +312,12 @@ class RoutedMoE(nnx.Module):
       self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
       self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
 
+    if self.config.attention == "vllm_rpa":
+      # vLLM uses 'model' as the tensor parallelism axis name
+      self._tensor_parallelism_name = "model"
+    else:
+      self._tensor_parallelism_name = "tensor"
+
     self.gate = GateLogit(
         in_features_shape=self.config.emb_dim,
         out_features_shape=self.num_experts,
@@ -398,7 +404,7 @@ class RoutedMoE(nnx.Module):
     return self.mesh.shape.get("expert", 1)
 
   def get_tensor_parallelism_size(self):
-    return self.mesh.shape.get("tensor", 1)
+    return self.mesh.shape.get(self._tensor_parallelism_name, 1)
 
   def get_tensor_transpose_parallelism_size(self):
     return self.mesh.shape.get("tensor_transpose", 1)
@@ -1073,14 +1079,17 @@ class RoutedMoE(nnx.Module):
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
+
       def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
-        if pspec_dim_axes is None: return []
+        if pspec_dim_axes is None:
+          return []
         axes = (pspec_dim_axes,) if isinstance(pspec_dim_axes, str) else pspec_dim_axes
         active = []
         for ax in axes:
           if ax and self.mesh.shape.get(ax, 1) > 1:
             active.append((ax, tensor_dim_index))
         return active
+
       wi_gather_axes = []
       wo_gather_axes = []
 
@@ -1136,7 +1145,9 @@ class RoutedMoE(nnx.Module):
 
       intermediate_output = gmm_fn(intermediate_layer, wo, tiling=wo_tile_size, weight_gather_axes=wo_gather_axes)
       if self.get_tensor_parallelism_size() > 1:
-        intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
+        intermediate_output = jax.lax.psum_scatter(
+            intermediate_output, self._tensor_parallelism_name, scatter_dimension=1, tiled=True
+        )
       if self.config.mlp_bias:
         intermediate_output = intermediate_output + wo_bias
       intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
