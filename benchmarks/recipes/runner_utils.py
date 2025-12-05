@@ -44,6 +44,9 @@ def _create_workload_config(
       "xpk_path": user_config.xpk_path,
       "num_steps": num_steps,
       "priority": priority,
+      "generate_metrics_and_upload_to_big_query": user_config.bq_enable,
+      "db_project": user_config.bq_db_project,
+      "db_dataset": user_config.bq_db_dataset,
   }
   # Add any extra arguments, like disruption_configs, if they exist
   config_args.update(kwargs)
