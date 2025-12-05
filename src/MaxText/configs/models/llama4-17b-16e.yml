@@ -1,0 +1,53 @@
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+decoder_block: "llama4"
+mlp_activations: ["silu","linear"]
+enable_dropout: False
+logits_via_embedding: False
+tokenizer_type: "huggingface"
+
+base_emb_dim: 5120
+base_num_decoder_layers: 48
+base_num_query_heads: 40
+base_num_kv_heads: 8
+base_mlp_dim: 8192
+base_moe_mlp_dim: 8192
+vocab_size: 202048
+normalization_layer_epsilon: 1e-05
+rope_max_timescale: 500000
+rope_type: "llama3.1"
+num_experts: 16
+shared_experts: 1
+num_experts_per_tok: 1
+use_qk_norm: True # Llama4 models apply an L2Norm to the Query and Keys after RoPE
+nope_layer_interval: 4 # Every fourth layer should NOT use RoPE
+interleave_moe_layer_step: 1 # Every layer is MoE layer
+inhomogeneous_layer_cycle_interval: 4 # Every four layers the pattern of nope and moe repeats (least common multiple of nope interval and moe interval)
+
+temperature_tuning: True
+# Chunk attention is used on all RoPE layers
+# otherwise, on NoPE layers, use global attention
+chunk_attn_window_size: 8192
+
+# Multimodal flags (need to set use_multimodal=true)
+image_size_for_vit: 336
+num_channels_for_vit: 3
+patch_size_for_vit: 14
+hidden_size_for_vit: 1408
+intermediate_size_for_vit: 5632
+num_hidden_layers_for_vit: 34
+num_attention_heads_for_vit: 16
+image_placeholder: "<|image|>"

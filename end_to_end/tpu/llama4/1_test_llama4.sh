@@ -9,7 +9,7 @@
 # Example Usage: export BASE_OUTPUT_PATH=/path/to/GCS/bucket; export MODEL_VARIATION=llama4-17b-[16e/128e]; bash end_to_end/tpu/llama4/1_test_llama4.sh
 # Use the same BASE_OUTPUT_PATH and MODEL_VARIATION for both 1_test_llama4.sh & 1_test_llama4.sh.
 
-# In order to generate the Llama4 golden logits, please see this script: MaxText/scratch_code/golden_llama4_17b_16e_128e_export.ipynb
+# In order to generate the Llama4 golden logits, please see this script: src/MaxText/scratch_code/golden_llama4_17b_16e_128e_export.ipynb
 
 set -ex
 idx=$(date +%Y-%m-%d)
@@ -43,5 +43,5 @@ gcloud storage cp -r ${CHKPT_BUCKET} /tmp
 
 export LOCATION_OF_HF_CHKPT_ON_DISK=/tmp/hf-checkpoint
 
-JAX_PLATFORMS=cpu python3 -m MaxText.llama4_ckpt_unscanned --base-model-path ${LOCATION_OF_HF_CHKPT_ON_DISK} --maxtext-model-path ${MODEL_BUCKET}/${idx}/unscanned --model-size ${MODEL_VARIATION} --huggingface-checkpoint True
+JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.llama4_ckpt_unscanned --base-model-path ${LOCATION_OF_HF_CHKPT_ON_DISK} --maxtext-model-path ${MODEL_BUCKET}/${idx}/unscanned --model-size ${MODEL_VARIATION} --huggingface-checkpoint True
 echo "Wrote MaxText compatible unscanned checkpoint to ${MODEL_BUCKET}/${idx}/unscanned"

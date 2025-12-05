@@ -17,7 +17,10 @@ echo "Running test_convergence_1b_params.sh"
 export LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass.
 export STEPS=20400 # Run for 20B tokens for a 1B sized mode for "chinchilla" scaling https://arxiv.org/abs/2203.15556
 export EVAL_STEPS=160
+export EVAL_INTERVAL=100
 export DATASET_TYPE=tfds
+export MTP_NUM_LAYERS=0 # Disable MTP by default
+export PER_DEVICE_BATCH_SIZE=8.0 # With the default learning rate (3e-4) this should have global batch of 512, with 2k sequence length (1M global batch in tokens)
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -35,7 +38,7 @@ then
     EVAL_METRICS=grain_checkpoint_save_restore
     echo "dataset_type is grain"
     echo "Mounting $DATASET_PATH to /tmp/gcsfuse/"
-    bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$DATASET_PATH MOUNT_PATH=/tmp/gcsfuse/
+    bash tools/setup/setup_gcsfuse.sh DATASET_GCS_BUCKET=$DATASET_PATH MOUNT_PATH=/tmp/gcsfuse/
     DATASET_PATH=/tmp/gcsfuse/
     CMD_DATA=" grain_worker_count=2 \
             grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record* \
@@ -46,19 +49,19 @@ if [ "$DATASET_TYPE" == "hf" ]
 then
     # We use a local copy of tokenizer from https://huggingface.co/meta-llama/Llama-2-7b-hf
     # Alternatively, you can set tokenizer_path="meta-llama/Llama-2-7b-hf" and hf_access_token="<your-token>" after gaining access through HF website.
-    gsutil cp -r gs://maxtext-dataset/hf/llama2-tokenizer assets
-    CMD_DATA=" hf_path=parquet tokenizer_path=assets/llama2-tokenizer\
+    gsutil cp -r gs://maxtext-dataset/hf/llama2-tokenizer "${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"
+    CMD_DATA=" hf_path=parquet tokenizer_path=${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}/llama2-tokenizer \
         hf_train_files=$DATASET_PATH/hf/c4/c4-train-*.parquet \
         hf_eval_files=$DATASET_PATH/hf/c4/c4-validation-*.parquet "
 fi
 
-TRAIN_CMD="python3 -m MaxText.train MaxText/configs/base.yml \
-        steps=$STEPS eval_steps=$EVAL_STEPS eval_interval=$STEPS \
-        per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
+TRAIN_CMD="python3 -m MaxText.train ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml \
+        steps=$STEPS eval_steps=$EVAL_STEPS eval_interval=$EVAL_INTERVAL \
+        per_device_batch_size=$PER_DEVICE_BATCH_SIZE learning_rate=3e-4 enable_checkpointing=false \
         max_target_length=2048 global_parameter_scale=1 \
         metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH \
         dataset_path=$DATASET_PATH dataset_type=$DATASET_TYPE log_period=150 \
-        remat_policy=minimal enable_data_shuffling=false "
+        remat_policy=minimal enable_data_shuffling=false mtp_num_layers=$MTP_NUM_LAYERS"
 TRAIN_CMD+=$CMD_DATA
 
 # Train

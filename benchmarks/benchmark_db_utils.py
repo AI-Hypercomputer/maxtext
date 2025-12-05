@@ -1,10 +1,10 @@
-# Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,12 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"Bash helper commands for AOTC artifacts"
+"""
+This module provides utilities for interacting with the benchmark database.
+
+It includes functions for writing benchmark run summaries to BigQuery,
+dataclasses for structuring metrics, and helpers for parsing and recovering
+tuning parameters from string formats.
+"""
+
 from tempfile import gettempdir
-from typing import Dict, Any, Type
+from typing import Any, Type
 import dataclasses
 import getpass
-import logging
 import os
 import sys
 import uuid
@@ -40,15 +46,15 @@ class Metrics:
   e2e_step_time: float
 
 
-def recover_tuning_params(tuning_params: str) -> Dict[str, Any]:
+def recover_tuning_params(tuning_params: str) -> dict[str, Any]:
   """
   Parse tuning params from json str format
   e.g. {"per_device_batch_size": 2, "ici_fsdp_parallelism": 1, ...}
-  
+
   Args:
     tuning_params: Tuning parameters in json str format
   Return type:
-    Dict[str, Any]: Dictionary mapping tuning param name to its value
+    dict[str, Any]: Dictionary mapping tuning param name to its value
   """
   items = tuning_params[1:-1].split(",")
   tuning_params_dict = {}
@@ -107,7 +113,7 @@ def write_run(
         topology: The topology of the hardware used in the run. ( valid for TPUs)
         dataset: The dataset used in the run.
         num_of_superblock: The number of superblocks in the hardware. ( valid for GPUs)
-        update_person_ldap: The LDAP ID of the person updating the record (default: current user).    
+        update_person_ldap: The LDAP ID of the person updating the record (default: current user).
         is_test: Whether to use the testing project or the production project.
     metrics: Metrics object containing:
         median_step_time: The median step time of the run.
@@ -138,17 +144,8 @@ def write_run(
   from benchmark_db_writer.run_summary_writer import sample_run_summary_writer
   from benchmark_db_writer.schema.workload_benchmark_v2 import workload_benchmark_v2_schema
 
-  # pylint: enable=import-outside-toplevel
-  logging.basicConfig(
-      format="%(asctime)s %(levelname)-8s %(message)s",
-      level=logging.INFO,
-      datefmt="%Y-%m-%d %H:%M:%S",
-  )
-  logger = logging.getLogger(__name__)
-
   def get_db_client(
-      project: str, dataset: str,
-      table: str, dataclass_type: Type, is_test: bool = False
+      project: str, dataset: str, table: str, dataclass_type: Type, is_test: bool = False
   ) -> dataclass_bigquery_writer.DataclassBigQueryWriter:
     """Creates a BigQuery client object.
 

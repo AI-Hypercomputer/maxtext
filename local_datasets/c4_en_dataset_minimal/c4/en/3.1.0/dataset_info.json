@@ -1,0 +1,38 @@
+{
+  "configDescription": "Local minimal C4 EN subset",
+  "configName": "en",
+  "description": "Local minimal C4 English subset.",
+  "fileFormat": "tfrecord",
+  "location": {
+    "urls": [
+      "https://www.tensorflow.org/datasets/catalog/c4"
+    ]
+  },
+  "moduleName": "__main__",
+  "name": "__local_c4_builder",
+  "splits": [
+    {
+      "filepathTemplate": "{DATASET}-{SPLIT}.{FILEFORMAT}-{SHARD_X_OF_Y}",
+      "name": "train",
+      "shardLengths": [
+        "125",
+        "125",
+        "125",
+        "125",
+        "125",
+        "125",
+        "125",
+        "125"
+      ]
+    },
+    {
+      "filepathTemplate": "{DATASET}-{SPLIT}.{FILEFORMAT}-{SHARD_X_OF_Y}",
+      "name": "validation",
+      "shardLengths": [
+        "100",
+        "100"
+      ]
+    }
+  ],
+  "version": "3.1.0"
+}

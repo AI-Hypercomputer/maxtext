@@ -1,0 +1,156 @@
+# Copyright 2025 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow will build maxtext python package and run tests.
+
+name: MaxText Package Tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Run the job every 4 hours
+    - cron:  '0 */4 * * *'
+
+concurrency:
+  # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
+  group: >
+    ${{
+      github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
+      github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
+      github.run_id
+    }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+jobs:
+  build_and_upload_maxtext_package:
+    name: Build and upload maxtext package
+    uses: ./.github/workflows/build_package.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      cloud_runner: linux-x86-n2-16-buildkit
+
+  maxtext_cpu_unit_tests:
+    needs: build_and_upload_maxtext_package
+    uses: ./.github/workflows/run_tests_against_package.yml
+    strategy:
+        fail-fast: false # don't cancel all jobs on failure
+        matrix:
+          image_type: ["py312"]
+          worker_group: [1, 2, 3, 4]
+    with:
+      device_type: cpu
+      device_name: X64
+      cloud_runner: linux-x86-n2-16
+      image_type: ${{ matrix.image_type }}
+      pytest_marker: 'cpu_only'
+      xla_python_client_mem_fraction: 0.75
+      tf_force_gpu_allow_growth: false
+      container_resource_option: "--privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      worker_group: ${{ matrix.worker_group }}
+      total_workers: 4
+
+  maxtext_tpu_unit_tests:
+    needs: build_and_upload_maxtext_package
+    uses: ./.github/workflows/run_tests_against_package.yml
+    strategy:
+        fail-fast: false
+        matrix:
+          image_type: ["py312"]
+    with:
+      device_type: tpu
+      device_name: v4-8
+      image_type: ${{ matrix.image_type }}
+      cloud_runner: linux-x86-ct4p-240-4tpu
+      pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
+      xla_python_client_mem_fraction: 0.75
+      tf_force_gpu_allow_growth: false
+      container_resource_option: "--privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+
+  maxtext_tpu_integration_tests:
+    needs: build_and_upload_maxtext_package
+    uses: ./.github/workflows/run_tests_against_package.yml
+    strategy:
+        fail-fast: false
+        matrix:
+          image_type: ["py312"]
+    with:
+      device_type: tpu
+      device_name: v4-8
+      image_type: ${{ matrix.image_type }}
+      cloud_runner: linux-x86-ct4p-240-4tpu
+      pytest_marker: 'not cpu_only and not gpu_only and integration_test'
+      xla_python_client_mem_fraction: 0.75
+      tf_force_gpu_allow_growth: false
+      container_resource_option: "--privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+
+  maxtext_gpu_unit_tests:
+    needs: build_and_upload_maxtext_package
+    uses: ./.github/workflows/run_tests_against_package.yml
+    strategy:
+        fail-fast: false
+        matrix:
+          image_type: ["py312"]
+          cuda: ["cuda12"]
+    with:
+      device_type: ${{ matrix.cuda }}
+      device_name: a100-40gb-4
+      image_type: ${{ matrix.image_type }}
+      cloud_runner: linux-x86-a2-48-a100-4gpu
+      pytest_marker: 'not cpu_only and not tpu_only and not integration_test'
+      pytest_addopts: '--ignore=tests/sft_hooks_test.py'
+      xla_python_client_mem_fraction: 0.65
+      tf_force_gpu_allow_growth: true
+      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+
+  maxtext_gpu_integration_tests:
+    needs: build_and_upload_maxtext_package
+    uses: ./.github/workflows/run_tests_against_package.yml
+    strategy:
+        fail-fast: false
+        matrix:
+          image_type: ["py312"]
+          cuda: ["cuda12"]
+    with:
+      device_type: ${{ matrix.cuda }}
+      device_name: a100-40gb-4
+      image_type: ${{ matrix.image_type }}
+      cloud_runner: linux-x86-a2-48-a100-4gpu
+      pytest_marker: 'not cpu_only and not tpu_only and integration_test'
+      pytest_addopts: '--ignore=tests/sft_hooks_test.py'
+      xla_python_client_mem_fraction: 0.65
+      tf_force_gpu_allow_growth: true
+      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+
+  notify_failure:
+    name: Notify failed build # creates an issue or modifies last open existing issue for failed build
+    needs: [maxtext_cpu_unit_tests, maxtext_tpu_unit_tests, maxtext_tpu_integration_tests, maxtext_gpu_unit_tests, maxtext_gpu_integration_tests]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+    - name: Check whether one of the jobs failed
+      if: ${{ contains(needs.*.result, 'failure') && github.event.pull_request == null && github.event_name != 'workflow_dispatch' }}
+      uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
