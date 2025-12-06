@@ -117,7 +117,7 @@ Run the following command for GRPO:
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   model_name=${MODEL} \
   tokenizer_path=${TOKENIZER} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH}/0/items \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   hf_access_token=${HF_TOKEN}
@@ -136,12 +136,12 @@ Run the following command for GSPO:
 
 ```
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  model_name=llama3.1-8b \
-  tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
-  load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN \
+  model_name=${MODEL} \
+  tokenizer_path=${TOKENIZER} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH}/0/items \
+  run_name=${RUN_NAME} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+  hf_access_token=${HF_TOKEN} \
   loss_algo=gspo-token
 ```
 

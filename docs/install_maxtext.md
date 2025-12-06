@@ -122,7 +122,7 @@ seed-env \
   --output-dir=generated_gpu_artifacts
 ```
 
-## 4. Update Project Files
+## Step 4: Update Project Files
 
 After generating the new requirements, you need to update the files in the MaxText repository.
 
@@ -133,7 +133,7 @@ After generating the new requirements, you need to update the files in the MaxTe
 2.  **Update `extra_deps_from_github.txt` (if necessary):**
     Currently, MaxText uses a few dependencies, such as `mlperf-logging` and `google-jetstream`, that are installed directly from GitHub source. These are defined in `base_requirements/requirements.txt`, and the `seed-env` tool will carry them over to the generated requirements files.
 
-## 5. Verify the New Dependencies
+## Step 5: Verify the New Dependencies
 
 Finally, test that the new dependencies install correctly and that MaxText runs as expected.
 
@@ -156,3 +156,27 @@ install_maxtext_github_deps
 ```
 
 3.  **Run tests:** Run MaxText tests to ensure there are no regressions.
+
+## Appendix: Install XPK for MaxText Multi-host Workloads
+
+> **_NOTE:_** XPK is only required for multi-host TPU configurations (e.g., v5p-128, v6e-256). For single-host training, XPK is not needed and you can run MaxText directly on your TPU VM.
+
+XPK (Accelerated Processing Kit) is a tool designed to simplify the orchestration and management of workloads on Google Kubernetes Engine (GKE) clusters with TPU or GPU accelerators. In MaxText, we use XPK to submit both pre-training and post-training jobs on multi-host TPU configurations.
+
+For your convenience, we provide a minimal installation path below:
+```bash
+# Directly install xpk using pip
+pip install xpk
+
+# Install kubectl
+sudo apt-get update
+sudo apt install snapd
+sudo snap install kubectl --classic
+
+# Install gke-gcloud-auth-plugin
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+sudo apt update && sudo apt-get install google-cloud-sdk-gke-gcloud-auth-plugin
+```
+
+For detailed setup instructions and advanced features, please refer to the [official XPK documentation](https://github.com/AI-Hypercomputer/xpk).

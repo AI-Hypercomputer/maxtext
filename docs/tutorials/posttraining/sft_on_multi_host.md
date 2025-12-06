@@ -43,7 +43,7 @@ gcloud auth application-default login
 gcloud auth configure-docker
 docker run hello-world
 ```
-Then run the following command to create a local Docker image named `maxtext_base_image`.
+Then run the following command to create a local Docker image named `maxtext_base_image`. This build process takes approximately 10 to 15 minutes.
 ```bash
 bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training
 ```
