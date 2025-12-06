@@ -268,7 +268,7 @@ elif [[ $MODE == "nightly" ]]; then
         fi
         # Install Transformer Engine
         export NVTE_FRAMEWORK=jax
-        python3 -m uv pip install https://github.com/NVIDIA/TransformerEngine/archive/9d031f.zip
+        python3 -m uv pip install 'transformer-engine[jax]'
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing nightly tensorboard plugin profile"
         python3 -m uv pip install tbp-nightly --upgrade
