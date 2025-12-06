@@ -29,7 +29,7 @@ For efficient model inference and response generation during this process, we re
 Let's get started!
 
 ## Create virtual environment and Install MaxText dependencies
-Follow instructions in [Install MaxText](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/install_maxtext.md), but 
+Follow instructions in [Install MaxText](../../install_maxtext.md), but 
 recommend creating the virtual environment outside the `maxtext` directory.
 
 
@@ -93,7 +93,7 @@ You can install the required dependencies using either of the following two opti
 ### Option 1: Installing stable releases of tunix and vllm-tpu
 Run the following bash script to create a docker image with all the dependencies of MaxText, Tunix, vLLM and tpu-inference installed.
 
-In addition to MaxText dependencies, primarily, it installs `vllm-tpu` which is [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby providing TPU inference for vLLM, with unified JAX and PyTorch support.
+In addition to MaxText dependencies, primarily, it installs `vllm-tpu` which is [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby providing TPU inference for vLLM, with unified JAX and PyTorch support. This build process takes approximately 10 to 15 minutes.
  
 ```
 bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training
@@ -109,13 +109,14 @@ bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training PO
 ```
 
 ### Upload the dependency docker image along with MaxText code
+> **Note:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to your project's Artifact Registry and to allow the cluster to pull them during workload execution. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
 ```
 bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME}
 ```
 
 ## Submit your RL workload via Pathways
 
-Please create a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster), and you can submit the `train_rl.py` script via [XPK](https://github.com/AI-Hypercomputer/xpk).
+Please create a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster), and you can submit the `train_rl.py` script via XPK. You can install XPK by following the instructions in the [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md). 
 
 ### Submit GRPO workload
 ```
