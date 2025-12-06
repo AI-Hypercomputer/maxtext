@@ -27,7 +27,7 @@ from absl import app
 
 import numpy as np
 
-import pathwaysutils  # pylint: disable=unused-import
+import pathwaysutils
 
 import tensorflow as tf
 
@@ -540,13 +540,27 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
 
 def run(config, recorder, diagnostic_config):
   """Run the job given hyperparameters and utilities"""
+  from pathwaysutils import _initialize
+  from pathwaysutils.elastic import manager
+
+  train_loop_func = train_loop
+
+  if _initialize.is_pathways_backend_used():
+    elastic_manager = manager.Manager()
+    max_retries = 5
+    timeout = 10 * 60  # ten minutes
+    train_loop_func = elastic_manager.pause_resume(
+        max_retries=max_retries,
+        timeout=timeout,
+    )(train_loop_func)
+
   with (
       diagnostic.diagnose(diagnostic_config),
       maybe_record_goodput(recorder, GoodputEvent.JOB),
       max_utils.maybe_get_transformer_engine_context(config),
       maybe_monitor_goodput(config),
   ):
-    train_loop(config, recorder)
+    train_loop_func(config, recorder)
 
 
 def main(argv: Sequence[str]) -> None:
