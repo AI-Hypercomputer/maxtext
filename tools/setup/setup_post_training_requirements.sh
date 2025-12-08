@@ -23,6 +23,9 @@ uv pip uninstall jax jaxlib libtpu
 
 uv pip install aiohttp==3.12.15
 
+# Install Tunix
+uv pip install google-tunix==0.1.5
+
 # Install vLLM for Jax and TPUs
 uv pip install vllm-tpu
 
