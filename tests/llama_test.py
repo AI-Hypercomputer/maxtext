@@ -20,15 +20,16 @@ import numpy as np
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 
 from MaxText.layers import embeddings
 
 
-"""  
-An example reference jax_llama RoPE implementation from https://github.com/Sea-Snell/ 
-Users should feel free to change and optimize the RoPE implementation in MaxText defined in layers.py 
-as long as it passes our tests. But they shouldn't change the "reference" implementation in 
-llama_test.py which is only to be used for comparison purpose. 
+"""
+An example reference jax_llama RoPE implementation from https://github.com/Sea-Snell/
+Users should feel free to change and optimize the RoPE implementation in MaxText defined in layers.py
+as long as it passes our tests. But they shouldn't change the "reference" implementation in
+llama_test.py which is only to be used for comparison purpose.
 """
 
 
@@ -76,6 +77,9 @@ def permute_to_match_maxtext_rope(arr):
 class RoPETest(unittest.TestCase):
   """Test for the RoPE implementation."""
 
+  def setUp(self):
+    self.mesh = Mesh(jax.devices(), "data")
+
   def test_rope(self):
     dim_per_head = 128
     seq_len = 8
@@ -91,7 +95,7 @@ class RoPETest(unittest.TestCase):
     llama_output = apply_rotary_emb(jnp.asarray(x_q), jnp.asarray(x_k), freqs_cis)
 
     position = jnp.arange(seq_len, dtype=jnp.float32)[jnp.newaxis, :]
-    rope = embeddings.RotaryEmbedding(min_timescale=1, max_timescale=10_000, embedding_dims=dim_per_head)
+    rope = embeddings.RotaryEmbedding(min_timescale=1, max_timescale=10_000, embedding_dims=dim_per_head, mesh=self.mesh)
     query_proj = rope(permute_to_match_maxtext_rope(x_q), position)
     key_proj = rope(permute_to_match_maxtext_rope(x_k), position)
 
@@ -108,7 +112,7 @@ class RoPETest(unittest.TestCase):
     position = jnp.arange(seq_len, dtype=jnp.float32)[jnp.newaxis, :]
 
     # Calculate RoPE embeddings and then scale
-    rope = embeddings.RotaryEmbedding(min_timescale=1, max_timescale=10_000, embedding_dims=dim_per_head)
+    rope = embeddings.RotaryEmbedding(min_timescale=1, max_timescale=10_000, embedding_dims=dim_per_head, mesh=self.mesh)
     query_proj_1 = rope(x_q, position=position)
 
     query_proj_1 = query_proj_1 * (dim_per_head**-0.5)
@@ -127,13 +131,13 @@ class RoPETest(unittest.TestCase):
 
     # Test LLaMARotaryEmbedding with scaling
     llama_rope_scaled = embeddings.LLaMARotaryEmbedding(
-        min_timescale=1, max_timescale=10000, embedding_dims=dim_per_head, use_scale=True
+        min_timescale=1, max_timescale=10000, embedding_dims=dim_per_head, use_scale=True, mesh=self.mesh
     )
     query_proj_scaled = llama_rope_scaled(x_q, position)
 
     # Test LLaMARotaryEmbedding without scaling
     llama_rope_no_scale = embeddings.LLaMARotaryEmbedding(
-        min_timescale=1, max_timescale=10000, embedding_dims=dim_per_head, use_scale=False
+        min_timescale=1, max_timescale=10000, embedding_dims=dim_per_head, use_scale=False, mesh=self.mesh
     )
     query_proj_no_scale = llama_rope_no_scale(x_q, position)
 
@@ -150,7 +154,11 @@ class RoPETest(unittest.TestCase):
 
     # Use LLaMARotaryEmbedding
     llama_rope = embeddings.LLaMARotaryEmbedding(
-        min_timescale=min_timescale, max_timescale=max_timescale, embedding_dims=dim_per_head, use_scale=False
+        min_timescale=min_timescale,
+        max_timescale=max_timescale,
+        embedding_dims=dim_per_head,
+        use_scale=False,
+        mesh=self.mesh,
     )
     query_proj = llama_rope(x_q, position)
 

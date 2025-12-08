@@ -54,7 +54,7 @@ Next, run the following bash script to get all the necessary installations insid
 This will take few minutes. Follow along the installation logs and look out for any issues!
 
 ```
-bash ~/maxtext/src/MaxText/examples/install_tunix_vllm_requirement.sh
+bash tools/setup/setup_post_training_requirements.sh
 ```
 
 Primarily, it installs `vllm-tpu` which is [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby providing TPU inference for vLLM, with unified JAX and PyTorch support.

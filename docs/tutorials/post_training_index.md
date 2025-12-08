@@ -1,6 +1,6 @@
-# Post training
+# Post-training
 
-## What is MaxText post training?
+## What is MaxText post-training?
 
 MaxText provides performance and scalable LLM and VLM post-training, across a variety of techniques like SFT and GRPO.
 
@@ -49,14 +49,13 @@ Pathways supercharges RL with:
 
 ## Getting started
 
-Start your Post-Training journey through quick experimentation with our [Google Colabs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/how_to_run_colabs.html) or our Production level tutorials for [SFT](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html) and [RL](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html).
+Start your Post-Training journey through quick experimentation with [Python Notebooks](https://maxtext.readthedocs.io/en/latest/guides/run_python_notebook.html) or our Production level tutorials for [SFT](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html) and [RL](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html).
 
 ## More tutorials
 
 ```{toctree}
 :maxdepth: 1
 
-posttraining/how_to_run_colabs.md
 posttraining/sft.md
 posttraining/sft_on_multi_host.md
 posttraining/rl.md

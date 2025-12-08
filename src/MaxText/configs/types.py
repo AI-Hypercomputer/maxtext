@@ -2008,7 +2008,7 @@ class MaxTextConfig(
         if self.packing:
           raise ValueError("For multimodal SFT, `packing` is not yet supported.")
     if self.shard_mode == ShardMode.EXPLICIT:
-      supported_decoders = {"simple", "simple_mlp", "llama2"}
+      supported_decoders = {"simple", "simple_mlp", "llama2", "deepseek"}
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(
             f"Decoder '{self.decoder_block.value}' is not supported with 'explicit' sharding. "
