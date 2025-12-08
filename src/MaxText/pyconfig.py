@@ -202,7 +202,6 @@ def initialize(argv: list[str], **kwargs) -> HyperParameters:
   config_path = resolve_config_path(argv[1])
   base_yml_config = _load_config(config_path)
 
-
   # 2. Get overrides from CLI and kwargs
   cli_cfg = omegaconf.OmegaConf.from_cli(argv[2:])
   kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
@@ -299,7 +298,6 @@ def initialize(argv: list[str], **kwargs) -> HyperParameters:
 
     compilation_cache.set_cache_dir(os.path.expanduser(pydantic_kwargs["jax_cache_dir"]))
 
-  jax.distributed.initialize()
   validate_and_set_hlo_dump_defaults(pydantic_kwargs)
 
   pydantic_config = types.MaxTextConfig(**pydantic_kwargs)

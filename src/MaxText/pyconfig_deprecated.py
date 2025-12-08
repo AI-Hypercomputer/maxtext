@@ -977,7 +977,6 @@ def set_mu_dtype(raw_keys):
 
 
 def validate_and_set_hlo_dump_defaults(raw_keys):
-  breakpoint()
   if not raw_keys["dump_hlo"]:
     return raw_keys
   if os.environ.get("XLA_FLAGS") and raw_keys["dump_hlo_xla_flags"]:
