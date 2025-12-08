@@ -79,7 +79,7 @@ def arg_parser():
       help="Base directory for output files. Should point to the root of the MaxText repo.",
   )
   parser.add_argument(
-      "--destination-source-url",
+      "--source-module",
       type=str,
       default="https://github.com/huggingface/transformers/blob/6ce8f0537537455806ab7bfd39b59ad37803ead9/src/",
       help="Base directory for source files. Should point to the root of the Transformer repo repo.",
@@ -95,7 +95,7 @@ def arg_parser():
 
 args = arg_parser()
 
-destination_source_url = args.destination_source_url
+destination_source_url = args.source_module
 
 module_list_path = files_order_file_format.format(module_name=args.module_name)
 destination_directory = os.path.join(args.output_directory, args.module_name)
@@ -234,7 +234,6 @@ def convert_given_file(module, jax_modules) -> None | dict:
   module_code = parse_python_code(resp.text)
   file_name, _ = find_appropriate_file_name(module_code)
 
-  jax_dir = 'Qwen3ForCausalLM'
   dest_path = os.path.join(destination_directory, f"{file_name}.py")
   os.makedirs(os.path.dirname(dest_path), exist_ok=True)
   
