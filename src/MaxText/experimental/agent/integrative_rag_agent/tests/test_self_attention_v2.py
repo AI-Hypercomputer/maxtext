@@ -8,14 +8,16 @@ import torch
 # --- CONFIGURATION ---
 # Force JAX to use High Precision (float32) for matrix multiplications.
 # This is critical for comparing against PyTorch on TPU/GPU.
+# Note that this didn't seem to impact final result, as in, the matmul_precision
+# input argument for the last linear layer was still required.
 jax.config.update("jax_default_matmul_precision", "float32")
 
-# 1. Path Setup
+# 1. Path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../..'))
 sys.path.append(project_root)
 
-from generated_code.SelfAttention.layers import SelfAttention as SelfAttentionJAX
+from generated_code.SelfAttention.layers_fixed import SelfAttention as SelfAttentionJAX
 from examples.level2_pytorch_module.self_attention import SelfAttention as SelfAttentionPT
 
 
@@ -35,6 +37,8 @@ def debug_test():
     dummy_input = jnp.ones((BATCH, SEQ_LEN, EMBED_SIZE))
     variables = jax_model.init(key, dummy_input, dummy_input, dummy_input, None)
     params = variables['params']
+
+    print(f'params: {params}')
 
     # Copy Weights
     print("Copying weights...")

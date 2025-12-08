@@ -6,7 +6,8 @@ import jax
 import jax.numpy as jnp
 
 # Re-used from src.MaxText.layers.linears
-from maxtext.layers import linears
+# from maxtext.layers import linears
+from MaxText.layers import linears 
 
 
 class SelfAttention(nn.Module):
@@ -34,26 +35,30 @@ class SelfAttention(nn.Module):
         out_features_shape=(self.embed_size,),
         use_bias=False,
         name="values_projection",
+        matmul_precision="highest",
     )
     self.keys = linears.dense_general(
         in_features_shape=(self.embed_size,),
         out_features_shape=(self.embed_size,),
         use_bias=False,
         name="keys_projection",
+        matmul_precision="highest",
     )
     self.queries = linears.dense_general(
         in_features_shape=(self.embed_size,),
         out_features_shape=(self.embed_size,),
         use_bias=False,
         name="queries_projection",
+        matmul_precision="highest",
     )
 
     # Final output dense layer
     self.fc_out = linears.dense_general(
         in_features_shape=(self.embed_size,),
         out_features_shape=(self.embed_size,),
-        use_bias=False,
+        use_bias=True,
         name="output_projection",
+        matmul_precision="highest",
     )
 
   def __call__(
