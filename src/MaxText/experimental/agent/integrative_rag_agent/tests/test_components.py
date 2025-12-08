@@ -31,7 +31,7 @@ def test_components():
     # Init JAX Layer
     dense = linears.dense_general(
         in_features_shape=(EMBED,), out_features_shape=(EMBED,), 
-        use_bias=False, name="test_dense"
+        use_bias=False, name="test_dense", matmul_precision="highest",
     )
     key = jax.random.PRNGKey(0)
     vars = dense.init(key, jax_in)
