@@ -25,11 +25,10 @@ from MaxText.common_types import Config
 from MaxText import max_logging, pyconfig
 from MaxText import maxtext_utils
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers.decoders import Decoder, DecoderLayer
+from MaxText.layers.decoders import DecoderLayer
 from MaxText.layers import multi_token_prediction  # The class under test
 from MaxText.layers import embeddings
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.layers import nnx_wrappers
 
 TEST_LAYER_NUM = 1
 
@@ -43,8 +42,10 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
         [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
         run_name="multi_token_prediction_layer_test",
         skip_jax_distributed_system=True,
+        per_device_batch_size=8,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
+    self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
@@ -54,6 +55,7 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
         mesh=self.mesh,
         layer_number=TEST_LAYER_NUM,
         transformer_layer_module=DecoderLayer,
+        rngs=self.rngs,
     )
 
     # Dimensions directly from the config object
@@ -64,36 +66,25 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     # Prepare Dummy Input Data
     prev_hidden_state_shape = (self.batch_size, self.seq_len, self.embed_dim)
     target_embedding_shape = (self.batch_size, self.seq_len, self.embed_dim)
-    data_rng1, data_rng2, init_rng = jax.random.split(self.rng, 3)
+    data_rng1, data_rng2, _ = jax.random.split(self.rng, 3)
 
     self.prev_hidden_state = jax.random.normal(data_rng1, prev_hidden_state_shape, dtype=self.cfg.dtype)
     self.target_token_embedding = jax.random.normal(data_rng2, target_embedding_shape, dtype=self.cfg.dtype)
     self.position_ids = jnp.arange(self.seq_len, dtype=jnp.int32).reshape(1, -1).repeat(self.batch_size, axis=0)
     # Simulate a simple case with no padding.
     self.decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
-
-    # Initialize Layer Parameters
-    init_rngs = {"params": init_rng, "dropout": init_rng}
-    self.variables = self.mtp_layer.init(
-        init_rngs,
-        self.prev_hidden_state,
-        self.target_token_embedding,
-        self.position_ids,
-        self.decoder_segment_ids,
-        deterministic=True,
-    )
     max_logging.log("Setup complete.")
 
   def test_multi_token_prediction_layer_output(self):
     """Tests the basic forward pass and output shape of MultiTokenPredictionLayer."""
 
-    output_hidden_state = self.mtp_layer.apply(
-        self.variables,
+    output_hidden_state = self.mtp_layer(
         self.prev_hidden_state,
         self.target_token_embedding,
-        self.position_ids,
+        position_ids=self.position_ids,
         decoder_segment_ids=self.decoder_segment_ids,
         deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
     )
     # Assertions using unittest methods
     expected_output_shape = (self.batch_size, self.seq_len, self.embed_dim)
@@ -125,32 +116,46 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
 class MTPBlockTestModel(nnx.Module):
   """A lightweight wrapper model for testing the MTPBlock."""
 
-  def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      rngs: nnx.Rngs | None = None,
-  ):
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
+    """Initializes the MTP block and its dependencies for the test."""
     self.config = config
     self.mesh = mesh
-    """Initializes the MTP block and its dependencies for the test."""
-    self.shared_embedding = embeddings.Embed(
+    self.rngs = rngs if rngs is not None else nnx.Rngs(0)
+    self._shared_embedding = embeddings.Embed(
         num_embeddings=self.config.vocab_size,
         num_features=self.config.base_emb_dim,
         config=self.config,
         mesh=self.mesh,
-        rngs=rngs,
+        rngs=self.rngs,
     )
-    decoder_for_mtp = Decoder(config=self.config, mesh=self.mesh, name="decoder_for_mtp")
 
-    self.multi_token_prediction_block = multi_token_prediction.MultiTokenPredictionBlock(
+    class MockDecoderForMTP:
+      """A mock decoder that simulates the behavior needed by MTPBlock."""
+
+      def __init__(self, config: Config):
+        self.config = config
+        self.model_mode = MODEL_MODE_TRAIN
+
+      def _apply_embedding(self, _shared_embedding, input_ids, _position_ids, _deterministic, model_mode):
+        """Returns a zero tensor with the correct embedding shape."""
+        batch_size, seq_len = input_ids.shape
+        embed_dim = self.config.base_emb_dim
+        return jnp.zeros((batch_size, seq_len, embed_dim), dtype=self.config.dtype)
+
+      def apply_output_head(self, _shared_embedding, hidden_state, _deterministic, model_mode):
+        """Returns a zero tensor with the correct logit shape."""
+        batch_size, seq_len, _ = hidden_state.shape
+        return jnp.zeros((batch_size, seq_len, self.config.vocab_size), dtype=self.config.dtype)
+
+    self.decoder = MockDecoderForMTP(config=self.config)
+
+    self.mtp_block = multi_token_prediction.MultiTokenPredictionBlock(
         config=self.config,
         mesh=self.mesh,
-        name="mtp_block",
         transformer_layer_module=DecoderLayer,
-        decoder=decoder_for_mtp,
+        decoder=self.decoder,
+        rngs=self.rngs,
     )
-    self.mtp_block = nnx_wrappers.ToNNX(self.multi_token_prediction_block, rngs=nnx.Rngs(params=0))
 
   def __call__(
       self,
@@ -158,6 +163,7 @@ class MTPBlockTestModel(nnx.Module):
       input_ids,
       target_ids,
       target_mask,
+      *,
       position_ids,
       decoder_segment_ids,
       model_mode,
@@ -165,17 +171,20 @@ class MTPBlockTestModel(nnx.Module):
       mutable=None,
   ):
     return self.mtp_block(
-        self.shared_embedding,
+        self._shared_embedding,
         main_hidden_state,
         input_ids,
         target_ids,
         target_mask,
-        position_ids,
-        decoder_segment_ids,
-        model_mode,
-        deterministic,
-        mutable=mutable,
+        position_ids=position_ids,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=model_mode,
+        deterministic=deterministic,
     )
+
+  def shared_embedding(self):
+    """Returns the shared embedding."""
+    return self._shared_embedding
 
 
 class MultiTokenPredictionBlockTest(unittest.TestCase):
@@ -188,79 +197,102 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         run_name="mtp_block_test",
         skip_jax_distributed_system=True,
         mtp_num_layers=2,
+        base_emb_dim=16,
     )
     self.nnx_rngs = nnx.Rngs(params=0)
     self.rng = jax.random.PRNGKey(43)
+    self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
     data_rng, self.init_rng = jax.random.split(self.rng)
 
-    self.batch_size, self.seq_len, self.embed_dim = 2, 8, 16
+    self.batch_size, self.seq_len, self.embed_dim = 2, 8, self.cfg.base_emb_dim
     key1, key2, key3 = jax.random.split(data_rng, 3)
     self.main_hidden_state = jax.random.normal(key1, (self.batch_size, self.seq_len, self.embed_dim))
     self.input_ids = jax.random.randint(key2, (self.batch_size, self.seq_len), 0, self.cfg.vocab_size)
     self.target_ids = jax.random.randint(key3, (self.batch_size, self.seq_len), 0, self.cfg.vocab_size)
     self.target_mask = jnp.ones_like(self.target_ids)
-    self.position_ids = jnp.arange(self.seq_len, dtype=jnp.int32).reshape(1, -1)
+    self.position_ids = jnp.arange(self.seq_len, dtype=jnp.int32).reshape(1, -1).repeat(self.batch_size, axis=0)
     self.decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
 
-    self.test_model = MTPBlockTestModel(config=self.cfg, mesh=self.mesh, rngs=self.nnx_rngs)
+    self.test_model = MTPBlockTestModel(
+        config=self.cfg,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+
+  def test_no_sow_during_init(self):
+    """Verifies losses/weights are initialized with zeros (NNX behavior)."""
+    # NNX pre-initializes Variables with zeros to avoid checkpointing errors.
+    # Unlike Linen which sows during forward pass, NNX creates Variables in __init__.
+    initial_state = nnx.state(self.test_model)
+    self.assertTrue(hasattr(initial_state.mtp_block, "losses"))
+    self.assertTrue(hasattr(initial_state.mtp_block, "weights"))
+
+    # Verify they're initialized with zeros of correct shape.
+    losses_val = initial_state.mtp_block.losses.value
+    weights_val = initial_state.mtp_block.weights.value
+    self.assertEqual(losses_val.shape, (self.cfg.mtp_num_layers,))
+    self.assertEqual(weights_val.shape, (self.cfg.mtp_num_layers,))
+    self.assertTrue(jnp.all(losses_val == 0.0))
+    self.assertTrue(jnp.all(weights_val == 0.0))
 
   def test_sow_functionality(self):
     """Verifies that the block correctly sows losses and weights."""
-    self.test_model(
-        self.main_hidden_state,
-        self.input_ids,
-        self.target_ids,
-        self.target_mask,
-        self.position_ids,
-        self.decoder_segment_ids,
-        deterministic=True,
+    _ = self.test_model(
+        main_hidden_state=self.main_hidden_state,
+        input_ids=self.input_ids,
+        target_ids=self.target_ids,
+        target_mask=self.target_mask,
+        position_ids=self.position_ids,
+        decoder_segment_ids=self.decoder_segment_ids,
         model_mode=MODEL_MODE_TRAIN,
-        mutable=["mtp_losses"],
+        deterministic=True,
     )
-    self.assertTrue(hasattr(self.test_model.mtp_block, "losses"))
-    mtp_loss = self.test_model.mtp_block.losses
-    self.assertTrue(type(mtp_loss).__name__, "mtp_losses")
-    self.assertEqual(len(mtp_loss), self.cfg.mtp_num_layers)
+    state = nnx.state(self.test_model)
 
-  def test_no_sow_during_init(self):
-    """Verifies no losses are sown during model initialization."""
-    # `self.variables` was created by `.init()`. We inspect it to ensure
-    # our `if not self.is_initializing()` check worked.
-    self.assertFalse(hasattr(self.test_model.mtp_block, "losses"))
+    # Check for the existence of the 'losses' and 'weights' attributes.
+    self.assertTrue(hasattr(state.mtp_block, "losses"))
+    self.assertTrue(hasattr(state.mtp_block, "weights"))
+
+    # Access the actual data tuple inside the .value attribute.
+    losses_val = state.mtp_block.losses.value
+    weights_val = state.mtp_block.weights.value
+
+    self.assertEqual(len(losses_val), self.cfg.mtp_num_layers)
+    self.assertEqual(len(weights_val), self.cfg.mtp_num_layers)
 
   def test_loss_aggregation_logic(self):
     """
     Tests the full 'sow and reap' cycle, mimicking the logic from train.py
     to ensure the final loss calculation is correct.
     """
-    # 1. Run the forward pass and capture the sown variables.
-    self.test_model(
-        self.main_hidden_state,
-        self.input_ids,
-        self.target_ids,
-        self.target_mask,
-        self.position_ids,
-        self.decoder_segment_ids,
-        deterministic=False,
-        mutable=["mtp_losses"],
+    # Run the forward pass and capture the sown variables.
+    _ = self.test_model(
+        main_hidden_state=self.main_hidden_state,
+        input_ids=self.input_ids,
+        target_ids=self.target_ids,
+        target_mask=self.target_mask,
+        position_ids=self.position_ids,
+        decoder_segment_ids=self.decoder_segment_ids,
         model_mode=MODEL_MODE_TRAIN,
+        deterministic=False,
     )
+    state = nnx.state(self.test_model)
 
     # This section of the test now *becomes* the logic from train.py
     # -------------------------------------------------------------
     final_loss_for_gradient = 100.0  # A dummy main loss
     mtp_loss_for_logging = 0.0
 
-    # 2. Get the weight and losses.
-    mtp_losses = self.test_model.mtp_block.losses.value
-    mtp_weights = self.test_model.mtp_block.weights.value
+    # Use the standard utility to get the data.
+    mtp_losses_var = getattr(state.mtp_block, "losses", None)
+    mtp_weights_var = getattr(state.mtp_block, "weights", None)
 
-    # 3. Perform the aggregation logic exactly as in `loss_fn`.
-    if mtp_losses:
-      sum_of_all_mtp_losses = jnp.sum(jnp.array(mtp_losses)).item()
-      sum_of_all_mtp_weights = jnp.sum(jnp.array(mtp_weights)).item()
+    # Perform the aggregation logic exactly as in `loss_fn`.
+    if mtp_losses_var and mtp_weights_var:
+      sum_of_all_mtp_losses = jnp.sum(jnp.array(mtp_losses_var.value))
+      sum_of_all_mtp_weights = jnp.sum(jnp.array(mtp_weights_var.value))
 
       self.assertGreater(sum_of_all_mtp_weights, 0)
 
@@ -271,7 +303,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
       mtp_loss_for_logging = scaled_mtp_loss
     # -------------------------------------------------------------
 
-    # 4. Assert that the final values are correct.
+    # Assert that the final values are correct.
     # The final loss should have increased from its base value.
     self.assertGreater(final_loss_for_gradient, 100.0)
     # The logged MTP loss should be a valid, positive number.
@@ -312,8 +344,15 @@ class TestRollAndMask(unittest.TestCase):
         dtype=jnp.int32,
     )
 
-    self.assertEqual(rolled_by_1.shape, (batch_size, seq_len), "Shape should be preserved after rolling.")
-    self.assertTrue(jnp.array_equal(rolled_by_1, expected_1), "Array content is incorrect after shift by -1.")
+    self.assertEqual(
+        rolled_by_1.shape,
+        (batch_size, seq_len),
+        "Shape should be preserved after rolling.",
+    )
+    self.assertTrue(
+        jnp.array_equal(rolled_by_1, expected_1),
+        "Array content is incorrect after shift by -1.",
+    )
 
     # --- Test Case 2: Larger left shift by 3 ---
     # This simulates a later step in a hypothetical MTP loop.
@@ -329,8 +368,15 @@ class TestRollAndMask(unittest.TestCase):
         ],
         dtype=jnp.int32,
     )
-    self.assertEqual(rolled_by_3.shape, (batch_size, seq_len), "Shape should be preserved after rolling.")
-    self.assertTrue(jnp.array_equal(rolled_by_3, expected_3), "Array content is incorrect after shift by -3.")
+    self.assertEqual(
+        rolled_by_3.shape,
+        (batch_size, seq_len),
+        "Shape should be preserved after rolling.",
+    )
+    self.assertTrue(
+        jnp.array_equal(rolled_by_3, expected_3),
+        "Array content is incorrect after shift by -3.",
+    )
 
     # --- Test Case 3: Shift of 0 (edge case) ---
     # This should result in no change to the tensor.
