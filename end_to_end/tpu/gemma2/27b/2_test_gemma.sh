@@ -25,7 +25,7 @@ if [ -z "${BASE_OUTPUT_PATH}" ]; then
 fi
 
 # Installing torch for deps in forward_pass_logit_checker.py
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
 export DATASET_PATH=gs://maxtext-dataset

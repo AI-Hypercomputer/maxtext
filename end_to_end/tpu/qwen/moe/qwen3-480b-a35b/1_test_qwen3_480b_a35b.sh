@@ -32,7 +32,7 @@ if [ -z "${HF_MODEL_PATH}" ]; then
 fi
 
 # Install dependencies required for the logit checker.
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # --- Run the Forward Pass Logit Checker ---
 

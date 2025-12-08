@@ -5,7 +5,7 @@
 set -ex
 
 # We install torch CPU because the checkpoint conversion script does not need a TPU/GPU
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # This is defined in 2_test_llama3.1_405b.sh
 export MODEL_VARIATION='llama3.1-405b'

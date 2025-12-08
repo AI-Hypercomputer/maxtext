@@ -14,7 +14,7 @@ export TOKENIZER_PATH='deepseek-ai/DeepSeek-V3'
 
 # TODO(ranran): add forward_pass_logit_checker.py test
 # Installing torch for deps in forward_pass_logit_checker.py
-# python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+# uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Step 1:
 # After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
