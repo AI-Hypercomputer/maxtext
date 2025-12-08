@@ -38,6 +38,8 @@ def maybe_shard_with_name(inputs, named_sharding, shard_mode):
   In auto shardmode, this function hints inputs follow given named_sharding.
   In explicit shardmode, this function enforces inputs following named_sharding.
   """
+  if inputs is None:
+    return None
   if shard_mode == ShardMode.EXPLICIT:
     return reshard(inputs, named_sharding)
   else:
@@ -48,6 +50,8 @@ def maybe_shard_with_logical(inputs, logical_axes, mesh, shard_mode):
   """
   A wrapper of maybe_shard_with_name when logical axes are inputs
   """
+  if inputs is None:
+    return None
   named_sharding = NamedSharding(mesh, nn.logical_to_mesh_axes(logical_axes))
   return maybe_shard_with_name(inputs, named_sharding, shard_mode)
 
