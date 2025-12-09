@@ -223,6 +223,10 @@ type ModelName = Literal[
 class RunInfo(BaseModel):
   """Configuration for the overall run, model identity, and logging."""
 
+  base_config: None | str = Field(
+      None,
+      description="Base config to inherit from. This is a meta-field and is consumed by the config loading system.",
+  )
   run_name: str = Field(
       "",
       description="The name of the run. Checkpoints will be stored under this name.",
