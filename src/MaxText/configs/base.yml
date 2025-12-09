@@ -449,6 +449,7 @@ logical_axis_rules: [
                       ['cache_kv', []],
                       ['cache_sequence', []],
                       ['exp', 'expert'],
+                      ['exp_with_fsdp', 'fsdp'],
                       ['paged_kv_heads', ['tensor']],
                       ['num_pages', []],
                       ['tokens_per_page', []],

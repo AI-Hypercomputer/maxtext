@@ -106,6 +106,7 @@ def self_attention_with_norm(
       mscale=cfg.mscale,
       rope_factor=cfg.rope_factor,
       model_mode=model_mode,
+      attn_logits_soft_cap=cfg.attn_logits_soft_cap,
   )
 
   attention_lnx, _ = attention_layer(
