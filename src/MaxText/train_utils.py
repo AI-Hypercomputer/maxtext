@@ -193,7 +193,7 @@ def setup_train_loop(config, recorder, devices=None):
       )
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
-    with mesh:
+    with jax.set_mesh(mesh):
       if context_parallel_size > 1 and config.context_parallel_load_balance:
         data_iterator = map(maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode), data_iterator)
         if eval_data_iterator:

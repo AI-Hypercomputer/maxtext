@@ -92,7 +92,7 @@ def get_maxtext_model(config, devices=None):
   # load_parameters_path=/path/to/your/output/directory/0/items
   """
   model, mesh = model_creation_utils.create_nnx_model(config, devices=devices)
-  with mesh:
+  with jax.set_mesh(mesh):
     tunix_model = TunixMaxTextAdapter(base_model=model)
     tunix_model.config = None
   return tunix_model, mesh
