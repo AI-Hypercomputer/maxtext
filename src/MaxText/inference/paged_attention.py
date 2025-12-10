@@ -30,6 +30,7 @@ from flax import nnx
 
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention_kernel_v2
+from MaxText.sharding import logical_to_mesh_axes
 from MaxText.common_types import Array, DType, AxisNames, BATCH, LENGTH, HEAD, D_KV, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.layers.initializers import variable_to_logically_partitioned
 
@@ -322,8 +323,8 @@ class PagedAttentionOp(nnx.Module):
       page_state: page_manager.PageState,
   ) -> Array:
     """Apply Paged Attention v1 in decode only."""
-    kv_pages_pspec = nn.logical_to_mesh_axes(("paged_kv_heads", None, None, None))
-    q_pspec = nn.logical_to_mesh_axes((None, None, "paged_kv_heads", None))
+    kv_pages_pspec = logical_to_mesh_axes(("paged_kv_heads", None, None, None), self.mesh)
+    q_pspec = logical_to_mesh_axes((None, None, "paged_kv_heads", None), self.mesh)
 
     @functools.partial(
         jax.shard_map,

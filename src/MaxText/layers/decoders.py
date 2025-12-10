@@ -22,7 +22,7 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 
 from flax import linen as nn
 from flax import nnx
@@ -32,6 +32,7 @@ from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONT
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText import max_logging
 from MaxText import max_utils
+from MaxText.sharding import create_sharding
 from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import quantizations
@@ -607,16 +608,7 @@ class Decoder(nn.Module):
 
     cfg = self.config
     if cfg.shard_mode == ShardMode.EXPLICIT:
-      norm_out_sharding = NamedSharding(
-          self.mesh,
-          nn.logical_to_mesh_axes(
-              (
-                  "activation_batch",
-                  "activation_length_no_exp",
-                  "activation_embed",
-              )
-          ),
-      )
+      norm_out_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length_no_exp", "activation_embed"))
     else:
       norm_out_sharding = None
 
@@ -631,17 +623,10 @@ class Decoder(nn.Module):
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
-      out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes((None, None, "activation_vocab")))
+      out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"))
     else:
-      out_sharding = NamedSharding(
-          self.mesh,
-          nn.logical_to_mesh_axes(
-              (
-                  "activation_embed_and_logits_batch",
-                  "activation_length_no_exp",
-                  "activation_vocab",
-              )
-          ),
+      out_sharding = create_sharding(
+          self.mesh, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
       )
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]

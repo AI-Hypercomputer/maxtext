@@ -21,7 +21,6 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh, NamedSharding
 import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
 
 from MaxText.common_types import (
@@ -56,6 +55,7 @@ from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
 from MaxText.inference.kvcache import KVQuant
+from MaxText.sharding import create_sharding
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.attentions import Attention
 from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
@@ -515,8 +515,8 @@ class MLA(Attention):
     else:
       query_logical_name = self.query_axis_names
       wqa_logical_name = (KV_BATCH, LENGTH_NO_EXP, Q_LORA_UP_PROJ)
-    query_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(query_logical_name))
-    wqa_out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(wqa_logical_name))
+    query_sharding = create_sharding(self.mesh, query_logical_name)
+    wqa_out_sharding = create_sharding(self.mesh, wqa_logical_name)
     # Set softmax scaling.
     self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
     self.softmax_scale = self.qk_head_dim**-0.5
@@ -555,7 +555,7 @@ class MLA(Attention):
       key_logical_name = self.key_axis_names
       value_logical_name = self.value_axis_names
 
-    wkva_out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(key_logical_name))
+    wkva_out_sharding = create_sharding(self.mesh, key_logical_name)
     kv_out = self.wkv_b(low_rank_main, out_sharding=wkva_out_sharding)
 
     # Split kv_out into key_nope and value parts.
@@ -664,7 +664,7 @@ class MLA(Attention):
       wka_logical_name = (KV_BATCH_NO_EXP, LENGTH, KV_LORA_UP_PROJ)
     else:
       wka_logical_name = (KV_BATCH, LENGTH_NO_EXP, KV_LORA_UP_PROJ)
-    wkva_out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(wka_logical_name))
+    wkva_out_sharding = create_sharding(self.mesh, wka_logical_name)
     low_rank = self.wkv_a(inputs, out_sharding=wkva_out_sharding)
     low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
     low_rank_main = self.kv_norm(low_rank_main)
@@ -759,7 +759,7 @@ class MLA(Attention):
     else:
       out = self._maybe_shard_with_logical(out, self.out_axis_names)
 
-    out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(out_logical_name))
+    out_sharding = create_sharding(self.mesh, out_logical_name)
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache
