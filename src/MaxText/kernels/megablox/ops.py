@@ -42,6 +42,7 @@ def gmm(
     use_qwix_quantization: bool = False,
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
+    vma_axes: tuple = tuple(),
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -60,9 +61,11 @@ def gmm(
           act_calibration_method="absmax",
       )
 
-  gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
+  _gmm_fwd_vma = functools.partial(_gmm_fwd, vma_axes=vma_axes)
+  _gmm_bwd_vma = functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype, vma_axes=vma_axes)
+  gmm_fwd_bwd = lambda *args: _gmm_fwd_vma(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9, 10, 11))
-  gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
+  gmm_fwd_bwd.defvjp(_gmm_fwd_vma, _gmm_bwd_vma)
   return gmm_fwd_bwd(
       lhs,
       rhs,
@@ -92,6 +95,7 @@ def _gmm_fwd(
     quantization_rule: qwix.QtRule | None = None,
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
+    vma_axes: tuple = tuple(),
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -125,10 +129,7 @@ def _gmm_fwd(
       # QAG is only supported for following conditions
   if use_tokamax_backend:
     if quantization_rule and quantization_rule.bwd_qtype:
-      if (
-          quantization_rule.weight_calibration_method.startswith("fixed")
-          and isinstance(rhs, qpl.QArray)
-      ):
+      if quantization_rule.weight_calibration_method.startswith("fixed") and isinstance(rhs, qpl.QArray):
         if weight_gather_axes:
           for axis_name, axis_idx in weight_gather_axes:
             rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)
@@ -155,6 +156,7 @@ def _gmm_fwd(
         existing_out,
         transpose_rhs=transpose_rhs,
         interpret=interpret,
+        vma_axes=vma_axes,
     )
   return out, (lhs, rhs, group_sizes, group_offset)
 
@@ -176,6 +178,7 @@ def _gmm_bwd(
         jnp.ndarray | None,
     ],
     grad: jnp.ndarray,
+    vma_axes: tuple = tuple(),
 ) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray]:
   """Backward function for throughput GMM VJP."""
   del preferred_element_type
@@ -256,6 +259,7 @@ def _gmm_bwd(
         group_offset,
         transpose_rhs=not transpose_rhs,
         interpret=interpret,
+        vma_axes=vma_axes,
     )
     drhs = backend.tgmm(
         lhs.swapaxes(0, 1),
@@ -266,6 +270,7 @@ def _gmm_bwd(
         group_offset,
         num_actual_groups,
         interpret=interpret,
+        vma_axes=vma_axes,
     )
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to
