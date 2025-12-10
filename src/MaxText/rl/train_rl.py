@@ -361,6 +361,10 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rl_cluster_lib.Role.REFERENCE: reference_mesh,
           rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
       },
+      role_to_logical_axis_rule={
+          rl_cluster_lib.Role.ACTOR: trainer_config.logical_axis_rules,
+          rl_cluster_lib.Role.REFERENCE: trainer_config.logical_axis_rules,
+      },
       rollout_engine="vllm",
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
