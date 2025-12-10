@@ -1368,7 +1368,7 @@ class RLDataset(BaseModel):
   num_batches: int = Field(4, description="Number of batches for RL training.")
   num_test_batches: int = Field(5, description="Number of batches for RL evaluation.")
   train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
-  micro_batch_size: float = Field(-1, description="Micro batch size for rollout and training.")
+  micro_batch_size: int = Field(-1, description="Micro batch size for rollout and training.")
 
 
 class RLEvaluation(BaseModel):
