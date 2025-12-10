@@ -102,6 +102,9 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   pydantic_kwargs = {}
   valid_fields = types.MaxTextConfig.model_fields.keys()
 
+  if "base_config" in raw_keys:
+    del raw_keys["base_config"]
+
   for key, value in raw_keys.items():
     if key not in valid_fields:
       logger.warning("Ignoring invalid/unsupported field from YAML/CLI: %s", repr(key))
