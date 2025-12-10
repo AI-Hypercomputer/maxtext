@@ -555,7 +555,8 @@ class Decoder(nnx.Module):
         # Define parameter movement with mesh-based sharding
         def move_to_device(variables):
           """Move parameters to device with proper sharding."""
-
+          print("move to devices")
+          breakpoint()
           def map_fn(path, value):
             max_logging.log(f"models.py: Moving parameter {path} to device")
             return jax.device_put(value, max_utils.device_space())
@@ -564,16 +565,26 @@ class Decoder(nnx.Module):
 
         # Transform layer class before remat
         block_layer = nn.map_variables(block_layer, ["params"], move_to_device, mutable=True)
+     
+      class RemattedBlockLayer(block_layer):
+        @functools.partial(
+            jax.checkpoint,
+            prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
+            policy=policy,
+            # Adjust static_argnums: original (4, 5) becomes (5, 6) to account for 'self' at index 0
+            static_argnums=(5,), 
+        )
+        def __call__(self, *args, **kwargs):
+            return super().__call__(*args, **kwargs)
 
-      breakpoint()
       # Apply remat policy to layer
-      layer = nn.remat(
-          block_layer,
-          prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
-          policy=policy,
-          static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
-      )
-      RemattedBlockLayers.append(layer)
+      # layer = nn.remat(
+      #     block_layer,
+      #     prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
+      #     policy=policy,
+      #     static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
+      # )
+      RemattedBlockLayers.append(RemattedBlockLayer)
     return RemattedBlockLayers
 
   def get_norm_layer(self, num_features: int):
@@ -605,6 +616,7 @@ class Decoder(nnx.Module):
   def scan_decoder_layers(self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, **kwargs):
 
     def create_real_nnx_layer(r):
+      breakpoint()
       partial_wrapper = decoder_layer(cfg, mesh=mesh, quant=self.quant, rngs=r, **kwargs)
       
       if hasattr(partial_wrapper, 'nnx_class'):
@@ -640,6 +652,17 @@ class Decoder(nnx.Module):
             """
             # 1. Rehydrate
             layer_i = nnx.merge(graph_def, params_slice)
+            def print_sharding(path, leaf):
+              if isinstance(leaf, jax.Array):
+                keystr = jax.tree_util.keystr(path)
+                if hasattr(leaf, "sharding"):
+                    jax.debug.print(f"Path: {keystr}, Shape: {leaf.shape}, Dtype: {leaf.dtype}, Sharding: {leaf.sharding}")
+                else:
+                    # This branch is taken during jax.eval_shape
+                    jax.debug.print(f"Path: {keystr}, Shape: {leaf.shape}, Dtype: {leaf.dtype}, Sharding: N/A (Abstract Array)")
+              return leaf
+            jax.tree_util.tree_map_with_path(print_sharding, nnx.state(layer_i))
+            
 
             # 2. Run Layer
             layer_out = layer_i(carry, *args, **run_kwargs)
