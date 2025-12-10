@@ -30,8 +30,8 @@ from MaxText.inference import page_manager
 from MaxText import multimodal_utils
 from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
-from MaxText.layers.decoders import Decoder
-from MaxText.layers.embeddings import Embed, embed_as_linen
+from MaxText.layers.decoders import DecoderNNX
+from MaxText.layers.embeddings import Embed
 from MaxText.layers.encoders import VisionEncoder
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.multi_token_prediction import MultiTokenPredictionBlock
@@ -70,7 +70,8 @@ def transformer_as_linen(
       A constructed Transformer model compatible with the specified framework (Linen or NNX).
   """
   rngs = rngs or nnx.Rngs(
-      params=jax.random.PRNGKey(config.init_weights_seed), dropout=jax.random.PRNGKey(config.init_dropouts_seed)
+      params=jax.random.PRNGKey(config.init_weights_seed),
+      dropout=jax.random.PRNGKey(config.init_dropouts_seed),
   )
   return TransformerLinen(
       Transformer,
@@ -113,7 +114,15 @@ class Transformer(nnx.Module):
   # Make new attributes required, so that all Transformer dependencies (train, decode,
   # compile, etc) will error instead of silently use defaults.
   # pylint: disable=attribute-defined-outside-init
-  def __init__(self, config: Config, mesh: Mesh, quant: Quant, *, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      quant: Quant,
+      *,
+      model_mode: str = MODEL_MODE_TRAIN,
+      rngs: nnx.Rngs,
+  ):
     """Initialize shared_embedding & decoder layers."""
     self.config = config
     self.mesh = mesh
@@ -134,39 +143,16 @@ class Transformer(nnx.Module):
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
 
-    decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
-    self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
+    self.decoder = DecoderNNX(
+        config=cfg,
+        mesh=mesh,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        rngs=rngs,
+    )
     self.hidden_states = None
 
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=cfg, model_mode=model_mode)
-    dummy_decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-    dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-
-    if self.config.attention == "vllm_rpa":
-      try:
-        # pylint: disable=import-outside-toplevel
-        # pytype: disable=import-error
-        from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-      except ImportError as e:
-        raise ImportError(
-            "vLLM RPA attention requires the vllm-tpu package. Please install it with `pip install vllm-tpu`."
-        ) from e
-      dummy_attention_metadata = AttentionMetadata(
-          input_positions=jnp.ones((batch_size * seq_len,), dtype=jnp.int32),
-          block_tables=jnp.ones((seq_len,), dtype=jnp.int32),
-          seq_lens=jnp.ones((1), dtype=jnp.int32),
-          query_start_loc=jnp.ones((2), dtype=jnp.int32),
-          request_distribution=jnp.ones((3), dtype=jnp.int32),
-      )
-    else:
-      dummy_attention_metadata = None
-
-    self.decoder.lazy_init(
-        shared_embedding=self.token_embedder,
-        decoder_input_tokens=dummy_decoder_input_tokens,
-        decoder_positions=dummy_decoder_positions,
-        attention_metadata=dummy_attention_metadata,
-    )
+    # Avoid eager lazy_init for NNX decoder; parameters initialize on first real call.
 
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
@@ -176,7 +162,11 @@ class Transformer(nnx.Module):
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
       mtp_block_linen = MultiTokenPredictionBlock(
-          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
+          config=self.config,
+          mesh=self.mesh,
+          name="mtp_block",
+          transformer_layer_module=mtp_layer,
+          decoder=self.decoder,
       )
       self.mtp_block = nnx_wrappers.ToNNX(mtp_block_linen, rngs=rngs)
 
@@ -394,7 +384,15 @@ class ZeroOneTransformer(nnx.Module):
   # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
   # TODO: Make model_mode required after confirming no users are affected.
   # May be different than the model_mode passed to __call__
-  def __init__(self, config: Config, mesh: Mesh, quant: Quant, *, rngs: nnx.Rngs, model_mode: str = MODEL_MODE_TRAIN):
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      quant: Quant,
+      *,
+      rngs: nnx.Rngs,
+      model_mode: str = MODEL_MODE_TRAIN,
+  ):
     """Initialize the Zero-1 FSDP Transformer wrapper."""
     self.config = config
     self.mesh = mesh
@@ -405,7 +403,13 @@ class ZeroOneTransformer(nnx.Module):
     batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(config=self.config, model_mode=self.model_mode)
     self.shape = (batch_size, sequence_length, self.config.emb_dim)
 
-    self.model = Transformer(config=config, mesh=mesh, quant=quant, model_mode=model_mode, rngs=self.rngs)
+    self.model = Transformer(
+        config=config,
+        mesh=mesh,
+        quant=quant,
+        model_mode=model_mode,
+        rngs=self.rngs,
+    )
 
   def __call__(
       self,
@@ -454,7 +458,10 @@ class ZeroOneTransformer(nnx.Module):
     if partition_spec is None:
       partition_spec = nnx.get_partition_spec(state)
     gathered_state = all_gather_over_fsdp(
-        state, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
+        state,
+        partition_spec,
+        mesh=self.mesh,
+        logical_axis_rules=self.config.logical_axis_rules,
     )
     gathered_model = nnx.merge(graphdef, gathered_state)
 

@@ -88,7 +88,15 @@ def get_functional_train_with_signature(
     train_step, data_sharding, state_mesh_shardings, model, config, params_shardings=None
 ):
   """Get the shardings (both state and data) for `train_step`."""
-  functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
+  # For NNX modules, drop captured variables by keeping only the graphdef so params
+  # aren't baked as constants when we partial the train_step.
+  static_state = None
+  if isinstance(model, nnx.Module):
+    model, _, static_state = nnx.split(model, nnx.Param, ...)
+
+  functional_train = functools.partial(
+      train_step, model, config, state_mesh_shardings, params_shardings, static_state=static_state
+  )
   functional_train.__name__ = "train_step"
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
@@ -99,6 +107,9 @@ def get_functional_train_with_signature(
 
 def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for `eval_step`."""
+  if isinstance(model, nnx.Module):
+    model, _, _ = nnx.split(model, nnx.Param, ...)
+
   functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
@@ -721,15 +732,16 @@ def init_training_state(graphdef, params, tx):
   return state
 
 
-def init_initial_state(model, tx, config, is_training, key):
+def init_initial_state(graphdef, tx, config, is_training, key, params):
   """Initialize training or decode state from an NNX model.
 
   Args:
-    model: NNX model (already initialized)
+    graphdef: NNX graph definition
     tx: Optax optimizer transformation
     config: Configuration object
     is_training: True for training, False for decode
     key: PRNG key (unused, kept for API compatibility)
+    params: Model parameters
 
   Returns:
     TrainState with model parameters and optimizer state.
@@ -738,8 +750,6 @@ def init_initial_state(model, tx, config, is_training, key):
     Extracts only trainable parameters from the NNX model. The model structure
     and RNG state are discarded as they're managed by the model object itself.
   """
-  # Extract only trainable parameters; discard structure and RNG state
-  graphdef, params, _ = nnx.split(model, nnx.Param, ...)
   max_logging.log(f"Initialized {'training' if is_training else 'decode'} state with parameters:")
   if is_training:
     return init_training_state(graphdef, params, tx)
@@ -877,14 +887,15 @@ def setup_initial_state(
         # The update of data_iterator state happens in place, no need to assign explicitly
         state = restored["items"]
     else:
-      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
+      graphdef, params, _ = nnx.split(model, nnx.Param, ...)
+      init_state_partial = functools.partial(init_initial_state, graphdef, tx, config, is_training)
       init_state_partial.__name__ = "initialize_state"
       # pylint: disable=not-callable
       state = jax.jit(
           init_state_partial,
-          in_shardings=None,
+          in_shardings=(None, None),
           out_shardings=state_mesh_shardings,
-      )(rng)
+      )(rng, params)
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
 
@@ -895,10 +906,11 @@ def setup_initial_state(
 
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+  graphdef, params, _ = nnx.split(model, nnx.Param, ...)
+  init_state_partial = functools.partial(init_initial_state, graphdef, tx, config, is_training, rng)
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_state = jax.eval_shape(init_state_partial)
+    abstract_state = jax.eval_shape(init_state_partial, params)
 
   state_logical_annotations = nnx.get_partition_spec(abstract_state)
 
@@ -926,7 +938,9 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     params = jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params)
     state_mesh_shardings = state_mesh_shardings.replace(params=params)
 
-  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
+  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape(
+      params
+  )
 
   unboxed_abstract_sharded_state = max_utils.unbox_logicallypartioned(abstract_sharded_state)
   # Initialization

@@ -39,9 +39,9 @@ from MaxText.layers import pipeline
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText import sharding
-from MaxText.layers.attentions import attention_as_linen
-from MaxText.layers.normalizations import rms_norm
-from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
+from MaxText.layers.attentions import attention_as_linen, Attention
+from MaxText.layers.normalizations import rms_norm, RMSNorm
+from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen, Embed, PositionalEmbedding
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers import (
     deepseek,
@@ -991,3 +991,359 @@ class Decoder(nn.Module):
           **layer_call_kwargs,
       )
     return y
+
+
+def get_decoder_layers_nnx(config: Config):
+  """Return NNX decoder layer blueprints based on config.
+
+  Mirrors `get_decoder_layers` but returns native NNX classes instead of the
+  Linen wrappers. Only blocks with NNX implementations are listed; others fall
+  back to a clear NotImplemented error.
+  """
+  match config.decoder_block:
+    case DecoderBlockType.DEFAULT:
+      return [DecoderLayerNNX]
+    case DecoderBlockType.LLAMA2:
+      return [llama2.LlamaDecoderLayer]
+    case DecoderBlockType.MISTRAL:
+      return [mistral.MistralDecoderLayer]
+    case DecoderBlockType.MIXTRAL:
+      return [mixtral.MixtralDecoderLayer]
+    case DecoderBlockType.GEMMA:
+      return [gemma.GemmaDecoderLayer]
+    case DecoderBlockType.GEMMA2:
+      return [gemma2.Gemma2DecoderLayer]
+    case DecoderBlockType.GEMMA3:
+      return [gemma3.Gemma3DecoderLayer]
+    case DecoderBlockType.GPT_OSS:
+      return [gpt_oss.GptOssDecoderLayer]
+    case DecoderBlockType.QWEN3:
+      return [qwen3.Qwen3DecoderLayer]
+    case DecoderBlockType.QWEN3_MOE:
+      return [qwen3.Qwen3MoeDecoderLayer]
+    case DecoderBlockType.QWEN3_NEXT:
+      return [qwen3.Qwen3NextDecoderLayer]
+    case DecoderBlockType.SIMPLE:
+      return [simple_layer.SimpleDecoderLayer]
+    case DecoderBlockType.SIMPLE_MLP:
+      return [simple_layer.SimpleMlpDecoderLayer]
+    case DecoderBlockType.LLAMA4:
+      return [llama4.Llama4DecoderLayer]
+    case DecoderBlockType.DEEPSEEK | DecoderBlockType.GPT3:
+      raise NotImplementedError("NNX decoder does not yet implement DEEPSEEK or GPT3 blocks.")
+    case _:
+      raise NotImplementedError(f"NNX decoder does not yet support decoder_block={config.decoder_block}.")
+
+
+class DecoderLayerNNX(nnx.Module):
+  """Minimal NNX decoder layer (no pipeline/scan)."""
+
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      quant: Quant,
+      *,
+      model_mode: str = MODEL_MODE_TRAIN,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.model_mode = model_mode
+
+    cfg = self.config
+
+    self.pre_norm = RMSNorm(
+        num_features=cfg.emb_dim,
+        epsilon=cfg.normalization_layer_epsilon,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        shard_mode=cfg.shard_mode,
+        kernel_axes=("norm",),
+        parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+        rngs=rngs,
+    )
+
+    dummy_inputs_shape = (1, cfg.max_target_length, cfg.emb_dim)
+    self.attention = Attention(
+        config=cfg,
+        num_query_heads=cfg.num_query_heads,
+        num_kv_heads=cfg.num_kv_heads,
+        head_dim=cfg.head_dim,
+        max_target_length=cfg.max_target_length,
+        mesh=mesh,
+        attention_kernel=cfg.attention,
+        inputs_q_shape=dummy_inputs_shape,
+        inputs_kv_shape=dummy_inputs_shape,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        max_prefill_predict_length=cfg.max_prefill_predict_length,
+        dropout_rate=cfg.dropout_rate,
+        float32_qk_product=cfg.float32_qk_product,
+        float32_logits=cfg.float32_logits,
+        quant=self.quant,
+        kv_quant=quantizations.configure_kv_quant(cfg),
+        prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
+        ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
+        compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
+        reshape_q=cfg.reshape_q,
+        model_mode=model_mode,
+        name="self_attention",
+        rngs=rngs,
+    )
+
+    self.mlp = linears.MlpBlock(
+        config=cfg,
+        mesh=mesh,
+        in_features=cfg.emb_dim,
+        intermediate_dim=cfg.mlp_dim,
+        activations=cfg.mlp_activations,
+        intermediate_dropout_rate=cfg.dropout_rate,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        quant=self.quant,
+        model_mode=model_mode,
+        rngs=rngs,
+    )
+
+    self.dropout = linears.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+
+  def __call__(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      *,
+      previous_chunk=None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
+      kv_cache: jax.Array | None = None,
+      attention_metadata: dict[str, Any] | None = None,
+  ):
+    cfg = self.config
+    lnx = self.pre_norm(inputs)
+
+    attention_lnx, kv_cache = self.attention(
+        lnx,
+        lnx,
+        decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        deterministic=deterministic,
+        model_mode=model_mode,
+        previous_chunk=previous_chunk,
+        slot=slot,
+        page_state=page_state,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
+    )
+
+    mlp_lnx = self.mlp(lnx, deterministic=deterministic)
+
+    next_layer_addition = mlp_lnx + attention_lnx
+    next_layer_addition_dropped_out = self.dropout(next_layer_addition, deterministic=deterministic)
+    layer_output = next_layer_addition_dropped_out + inputs
+
+    if cfg.record_internal_nn_metrics:
+      self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
+      self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
+      self.sow(
+          "intermediates",
+          "activation_fraction_zero",
+          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+      )
+
+    if cfg.scan_layers:
+      return (layer_output, None)
+    return layer_output, kv_cache
+
+
+class DecoderNNX(nnx.Module):
+  """NNX decoder (minimal core, no pipeline/scan)."""
+
+  def __init__(self, config: Config, mesh: Mesh, quant: Quant, *, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs):
+    if config.using_pipeline_parallelism:
+      raise NotImplementedError("NNX decoder does not yet support pipeline parallelism in this minimal version.")
+
+    layer_blueprints = get_decoder_layers_nnx(config)
+
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.model_mode = model_mode
+
+    cfg = self.config
+    self.dropout = linears.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+
+    # NNX positional components
+    self.positional_embedding = PositionalEmbedding(embedding_dims=cfg.base_emb_dim)
+
+    self.position_embedder = None
+    if cfg.trainable_position_size > 0:
+      pos_rng = rngs.fork() if hasattr(type(rngs), "fork") else nnx.clone(rngs)
+      self.position_embedder = Embed(
+          num_embeddings=cfg.trainable_position_size,
+          num_features=cfg.emb_dim,
+          config=cfg,
+          mesh=self.mesh,
+          dtype=cfg.dtype,
+          attend_dtype=None,
+          rngs=pos_rng,
+      )
+
+    def _layer_rng():
+      return rngs.fork() if hasattr(type(rngs), "fork") else nnx.clone(rngs)
+
+    # Store child modules in a tuple so they are tracked as pytree children.
+    self.layers = tuple(
+        layer_blueprints[0](config=cfg, mesh=mesh, quant=quant, model_mode=model_mode, rngs=_layer_rng())
+        for _ in range(cfg.num_decoder_layers)
+    )
+
+    self.norm_layer = RMSNorm(
+        num_features=cfg.emb_dim,
+        epsilon=cfg.normalization_layer_epsilon,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        shard_mode=cfg.shard_mode,
+        kernel_axes=("norm",),
+        parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+        rngs=rngs,
+    )
+
+    if not cfg.logits_via_embedding:
+      self.logits_dense = linears.DenseGeneral(
+          in_features_shape=(cfg.emb_dim,),
+          out_features_shape=cfg.vocab_size,
+          weight_dtype=cfg.weight_dtype,
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,
+          kernel_axes=("embed", "vocab"),
+          shard_mode=cfg.shard_mode,
+          matmul_precision=cfg.matmul_precision,
+          parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+          rngs=rngs,
+      )
+    else:
+      self.logits_dense = None
+
+  def get_decoder_layers(self):
+    return [DecoderLayerNNX]
+
+  def lazy_init(self, *args, **kwargs):
+    # Direct call initializes parameters in NNX; no wrapper needed.
+    return self(*args, **kwargs)
+
+  def _apply_embedding(
+      self,
+      shared_embedding: nn.Module | nnx.Module,
+      decoder_input_tokens,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      image_embeddings=None,
+      bidirectional_mask=None,
+      image_masks=None,
+  ):
+    cfg = self.config
+    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    y = self.dropout(y, deterministic=deterministic)
+    y = y.astype(cfg.dtype)
+
+    if cfg.use_untrainable_positional_embedding:
+      y = self.positional_embedding(y, decoder_positions)
+
+    if self.position_embedder is not None:
+      y += self.position_embedder(decoder_positions, model_mode=model_mode)
+    return y
+
+  def apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode):
+    cfg = self.config
+    y = self.norm_layer(y)
+    y = self.dropout(y, deterministic=deterministic)
+
+    if cfg.logits_via_embedding:
+      if isinstance(shared_embedding, nnx.Module):
+        embedding_table = shared_embedding.embedding.value
+      else:
+        embedding_table = shared_embedding.variables["params"]["embedding"]
+      attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
+      logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config, None)
+      if self.config.normalize_embedding_logits:
+        logits = logits / jnp.sqrt(y.shape[-1])
+      if cfg.final_logits_soft_cap:
+        logits = logits / cfg.final_logits_soft_cap
+        logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
+    else:
+      logits = self.logits_dense(y)
+
+    if self.config.cast_logits_to_fp32:
+      logits = logits.astype(jnp.float32)
+    return logits
+
+  def __call__(
+      self,
+      shared_embedding: nn.Module | nnx.Module,
+      decoder_input_tokens,
+      decoder_positions,
+      decoder_segment_ids=None,
+      deterministic=False,
+      model_mode=MODEL_MODE_TRAIN,
+      previous_chunk=None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
+      bidirectional_mask: None | Any = None,
+      image_embeddings: None | jnp.ndarray = None,
+      image_masks: None | jnp.ndarray = None,
+      kv_caches: list[jax.Array] | None = None,
+      attention_metadata=None,
+  ):
+    cfg = self.config
+    assert decoder_input_tokens.ndim == 2
+
+    y = self._apply_embedding(
+        shared_embedding,
+        decoder_input_tokens,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        image_embeddings,
+        bidirectional_mask,
+        image_masks,
+    )
+
+    if kv_caches is None:
+      kv_caches = [None] * cfg.num_decoder_layers
+
+    for lyr, layer in enumerate(self.layers):
+      kv_cache = kv_caches[lyr] if kv_caches is not None else None
+      y_out, kv_cache = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+      )
+
+      # Layers return the next hidden state directly; for scan_layers they already
+      # return (outputs, None), and we unpacked kv_cache above, so no extra indexing.
+      y = y_out
+
+      if kv_caches is not None and kv_cache is not None:
+        kv_caches[lyr] = kv_cache
+
+    hidden_state = y
+
+    if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+      logits = None
+      self.sow("intermediates", "hidden_states", hidden_state)
+    else:
+      logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+
+    return logits, hidden_state, kv_caches
