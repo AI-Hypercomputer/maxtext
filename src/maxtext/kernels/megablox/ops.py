@@ -44,6 +44,7 @@ def gmm(
     weight_gather_axes: List[Tuple[str, int]] | None = None,
     input_buffer_count: tuple[int, int, int] = (2, 2, 2),
     combine_scopes: bool = False,
+    vma_axes: tuple = tuple(),
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -62,9 +63,11 @@ def gmm(
           act_calibration_method="absmax",
       )
 
-  gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
+  _gmm_fwd_vma = functools.partial(_gmm_fwd, vma_axes=vma_axes)
+  _gmm_bwd_vma = functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype, vma_axes=vma_axes)
+  gmm_fwd_bwd = lambda *args: _gmm_fwd_vma(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 5, 6, 9, 10, 11, 12, 13))
-  gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
+  gmm_fwd_bwd.defvjp(_gmm_fwd_vma, _gmm_bwd_vma)
   return gmm_fwd_bwd(
       lhs,
       rhs,
@@ -98,6 +101,7 @@ def _gmm_fwd(
     quantization_rule: qwix.QtRule | None = None,
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
+    vma_axes: tuple = tuple(),
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -157,6 +161,7 @@ def _gmm_fwd(
         existing_out,
         transpose_rhs=transpose_rhs,
         interpret=interpret,
+        vma_axes=vma_axes,
     )
   return out, (lhs, rhs, group_sizes, group_offset)
 
@@ -180,6 +185,7 @@ def _gmm_bwd(
         jnp.ndarray | None,
     ],
     grad: jnp.ndarray,
+    vma_axes: tuple = tuple(),
 ) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray]:
   """Backward function for throughput GMM VJP."""
   del preferred_element_type
@@ -261,6 +267,7 @@ def _gmm_bwd(
         group_offset,
         transpose_rhs=not transpose_rhs,
         interpret=interpret,
+        vma_axes=vma_axes,
     )
     drhs = backend.tgmm(
         lhs.swapaxes(0, 1),
@@ -271,6 +278,7 @@ def _gmm_bwd(
         group_offset,
         num_actual_groups,
         interpret=interpret,
+        vma_axes=vma_axes,
     )
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to
