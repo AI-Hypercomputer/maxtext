@@ -198,6 +198,7 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
+        grain_ram_budget_mb=512,
         grain_train_files=os.path.join(
             temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"
         ),

@@ -201,6 +201,8 @@ def pretrain_preprocessing_pipeline(
   if config.grain_file_type == "arrayrecord":
     dataset = dataset.map(_input_pipeline_utils.ParseFeatures(data_columns, tokenize))
     dataset = dataset.map(_input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
+  else:
+    dataset = dataset.map(_input_pipeline_utils.KeepFeatures(feature_names=data_columns))
 
   assert len(data_columns) == 1
   text_column = data_columns[0]
@@ -237,11 +239,26 @@ def pretrain_preprocessing_pipeline(
     # But when using Grain, we want to keep the batch_size consistent with that in the checkpoint.
     # We revert the batch_size expansion here, but load multiple batches per step in multihost_dataloading.py.
     batch_size = batch_size // config.expansion_factor_real_data
+
   if config.packing:
     length_struct = {col: config.max_target_length for col in data_columns}
-    dataset = grain.experimental.FirstFitPackIterDataset(
-        dataset, length_struct=length_struct, num_packing_bins=batch_size
-    )
+    if config.grain_packing_type == "first_fit":
+      dataset = grain.experimental.FirstFitPackIterDataset(
+          dataset, length_struct=length_struct, num_packing_bins=batch_size
+      )
+    elif config.grain_packing_type == "concat_then_split":
+      if config.add_bos and hasattr(tokenizer_model, "bos_id"):
+        dataset = grain.experimental.ConcatThenSplitIterDataset(
+            dataset,
+            length_struct=length_struct,
+            bos_handling=grain.experimental.BOSHandling.REPLACE_FIRST_TOKEN_WITH_BOS,
+            bos_token_id=tokenizer_model.bos_id,
+        )
+      else:
+        dataset = grain.experimental.ConcatThenSplitIterDataset(dataset, length_struct=length_struct)
+    else:
+      raise ValueError(f"Unknown packing type: {config.packing}")
+
     rekey_dict = {
         "targets_segmentation": "targets_segment_ids",
         "inputs_segmentation": "inputs_segment_ids",
