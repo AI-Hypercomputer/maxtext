@@ -36,7 +36,43 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  doc-only-check:
+    runs-on: ubuntu-latest
+    outputs:
+      should-skip-tests: ${{ steps.check.outputs.should-skip-tests }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check if only markdown files changed
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Not a pull request, running all tests"
+            echo "should-skip-tests=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Get changed files
+          git fetch origin ${{ github.base_ref }}
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          
+          # TEMPORARY: Force skip for testing - treat .yml as .md
+          # Check if all changed files are markdown OR yml (for testing only)
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No files changed"
+            echo "should-skip-tests=false" >> $GITHUB_OUTPUT
+          elif echo "$CHANGED_FILES" | grep -v -E '\.(md|yml|yaml)$' > /dev/null; then
+            echo "Non-markdown/yml files changed, running tests"
+            echo "should-skip-tests=false" >> $GITHUB_OUTPUT
+          else
+            echo "All changes are in markdown or yml files, skipping tests (TEMPORARY TEST)"
+            echo "should-skip-tests=true" >> $GITHUB_OUTPUT
+          fi
+
   build_and_upload_maxtext_package:
+    needs: doc-only-check
+    if: needs.doc-only-check.outputs.should-skip-tests != 'true'
     name: Build and upload maxtext package
     uses: ./.github/workflows/build_package.yml
     with:
