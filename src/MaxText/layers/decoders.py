@@ -555,27 +555,13 @@ class Decoder(nnx.Module):
         # Define parameter movement with mesh-based sharding
         def move_to_device(variables):
           """Move parameters to device with proper sharding."""
-          print("move to devices")
-          breakpoint()
           def map_fn(path, value):
             max_logging.log(f"models.py: Moving parameter {path} to device")
             return jax.device_put(value, max_utils.device_space())
 
           return jax.tree_util.tree_map_with_path(map_fn, variables)
 
-        # Transform layer class before remat
-        block_layer = nn.map_variables(block_layer, ["params"], move_to_device, mutable=True)
-     
-      class RemattedBlockLayer(block_layer):
-        @functools.partial(
-            jax.checkpoint,
-            prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
-            policy=policy,
-            # Adjust static_argnums: original (4, 5) becomes (5, 6) to account for 'self' at index 0
-            static_argnums=(5,), 
-        )
-        def __call__(self, *args, **kwargs):
-            return super().__call__(*args, **kwargs)
+      # rematted_step = jax.checkpoint(block_layer, prevent_cse=True)
 
       # Apply remat policy to layer
       # layer = nn.remat(
@@ -584,7 +570,7 @@ class Decoder(nnx.Module):
       #     policy=policy,
       #     static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
       # )
-      RemattedBlockLayers.append(RemattedBlockLayer)
+      RemattedBlockLayers.append(block_layer)
     return RemattedBlockLayers
 
   def get_norm_layer(self, num_features: int):
@@ -646,13 +632,9 @@ class Decoder(nnx.Module):
         run_kwargs.pop('model_mode', None)
 
         def forward_single_step(carry, params_slice):
-            """
-            Pure function representing one layer step.
-            We will checkpoint (remat) this function.
-            """
-            # 1. Rehydrate
             layer_i = nnx.merge(graph_def, params_slice)
             def print_sharding(path, leaf):
+              breakpoint()
               if isinstance(leaf, jax.Array):
                 keystr = jax.tree_util.keystr(path)
                 if hasattr(leaf, "sharding"):
@@ -663,26 +645,21 @@ class Decoder(nnx.Module):
               return leaf
             jax.tree_util.tree_map_with_path(print_sharding, nnx.state(layer_i))
             
-
-            # 2. Run Layer
             layer_out = layer_i(carry, *args, **run_kwargs)
 
-            # 3. Handle Tuple Returns
             if isinstance(layer_out, tuple):
                 new_carry = layer_out[0]
             else:
                 new_carry = layer_out
 
-            # 4. Capture Updates
             _, new_params_slice = nnx.split(layer_i)
 
-            # Return (next_carry, scan_output)
             return new_carry, (new_params_slice, layer_out)
 
-        # rematted_step = jax.checkpoint(forward_single_step, prevent_cse=True)
-
+        rematted_step = jax.checkpoint(forward_single_step, prevent_cse=True)
+        breakpoint()
         final_carry, (new_params_stack, stacked_layer_outs) = jax.lax.scan(
-            forward_single_step,
+            rematted_step,
             init=x_in,
             xs=params_stack,
             length=length
