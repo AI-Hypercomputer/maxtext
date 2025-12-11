@@ -1,7 +1,8 @@
 *__pycache__*
 tmp/
 logs/
-
+.venvs
+venv*
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

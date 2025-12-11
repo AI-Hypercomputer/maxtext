@@ -33,7 +33,6 @@ from jaxtyping import Array, Integer, Bool
 
 from MaxText.common_types import Config
 
-
 # Aliases using <Dims><Type><Rank>d convention
 # We use string names for dimensions as they are symbolic within the type hints.
 PagesInt1d = Integer[Array, "num_pages"]
@@ -52,32 +51,6 @@ class PageState:
   the mapping of pages to page groups (requests), and the current position within
   each sequence's pages. State is managed globally, providing a single view
   across all potential layers using this manager.
-
-  Attributes:
-    page_status: A `jnp.ndarray` of shape `[num_pages]`. Each element
-      indicates whether the corresponding page in the global pool is free (0)
-      or allocated (1).
-    page_map: A `jnp.ndarray` of shape `[max_page_groups, max_pages_per_group]`.
-      This array maps each page group to the indices (within the global pool)
-      of its allocated pages. Entries beyond `num_pages_used` for a group are invalid.
-    num_pages_used: A `jnp.ndarray` of shape `[max_page_groups]`. This array
-      tracks the number of pages currently allocated to each page group. This
-      determines the valid entries in `page_map` for each group.
-    sequence_lengths: A `jnp.ndarray` of shape `[max_page_groups]`. This array
-      stores the current true length of each sequence (in tokens) associated
-      with a page group.
-    active_page: A `jnp.ndarray` of shape `[max_page_groups]`. This array
-      stores the global index of the *currently active* page (the page where the
-      next token will be written) for each page group. Only valid if the
-      corresponding `has_active_page` is True.
-    has_active_page: A `jnp.ndarray` of shape `[max_page_groups]`. Boolean mask
-      indicating whether a page group currently represents an active sequence
-      and thus whether its `active_page` and `active_page_position` entries
-      are meaningful.
-    active_page_position: A `jnp.ndarray` of shape `[max_page_groups]`. This array
-      stores the index (offset, 0 to tokens_per_page-1) of the next available
-      token *within the `active_page`* for each page group. Only valid if
-      `has_active_page` is True.
   """
 
   page_status: PagesInt1d
@@ -300,7 +273,8 @@ def _reserve_pages_for_group(
         active_page_position=released_state.active_page_position.at[page_group_id].set(next_write_position),
     )
 
-  # Conditionally perform allocation or return the released state
+    # Conditionally perform allocation or return the released state
+
   final_state = jax.lax.cond(
       has_enough_resources,
       allocate_and_update_state,
@@ -400,7 +374,8 @@ def _update_decode_pages_global(
         active_page=new_active_page,
     )
 
-  # Initialize loop state with pre-calculated lengths and positions
+    # Initialize loop state with pre-calculated lengths and positions
+
   initial_loop_state = page_state.replace(
       sequence_lengths=new_sequence_lengths,
       active_page_position=new_active_page_position,
@@ -481,7 +456,7 @@ class PageManager:
           f"`pagedattn_max_pages_per_group` ({self.max_pages_per_group}) is insufficient for `max_target_length` "
           f"({self.max_target_length}). Needs {min_required}."
       )
-    # Check > 1 due to potential page 0 workaround
+      # Check > 1 due to potential page 0 workaround
     if self.num_pages <= 1:
       raise ValueError("`pagedattn_num_pages` must be greater than 1.")
     if self.tokens_per_page <= 0:

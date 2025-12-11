@@ -133,7 +133,7 @@ def generate_test_case(python_file, entry_module, python_code, jax_code, jax_fil
       f"{python_code}"
   )
   jax_code = (
-      f"from {".".join(jax_file.split(os.path.sep)[1:]).removesuffix('.py')}" f" import {entry_module}\n\n" f"{jax_code}"
+      f"from {'.'.join(jax_file.split(os.path.sep)[1:]).removesuffix('.py')}" f" import {entry_module}\n\n" f"{jax_code}"
   )
   prompt = prompt.replace("<module.path.to.pytorch_code>", python_code)
   prompt = prompt.replace("<module.path.to.jax_code>", jax_code)
