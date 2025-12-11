@@ -820,6 +820,9 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
+    vma_axes = tuple(axis for axis in self.config.mesh_axes if self.mesh.shape[axis] > 1)
+    use_vma = not self.config.use_tokamax_gmm
+
     def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes):
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
@@ -882,6 +885,7 @@ class RoutedMoE(nnx.Module):
               use_qwix_quantization=self.config.use_qwix_quantization,
               use_tokamax_backend=self.config.use_tokamax_gmm,
               weight_gather_axes=weight_gather_axes,
+              vma_axes=vma_axes,
           )
         else:
           rhs_inputs = kernel
@@ -1006,7 +1010,7 @@ class RoutedMoE(nnx.Module):
             None,
         ),
         out_specs=(self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))),
-        check_vma=False,
+        check_vma=use_vma,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
