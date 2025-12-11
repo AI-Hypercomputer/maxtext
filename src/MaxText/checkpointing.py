@@ -56,7 +56,7 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
       self,
       directory: epath.Path,
       # `item` is for backwards compatibility with older Orbax API, see
-      # https://orbax.readthedocs.io/en/latest/api_refactor.html.
+      # https://orbax.readthedocs.io/en/latest/guides/checkpoint/api_refactor.html.
       item: Optional[Any] = None,
       args: Any = None,
   ):
