@@ -1362,7 +1362,7 @@ class GRPO(BaseModel):
   num_iterations: int = Field(1, description="Number of iterations per batch (μ in GRPO paper).")
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
   grpo_epsilon: float = Field(0.2, description="Epsilon value for clipping in the GRPO loss.")
-  loss_algo: str = Field("grpo", description="Loss algorithm, e.g., 'grpo' or 'gspo-token'.")
+  loss_algo: Literal["grpo", "gspo-token"] = Field("grpo", description="Loss algorithm, i.e., 'grpo' or 'gspo-token'.")
 
 
 class RLDataset(BaseModel):
@@ -1599,7 +1599,6 @@ class MaxTextConfig(
     # Reinforcement Learning
     RLHardware,
     VLLM,
-    GRPO,
     RLDataset,
     RLEvaluation,
     Reward,
@@ -1649,6 +1648,7 @@ class MaxTextConfig(
   """
 
   debug: Debug = Field(default_factory=Debug, description="Configuration for debugging options.")
+  grpo: GRPO = Field(default_factory=GRPO, description="Configuration for Group Relative Policy Optimization (GRPO).")
   model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
   @model_validator(mode="before")
@@ -2088,9 +2088,9 @@ class MaxTextConfig(
       self.tokenizer_type = TokenizerType.TIKTOKEN
     if self.eval_interval > 0 >= self.eval_steps and self.generate_padding_batch_eval:
       raise ValueError("`eval_steps` must be > 0 when `generate_padding_batch_eval` is True.")
-    if self.dataset_type == "hf" and self.num_epoch != 1:
+    if self.dataset_type == "hf" and self.num_epoch != 1 and not self.grpo.loss_algo == "grpo":
       raise ValueError("HuggingFace pipeline only supports num_epoch=1.")
-    if self.loss_algo == "grpo":
+    if self.grpo.loss_algo == "grpo":
       self.use_grpo = True
     else:
       self.use_grpo = False
