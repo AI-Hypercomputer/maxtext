@@ -27,23 +27,18 @@ RUN pip install keyring keyrings.google-artifactregistry-auth
 
 RUN pip install numba==0.61.2
 
-COPY tunix /tunix
-RUN pip uninstall -y google-tunix
-RUN pip install -e /tunix --no-cache-dir
+RUN pip install vllm==0.12.0
 
+RUN pip uninstall -y tpu-inference &&  git clone https://github.com/abhinavclemson/tpu-inference.git && cd tpu-inference && pip install -e .
 
-COPY vllm /vllm
-RUN VLLM_TARGET_DEVICE="tpu" pip install -e /vllm --no-cache-dir
-
-
-COPY tpu-inference /tpu-inference
-RUN pip install -e /tpu-inference --no-cache-dir
+RUN pip uninstall -y tunix && git clone -b moe https://github.com/abhinavclemson/tunix.git && cd tunix && pip install -e . && cd ..
 
 RUN pip install --no-deps qwix==0.1.4
+
+RUN pip install google-metrax numpy==2.2
 
 RUN if [ "$MODE" = "post-training-experimental" ]; then \
     echo "MODE=post-training-experimental: Re-installing JAX/libtpu"; \
     pip uninstall -y jax jaxlib libtpu && \
-    pip install --pre -U jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ && \
-    pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html; \
+    pip install --pre jax==0.8.0.dev20251013 jaxlib==0.8.0.dev20251013 libtpu==0.0.25.dev20251012+nightly  -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ -f https://storage.googleapis.com/jax-releases/libtpu_releases.html; \
     fi

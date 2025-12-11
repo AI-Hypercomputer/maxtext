@@ -372,9 +372,9 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           eval_every_n_steps=trainer_config.eval_interval,
           max_steps=max_train_steps,
           # Micro batching
-          mini_batch_size=trainer_config.batch_size,
-          train_micro_batch_size=micro_batch_size,
-          rollout_micro_batch_size=micro_batch_size,
+          mini_batch_size=int(trainer_config.batch_size),
+          train_micro_batch_size=int(micro_batch_size),
+          rollout_micro_batch_size=int(micro_batch_size),
           # Metrics logging
           metrics_logging_options=metrics_logging_options,
           # Profiling

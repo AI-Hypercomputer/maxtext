@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """Utils for Tunix integration."""
-
+import inspect
 import re
 
 import MaxText.integration.tunix.weight_mapping as weight_mapping  # pylint: disable=consider-using-from-import
@@ -127,7 +127,18 @@ class VllmWeightMapping:
   def to_hf_mapping(self):
     """Returns a mapping from MaxText parameter names to HuggingFace parameter names."""
     if self.use_standalone_mappings:
-      return STANDALONE_VLLM_WEIGHT_MAPPING[self.model_name].to_hf_mapping()
+      mapping_fn = STANDALONE_VLLM_WEIGHT_MAPPING[self.model_name].to_hf_mapping
+      total_num_layers = self.config["num_hidden_layers"]
+      print(f"total_num_layers: {total_num_layers} for model: {self.model_name}")
+      sig = inspect.signature(mapping_fn)
+      if len(sig.parameters) >= 1 and "total_num_layers" in sig.parameters:
+        mapping = mapping_fn(
+            total_num_layers=total_num_layers,
+        )
+        return mapping
+
+      return mapping_fn()
+
 
     config = self.config
     mapping = self.convert_hf_map_to_sharding_map(
