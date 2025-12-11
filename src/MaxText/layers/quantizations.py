@@ -65,8 +65,8 @@ def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
 
   (lhs_ca, rhs_ca), _ = dimension_numbers
   ret = tiled_dot_general.Cfg(
-      lhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
-      rhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
+    lhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
+    rhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
   )
 
   for lhs_idx, rhs_idx in zip(lhs_ca, rhs_ca):
@@ -77,12 +77,12 @@ def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
 
 
 def _rhs_axis_metadata_wrapper(
-    x: jnp.ndarray,
-    tile_map,
-    no_sharding_axis: Sequence[int],
-    mesh_axes: Tuple[str, ...],
-    is_tiled: bool,
-    replicate_scale: bool = False,
+  x: jnp.ndarray,
+  tile_map,
+  no_sharding_axis: Sequence[int],
+  mesh_axes: Tuple[str, ...],
+  is_tiled: bool,
+  replicate_scale: bool = False,
 ):
   """right-hand-side axis metadata wrapper"""
   if replicate_scale:
@@ -139,12 +139,12 @@ class AqtQuantization:
     return quant_dg, is_tiled, tiling_fn
 
   def _get_rhs_axis_metadata_wrapper(
-      self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
+    self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
   ):
     if self.quant_mode == aqt_flax.QuantMode.CONVERT:
       return None
     return functools.partial(
-        _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale
+      _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale
     )
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
@@ -154,19 +154,19 @@ class AqtQuantization:
     else:
       quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
-        mesh_axes, is_tiled, replicate_scale=self.replicate_scale
+      mesh_axes, is_tiled, replicate_scale=self.replicate_scale
     )
     # module_path = "/".join(nn.module._context.module_stack[-1].path)
     # print(f"quant_dg: {quant_dg}, is_tiled: {is_tiled}, module_path: {module_path}")
     aqt_dg_cls = functools.partial(
-        aqt_flax.AqtDotGeneral,
-        quant_dg,
-        rhs_quant_mode=self.quant_mode,
-        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-        rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
-        rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
-        use_legacy_freezer=False,
-        tiling_fn=tiling_fn,
+      aqt_flax.AqtDotGeneral,
+      quant_dg,
+      rhs_quant_mode=self.quant_mode,
+      lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+      rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+      rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+      use_legacy_freezer=False,
+      tiling_fn=tiling_fn,
     )
     return aqt_dg_cls
 
@@ -178,18 +178,18 @@ class AqtQuantization:
       quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
 
     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
-        mesh_axes, is_tiled, replicate_scale=self.replicate_scale
+      mesh_axes, is_tiled, replicate_scale=self.replicate_scale
     )
     aqt_einsum = functools.partial(
-        aqt_flax.AqtEinsum(
-            cfg=quant_dg,
-            rhs_quant_mode=self.quant_mode,
-            lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-            rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
-            rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
-            use_legacy_freezer=False,
-            tiling_fn=tiling_fn,
-        )
+      aqt_flax.AqtEinsum(
+        cfg=quant_dg,
+        rhs_quant_mode=self.quant_mode,
+        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+        rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+        use_legacy_freezer=False,
+        tiling_fn=tiling_fn,
+      )
     )
     return aqt_einsum
 
@@ -241,16 +241,16 @@ class Fp8Einsum(nn.Module):
     """init with input_amax_history, kernel_amax_history, output_grad_amax_history,
     input_scale, kernel_scale, output_grad_scale"""
     scale_args = (
-        flax_initializers.ones_init(),
-        jax.random.PRNGKey(0),
-        (1,),
-        jnp.float32,
+      flax_initializers.ones_init(),
+      jax.random.PRNGKey(0),
+      (1,),
+      jnp.float32,
     )
     amax_history_args = (
-        flax_initializers.zeros_init(),
-        jax.random.PRNGKey(0),
-        (self.amax_history_length,),
-        jnp.float32,
+      flax_initializers.zeros_init(),
+      jax.random.PRNGKey(0),
+      (self.amax_history_length,),
+      jnp.float32,
     )
 
     OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
@@ -277,11 +277,11 @@ class Fp8Einsum(nn.Module):
     y_qdq = jnp.einsum(eqn, x_qdq, k_qdq, _dot_general=fp8_ops.dot_general_with_precision)
 
     y = fp8_ops.out_qdq(
-        comp_dtype,
-        self.e5m2_dtype,
-        y_qdq,
-        self.output_grad_scale.value,
-        self.output_grad_amax_history.value,
+      comp_dtype,
+      self.e5m2_dtype,
+      y_qdq,
+      self.output_grad_scale.value,
+      self.output_grad_amax_history.value,
     )
     return y
 
@@ -306,15 +306,15 @@ def _get_int8_quant_config(config):
     drhs_accumulator_dtype = jnp.int32
     drhs_local_aqt = aqt_config.LocalAqt(contraction_axis_shard_count=config.quantization_local_shard_count)
   return aqt_config.config_v3(
-      fwd_bits=8,
-      dlhs_bits=8,
-      drhs_bits=drhs_bits,
-      rng_type="jax.uniform",
-      dlhs_local_aqt=None,
-      drhs_local_aqt=drhs_local_aqt,
-      fwd_accumulator_dtype=jnp.int32,
-      dlhs_accumulator_dtype=jnp.int32,
-      drhs_accumulator_dtype=drhs_accumulator_dtype,
+    fwd_bits=8,
+    dlhs_bits=8,
+    drhs_bits=drhs_bits,
+    rng_type="jax.uniform",
+    dlhs_local_aqt=None,
+    drhs_local_aqt=drhs_local_aqt,
+    fwd_accumulator_dtype=jnp.int32,
+    dlhs_accumulator_dtype=jnp.int32,
+    drhs_accumulator_dtype=drhs_accumulator_dtype,
   )
 
 
@@ -329,8 +329,8 @@ class ConstantBoundConfig:
 
 
 def _build_const_scale_config(
-    aqt_dg: aqt_config.DotGeneral,
-    cst_bound_config: ConstantBoundConfig,
+  aqt_dg: aqt_config.DotGeneral,
+  cst_bound_config: ConstantBoundConfig,
 ) -> aqt_config.DotGeneral:
   """Build a constant scale config for AQT dot general.
 
@@ -343,30 +343,30 @@ def _build_const_scale_config(
   """
   if cst_bound_config.fwd_lhs_bound is not None:
     aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(
-        calibration.ConstantCalibration, bound=cst_bound_config.fwd_lhs_bound
+      calibration.ConstantCalibration, bound=cst_bound_config.fwd_lhs_bound
     )
   if cst_bound_config.fwd_rhs_bound is not None:
     aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(
-        calibration.ConstantCalibration, bound=cst_bound_config.fwd_rhs_bound
+      calibration.ConstantCalibration, bound=cst_bound_config.fwd_rhs_bound
     )
   if cst_bound_config.dlhs_lhs_bound:
     aqt_dg.dlhs.dg_quantizer.lhs.calibration = functools.partial(
-        calibration.ConstantCalibration, bound=cst_bound_config.dlhs_lhs_bound
+      calibration.ConstantCalibration, bound=cst_bound_config.dlhs_lhs_bound
     )
 
   if cst_bound_config.dlhs_rhs_bound is not None:
     aqt_dg.dlhs.dg_quantizer.rhs.calibration = functools.partial(
-        calibration.ConstantCalibration, bound=cst_bound_config.dlhs_rhs_bound
+      calibration.ConstantCalibration, bound=cst_bound_config.dlhs_rhs_bound
     )
 
   if cst_bound_config.drhs_lhs_bound is not None:
     aqt_dg.drhs.dg_quantizer.lhs.calibration = functools.partial(
-        calibration.ConstantCalibration, bound=cst_bound_config.drhs_lhs_bound
+      calibration.ConstantCalibration, bound=cst_bound_config.drhs_lhs_bound
     )
 
   if cst_bound_config.drhs_rhs_bound is not None:
     aqt_dg.drhs.dg_quantizer.rhs.calibration = functools.partial(
-        calibration.ConstantCalibration, bound=cst_bound_config.drhs_rhs_bound
+      calibration.ConstantCalibration, bound=cst_bound_config.drhs_rhs_bound
     )
 
   return aqt_dg
@@ -383,8 +383,8 @@ class PerTensorScales:
 
 
 def _build_per_tensor_config(
-    aqt_dg: aqt_config.DotGeneral,
-    per_tensor_scales: PerTensorScales,
+  aqt_dg: aqt_config.DotGeneral,
+  per_tensor_scales: PerTensorScales,
 ) -> aqt_config.DotGeneral:
   """Build a per tensor config for AQT dot general.
 
@@ -414,46 +414,46 @@ def _build_per_tensor_config(
 def _get_aqt_fp8_default_config(config):
   """Get aqt for 8-bit floating point quantization configuration."""
   aqt_dg = aqt_config.config_v4(
-      fwd_bits="e4m3",
-      dlhs_bits="e5m2",
-      drhs_bits="e5m2",
-      use_dummy_static_bound=False,
-      fwd_accumulator_dtype=jnp.bfloat16,
-      dlhs_accumulator_dtype=jnp.bfloat16,
-      drhs_accumulator_dtype=jnp.bfloat16,
-      dlhs_use_fwd_quant=False,
-      drhs_use_fwd_quant=False,
+    fwd_bits="e4m3",
+    dlhs_bits="e5m2",
+    drhs_bits="e5m2",
+    use_dummy_static_bound=False,
+    fwd_accumulator_dtype=jnp.bfloat16,
+    dlhs_accumulator_dtype=jnp.bfloat16,
+    drhs_accumulator_dtype=jnp.bfloat16,
+    dlhs_use_fwd_quant=False,
+    drhs_use_fwd_quant=False,
   )
   constant_bound_config = None
 
   if len(config.constant_bound_config) == 6:
     fwd_lhs_bound, fwd_rhs_bound, dlhs_lhs_bound, dlhs_rhs_bound, drhs_lhs_bound, drhs_rhs_bound = (
-        config.constant_bound_config
+      config.constant_bound_config
     )
     constant_bound_config = ConstantBoundConfig(
-        fwd_lhs_bound=fwd_lhs_bound,
-        fwd_rhs_bound=fwd_rhs_bound,
-        dlhs_lhs_bound=dlhs_lhs_bound,
-        dlhs_rhs_bound=dlhs_rhs_bound,
-        drhs_lhs_bound=drhs_lhs_bound,
-        drhs_rhs_bound=drhs_rhs_bound,
+      fwd_lhs_bound=fwd_lhs_bound,
+      fwd_rhs_bound=fwd_rhs_bound,
+      dlhs_lhs_bound=dlhs_lhs_bound,
+      dlhs_rhs_bound=dlhs_rhs_bound,
+      drhs_lhs_bound=drhs_lhs_bound,
+      drhs_rhs_bound=drhs_rhs_bound,
     )
     aqt_dg = _build_const_scale_config(aqt_dg, constant_bound_config)
 
   aqt_config.set_stochastic_rounding(
-      aqt_dg,
-      vjp_lhs_stochastic_rounding=False,
-      vjp_rhs_stochastic_rounding=False,
-      implementation="jax.uniform",
+    aqt_dg,
+    vjp_lhs_stochastic_rounding=False,
+    vjp_rhs_stochastic_rounding=False,
+    implementation="jax.uniform",
   )
 
   per_tensor_scales = PerTensorScales(
-      fwd_lhs=True,
-      fwd_rhs=True,
-      dlhs_lhs=True,
-      dlhs_rhs=True,
-      drhs_lhs=True,
-      drhs_rhs=True,
+    fwd_lhs=True,
+    fwd_rhs=True,
+    dlhs_lhs=True,
+    dlhs_rhs=True,
+    drhs_lhs=True,
+    drhs_rhs=True,
   )
   return _build_per_tensor_config(aqt_dg, per_tensor_scales)
 
@@ -568,7 +568,7 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
 def match_aqt_and_unquantized_param(aqt_params, params):
   """match aqt and unquantized params"""
   aqt_param_flat, aqt_tree_def = jax.tree_util.tree_flatten_with_path(
-      aqt_params, is_leaf=lambda x: isinstance(x, aqt_tensor.QTensor)
+    aqt_params, is_leaf=lambda x: isinstance(x, aqt_tensor.QTensor)
   )
   param_tree_flat, _ = jax.tree_util.tree_flatten_with_path(params)
   aqt_paths = []
@@ -634,7 +634,6 @@ class NvidaFp8Provider(qwix.QtProvider):
 
 
 class NANOOFp8Provider(qwix.QtProvider):
-
   def dot_general(self, *args, **kwargs):
     # Here we only check if the rule is None or not.
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
@@ -647,50 +646,50 @@ def get_quantization_rule(config: Config):
   match config.quantization:
     case "int8":
       return qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.int8,
-          act_qtype=jnp.int8,
-          bwd_qtype=jnp.int8,
-          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
-          op_names=("dot_general",),
+        module_path="decoder/.*layers.*",
+        weight_qtype=jnp.int8,
+        act_qtype=jnp.int8,
+        bwd_qtype=jnp.int8,
+        bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+        op_names=("dot_general",),
       )
     case "fp8":
       return qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.float8_e4m3fn,
-          act_qtype=jnp.float8_e4m3fn,
-          bwd_qtype=jnp.float8_e4m3fn,
-          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
-          op_names=("dot_general",),
+        module_path="decoder/.*layers.*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e4m3fn,
+        bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+        op_names=("dot_general",),
       )
     case "fp8_full":
       return qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.float8_e4m3fn,
-          act_qtype=jnp.float8_e4m3fn,
-          bwd_qtype=jnp.float8_e5m2,
-          weight_calibration_method=config.weight_quantization_calibration_method,
-          act_calibration_method=config.act_quantization_calibration_method,
-          bwd_calibration_method=config.bwd_quantization_calibration_method,
-          op_names=("dot_general", "gmm", "ragged_dot"),
+        module_path="decoder/.*layers.*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e5m2,
+        weight_calibration_method=config.weight_quantization_calibration_method,
+        act_calibration_method=config.act_quantization_calibration_method,
+        bwd_calibration_method=config.bwd_quantization_calibration_method,
+        op_names=("dot_general", "gmm", "ragged_dot"),
       )
     case "fp8_gpu":
       return qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.float8_e4m3fn,
-          act_qtype=jnp.float8_e4m3fn,
-          bwd_qtype=jnp.float8_e4m3fn,
-          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
-          op_names=("dot_general",),
+        module_path="decoder/.*layers.*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e4m3fn,
+        bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+        op_names=("dot_general",),
       )
     case "fp8_nanoo":
       return qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.float8_e4m3fn,
-          act_qtype=jnp.float8_e4m3fn,
-          bwd_qtype=jnp.float8_e4m3fn,
-          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
-          op_names=("dot_general",),
+        module_path="decoder/.*layers.*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e4m3fn,
+        bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+        op_names=("dot_general",),
       )
     case "":
       return None
@@ -748,10 +747,10 @@ class TransformerEngineQuantization(Quantization):
     from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     RECIPES = {
-        "te_fp8_delayedscaling": recipe.DelayedScaling,
-        "te_fp8_currentscaling": recipe.Float8CurrentScaling,
-        "te_mxfp8": recipe.MXFP8BlockScaling,
-        "te_nvfp4": recipe.NVFP4BlockScaling,  # pytype: disable=module-attr
+      "te_fp8_delayedscaling": recipe.DelayedScaling,
+      "te_fp8_currentscaling": recipe.Float8CurrentScaling,
+      "te_mxfp8": recipe.MXFP8BlockScaling,
+      "te_nvfp4": recipe.NVFP4BlockScaling,  # pytype: disable=module-attr
     }
     if recipe_name not in RECIPES:
       raise ValueError(f"Invalid TransformerEngine recipe: {recipe_name}")
@@ -807,7 +806,7 @@ class TransformerEngineQuantization(Quantization):
       def generate_quantizer_set(self, postfix: str = ""):
         OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
         return super().generate_quantizer_set(  # pytype: disable=wrong-keyword-args
-            postfix=postfix, variable_collection=OVERWRITE_WITH_GRADIENT, fp8_recipe=fp8_recipe
+          postfix=postfix, variable_collection=OVERWRITE_WITH_GRADIENT, fp8_recipe=fp8_recipe
         )
 
       @nn.compact
@@ -828,10 +827,10 @@ class TransformerEngineQuantization(Quantization):
 
       quantizer_set = generate_quantizer_set()
       return transformer_engine.jax.dense.dense(
-          x,
-          kernel,
-          contracting_dims=contracting_dims,
-          quantizer_set=quantizer_set,
+        x,
+        kernel,
+        contracting_dims=contracting_dims,
+        quantizer_set=quantizer_set,
       )
 
     return self._wrap(te_dot_general, "dot_general")

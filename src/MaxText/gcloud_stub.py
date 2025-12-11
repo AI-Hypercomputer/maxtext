@@ -28,6 +28,7 @@ integrations while still allowing local unit tests to import modules. This modul
 
 All stubs raise RuntimeError only when actually invoked, not at import time, so test collection proceeds.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -61,7 +62,7 @@ def _cloud_diag_stubs():
         try:
           yield
         except Exception as exc:  # pylint: disable=broad-exception-caught
-          print("Warning: using stubs for cloud_diagnostics diagnose() - " f"caught: {exc}")
+          print(f"Warning: using stubs for cloud_diagnostics diagnose() - caught: {exc}")
 
       return _graceful_diagnose()
 
@@ -85,10 +86,10 @@ def _cloud_diag_stubs():
       self.debug_config = debug_config
 
   return (
-      _StubDiag(),
-      SimpleNamespace(DebugConfig=_StubDebugConfig, StackTraceConfig=_StubStackTraceConfig),
-      SimpleNamespace(DiagnosticConfig=_StubDiagnosticConfig),
-      SimpleNamespace(StackTraceConfig=_StubStackTraceConfig),
+    _StubDiag(),
+    SimpleNamespace(DebugConfig=_StubDebugConfig, StackTraceConfig=_StubStackTraceConfig),
+    SimpleNamespace(DiagnosticConfig=_StubDiagnosticConfig),
+    SimpleNamespace(StackTraceConfig=_StubStackTraceConfig),
   )
 
 
@@ -101,9 +102,9 @@ def cloud_diagnostics():
   try:
     from cloud_tpu_diagnostics import diagnostic  # type: ignore  # pylint: disable=import-outside-toplevel
     from cloud_tpu_diagnostics.configuration import (  # type: ignore  # pylint: disable=import-outside-toplevel
-        debug_configuration,
-        diagnostic_configuration,
-        stack_trace_configuration,
+      debug_configuration,
+      diagnostic_configuration,
+      stack_trace_configuration,
     )
 
     return diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration
@@ -130,15 +131,15 @@ def _jetstream_stubs():
     """Container for result token arrays used by JetStream."""
 
     def __init__(
-        self,
-        *args,
-        data=None,
-        tokens_idx=None,
-        valid_idx=None,
-        length_idx=None,
-        log_prob=None,
-        samples_per_slot: int | None = None,
-        **kwargs,
+      self,
+      *args,
+      data=None,
+      tokens_idx=None,
+      valid_idx=None,
+      length_idx=None,
+      log_prob=None,
+      samples_per_slot: int | None = None,
+      **kwargs,
     ):
       del args, kwargs  # unused
       self.data = data
@@ -171,11 +172,11 @@ def _jetstream_stubs():
 def jetstream():
   """Return JetStream modules or stubs based on availability and decoupling."""
   needed = [
-      "jetstream.core.config_lib",
-      "jetstream.engine.engine_api",
-      "jetstream.engine.token_utils",
-      "jetstream.engine.tokenizer_api",
-      "jetstream.engine.tokenizer_pb2",
+    "jetstream.core.config_lib",
+    "jetstream.engine.engine_api",
+    "jetstream.engine.token_utils",
+    "jetstream.engine.tokenizer_api",
+    "jetstream.engine.tokenizer_pb2",
   ]
   try:
     for mod in needed:
@@ -190,11 +191,11 @@ def jetstream():
     from jetstream.engine.tokenizer_pb2 import TokenizerParameters, TokenizerType  # type: ignore  # pylint: disable=import-outside-toplevel
 
     return (
-        config_lib,
-        engine_api,
-        token_utils,
-        tokenizer_api,
-        SimpleNamespace(TokenizerParameters=TokenizerParameters, TokenizerType=TokenizerType),
+      config_lib,
+      engine_api,
+      token_utils,
+      tokenizer_api,
+      SimpleNamespace(TokenizerParameters=TokenizerParameters, TokenizerType=TokenizerType),
     )
   except ModuleNotFoundError:
     if is_decoupled():
@@ -347,27 +348,22 @@ def _monitoring_stubs():  # pragma: no cover - simple placeholders
     """Dummy monitoring module providing minimal types."""
 
     class TimeSeries:
-
       def __init__(self, *a, **k):  # pylint: disable=unused-argument
         del a, k
 
     class Point:
-
       def __init__(self, *a, **k):  # pylint: disable=unused-argument
         del a, k
 
     class TimeInterval:
-
       def __init__(self, *a, **k):  # pylint: disable=unused-argument
         del a, k
 
     class TypedValue:
-
       def __init__(self, *a, **k):  # pylint: disable=unused-argument
         del a, k
 
     class MetricServiceClient:
-
       def __init__(self, *a, **k):  # pylint: disable=unused-argument
         del a, k
 
@@ -378,7 +374,6 @@ def _monitoring_stubs():  # pragma: no cover - simple placeholders
     """Dummy metric_pb2 module namespace."""
 
     class Metric:
-
       def __init__(self, *a, **k):  # pylint: disable=unused-argument
         del a, k
 
@@ -386,7 +381,6 @@ def _monitoring_stubs():  # pragma: no cover - simple placeholders
     """Dummy monitored_resource_pb2 module namespace."""
 
     class MonitoredResource:
-
       def __init__(self, *a, **k):  # pylint: disable=unused-argument
         del a, k
 

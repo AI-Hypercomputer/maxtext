@@ -112,7 +112,7 @@ class MaxTextDecoderModel(nnx.Module):
     if vllm_config.load_config.load_format == "dummy":
       if self.maxtext_config.load_parameters_path is not None:
         max_logging.log(
-            "Warning: load_parameters_path is set when using dummy load format. Checkpoint loading will be skipped."
+          "Warning: load_parameters_path is set when using dummy load format. Checkpoint loading will be skipped."
         )
         self.maxtext_config.load_parameters_path = None
 
@@ -123,12 +123,12 @@ class MaxTextDecoderModel(nnx.Module):
       max_logging.log("Warning: No load_parameters_path provided. The model will be initialized with random weights.")
 
   def __call__(
-      self,
-      kv_caches: list[jax.Array],
-      input_ids: jax.Array,
-      attention_metadata: AttentionMetadata,
-      *args,
-      **kwargs,
+    self,
+    kv_caches: list[jax.Array],
+    input_ids: jax.Array,
+    attention_metadata: AttentionMetadata,
+    *args,
+    **kwargs,
   ) -> tuple[list[jax.Array], jax.Array, list[jax.Array]]:
     """Performs a forward pass through the decoder model.
 
@@ -161,12 +161,12 @@ class MaxTextDecoderModel(nnx.Module):
     with nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
       logits, hidden, kv_caches = self.model(
-          decoder_input_tokens=input_ids,
-          decoder_positions=input_positions,
-          kv_caches=kv_caches,
-          attention_metadata=attention_metadata,
-          model_mode=self.model_mode,
-          **kwargs,
+        decoder_input_tokens=input_ids,
+        decoder_positions=input_positions,
+        kv_caches=kv_caches,
+        attention_metadata=attention_metadata,
+        model_mode=self.model_mode,
+        **kwargs,
       )
 
     if hidden.ndim > 1:
@@ -200,7 +200,7 @@ class MaxTextDecoderModel(nnx.Module):
       rng_key: A JAX random key for model initialization.
     """
     self.model, _ = model_creation_utils.create_nnx_model(
-        self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
+      self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
     )
 
 
@@ -227,7 +227,7 @@ class MaxTextForCausalLM(nnx.Module):
     self.is_text_generation_model = True
 
   def __call__(
-      self, kv_caches: list[jax.Array], input_ids: jax.Array, attention_metadata: AttentionMetadata, *args, **kwargs
+    self, kv_caches: list[jax.Array], input_ids: jax.Array, attention_metadata: AttentionMetadata, *args, **kwargs
   ) -> tuple[list[jax.Array], jax.Array]:
     """Performs a forward pass through the causal language model.
 

@@ -14,8 +14,8 @@
 
 """Tests to verify the deterministic nature of MaxText training runs.
 
-This module ensures that when the MaxText training is executed multiple times 
-with identical configurations, the loss metrics across runs are exactly 
+This module ensures that when the MaxText training is executed multiple times
+with identical configurations, the loss metrics across runs are exactly
 the same.
 """
 
@@ -49,23 +49,23 @@ class DeterminismTests(unittest.TestCase):
     """Executes two identical training runs and verifies training loss is the same."""
     run_name = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     common_config = [
-        None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-        "steps=5",
-        "enable_checkpointing=False",
-        "enable_data_shuffling=True",
-        "enable_dropout=False",
-        "base_output_directory=gs://runner-maxtext-logs",
-        "dataset_path=gs://maxtext-dataset",
-        "skip_jax_distributed_system=True",
+      None,
+      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      "steps=5",
+      "enable_checkpointing=False",
+      "enable_data_shuffling=True",
+      "enable_dropout=False",
+      "base_output_directory=gs://runner-maxtext-logs",
+      "dataset_path=gs://maxtext-dataset",
+      "skip_jax_distributed_system=True",
     ]
     train_1_config = common_config + [
-        f"run_name={run_name}_1",
-        f"metrics_file={run_name}_1_metrics.txt",
+      f"run_name={run_name}_1",
+      f"metrics_file={run_name}_1_metrics.txt",
     ]
     train_2_config = common_config + [
-        f"run_name={run_name}_2",
-        f"metrics_file={run_name}_2_metrics.txt",
+      f"run_name={run_name}_2",
+      f"metrics_file={run_name}_2_metrics.txt",
     ]
 
     train_main(train_1_config)
