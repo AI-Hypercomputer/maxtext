@@ -101,11 +101,24 @@ jobs:
               process.exit()
             }
             for (const checkRun of checkRuns.data.check_runs) {
-              if (checkRun.name.endsWith(context.job)) continue
-              if (checkRun.conclusion !== "success") {
-                console.log("Not adding pull ready because " + checkRun.name + " has not passed yet: " + checkRun.html_url)
-                process.exit()
+              if (checkRun.name.endsWith(context.job)) continue  # Ignore the current job
+              const maintenanceJobs = [
+                "notify_success_and_close",
+                "notify_failure",
+              ];
+              const isMaintenanceJob = maintenanceJobs.some(job => checkRun.name.includes(job));
+
+              // It must be 'success', OR it can be 'skipped' if it's a maintenance job
+              if (checkRun.conclusion === "success") {
+                continue;
               }
+              if (checkRun.conclusion === "skipped" && isMaintenanceJob) {
+                console.log(`Ignoring skipped maintenance job: ${checkRun.name}`);
+                continue;
+              }
+              // If it's anything else (failure, cancelled, in_progress, or a skipped core test)
+              console.log("Not adding pull ready because " + checkRun.name + " status is " + checkRun.conclusion + ": " + checkRun.html_url);
+              process.exit();
             }
             console.log("Adding pull ready label because the PR is approved AND all the check runs have passed")
             await github.rest.issues.addLabels({
