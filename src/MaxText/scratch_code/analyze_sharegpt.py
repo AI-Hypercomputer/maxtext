@@ -66,7 +66,7 @@ def get_conversations_from_file(filename, max_input_tokens, max_output_tokens):
   mean_input = sum(c[0] for c in kept_convos) / len(kept_convos)
   mean_output = sum(c[1] for c in kept_convos) / len(kept_convos)
 
-  print(f"Kept {len(kept_convos)} of {num_convos} total convos. {len(100*kept_convos)/num_convos:.3f}%")
+  print(f"Kept {len(kept_convos)} of {num_convos} total convos. {len(100 * kept_convos) / num_convos:.3f}%")
   print(f"Out of kept convos, mean input tokens: {mean_input:.3f}, mean output tokens: {mean_output:.3f}")
   return kept_convos
 
@@ -90,9 +90,9 @@ def compute_times(conversations, prefill_bucket_size_to_ms, system_time_per_deco
   total_time_s = total_prefill_time_seconds + total_generate_time_seconds
 
   print(
-      f"\nTotal time {total_time_s:.3f} seconds: "
-      f"\n\tPrefill time: {total_prefill_time_seconds:.3f} seconds"
-      f"\n\tGenerate time: {total_generate_time_seconds:.3f} seconds"
+    f"\nTotal time {total_time_s:.3f} seconds: "
+    f"\n\tPrefill time: {total_prefill_time_seconds:.3f} seconds"
+    f"\n\tGenerate time: {total_generate_time_seconds:.3f} seconds"
   )
   return total_time_s, total_prefill_time_seconds, total_generate_time_seconds
 
@@ -107,7 +107,7 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("convo_file", type=str, help="a json file containing conversations")
   parser.add_argument(
-      "-t", "--mb_timing_file", type=str, default="", help="a json file containing microbenchmark timing results"
+    "-t", "--mb_timing_file", type=str, default="", help="a json file containing microbenchmark timing results"
   )
   parser.add_argument("-v", "--verbose", action="store_true")
   args = parser.parse_args()
@@ -118,6 +118,6 @@ if __name__ == "__main__":
   total_time_seconds, _, _ = compute_times(convos, prefill_time_ms_buckets, generate_time_ms, args.verbose)
 
   print(
-      f"Output {total_output_tokens} tokens in {total_time_seconds:.3f} seconds "
-      f"= {total_output_tokens/total_time_seconds:.3f} out tok/s"
+    f"Output {total_output_tokens} tokens in {total_time_seconds:.3f} seconds "
+    f"= {total_output_tokens / total_time_seconds:.3f} out tok/s"
   )

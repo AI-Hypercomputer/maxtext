@@ -21,10 +21,10 @@ MAXTEXT_PKG_DIR = os.environ.get("MAXTEXT_PKG_DIR", os.path.basename(os.path.dir
 
 # This is the maxtext repo root: with ".git" folder; "README.md"; "pyproject.toml"; &etc.
 MAXTEXT_REPO_ROOT = os.environ.get(
-    "MAXTEXT_REPO_ROOT",
-    r
-    if os.path.isdir(os.path.join(r := os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".git"))
-    else MAXTEXT_PKG_DIR,
+  "MAXTEXT_REPO_ROOT",
+  r
+  if os.path.isdir(os.path.join(r := os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".git"))
+  else MAXTEXT_PKG_DIR,
 )
 
 # This is the assets root: with "tokenizer.gemma3"; &etc.
@@ -37,10 +37,10 @@ EPS = 1e-8  # Epsilon to calculate loss
 DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3  # Default checkpoint file size
 
 __all__ = [
-    "DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE",
-    "EPS",
-    "MAXTEXT_ASSETS_ROOT",
-    "MAXTEXT_PKG_DIR",
-    "MAXTEXT_REPO_ROOT",
-    "MAXTEXT_TEST_ASSETS_ROOT",
+  "DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE",
+  "EPS",
+  "MAXTEXT_ASSETS_ROOT",
+  "MAXTEXT_PKG_DIR",
+  "MAXTEXT_REPO_ROOT",
+  "MAXTEXT_TEST_ASSETS_ROOT",
 ]

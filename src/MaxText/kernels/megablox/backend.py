@@ -31,11 +31,11 @@ import qwix.pallas as qpl
 
 
 def _validate_args(
-    *,
-    lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
-    group_sizes: jnp.ndarray,
-    expected_rhs_dims: int = 3,
+  *,
+  lhs: jnp.ndarray,
+  rhs: jnp.ndarray,
+  group_sizes: jnp.ndarray,
+  expected_rhs_dims: int = 3,
 ) -> jnp.ndarray:
   """Validates the arguments for the gmm function."""
   # Validate 'lhs'.
@@ -44,7 +44,7 @@ def _validate_args(
 
   # Validate 'rhs'.
   if rhs.ndim != expected_rhs_dims:
-    raise ValueError(f"Expected {expected_rhs_dims}-tensor for 'rhs' but got" f" {rhs.ndim}-tensor.")
+    raise ValueError(f"Expected {expected_rhs_dims}-tensor for 'rhs' but got {rhs.ndim}-tensor.")
   # Validate 'group_sizes'.
   if group_sizes.dtype != jnp.int32:
     raise ValueError(f"Expected 32-bit integer 'group_sizes' but got {group_sizes.dtype}.")
@@ -70,13 +70,13 @@ GroupMetadata = Any  # TODO(enriqueps): Clean this up and use a namedtuple
 
 
 def make_group_metadata(
-    *,
-    group_sizes: jnp.ndarray,
-    m: int,
-    tm: int,
-    start_group: jnp.ndarray,
-    num_nonzero_groups: int,
-    visit_empty_groups: bool = True,
+  *,
+  group_sizes: jnp.ndarray,
+  m: int,
+  tm: int,
+  start_group: jnp.ndarray,
+  num_nonzero_groups: int,
+  visit_empty_groups: bool = True,
 ) -> GroupMetadata:
   """Create the metadata needed for grouped matmul computation.
 
@@ -176,9 +176,9 @@ def make_group_metadata(
   # such that we only execute the necessary number of tiles.
   tiles_m = _calculate_num_tiles(m, tm)
   group_ids = jnp.repeat(
-      jnp.arange(num_groups, dtype=jnp.int32),
-      group_tiles,
-      total_repeat_length=tiles_m + num_groups - 1,
+    jnp.arange(num_groups, dtype=jnp.int32),
+    group_tiles,
+    total_repeat_length=tiles_m + num_groups - 1,
   )
 
   # Assign an m-dimension tile id to each grid index.
@@ -214,9 +214,9 @@ def make_group_metadata(
   # Create the m-dimension tile ids for each grid index based on the visit
   # counts for each tile.
   m_tile_ids = jnp.repeat(
-      jnp.arange(tiles_m, dtype=jnp.int32),
-      tile_visits.astype(jnp.int32),
-      total_repeat_length=tiles_m + num_groups - 1,
+    jnp.arange(tiles_m, dtype=jnp.int32),
+    tile_visits.astype(jnp.int32),
+    total_repeat_length=tiles_m + num_groups - 1,
   )
 
   # Account for sharding.
@@ -249,11 +249,11 @@ def _get_group_size(*, grid_id: jnp.ndarray, group_metadata: GroupMetadata) -> j
 
 
 def _get_store_mask(
-    *,
-    grid_id: jnp.ndarray,
-    group_metadata: GroupMetadata,
-    tm: int,
-    tn: int,
+  *,
+  grid_id: jnp.ndarray,
+  group_metadata: GroupMetadata,
+  tm: int,
+  tn: int,
 ) -> jnp.ndarray:
   """Mask for rows that belong to the current group in the current tile."""
   group_offsets, group_ids, m_tile_ids = group_metadata[:3]
@@ -266,11 +266,11 @@ def _get_store_mask(
 
 
 def _zero_uninitialized_memory(
-    out: jnp.ndarray,
-    *,
-    start_group: jnp.ndarray,
-    num_nonzero_groups: int,
-    group_metadata: GroupMetadata,
+  out: jnp.ndarray,
+  *,
+  start_group: jnp.ndarray,
+  num_nonzero_groups: int,
+  group_metadata: GroupMetadata,
 ) -> jnp.ndarray:
   """Zero out uninitialized memory from output."""
   group_offsets = group_metadata[0]
@@ -292,24 +292,24 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
 
 
 @functools.partial(
-    jax.jit,
-    static_argnames=[
-        "preferred_element_type",
-        "tiling",
-        "transpose_rhs",
-        "interpret",
-    ],
+  jax.jit,
+  static_argnames=[
+    "preferred_element_type",
+    "tiling",
+    "transpose_rhs",
+    "interpret",
+  ],
 )
 def gmm(
-    lhs: jnp.ndarray | qpl.QArray,
-    rhs: jnp.ndarray | qpl.QArray,
-    group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
-    group_offset: jnp.ndarray | None = None,
-    existing_out: jnp.ndarray | None = None,
-    transpose_rhs: bool = False,
-    interpret: bool = False,
+  lhs: jnp.ndarray | qpl.QArray,
+  rhs: jnp.ndarray | qpl.QArray,
+  group_sizes: jnp.ndarray,
+  preferred_element_type: jnp.dtype = jnp.float32,
+  tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
+  group_offset: jnp.ndarray | None = None,
+  existing_out: jnp.ndarray | None = None,
+  transpose_rhs: bool = False,
+  interpret: bool = False,
 ) -> jnp.ndarray:
   """Compute lhs[sizes[i-1]:sizes[i], :] @ rhs for each group 'i'.
 
@@ -365,22 +365,22 @@ def gmm(
 
   # Create the metadata we need for computation.
   group_metadata, num_active_tiles = make_group_metadata(  # pylint: disable=unbalanced-tuple-unpacking
-      group_sizes=group_sizes,
-      m=m,
-      tm=tm,
-      start_group=group_offset[0],
-      num_nonzero_groups=rhs.shape[0],
-      visit_empty_groups=False,
+    group_sizes=group_sizes,
+    m=m,
+    tm=tm,
+    start_group=group_offset[0],
+    num_nonzero_groups=rhs.shape[0],
+    visit_empty_groups=False,
   )
 
   def kernel(
-      group_metadata,
-      group_offset,
-      lhs: jax.Array | qpl.QArray,
-      rhs: jax.Array | qpl.QArray,
-      existing_out,
-      out,
-      acc_scratch,
+    group_metadata,
+    group_offset,
+    lhs: jax.Array | qpl.QArray,
+    rhs: jax.Array | qpl.QArray,
+    existing_out,
+    out,
+    acc_scratch,
   ):
     group_offsets, group_ids, m_tile_ids = group_metadata
     del group_offsets, group_ids, group_offset
@@ -411,10 +411,10 @@ def gmm(
 
     def _store_accum():
       mask = _get_store_mask(
-          grid_id=grid_id,
-          group_metadata=group_metadata,
-          tm=tm,
-          tn=tn,
+        grid_id=grid_id,
+        group_metadata=group_metadata,
+        tm=tm,
+        tn=tn,
       )
       to_store = acc_scratch[...]
       out[...] = jax.lax.select(mask[...], to_store, out[...].astype(jnp.float32)).astype(preferred_element_type)
@@ -445,18 +445,18 @@ def gmm(
         dot_general_dims = (((1,), (0,)), ((), ()))
 
       acc_scratch[...] += qpl.dot_general(
-          loaded_lhs,
-          loaded_rhs,
-          preferred_element_type=jnp.float32,
-          dimension_numbers=dot_general_dims,
+        loaded_lhs,
+        loaded_rhs,
+        preferred_element_type=jnp.float32,
+        dimension_numbers=dot_general_dims,
       )
       if is_last_k_tile:
         _store_accum()
 
     lax.cond(
-        k_i == tiles_k - 1,
-        functools.partial(_accum, True),
-        functools.partial(_accum, False),
+      k_i == tiles_k - 1,
+      functools.partial(_accum, True),
+      functools.partial(_accum, False),
     )
 
   def lhs_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
@@ -516,67 +516,67 @@ def gmm(
   flops = 2 * m * k * n
   cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
   metadata = {
-      "preferred_element_type": jnp.dtype(preferred_element_type).name,
-      "tiling": {"tile_m": tm, "tile_k": tk, "tile_n": tn},
-      "transpose_rhs": transpose_rhs,
+    "preferred_element_type": jnp.dtype(preferred_element_type).name,
+    "tiling": {"tile_m": tm, "tile_k": tk, "tile_n": tn},
+    "transpose_rhs": transpose_rhs,
   }
   call_gmm = qpl.pallas_call(
-      kernel,
-      out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
-      grid_spec=pltpu.PrefetchScalarGridSpec(
-          num_scalar_prefetch=2,
-          in_specs=[
-              lhs_block_spec,
-              rhs_block_spec,
-              in_out_block_spec,
-          ],
-          out_specs=out_block_spec,
-          grid=(tiles_n, num_active_tiles, tiles_k),
-          scratch_shapes=[pltpu.VMEM((tm, tn), jnp.float32)],
-      ),
-      input_output_aliases=input_output_aliases,
-      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
-      interpret=interpret,
-      cost_estimate=cost_estimate,
-      metadata={"xprof_metadata": json.dumps(metadata)},
+    kernel,
+    out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
+    grid_spec=pltpu.PrefetchScalarGridSpec(
+      num_scalar_prefetch=2,
+      in_specs=[
+        lhs_block_spec,
+        rhs_block_spec,
+        in_out_block_spec,
+      ],
+      out_specs=out_block_spec,
+      grid=(tiles_n, num_active_tiles, tiles_k),
+      scratch_shapes=[pltpu.VMEM((tm, tn), jnp.float32)],
+    ),
+    input_output_aliases=input_output_aliases,
+    compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
+    interpret=interpret,
+    cost_estimate=cost_estimate,
+    metadata={"xprof_metadata": json.dumps(metadata)},
   )
 
   out = call_gmm(
-      group_metadata,
-      group_offset,
-      lhs,
-      rhs,
-      existing_out,
+    group_metadata,
+    group_offset,
+    lhs,
+    rhs,
+    existing_out,
   )
   if existing_out is None and num_current_groups < num_total_groups:
     out = _zero_uninitialized_memory(
-        out,
-        start_group=group_offset[0],
-        num_nonzero_groups=rhs.shape[0],
-        group_metadata=group_metadata,
+      out,
+      start_group=group_offset[0],
+      num_nonzero_groups=rhs.shape[0],
+      group_metadata=group_metadata,
     )
   return out
 
 
 @functools.partial(
-    jax.jit,
-    static_argnames=[
-        "preferred_element_type",
-        "tiling",
-        "num_actual_groups",
-        "interpret",
-    ],
+  jax.jit,
+  static_argnames=[
+    "preferred_element_type",
+    "tiling",
+    "num_actual_groups",
+    "interpret",
+  ],
 )
 def tgmm(
-    lhs: jnp.ndarray | qpl.QArray,
-    rhs: jnp.ndarray | qpl.QArray,
-    group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
-    group_offset: jnp.ndarray | None = None,
-    num_actual_groups: int | None = None,
-    existing_out: jnp.ndarray | None = None,
-    interpret: bool = False,
+  lhs: jnp.ndarray | qpl.QArray,
+  rhs: jnp.ndarray | qpl.QArray,
+  group_sizes: jnp.ndarray,
+  preferred_element_type: jnp.dtype = jnp.float32,
+  tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
+  group_offset: jnp.ndarray | None = None,
+  num_actual_groups: int | None = None,
+  existing_out: jnp.ndarray | None = None,
+  interpret: bool = False,
 ) -> jnp.ndarray:
   """Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :].
 
@@ -624,22 +624,22 @@ def tgmm(
 
   # Create the metadata we need for computation.
   group_metadata, num_active_tiles = make_group_metadata(
-      group_sizes=group_sizes,
-      m=m,
-      tm=tm,
-      start_group=group_offset[0],
-      num_nonzero_groups=num_actual_groups,
-      visit_empty_groups=True,
+    group_sizes=group_sizes,
+    m=m,
+    tm=tm,
+    start_group=group_offset[0],
+    num_nonzero_groups=num_actual_groups,
+    visit_empty_groups=True,
   )
 
   def kernel(
-      group_metadata,
-      group_offset,
-      lhs,
-      rhs,
-      existing_out,
-      out,
-      acc_scratch,
+    group_metadata,
+    group_offset,
+    lhs,
+    rhs,
+    existing_out,
+    out,
+    acc_scratch,
   ):
     grid_id = pl.program_id(2)
     group_offsets, group_ids, m_tile_ids = group_metadata
@@ -661,56 +661,56 @@ def tgmm(
     @pl.when(dont_skip)
     def _do():
       rhs_mask = _get_store_mask(
-          grid_id=grid_id,
-          group_metadata=group_metadata,
-          tm=tm,
-          tn=tn,
+        grid_id=grid_id,
+        group_metadata=group_metadata,
+        tm=tm,
+        tn=tn,
       )
       lhs_mask = _get_store_mask(
-          grid_id=grid_id,
-          group_metadata=group_metadata,
-          tm=tm,
-          tn=tk,
+        grid_id=grid_id,
+        group_metadata=group_metadata,
+        tm=tm,
+        tn=tk,
       )
       loaded_lhs = lhs[...]
       if isinstance(loaded_lhs, qpl.QArray):
         loaded_lhs = dataclasses.replace(
-            loaded_lhs,
-            qvalue=lax.select(
-                lhs_mask[...],
-                loaded_lhs.qvalue,
-                jnp.zeros_like(loaded_lhs.qvalue),
-            ),
+          loaded_lhs,
+          qvalue=lax.select(
+            lhs_mask[...],
+            loaded_lhs.qvalue,
+            jnp.zeros_like(loaded_lhs.qvalue),
+          ),
         )
       else:
         loaded_lhs = lax.select(
-            lhs_mask[...],
-            loaded_lhs,
-            jnp.zeros_like(lhs),
+          lhs_mask[...],
+          loaded_lhs,
+          jnp.zeros_like(lhs),
         )
       loaded_lhs = loaded_lhs.swapaxes(0, 1)
 
       loaded_rhs = rhs[...]
       if isinstance(rhs, qpl.QArray):
         loaded_rhs = dataclasses.replace(
-            loaded_rhs,
-            qvalue=lax.select(
-                rhs_mask[...],
-                loaded_rhs.qvalue,
-                jnp.zeros_like(loaded_rhs.qvalue),
-            ),
+          loaded_rhs,
+          qvalue=lax.select(
+            rhs_mask[...],
+            loaded_rhs.qvalue,
+            jnp.zeros_like(loaded_rhs.qvalue),
+          ),
         )
       else:
         loaded_rhs = lax.select(
-            rhs_mask[...],
-            loaded_rhs,
-            jnp.zeros_like(rhs),
+          rhs_mask[...],
+          loaded_rhs,
+          jnp.zeros_like(rhs),
         )
 
       acc_scratch[...] += qpl.dot(
-          loaded_lhs,
-          loaded_rhs,
-          preferred_element_type=jnp.float32,
+        loaded_lhs,
+        loaded_rhs,
+        preferred_element_type=jnp.float32,
       )
 
     is_end_of_grid = grid_id == (pl.num_programs(2) - 1)
@@ -769,36 +769,36 @@ def tgmm(
   cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
   lhs = lhs.swapaxes(0, 1)
   metadata = {
-      "tiling": {"tile_m": tm, "tile_k": tk, "tile_n": tn},
-      "prefer_element_type": jnp.dtype(preferred_element_type).name,
-      "num_actual_groups": num_actual_groups,
+    "tiling": {"tile_m": tm, "tile_k": tk, "tile_n": tn},
+    "prefer_element_type": jnp.dtype(preferred_element_type).name,
+    "num_actual_groups": num_actual_groups,
   }
   call_gmm = qpl.pallas_call(
-      kernel,
-      out_shape=jax.ShapeDtypeStruct((num_actual_groups, k, n), preferred_element_type),
-      grid_spec=pltpu.PrefetchScalarGridSpec(
-          num_scalar_prefetch=2,
-          in_specs=[
-              lhs_block_spec,
-              rhs_block_spec,
-              in_out_block_spec,
-          ],
-          out_specs=out_block_spec,
-          grid=(tiles_n, tiles_k, num_active_tiles),
-          scratch_shapes=[pltpu.VMEM((tk, tn), jnp.float32)],
-      ),
-      input_output_aliases=input_output_aliases,
-      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
-      interpret=interpret,
-      cost_estimate=cost_estimate,
-      metadata={"xprof_metadata": json.dumps(metadata)},
+    kernel,
+    out_shape=jax.ShapeDtypeStruct((num_actual_groups, k, n), preferred_element_type),
+    grid_spec=pltpu.PrefetchScalarGridSpec(
+      num_scalar_prefetch=2,
+      in_specs=[
+        lhs_block_spec,
+        rhs_block_spec,
+        in_out_block_spec,
+      ],
+      out_specs=out_block_spec,
+      grid=(tiles_n, tiles_k, num_active_tiles),
+      scratch_shapes=[pltpu.VMEM((tk, tn), jnp.float32)],
+    ),
+    input_output_aliases=input_output_aliases,
+    compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
+    interpret=interpret,
+    cost_estimate=cost_estimate,
+    metadata={"xprof_metadata": json.dumps(metadata)},
   )
 
   out = call_gmm(
-      group_metadata,
-      group_offset,
-      lhs,
-      rhs,
-      existing_out,
+    group_metadata,
+    group_offset,
+    lhs,
+    rhs,
+    existing_out,
   )
   return out

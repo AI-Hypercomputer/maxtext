@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the standalone_checkpointer.py """
+"""Tests for the standalone_checkpointer.py"""
+
 import unittest
 import pytest
 from tools.gcs_benchmarks.standalone_checkpointer import main as sckpt_main
@@ -39,17 +40,17 @@ class Standalone_DL_CKPT(unittest.TestCase):
   def test_standalone_dataloader(self):
     random_run_name = self._get_random_test_name("standalone_dataloader")
     sdl_main(
-        (
-            "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            f"run_name={random_run_name}",
-            "base_output_directory=gs://runner-maxtext-logs",
-            "dataset_path=gs://maxtext-dataset",
-            "steps=100",
-            "enable_checkpointing=false",
-            "enable_goodput_recording=False",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-        )
+      (
+        "",
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        f"run_name={random_run_name}",
+        "base_output_directory=gs://runner-maxtext-logs",
+        "dataset_path=gs://maxtext-dataset",
+        "steps=100",
+        "enable_checkpointing=false",
+        "enable_goodput_recording=False",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+      )
     )  # need to pass relative path to tokenizer
 
   @pytest.mark.integration_test
@@ -58,45 +59,45 @@ class Standalone_DL_CKPT(unittest.TestCase):
     random_run_name = self._get_random_test_name("standalone_checkpointer")
     # checkpoint at 50
     sckpt_main(
-        (
-            "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            f"run_name={random_run_name}",
-            "base_output_directory=gs://runner-maxtext-logs",
-            "dataset_path=gs://maxtext-dataset",
-            "base_emb_dim=128",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "base_mlp_dim=128",
-            "base_num_decoder_layers=2",
-            "steps=60",
-            "enable_checkpointing=True",
-            "checkpoint_period=50",
-            "async_checkpointing=False",
-            "enable_goodput_recording=False",
-            "skip_jax_distributed_system=True",
-        )
+      (
+        "",
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        f"run_name={random_run_name}",
+        "base_output_directory=gs://runner-maxtext-logs",
+        "dataset_path=gs://maxtext-dataset",
+        "base_emb_dim=128",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=128",
+        "base_num_decoder_layers=2",
+        "steps=60",
+        "enable_checkpointing=True",
+        "checkpoint_period=50",
+        "async_checkpointing=False",
+        "enable_goodput_recording=False",
+        "skip_jax_distributed_system=True",
+      )
     )
     # restore at 50 and checkpoint at 100
     sckpt_main(
-        (
-            "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            f"run_name={random_run_name}",
-            "base_output_directory=gs://runner-maxtext-logs",
-            "dataset_path=gs://maxtext-dataset",
-            "base_emb_dim=128",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "base_mlp_dim=128",
-            "base_num_decoder_layers=2",
-            "steps=110",
-            "enable_checkpointing=True",
-            "checkpoint_period=50",
-            "async_checkpointing=False",
-            "enable_goodput_recording=False",
-            "skip_jax_distributed_system=True",
-        )
+      (
+        "",
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        f"run_name={random_run_name}",
+        "base_output_directory=gs://runner-maxtext-logs",
+        "dataset_path=gs://maxtext-dataset",
+        "base_emb_dim=128",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=128",
+        "base_num_decoder_layers=2",
+        "steps=110",
+        "enable_checkpointing=True",
+        "checkpoint_period=50",
+        "async_checkpointing=False",
+        "enable_goodput_recording=False",
+        "skip_jax_distributed_system=True",
+      )
     )
 
 

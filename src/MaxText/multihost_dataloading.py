@@ -18,6 +18,7 @@
 Adapted from Sholto's:
 https://github.com/sholtodouglas/multihost_dataloading
 """
+
 from functools import partial
 from typing import Union, Sequence
 from collections.abc import Iterator, Iterable
@@ -39,7 +40,7 @@ from MaxText import max_logging
 
 
 def _build_global_shape_and_sharding(
-    local_shape: tuple[int, ...], global_mesh: Mesh
+  local_shape: tuple[int, ...], global_mesh: Mesh
 ) -> tuple[tuple[int, ...], NamedSharding]:
   sharding = NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
 
@@ -56,9 +57,9 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
     local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
   except ValueError as array_split_error:
     raise ValueError(
-        f"Unable to put to devices shape {array.shape} with "
-        f"local device count {len(global_mesh.local_devices)} "
-        f"at {jtu.keystr(path)}"
+      f"Unable to put to devices shape {array.shape} with "
+      f"local device count {len(global_mesh.local_devices)} "
+      f"at {jtu.keystr(path)}"
     ) from array_split_error
 
   local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
@@ -71,11 +72,11 @@ class MultiHostDataLoadIterator:
   """
 
   def __init__(
-      self,
-      dataloader: tf.data.Dataset | Iterable,
-      global_mesh: Mesh,
-      generate_padding_batch: bool = False,
-      expansion_loading_factor_for_grain: int = -1,
+    self,
+    dataloader: tf.data.Dataset | Iterable,
+    global_mesh: Mesh,
+    generate_padding_batch: bool = False,
+    expansion_loading_factor_for_grain: int = -1,
   ):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
@@ -136,8 +137,8 @@ class MultiHostDataLoadIterator:
         except StopIteration as e:
           if self.generate_padding_batch:
             max_logging.log(
-                f"MultiHostDataLoadIterator: host {jax.process_index()} failed to load data with {type(e)} error: ({e}). "
-                "It may have reached the end of the data. Generating a padding batch as generate_padding_batch=True."
+              f"MultiHostDataLoadIterator: host {jax.process_index()} failed to load data with {type(e)} error: ({e}). "
+              "It may have reached the end of the data. Generating a padding batch as generate_padding_batch=True."
             )
             self.out_of_data = True
             local_data = self._make_padding_batch()
@@ -175,26 +176,24 @@ def _get_next(dummy_array):
       device_arrays = np.split(array, len(devices), axis=0)
     except ValueError as array_split_error:
       raise ValueError(
-          f"Unable to put to devices shape {array.shape} with "
-          f"local device count {len(devices)} "
-          f"at {jtu.keystr(path)}"
+        f"Unable to put to devices shape {array.shape} with local device count {len(devices)} at {jtu.keystr(path)}"
       ) from array_split_error
     device_arrays = jax.device_put(device_arrays, devices)
     return jax.make_array_from_single_device_arrays(shape=global_shape, sharding=sharding, arrays=device_arrays)
 
   return jtu.tree_map_with_path(
-      partial(
-          form_global_array_colocated_python,
-          devices=list(dummy_array.sharding.addressable_devices),
-          global_shape=global_shape,
-          sharding=dummy_array.sharding,
-      ),
-      local_data,
+    partial(
+      form_global_array_colocated_python,
+      devices=list(dummy_array.sharding.addressable_devices),
+      global_shape=global_shape,
+      sharding=dummy_array.sharding,
+    ),
+    local_data,
   )
 
 
 def _colocated_cpu_devices(
-    devices: Sequence[jax.Device],
+  devices: Sequence[jax.Device],
 ) -> Sequence[jax.Device]:
   """Returns CPU devices colocated with the given devices."""
   return colocated_python.colocated_cpu_devices(devices)

@@ -70,11 +70,11 @@ class SFTTrainingHooks(TrainingHooks):
     if self.config.dump_hlo:
       jax.block_until_ready(state)  # Ensure compilation has finished
       gcs_utils.upload_dump(
-          self.config.dump_hlo_local_dir,
-          self.config.dump_hlo_gcs_dir,
-          module_name=self.config.dump_hlo_module_name,
-          delete_local_after=self.config.dump_hlo_delete_local_after,
-          all_host_upload=self.config.dump_hlo_upload_all,
+        self.config.dump_hlo_local_dir,
+        self.config.dump_hlo_gcs_dir,
+        module_name=self.config.dump_hlo_module_name,
+        delete_local_after=self.config.dump_hlo_delete_local_after,
+        all_host_upload=self.config.dump_hlo_upload_all,
       )
 
     self.metadata["first_train_step"] = train_ctx.train_steps
@@ -82,9 +82,9 @@ class SFTTrainingHooks(TrainingHooks):
   @override
   def on_train_end(self, train_ctx: peft_trainer.PeftTrainer):  # pylint: disable=unused-argument
     """Called at the end of training."""
-    assert (
-        "first_train_step" in self.metadata
-    ), "SFTTrainingHooks.on_train_start() must be called before SFTTrainingHooks.on_train_end()"
+    assert "first_train_step" in self.metadata, (
+      "SFTTrainingHooks.on_train_start() must be called before SFTTrainingHooks.on_train_end()"
+    )
 
     if self.metric_logger:
       self.metric_logger.flush_metrics_and_cleanup()
@@ -99,16 +99,16 @@ class SFTTrainingHooks(TrainingHooks):
     total_weights = jnp.sum(train_ctx.data_hooks.train_batch["targets_segmentation"] != 0)
 
     self.train_metadata[train_ctx.train_steps] = {
-        "total_weights": total_weights,
+      "total_weights": total_weights,
     }
 
   @override
   def on_train_step_end(
-      self,
-      train_ctx: peft_trainer.PeftTrainer,
-      train_step: int,
-      train_loss: float,
-      step_time: float,
+    self,
+    train_ctx: peft_trainer.PeftTrainer,
+    train_step: int,
+    train_loss: float,
+    step_time: float,
   ):
     """Called at the end of training step.
     This hook is called by Tunix after the step counter has been incremented for logging purposes.
@@ -118,17 +118,17 @@ class SFTTrainingHooks(TrainingHooks):
     """
 
     assert train_step - 1 in self.train_metadata, (
-        "SFTTrainingHooks.on_train_step_start() must be called before" " SFTTrainingHooks.on_train_step_end()"
+      "SFTTrainingHooks.on_train_step_start() must be called before SFTTrainingHooks.on_train_step_end()"
     )
 
     if self.metadata["first_train_step"] == train_step - 1:
       max_utils.print_mem_stats("After params initialized")
 
     metrics = {
-        "scalar": {
-            "learning/loss": train_loss,
-            "learning/total_weights": self.train_metadata[train_step - 1]["total_weights"],
-        }
+      "scalar": {
+        "learning/loss": train_loss,
+        "learning/total_weights": self.train_metadata[train_step - 1]["total_weights"],
+      }
     }
     self.metric_logger.record_train_metrics(metrics, train_step, step_time)
     self.metric_logger.write_metrics(metrics, train_step)
@@ -144,17 +144,17 @@ class SFTTrainingHooks(TrainingHooks):
   @override
   def on_eval_step_end(self, train_ctx: peft_trainer.PeftTrainer, eval_loss: float):
     """Called at the end of evaluation step."""
-    assert (
-        self.eval_metadata["eval_step_count"] != 0
-    ), "SFTTrainingHooks.on_eval_step_start() must be called before SFTTrainingHooks.on_eval_step_end()"
+    assert self.eval_metadata["eval_step_count"] != 0, (
+      "SFTTrainingHooks.on_eval_step_start() must be called before SFTTrainingHooks.on_eval_step_end()"
+    )
 
     avg_loss = eval_loss / self.eval_metadata["eval_step_count"]
     metrics = {
-        "scalar": {
-            "eval/total_loss": eval_loss,
-            "eval/avg_loss": avg_loss,
-            "eval/total_weights": self.eval_metadata["total_weights"],
-        }
+      "scalar": {
+        "eval/total_loss": eval_loss,
+        "eval/avg_loss": avg_loss,
+        "eval/total_weights": self.eval_metadata["total_weights"],
+      }
     }
     self.metric_logger.write_metrics(metrics, train_ctx.train_steps, is_training=False)
     self.eval_metadata.clear()
@@ -189,8 +189,7 @@ class SFTDataHooks(DataHooks):
     try:
       # Run evaluation only for `config.eval_steps` steps.
       if (
-          self.config.eval_steps > 0
-          and train_ctx.training_hooks.eval_metadata["eval_step_count"] >= self.config.eval_steps
+        self.config.eval_steps > 0 and train_ctx.training_hooks.eval_metadata["eval_step_count"] >= self.config.eval_steps
       ):
         self.eval_batch = None
       else:

@@ -46,14 +46,13 @@ class LlamaDecoderLayer(nnx.Module):
   """Transformer decoder layer that attends to the encoder."""
 
   def __init__(
-      self,
-      config: Config,
-      model_mode: str,
-      mesh: Mesh,
-      rngs: nnx.Rngs,
-      quant: None | Quant = None,
+    self,
+    config: Config,
+    model_mode: str,
+    mesh: Mesh,
+    rngs: nnx.Rngs,
+    quant: None | Quant = None,
   ):
-
     self.config = config
     self.mesh = mesh
     self.quant = quant
@@ -67,87 +66,87 @@ class LlamaDecoderLayer(nnx.Module):
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.pre_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        shard_mode=config.shard_mode,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      shard_mode=config.shard_mode,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=rngs,
     )
 
     self.self_attention = Attention(
-        config=config,
-        num_query_heads=config.num_query_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        attention_kernel=config.attention,
-        inputs_q_shape=dummy_inputs_shape,
-        inputs_kv_shape=dummy_inputs_shape,
-        mesh=mesh,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        dropout_rate=config.dropout_rate,
-        float32_qk_product=config.float32_qk_product,
-        float32_logits=config.float32_logits,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(config),
-        prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
-        ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
-        compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))),
-        reshape_q=config.reshape_q,
-        use_ragged_attention=config.use_ragged_attention,
-        ragged_block_size=config.ragged_block_size,
-        model_mode=model_mode,
-        rngs=rngs,
+      config=config,
+      num_query_heads=config.num_query_heads,
+      num_kv_heads=config.num_kv_heads,
+      head_dim=config.head_dim,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      attention_kernel=config.attention,
+      inputs_q_shape=dummy_inputs_shape,
+      inputs_kv_shape=dummy_inputs_shape,
+      mesh=mesh,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      dropout_rate=config.dropout_rate,
+      float32_qk_product=config.float32_qk_product,
+      float32_logits=config.float32_logits,
+      quant=self.quant,
+      kv_quant=quantizations.configure_kv_quant(config),
+      prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
+      ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
+      compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))),
+      reshape_q=config.reshape_q,
+      use_ragged_attention=config.use_ragged_attention,
+      ragged_block_size=config.ragged_block_size,
+      model_mode=model_mode,
+      rngs=rngs,
     )
 
     self.post_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        shard_mode=config.shard_mode,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      shard_mode=config.shard_mode,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=rngs,
     )
 
     self.mlp = MlpBlock(
-        in_features=config.emb_dim,
-        intermediate_dim=config.mlp_dim,
-        activations=config.mlp_activations,
-        intermediate_dropout_rate=config.dropout_rate,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        config=config,
-        mesh=mesh,
-        quant=self.quant,
-        model_mode=model_mode,
-        rngs=rngs,
+      in_features=config.emb_dim,
+      intermediate_dim=config.mlp_dim,
+      activations=config.mlp_activations,
+      intermediate_dropout_rate=config.dropout_rate,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      config=config,
+      mesh=mesh,
+      quant=self.quant,
+      model_mode=model_mode,
+      rngs=rngs,
     )
 
     self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
 
     self._maybe_shard_with_logical = functools.partial(
-        maybe_shard_with_logical,
-        mesh=self.mesh,
-        shard_mode=config.shard_mode,
+      maybe_shard_with_logical,
+      mesh=self.mesh,
+      shard_mode=config.shard_mode,
     )
 
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
-      previous_chunk=None,
-      kv_cache=None,
-      attention_metadata=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    slot: None | int = None,
+    page_state: None | page_manager.PageState = None,
+    previous_chunk=None,
+    kv_cache=None,
+    attention_metadata=None,
   ):
     cfg = self.config
 
@@ -162,18 +161,18 @@ class LlamaDecoderLayer(nnx.Module):
 
     # Self-attention block
     attention_lnx, kv_cache = self.self_attention(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        slot=slot,
-        page_state=page_state,
-        previous_chunk=previous_chunk,
-        out_sharding=lnx_sharding,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
+      lnx,
+      lnx,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=model_mode,
+      slot=slot,
+      page_state=page_state,
+      previous_chunk=previous_chunk,
+      out_sharding=lnx_sharding,
+      kv_cache=kv_cache,
+      attention_metadata=attention_metadata,
     )
 
     attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
@@ -185,13 +184,13 @@ class LlamaDecoderLayer(nnx.Module):
 
     # MLP block.
     mlp_intermediate_sharding = create_sharding(
-        self.mesh, ("activation_batch", "activation_length_no_exp", "activation_mlp")
+      self.mesh, ("activation_batch", "activation_length_no_exp", "activation_mlp")
     )
     mlp_lnx = self.mlp(
-        hidden_states,
-        deterministic=deterministic,
-        intermediate_sharding=mlp_intermediate_sharding,
-        out_sharding=lnx_sharding,
+      hidden_states,
+      deterministic=deterministic,
+      intermediate_sharding=mlp_intermediate_sharding,
+      out_sharding=lnx_sharding,
     )
     mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
@@ -203,9 +202,9 @@ class LlamaDecoderLayer(nnx.Module):
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
-          "activation_fraction_zero",
-          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+        "intermediates",
+        "activation_fraction_zero",
+        jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
     if cfg.scan_layers:
@@ -215,6 +214,6 @@ class LlamaDecoderLayer(nnx.Module):
 
 
 LlamaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    LlamaDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  LlamaDecoderLayer,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )

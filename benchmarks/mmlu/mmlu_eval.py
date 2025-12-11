@@ -71,9 +71,9 @@ Answer:"""
 
 
 _PROMPT_TEMPLATE = flags.DEFINE_string(
-    "prompt_template",
-    default=DEFAULT_PROMPT_TEMPLATE,
-    help="prompt template",
+  "prompt_template",
+  default=DEFAULT_PROMPT_TEMPLATE,
+  help="prompt template",
 )
 
 
@@ -120,7 +120,7 @@ def main(config):
     tokens, true_length = tokenizer.encode(prompt, is_bos=True, prefill_lengths=[max_prefill_predict_length])
     if true_length > max_prefill_predict_length:
       max_logging.log(
-          f"Warning: Prompt length {true_length} exceeds max prefill length" f" {max_prefill_predict_length}. Truncating."
+        f"Warning: Prompt length {true_length} exceeds max prefill length {max_prefill_predict_length}. Truncating."
       )
       tokens = tokens[:max_prefill_predict_length]
       true_length = max_prefill_predict_length
@@ -154,7 +154,7 @@ def main(config):
         break
 
     if not predicted_answer:
-      max_logging.log("Could not extract an answer from the model's output for example" f" {total_count + 1}")
+      max_logging.log(f"Could not extract an answer from the model's output for example {total_count + 1}")
     elif predicted_answer not in {chr(ASCII_UPPERCASE_A + idx) for idx in range(len(choices))}:
       max_logging.log(f"Invalid or missing predicted answer for subject '{subject}' in example {total_count + 1}")
 
@@ -163,8 +163,8 @@ def main(config):
 
     # Log answer
     max_logging.log(
-        f"{total_count + 1} | {prompt}\n[Model output] {output}\n"
-        f"[Correct answer] {correct_answer}, Matching: {predicted_answer == correct_answer}"
+      f"{total_count + 1} | {prompt}\n[Model output] {output}\n"
+      f"[Correct answer] {correct_answer}, Matching: {predicted_answer == correct_answer}"
     )
 
     # Update accuracy for overall and per-subject
@@ -223,8 +223,7 @@ def main(config):
 
 def validate_config(config):
   assert not config.load_full_state_path, (
-      "Decode doesn't operate on full states! Convert to parameter checkpoint"
-      " first. Using generate_param_only_checkpoint."
+    "Decode doesn't operate on full states! Convert to parameter checkpoint first. Using generate_param_only_checkpoint."
   )
 
 

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Create the managed mldiagnostics run."""
+
 import json
 from typing import Any
 
@@ -66,11 +67,11 @@ class ManagedMLDiagnostics:
 
     # Create a run for the managed mldiagnostics, and upload the configuration.
     mldiag.machinelearning_run(
-        name=f"{config.run_name}",
-        run_group=config.managed_mldiagnostics_run_group,
-        configs=config_dict,
-        gcs_path=config.managed_mldiagnostics_dir,
-        # TODO: b/455623960 - Remove the following once multi-region and prod support are enabled.
-        region="us-central1",
-        environment="autopush",  # Default would be "prod" for formal launch.
+      name=f"{config.run_name}",
+      run_group=config.managed_mldiagnostics_run_group,
+      configs=config_dict,
+      gcs_path=config.managed_mldiagnostics_dir,
+      # TODO: b/455623960 - Remove the following once multi-region and prod support are enabled.
+      region="us-central1",
+      environment="autopush",  # Default would be "prod" for formal launch.
     )

@@ -44,11 +44,23 @@ repos:
   #          - '--keep-going'
   #          - 'src/MaxText/'
 
-  - repo: https://github.com/google/pyink
-    rev: 24.10.1
+  #  - repo: https://github.com/google/pyink
+  #    rev: 24.10.1
+  #    hooks:
+  #      - id: pyink
+  #        args:
+  #          - '--pyink-indentation=2'
+  #          - '--line-length=122'
+  #          - '--check'
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
     hooks:
-      - id: pyink
+      # Run the linter.
+      # - id: ruff-check
+      # Run the formatter.
+      - id: ruff-format
         args:
-          - '--pyink-indentation=2'
-          - '--line-length=122'
+          - '--config'
+          - 'pyproject.toml'
           - '--check'

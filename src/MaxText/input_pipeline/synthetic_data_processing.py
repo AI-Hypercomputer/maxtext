@@ -40,20 +40,20 @@ class SyntheticDataIterator:
     data_pspec = P(*config.data_sharding)
     data_pspec_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
     self.data_generator = jax.jit(
-        SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
+      SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
     )
 
     tokens = jax.random.randint(
-        jax.random.PRNGKey(0),
-        (config.global_batch_size_to_load, config.max_target_length + 1),
-        0,
-        config.vocab_size,
-        dtype=jnp.int32,
+      jax.random.PRNGKey(0),
+      (config.global_batch_size_to_load, config.max_target_length + 1),
+      0,
+      config.vocab_size,
+      dtype=jnp.int32,
     )
 
     sequence_positions = jnp.arange(0, config.max_target_length + 1, dtype=jnp.int32).reshape(1, -1)
     batch_positions = jnp.broadcast_to(
-        sequence_positions, (config.global_batch_size_to_load, config.max_target_length + 1)
+      sequence_positions, (config.global_batch_size_to_load, config.max_target_length + 1)
     )
     segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
     self.data = (tokens, batch_positions, segmentation)
@@ -102,22 +102,22 @@ class PlaceHolderDataIterator:
     """fill negative value in synthetic data"""
     output = {}
     output["inputs"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
+      np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
     )
     output["inputs_position"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
+      np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
     )
     output["inputs_segmentation"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
+      np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
     )
     output["targets"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
+      np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
     )
     output["targets_position"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
+      np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
     )
     output["targets_segmentation"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
+      np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
     )
     dataset = tf.data.Dataset.zip((output))  # pytype: disable=wrong-arg-types
     dataset = dataset.repeat()

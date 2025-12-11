@@ -187,13 +187,13 @@ class Gemma3RotaryEmbeddingTest(unittest.TestCase):
 
     # JAX implementation
     jax_rope = embeddings.RotaryEmbedding(
-        min_timescale=min_timescale,
-        max_timescale=max_timescale,
-        mesh=self.mesh,
-        embedding_dims=head_dim,
-        cast_as_fprop_dtype=False,
-        fprop_dtype=jnp.float32,
-        rope_linear_scaling_factor=8.0,
+      min_timescale=min_timescale,
+      max_timescale=max_timescale,
+      mesh=self.mesh,
+      embedding_dims=head_dim,
+      cast_as_fprop_dtype=False,
+      fprop_dtype=jnp.float32,
+      rope_linear_scaling_factor=8.0,
     )
 
     # JAX expects [B, S, N, H]

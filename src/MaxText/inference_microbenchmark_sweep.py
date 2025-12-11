@@ -62,20 +62,20 @@ def main():
 
   results = []
   for (
-      two_axis_order_product_id,
-      prefill_cache_axis_order,
-      ar_cache_axis_order,
+    two_axis_order_product_id,
+    prefill_cache_axis_order,
+    ar_cache_axis_order,
   ) in zip(
-      two_axis_order_product_id_list,
-      prefill_cache_axis_order_list,
-      ar_cache_axis_order_list,
+    two_axis_order_product_id_list,
+    prefill_cache_axis_order_list,
+    ar_cache_axis_order_list,
   ):
     print(f"two_axis_order_product_id {two_axis_order_product_id}")
     print(f"prefill_cache_axis_order {prefill_cache_axis_order}")
     print(f"ar_cache_axis_order {ar_cache_axis_order}")
 
     run_tag = (
-        f"{two_axis_order_product_id}-{prefill_cache_axis_order.replace(',','')}-{ar_cache_axis_order.replace(',','')}"
+      f"{two_axis_order_product_id}-{prefill_cache_axis_order.replace(',', '')}-{ar_cache_axis_order.replace(',', '')}"
     )
     run_name = f"{base_run_name}/{run_tag}"
 
@@ -87,44 +87,44 @@ def main():
 
     # Prepare metadata (dimensions) json for XLML
     dimensions_json = {
-        "base_output_directory": config.base_output_directory,
-        "model_name": config.model_name,
-        "tokenizer": config.tokenizer_path,
-        "weight_dtype": config.weight_dtype,
-        "inference_microbenchmark_prefill_lengths": f"{config.inference_microbenchmark_prefill_lengths}",
-        "inference_microbenchmark_stages": config.inference_microbenchmark_stages,
-        "inference_microbenchmark_loop_iters": f"{config.inference_microbenchmark_loop_iters}",
-        "max_prefill_predict_length": f"{config.max_prefill_predict_length}",
-        "max_target_length": f"{config.max_target_length}",
-        "per_device_batch_size": f"{config.per_device_batch_size}",
-        "ici_fsdp_parallelism": f"{config.ici_fsdp_parallelism}",
-        "ici_autoregressive_parallelism": f"{config.ici_autoregressive_parallelism}",
-        "ici_tensor_parallelism": f"{config.ici_tensor_parallelism}",
-        "profiler": f"{config.profiler}",
-        "scan_layers": f"{config.scan_layers}",
-        "quantization": config.quantization,
-        "quantize_kvcache": f"{config.quantize_kvcache}",
-        "attention": config.attention,
-        "two_axis_order_product_id": f"{two_axis_order_product_id}",
-        "prefill_cache_axis_order": f"{prefill_cache_axis_order}",
-        "ar_cache_axis_order": f"{ar_cache_axis_order}",
-        "compute_axis_order": f"{config.compute_axis_order}",
-        "reshape_q": f"{config.reshape_q}",
-        "kv_quant_axis": f"{config.kv_quant_axis}",
-        "run_name": f"{run_name}",
-        "run_tag": f"{run_tag}",
-        "config_json_string": json.dumps(
-            pyconfig._config.keys,  # pylint: disable=protected-access
-            default=lambda x: f"<<non-serializable: {type(x).__qualname__}>>",
-        ),
+      "base_output_directory": config.base_output_directory,
+      "model_name": config.model_name,
+      "tokenizer": config.tokenizer_path,
+      "weight_dtype": config.weight_dtype,
+      "inference_microbenchmark_prefill_lengths": f"{config.inference_microbenchmark_prefill_lengths}",
+      "inference_microbenchmark_stages": config.inference_microbenchmark_stages,
+      "inference_microbenchmark_loop_iters": f"{config.inference_microbenchmark_loop_iters}",
+      "max_prefill_predict_length": f"{config.max_prefill_predict_length}",
+      "max_target_length": f"{config.max_target_length}",
+      "per_device_batch_size": f"{config.per_device_batch_size}",
+      "ici_fsdp_parallelism": f"{config.ici_fsdp_parallelism}",
+      "ici_autoregressive_parallelism": f"{config.ici_autoregressive_parallelism}",
+      "ici_tensor_parallelism": f"{config.ici_tensor_parallelism}",
+      "profiler": f"{config.profiler}",
+      "scan_layers": f"{config.scan_layers}",
+      "quantization": config.quantization,
+      "quantize_kvcache": f"{config.quantize_kvcache}",
+      "attention": config.attention,
+      "two_axis_order_product_id": f"{two_axis_order_product_id}",
+      "prefill_cache_axis_order": f"{prefill_cache_axis_order}",
+      "ar_cache_axis_order": f"{ar_cache_axis_order}",
+      "compute_axis_order": f"{config.compute_axis_order}",
+      "reshape_q": f"{config.reshape_q}",
+      "kv_quant_axis": f"{config.kv_quant_axis}",
+      "run_name": f"{run_name}",
+      "run_tag": f"{run_tag}",
+      "config_json_string": json.dumps(
+        pyconfig._config.keys,  # pylint: disable=protected-access
+        default=lambda x: f"<<non-serializable: {type(x).__qualname__}>>",
+      ),
     }
     dimensions_json = {
-        **dimensions_json,
-        **inference_metadata,
+      **dimensions_json,
+      **inference_metadata,
     }
     try:
       microbenchmark_results = inference_microbenchmark.run_benchmarks_with_unsafe_rbg(
-          config, inference_metadata=inference_metadata
+        config, inference_metadata=inference_metadata
       )
       if microbenchmark_results:
         metrics = microbenchmark_results["flattened_results"]
@@ -133,16 +133,16 @@ def main():
         metrics = {}
       dimensions_json["oom"] = "False"
       print(
-          f"Completed run {two_axis_order_product_id} out of: "
-          f"{start_two_axis_order_product_id} to {end_two_axis_order_product_id}"
+        f"Completed run {two_axis_order_product_id} out of: "
+        f"{start_two_axis_order_product_id} to {end_two_axis_order_product_id}"
       )
     except JaxRuntimeError:
       # OOM
       metrics = {}
       dimensions_json["oom"] = "True"
       print(
-          f"Failed at run {two_axis_order_product_id} out of: "
-          f"{start_two_axis_order_product_id} to {end_two_axis_order_product_id}"
+        f"Failed at run {two_axis_order_product_id} out of: "
+        f"{start_two_axis_order_product_id} to {end_two_axis_order_product_id}"
       )
 
     final = {"metrics": metrics, "dimensions": dimensions_json}
