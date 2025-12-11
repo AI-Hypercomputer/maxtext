@@ -298,6 +298,8 @@ key_proj: 'remat'
 value_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
+mla_q: 'remat'
+mla_kv: 'remat'
 
 optimizer_memory_host_offload: False
 parameter_memory_host_offload: False

@@ -805,6 +805,14 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the attention output projection.",
   )
+  mla_q: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the mla's query projectiont.",
+  )
+  mla_kv: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the mla's key and value projection.",
+  )
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
 
@@ -1855,6 +1863,8 @@ class MaxTextConfig(
           "query_proj",
           "key_proj",
           "value_proj",
+          "mla_kv",
+          "mla_q",
           "qkv_proj",
           "out_proj",
       ]
