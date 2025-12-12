@@ -48,11 +48,11 @@ jobs:
           - device: tpu
             build_mode: stable
             image_name: maxtext_jax_stable
-            dockerfile: ./dependencies/dockerfiles/maxtext_dependencies.Dockerfile
+            dockerfile: ./dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
           - device: tpu
             build_mode: nightly
             image_name: maxtext_jax_nightly
-            dockerfile: ./dependencies/dockerfiles/maxtext_dependencies.Dockerfile
+            dockerfile: ./dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
           # GPU Image Builds
           - device: gpu
             build_mode: stable
@@ -132,4 +132,4 @@ jobs:
             DEVICE=${{ matrix.device }}
             MODE=${{ matrix.build_mode }}
             JAX_VERSION=NONE
-            LIBTPU_GCS_PATH=NONE
+            LIBTPU_VERSION=NONE
