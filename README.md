@@ -41,6 +41,7 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 
 ## 🔥 Latest news 🔥
 
+* \[December 10, 2025\] DeepSeek V3.1 is now supported. Use existing configs for [DeepSeek V3 671B](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/models/deepseek3-671b.yml) and load in V3.1 checkpoint to use model.
 * \[September 26, 2025\] Vocabulary tiling ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/2242)) is now supported in MaxText! Adjust config `num_vocab_tiling` to unlock more efficient memory usage.
 * \[September 24, 2025\] The GPT-OSS family of models (20B, 120B) is now supported.
 * \[September 15, 2025\] MaxText is now available as a [PyPI package](https://pypi.org/project/maxtext). Users can now [install maxtext through pip](https://maxtext.readthedocs.io/en/latest/guides/install_maxtext.html).
@@ -97,8 +98,9 @@ MaxText aims to provide you with the best OSS models, whether as a reference imp
   * Qwen 3 MoE (30B, 235B)
   * Qwen 3 Dense (0.6B, 1.7B, 4B, 8B, 14B, 32B)
 * DeepSeek
-  * DeepSeek-V3 0324 (671B) & DeepSeek-R1 0528 (671B)
-  * DeepSeek-V2 (16B, 236B)
+  * DeepSeek V3.1 (671B)
+  * DeepSeek V3 0324 (671B) & DeepSeek R1 0528 (671B)
+  * DeepSeek V2 (16B, 236B)
 * Meta
   * Llama 4 Scout (109B) & Maverick (400B)
   * Llama 3.3 70B, 3.1 (8B, 70B, 405B), 3.0 (8B, 70B, 405B)
