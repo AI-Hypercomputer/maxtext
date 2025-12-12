@@ -752,18 +752,19 @@ def init_initial_state(model, tx, config, is_training, key):
 
 def get_abstract_param(model, config):
   """Get abstract model structure (name, shape) without materializing the weights to save memory"""
-  key = jax.random.PRNGKey(0)
-  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-      config.model_name, batch_size=config.micro_batch_size_to_train_on
-  )
-  abstract_vars = jax.eval_shape(
-      model.init,
-      {"params": key, "dropout": key, "aqt": key},
-      jnp.ones(input_shape, dtype=jnp.int32),
-      jnp.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
-  )
+  with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    key = jax.random.PRNGKey(0)
+    input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+        config.model_name, batch_size=config.micro_batch_size_to_train_on
+    )
+    abstract_vars = jax.eval_shape(
+        model.init,
+        {"params": key, "dropout": key, "aqt": key},
+        jnp.ones(input_shape, dtype=jnp.int32),
+        jnp.ones(input_shape, dtype=jnp.int32),
+        encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+    )
   return abstract_vars
 
 
