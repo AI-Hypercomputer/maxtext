@@ -91,7 +91,7 @@ jax.config.update("jax_platform_name", "cpu")
 def print_ram_usage(stage=""):
   memory = psutil.virtual_memory()
   max_logging.log(
-      f"[{stage}] RAM Usage: {memory.used / (1024**3):.2f}/{memory.total / (1024**3):.2f} GB ({memory.percent:.1f}%)"
+      f"[{stage}] RAM Usage: {memory.used / (1024 ** 3):.2f}/{memory.total / (1024 ** 3):.2f} GB ({memory.percent:.1f}%)"
   )
 
 
@@ -184,7 +184,7 @@ class LazyHFLoader:
     else:
       raise ValueError("Could not find recognized model weights (safetensors) in HF repo.")
 
-    # Download and parse the index
+      # Download and parse the index
     max_logging.log(f"Loading index file: {index_file}")
     index_path = hf_hub_download(repo_id=self.model_id, filename=index_file, token=self.token)
     with open(index_path, "r", encoding="utf-8") as f:
@@ -211,7 +211,7 @@ class LazyHFLoader:
       # You might need advanced fuzzy matching here if you encounter errors.
       raise ValueError(f"Key {key} not found in HF checkpoint index.")
 
-    # STEP 1: Download outside the lock.
+      # STEP 1: Download outside the lock.
     # multiple threads can download different shards at the same time.
     local_path = hf_hub_download(repo_id=self.model_id, filename=shard_name, token=self.token)
 
@@ -266,7 +266,7 @@ class LazyTensor:
       # Re-raise the original exception so it doesn't get masked by "object __array__..."
       raise
 
-    # Ensure it's a standard numpy array (converts JAX arrays if necessary)
+      # Ensure it's a standard numpy array (converts JAX arrays if necessary)
     if not isinstance(arr, np.ndarray):
       arr = np.array(arr)
 
@@ -295,10 +295,15 @@ class LazyTensorHandler(type_handlers.NumpyHandler):
 
     return await super().serialize(value, *args, **kwargs)
 
+  # Register LazyTensor with the custom handler.
 
-# Register LazyTensor with the custom handler.
+
 # It's safe to register this globally even if eager loading is used.
-type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=True)
+try:
+  type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=False)
+except ValueError:
+  # pass to avoid "warning: Type handler registry overriding type ... collision"
+  pass
 
 
 def _build_multi_axis_stacked_tensor(
@@ -381,7 +386,7 @@ def _build_single_axis_stacked_tensor(
     processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
     tensors_to_stack.append(processed_hf_tensor)
 
-  # Stack all processed tensors along the determined axis.
+    # Stack all processed tensors along the determined axis.
   return np.stack(tensors_to_stack, axis=axis_to_stack)
 
 
@@ -421,7 +426,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   else:
     output_directory = config.base_output_directory
 
-  # Setup JAX distributed system and mesh
+    # Setup JAX distributed system and mesh
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
@@ -554,7 +559,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
             config,
         )
 
-    # Execute based on mode
+        # Execute based on mode
     if use_lazy_load:
       # In lazy mode, we don't execute the loading/transformation function
       # immediately. Instead, we wrap it in a `LazyTensor` object. This
@@ -596,7 +601,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     if save_checkpoint(checkpoint_manager, 0, final_save_state):
       max_logging.log("saved a checkpoint at step 0")
 
-    # Upon preemption, exit when and only when all ongoing saves are complete.
+      # Upon preemption, exit when and only when all ongoing saves are complete.
     if checkpoint_manager.reached_preemption(0):
       checkpoint_manager.wait_until_finished()
       sys.exit()
