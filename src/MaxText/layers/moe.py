@@ -321,6 +321,9 @@ class RoutedMoE(nnx.Module):
       # special sharding for dsv3
       self.wi_kernel_axes = ("embed_no_exp", None, "mlp")
       self.wo_kernel_axes = ("embed_no_exp", "mlp", None)
+    elif self.config.use_2d_fsdp_sharding:
+      self.wi_kernel_axes = ("embed_no_exp", "mlp", None)
+      self.wo_kernel_axes = ("embed_no_exp", "mlp", None)
     else:
       self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
       self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
@@ -979,6 +982,10 @@ class RoutedMoE(nnx.Module):
         w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
         w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
         wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+    elif self.config.use_2d_fsdp_sharding:
+      w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+      w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+      wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
     else:
       w0_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       w1_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))

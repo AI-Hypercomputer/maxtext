@@ -68,6 +68,12 @@ def _merge_logical_axis_rules(base_rules, new_rules):
   return updated_rules
 
 
+def _apply_rules(base_rules, new_rules, config):
+  if config.get("override_logical_axis_rules"):
+    return new_rules
+  return _merge_logical_axis_rules(base_rules, new_rules)
+
+
 def _load_config(config_name: str) -> omegaconf.DictConfig:
   """Loads a YAML file and its base_configs recursively using OmegaConf."""
   cfg = omegaconf.OmegaConf.load(config_name)
@@ -241,8 +247,8 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   model_rules = omegaconf.OmegaConf.to_container(model_rules_oc, resolve=True) if model_rules_oc else []
   overrides_rules = omegaconf.OmegaConf.to_container(overrides_rules_oc, resolve=True) if overrides_rules_oc else []
 
-  merged_rules = _merge_logical_axis_rules(base_rules, model_rules)
-  merged_rules = _merge_logical_axis_rules(merged_rules, overrides_rules)
+  merged_rules = _apply_rules(base_rules, model_rules, model_cfg_oc)
+  merged_rules = _apply_rules(merged_rules, overrides_rules, overrides_cfg)
 
   # Remove the rules from the original configs before the main merge
   if "logical_axis_rules" in base_yml_config:
