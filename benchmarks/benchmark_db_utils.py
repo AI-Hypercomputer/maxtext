@@ -25,15 +25,12 @@ from typing import Any, Type
 import dataclasses
 import getpass
 import os
-import sys
 import uuid
 
 from argparse import Namespace
 
-BQ_WRITER_PATH = "/benchmark-automation/benchmark_db_writer/src"
 temp_dir = gettempdir()
 DEFAULT_LOCAL_DIR = os.path.join(temp_dir, "")
-# bq_writer_repo_root = get_bq_writer_path(DEFAULT_LOCAL_DIR)
 
 DEFAULT_TUNING_PARAMS_FILE = os.path.join(temp_dir, "tuning_params.json")
 
@@ -114,7 +111,6 @@ def write_run(
         dataset: The dataset used in the run.
         num_of_superblock: The number of superblocks in the hardware. ( valid for GPUs)
         update_person_ldap: The LDAP ID of the person updating the record (default: current user).
-        is_test: Whether to use the testing project or the production project.
     metrics: Metrics object containing:
         median_step_time: The median step time of the run.
         e2e_step_time: The end-to-end time of the run.
@@ -134,25 +130,20 @@ def write_run(
   Raises:
     ValueError: If any of the IDs are invalid.
   """
-  bq_writer_repo_root = BQ_WRITER_PATH
-  sys.path.append(bq_writer_repo_root)
-
   # pylint: disable=import-outside-toplevel
 
-  from benchmark_db_writer import bq_writer_utils
-  from benchmark_db_writer import dataclass_bigquery_writer
-  from benchmark_db_writer.run_summary_writer import sample_run_summary_writer
-  from benchmark_db_writer.schema.workload_benchmark_v2 import workload_benchmark_v2_schema
+  from benchmarks.benchmark_db_writer import bq_writer_utils
+  from benchmarks.benchmark_db_writer import dataclass_bigquery_writer
+  from benchmarks.benchmark_db_writer.schema.workload_benchmark_v2 import workload_benchmark_v2_schema
 
   def get_db_client(
-      project: str, dataset: str, table: str, dataclass_type: Type, is_test: bool = False
+      project: str, dataset: str, table: str, dataclass_type: Type
   ) -> dataclass_bigquery_writer.DataclassBigQueryWriter:
     """Creates a BigQuery client object.
 
     Args:
       table: The name of the BigQuery table.
       dataclass_type: The dataclass type corresponding to the table schema.
-      is_test: Whether to use the testing project or the production project.
 
     Returns:
       A BigQuery client object.
@@ -167,53 +158,45 @@ def write_run(
 
   print(options.model_id)
 
-  if (
-      sample_run_summary_writer.validate_model_id(options.model_id, options.is_test)
-      and sample_run_summary_writer.validate_hardware_id(options.hardware_id, options.is_test)
-      and sample_run_summary_writer.validate_software_id(options.software_id, options.is_test)
-  ):
-    summary = workload_benchmark_v2_schema.WorkloadBenchmarkV2Schema(
-        run_id=f"run-{uuid.uuid4()}",
-        model_id=options.model_id,
-        software_id=options.software_id,
-        hardware_id=options.hardware_id,
-        hardware_num_chips=number_of_chips,
-        hardware_num_nodes=number_of_nodes,
-        result_success=run_success,
-        configs_framework=framework_config_in_json,
-        configs_env=env_variables,
-        configs_container_version=options.container_image_name,
-        configs_xla_flags=options.xla_flags.replace(",", " "),
-        configs_dataset=options.dataset,
-        logs_artifact_directory="",
-        update_person_ldap=getpass.getuser(),
-        run_source="automation",
-        run_type=options.run_type,
-        run_release_status=run_release_status,
-        workload_precision=options.precision,
-        workload_gbs=int(options.global_batch_size),
-        workload_optimizer=options.optimizer,
-        workload_sequence_length=int(options.seq_length),
-        metrics_e2e_time=metrics.e2e_step_time,
-        metrics_mfu=mfu,
-        metrics_step_time=metrics.median_step_time,
-        metrics_tokens_per_second=metrics.avg_tokens_per_sec,
-        metrics_num_steps=number_of_steps,
-        metrics_other=other_metrics_in_json,
-        hardware_nccl_driver_nickname=nccl_driver_nickname,
-        hardware_topology=options.topology,
-        hardware_num_superblocks=0,
-        logs_comments=comment,
-    )
+  summary = workload_benchmark_v2_schema.WorkloadBenchmarkV2Schema(
+      run_id=f"run-{uuid.uuid4()}",
+      model_id=options.model_id,
+      software_id=options.software_id,
+      hardware_id=options.hardware_id,
+      hardware_num_chips=number_of_chips,
+      hardware_num_nodes=number_of_nodes,
+      hardware_num_slices=options.hardware_num_slices,
+      result_success=run_success,
+      configs_framework=framework_config_in_json,
+      configs_env=env_variables,
+      configs_container_version=options.container_image_name,
+      configs_xla_flags=options.xla_flags.replace(",", " "),
+      configs_dataset=options.dataset,
+      logs_artifact_directory="",
+      update_person_ldap=getpass.getuser(),
+      run_source="automation",
+      run_type=options.run_type,
+      run_release_status=run_release_status,
+      workload_precision=options.precision,
+      workload_gbs=int(options.global_batch_size),
+      workload_optimizer=options.optimizer,
+      workload_sequence_length=int(options.seq_length),
+      metrics_e2e_time=metrics.e2e_step_time,
+      metrics_mfu=mfu,
+      metrics_step_time=metrics.median_step_time,
+      metrics_tokens_per_second=metrics.avg_tokens_per_sec,
+      metrics_num_steps=number_of_steps,
+      metrics_other=other_metrics_in_json,
+      hardware_nccl_driver_nickname=nccl_driver_nickname,
+      hardware_topology=options.topology,
+      hardware_num_superblocks=0,
+      logs_comments=comment,
+  )
 
-    client = get_db_client(
-        options.db_project,
-        options.db_dataset,
-        "run_summary",
-        workload_benchmark_v2_schema.WorkloadBenchmarkV2Schema,
-        options.is_test,
-    )
-    client.write([summary])
-
-  else:
-    raise ValueError("Could not upload data in run summary table")
+  client = get_db_client(
+      options.db_project,
+      options.db_dataset,
+      "run_summary",
+      workload_benchmark_v2_schema.WorkloadBenchmarkV2Schema,
+  )
+  client.write([summary])
