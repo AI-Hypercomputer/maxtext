@@ -83,7 +83,7 @@ from MaxText.inference_utils import str2bool
 from MaxText.layers import models, quantizations
 from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
+from MaxText.utils.ckpt_conversion.utils.utils import check_param_map_keys, apply_hook_fns, HF_IDS
 
 jax.config.update("jax_platform_name", "cpu")
 
@@ -368,7 +368,10 @@ def _build_single_axis_stacked_tensor(
   # If the number of items to stack equals the number of layers, it's a standard
   # scanned layer, and we use the configured param_scan_axis. Otherwise, it's
   # an unscanned MoE layer, and we stack along the expert axis (0).
+
+  # TODO(shuningjin): this is heuristic is not working
   axis_to_stack = config.param_scan_axis if len(hf_source_keys) == config.base_num_decoder_layers else 0
+  axis_to_stack = config.param_scan_axis
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
@@ -414,7 +417,11 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   if model_name_original not in HF_IDS:
     raise ValueError(f"Unsupported model name: {model_name_original}. Supported models are: {list(HF_IDS.keys())}")
 
-  model_id = HF_IDS[model_name_original]
+  if not test_args.hf_model_path:
+    model_id = HF_IDS[model_name_original]
+  else:
+    model_id = test_args.hf_model_path
+
   max_utils.print_system_information()
   if not config.base_output_directory:
     output_directory = f"tmp/{config.run_name}"
@@ -495,7 +502,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   max_logging.log("Parameter mappings and hooks obtained.")
 
   max_logging.log("Starting weight transformation...")
-  final_mt_weights = []
+  final_mt_weights = [None] * len(abstract_params_flat)
 
   # Define the appropriate tensor getter based on mode
   if use_lazy_load:
@@ -509,19 +516,36 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
 
     tensor_getter = _eager_getter
 
-  for path_tuple, abstract_leaf_value in MemoryMonitorTqdm(
-      abstract_params_flat, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
-  ):
+  # preprocess state
+  maxtext_abstract_dict = {}
+  for idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
     key_parts = [k.key for k in path_tuple if hasattr(k, "key")]
     mt_param_key = "params-" + "-".join(key_parts)
     mt_target_shape_final = abstract_leaf_value.shape
+    maxtext_abstract_dict[mt_param_key] = (idx, mt_target_shape_final)
+  del abstract_params_flat
 
+  # preprocess key
+  filtered_map_keys = check_param_map_keys(param_map_mt_to_hf.keys(), maxtext_abstract_dict.keys())
+  print(filtered_map_keys)
+
+  for mt_param_key in MemoryMonitorTqdm(
+      filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
+  ):
+    print(mt_param_key)
     hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key)
-
     if hf_source_keys_or_key is None:
       raise ValueError(f"MaxText parameter {mt_param_key} not found in mapping.")
-
     hook_fn = hook_fn_map_mt.get(mt_param_key)
+
+    if not isinstance(mt_param_key, tuple):
+      idx, mt_target_shape_final = maxtext_abstract_dict[mt_param_key]
+    else:
+      idx, mt_target_shape_final = [], []
+      for subkey in mt_param_key:
+        sub_idx, sub_mt_target_shape_final = maxtext_abstract_dict[subkey]
+        idx.append(sub_idx)
+        mt_target_shape_final.append(sub_mt_target_shape_final)
 
     # Determine the loading function for this specific parameter
     load_fn = None
@@ -562,18 +586,28 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
       # to load the tensor later (the `load_fn`, shape, dtype).
       # The actual data will only be loaded when Orbax calls `__array__`
       # on this object during the saving process.
-      final_mt_weights.append(LazyTensor(load_fn, mt_target_shape_final, abstract_leaf_value.dtype, name=mt_param_key))
+      final_mt_tensor_numpy = LazyTensor(load_fn, mt_target_shape_final, abstract_leaf_value.dtype, name=mt_param_key)
     else:
       # In eager mode, we execute the function immediately to get the
       # NumPy array and append it to our list of weights.
       final_mt_tensor_numpy = load_fn()
+
+    if not isinstance(mt_param_key, tuple):
       if final_mt_tensor_numpy.shape != mt_target_shape_final:
         raise ValueError(
             f"Shape mismatch for {mt_param_key}: Expected {mt_target_shape_final}, got {final_mt_tensor_numpy.shape}"
         )
-      final_mt_weights.append(final_mt_tensor_numpy)
+      final_mt_weights[idx] = final_mt_tensor_numpy
+    else:
+      # TODO(shuningjin): lazy load
+      assert not use_lazy_load
+      for i, sub_idx in enumerate(idx):
+        final_mt_weights[sub_idx] = final_mt_tensor_numpy[..., i]
+        assert (
+            final_mt_weights[sub_idx].shape == mt_target_shape_final[i]
+        ), f"expect {mt_target_shape_final[i]}, got {final_mt_weights[sub_idx].shape}"
 
-  del abstract_params_flat, hf_state_dict_numpy
+  del hf_state_dict_numpy
   max_logging.log("Weight transformation preparation complete.")
   print_ram_usage("Before creating full JAX tree")
 
@@ -617,9 +651,13 @@ if __name__ == "__main__":
       default=False,
       help="Whether to use lazy loading of HF tensors.",
   )
+  # if not specified, default to MaxText.utils.ckpt_conversion.utils.utils.HF_IDS[model_name]
+  parser.add_argument(
+      "--hf_model_path", type=str, required=False, default="", help="local path to hf model, or custom remote hf repo"
+  )
   local_args, _ = parser.parse_known_args()
   model_args = sys.argv
-  to_remove_args = ["--lazy_load_tensors"]
+  to_remove_args = ["--lazy_load_tensors", "--hf_model_path"]
   for a in to_remove_args:
     model_args = [s for s in model_args if not s.startswith(a)]
   main(model_args, local_args)

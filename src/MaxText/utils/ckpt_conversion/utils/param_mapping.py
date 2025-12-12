@@ -953,8 +953,8 @@ def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
   - (GptOssMlp-wi_0_bias, GptOssMlp-wi_1_bias): mlp.experts.gate_up_proj_bias
   """
   # TODO(shuningjin): add unscan support, b/459541579
-  if not scan_layers:
-    raise NotImplementedError("Current gpt-oss mapping only supports scan_layers=True")
+  # if not scan_layers:
+  #   raise NotImplementedError("Current gpt-oss mapping only supports scan_layers=True")
 
   n_layers = config["num_hidden_layers"]  # hf config
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
@@ -966,63 +966,82 @@ def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       "params-decoder-logits_dense-kernel": "lm_head.weight",
   }
 
-  for block_idx in range(layer_cycle_interval):
-    # Identify all original HF layer indices that collapse into this block
-    hf_indices = list(range(block_idx, n_layers, layer_cycle_interval))
-    prefix = f"params-decoder-layers-layers_{block_idx}"
+  if scan_layers:
+    # Scan over blocks
+    for block_idx in range(layer_cycle_interval):
+      # Identify all original HF layer indices that collapse into this block
+      hf_indices = range(block_idx, n_layers, layer_cycle_interval)
+      prefix = f"params-decoder-layers-layers_{block_idx}"
+      block_mapping = {
+          # Layer Norms
+          f"{prefix}-pre_self_attention_layer_norm-scale": [
+              f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
+          ],
+          f"{prefix}-post_self_attention_layer_norm-scale": [
+              f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
+          ],
+          # GptOssAttention
+          f"{prefix}-GptOssAttention-query-kernel": [f"model.layers.{i}.self_attn.q_proj.weight" for i in hf_indices],
+          f"{prefix}-GptOssAttention-query-bias": [f"model.layers.{i}.self_attn.q_proj.bias" for i in hf_indices],
+          f"{prefix}-GptOssAttention-key-kernel": [f"model.layers.{i}.self_attn.k_proj.weight" for i in hf_indices],
+          f"{prefix}-GptOssAttention-key-bias": [f"model.layers.{i}.self_attn.k_proj.bias" for i in hf_indices],
+          f"{prefix}-GptOssAttention-value-kernel": [f"model.layers.{i}.self_attn.v_proj.weight" for i in hf_indices],
+          f"{prefix}-GptOssAttention-value-bias": [f"model.layers.{i}.self_attn.v_proj.bias" for i in hf_indices],
+          f"{prefix}-GptOssAttention-out-kernel": [f"model.layers.{i}.self_attn.o_proj.weight" for i in hf_indices],
+          f"{prefix}-GptOssAttention-out-bias": [f"model.layers.{i}.self_attn.o_proj.bias" for i in hf_indices],
+          f"{prefix}-GptOssAttention-sinks": [f"model.layers.{i}.self_attn.sinks" for i in hf_indices],
+          # GptOssMlp
+          # 1. Gate/Router
+          f"{prefix}-GptOssMlp-gate-kernel": [f"model.layers.{i}.mlp.router.weight" for i in hf_indices],
+          f"{prefix}-GptOssMlp-gate-bias": [f"model.layers.{i}.mlp.router.bias" for i in hf_indices],
+          # 2. Experts (Down Projection)
+          f"{prefix}-GptOssMlp-wo": [f"model.layers.{i}.mlp.experts.down_proj" for i in hf_indices],
+          f"{prefix}-GptOssMlp-wo_bias": [f"model.layers.{i}.mlp.experts.down_proj_bias" for i in hf_indices],
+          # 3. Experts (Gate/Up Fused Projection)
+          # N-to-1 mapping
+          (f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1"): [
+              f"model.layers.{i}.mlp.experts.gate_up_proj" for i in hf_indices
+          ],
+          (f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias"): [
+              f"model.layers.{i}.mlp.experts.gate_up_proj_bias" for i in hf_indices
+          ],
+      }
+      mapping.update(block_mapping)
 
-    # Layer Norms
-    mapping[f"{prefix}-pre_self_attention_layer_norm-scale"] = [
-        f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
-    ]
-    mapping[f"{prefix}-post_self_attention_layer_norm-scale"] = [
-        f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
-    ]
-
-    # GptOssAttention
-    mapping.update(
-        {
-            f"{prefix}-GptOssAttention-query-kernel": [f"model.layers.{i}.self_attn.q_proj.weight" for i in hf_indices],
-            f"{prefix}-GptOssAttention-query-bias": [f"model.layers.{i}.self_attn.q_proj.bias" for i in hf_indices],
-            f"{prefix}-GptOssAttention-key-kernel": [f"model.layers.{i}.self_attn.k_proj.weight" for i in hf_indices],
-            f"{prefix}-GptOssAttention-key-bias": [f"model.layers.{i}.self_attn.k_proj.bias" for i in hf_indices],
-            f"{prefix}-GptOssAttention-value-kernel": [f"model.layers.{i}.self_attn.v_proj.weight" for i in hf_indices],
-            f"{prefix}-GptOssAttention-value-bias": [f"model.layers.{i}.self_attn.v_proj.bias" for i in hf_indices],
-            f"{prefix}-GptOssAttention-out-kernel": [f"model.layers.{i}.self_attn.o_proj.weight" for i in hf_indices],
-            f"{prefix}-GptOssAttention-out-bias": [f"model.layers.{i}.self_attn.o_proj.bias" for i in hf_indices],
-            f"{prefix}-GptOssAttention-sinks": [f"model.layers.{i}.self_attn.sinks" for i in hf_indices],
-        }
-    )
-
-    # GptOssMlp
-    # 1. Gate/Router
-    mapping.update(
-        {
-            f"{prefix}-GptOssMlp-gate-kernel": [f"model.layers.{i}.mlp.router.weight" for i in hf_indices],
-            f"{prefix}-GptOssMlp-gate-bias": [f"model.layers.{i}.mlp.router.bias" for i in hf_indices],
-        }
-    )
-
-    # 2. Experts (Down Projection)
-    mapping.update(
-        {
-            f"{prefix}-GptOssMlp-wo": [f"model.layers.{i}.mlp.experts.down_proj" for i in hf_indices],
-            f"{prefix}-GptOssMlp-wo_bias": [f"model.layers.{i}.mlp.experts.down_proj_bias" for i in hf_indices],
-        }
-    )
-
-    # 3. Experts (Gate/Up Fused Projection)
-    # N-to-1 mapping
-    mapping.update(
-        {
-            (f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1"): [
-                f"model.layers.{i}.mlp.experts.gate_up_proj" for i in hf_indices
-            ],
-            (f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias"): [
-                f"model.layers.{i}.mlp.experts.gate_up_proj_bias" for i in hf_indices
-            ],
-        }
-    )
+  else:
+    # Unscan
+    for i in range(n_layers):
+      prefix = f"params-decoder-layers_{i}"
+      layer_mapping = {
+          # Layer Norms
+          f"{prefix}-pre_self_attention_layer_norm-scale": f"model.layers.{i}.input_layernorm.weight",
+          f"{prefix}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
+          # GptOssAttention
+          f"{prefix}-GptOssAttention-query-kernel": f"model.layers.{i}.self_attn.q_proj.weight",
+          f"{prefix}-GptOssAttention-query-bias": f"model.layers.{i}.self_attn.q_proj.bias",
+          f"{prefix}-GptOssAttention-key-kernel": f"model.layers.{i}.self_attn.k_proj.weight",
+          f"{prefix}-GptOssAttention-key-bias": f"model.layers.{i}.self_attn.k_proj.bias",
+          f"{prefix}-GptOssAttention-value-kernel": f"model.layers.{i}.self_attn.v_proj.weight",
+          f"{prefix}-GptOssAttention-value-bias": f"model.layers.{i}.self_attn.v_proj.bias",
+          f"{prefix}-GptOssAttention-out-kernel": f"model.layers.{i}.self_attn.o_proj.weight",
+          f"{prefix}-GptOssAttention-out-bias": f"model.layers.{i}.self_attn.o_proj.bias",
+          f"{prefix}-GptOssAttention-sinks": f"model.layers.{i}.self_attn.sinks",
+          # GptOssMlp
+          # 1. Gate/Router
+          f"{prefix}-GptOssMlp-gate-kernel": f"model.layers.{i}.mlp.router.weight",
+          f"{prefix}-GptOssMlp-gate-bias": f"model.layers.{i}.mlp.router.bias",
+          # 2. Experts (Down Projection)
+          f"{prefix}-GptOssMlp-wo": f"model.layers.{i}.mlp.experts.down_proj",
+          f"{prefix}-GptOssMlp-wo_bias": f"model.layers.{i}.mlp.experts.down_proj_bias",
+          # 3. Experts (Gate/Up Fused Projection)
+          # N-to-1 mapping
+          (f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1"): f"model.layers.{i}.mlp.experts.gate_up_proj",
+          (
+              f"{prefix}-GptOssMlp-wi_0_bias",
+              f"{prefix}-GptOssMlp-wi_1_bias",
+          ): f"model.layers.{i}.mlp.experts.gate_up_proj_bias",
+      }
+      mapping.update(layer_mapping)
 
   return mapping
 
@@ -1037,11 +1056,11 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
   - (GptOssMlp-wi_0_bias, GptOssMlp-wi_1_bias): mlp.experts.gate_up_proj_bias
   """
   # TODO(shuningjin): support hf->orbax(scan), b/459541579
-  if not saving_to_hf:
-    raise NotImplementedError("Currently gpt-oss only supports saving_to_hf=True.")
+  # if not saving_to_hf:
+  #   raise NotImplementedError("Currently gpt-oss only supports saving_to_hf=True.")
   # TODO(shuningjin): add unscan support, b/459541579
-  if not scan_layers:
-    raise NotImplementedError("Currently gpt-oss only supports scan_layers=True.")
+  # if not scan_layers:
+  #   raise NotImplementedError("Currently gpt-oss only supports scan_layers=True.")
 
   def transpose(input_tensor, target_shape=None):
     if saving_to_hf:
@@ -1069,35 +1088,40 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
   def interleave(input_tensor, target_shape=None):
     """
     N-to-1 mapping: maxtext (wi_0, wi_1) <-> hf (wi_0_1)
-    if saving_to_hf, input_tensor is a list of tensors
+    - if saving_to_hf: (wi_0, wi_1) -> wi_0_1
+      - input_tensor is a list of two tensors, tensor ORDER must be same as key order
+      - return a single tensor
+    - otherwise: wi_0_1 -> (wi_0, wi_1)
+      - input_tensor is a single tensor
+      - return two tensors stack at LAST index -1, tensor ORDER must be same as key order
     """
     if saving_to_hf:
-      # (wi_0, wi_1) -> wi_0_1
       wi_0, wi_1 = input_tensor
       wi_0_1 = np.empty(target_shape, dtype=wi_0.dtype)
       wi_0_1[..., ::2] = wi_0
       wi_0_1[..., 1::2] = wi_1
       return wi_0_1
     else:
-      # wi_0_1 -> (wi_0, wi_1)
       # TODO(shuningjin): support hf->orbax(scan), b/459541579
-      raise NotImplementedError
+      # NOTE: array order must be same as key order, stack at axis -1
+      wi_0_1 = input_tensor
+      wi_0 = wi_0_1[..., ::2]
+      wi_1 = wi_0_1[..., 1::2]
+      return np.stack([wi_0, wi_1], axis=-1)
 
-  hooks = {
-      "params-decoder-logits_dense-kernel": transpose,
-  }
-
-  # Scan over blocks
+  n_layers = config["num_hidden_layers"]  # hf config
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
-  for block_idx in range(layer_cycle_interval):
-    prefix = f"params-decoder-layers-layers_{block_idx}"
+
+  hooks = {"params-decoder-logits_dense-kernel": transpose}
+
+  indices = range(layer_cycle_interval) if scan_layers else range(n_layers)
+  for idx in indices:
+    prefix = f"params-decoder-layers-layers_{idx}" if scan_layers else f"params-decoder-layers_{idx}"
     # Attention Kernels & Biases
     for key in ["query", "key", "value"]:
       hooks[f"{prefix}-GptOssAttention-{key}-kernel"] = reshape_kernel
       hooks[f"{prefix}-GptOssAttention-{key}-bias"] = reshape_bias
-
     hooks[f"{prefix}-GptOssAttention-out-kernel"] = reshape_kernel
-
     # MLP Kernels & Biases
     hooks[f"{prefix}-GptOssMlp-gate-kernel"] = transpose
     # Experts (Gate/Up Fused Projection), N-to-1 mapping
