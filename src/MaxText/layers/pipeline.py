@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 
 from jax import numpy as jnp
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import jax
 import jax.ad_checkpoint
 
@@ -28,7 +28,7 @@ from flax.core import meta
 from flax import linen as nn
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN, EP_AS_CONTEXT
-from MaxText.sharding import all_gather_over_fsdp
+from MaxText.sharding import all_gather_over_fsdp, maybe_shard_with_logical, maybe_shard_with_name
 
 
 class Pipeline(nn.Module):
@@ -85,6 +85,15 @@ class Pipeline(nn.Module):
         + self.iterations_to_complete_first_microbatch_one_repeat()
     )
 
+  def _maybe_shard_with_logical(self, inputs, logical_axes):
+    """Wrapper of maybe_shard_with_logical"""
+    with self.mesh, nn.partitioning.axis_rules(self.config.logical_axis_rules):
+      return maybe_shard_with_logical(inputs, logical_axes, shard_mode=self.config.shard_mode, mesh=self.mesh)
+
+  def _maybe_shard_with_name(self, inputs, sharding_name):
+    """Wrapper of maybe_shard_with_name"""
+    return maybe_shard_with_name(inputs, sharding_name, shard_mode=self.config.shard_mode)
+
   def init_states(self, inputs):
     """Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
     Assumes input has already been reshaped into microbatches: [num_micro_batches, micro_batch_size, sequence, embed]
@@ -102,21 +111,17 @@ class Pipeline(nn.Module):
     # shift has shape [num_stages, micro_size, sequence, embed]
     shift = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
 
-    shift = nn.with_logical_constraint(
+    shift = self._maybe_shard_with_logical(
         shift,
         ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
-        rules=self.config.logical_axis_rules,
-        mesh=self.mesh,
     )
 
     # Prev outputs has the same shape of the output (and shift)
     if self.config.pipeline_delay_activation_forwarding:
       prev_outputs = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
-      prev_outputs = nn.with_logical_constraint(
+      prev_outputs = self._maybe_shard_with_logical(
           prev_outputs,
           ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
-          rules=self.config.logical_axis_rules,
-          mesh=self.mesh,
       )
     else:
       prev_outputs = None
@@ -126,11 +131,9 @@ class Pipeline(nn.Module):
     # state_io has shape [num_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])
     # We shard the pipeline_microbatch_size axis by data/fsdp, not num_microbatches since those are looped over.
-    state_io = nn.with_logical_constraint(
+    state_io = self._maybe_shard_with_logical(
         state_io,
         ("activation_stage", None, self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
-        rules=self.config.logical_axis_rules,
-        mesh=self.mesh,
     )
 
     # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only
@@ -202,22 +205,20 @@ class Pipeline(nn.Module):
 
     # Selects input (from stream_io) for stage 0, other stages get from shift (the rotated previous output)
     stages_in = select_state_or_input(first_stage_in, shift)
-    stages_in = nn.with_logical_constraint(
+    stages_in = self._maybe_shard_with_logical(
         stages_in,
         ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
-        rules=self.config.logical_axis_rules,
-        mesh=self.mesh,
     )
     return stages_in
 
   def shard_dim_by_stages(self, x, dim: int):
     # Shards a dimension by stages. Currently, the sharding of other dimensions are left up the compiler, alternatively
     # we may want to copy over the sharding from the other input axes.
-    dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
+    dims_mapping = [None] * x.ndim
     dims_mapping[dim] = "stage"
     dims_mapping = tuple(dims_mapping)
     sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(*dims_mapping))
-    return jax.lax.with_sharding_constraint(x, sharding)
+    return self._maybe_shard_with_name(x, sharding)
 
   def get_microbatch_and_repeat_ids(self, loop_iteration):
     """Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and
@@ -271,7 +272,11 @@ class Pipeline(nn.Module):
     """
 
     def _gather_one(x, i):
-      return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, i, 1, ids_dim), ids_dim)
+      idx = tuple(i if d == ids_dim else slice(None) for d in range(x.ndim))
+      replicated_sharding = NamedSharding(self.mesh, P())
+      return x.at[idx].get(out_sharding=replicated_sharding)
+
+      # return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, i, 1, ids_dim), ids_dim)
 
     ids = self.shard_dim_by_stages(ids, 0)
     outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
@@ -468,7 +473,7 @@ class Pipeline(nn.Module):
     vmap_func = nn.vmap(
         func_to_vmap,
         in_axes=(0, 0, 0, 0, None, None),
-        spmd_axis_name="stage",
+        # spmd_axis_name="stage",
         variable_axes={"params": 0},
         split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
         metadata_params={
@@ -626,7 +631,7 @@ class Pipeline(nn.Module):
 
   def all_gather_over_fsdp(self, sharding_info):
     physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
-    return jax.lax.with_sharding_constraint(self.layers.variables, physical_constraint_no_fsdp)
+    return self._maybe_shard_with_name(self.layers.variables, physical_constraint_no_fsdp)
 
   @nn.compact
   def __call__(
@@ -651,12 +656,14 @@ class Pipeline(nn.Module):
             self.config.emb_dim,
         )
     )
-    example_inputs = jax.lax.broadcast(inputs[0], [self.num_stages])  # dummy inputs fed to initialize the module
+
+    example_inputs = inputs
+    # jax.lax.broadcast(sliced_inputs[0], [self.num_stages])  # dummy inputs fed to initialize the module
     # weights.
     ag_sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(None, None))
     if positions is not None:
       # AG positions
-      positions = jax.lax.with_sharding_constraint(positions, ag_sharding)
+      positions = self._maybe_shard_with_name(positions, ag_sharding)
 
       positions = positions.reshape(
           (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
@@ -667,7 +674,7 @@ class Pipeline(nn.Module):
       example_position = None
       position_idx = None
     if segment_ids is not None:
-      segment_ids = jax.lax.with_sharding_constraint(segment_ids, ag_sharding)
+      segment_ids = self._maybe_shard_with_name(segment_ids, ag_sharding)
       segment_ids = segment_ids.reshape(
           (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
       )
@@ -731,6 +738,7 @@ class Pipeline(nn.Module):
         )
       # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches for
       # the full total_iterations.
+      example_inputs = self._maybe_shard_with_logical(example_inputs, (None, None, None, None))
       stage_outputs = vmap_func(
           self.layers, example_inputs, example_segmentation, example_position, deterministic, model_mode
       )
