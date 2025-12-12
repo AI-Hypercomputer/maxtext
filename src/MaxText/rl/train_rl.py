@@ -146,9 +146,9 @@ def get_dataset(model_tokenizer, tmvp_config, data_dir, split="train") -> grain.
   return loaded_dataset
 
 
-def setup_configs_and_devices(argv: Sequence[str]):
+def setup_configs_and_devices(argv: list[str]):
   """Setup device allocation and configs for training and inference."""
-  config = pyconfig.initialize(argv)
+  config = pyconfig.initialize_pydantic(argv)
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
     max_logging.log("Running RL on a single slice")
@@ -188,13 +188,13 @@ def setup_configs_and_devices(argv: Sequence[str]):
     for i in range(config.num_trainer_slices, config.num_trainer_slices + config.num_samplers_slices):
       sampler_devices.extend(devices_by_slice[slice_indices[i]])
 
-    trainer_config = pyconfig.initialize(
+    trainer_config = pyconfig.initialize_pydantic(
         argv,
         num_slices=config.num_trainer_slices,
         ici_fsdp_parallelism=len(trainer_devices) // config.num_trainer_slices,
         dcn_data_parallelism=config.num_trainer_slices,
     )
-    sampler_config = pyconfig.initialize(
+    sampler_config = pyconfig.initialize_pydantic(
         argv,
         num_slices=config.num_samplers_slices,
         ici_fsdp_parallelism=len(sampler_devices) // config.num_samplers_slices,
@@ -257,7 +257,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   # Number of training steps.
   max_train_steps = int(
       trainer_config.num_batches
-      * trainer_config.num_iterations
+      * trainer_config.grpo.num_iterations
       * trainer_config.train_fraction
       * trainer_config.num_epoch
   )
@@ -291,7 +291,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   )[: trainer_config.num_test_batches]
 
   # Let's see how one batch of the dataset looks like!
-  if trainer_config.debug["rl"]:
+  if trainer_config.debug.rl:
     for ele in train_dataset[:1]:
       pprint(ele)
 
@@ -302,7 +302,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   # if trainer_devices=sampler_devices, then rollout_mesh=reference_mesh
   # else rollout_mesh uses sampler_devices
   rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
-  if trainer_config.debug["rl"]:
+  if trainer_config.debug.rl:
     max_logging.log("Reference Model initialized successfully")
     nnx.display(reference_model)
     max_logging.log(f"Reference mesh shape: {reference_mesh.shape}")
@@ -321,7 +321,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   max_logging.log("Creating policy model with same config as reference model on trainer mesh")
   actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
 
-  if trainer_config.debug["rl"]:
+  if trainer_config.debug.rl:
     max_logging.log("Policy Model initialized successfully")
     nnx.display(actor_model)
     max_logging.log(f"Policy mesh shape: {actor_mesh.shape}")
@@ -398,11 +398,11 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       ),
   )
   grpo_config = GrpoConfig(
-      num_generations=trainer_config.num_generations,
-      num_iterations=trainer_config.num_iterations,
-      beta=trainer_config.grpo_beta,
-      epsilon=trainer_config.grpo_epsilon,
-      loss_algo=trainer_config.loss_algo,
+      num_generations=trainer_config.grpo.num_generations,
+      num_iterations=trainer_config.grpo.num_iterations,
+      beta=trainer_config.grpo.grpo_beta,
+      epsilon=trainer_config.grpo.grpo_epsilon,
+      loss_algo=trainer_config.grpo.loss_algo,
   )
 
   # Create RL cluster
