@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:experimental
-# Copy benchmark-db
-FROM gcr.io/tpu-prod-env-one-vm/benchmark-db:2025-02-14
+
+ARG BASEIMAGE=python:3.12-slim-bullseye
+FROM $BASEIMAGE
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y curl gnupg
@@ -25,8 +26,8 @@ ENV ENV_MODE=$MODE
 ARG JAX_VERSION
 ENV ENV_JAX_VERSION=$JAX_VERSION
 
-ARG LIBTPU_GCS_PATH
-ENV ENV_LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH
+ARG LIBTPU_VERSION
+ENV ENV_LIBTPU_VERSION=$LIBTPU_VERSION
 
 ARG DEVICE
 ENV ENV_DEVICE=$DEVICE
@@ -44,9 +45,12 @@ COPY tools/setup tools/setup/
 COPY dependencies/requirements/ dependencies/requirements/
 COPY src/install_maxtext_extra_deps/extra_deps_from_github.txt src/install_maxtext_extra_deps/
 
+# Copy the custom libtpu.so file if it exists inside maxtext repository
+COPY libtpu.so* /root/custom_libtpu/
+
 # Install dependencies - these steps are cached unless the copied files change
-RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH} DEVICE=${ENV_DEVICE}"
-RUN --mount=type=cache,target=/root/.cache/pip bash /deps/tools/setup/setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH} DEVICE=${ENV_DEVICE}
+RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_VERSION=$ENV_LIBTPU_VERSION DEVICE=${ENV_DEVICE}"
+RUN --mount=type=cache,target=/root/.cache/pip bash /deps/tools/setup/setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_VERSION=${ENV_LIBTPU_VERSION} DEVICE=${ENV_DEVICE}
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
