@@ -234,8 +234,6 @@ class DecoderNNX(nnx.Module):
         )
         num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
         self.scanned_moe_layers = self._create_scanned_layers(moe_layer_cls, num_moe_layers, self.rngs.fork())
-        self.dense_graph_def, _ = nnx.split(self.scanned_dense_layers)
-        self.moe_graph_def, _ = nnx.split(self.scanned_moe_layers)
       elif cfg.decoder_block == DecoderBlockType.GEMMA3:
         from MaxText.layers import gemma3
 
@@ -248,7 +246,6 @@ class DecoderNNX(nnx.Module):
           self.scanned_layers = self._create_scanned_layers(
               scannable_block_cls, scan_length, self.rngs.fork(), **layer_kwargs
           )
-          self.layers_graph_def, _ = nnx.split(self.scanned_layers)
 
         num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
         if num_remaining_layers > 0:
@@ -272,7 +269,6 @@ class DecoderNNX(nnx.Module):
         self.scanned_layers = self._create_scanned_layers(
             self.decoder_layer_classes[0], scan_length, self.rngs.fork(), **layer_kwargs
         )
-        self.layers_graph_def, _ = nnx.split(self.scanned_layers)
     else:
       self.layers = []
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
@@ -525,7 +521,6 @@ class DecoderNNX(nnx.Module):
     base_stage = get_layer_to_pipeline(decoder_blocks, cfg)
     if cfg.set_remat_policy_on_layers_per_stage:
       policy = self.get_remat_policy()
-      # Apply remat policy via jax.checkpoint in the layer
 
     if issubclass(base_stage, nnx.Module):
       stage_module = nnx_wrappers.ToLinen(
@@ -538,15 +533,11 @@ class DecoderNNX(nnx.Module):
           },
       )
     else:
-      if cfg.num_layers_per_pipeline_stage == 1:
-        stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode)
-      else:
-        # For pipeline stages, wrap the layer
-        stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode)
+      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode)
     return stage_module
 
   def _create_scanned_layers(self, decoder_layer_class, length: int, rngs: nnx.Rngs, **layer_kwargs):
-    """Create scanned layers using NNX vmap. Checkpointing is applied at scan level."""
+    """Create scanned layers using NNX vmap with pipeline parallelism sharding."""
 
     def create_layer_fn(rng):
       if issubclass(decoder_layer_class, nnx.Module):
@@ -561,74 +552,32 @@ class DecoderNNX(nnx.Module):
       return layer
 
     nnx.split_rngs(rngs, splits=length)
-    layers_vmapped = nnx.vmap(create_layer_fn, in_axes=0, out_axes=0)(rngs)
+    layers_vmapped = nnx.vmap(
+        create_layer_fn,
+        in_axes=0,
+        out_axes=0,
+        axis_name="layers",
+        transform_metadata={nnx.PARTITION_NAME: "layers"},
+    )(rngs)
 
     return layers_vmapped
 
-  def _remat_layer(self, layer, policy, prevent_cse):
-    """Apply jax.checkpoint to layer's __call__ method."""
-    original_call = layer.__call__
-
-    def checkpointed_call(*args, **kwargs):
-      return jax.checkpoint(original_call, policy=policy, prevent_cse=prevent_cse)(*args, **kwargs)
-
-    object.__setattr__(layer, "__call__", checkpointed_call)
-    return layer
-
   def _apply_layers_sequentially(self, layers, x_in, *args, length: int, **kwargs):
-    """Apply layers using jax.lax.scan, mimicking Linen's nn.scan approach.
-
-    Linen's nn.scan works directly with parameter PyTrees and uses vmap to apply
-    the same computation with different parameters. We do the same here:
-
-    1. Extract layer's __call__ as a pure function
-    2. Use scan to iterate over parameter PyTrees (not module objects)
-    3. Avoid nnx.merge inside the loop - work with raw PyTrees like Linen does
-
-    This mimics Linen's approach of scanning over variable collections.
-    """
-
-    # Split once - separate static graph structure from parameters
-    graphdef, params, other_state = nnx.split(layers, nnx.Param, ...)
-
-    # Get checkpoint policy
+    """Apply layers using jax.lax.scan with gradient checkpointing."""
+    graphdef, state = nnx.split(layers)
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
 
-    # Create a pure function that applies the layer computation
-    # This captures graphdef and other_state in closure (like Linen captures the module class)
-    def pure_layer_fn(carry, layer_params):
-      """Pure function that operates on parameter PyTrees, mimicking Linen's approach.
-
-      Linen's nn.scan does essentially this:
-      - Takes parameters as a PyTree (not a module object)
-      - Applies the layer computation with those parameters
-      - Returns new carry
-
-      We do the same by merging params into the layer structure only once per iteration.
-      The key is that merge happens inside scan (unavoidable with NNX), but we minimize
-      what we pass through scan by only scanning over params.
-      """
-      # Reconstruct layer - this is the overhead compared to Linen
-      # Linen doesn't need this because it works directly with FrozenDict variables
-      layer = nnx.merge(graphdef, layer_params, other_state)
-
-      # Forward pass - pure computation on activations
+    def pure_layer_fn(carry, layer_state):
+      layer = nnx.merge(graphdef, layer_state)
       layer_out = layer(carry, *args, **kwargs)
-
-      # Extract carry for next iteration
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
-
       return new_carry, None
 
-    # Apply checkpoint to the entire scan body (like Linen's nn.scan + nn.remat)
     if policy is not None:
       pure_layer_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
-    # Scan over parameter PyTrees (like Linen scans over variable_axes)
-    # This creates a single computation graph that's reused with different parameters
-    final_carry, _ = jax.lax.scan(pure_layer_fn, x_in, params)
-
+    final_carry, _ = jax.lax.scan(pure_layer_fn, x_in, state)
     return final_carry, None
 
   def _apply_embedding(
