@@ -37,7 +37,7 @@ from MaxText.sharding import create_sharding
 from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import quantizations
-from MaxText.layers import pipeline
+from MaxText.layers import pipeline_nnx as pipeline
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText import sharding
@@ -221,18 +221,85 @@ class DecoderLayer(nn.Module):
     else:
       return layer_output, kv_cache
 
+class ScannedBlock(nnx.Module):
+  """Wraps a vmapped layer stack to execute it via jax.lax.scan.
+     This replaces the closure 'scan_runner' to make NNX happy.
+  """
+  def __init__(self, layers_vmapped, length, config, remat_policy):
+    self.layers = layers_vmapped
+    self.length = length
+    self.config = config
+    self.remat_policy = remat_policy
 
-class SequentialBlockDecoderLayers(nn.Module):
+  def __call__(self, x_in, *args, **kwargs):
+    # Split the vmapped module into Graph and Params
+    graph_def, params_stack = nnx.split(self.layers)
+    
+    # Prepare kwargs (filter out model_mode if needed, or pass through)
+    run_kwargs = kwargs.copy()
+    # Ensure model_mode isn't passed twice if it's in *args (broadcast_args)
+    run_kwargs.pop('model_mode', None)
+
+    def forward_single_step(carry, params_slice):
+      # Merge params back into a functional instance for this step
+      layer_i = nnx.merge(graph_def, params_slice)
+      
+      # Run the layer
+      # Note: *args captures [segment_ids, positions, deterministic, model_mode] 
+      layer_out = layer_i(carry, *args, **run_kwargs)
+
+      # Handle potential tuple return (e.g. (output, None)) from DecoderLayer
+      if isinstance(layer_out, tuple):
+        new_carry = layer_out[0]
+        extra_out = layer_out[1]
+      else:
+        new_carry = layer_out
+        extra_out = None
+
+      # Split again to capture any state updates (if mutable)
+      _, new_params_slice = nnx.split(layer_i)
+
+      return new_carry, (new_params_slice, extra_out)
+
+    # Apply Checkpointing (Remat)
+    # Using jax.checkpoint instead of nnx.remat to keep explicit control over policy
+    prevent_cse = not self.config.scan_pipeline_iterations
+    rematted_step = jax.checkpoint(forward_single_step, policy=self.remat_policy, prevent_cse=prevent_cse)
+    
+    # Run Scan
+    final_carry, (new_params_stack, stacked_outs) = jax.lax.scan(
+      rematted_step,
+      init=x_in,
+      xs=params_stack,
+      length=self.length,
+    )
+
+    # Update the stored parameters with the result (if they changed)
+    nnx.update(self.layers, new_params_stack)
+
+    # Return structure matching original code: (output, extra)
+    return final_carry, stacked_outs
+
+
+class SequentialBlockDecoderLayers(nnx.Module):
   """Sequential unscanned series of decoder layers."""
 
-  decoder_layer: Any
-  num_decoder_layers: int
-  config: Config
-  mesh: Mesh
-  quant: Quant
-  model_mode: str
 
-  @nn.compact
+  def __init__(self,decoder_layer:Any, num_decoder_layers:int, config:Config, mesh:Mesh, quant:Quant, model_mode:str, rngs:nnx.Rngs):
+    self.decoder_layer = decoder_layer
+    self.num_decoder_layers = num_decoder_layers
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.model_mode = model_mode
+    self.rngs = rngs
+    for lyr in range(num_decoder_layers):
+      new_layer = self.decoder_layer(
+          config=self.config, mesh=self.mesh, quant=self.quant, model_mode=model_mode,
+          rngs=self.rngs
+      )
+      setattr(self, f"layer_{lyr}", new_layer)
+
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -244,9 +311,7 @@ class SequentialBlockDecoderLayers(nn.Module):
       page_state: None | page_manager.PageState = None,
   ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
-      inputs = self.decoder_layer(
-          config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=model_mode
-      )(
+      inputs = getattr(self,f"layer_{lyr}")(
           inputs,
           decoder_segment_ids,
           decoder_positions,
@@ -259,8 +324,7 @@ class SequentialBlockDecoderLayers(nn.Module):
         inputs = inputs[0]  #  When scan_layers is True the decoder layers return (outputs, None).
     if self.config.scan_layers:
       return inputs, None  # pytype: disable=bad-return-type
-    else:
-      return inputs
+    return inputs
 
 
 class Decoder(nnx.Module):
@@ -297,7 +361,8 @@ class Decoder(nnx.Module):
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
       self.pipeline_module = pipeline.Pipeline(
-          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy,
+          rngs=self.rngs
       )
 
 
@@ -319,11 +384,10 @@ class Decoder(nnx.Module):
     self.RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
 
     broadcast_args_len = 4
-    
+    self.moe_layer = None
+
     if config.using_pipeline_parallelism:
       self.dense_layer = self.RemattedBlockLayers[0]
-      self.moe_layer = self.RemattedBlockLayers[1]
-
       if config.decoder_block == DecoderBlockType.DEEPSEEK:
         self.dense_layers = self.scan_decoder_layers(
             config,
@@ -335,7 +399,7 @@ class Decoder(nnx.Module):
             model_mode=model_mode,
         )
 
-        self.moe_layers = self.scan_decoder_layesrs(
+        self.moe_layers = self.scan_decoder_layers(
             config,
             self.moe_layer,
             config.num_moe_layers_outside_pp,
@@ -346,6 +410,7 @@ class Decoder(nnx.Module):
         )
       else:
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
+        breakpoint()
         self.layers_outside_pipeline = self.scan_decoder_layers(
                     config,
                     self.RemattedBlockLayers[0],
@@ -550,6 +615,7 @@ class Decoder(nnx.Module):
   def set_remat_policy(self, block_layers, policy):
     """Set remat policy"""
     RemattedBlockLayers = []
+    
     for block_layer in block_layers:
       if self.config.parameter_memory_host_offload:
         # Define parameter movement with mesh-based sharding
@@ -600,55 +666,44 @@ class Decoder(nnx.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
   def scan_decoder_layers(self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, **kwargs):
-
-    def create_real_nnx_layer(r):
-      partial_wrapper = decoder_layer(cfg, mesh=mesh, quant=self.quant, rngs=r, **kwargs)
-      
-      if hasattr(partial_wrapper, 'nnx_class'):
-          args_to_pass = partial_wrapper.args
-          
-          if not isinstance(args_to_pass, (list, tuple)):
-              args_to_pass = (args_to_pass,)
-
-          real_module = partial_wrapper.nnx_class(
-              *args_to_pass, 
-              **partial_wrapper.kwargs
-          )
-          return real_module
+      # 1. Generate keys explicitly (outside of any vmap)
+      # This avoids the "IndexError: index is out of bounds" caused by tracing Rngs inside vmap
+      if self.rngs is not None and 'params' in self.rngs:
+          root_key = self.rngs.params()
       else:
-          return partial_wrapper
-    rngs = nnx.Rngs(0)
-    nnx.split_rngs(rngs, splits=length)
-    layers = nnx.vmap(
-        create_real_nnx_layer,
-        in_axes=0, out_axes=0
-    )(rngs) 
-    
-    graph_def, params_stack = nnx.split(layers)
+          root_key = jax.random.key(0)
+      
+      keys = jax.random.split(root_key, length)
 
-    def scan_runner(x_in, *args, **dynamic_kwargs):
-        run_kwargs = {**kwargs, **dynamic_kwargs}
-        run_kwargs.pop('model_mode', None)
+      # 2. Create layers manually in a loop
+      layer_instances = []
+      for i in range(length):
+          k = keys[i]
+          # Create fresh, independent RNGs for this layer index
+          layer_rngs = nnx.Rngs(params=k, dropout=k, aqt=k, gate=k)
+          
+          # Initialize the layer
+          partial_wrapper = decoder_layer(cfg, mesh=mesh, quant=self.quant, rngs=layer_rngs, **kwargs)
+          
+          # Handle potential wrappers (ToLinen/ToNNX)
+          if hasattr(partial_wrapper, 'nnx_class'):
+              args_to_pass = partial_wrapper.args
+              if not isinstance(args_to_pass, (list, tuple)):
+                  args_to_pass = (args_to_pass,)
+              real_module = partial_wrapper.nnx_class(*args_to_pass, **partial_wrapper.kwargs)
+              layer_instances.append(real_module)
+          else:
+              layer_instances.append(partial_wrapper)
 
-        def forward_single_step(carry, params_slice):
-            breakpoint()
-            layer_i = nnx.merge(graph_def, params_slice)
-            def print_sharding(path, leaf):
-              if isinstance(leaf, jax.Array):
-                keystr = jax.tree_util.keystr(path)
-                if hasattr(leaf, "sharding"):
-                    jax.debug.print(f"Path: {keystr}, Shape: {leaf.shape}, Dtype: {leaf.dtype}, Sharding: {leaf.sharding}")
-                else:
-                    # This branch is taken during jax.eval_shape
-                    jax.debug.print(f"Path: {keystr}, Shape: {leaf.shape}, Dtype: {leaf.dtype}, Sharding: N/A (Abstract Array)")
-              return leaf
-            # jax.tree_util.tree_map_with_path(print_sharding, nnx.state(layer_i))
-            layer_out = layer_i(carry, *args, **run_kwargs)
+      if not layer_instances:
+        breakpoint()
+        raise ValueError("Scan length is 0, cannot create layers.")
 
-            if isinstance(layer_out, tuple):
-                new_carry = layer_out[0]
-            else:
-                new_carry = layer_out
+      # 3. Stack the states manually
+      # We extract the state from every instance and stack the arrays along axis 0.
+      # This effectively creates the same structure as a vmapped module's state.
+      all_states = [nnx.state(l) for l in layer_instances]
+      stacked_state = jax.tree.map(lambda *leaves: jnp.stack(leaves), *all_states)
 
             _, new_params_slice = nnx.split(layer_i)
 
@@ -716,6 +771,7 @@ class Decoder(nnx.Module):
           mesh=self.mesh,
           quant=self.quant,
           model_mode=self.model_mode,
+          rngs=self.rngs,
       )
     return stage_module
 
@@ -957,7 +1013,6 @@ class Decoder(nnx.Module):
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
-          breakpoint()
           y, _ = self.layers(y, *broadcast_args)
           y, _ = self.layers(y, *broadcast_args)
       else:
