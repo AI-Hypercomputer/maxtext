@@ -45,7 +45,7 @@ docker run hello-world
 ```
 Then run the following command to create a local Docker image named `maxtext_base_image`.
 ```bash
-bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training
+bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
 ```
 
 ### 1.3. Upload the Docker image to Artifact Registry

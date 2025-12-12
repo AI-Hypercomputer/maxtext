@@ -173,7 +173,7 @@ if [[ "$MODE" == "nightly" ]]; then
                                                 -r 'src/install_maxtext_extra_deps/extra_deps_from_github.txt'
     rm -fv -- "$nightly_txt"
 else
-    # stable or stable_stack mode: Install with pinned commits
+    # stable mode: Install with pinned commits
     if [ "$DEVICE" = "gpu" ]; then
         dep_basename='cuda12-requirements.txt'
     else
@@ -220,7 +220,6 @@ fi
 if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ $DEVICE == "tpu" ]]; then
-        echo "Installing stable jax, jaxlib for tpu"
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
             python3 -m uv pip install -U jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
@@ -234,24 +233,20 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
             gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
         fi
     elif [[ $DEVICE == "gpu" ]]; then
-        echo "Installing stable jax, jaxlib for NVIDIA gpu"
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib ${JAX_VERSION}"
             python3 -m uv pip install -U "jax[cuda12]==${JAX_VERSION}"
-        else
-            echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
-            python3 -m uv pip install "jax[cuda12]"
-        fi
-        export NVTE_FRAMEWORK=jax
-        if [[ -n "$JAX_VERSION" && "$JAX_VERSION" != "0.7.0" ]]; then
-            python3 -m uv pip install transformer-engine[jax]
-        else
-            python3 -m uv pip install git+https://github.com/NVIDIA/TransformerEngine.git@9d031f
+
+            export NVTE_FRAMEWORK=jax
+            if [[ "$JAX_VERSION" != "0.7.0" ]]; then
+                python3 -m uv pip install transformer-engine[jax]
+            else
+                python3 -m uv pip install git+https://github.com/NVIDIA/TransformerEngine.git@9d031f
+            fi
         fi
     fi
 elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
-
     # Uninstall existing jax, jaxlib and  libtpu-nightly
     python3 -m uv pip show jax && python3 -m uv pip uninstall jax
     python3 -m uv pip show jaxlib && python3 -m uv pip uninstall jaxlib
