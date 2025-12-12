@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""""Module for decoder layers."""
+"""Module for decoder layers"""
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -35,6 +35,7 @@ from MaxText import max_utils
 from MaxText.sharding import create_sharding
 from MaxText.inference import page_manager
 from MaxText.layers import linears
+from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
 from MaxText import maxtext_utils
@@ -473,7 +474,6 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
-        DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
@@ -482,6 +482,10 @@ class Decoder(nn.Module):
       return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
+    elif self.config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+      return functools.partial(
+          normalizations.Qwen3NextRMSNormLinen, num_features=num_features, shard_mode=self.config.shard_mode
+      )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 

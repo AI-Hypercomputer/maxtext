@@ -717,3 +717,19 @@ class TrainCompile(unittest.TestCase):
             "per_device_batch_size=1",
         )
     )
+
+  @pytest.mark.cpu_only
+  def test_qwen3_next(self):
+    """AOT test for qwen3-next and GatedDeltaNet implementation"""
+    compiled_trainstep_file = "/tmp/test_qwen3_next"
+    train_compile_main(
+        (
+            "",
+            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3-next-80b-a3b",
+            "per_device_batch_size=1",
+        )
+    )

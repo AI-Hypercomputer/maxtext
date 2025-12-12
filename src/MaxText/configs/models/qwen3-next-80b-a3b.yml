@@ -46,3 +46,6 @@ gdn_chunk_size: 64
 # RoPE Settings
 rope_max_timescale: 10000000
 partial_rotary_factor: 0.25
+
+# General Model Settings
+enable_dropout: False

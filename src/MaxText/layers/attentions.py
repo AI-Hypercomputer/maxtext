@@ -1104,9 +1104,6 @@ class Attention(nnx.Module):
           bidirectional_mask,
           self.sinks,
       )
-    if self.is_qwen3_next:
-      out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
-      out = out * jax.nn.sigmoid(gate)
     if model_mode == MODEL_MODE_PREFILL:
       out = self._maybe_shard_with_logical(out, self.prefill_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
@@ -1115,6 +1112,9 @@ class Attention(nnx.Module):
       out = self._maybe_shard_with_logical(out, self.out_axis_names)
     else:
       out = self._maybe_shard_with_logical(out, self.decode_out_axis_names)
+    if self.is_qwen3_next:
+      out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
+      out = out * jax.nn.sigmoid(gate)
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache
