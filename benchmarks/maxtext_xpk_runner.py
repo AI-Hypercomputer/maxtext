@@ -583,6 +583,8 @@ def generate_xpk_workload_cmd(
     cluster_config: XpkClusterConfig,
     wl_config: WorkloadConfig,
     workload_name=None,
+    user=os.environ["USER"],
+    temp_key=None,
     exp_name=None,
 ):
   """Generates a command to run a maxtext model on XPK."""
@@ -592,15 +594,19 @@ def generate_xpk_workload_cmd(
 
   time.localtime()
   length_of_random_str = 3
-  temp_post_fix = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(length_of_random_str))
+  # Allow DAG to resolve workload name for cleanup, preventing reliance on random IDs
+  if temp_key is not None:
+    temp_post_fix = temp_key
+  else:
+    temp_post_fix = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(length_of_random_str))
 
   truncate_model_name = 10
   truncate_prefix = 3
   post_fix = f"-{wl_config.num_slices}-{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
-  common_prefix = os.environ["USER"]
+  common_prefix = user
   pw_prefix = "pw-"
 
-  if workload_name is None:  # Generate name if not provided
+  if workload_name is None:
     if is_pathways_enabled:
       post_fix = f"-{wl_config.num_slices}-{temp_post_fix}"
       name = f"{pw_prefix}{wl_config.model.model_name.replace('_', '-')[:truncate_model_name - len(pw_prefix)]}"
