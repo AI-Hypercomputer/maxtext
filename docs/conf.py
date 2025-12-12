@@ -62,6 +62,9 @@ myst_linkify_fuzzy_links = False
 # Theme-specific options
 # https://sphinx-book-theme.readthedocs.io/en/stable/reference.html
 html_theme_options = {
+    "analytics": {
+        "google_analytics_id": "G-RC6NRK4GNN",
+    },
     "show_navbar_depth": 1,
     "show_toc_level": 1,
     "repository_url": "https://github.com/AI-Hypercomputer/maxtext",
