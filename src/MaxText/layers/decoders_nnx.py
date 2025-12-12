@@ -546,12 +546,7 @@ class DecoderNNX(nnx.Module):
     return stage_module
 
   def _create_scanned_layers(self, decoder_layer_class, length: int, rngs: nnx.Rngs, **layer_kwargs):
-    """Create scanned layers using NNX vmap.
-
-    NOTE: We use vmap here (not scan) to create N independent layer instances.
-    This matches Linen's approach where nn.scan creates N parameter trees.
-    The actual scanning happens later in _apply_layers_sequentially.
-    """
+    """Create scanned layers using NNX vmap. Checkpointing is applied at scan level."""
 
     def create_layer_fn(rng):
       if issubclass(decoder_layer_class, nnx.Module):
@@ -581,39 +576,59 @@ class DecoderNNX(nnx.Module):
     return layer
 
   def _apply_layers_sequentially(self, layers, x_in, *args, length: int, **kwargs):
-    """Apply layers using nnx.scan - NO MERGE needed!
+    """Apply layers using jax.lax.scan, mimicking Linen's nn.scan approach.
 
-    CORRECT APPROACH: Use nnx.scan (not jax.lax.scan)!
+    Linen's nn.scan works directly with parameter PyTrees and uses vmap to apply
+    the same computation with different parameters. We do the same here:
 
-    nnx.scan is designed for NNX modules and handles state management internally:
-    - No split/merge needed - nnx.scan does this efficiently
-    - Automatically handles Param vs non-Param state
-    - Applies remat via nnx.remat (not jax.checkpoint)
+    1. Extract layer's __call__ as a pure function
+    2. Use scan to iterate over parameter PyTrees (not module objects)
+    3. Avoid nnx.merge inside the loop - work with raw PyTrees like Linen does
 
-    This is the NNX equivalent of Linen's nn.scan - zero manual state management!
+    This mimics Linen's approach of scanning over variable collections.
     """
+
+    # Split once - separate static graph structure from parameters
+    graphdef, params, other_state = nnx.split(layers, nnx.Param, ...)
+
+    # Get checkpoint policy
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
 
-    def layer_fn(carry, layer_i):
-      """Simple layer call - nnx.scan handles all state management."""
-      layer_out = layer_i(carry, *args, **kwargs)
+    # Create a pure function that applies the layer computation
+    # This captures graphdef and other_state in closure (like Linen captures the module class)
+    def pure_layer_fn(carry, layer_params):
+      """Pure function that operates on parameter PyTrees, mimicking Linen's approach.
+
+      Linen's nn.scan does essentially this:
+      - Takes parameters as a PyTree (not a module object)
+      - Applies the layer computation with those parameters
+      - Returns new carry
+
+      We do the same by merging params into the layer structure only once per iteration.
+      The key is that merge happens inside scan (unavoidable with NNX), but we minimize
+      what we pass through scan by only scanning over params.
+      """
+      # Reconstruct layer - this is the overhead compared to Linen
+      # Linen doesn't need this because it works directly with FrozenDict variables
+      layer = nnx.merge(graphdef, layer_params, other_state)
+
+      # Forward pass - pure computation on activations
+      layer_out = layer(carry, *args, **kwargs)
+
+      # Extract carry for next iteration
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+
       return new_carry, None
 
-    # Apply remat to the layer function (not the scan)
+    # Apply checkpoint to the entire scan body (like Linen's nn.scan + nn.remat)
     if policy is not None:
-      layer_fn = nnx.remat(layer_fn, policy=policy, prevent_cse=prevent_cse)
+      pure_layer_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
-    # Use nnx.scan - it handles everything automatically!
-    scan_fn = nnx.scan(
-        layer_fn,
-        in_axes=(nnx.Carry, 0),  # carry is carried, scan over layers axis 0
-        out_axes=(nnx.Carry, 0),
-        length=length,
-    )
+    # Scan over parameter PyTrees (like Linen scans over variable_axes)
+    # This creates a single computation graph that's reused with different parameters
+    final_carry, _ = jax.lax.scan(pure_layer_fn, x_in, params)
 
-    final_carry, _ = scan_fn(x_in, layers)
     return final_carry, None
 
   def _apply_embedding(
@@ -670,7 +685,7 @@ class DecoderNNX(nnx.Module):
             num_embeddings=cfg.trainable_position_size,
             num_features=cfg.emb_dim,
             dtype=cfg.dtype,
-            embedding_init=jax.nn.initializers.normal(stddev=1.0),
+            embedding_init=nn.initializers.normal(stddev=1.0),
             config=cfg,
             rngs=self.rngs,
         )
