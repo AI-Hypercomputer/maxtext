@@ -27,38 +27,35 @@ load_dotenv()
 
 import backoff  # If this is not available, try ``pip install backoff``
 
-import google.generativeai as genai  # If this is not available, try ``pip install google-generativeai``
 from google.api_core.exceptions import DeadlineExceeded, InternalServerError, RetryError
+from google import genai
+from google.genai import types
 
 
 logger = logging.getLogger("__name__")
 
 
 class GeminiAgent:
-  """
-  A class to manage interactions with a Google Gemini model.
-
-  This agent handles model configuration, API calls with retry logic,
-  and response processing. It is designed to be instantiated with a
-  system instruction and then called with a list of memory parts.
-  """
-
   TEMPERATURE = 0.1
   MAX_OUTPUT_TOKENS = 50000
-  generation_config = genai.GenerationConfig(
-      temperature=TEMPERATURE,
-      max_output_tokens=MAX_OUTPUT_TOKENS,
-  )
 
   def __init__(self, system_instruction):
-    """
-    Initializes the GeminiAgent with a specific system instruction.
-
-    Args:
-        system_instruction (str): The system prompt to guide the model's behavior.
-    """
-    self.client = genai.GenerativeModel(
-        os.environ["Model"], generation_config=self.generation_config, system_instruction=system_instruction
+    # 1. ENTERPRISE AUTH
+    # The SDK will use your Service Account or gcloud login automatically.
+    self.client = genai.Client(
+        vertexai=True,
+        project=os.environ.get("GCP_PROJECT_ID"),
+        location=os.environ.get("REGION", "us-central1")
+    )
+    
+    # Ensure this matches the full string: "gemini-2.5-flash-lite"
+    self.model_name = os.environ["Model"]
+    
+    # System instruction is now part of the GenerateContentConfig
+    self.config = types.GenerateContentConfig(
+        temperature=self.TEMPERATURE,
+        max_output_tokens=self.MAX_OUTPUT_TOKENS,
+        system_instruction=system_instruction 
     )
 
   @backoff.on_exception(
@@ -81,9 +78,21 @@ class GeminiAgent:
         google.generativeai.types.GenerateContentResponse: The response from the model.
     """
     if isinstance(memory_list, str):
-      memory_list = {"role": "user", "parts": memory_list}
+      contents = [types.Content(role="user", parts=[types.Part(text=memory_list)])]
+    elif isinstance(memory_list, dict):
+      # Convert old dict style to SDK types
+      parts = memory_list.get("parts", [])
+      if isinstance(parts, str):
+          parts = [types.Part(text=parts)] # Wrap string in a list of Parts
+      contents = [types.Content(role=memory_list.get("role", "user"), parts=parts)]
+    else:
+      contents = memory_list
     for _ in range(10):
-      resp = self.client.generate_content(memory_list, stream=False)
+      resp = self.client.models.generate_content(
+          model=self.model_name,
+          contents=memory_list,
+          config=self.config
+          )
       if hasattr(resp, "text"):
         return resp
       logger.error("Response not have text %s", resp)
