@@ -602,7 +602,6 @@ class Decoder(nnx.Module):
   def scan_decoder_layers(self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, **kwargs):
 
     def create_real_nnx_layer(r):
-      breakpoint()
       partial_wrapper = decoder_layer(cfg, mesh=mesh, quant=self.quant, rngs=r, **kwargs)
       
       if hasattr(partial_wrapper, 'nnx_class'):
@@ -632,9 +631,9 @@ class Decoder(nnx.Module):
         run_kwargs.pop('model_mode', None)
 
         def forward_single_step(carry, params_slice):
+            breakpoint()
             layer_i = nnx.merge(graph_def, params_slice)
             def print_sharding(path, leaf):
-              breakpoint()
               if isinstance(leaf, jax.Array):
                 keystr = jax.tree_util.keystr(path)
                 if hasattr(leaf, "sharding"):
@@ -643,8 +642,7 @@ class Decoder(nnx.Module):
                     # This branch is taken during jax.eval_shape
                     jax.debug.print(f"Path: {keystr}, Shape: {leaf.shape}, Dtype: {leaf.dtype}, Sharding: N/A (Abstract Array)")
               return leaf
-            jax.tree_util.tree_map_with_path(print_sharding, nnx.state(layer_i))
-            
+            # jax.tree_util.tree_map_with_path(print_sharding, nnx.state(layer_i))
             layer_out = layer_i(carry, *args, **run_kwargs)
 
             if isinstance(layer_out, tuple):
@@ -655,17 +653,15 @@ class Decoder(nnx.Module):
             _, new_params_slice = nnx.split(layer_i)
 
             return new_carry, (new_params_slice, layer_out)
-
-        rematted_step = jax.checkpoint(forward_single_step, prevent_cse=True)
-        breakpoint()
+        rematted_step = jax.checkpoint(forward_single_step, policy=self.get_remat_policy(), prevent_cse=not self.config.scan_pipeline_iterations)
+        
         final_carry, (new_params_stack, stacked_layer_outs) = jax.lax.scan(
             rematted_step,
             init=x_in,
             xs=params_stack,
-            length=length
+            length=length,
         )
 
-        # --- Update Mutable State ---
         nnx.update(layers, new_params_stack)
 
         return final_carry, stacked_layer_outs
@@ -961,6 +957,7 @@ class Decoder(nnx.Module):
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
+          breakpoint()
           y, _ = self.layers(y, *broadcast_args)
           y, _ = self.layers(y, *broadcast_args)
       else:
