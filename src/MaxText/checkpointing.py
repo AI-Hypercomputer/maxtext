@@ -65,7 +65,15 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
 
     def save_single_process(item, process_index, process_count):
       filename = directory / f"process_{process_index}-of-{process_count}.json"
-      if isinstance(item, grain.DatasetIterator):
+      if isinstance(item, RemoteIterator):
+        # For RemoteIterator, get state from the remote iterator
+        state_data = item.get_state()
+        # Check if state is dict (grain iterator) or bytes (tf.data iterator)
+        if isinstance(state_data, (dict, list)):
+          state = json.dumps(state_data, indent=4)
+        else:
+          state = state_data.decode()
+      elif isinstance(item, grain.DatasetIterator):
         state = json.dumps(item.get_state(), indent=4)
       else:
         state = item.get_state().decode()
@@ -93,11 +101,19 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
       filename = directory / f"process_{process_index}-of-{process_count}.json"
       if not filename.exists():
         raise ValueError(f"File {filename} does not exist.")
-      state = filename.read_text()
-      if isinstance(item, grain.DatasetIterator):
-        state = json.loads(state)
+      state_text = filename.read_text()
+      if isinstance(item, RemoteIterator):
+        # For RemoteIterator, determine state format and restore accordingly
+        # Try to parse as JSON first (for grain iterator state)
+        try:
+          state = json.loads(state_text)
+        except json.JSONDecodeError:
+          # If not JSON, treat as encoded bytes (for tf.data iterator state)
+          state = state_text.encode()
+      elif isinstance(item, grain.DatasetIterator):
+        state = json.loads(state_text)
       else:
-        state = state.encode()
+        state = state_text.encode()
       item.set_state(state)
       return item
 
@@ -380,7 +396,8 @@ def _prepare_scaled_down_grain_restore_args(
   )
 
   # 2. Prepare Arguments
-  local_iterator_list = [x.local_iterator for x in data_iterator]
+  # For RemoteIterator, use the iterator itself; for others, use local_iterator
+  local_iterator_list = [x if isinstance(x, RemoteIterator) else x.local_iterator for x in data_iterator]
   # Each JAX process calculates the global indices it's responsible for.
   # e.g., process 0 with scaling_factor=2 handles checkpoints from processes [0, 32]
   # e.g., process 1 with scaling_factor=2 handles checkpoints from processes [1, 33]
@@ -422,7 +439,9 @@ def _restore_grain_iterator(
         f"{process_count_stored} processes found in Grain checkpoint directory {directory}, matching the number of "
         "jax process, please do not set expansion_factor_real_data."
     )
-    grain_restore_args = GrainCheckpointRestore(data_iterator.local_iterator)
+    # For RemoteIterator, use the iterator itself; for others, use local_iterator
+    iterator_to_restore = data_iterator if isinstance(data_iterator, RemoteIterator) else data_iterator.local_iterator
+    grain_restore_args = GrainCheckpointRestore(iterator_to_restore)
 
   elif expansion_factor_real_data > 1 and process_count_stored == process_count_jax // expansion_factor_real_data:
     # Scaling up to a larger number of hosts.(e.g., 32 files -> 64 processes)
@@ -430,8 +449,10 @@ def _restore_grain_iterator(
     assert not isinstance(
         data_iterator, list
     ), "when expansion_factor_real_data > 1, the data iterator should not be a list."
+    # For RemoteIterator, use the iterator itself; for others, use local_iterator
+    iterator_to_restore = data_iterator if isinstance(data_iterator, RemoteIterator) else data_iterator.local_iterator
     grain_restore_args = GrainCheckpointRestore(
-        data_iterator.local_iterator, process_index=jax.process_index(), process_count=process_count_stored
+        iterator_to_restore, process_index=jax.process_index(), process_count=process_count_stored
     )
 
   else:
@@ -714,7 +735,9 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       process_count_total = process_count_total // config.expansion_factor_real_data
     for i, data_iter in enumerate(data_iterator):
       process_index = jax.process_index() + i * jax.process_count()
-      grain_iters_to_save.append((data_iter.local_iterator, process_index, process_count_total))
+      # For RemoteIterator, pass the iterator itself; for others, pass local_iterator
+      iterator_to_save = data_iter if isinstance(data_iter, RemoteIterator) else data_iter.local_iterator
+      grain_iters_to_save.append((iterator_to_save, process_index, process_count_total))
     save_args_composite["iter"] = GrainCheckpointSave(item=grain_iters_to_save)
 
   match (checkpoint_manager, config, data_iterator):

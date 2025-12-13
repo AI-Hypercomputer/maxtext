@@ -157,6 +157,18 @@ class MultiHostDataLoadIterator:
       raise ValueError("last_local_data is None, cannot make padding batch.")
     return jtu.tree_map(lambda x: jnp.full_like(x, 0), self.last_local_data)
 
+@colocated_python.colocated_python
+def _get_state(dummy_array):
+  if "iterator" not in colocated_python.__dict__:
+    raise ValueError("iterator not found in colocated_python.__dict__")
+  return colocated_python.__dict__["iterator"].get_state()
+
+@colocated_python.colocated_python
+def _set_state(dummy_array, state):
+  if "iterator" not in colocated_python.__dict__:
+    raise ValueError("iterator not found in colocated_python.__dict__")
+  colocated_python.__dict__["iterator"].set_state(state)
+  return dummy_array
 
 @colocated_python.colocated_python
 def _get_next(dummy_array):
@@ -209,13 +221,21 @@ class RemoteIterator:
   "iterator class for using colocated python, iterator is initiated remotely and stored in the state of colocated python"
 
   def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape):
+    max_logging.log(f"############### aireen {global_mesh=}")
+    max_logging.log(f"############### aireen {global_shape=}")
     self.cpu_devices = _colocated_cpu_devices(jax.local_devices())
+    max_logging.log(f"############### aireen cpu_devices={self.cpu_devices}, count={len(self.cpu_devices)}")
     self.tpu_devices = jax.local_devices()
+    max_logging.log(f"############### aireen tpu_devices={self.tpu_devices}, count={len(self.tpu_devices)}")
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
+    max_logging.log(f"############### aireen {self.cpu_mesh=}")
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
     self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
+    max_logging.log(f"############### aireen creating dummy_array with shape ({len(self.cpu_devices)},)")
     self.dummy_array = jnp.zeros((len(self.cpu_devices)))
+    max_logging.log(f"############### aireen putting dummy_array to cpu_sharding")
     self.dummy_array = jax.device_put(self.dummy_array, self.cpu_sharding)
+    max_logging.log(f"############### aireen dummy_array created: {self.dummy_array.shape}, {self.dummy_array.sharding}")
 
     @colocated_python.colocated_python
     def init(dummy_array):
@@ -250,3 +270,9 @@ class RemoteIterator:
     input_gdas = jtu.tree_map_with_path(partial(put_to_tpu_devices, sharding=self.tpu_sharding), out)
 
     return input_gdas
+   
+  def get_state(self):
+    return _get_state(self.dummy_array)
+
+  def set_state(self, state):
+    _set_state(self.dummy_array, state)
