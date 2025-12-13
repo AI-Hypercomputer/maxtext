@@ -76,7 +76,7 @@ These scripts can provide a reference point for various scripts.
 
 ### MaxText checkpoint to Hugging Face
 
-Post finetuning or pre-training, MaxText also provides scripts to convert MaxText format weights back to [Hugging Face](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/llama_mistral_mixtral_orbax_to_hf.py).
+Post finetuning or pre-training, MaxText also provides scripts to convert MaxText format weights back to [Hugging Face](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_scripts/llama_mistral_mixtral_orbax_to_hf.py).
 
 #### Dataset
 

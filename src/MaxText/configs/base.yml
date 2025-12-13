@@ -537,7 +537,7 @@ per_device_batch_size: 12.0
 # When expansion_factor_real_data is set to > 1, total_hosts//expansion_factor_real_data will load data.
 # Each data-loading host will load per_device_batch_size * expansion_factor_real_data.
 # When set to between 0 and 1, it's for grain pipeline to use a smaller chip count to read checkpoint from a larger chip count job.
-# Details in https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_grain.md#using-grain
+# Details in https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/data_input_grain.md#using-grain
 expansion_factor_real_data: -1.0
 eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
@@ -578,7 +578,7 @@ use_sft: False
 sft_train_on_completion_only: False
 
 # dataset_type must be synthetic, hf, grain, tfds
-# details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
+# details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
 dataset_type: tfds
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
