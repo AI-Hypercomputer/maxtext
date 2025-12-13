@@ -976,3 +976,11 @@ partial_rotary_factor: 1.0
 # Use tokamax library for gmm kernel implementation
 use_tokamax_gmm: false
 use_tokamax_splash: false
+
+use_ray: False
+failure_sim_time: 300
+crash_prob: 0.5
+hang_prob: 0.5
+
+# Logging
+log_hps: False

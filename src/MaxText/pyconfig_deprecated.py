@@ -678,7 +678,8 @@ class _HyperParameters:
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
     if raw_keys["jax_debug_log_modules"]:
       jax.config.update("jax_debug_log_modules", raw_keys["jax_debug_log_modules"])
-    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    if not raw_keys["use_ray"]:
+      max_utils.maybe_initialize_jax_distributed_system(raw_keys)
 
     if raw_keys["jax_cache_dir"]:
       compilation_cache.set_cache_dir(os.path.expanduser(raw_keys["jax_cache_dir"]))
@@ -710,11 +711,11 @@ class _HyperParameters:
           raw_keys["tokenizer_path"] = tokenizer_path
           break
 
-    self.keys = raw_keys
-    keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension
-    keys.sort()
 
-    if raw_keys["log_config"]:
+    self.keys = raw_keys
+    if raw_keys["log_hps"]:
+      keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension
+      keys.sort()
       for k in keys:
         if k != "hf_access_token":
           max_logging.log(f"Config param {k}: {raw_keys[k]}")

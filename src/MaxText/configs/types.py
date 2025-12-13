@@ -247,6 +247,11 @@ class RunInfo(BaseModel):
       None,
       description="Experimental sharding strategy used for some inference configs.",
   )
+  use_ray: bool = Field(False, description="If True, uses Ray for distributed training.")
+  failure_sim_time: int = Field(300, description="The time in seconds to simulate a failure.")
+  crash_prob: float = Field(0.5, description="The probability of a crash.")
+  hang_prob: float = Field(0.5, description="The probability of a hang.")
+  log_hps: bool = Field(False, description="If True, logs the hyperparameters.")
 
 
 class Checkpointing(BaseModel):

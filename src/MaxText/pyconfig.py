@@ -297,7 +297,7 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   if pydantic_kwargs.get("jax_debug_log_modules"):
     jax.config.update("jax_debug_log_modules", pydantic_kwargs["jax_debug_log_modules"])
   # Do not initialize jax distributed system during pytest runs.
-  if "pytest" not in sys.modules:
+  if "pytest" not in sys.modules and not pydantic_kwargs.get("use_ray"):
     max_utils.maybe_initialize_jax_distributed_system(pydantic_kwargs)
   if pydantic_kwargs.get("jax_cache_dir"):
     from jax.experimental.compilation_cache import compilation_cache  # pylint: disable=import-outside-toplevel
