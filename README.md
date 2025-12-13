@@ -115,3 +115,15 @@ MaxText aims to provide you with the best OSS models, whether as a reference imp
 ## Get involved
 
 Please join our [Discord Channel](https://discord.com/invite/2H9PhvTcDU) and if you have feedback, you can file a feature request, documentation request, or bug report [here](https://github.com/AI-Hypercomputer/maxtext/issues/new/choose).
+
+## Citation
+
+To cite the MaxText repository:
+```
+@software{maxtext2023github,
+  author = {{Google Cloud AI Hypercomputer}},
+  title  = {{M}ax{T}ext: A simple, performant and scalable {JAX} {LLM} training framework},
+  url    = {https://github.com/AI-Hypercomputer/maxtext},
+  year   = {2023}
+}
+```
