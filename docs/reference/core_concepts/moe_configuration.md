@@ -91,7 +91,7 @@ Dropping:
   * `fsdp`: Treats the expert axis as a FSDP axis.
   * `context`: Treats the expert axis as a context parallelism axis, useful for long context.
 
-`use_ring_of_experts` (experimental): If enabled, reduces all-to-all communication in EP sharding by circulating tokens in a ring topology rather than sending them all at once.
+`use_ring_of_experts` (experimental): This feature requires expert parallelism. If enabled, it replaces the standard two All-to-All communications with All-Gather in dispatch and Reduce-Scatter in collect. By gathering inputs across all shards, it allows for local routing and Top-K calculations, followed by result aggregation via Reduce-Scatter. This approach is particularly effective for models with a large Top-K, as it gathers activations before they are replicated k times to reduce communication.
 
 `moe_fsdp_use_two_stage_all_gather`: If enabled, splits the All-Gather operation for MoE weights into two separate stages when using FSDP/FSDP-transpose sharding. This is preferred when 3D All-Gather support is unavailable.
 
@@ -116,7 +116,7 @@ For each dimension, you can control:
 Implementation Support:
 * Megablox/JAX Ragged Dot: 
   * Supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`).
-  * Configs are enabled for both INT8, BF8, and BF16.
+  * Configs are enabled for INT8, FP8, and BF16.
 
 * Tokamax Ragged Dot:
   * Supports all 18 configurations. **Note**: Currently enabled for FP8 quantization; BF16 integration is in progress.
