@@ -60,7 +60,7 @@ For more information on using Orbax, please refer to https://github.com/google/o
 
 Its APIs are explicitly designed for the multi-host paradigm, simplifying the process of ensuring that each host loads a unique shard of the global batch.
 
-For more information on using Grain, please refer to https://github.com/google/grain and the grain guide in maxtext located at https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_grain.md 
+For more information on using Grain, please refer to https://github.com/google/grain and the grain guide in maxtext located at https://maxtext.readthedocs.io/en/latest/guides/data_input_pipeline/data_input_grain.html
 
 ## Qwix: For native JAX quantization
 
