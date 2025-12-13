@@ -77,11 +77,7 @@ class RMSNorm(nnx.Module):
 
     scale = jnp.asarray(scale, self.dtype)
     effective_scale = scale + self.scale_offset  # Apply offset
-    # y: (B, S, E)
-    # effective_scale:  (E,) -> (1, 1, E) -> (B, S, E)
-    effective_scale = jnp.expand_dims(effective_scale, axis=tuple(range(y.ndim - effective_scale.ndim)))
-    effective_scale = jnp.broadcast_to(effective_scale, y.shape, out_sharding=out_sharding)
-    return jnp.multiply(y, effective_scale)
+    return jnp.einsum("i...k,...k->i...k", y, effective_scale, out_sharding=out_sharding)
 
 
 def Qwen3NextRMSNorm(num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
