@@ -176,10 +176,44 @@ jobs:
           # configure registries as root and as runner
           gcloud auth configure-docker --quiet
           gcloud auth configure-docker us-docker.pkg.dev --quiet
-    - name: Delete the tpu image
-      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu" --force-delete-tags --quiet
-    - name: Delete the gpu image
-      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu" --force-delete-tags --quiet
+    - name: Check and Delete the tpu image
+      run: |
+        IMAGE_PATH="gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}"
+        IMAGE_TAG="tpu"
+        FULL_IMAGE="${IMAGE_PATH}:${IMAGE_TAG}"
+        set -e
+        echo "Checking for image: ${FULL_IMAGE}"
+
+        # Use list-tags and filter to see if the specific tag exists.
+        OUTPUT=$(gcloud container images list-tags "${IMAGE_PATH}" \
+                              --filter="tags:${IMAGE_TAG}" \
+                              --format="value(tags)")
+        if echo $OUTPUT | grep -q "${IMAGE_TAG}"; then
+          echo "Tag '${IMAGE_TAG}' found for '${IMAGE_PATH}'. Proceeding with deletion."
+          gcloud container images delete "${FULL_IMAGE}" --force-delete-tags --quiet
+          echo "Successfully deleted image: ${FULL_IMAGE}"
+        else
+          echo "Image '${FULL_IMAGE}' not found. Skipping deletion."
+        fi
+    - name: Check and Delete the gpu image
+      run: |
+        IMAGE_PATH="gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}"
+        IMAGE_TAG="gpu"
+        FULL_IMAGE="${IMAGE_PATH}:${IMAGE_TAG}"
+        set -e
+        echo "Checking for image: ${FULL_IMAGE}"
+
+        # Use list-tags and filter to see if the specific tag exists.
+        OUTPUT=$(gcloud container images list-tags "${IMAGE_PATH}" \
+                              --filter="tags:${IMAGE_TAG}" \
+                              --format="value(tags)")
+        if echo $OUTPUT | grep -q "${IMAGE_TAG}"; then
+          echo "Tag '${IMAGE_TAG}' found for '${IMAGE_PATH}'. Proceeding with deletion."
+          gcloud container images delete "${FULL_IMAGE}" --force-delete-tags --quiet
+          echo "Successfully deleted image: ${FULL_IMAGE}"
+        else
+          echo "Image '${FULL_IMAGE}' not found. Skipping deletion."
+        fi
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
@@ -214,7 +248,7 @@ jobs:
   notify_success_and_close:
       name: Close issue after 3 successful builds
       # This job runs only if all the preceding test jobs succeeded
-      if: ${{ success() && github.event.pull_request == null && github.event_name != 'workflow_dispatch' }}
+      if: ${{ always() && !contains(needs.*.result,'failure') && github.event.pull_request == null && github.event_name != 'workflow_dispatch' }}
       needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests, tpu_pathways_integration_tests]
       runs-on: ubuntu-latest
       permissions:
