@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:experimental
-# Copy benchmark-db
-FROM gcr.io/tpu-prod-env-one-vm/benchmark-db:2025-02-14
+
+ARG BASEIMAGE=python:3.12-slim-bullseye
+FROM $BASEIMAGE
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y curl gnupg

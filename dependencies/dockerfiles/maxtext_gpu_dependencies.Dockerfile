@@ -18,8 +18,12 @@ RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyri
 # Install the Google Cloud SDK
 RUN apt-get update && apt-get install -y google-cloud-sdk
 
-# Set environment variables for Google Cloud SDK
-ENV PATH="/usr/local/google-cloud-sdk/bin:${PATH}"
+# Install python3.12-venv and create a virtual environment
+RUN apt-get install -y python3.12-venv
+RUN python3 -m venv /opt/venv
+
+# Set environment variables for Google Cloud SDK and virtual environment
+ENV PATH="/usr/local/google-cloud-sdk/bin:/opt/venv/bin:${PATH}"
 
 # Upgrade libcusprase to work with Jax
 RUN apt-get update && apt-get install -y libcusparse-12-6
