@@ -73,6 +73,8 @@ def create_training_tools(config, model, mesh):
         logger,
         use_ocdbt,
         use_zarr3,
+        config.enable_continuous_checkpointing,
+        config.keep_last_n_checkpoints,
     )
 
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
