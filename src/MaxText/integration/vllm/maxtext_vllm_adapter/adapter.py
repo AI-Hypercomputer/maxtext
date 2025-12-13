@@ -49,26 +49,17 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   Raises:
     ValueError: If `hf_config_path` is not provided in the vLLM model config.
   """
-
-  def _path_exists(path: str) -> bool:
-    if not path:
-      return False
-    return epath.Path(path).exists()
-
   if "maxtext_config" in vllm_config.additional_config:
     overrides = vllm_config.additional_config["maxtext_config"]
   else:
     overrides = {}
-    load_path = None
-    if _path_exists(vllm_config.load.download_dir):
-      load_path = vllm_config.load.download_dir
-    elif _path_exists(vllm_config.model.model):
-      load_path = vllm_config.model.model
 
-    if load_path:
-      overrides["load_parameters_path"] = load_path
-    elif vllm_config.model.model:
-      overrides["model_name"] = vllm_config.model.model
+  if vllm_config.load_config.load_format == "dummy":
+    if overrides.get("load_parameters_path") is not None:
+      max_logging.log(
+          "Warning: load_parameters_path is set when using dummy load format. Checkpoint loading will be skipped."
+      )
+      overrides["load_parameters_path"] = None
 
   if vllm_config.model_config.hf_config_path is None:
     raise ValueError("hf_config_path must be provided when using MaxTextForCausalLM.")
@@ -110,12 +101,6 @@ class MaxTextDecoderModel(nnx.Module):
 
     # Handle dummy weight loading during initialization
     if vllm_config.load_config.load_format == "dummy":
-      if self.maxtext_config.load_parameters_path is not None:
-        max_logging.log(
-            "Warning: load_parameters_path is set when using dummy load format. Checkpoint loading will be skipped."
-        )
-        self.maxtext_config.load_parameters_path = None
-
       with self.mesh:
         self.load_weights(rng_key)
 
@@ -199,9 +184,14 @@ class MaxTextDecoderModel(nnx.Module):
     Args:
       rng_key: A JAX random key for model initialization.
     """
-    self.model, _ = model_creation_utils.create_nnx_model(
-        self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
-    )
+    if self.model is not None:
+      return
+
+    with nn.logical_axis_rules(""):
+      model, _ = model_creation_utils.create_nnx_model(
+          self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
+      )
+      self.model = nnx.data(model)
 
 
 class MaxTextForCausalLM(nnx.Module):

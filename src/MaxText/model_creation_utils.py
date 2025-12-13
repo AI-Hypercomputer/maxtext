@@ -78,9 +78,9 @@ def from_config(
   Example:
       model = from_config(config)
   """
-  devices_array = maxtext_utils.create_device_mesh(config, devices)
-
   if mesh is None:
+    devices_array = maxtext_utils.create_device_mesh(config, devices)
+
     if config.shard_mode == ShardMode.EXPLICIT:
       axis_types = tuple([AxisType.Explicit] * len(config.mesh_axes))
     else:
@@ -154,7 +154,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
     model = _create_model_partial()
     return nnx.state(model)
 
-  with jax.set_mesh(mesh):
+  with mesh:
     # Create the model with sharded parameters.
     with nn.logical_axis_rules(config.logical_axis_rules):
       sharded_state = create_sharded_state()
