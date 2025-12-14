@@ -850,6 +850,7 @@ def setup_initial_state(
   )
 
   # Initialization
+  # with nn_partitioning.axis_rules(config.logical_axis_rules), jax.set_mesh(mesh):
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
@@ -867,7 +868,9 @@ def setup_initial_state(
         source_checkpoint_layout=config.source_checkpoint_layout,
         expansion_factor_real_data=config.expansion_factor_real_data,
     )
-
+    # w1_kernel = jax.lax.optimization_barrier(w1_kernel)
+    print("hello")
+    # assert restored, "No checkpoint found"
     if restored:
       if isinstance(
           checkpoint_manager,
@@ -884,11 +887,17 @@ def setup_initial_state(
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       init_state_partial.__name__ = "initialize_state"
       # pylint: disable=not-callable
+      
+      # print(init_state_partial)
+      # with jax.default_device(jax.devices("cpu")[0]):
+
+
+
       state = jax.jit(
-          init_state_partial,
-          in_shardings=None,
-          out_shardings=state_mesh_shardings,
-      )(rng)
+            init_state_partial,
+            in_shardings=None,
+            out_shardings=state_mesh_shardings,
+        )(rng)
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
 

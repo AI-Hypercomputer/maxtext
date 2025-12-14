@@ -368,6 +368,12 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
         state_mesh_shardings.opt_state[0], optax.ScaleByAdamState
     ):
       sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
+    elif isinstance(state_mesh_shardings.opt_state, tuple) and isinstance(
+        state_mesh_shardings.opt_state[0], optax.EmptyState
+    ):
+      # SGD and other simple optimizers don't have moment states to merge.
+      # Return unchanged when shard_optimizer_over_data is enabled with SGD.
+      return prev_params_shardings, state_mesh_shardings
     else:
       raise NotImplementedError(f"Could not find optimizer state shardings from {type(state_mesh_shardings.opt_state)}")
     if "params" not in sharded_fp32_params.keys():

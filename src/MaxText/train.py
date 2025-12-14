@@ -443,7 +443,7 @@ def train_loop(config, recorder, state=None):
       last_step_completion = datetime.datetime.now()
 
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+      # checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
       if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
         jax.block_until_ready(state)  # Ensure compilation has finished.

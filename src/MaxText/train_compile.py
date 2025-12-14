@@ -159,10 +159,13 @@ def is_oom(argv: Sequence[str]) -> bool:
   # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
 
+  # Get params shardings for optimizer sharding over data
+  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
       maxtext_utils.get_functional_train_with_signature(
-          train.train_step, data_sharding, state_mesh_shardings, model, config
+          train.train_step, data_sharding, state_mesh_shardings, model, config, params_shardings
       )
   )
 
@@ -214,10 +217,13 @@ def main(argv: Sequence[str]) -> None:
   # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
 
+  # Get params shardings for optimizer sharding over data
+  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
       maxtext_utils.get_functional_train_with_signature(
-          train.train_step, data_sharding, state_mesh_shardings, model, config
+          train.train_step, data_sharding, state_mesh_shardings, model, config, params_shardings
       )
   )
 

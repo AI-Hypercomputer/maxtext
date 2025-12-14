@@ -202,9 +202,9 @@ def setup_train_loop(config, recorder, devices=None):
               eval_data_iterator,
           )
 
-    state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
-    )
+      state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+          model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+      )
 
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
     if not config.using_pipeline_parallelism and not config.use_multimodal:
