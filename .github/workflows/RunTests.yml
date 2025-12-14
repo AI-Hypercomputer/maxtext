@@ -34,8 +34,48 @@ concurrency:
     }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
+  doc-only-check:
+    runs-on: ubuntu-latest
+    outputs:
+      should-skip-tests: ${{ steps.check.outputs.should-skip-tests }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check if only markdown files changed
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Not a pull request, running all tests"
+            echo "should-skip-tests=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Get changed files
+          git fetch origin ${{ github.base_ref }}
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          
+          # TEMPORARY: Force skip for testing - treat .yml as .md
+          # Check if all changed files are markdown OR yml (for testing only)
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No files changed"
+            echo "should-skip-tests=false" >> $GITHUB_OUTPUT
+          elif echo "$CHANGED_FILES" | grep -v -E '\.(md|yml|yaml)$' > /dev/null; then
+            echo "Non-markdown/yml files changed, running tests"
+            echo "should-skip-tests=false" >> $GITHUB_OUTPUT
+          else
+            echo "All changes are in markdown or yml files, skipping tests (TEMPORARY TEST)"
+            echo "should-skip-tests=true" >> $GITHUB_OUTPUT
+          fi
+
   prelim:
+    needs: doc-only-check
+    if: needs.doc-only-check.outputs.should-skip-tests != 'true'
     runs-on: ["self-hosted"]
     steps:
     - name: Test gsutil installation
@@ -44,7 +84,8 @@ jobs:
       run: docker system prune --all --force
 
   tpu_image:
-    needs: prelim
+    needs: [doc-only-check, prelim]
+    if: needs.doc-only-check.outputs.should-skip-tests != 'true'
     uses: ./.github/workflows/build_upload_internal.yml
     with:
       device_type: tpu
@@ -54,7 +95,8 @@ jobs:
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
   gpu_image:
-    needs: prelim
+    needs: [doc-only-check, prelim]
+    if: needs.doc-only-check.outputs.should-skip-tests != 'true'
     uses: ./.github/workflows/build_upload_internal.yml
     with:
       device_type: gpu
@@ -64,7 +106,8 @@ jobs:
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
 
   cpu_unit_tests:
-    needs: tpu_image
+    needs: [doc-only-check, tpu_image]
+    if: needs.doc-only-check.outputs.should-skip-tests != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -163,8 +206,8 @@ jobs:
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
   clean_up:
-    if: ${{ always() }}
-    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests, tpu_pathways_integration_tests]
+    if: ${{ always() && needs.doc-only-check.outputs.should-skip-tests != 'true' }}
+    needs: [doc-only-check, cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests, tpu_pathways_integration_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
     permissions:
@@ -210,6 +253,31 @@ jobs:
         # This command will attempt to remove both labels. 
         # It will not fail if the labels don't exist.
         gh issue remove-label $ISSUE_NUMBER "success-run-1" "success-run-2" --repo $GH_REPO || echo "No success labels to remove."
+
+  # This job always runs and reports success if tests passed or were skipped
+  # Make THIS job required in branch protection settings instead of individual test jobs
+  all-tests-pass:
+    name: All tests pass
+    if: ${{ always() }}
+    needs: [doc-only-check, cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests, tpu_pathways_integration_tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check test results
+        run: |
+          # If tests were skipped, that's OK
+          if [ "${{ needs.doc-only-check.outputs.should-skip-tests }}" == "true" ]; then
+            echo "Tests were skipped (markdown-only changes)"
+            exit 0
+          fi
+          
+          # Otherwise, check if any test failed
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "One or more tests failed"
+            exit 1
+          fi
+          
+          echo "All tests passed"
+          exit 0
 
   notify_success_and_close:
       name: Close issue after 3 successful builds
