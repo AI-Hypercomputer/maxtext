@@ -14,8 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Heavily influenced by
-# https://github.com/openxla/iree/tree/main/build_tools/github_actions/runner/config
+# Not currently used after the move to ML Actions (GKE). Kept around in case
+# we need to reference it for older workflows or as a guide for future workflow
+# configurations.
 
 # This file sets up a tpu vm to be used as a github runner for testing. 
 # It creates a user runner without sudo permissions to
