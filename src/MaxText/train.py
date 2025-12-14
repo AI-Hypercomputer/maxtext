@@ -401,15 +401,27 @@ def train_loop(config, recorder, state=None):
       eval_data_iterator,
       params_shardings,
   )
-
+  
+  # jax.profiler.save_device_memory_profile("memory_profile.txt")
+  # jax.clear_caches()
+  # import time
+  # time.sleep(20)
+  # print("Memory profile saved to memory_profile.txt")
+  jax.block_until_ready(state)  # Ensure compilation has finished.
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data:
       state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
+      
     if config.compiled_trainstep_file == "":  # compile only when there is no pre-compiled file loaded
       compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
       compiled_stats = compiled.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_stats)
+      # trainstep_memory_gb = max_utils.get_compiled_memory_gb(compiled_stats, exclude_argument=True) + 1.5
+      # trainstep_memory_gb = compiled_stats.temp_size_in_bytes / (1024**3)
+      trainstep_memory_gb = 18
+    else:
+      trainstep_memory_gb = None
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
@@ -421,6 +433,8 @@ def train_loop(config, recorder, state=None):
   try:
     last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
+      
+      
       prof.maybe_activate_profiler(step, state)
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
@@ -437,13 +451,21 @@ def train_loop(config, recorder, state=None):
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             if config.shard_optimizer_over_data:
               state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
+            max_utils.print_mem_stats("Before train step")
+            if trainstep_memory_gb is not None:
+              max_utils.wait_until_free_memory(trainstep_memory_gb)
+            jax.block_until_ready(state)
             state, metrics = p_train_step(state, example_batch, nextrng)
+            jax.block_until_ready(state)
+            print(jax.device_get(metrics),flush=True)
+            print("Done train step",flush=True)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()
 
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      # checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+      # state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+      # if checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step):
+      #   checkpoint_manager.wait_until_finished()
 
       if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
         jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -483,12 +505,12 @@ def train_loop(config, recorder, state=None):
 
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
-    if config.save_checkpoint_on_completion:
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
-    if checkpoint_manager is not None:
-      # in case the last checkpoint_period checkpoint is still in progress
-      checkpoint_manager.wait_until_finished()
+    # if config.save_checkpoint_on_completion:
+    #   state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+    #   checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+    # if checkpoint_manager is not None:
+    #   # in case the last checkpoint_period checkpoint is still in progress
+    #   checkpoint_manager.wait_until_finished()
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
@@ -550,8 +572,16 @@ def run(config, recorder, diagnostic_config):
 
 
 def main(argv: Sequence[str]) -> None:
-  config, recorder, diagnostic_config = initialize(argv)
-  run(config, recorder, diagnostic_config)
+  # Start tracing if MAXTEXT_TRACE=1
+  from MaxText import tracer
+  tracing_enabled = tracer.maybe_start_tracing()
+
+  try:
+    config, recorder, diagnostic_config = initialize(argv)
+    run(config, recorder, diagnostic_config)
+  finally:
+    if tracing_enabled:
+      tracer.maybe_stop_tracing()
 
 
 if __name__ == "__main__":

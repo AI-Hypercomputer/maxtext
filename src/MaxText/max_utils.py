@@ -653,6 +653,49 @@ def summarize_pytree_data(params, name="Params", raw=False):
   return num_params, total_param_size, avg_param_size
 
 
+def get_per_device_mem_stats():
+  """Returns list of (used_gb, limit_gb, device) for each local device."""
+  stats_list = []
+  for d in jax.local_devices():
+    stats = d.memory_stats()
+    used = stats["bytes_in_use"] / (1024**3)
+    limit = stats["bytes_limit"] / (1024**3)
+    stats_list.append((used, limit, d))
+  return stats_list
+
+def get_min_free_memory_gb():
+  """Returns the minimum free memory across all local devices."""
+  min_free = float('inf')
+  for used, limit, _ in get_per_device_mem_stats():
+    free = limit - used
+    if free < min_free:
+      min_free = free
+  return min_free
+
+def wait_until_free_memory(needed_gb, log_interval=10):
+  """Waits until all devices have at least needed_gb free memory."""
+  import gc
+  waited = 0
+  while True:
+    gc.collect()
+    # Don't clear caches - forces reloading compiled function which needs contiguous memory
+    # jax.clear_caches()
+    try:
+      min_free = get_min_free_memory_gb()
+      if min_free >= needed_gb:
+        break
+    except (RuntimeError, KeyError, TypeError) as ex:
+      max_logging.log(f"Memstats unavailable, skipping wait: {ex}")
+      break
+    time.sleep(1)
+    waited += 1
+    needed_gb *= 0.99
+    if waited % log_interval == 0:
+      max_logging.log(f"Waiting for {needed_gb:.1f}GB free per device... (min free: {min_free:.1f}GB, waited {waited}s)")
+  # if waited > 0:
+  max_logging.log(f"Memory available after {waited}s wait")
+
+
 def print_mem_stats(label: str):
   max_logging.log(f"\nMemstats: {label}:")
   try:
@@ -680,6 +723,30 @@ def print_cpu_ram_stats(label: str):
     max_logging.log(f"\tRAM stats unavailable, error: {ex}")
 
 
+def get_compiled_memory_gb(compiled_stats, exclude_argument=False):
+  """Returns the memory size in GB from compiled memory statistics.
+
+  Args:
+    compiled_stats: The compiled memory analysis stats.
+    exclude_argument: If True, excludes argument size since it's already in memory.
+  """
+  if compiled_stats is None:
+    return None
+
+  def bytes_to_gb(num_bytes):
+    return num_bytes / (1024**3)
+
+  output_gb = bytes_to_gb(compiled_stats.output_size_in_bytes)
+  temp_gb = bytes_to_gb(compiled_stats.temp_size_in_bytes)
+  alias_gb = bytes_to_gb(compiled_stats.alias_size_in_bytes)
+
+  if exclude_argument:
+    # Argument (state) is already in memory, only need additional space for output + temp
+    return output_gb + temp_gb - alias_gb
+  else:
+    argument_gb = bytes_to_gb(compiled_stats.argument_size_in_bytes)
+    return output_gb + temp_gb + argument_gb - alias_gb
+
 def print_compiled_memory_stats(compiled_stats):
   """Prints a summary of the compiled memory statistics."""
   if compiled_stats is None:
@@ -688,12 +755,11 @@ def print_compiled_memory_stats(compiled_stats):
   def bytes_to_gb(num_bytes):
     return num_bytes / (1024**3)
 
+  total_gb = get_compiled_memory_gb(compiled_stats)
   output_gb = bytes_to_gb(compiled_stats.output_size_in_bytes)
   temp_gb = bytes_to_gb(compiled_stats.temp_size_in_bytes)
   argument_gb = bytes_to_gb(compiled_stats.argument_size_in_bytes)
-  alias_gb = bytes_to_gb(compiled_stats.alias_size_in_bytes)
   host_temp_gb = bytes_to_gb(compiled_stats.host_temp_size_in_bytes)
-  total_gb = output_gb + temp_gb + argument_gb - alias_gb
 
   max_logging.log(
       f"Total memory size: {total_gb:.1f} GB, Output size: {output_gb:.1f} GB, Temp size: {temp_gb:.1f} GB, "

@@ -37,6 +37,7 @@ def create_training_tools(config, model, mesh):
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   logger = checkpointing.setup_checkpoint_logger(config)
+  checkpoint_manager = None
   if config.enable_multi_tier_checkpointing:
     checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
         config.local_checkpoint_directory,
@@ -64,16 +65,16 @@ def create_training_tools(config, model, mesh):
     checkpoint_dir = ""
     if config.enable_checkpointing:
       checkpoint_dir = config.checkpoint_dir
-    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-        checkpoint_dir,
-        config.enable_checkpointing,
-        config.async_checkpointing,
-        config.checkpoint_period,
-        config.dataset_type,
-        logger,
-        use_ocdbt,
-        use_zarr3,
-    )
+      checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+          checkpoint_dir,
+          config.enable_checkpointing,
+          config.async_checkpointing,
+          config.checkpoint_period,
+          config.dataset_type,
+          logger,
+          use_ocdbt,
+          use_zarr3,
+      )
 
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
 

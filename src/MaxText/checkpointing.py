@@ -645,7 +645,7 @@ def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):
 def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None):
   """Save checkpoint if checkpointing is enabled."""
   if checkpoint_manager is None:
-    return
+    return False
 
   # Determine the effective step for saving a checkpoint.
   # If 'step' is not provided, this call is for a potential final checkpoint
@@ -663,6 +663,7 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)
     if checkpoint_saved:
       print_save_message(actual_step, config.async_checkpointing)
+      return True
   except Exception as e:
     raise exceptions.StopTraining(f"Checkpointing failed. {str(e)}") from e
 
@@ -673,6 +674,8 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   # Raise exception upon preemption
   if checkpoint_manager.reached_preemption(actual_step):
     raise exceptions.StopTraining("Job is preempted.")
+
+  return False
 
 
 def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False):
