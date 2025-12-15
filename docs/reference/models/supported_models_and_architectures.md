@@ -70,7 +70,7 @@ MaxText supports a wide range of parallelism strategies for scaling training and
 
 The following summarizes observed runtime efficiency and scaling behaviors of MaxText across different hardware and model types, based on published benchmarks and large-scale runs.
 
-* **High MFU**: MaxText targets high Model FLOPs Utilization across scales; exact numbers vary by model, hardware and config. See [**Performance Metrics → MFU**](performance-metrics) for the definition and how we calculate it.
+* **High MFU**: MaxText targets high Model FLOPs Utilization across scales; exact numbers vary by model, hardware and config. See [**Performance Metrics → MFU**](../performance_metrics.md#performance-metrics) for the definition and how we calculate it.
 * **Quantization**: MaxText supports quantization via both the AQT and Qwix libraries. Qwix is the recommended approach, providing a non-intrusive way to apply various quantization techniques, including Quantization-Aware Training (QAT) and Post-Training Quantization (PTQ).
  * **MoE**: The Mixture-of-Experts implementation features dropless routing with Megablox and `jax.lax.ragged_dot` kernels for enhanced performance.
 * **Multi-Token Prediction (MTP)**: This feature improves training efficiency on DeepSeek-style models by adding an auxiliary loss based on predicting multiple future tokens.
@@ -91,6 +91,6 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
 
 
 * **Technical Explanations:**
-    * [Parallelism & Sharding](sharding_on_TPUs)
-    * [Quantization Documentation](quantization)
-    * [AOT Compilation Instructions](aot-compilation)
+    * [Parallelism & Sharding](../../guides/optimization/sharding.md)
+    * [Quantization Documentation](../core_concepts/quantization.md)
+    * [AOT Compilation Instructions](../../guides/monitoring_and_debugging/features_and_diagnostics.md#ahead-of-time-compilation-aot)
