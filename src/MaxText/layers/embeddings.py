@@ -913,7 +913,6 @@ def positional_embedding_as_linen(*, embedding_dims: int, max_wavelength: int = 
   )
 
 
-@dataclasses.dataclass(repr=False)
 class PositionalEmbedding(nnx.Module):
   """A layer that adds sinusoidal positional embeddings to the input.
 
@@ -923,10 +922,22 @@ class PositionalEmbedding(nnx.Module):
     rngs: RNG state passed in by nnx.bridge.to_linen, not used in this module.
   """
 
-  embedding_dims: int
-  max_wavelength: int = _MAX_WAVELENGTH
+  def __init__(
+      self,embedding_dims: int,
+      max_wavelength: int = _MAX_WAVELENGTH,
+      rngs: nnx.Rngs | None = None,# Not used in PositionalEmbedding but passed in by nnx.bridge.to_linen
 
-  rngs: nnx.Rngs = None  # Not used in PositionalEmbedding but passed in by nnx.bridge.to_linen
+  ):
+    """Initializes the PositionalEmbedding module.
+
+    Args:
+      embedding_dims: The dimension of the embeddings.
+      max_wavelength: The maximum wavelength for the sinusoidal positional embeddings.
+      rngs: rng keys passed in by nnx.bridge.to_linen.
+    """
+    self.embedding_dims = embedding_dims
+    self.max_wavelength = max_wavelength 
+    self.rngs = rngs
 
   def __call__(
       self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks

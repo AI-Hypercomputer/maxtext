@@ -1,25 +1,5 @@
-# Copyright 2023–2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-""""Module for decoder layers."""
-# pylint: disable=arguments-differ
-# pylint: disable=no-name-in-module
-
-from typing import Any
+from typing import Any, Callable, Sequence, Optional, Tuple, List, Union
 import functools
-
-from MaxText.configs.types import PositionalEmbedding
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
@@ -27,17 +7,24 @@ from jax.sharding import Mesh
 
 from flax import linen as nn
 from flax import nnx
-from flax.linen.partitioning import ScanIn
+from flax.nnx import Rngs
 
-from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONTEXT
-from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import (
+    DecoderBlockType,
+    ShardMode,
+    Config,
+    EP_AS_CONTEXT,
+    MODEL_MODE_TRAIN,
+    MODEL_MODE_PREFILL,
+    MODEL_MODE_AUTOREGRESSIVE,
+)
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.sharding import create_sharding
 from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import quantizations
-from MaxText.layers import pipeline_nnx as pipeline
+from MaxText.layers import pipeline
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText import sharding
@@ -62,10 +49,13 @@ from MaxText.layers import (
     simple_layer,
 )
 
+
 # ------------------------------------------------------------------------------
-# The network: Decoder Definitions
+# Decoder Layer (NNX Implementation)
 # ------------------------------------------------------------------------------
 
+class DecoderLayer(nnx.Module):
+    """Transformer decoder layer that attends to the encoder."""
 
 class DecoderLayer(nn.Module):
   """
@@ -807,9 +797,6 @@ class Decoder(nnx.Module):
             mask=bidirectional_mask,
             image_masks=image_masks,
         )
-      # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
-      else:
-        raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
     y = self.dropout(y, deterministic=deterministic)
     y = self.dropout(y, deterministic=deterministic)
@@ -923,7 +910,11 @@ class Decoder(nnx.Module):
         decoder_positions,
         deterministic,
         model_mode,
-    )
+        kv_cache: jax.Array | None = None,
+        attention_metadata: dict[str, Any] | None = None,
+    ):
+        cfg = self.config
+        mesh = self.mesh
 
     # scan does not support kwargs in layer call, passing broadcast_args as positional arg
 
@@ -1024,30 +1015,76 @@ class Decoder(nnx.Module):
           dense_layer = self.RemattedBlockLayers[0]
           moe_layer = self.RemattedBlockLayers[1]
 
-          layers = [dense_layer, moe_layer]
-          layer_prefixes = ["dense_layers", "moe_layers"]
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
-          num_layers_list = [cfg.first_num_dense_layers, num_moe_layers]
-          # Iterate over the two layer groups (dense and MoE) and apply layer transformation
-          for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
-            for index in range(num_layers):
-              kv_cache = kv_caches[index] if kv_caches is not None else None
-              y, kv_cache = layer(
-                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
-              )(
-                  y,
-                  decoder_segment_ids,
-                  decoder_positions,
-                  deterministic,
-                  model_mode,
-                  previous_chunk=previous_chunk,
-                  page_state=page_state,
-                  slot=slot,
-                  kv_cache=kv_cache,
-                  attention_metadata=attention_metadata,
-              )
-              if kv_caches is not None and kv_cache is not None:
-                kv_caches[index] = kv_cache
+        # Input Checkpoint & Sharding
+        inputs = _maybe_shard_with_logical(inputs, logical_axis_names)
+        inputs = checkpoint_name(inputs, "decoder_layer_input")
+
+        # Norm
+        lnx = self.lnx(inputs)
+        lnx = _maybe_shard_with_logical(lnx, logical_axis_names)
+
+        # Attention
+        attention_lnx, kv_cache = self.attention_layer(
+            lnx, lnx, decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            kv_cache=kv_cache,
+            attention_metadata=attention_metadata,
+        )
+        attention_lnx = _maybe_shard_with_logical(attention_lnx, logical_axis_names)
+
+        # MLP
+        mlp_lnx_out = self.mlp_lnx(lnx, deterministic=deterministic)
+        mlp_lnx_out = _maybe_shard_with_logical(mlp_lnx_out, logical_axis_names)
+
+        # Residuals
+        next_layer_addition = mlp_lnx_out + attention_lnx
+        next_layer_addition_dropped_out = self.dropout(
+            next_layer_addition, deterministic=deterministic, broadcast_dims=(-2,)
+        )
+
+        layer_output = next_layer_addition_dropped_out + inputs
+        layer_output = _maybe_shard_with_logical(layer_output, logical_axis_names)
+
+        return layer_output, kv_cache
+
+
+# ------------------------------------------------------------------------------
+# Decoder Container (NNX Implementation)
+# ------------------------------------------------------------------------------
+
+class Decoder(nnx.Module):
+    """A stack of decoder layers as a part of an encoder-decoder architecture."""
+
+    def __init__(
+        self,
+        config: Config,
+        mesh: Mesh,
+        model_mode: str = MODEL_MODE_TRAIN,
+        quant: None | Quant = None,
+        *,
+        rngs: Rngs,
+    ):
+        self.config = config
+        self.mesh = mesh
+        self.quant = quant
+        self.model_mode = model_mode
+        self.rngs = rngs
+
+        # 1. Setup Layers
+        self.layer_stacks, self.template_layers = self._setup_layers(rngs)
+
+        # 2. Norm Layer
+        self.norm_layer = self._get_norm_layer_module(num_features=self.config.emb_dim, rngs=rngs)
+
+        # 3. Positional Embeddings
+        # 3a. Untrainable (Sinusoidal)
+        if self.config.use_untrainable_positional_embedding:
+            self.sinusoidal_pos_emb = PositionalEmbedding(
+                embedding_dims=self.config.base_emb_dim,
+                rngs=rngs # Passed though often not used for sinusoidal
+            )
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = self.RemattedBlockLayers[0]
@@ -1070,103 +1107,256 @@ class Decoder(nnx.Module):
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
-            kv_cache = kv_caches[lyr] if kv_caches is not None else None
-            y, kv_cache = layer(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-                previous_chunk=previous_chunk,
-                page_state=page_state,
-                slot=slot,
-                kv_cache=kv_cache,
-                attention_metadata=attention_metadata,
-                **layer_call_kwargs,
+        else:
+            self.trainable_pos_emb = None
+
+        # 4. Dense Head
+        if not self.config.logits_via_embedding and not self.config.final_logits_soft_cap:
+             self.logits_dense = linears.DenseGeneral(
+                in_features_shape=self.config.emb_dim, 
+                out_features_shape=self.config.vocab_size,
+                weight_dtype=self.config.weight_dtype,
+                dtype=jnp.float32 if self.config.logits_dot_in_fp32 else self.config.dtype,
+                kernel_axes=("embed", "vocab"),
+                shard_mode=self.config.shard_mode,
+                matmul_precision=self.config.matmul_precision,
+                parameter_memory_host_offload=self.config.parameter_memory_host_offload,
+                rngs=rngs,
             )
-            if kv_caches is not None and kv_cache is not None:
-              kv_caches[lyr] = kv_cache
 
-    assert isinstance(y, jax.Array)
+        # 5. Pipeline Parallelism
+        if self.config.using_pipeline_parallelism:
+            self.pipeline_module = None 
 
-    # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    hidden_state = y
+        self.drop_out = linears.Dropout(rate=self.config.dropout_rate, rngs=rngs)
 
-    # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
-    # Instead, we keep track on the hidden states, which has smaller size compared to full logits
-    if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
-      logits = None
-      self.sow("intermediates", "hidden_states", hidden_state)
-    else:
-      logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+    def _get_decoder_layer_cls(self):
+        match self.config.decoder_block:
+            case DecoderBlockType.DEFAULT: return DecoderLayer
+            case DecoderBlockType.LLAMA2: return llama2.LlamaDecoderLayerToLinen
+            case DecoderBlockType.DEEPSEEK:
+                if self.config.use_batch_split_schedule:
+                    return (deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer)
+                else:
+                    return (deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer)
+            case _: return DecoderLayer
 
-    # The API of the Decoder is now a tuple, providing both the main output
-    # and the raw hidden state needed for auxiliary tasks.
-    return logits, hidden_state, kv_caches
+    def _setup_layers(self, rngs: Rngs) -> Tuple[Any, Any]:
+        cfg = self.config
+        LayerCls = self._get_decoder_layer_cls()
 
-  def _apply_gemma3_scanned_blocks(
-      self,
-      y,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      bidirectional_mask,
-      previous_chunk,
-      page_state,
-      slot,
-  ):
-    """Applies Gemma3 scanned decoder blocks, handling main scan and remainders."""
+        def create_layer_list(cls, count, prefix):
+            layers = []
+            for i in range(count):
+                layers.append(
+                    cls(config=cfg, mesh=self.mesh, model_mode=self.model_mode, 
+                        quant=self.quant, rngs=rngs, layer_idx=i)
+                )
+            return layers
 
-    cfg = self.config
-    mesh = self.mesh
+        def stack_layers(layer_list):
+            if not layer_list: return None, None
+            template_graph, _ = nnx.split(layer_list[0])
+            states = [nnx.state(l) for l in layer_list]
+            stacked_state = jax.tree_map(lambda *args: jnp.stack(args), *states)
+            return stacked_state, template_graph
 
-    # Define the repeating pattern length and calculate how many full blocks to scan
-    attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
-    scan_length = cfg.num_decoder_layers // attention_pattern_length
+        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+            dense_cls, moe_cls = LayerCls
+            dense_layers = create_layer_list(dense_cls, cfg.first_num_dense_layers, "dense")
+            moe_layers = create_layer_list(moe_cls, cfg.num_decoder_layers - cfg.first_num_dense_layers, "moe")
+            
+            if cfg.scan_layers:
+                dense_stack, dense_tmpl = stack_layers(dense_layers)
+                moe_stack, moe_tmpl = stack_layers(moe_layers)
+                return (dense_stack, moe_stack), (dense_tmpl, moe_tmpl)
+            else:
+                return (dense_layers, moe_layers), (None, None)
+        else:
+            layers = create_layer_list(LayerCls, cfg.num_decoder_layers, "layers")
+            if cfg.scan_layers:
+                stack, tmpl = stack_layers(layers)
+                return (stack,), (tmpl,)
+            else:
+                return (layers,), (None,)
 
-    policy = self.get_remat_policy()
-    RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlockToLinen], policy)[0]
+    def _get_norm_layer_module(self, num_features, rngs):
+        if self.config.decoder_block == DecoderBlockType.GPT3:
+            return gpt3.gpt3_layer_norm(num_features=num_features, reductions_in_fp32=False, use_bias=True, rngs=rngs)
+        return RMSNorm(
+            num_features=num_features, 
+            shard_mode=self.config.shard_mode, 
+            rngs=rngs
+        )
 
-    layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
-    layer_kwargs = {"num_of_layers": attention_pattern_length}
+    def _get_jax_policy(self):
+        cfg = self.config
+        if cfg.remat_policy == "none": return None
+        if "minimal" in cfg.remat_policy: return jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+        elif cfg.remat_policy == "full": return jax.checkpoint_policies.nothing_saveable 
+        return jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
 
-    # Apply the main scan over the full blocks
-    if scan_length > 0:
-      broadcast_args = (
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-      )
-      y, _ = self.scan_decoder_layers(
-          cfg,
-          RemattedGemma3Block,
-          scan_length,
-          "layers",
-          mesh,
-          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-          model_mode=self.model_mode,
-          **layer_kwargs,
-      )(y, *broadcast_args, **layer_call_kwargs)
+    # --------------------------------------------------------------------------
+    # Scan Helper
+    # --------------------------------------------------------------------------
 
-    # Apply any remaining layers that did not fit into a full scanned block
-    num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
-    if num_remaining_layers > 0:
-      # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
-      rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
-      layer = RemattedGemma3Block(
-          config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
-      )  # pytype: disable=wrong-keyword-args
-      y, _ = layer(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk=previous_chunk,
-          page_state=page_state,
-          slot=slot,
-          **layer_call_kwargs,
-      )
-    return y
+    def _run_scan(self, template_graph, stacked_state, inputs, broadcast_args, attention_metadata):
+        policy = self._get_jax_policy()
+        (decoder_segment_ids, decoder_positions, deterministic, model_mode) = broadcast_args
+
+        def scan_body(carry, layer_state_slice):
+            y, _ = carry 
+            layer_module = nnx.merge(template_graph, layer_state_slice)
+            
+            def step_fn(mdl, _y):
+                return mdl(_y, decoder_segment_ids, decoder_positions, deterministic, model_mode, kv_cache=None, attention_metadata=attention_metadata)
+
+            if policy is not None:
+                def pure_step(params, val):
+                    m = nnx.merge(template_graph, params)
+                    out, _ = step_fn(m, val)
+                    _, new_p = nnx.split(m)
+                    return new_p, out
+                final_state, out_y = jax.checkpoint(pure_step, policy=policy)(layer_state_slice, y)
+            else:
+                out_y, _ = step_fn(layer_module, y)
+                _, final_state = nnx.split(layer_module)
+
+            return (out_y, None), (final_state, None)
+
+        init_carry = (inputs, None)
+        (final_y, _), (final_stacked_states, _) = jax.lax.scan(scan_body, init_carry, stacked_state)
+        return final_y, final_stacked_states
+
+    # --------------------------------------------------------------------------
+    # Forward Pass
+    # --------------------------------------------------------------------------
+
+    def _apply_embedding(self, shared_embedding, decoder_input_tokens, decoder_positions, deterministic, model_mode, image_embeddings, bidirectional_mask, image_masks):
+        cfg = self.config
+        y = shared_embedding(decoder_input_tokens.astype("int32"))
+        
+        if image_embeddings is not None and cfg.use_multimodal:
+             y = multimodal_utils.merge_mm_embeddings(
+                text_embeddings=y, vision_embeddings=image_embeddings,
+                mask=bidirectional_mask, image_masks=image_masks,
+            )
+        
+        y = self.drop_out(y, deterministic=deterministic, broadcast_dims=(-2,))
+        y = y.astype(cfg.dtype)
+        
+        # 1. Sinusoidal Position Embedding
+        if self.sinusoidal_pos_emb is not None:
+            # Assumes call signature: (inputs, positions)
+            y = self.sinusoidal_pos_emb(y, decoder_positions)
+        
+        # 2. Trainable Position Embedding
+        if self.trainable_pos_emb is not None:
+            # Assumes call signature matching Embed NNX module
+            y += self.trainable_pos_emb(decoder_positions.astype("int32"), model_mode=model_mode)
+            
+        return y
+
+    def apply_output_head(self, shared_embedding, y, deterministic, model_mode):
+        cfg = self.config
+        if cfg.shard_mode == ShardMode.EXPLICIT:
+             create_sharding(self.mesh, ("activation_batch", "activation_length_no_exp", "activation_embed"))
+            
+        y = self.norm_layer(y)
+        y = nnx.Dropout(rate=cfg.dropout_rate, rngs=self.rngs)(y, deterministic=deterministic, broadcast_dims=(-2,))
+        
+        if cfg.logits_via_embedding:
+            embedding_table = shared_embedding.embedding.value
+            attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
+            
+            if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+                out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"))
+            else:
+                out_sharding = create_sharding(self.mesh, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab"))
+
+            logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config, out_sharding)
+            
+            if self.config.normalize_embedding_logits:
+                logits = logits / jnp.sqrt(y.shape[-1])
+            if cfg.final_logits_soft_cap:
+                logits = jnp.tanh(logits / cfg.final_logits_soft_cap) * cfg.final_logits_soft_cap
+        else:
+            if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+                out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"))
+            else:
+                out_sharding = create_sharding(self.mesh, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab"))
+            
+            logits = self.logits_dense(y, out_sharding=out_sharding)
+            
+        if self.config.cast_logits_to_fp32:
+            logits = logits.astype(jnp.float32)
+        return logits
+
+    def __call__(
+        self,
+        shared_embedding: nnx.Module,
+        decoder_input_tokens,
+        decoder_positions,
+        decoder_segment_ids=None,
+        deterministic=False,
+        model_mode=MODEL_MODE_TRAIN,
+        previous_chunk=None,
+        slot: None | int = None,
+        page_state: None | page_manager.PageState = None,
+        bidirectional_mask: None | Any = None,
+        image_embeddings: None | jnp.ndarray = None,
+        image_masks: None | jnp.ndarray = None,
+        kv_caches: list[jax.Array] | None = None,
+        attention_metadata=None,
+    ):
+        cfg = self.config
+        
+        y = self._apply_embedding(
+            shared_embedding, decoder_input_tokens, decoder_positions, 
+            deterministic, model_mode, image_embeddings, bidirectional_mask, image_masks
+        )
+        
+        broadcast_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
+
+        if cfg.scan_layers:
+            if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+                (dense_stack, moe_stack), (dense_tmpl, moe_tmpl) = self.layer_stacks, self.template_layers
+                y, new_dense_states = self._run_scan(dense_tmpl, dense_stack, y, broadcast_args, attention_metadata)
+                nnx.update(self.layer_stacks[0], new_dense_states)
+                y, new_moe_states = self._run_scan(moe_tmpl, moe_stack, y, broadcast_args, attention_metadata)
+                nnx.update(self.layer_stacks[1], new_moe_states)
+            else:
+                (stack,), (tmpl,) = self.layer_stacks, self.template_layers
+                y, new_states = self._run_scan(tmpl, stack, y, broadcast_args, attention_metadata)
+                nnx.update(self.layer_stacks[0], new_states)
+        
+        else:
+            stacks = self.layer_stacks
+            all_layers = []
+            for s in stacks: all_layers.extend(s)
+
+            for i, layer in enumerate(all_layers):
+                kv_cache = kv_caches[i] if kv_caches is not None else None
+                policy = self._get_jax_policy()
+                
+                if policy:
+                    def pure_step(state, _y, _kv):
+                        m = nnx.merge(nnx.graph(layer), state)
+                        res = m(_y, *broadcast_args, kv_cache=_kv, attention_metadata=attention_metadata)
+                        _, new_s = nnx.split(m)
+                        return new_s, res
+
+                    new_state, (y, new_kv) = jax.checkpoint(pure_step, policy=policy)(nnx.state(layer), y, kv_cache)
+                    nnx.update(layer, new_state)
+                else:
+                    y, new_kv = layer(y, *broadcast_args, kv_cache=kv_cache, attention_metadata=attention_metadata)
+                
+                if kv_caches is not None:
+                    kv_caches[i] = new_kv
+
+        hidden_state = y
+        logits = None
+        if not (cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN):
+            logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+            
+        return logits, hidden_state, kv_caches
