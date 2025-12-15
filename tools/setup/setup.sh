@@ -14,15 +14,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Description:
-# bash setup.sh MODE={stable,nightly,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu} DEVICE={tpu,gpu}
+# ==================================
+# TPU EXAMPLES
+# ==================================
 
+# Install dependencies in dependencies/generated_requirements/tpu-requirements.txt
+## bash tools/setup/setup.sh MODE=stable
 
-# You need to specify a MODE, default value stable.
-# You have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google.
-# In libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
-# For MODE=stable you may additionally specify JAX_VERSION, e.g. JAX_VERSION=0.4.13
-# For DEVICE=gpu, you may also specify JAX_VERSION when MODE=nightly, e.g. JAX_VERSION=0.4.36.dev20241109
+# Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + specified jax, jaxlib, libtpu
+## bash tools/setup/setup.sh MODE=stable JAX_VERSION=0.8.0
+
+# Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + custom libtpu
+## bash tools/setup/setup.sh MODE=stable LIBTPU_GCS_PATH=gs://my_custom_libtpu/libtpu.so
+
+# Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + jax-nightly, jaxlib-nightly, libtpu-nightly
+## bash tools/setup/setup.sh MODE=nightly
+
+# Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + specified jax-nightly, jaxlib-nightly + latest libtpu-nightly
+## bash tools/setup/setup.sh MODE=nightly JAX_VERSION=0.8.2.dev20251211
+
+# Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + jax-nightly, jaxlib-nightly + custom libtpu
+## bash tools/setup/setup.sh MODE=nightly LIBTPU_GCS_PATH=gs://my_custom_libtpu/libtpu.so
+
+# Install custom libtpu only
+## bash tools/setup/setup.sh MODE=libtpu-only LIBTPU_GCS_PATH=gs://my_custom_libtpu/libtpu.so
+
+# ==================================
+# GPU EXAMPLES
+# ==================================
+
+# Install dependencies in dependencies/generated_requirements/cuda12-requirements.txt
+## bash tools/setup/setup.sh MODE=stable DEVICE=gpu
+
+# Install dependencies in dependencies/generated_requirements/cuda12-requirements.txt + specified jax, jaxlib, jax-cuda12-plugin, jax-cuda12-pjrt
+## bash tools/setup/setup.sh MODE=stable DEVICE=gpu JAX_VERSION=0.4.13
+
+# Install dependencies in dependencies/generated_requirements/cuda12-requirements.txt + jax-nightly, jaxlib-nightly
+## bash tools/setup/setup.sh MODE=nightly DEVICE=gpu
+
+# Install dependencies in dependencies/generated_requirements/cuda12-requirements.txt + specified jax, jaxlib, jax-cuda12-plugin, jax-cuda12-pjrt
+## bash tools/setup/setup.sh MODE=nightly DEVICE=gpu JAX_VERSION=0.4.36.dev20241109
 
 
 # Enable "exit immediately if any command fails" option
@@ -102,7 +133,6 @@ apt update -y && apt -y install gcsfuse
 rm -rf /var/lib/apt/lists/*
 EOF
 
-
 python3 -m pip install -U setuptools wheel uv
 
 # Set environment variables
@@ -111,188 +141,148 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
+# Set default value for $DEVICE
 if [[ -z "$DEVICE" ]]; then
-    export DEVICE="tpu"
+    export DEVICE=tpu
 fi
 
-if [[ $JAX_VERSION == NONE ]]; then
-    unset JAX_VERSION
+# Set default value for $MODE
+if [[ -z "$MODE" ]]; then
+  export MODE=stable
 fi
 
-if [[ $LIBTPU_GCS_PATH == NONE ]]; then
-    unset LIBTPU_GCS_PATH
-fi
-
-if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE || ($MODE == "nightly" && $DEVICE == "gpu")) ]]; then
-    echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode (plus nightly mode on GPU).\n\n"
-    exit 1
-fi
-
-if [[ $DEVICE == "tpu" ]]; then
-    libtpu_path="$HOME/custom_libtpu/libtpu.so"
-    if [[ "$MODE" == "libtpu-only" ]]; then
-        # Only update custom libtpu.
-        if [[ -n "$LIBTPU_GCS_PATH" ]]; then
-            # Install custom libtpu
-            echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
-            # Install required dependency
-            python3 -m uv pip install -U crcmod
-            # Copy libtpu.so from GCS path
-            gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
-            exit 0
-        else
-            echo -e "\n\nError: You must provide a custom libtpu for libtpu-only mode.\n\n"
-            exit 1
+# Unset optional variables if set to NONE
+unset_optional_vars() {
+    local optional_vars=("JAX_VERSION" "LIBTPU_GCS_PATH")
+    for var_name in "${optional_vars[@]}"; do
+        if [[ ${!var_name} == NONE ]]; then
+            unset "$var_name"
         fi
-    fi
-fi
+    done
+}
+unset_optional_vars
 
-if [[ "$MODE" == "nightly" ]]; then
+version_mismatch_warning() {
+    echo -e "\n\nWARNING: You are installing a $1 version that is different from the one pinned by MaxText. This can lead to the following issues:"
+    echo -e "1. Compatibility: The dependencies in the requirements file are tested and compatible with the pinned $1 version. We cannot guarantee that they will work correctly with a different $1 version."
+    echo -e "2. Consistency: Installing a custom $1 version can pull in different transitive dependencies over time, making the environment non-reproducible and potentially affecting performance.\n\n"
+}
+
+install_custom_libtpu() {
+    libtpu_path="$HOME/custom_libtpu/libtpu.so"
+    echo -e "\nInstalling libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+    version_mismatch_warning "libtpu"
+    # Delete custom libtpu if it exists
+    if [ -e "$libtpu_path" ]; then
+        rm -v "$libtpu_path"
+    fi
+    # Install 'crcmod' to download 'libtpu.so' from GCS reliably
+    python3 -m uv pip install -U crcmod
+    # Copy libtpu.so from GCS path
+    gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+}
+
+install_maxtext_with_deps() {
+    if [[ "$DEVICE" != "tpu" && "$DEVICE" != "gpu" ]]; then
+      echo -e "\n\nError: DEVICE must be either 'tpu' or 'gpu'.\n\n"
+      exit 1
+    fi
+    echo "Setting up MaxText in $MODE mode for $DEVICE device"
     if [ "$DEVICE" = "gpu" ]; then
         dep_name='dependencies/requirements/generated_requirements/cuda12-requirements.txt'
     else
-        dep_name='dependencies/requirements/generated_requirements/'"${DEVICE?}"'-requirements.txt'
+        dep_name='dependencies/requirements/generated_requirements/tpu-requirements.txt'
     fi
-    printf 'Nightly mode: Installing "%s", stripping commit pins from git+ repos.\n' "$dep_name"
-    nightly_txt="${dep_name##*/}"
-    nightly_txt="${nightly_txt%.txt}"'-nightly-temp.txt'
+    echo "Installing requirements from $dep_name"
+    python3 -m uv pip install --resolution=lowest -r "$dep_name" \
+        -r 'src/install_maxtext_extra_deps/extra_deps_from_github.txt'
 
-    # Create a temp file, strip commit pins from git+ repos in requirements.txt
-    # Remove/update this section based on the pinned github repo commit in requirements.txt
-    sed -E \
-      -e 's|^([^ ]*) @ https?://github.com/([^/]*\/[^/]*)/archive/.*\.zip$|\1@git+https://github.com/\2.git|' \
-      -e '/JetStream/d' \
-      -e '/mlperf-logging/d' \
-      "$dep_name" > "$nightly_txt"
-
-    echo "--- Installing modified nightly requirements: ---"
-    cat -- "$nightly_txt"
-    echo "-------------------------------------------------"
-    
-    python3 -m uv pip install --no-cache-dir -U -r "$nightly_txt" \
-                                                -r 'src/install_maxtext_extra_deps/extra_deps_from_github.txt'
-    rm -fv -- "$nightly_txt"
-else
-    # stable or stable_stack mode: Install with pinned commits
-    if [ "$DEVICE" = "gpu" ]; then
-        dep_basename='cuda12-requirements.txt'
-    else
-        dep_basename="${DEVICE?}"'-requirements.txt'
+    # The MaxText package is installed separately from its dependencies to optimize
+    # docker image rebuild times by leveraging docker's layer caching.
+    # Dependencies are installed in a separate step before MaxText code is
+    # copied. This means that if MaxText code changes, but the
+    # dependencies do not, docker can reuse the cached dependency layer, leading
+    # to significantly faster image builds.
+    if [ -f 'pyproject.toml' ]; then
+        echo "Installing MaxText package without installing the dependencies (already installed)"
+        python3 -m uv pip install --no-deps -e .
     fi
+}
 
-    printf 'Installing "%s" with pinned commits.\n' "$dep_basename"
-    requirements_txt=
-    for candidate in 'dependencies/requirements/generated_requirements' 'dependencies/requirements' "${MAXTEXT_REPO_ROOT}"'/dependencies/requirements' "$PWD"; do
-      if [ -f "$candidate"'/'"$dep_basename" ]; then
-        requirements_txt="$candidate"'/'"$dep_basename"
-        break
-      else
-        searched="$searched"':'
-      fi
-    done
-    if [ -z "${requirements_txt}" ]; then
-      >&2 printf 'Could not find "%s", looked in: %s\n' "$dep_basename" "${searched%?}"
-      exit 2
-    else
-      python3 -m uv pip install --resolution=lowest -r "$requirements_txt" \
-                                                    -r 'src/install_maxtext_extra_deps/extra_deps_from_github.txt'
-    fi
-fi
+# stable mode installation
+if [[ "$MODE" == "stable" ]]; then
+    install_maxtext_with_deps
 
-# Install maxtext package
-if [ -f 'pyproject.toml' ]; then
-  case "$DEVICE" in
-      'gpu') python3 -m uv pip install -e .[cuda12] --no-deps --resolution=lowest ;;
-      'tpu') python3 -m uv pip install -e .[tpu] --no-deps --resolution=lowest ;;
-      *)
-          >&2 printf 'Unsupported device\n'
-          exit 6
-          ;;
-  esac
-  python3 -m uv pip install --resolution=lowest -r 'src/install_maxtext_extra_deps/extra_deps_from_github.txt'
-fi
-
-# Delete custom libtpu if it exists
-if [ -e "$libtpu_path" ]; then
-    rm -v "$libtpu_path"
-fi
-
-if [[ "$MODE" == "stable" || ! -v MODE ]]; then
-# Stable mode
     if [[ $DEVICE == "tpu" ]]; then
-        echo "Installing stable jax, jaxlib for tpu"
         if [[ -n "$JAX_VERSION" ]]; then
-            echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
-            python3 -m uv pip install -U jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+            echo -e "\nInstalling stable jax, jaxlib, libtpu version ${JAX_VERSION}"
+            version_mismatch_warning "jax"
+            python3 -m uv pip install -U jax[tpu]==${JAX_VERSION}
         fi
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
-            # Install custom libtpu
-            echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
-            # Install required dependency
-            python3 -m uv pip install -U crcmod
-            # Copy libtpu.so from GCS path
-            gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+            install_custom_libtpu
         fi
     elif [[ $DEVICE == "gpu" ]]; then
-        echo "Installing stable jax, jaxlib for NVIDIA gpu"
         if [[ -n "$JAX_VERSION" ]]; then
-            echo "Installing stable jax, jaxlib ${JAX_VERSION}"
+            echo -e "\nInstalling stable jax, jaxlib ${JAX_VERSION}"
+            version_mismatch_warning "jax"
             python3 -m uv pip install -U "jax[cuda12]==${JAX_VERSION}"
-        else
-            echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
-            python3 -m uv pip install "jax[cuda12]"
-        fi
-        export NVTE_FRAMEWORK=jax
-        if [[ -n "$JAX_VERSION" && "$JAX_VERSION" != "0.7.0" ]]; then
-            python3 -m uv pip install transformer-engine[jax]
-        else
-            python3 -m uv pip install git+https://github.com/NVIDIA/TransformerEngine.git@9d031f
         fi
     fi
-elif [[ $MODE == "nightly" ]]; then
-# Nightly mode
+    exit 0
+fi
 
-    # Uninstall existing jax, jaxlib and  libtpu-nightly
+# nightly mode installation
+if [[ $MODE == "nightly" ]]; then
+    install_maxtext_with_deps
+
+    # Uninstall existing jax, jaxlib and libtpu
     python3 -m uv pip show jax && python3 -m uv pip uninstall jax
     python3 -m uv pip show jaxlib && python3 -m uv pip uninstall jaxlib
-    python3 -m uv pip show libtpu-nightly && python3 -m uv pip uninstall libtpu-nightly
+    python3 -m uv pip show libtpu && python3 -m uv pip uninstall libtpu
 
-    if [[ $DEVICE == "gpu" ]]; then
-        # Install jax-nightly
+    if [[ $DEVICE == "tpu" ]]; then
         if [[ -n "$JAX_VERSION" ]]; then
-            echo "Installing jax-nightly, jaxlib-nightly ${JAX_VERSION}"
-            python3 -m uv pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            echo -e "\nInstalling jax-nightly, jaxlib-nightly ${JAX_VERSION}"
+            python3 -m uv pip install -U --pre --no-deps jax==${JAX_VERSION} jaxlib==${JAX_VERSION} -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
         else
-            echo "Installing latest jax-nightly, jaxlib-nightly"
-            python3 -m uv pip install -U --pre jax jaxlib jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            echo -e "\nInstalling the latest jax-nightly, jaxlib-nightly"
+            python3 -m uv pip install --pre -U --no-deps jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
         fi
-        # Install Transformer Engine
-        export NVTE_FRAMEWORK=jax
-        python3 -m uv pip install https://github.com/NVIDIA/TransformerEngine/archive/9d031f.zip
-    elif [[ $DEVICE == "tpu" ]]; then
-        echo "Installing nightly tensorboard plugin profile"
-        python3 -m uv pip install tbp-nightly --upgrade
-        echo "Installing jax-nightly, jaxlib-nightly"
-        # Install jax-nightly
-        python3 -m uv pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
-        # Install jaxlib-nightly
-        python3 -m uv pip install --pre -U jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
-            # Install custom libtpu
-            echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
-            # Install required dependency
-            python3 -m uv pip install -U crcmod
-            # Copy libtpu.so from GCS path
-            gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+            install_custom_libtpu
         else
-            # Install libtpu-nightly
-            echo "Installing libtpu-nightly"
-            python3 -m uv pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+            echo -e "\nInstalling the latest libtpu-nightly"
+            python3 -m uv pip install -U --pre --no-deps libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        fi
+    elif [[ $DEVICE == "gpu" ]]; then
+        if [[ -n "$JAX_VERSION" ]]; then
+            echo -e "\nInstalling jax-nightly, jaxlib-nightly ${JAX_VERSION}"
+            python3 -m uv pip install -U --pre --no-deps jax==${JAX_VERSION} jaxlib==${JAX_VERSION} \
+                jax-cuda12-plugin[with-cuda]==${JAX_VERSION} jax-cuda12-pjrt==${JAX_VERSION} -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+        else
+            echo -e "\nInstalling the latest jax-nightly, jaxlib-nightly"
+            python3 -m uv pip install -U --pre --no-deps jax jaxlib \
+                jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
         fi
     fi
-    echo "Installing nightly tensorboard plugin profile"
-    python3 -m uv pip install tbp-nightly --upgrade
-else
-    echo -e "\n\nError: You can only set MODE to [stable,nightly,libtpu-only].\n\n"
-    exit 1
+    exit 0
 fi
+
+# libtpu-only mode installation
+if [[ "$MODE" == "libtpu-only" ]]; then
+    if [[ "$DEVICE" != "tpu" ]]; then
+      echo -e "\n\nError: MODE=libtpu-only is only supported for DEVICE=tpu.\n\n"
+      exit 1
+    fi
+    if [[ -z "$LIBTPU_GCS_PATH" ]]; then
+        echo -e "\n\nError: LIBTPU_GCS_PATH must be set when MODE is libtpu-only.\n\n"
+        exit 1
+    fi
+    install_custom_libtpu
+    exit 0
+fi
+
+echo -e "\n\nError: MODE must be either 'stable', 'nightly', or 'libtpu-only'.\n\n"
+exit 1
