@@ -915,6 +915,8 @@ class AttentionWithNorm(nnx.Module):
         use_qk_norm=config.use_qk_norm,
         query_pre_attn_scalar=query_pre_attn_scalar,
         model_mode=model_mode,
+        lora_rank=config.lora_rank,
+        lora_alpha=config.lora_alpha,
         rngs=rngs,
     )
 

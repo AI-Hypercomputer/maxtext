@@ -248,7 +248,6 @@ class Checkpointing(BaseModel):
   """Core configuration for checkpointing and run restoration."""
 
   load_parameters_path: PathStr = Field("", description="Loads only model parameters from a specific checkpoint path.")
-  lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
   load_full_state_path: PathStr = Field("", description="Loads the complete training state from a checkpoint path.")
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
   async_checkpointing: bool = Field(True, description="If True, uses an asynchronous checkpointer for performance.")
@@ -274,6 +273,14 @@ class Checkpointing(BaseModel):
   save_checkpoint_on_completion: bool = Field(
       True, description="If True, saves a final checkpoint upon training completion."
   )
+
+
+class LoRA(BaseModel):
+  """Configuration for LoRA (Low-Rank Adaptation) fine-tuning."""
+
+  lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
+  lora_rank: NonNegativeInt = Field(0, description="LoRA adapter rank. 0 means no LoRA.")
+  lora_alpha: NonNegativeFloat = Field(1.0, description="LoRA scaling factor. Output is scaled by alpha/rank.")
 
 
 class OrbaxStorage(BaseModel):
@@ -1571,6 +1578,7 @@ class MaxTextConfig(
     # Run and Checkpointing
     RunInfo,
     Checkpointing,
+    LoRA,
     OrbaxStorage,
     EmergencyCheckpointing,
     # Data Types and Quantization

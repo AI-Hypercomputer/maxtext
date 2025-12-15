@@ -150,6 +150,8 @@ class DecoderLayer(nn.Module):
         compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
         model_mode=model_mode,
+        lora_rank=cfg.lora_rank,
+        lora_alpha=cfg.lora_alpha,
     )
 
     attention_lnx, kv_cache = attention_layer(

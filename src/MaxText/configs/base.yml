@@ -38,6 +38,8 @@ load_parameters_path: ""
 
 # LoRA adapter support configs
 lora_input_adapters_path: ""    # Input GCS path for a parent directory which has all the LoRA adapters (lora_id as subdir)
+lora_rank: 0
+lora_alpha: 1.0  # LoRA scaling factor (output scaled by alpha/rank)
 
 # Loads a full checkpoint including optimizer state and step count from a specific directory
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
@@ -306,6 +308,9 @@ parameter_memory_host_offload: False
 scan_layers: True # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
 param_scan_axis: 1
 
+
+
+
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
@@ -372,6 +377,8 @@ local_checkpoint_directory: ""
 
 # It should be a positive number when and only when `enable_emergency_checkpoint` or `enable_multi_tier_checkpointing` is True.
 local_checkpoint_period: 0
+
+
 
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"

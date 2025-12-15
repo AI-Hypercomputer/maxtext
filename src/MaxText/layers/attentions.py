@@ -69,12 +69,15 @@ from MaxText.layers.embeddings import (
     Qwen3NextRotaryEmbedding,
 )
 from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
-from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
+from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes, LoRADenseGeneral
 from MaxText.layers.normalizations import RMSNorm, Qwen3NextRMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from flax.nnx.nn.lora import LoRAParam
+from flax.nnx.nn import initializers as nnx_initializers
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
+
 
 
 @dataclasses.dataclass(repr=False)
@@ -131,6 +134,8 @@ def attention_as_linen(
     use_qk_norm: bool = False,
     query_pre_attn_scalar: float | None = None,
     use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
+    lora_rank: int = 0,  # LoRA rank for attention projections (0 = no LoRA)
+    lora_alpha: float = 1.0,  # LoRA scaling factor (output scaled by alpha/rank)
     # Temperature tuning parameters used for Llama4
     temperature_tuning: bool = False,
     temperature_tuning_scale: float = 0.1,
@@ -197,6 +202,8 @@ def attention_as_linen(
       use_qk_norm=use_qk_norm,
       query_pre_attn_scalar=query_pre_attn_scalar,
       use_bias_in_projections=use_bias_in_projections,
+      lora_rank=lora_rank,
+      lora_alpha=lora_alpha,
       temperature_tuning=temperature_tuning,
       temperature_tuning_scale=temperature_tuning_scale,
       temperature_tuning_floor_scale=temperature_tuning_floor_scale,
@@ -290,6 +297,8 @@ class Attention(nnx.Module):
       use_qk_norm: bool = False,
       query_pre_attn_scalar: float | None = None,
       use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
+      lora_rank: int = 0,  # LoRA rank for attention projections (0 = no LoRA)
+      lora_alpha: float = 1.0,  # LoRA scaling factor (output scaled by alpha/rank)
       # Temperature tuning parameters used for Llama4
       temperature_tuning: bool = False,
       temperature_tuning_scale: float = 0.1,
@@ -389,6 +398,8 @@ class Attention(nnx.Module):
     self.use_qk_norm = use_qk_norm
     self.query_pre_attn_scalar = query_pre_attn_scalar
     self.use_bias_in_projections = use_bias_in_projections
+    self.lora_rank = lora_rank
+    self.lora_alpha = lora_alpha
     self.temperature_tuning = temperature_tuning
     self.temperature_tuning_scale = temperature_tuning_scale
     self.temperature_tuning_floor_scale = temperature_tuning_floor_scale
@@ -562,6 +573,24 @@ class Attention(nnx.Module):
 
     if self.is_qwen3_next:
       out_features = (self.num_query_heads, self.head_dim * 2)
+    assert self.lora_rank > 0
+    if self.lora_rank > 0:
+      return LoRADenseGeneral(
+          in_features_shape=in_features,
+          out_features_shape=out_features,
+          lora_rank=self.lora_rank,
+          lora_alpha=self.lora_alpha,
+          axis=-1,
+          kernel_init=query_init,
+          kernel_axes=kernel_axes,
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          matmul_precision=self.config.matmul_precision,
+          use_bias=self.use_bias_in_projections,
+          shard_mode=self.config.shard_mode,
+          rngs=self.rngs,
+      )
 
     return DenseGeneral(
         in_features_shape=in_features,
@@ -604,9 +633,30 @@ class Attention(nnx.Module):
         else ("embed", "kv_heads", "kv_head_dim")
     )
 
+    in_features = self.convert_dense_general_inputs_shape(inputs_kv_shape)
+    out_features = (self.num_kv_heads, self.head_dim)
+
+    if self.lora_rank > 0:
+      return LoRADenseGeneral(
+          in_features_shape=in_features,
+          out_features_shape=out_features,
+          lora_rank=self.lora_rank,
+          lora_alpha=self.lora_alpha,
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=kernel_axes,
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          shard_mode=self.config.shard_mode,
+          matmul_precision=self.config.matmul_precision,
+          use_bias=self.use_bias_in_projections,
+          rngs=self.rngs,
+      )
+
     return DenseGeneral(
-        in_features_shape=self.convert_dense_general_inputs_shape(inputs_kv_shape),
-        out_features_shape=(self.num_kv_heads, self.head_dim),
+        in_features_shape=in_features,
+        out_features_shape=out_features,
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=kernel_axes,
@@ -678,6 +728,24 @@ class Attention(nnx.Module):
       in_features = self.num_query_heads * self.head_dim
       out_kernel_axis = ("mlp", "embed")
       axis = (-1,)
+
+    if self.lora_rank > 0:
+      return LoRADenseGeneral(
+          in_features_shape=in_features,
+          out_features_shape=out_features,
+          lora_rank=self.lora_rank,
+          lora_alpha=self.lora_alpha,
+          axis=axis,
+          kernel_init=self.kernel_init,
+          kernel_axes=out_kernel_axis,
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          shard_mode=self.config.shard_mode,
+          matmul_precision=self.config.matmul_precision,
+          use_bias=self.use_bias_in_projections,
+          rngs=self.rngs,
+      )
 
     return DenseGeneral(
         in_features_shape=in_features,
@@ -1007,6 +1075,7 @@ class Attention(nnx.Module):
 
     # apply projection.
     if self.config.fused_qkv:
+      assert False
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
     else:
       query = self.query_projection(inputs_q, out_sharding=qkv_sharding)

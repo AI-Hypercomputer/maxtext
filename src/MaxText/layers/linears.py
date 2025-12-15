@@ -16,7 +16,7 @@
 
 import functools
 import operator
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import jax
@@ -27,6 +27,8 @@ from jax.sharding import NamedSharding, Mesh
 from jax.ad_checkpoint import checkpoint_name
 
 from flax import nnx
+from flax.nnx.nn import initializers as nnx_initializers
+from flax.nnx.nn.lora import LoRAParam
 import flax.linen as nn
 
 from MaxText import max_logging
@@ -568,3 +570,158 @@ def mlp_block(
       abstract_init=False,
   )
   return module
+
+
+
+class LoRADenseGeneral(DenseGeneral):
+  """A DenseGeneral layer with LoRA support.
+
+  This wraps a DenseGeneral layer and adds low-rank adaptation (LoRA) to it.
+  The output is: base_output + scale * lora_b(lora_a(x)).
+
+  Attributes:
+    lora_rank: The rank of the LoRA adaptation.
+    lora_alpha: Scaling factor for LoRA (output is scaled by alpha/rank).
+    lora_a: LoRA down-projection parameter (None if lora_rank <= 0).
+    lora_b: LoRA up-projection parameter (None if lora_rank <= 0).
+  """
+
+  def __init__(
+      self,
+      in_features_shape: Union[int, Tuple[int, ...]],
+      out_features_shape: Union[int, Tuple[int, ...]],
+      *,
+      lora_rank: int = 0,
+      lora_alpha: float = 1.0,
+      axis: Union[int, Tuple[int, ...]] = -1,
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+      kernel_axes: Tuple[str, ...] = (),
+      dtype: DType = jnp.float32,
+      weight_dtype: DType = jnp.float32,
+      quant: Optional[Quant] = None,
+      shard_mode: Any = None,
+      matmul_precision: str = "default",
+      use_bias: bool = False,
+      rngs: Optional[nnx.Rngs] = None,
+  ):
+    """Initializes the LoRADenseGeneral module.
+
+    Args:
+      in_features_shape: The input feature dimensions.
+      out_features_shape: The output feature dimensions.
+      lora_rank: The rank of the LoRA adaptation. If 0, no LoRA is applied.
+      lora_alpha: Scaling factor for LoRA output (scaled by alpha/rank).
+      axis: The axis or axes along which to apply the transformation.
+      kernel_init: Initializer for the kernel.
+      kernel_axes: Axis names for the kernel for partitioning.
+      dtype: The dtype of the computation.
+      weight_dtype: The dtype of the weights.
+      quant: Quantization configuration.
+      shard_mode: Sharding mode configuration.
+      matmul_precision: Matrix multiplication precision.
+      use_bias: Whether to use bias in the dense layer.
+      rngs: RNG state for initialization.
+    """
+
+    # Initialize the base DenseGeneral layer via super().__init__
+    super().__init__(
+        in_features_shape=in_features_shape,
+        out_features_shape=out_features_shape,
+        axis=axis,
+        kernel_init=kernel_init,
+        kernel_axes=kernel_axes,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        quant=quant,
+        shard_mode=shard_mode,
+        matmul_precision=matmul_precision,
+        use_bias=use_bias,
+        rngs=rngs,
+    )
+    self.lora_rank = lora_rank
+    self.lora_alpha = lora_alpha
+    self.lora_scale = lora_alpha / lora_rank if lora_rank > 0 else 1.0
+
+    # Create LoRA parameters if lora_rank > 0
+    if lora_rank > 0:
+      in_features = canonicalize_tuple(in_features_shape)
+      out_features = canonicalize_tuple(out_features_shape)
+
+      # Use shapes compatible with dot_general (like DenseGeneral kernel)
+      # lora_a: in_features_shape + (rank,) e.g., (32, 128, 8)
+      # lora_b: (rank,) + out_features_shape e.g., (8, 4096)
+      lora_a_shape = in_features + (lora_rank,)
+      lora_b_shape = (lora_rank,) + out_features
+
+      # Compute LoRA-specific sharding from kernel_axes (see lora_utils.py)
+      # kernel_axes is for shape in_features_shape + out_features_shape
+      # lora_a needs: kernel_axes[:len(in_features)] + (None,)
+      # lora_b needs: (None,) + kernel_axes[len(in_features):]
+      if kernel_axes:
+        lora_a_axes = kernel_axes[:len(in_features)] + (None,)
+        lora_b_axes = (None,) + kernel_axes[len(in_features):]
+      else:
+        lora_a_axes = None
+        lora_b_axes = None
+
+      # Use LoRAParam type (like Flax does) for filtering/freezing base params
+      self.lora_a = nnx.Param(
+          nnx_initializers.he_uniform()(rngs.params(), lora_a_shape, weight_dtype),
+          sharding=lora_a_axes,
+      )
+      self.lora_b = nnx.Param(
+          nnx_initializers.zeros(rngs.params(), lora_b_shape, weight_dtype),
+          sharding=lora_b_axes,
+      )
+    else:
+      self.lora_a = None
+      self.lora_b = None
+      assert False
+
+  def __call__(self, inputs: Array, _initializing: bool = False, out_sharding: NamedSharding | None = None) -> Array:
+    """Applies the LoRA-enhanced DenseGeneral transformation.
+
+    Args:
+      inputs: The input array.
+      _initializing: Whether this is being called during initialization (for quant).
+      out_sharding: Optional output sharding specification.
+
+    Returns:
+      The transformed array with LoRA adaptation applied.
+    """
+    # Get base output using parent class
+    base_out = super().__call__(inputs, _initializing=_initializing, out_sharding=out_sharding)
+
+    if self.lora_a is not None and self.lora_b is not None:
+      # Use dot_general like DenseGeneral for proper multi-axis contraction
+      x = jnp.asarray(inputs, self.dtype)
+      lora_a = jnp.asarray(self.lora_a[...], self.dtype)
+      lora_b = jnp.asarray(self.lora_b[...], self.dtype)
+
+      # Compute axes for dot_general (same logic as DenseGeneral)
+      norm_axis = normalize_axes(self.axis, x.ndim)
+      contract_ind = tuple(range(len(self.axis)))  # (0, 1, ...) for lora_a
+
+      # x @ lora_a: contract input axes with first axes of lora_a
+      # x shape: (..., in_features_shape) e.g., (batch, seq, 32, 128)
+      # lora_a shape: in_features_shape + (rank,) e.g., (32, 128, 8)
+      # result shape: (..., rank) e.g., (batch, seq, 8)
+      intermediate = lax.dot_general(
+          x, lora_a, ((norm_axis, contract_ind), ((), ())),
+          precision=lax.Precision(self.matmul_precision)
+      )
+
+      # intermediate @ lora_b: contract last axis with first axis of lora_b
+      # intermediate shape: (..., rank)
+      # lora_b shape: (rank,) + out_features_shape e.g., (8, 4096)
+      # result shape: (..., out_features_shape)
+      # Note: dot_general doesn't accept negative indices, so normalize -1
+      lora_out = lax.dot_general(
+          intermediate, lora_b, (((intermediate.ndim - 1,), (0,)), ((), ())),
+          precision=lax.Precision(self.matmul_precision)
+      )
+
+      return base_out + self.lora_scale * lora_out
+    assert False
+
+    return base_out
