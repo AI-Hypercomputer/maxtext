@@ -40,5 +40,4 @@ Below is a list of all available tutorials organized by topic.
 tutorials/first_run.md
 tutorials/pretraining.md
 tutorials/post_training_index.md
-tutorials/demo_decoding.ipynb
 ```
