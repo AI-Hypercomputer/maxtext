@@ -16,7 +16,7 @@
 
 # MaxText
 
-[![MaxText Package Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/RunTests.yml/badge.svg)](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/build_and_test_maxtext.yml)
+[![MaxText Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/build_and_test_maxtext.yml/badge.svg)](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/build_and_test_maxtext.yml)
 
 > **_NOTE:_** We recommend running MaxText with Python 3.12, as it is our primary supported version. Other Python versions may encounter compatibility issues.
 
