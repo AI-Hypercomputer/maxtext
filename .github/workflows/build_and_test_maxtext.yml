@@ -37,7 +37,6 @@ permissions:
   contents: read
 jobs:
   build_and_upload_maxtext_package:
-    name: Build and upload maxtext package
     uses: ./.github/workflows/build_package.yml
     with:
       device_type: tpu
@@ -101,6 +100,42 @@ jobs:
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
+  maxtext_tpu_pathways_unit_tests:
+    needs: build_and_upload_maxtext_package
+    uses: ./.github/workflows/run_pathways_tests.yml
+    strategy:
+        fail-fast: false
+        matrix:
+          image_type: ["py312"]
+    with:
+      device_type: tpu
+      device_name: v4-8
+      image_type: ${{ matrix.image_type }}
+      cloud_runner: linux-x86-ct4p-240-4tpu
+      pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
+      xla_python_client_mem_fraction: 0.75
+      tf_force_gpu_allow_growth: false
+      container_resource_option: "--privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+
+  maxtext_tpu_pathways_integration_tests:
+    needs: build_and_upload_maxtext_package
+    uses: ./.github/workflows/run_pathways_tests.yml
+    strategy:
+        fail-fast: false
+        matrix:
+          image_type: ["py312"]
+    with:
+      device_type: tpu
+      device_name: v4-8
+      image_type: ${{ matrix.image_type }}
+      cloud_runner: linux-x86-ct4p-240-4tpu
+      pytest_marker: 'not cpu_only and not gpu_only and integration_test'
+      xla_python_client_mem_fraction: 0.75
+      tf_force_gpu_allow_growth: false
+      container_resource_option: "--privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+
   maxtext_gpu_unit_tests:
     needs: build_and_upload_maxtext_package
     uses: ./.github/workflows/run_tests_against_package.yml
@@ -143,7 +178,7 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [maxtext_cpu_unit_tests, maxtext_tpu_unit_tests, maxtext_tpu_integration_tests, maxtext_gpu_unit_tests, maxtext_gpu_integration_tests]
+    needs: [maxtext_cpu_unit_tests, maxtext_tpu_unit_tests, maxtext_tpu_integration_tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, maxtext_gpu_unit_tests, maxtext_gpu_integration_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
