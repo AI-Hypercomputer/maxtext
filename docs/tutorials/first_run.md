@@ -20,9 +20,23 @@
 This topic provides a basic introduction to get your MaxText workload up and running on single host and multihost environments using Cloud TPUs or NVIDIA GPUs. To help you get familiar with MaxText, we recommend starting with a single host first and then moving to multihost.
 
 ## Prerequisites: Set up storage and configure MaxText
-1. To store logs and checkpoints, [Create a Cloud Storage bucket](https://cloud.google.com/storage/docs/creating-buckets) in your project. To run MaxText, the TPU or GPU VMs must have read/write permissions for the bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role.
 
-2. MaxText reads a yaml file for configuration. We also recommend reviewing the configurable options in `configs/base.yml`. This file includes a decoder-only model of ~1B parameters. The configurable options can be overwritten from the command line. For instance, you can change the `steps` or `log_period` by either modifying `configs/base.yml` or by passing in `steps` and `log_period` as additional arguments to the `train.py` call. Set `base_output_directory` to a folder in the bucket you just created.
+### 1. Set up Environment Variables
+To make the commands in this tutorial copy-paste friendly, set your bucket name as an environment variable:
+```bash
+export BUCKET_NAME=your-bucket-name
+# Example: export BUCKET_NAME=maxtext-test-runs
+```
+
+### 2. Create Cloud Storage Bucket
+Create a bucket to store logs and checkpoints:
+```bash
+gcloud storage buckets create gs://${BUCKET_NAME} --location=us-central1
+# Note: Ensure your TPU VM has read/write access to this bucket.
+```
+
+### 3. Configuration
+MaxText reads a yaml file for configuration. The default configuration is in `configs/base.yml` (decoder-only model, ~1B params). We will override specific parameters (like `base_output_directory`) via command line arguments.
 
 ## Local development for single host
 This procedure describes how to run MaxText on a single GPU or TPU host.
@@ -33,31 +47,42 @@ multiple hosts but is a good way to learn about MaxText.
 
 1. [Create and SSH to the single host VM of your choice](https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm). You can use any available single host TPU, such as `v5litepod-8`, `v5p-8`, or `v4-8`.
 2. Clone MaxText onto that TPU VM.
-3. Within the root directory of the cloned repo, install dependencies and pre-commit hook by running:
-```sh
+3. Make sure you are in the `MaxText` root directory (where `setup.sh` was run):
+```bash
+cd ~/MaxText
+```
+
+4. Within the root directory of the cloned repo, install dependencies and pre-commit hook by running:
+```bash
 python3 -m venv ~/venv-maxtext
 source ~/venv-maxtext/bin/activate
 bash tools/setup/setup.sh
 pre-commit install
 ```
-4. After installation completes, run training on synthetic data with the following command:
-```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
-  base_output_directory=gs://<my-bucket> \
+5. After installation completes, run training on synthetic data with the following command:
+```bash
+# Set a unique run name
+export RUN_NAME=run_$(date +%Y%m%d_%H%M%S)
+
+# Run training
+python3 -m MaxText.train configs/base.yml \
+  run_name=$RUN_NAME \
+  base_output_directory=gs://${BUCKET_NAME} \
   dataset_type=synthetic \
   steps=10
 ```
-Optional: If you want to try training on a Hugging Face dataset, see [Data Input Pipeline](../guides/data_input_pipeline.md) for data input options.
+Optional: If you want to try training on a Hugging Face dataset, see [Data Input Pipeline](data-input-pipeline) for data input options.
 
-5. To demonstrate model output, run the following command:
-```sh
-python3 -m MaxText.decode src/MaxText/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
-  base_output_directory=gs://<my-bucket> \
+6. To demonstrate model output, we can run decoding (inference).
+> **Note:** We use the same `RUN_NAME` and `BUCKET_NAME` to automatically load the checkpoint we just trained.
+
+```bash
+python3 -m MaxText.decode configs/base.yml \
+  run_name=$RUN_NAME \
+  base_output_directory=gs://${BUCKET_NAME} \
   per_device_batch_size=1
 ```
-This command uses a model with randomly initialized weights, so the outputs are also random. To get high quality output you need pass in a checkpoint, typically via the `load_parameters_path` argument.
+This command uses the checkpoint from the training run. If no checkpoint is found (e.g. if you changed the run name), it will initialize with random weights.
 
 
 ### Run MaxText via notebook
