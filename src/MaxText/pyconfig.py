@@ -293,6 +293,14 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
 
   pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict)
 
+  if pydantic_kwargs.get("use_tokamax_splash") and pydantic_kwargs.get(
+      "use_jax_splash"
+  ):
+    raise ValueError(
+        "At most one of `use_tokamax_splash` and `use_jax_splash` can be set to"
+        " True."
+    )
+
   # Initialize JAX distributed system before device backend is initialized.
   if pydantic_kwargs.get("jax_debug_log_modules"):
     jax.config.update("jax_debug_log_modules", pydantic_kwargs["jax_debug_log_modules"])
