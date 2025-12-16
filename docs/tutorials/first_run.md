@@ -29,14 +29,32 @@ export BUCKET_NAME=your-bucket-name
 ```
 
 ### 2. Create Cloud Storage Bucket
-Create a bucket to store logs and checkpoints:
+To store logs and checkpoints, [Create a Cloud Storage bucket](https://cloud.google.com/storage/docs/creating-buckets) in your project. To run MaxText, the TPU or GPU VMs must have read/write permissions for the bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role.
+
 ```bash
 gcloud storage buckets create gs://${BUCKET_NAME} --location=us-central1
 # Note: Ensure your TPU VM has read/write access to this bucket.
 ```
 
 ### 3. Configuration
-MaxText reads a yaml file for configuration. The default configuration is in `configs/base.yml` (decoder-only model, ~1B params). We will override specific parameters (like `base_output_directory`) via command line arguments.
+MaxText reads a yaml file for configuration. The default configuration is in `configs/base.yml`.
+**Note:** This default configuration defines a **Decoder-only** model with **~1B parameters**.
+
+You can review the full [base.yml](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/base.yml) file, but here are the key configurable options:
+
+```yaml
+# configs/base.yml snippet
+model_name: "default"
+weight_dtype: "float32"
+base_emb_dim: 2048
+base_num_query_heads: 16
+base_num_kv_heads: 16
+base_mlp_dim: 7168
+base_num_decoder_layers: 16
+head_dim: 128
+```
+
+The configurable options can be overwritten from the command line. For instance, you can change the `steps` or `log_period` by either modifying `configs/base.yml` or by passing in `steps` and `log_period` as additional arguments to the `train.py` call.
 
 ## Local development for single host
 This procedure describes how to run MaxText on a single GPU or TPU host.
