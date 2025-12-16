@@ -51,8 +51,7 @@ bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-trainin
 ### 1.3. Upload the Docker image to Artifact Registry
 > **Note:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to your project's Artifact Registry and to allow the cluster to pull them during workload execution. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
 ```bash
-# Replace `$USER_runner` with your desired image name
-export DOCKER_IMAGE_NAME=${USER}_runner
+export DOCKER_IMAGE_NAME=<Docker Image Name>
 bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$DOCKER_IMAGE_NAME
 ```
 The `docker_upload_runner.sh` script uploads your Docker image to Artifact Registry.
@@ -73,7 +72,7 @@ export ZONE=<GKE Cluster Zone>
 # -- Workload Configuration --
 export WORKLOAD_NAME=<Name of Workload> # e.g., sft-$(date +%s)
 export TPU_TYPE=<TPU Type> # e.g., v6e-256
-export TPU_SLICE=1
+export TPU_SLICE=<number of slices>
 export DOCKER_IMAGE="gcr.io/${PROJECT}/${DOCKER_IMAGE_NAME}"
 
 # -- MaxText Configuration --

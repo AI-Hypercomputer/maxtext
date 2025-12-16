@@ -24,6 +24,7 @@ We use [Tunix](https://github.com/google/tunix), a JAX-based library designed fo
 In this tutorial we use a single host TPU VM such as `v6e-8/v5p-8`. Let's get started!
 
 ## Install dependencies
+
 ```sh
 # 1. Clone the repository
 git clone https://github.com/AI-Hypercomputer/maxtext.git
