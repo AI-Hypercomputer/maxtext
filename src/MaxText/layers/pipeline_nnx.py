@@ -89,12 +89,12 @@ class Pipeline(nnx.Module):
             stage_rngs = nnx.Rngs(params=key_s) 
             return LayerCls(config=self.config, mesh=self.mesh, rngs=stage_rngs, **kwargs)
 
-        # Generate keys for all stages
+        # Generate keys
         total_instances = num_repeats * self.num_stages
         root_key = rngs.params()
         keys = jax.random.split(root_key, total_instances)
         
-        # 1. Instantiate the template (Graph definition)
+        # 1. Instantiate the template
         template_module = create_stage(keys[0])
         self.graphdef, _ = nnx.split(template_module)
         
@@ -103,19 +103,66 @@ class Pipeline(nnx.Module):
             m = create_stage(k)
             return nnx.state(m)
 
-        self.stacked_state = jax.vmap(get_layer_state)(keys)
+        stacked_state_raw = jax.vmap(get_layer_state)(keys)
         
-        # 3. Apply Sharding to the Stacked State
+        # 3. Apply Sharding (FIXED: Incorporate FSDP Logical Axes)
         if self.mesh is not None:
-            def shard_leading_dim(leaf):
-                axes = ("stage",) + (None,) * (leaf.ndim - 1)
-                spec = PartitionSpec(*axes)
+            # We map 'template_module' state to get the logical axes of every param
+            # Note: This relies on the params in template_module having 'sharding' attribute or similar.
+            # IF layers/linears.py is not updated to store this, this will still default to None.
+            
+            def get_leaf_logical_axes(leaf):
+                # Try to extract logical axes metadata if it exists
+                # Future-proof for when we fix linears.py to add sharding metadata
+                if hasattr(leaf, 'sharding_axes'): 
+                    return leaf.sharding_axes
+                return None
+
+            template_logical_axes = jax.tree.map(get_leaf_logical_axes, nnx.state(template_module))
+
+            def shard_leading_dim(leaf, logical_axes):
+                # 1. Start with Stage Axis
+                axes = ["stage"]
+                
+                # 2. Append Logical Axes (mapped to physical mesh axes via config rules)
+                if logical_axes is not None:
+                    # Convert logical names (e.g. 'embed') to mesh names (e.g. 'data')
+                    # We reuse nn_linen.logical_to_mesh_sharding logic conceptually
+                    # But here we need to construct the PartitionSpec explicitly.
+                    
+                    # We can use the helper to get the physical spec for the inner dims
+                    inner_spec = PartitionSpec(*logical_axes)
+                    physical_sharding = nn_linen.logical_to_mesh_sharding(
+                        inner_spec, mesh=self.mesh, rules=self.config.logical_axis_rules
+                    )
+                    
+                    if isinstance(physical_sharding, NamedSharding):
+                        # Append the inner specs
+                        axes.extend(physical_sharding.spec)
+                    else:
+                        # Fallback if no specific rule
+                        axes.extend([None] * (leaf.ndim - 1))
+                else:
+                    # No metadata found (current state of linears.py), replicate inner
+                    axes.extend([None] * (leaf.ndim - 1))
+                
+                # 3. Apply
+                # Ensure spec length matches leaf dimensions (leaf has +1 dim for stack)
+                # If logical axes were provided, they account for leaf.ndim-1.
+                
+                spec = PartitionSpec(*tuple(axes))
                 sharding = NamedSharding(self.mesh, spec)
                 return jax.device_put(leaf, sharding)
             
-            # FIX: Use jax.tree.map instead of jax.tree_map
-            self.stacked_state = jax.tree.map(shard_leading_dim, self.stacked_state)
+            # Apply using structure of template to guide the structure of stacked_state
+            self.stacked_state = jax.tree.map(shard_leading_dim, stacked_state_raw, template_logical_axes)
+        else:
+            self.stacked_state = stacked_state_raw
 
+        # Register as Data
+        self.stacked_state = nnx.data(self.stacked_state)
+
+    # ... (Helpers need_circ_storage to get_pipeline_remat_policy remain same) ...
     def need_circ_storage(self):
         return (self.config.num_pipeline_repeats > 1 and 
                 self.config.num_pipeline_microbatches > self.num_stages * self.forwarding_delay)
@@ -138,7 +185,6 @@ class Pipeline(nnx.Module):
             if hasattr(leaf, 'sharding') and isinstance(leaf.sharding, NamedSharding):
                 return leaf.sharding.spec
             return None
-        # FIX: Use jax.tree.map
         return jax.tree.map(get_spec, self.stacked_state)
 
     def all_gather_over_fsdp(self):
@@ -149,8 +195,8 @@ class Pipeline(nnx.Module):
                 return jax.lax.with_sharding_constraint(leaf, target)
             return leaf
         
-        # FIX: Use jax.tree.map
-        self.stacked_state = jax.tree.map(apply_ag, self.stacked_state)
+        # Returns new view
+        return jax.tree.map(apply_ag, self.stacked_state)
 
     def shard_dim_by_stages(self, x, dim: int):
         if self.mesh is None: return x
@@ -159,7 +205,7 @@ class Pipeline(nnx.Module):
         sharding = NamedSharding(self.mesh, PartitionSpec(*dims))
         return jax.lax.with_sharding_constraint(x, sharding)
 
-    # ... (Loop Helpers: init_loop_state, get_iteration_inputs... COPY FROM PREVIOUS) ...
+    # ... (Loop Helpers init_loop_state, get_iteration_inputs... COPY FROM PREVIOUS) ...
     def get_microbatch_and_repeat_ids(self, loop_iteration):
         processed = jnp.maximum(loop_iteration - self.forwarding_delay * jnp.arange(self.num_stages), 0)
         return processed % self.config.num_pipeline_microbatches, processed // self.config.num_pipeline_microbatches
@@ -214,7 +260,6 @@ class Pipeline(nnx.Module):
     # --- MAIN CALL ---
 
     def __call__(self, inputs, segment_ids=None, positions=None, deterministic=False, model_mode=MODEL_MODE_TRAIN, partition_spec=None):
-        # 0. Convert & Reshape Inputs
         inputs = jnp.asarray(inputs).reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length, self.config.emb_dim))
         
         ag_sharding = NamedSharding(self.mesh, PartitionSpec(None, None))
@@ -223,7 +268,11 @@ class Pipeline(nnx.Module):
         if segment_ids is not None:
             segment_ids = jax.lax.with_sharding_constraint(jnp.asarray(segment_ids), ag_sharding).reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length))
 
-        if self.config.pipeline_fsdp_ag_once: self.all_gather_over_fsdp()
+        # Get effective state
+        if self.config.pipeline_fsdp_ag_once: 
+            current_stacked_state = self.all_gather_over_fsdp()
+        else:
+            current_stacked_state = self.stacked_state
 
         loop_state = self.init_loop_state(inputs)
 
@@ -245,13 +294,12 @@ class Pipeline(nnx.Module):
             if self.config.num_pipeline_repeats > 1:
                 target_indices = repeat_ids * self.num_stages + stage_indices
             
-            # Select weights for this step using jax.tree.map
             def gather_state(stacked, idxs):
+                # Vectorized gather using vmap indexing
                 return jax.vmap(lambda i: jax.tree.map(lambda l: l[i], stacked))(idxs)
             
-            current_states = jax.tree.map(lambda leaf: gather_state(leaf, target_indices), self.stacked_state)
+            current_states = jax.tree.map(lambda leaf: gather_state(leaf, target_indices), current_stacked_state)
 
-            # Run Layer (Pure Vmap)
             def run_layer(state, x, seg, pos):
                 model = nnx.merge(self.graphdef, state)
                 out = model(x, decoder_segment_ids=seg, decoder_positions=pos, deterministic=deterministic, model_mode=model_mode)
