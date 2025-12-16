@@ -26,4 +26,5 @@ monitoring_and_debugging/monitor_goodput.md
 monitoring_and_debugging/understand_logs_and_metrics.md
 monitoring_and_debugging/use_vertex_ai_tensorboard.md
 monitoring_and_debugging/xprof_user_guide.md
+monitoring_and_debugging/ml_workload_diagnostics.md
 ```
