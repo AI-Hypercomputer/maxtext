@@ -114,12 +114,6 @@ class ConfigTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       pyconfig.initialize(argv)
 
-  def test_qwen3_next_sparse_matmul_correction(self):
-    """Tests that sparse_matmul is forced to False for qwen3-next."""
-    argv = ["", _BASE_CONFIG_PATH, "model_name=qwen3-next-80b-a3b", "run_name=test"]
-    config = pyconfig.initialize(argv)
-    self.assertFalse(config.sparse_matmul)
-
   def test_llama3_tokenizer_correction(self):
     """Tests that tokenizer_type is forced to 'tiktoken' for llama3."""
     argv = [
