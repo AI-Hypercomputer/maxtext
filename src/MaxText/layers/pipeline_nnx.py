@@ -1,3 +1,6 @@
+"""
+Pipeline Parallelism Module for MaxText using Flax NNX.
+"""
 import functools
 from typing import Any, Optional, Dict, Type, Tuple, List
 
@@ -27,6 +30,7 @@ def _strip_spec(spec):
     return PartitionSpec(*new_axes)
 
 def with_logical_constraint(x, logical_axis_names, rules, mesh):
+    """Applies logical sharding constraints to a tensor."""
     if mesh is None:
         return x
     sharding_or_spec = nn_linen.logical_to_mesh_sharding(
@@ -42,6 +46,9 @@ def with_logical_constraint(x, logical_axis_names, rules, mesh):
 # --- NNX Pipeline Module ---
 
 class Pipeline(nnx.Module):
+    """
+    Module that implements pipelining across stages using Flax NNX.
+    """
     def __init__(
         self, 
         layers: nnx.Module, 
@@ -75,7 +82,11 @@ class Pipeline(nnx.Module):
         
         # Extract init kwargs from the template layer
         kwargs = {}
-        for attr in ['decoder_layer', 'num_decoder_layers', 'quant', 'model_mode']:
+        # FIX 1: Added 'scan_layers' to propagation list
+        attributes_to_copy = [
+            'decoder_layer', 'num_decoder_layers', 'quant', 'model_mode', 'scan_layers'
+        ]
+        for attr in attributes_to_copy:
             if hasattr(layers, attr):
                 kwargs[attr] = getattr(layers, attr)
         
@@ -102,11 +113,9 @@ class Pipeline(nnx.Module):
                 stage_rngs_dict = layer_keys_dicts[flat_idx]
                 layer_rngs = nnx.Rngs(**stage_rngs_dict)
                 
-                # --- FIX: Calculate Layer Index Offset ---
-                # Ensure layers in subsequent stages continue the index sequence
+                # Calculate correct layer index offset for this stage
                 stage_kwargs = kwargs.copy()
                 if 'num_decoder_layers' in kwargs:
-                    # e.g., if 4 layers per stage: Stage 0 is 0-3, Stage 1 is 4-7
                     start_layer = s_idx * kwargs['num_decoder_layers']
                     stage_kwargs['layer_idx'] = start_layer
 
@@ -136,41 +145,58 @@ class Pipeline(nnx.Module):
         return (jax.checkpoint_policies.save_from_both_policies(self.remat_policy, save_input) 
                 if self.remat_policy else save_input)
 
-    # --- Fix #3: Full State Spec ---
     def get_weight_sharding(self, *args, **kwargs):
+        """Returns partition spec for all state."""
         def get_spec(leaf):
             if hasattr(leaf, 'sharding') and isinstance(leaf.sharding, NamedSharding):
                 return leaf.sharding.spec
             return None
-        
-        # Capture ALL state (params, batch_stats, quantization state, etc.)
         return jax.tree.map(get_spec, nnx.state(self.layers))
 
-    def all_gather_over_fsdp(self):
+    def get_physical_spec_no_fsdp(self, full_logical):
+        """Converts logical partition spec to physical mesh sharding, removing FSDP."""
+        def remove_fsdp_sharding(sharding_tree):
+            def _remove_fsdp_from_named_sharding(named_sharding):
+                if isinstance(named_sharding, NamedSharding):
+                    new_spec = _strip_spec(named_sharding.spec)
+                    return NamedSharding(named_sharding.mesh, new_spec)
+                return named_sharding
+            return jax.tree.map(_remove_fsdp_from_named_sharding, sharding_tree)
+
+        physical = nn_linen.logical_to_mesh_sharding(full_logical, mesh=self.mesh, rules=self.config.logical_axis_rules)
+        return remove_fsdp_sharding(physical)
+
+    def all_gather_over_fsdp(self, partition_spec):
         """
-        Fix #2: Transforms the module variables in-place to enforce 'AG' (All-Gather) 
+        FIX 2: Transforms module variables in-place to enforce 'AG' (All-Gather) 
         sharding constraints, effectively stripping FSDP axes.
+        Matches Linen's logic of using partition_spec to derive physical layout.
         """
-        def apply_ag_constraint(leaf):
-            if hasattr(leaf, 'sharding') and isinstance(leaf.sharding, NamedSharding):
-                # 1. Get Physical Spec (Mesh + Spec)
-                current_mesh = leaf.sharding.mesh
-                current_spec = leaf.sharding.spec
-                
-                # 2. Strip FSDP from the spec
-                new_spec = _strip_spec(current_spec)
-                
-                # 3. Create new target sharding
-                target_sharding = NamedSharding(current_mesh, new_spec)
-                
-                # 4. Apply constraint (forces gather)
+        # 1. Get target physical layout (No FSDP) from logical spec
+        physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(partition_spec)
+
+        # 2. Define constraint application
+        def apply_constraint(leaf, target_sharding):
+            if isinstance(target_sharding, NamedSharding):
                 return jax.lax.with_sharding_constraint(leaf, target_sharding)
             return leaf
 
-        # Update the module state in-place with the constrained variables
+        # 3. Apply to full state
         full_state = nnx.state(self.layers)
-        new_state = jax.tree.map(apply_ag_constraint, full_state)
+        new_state = jax.tree.map(apply_constraint, full_state, physical_constraint_no_fsdp)
+        
+        # 4. Update Module
         nnx.update(self.layers, new_state)
+
+    def shard_dim_by_stages(self, x, dim: int):
+        """Shards a specific dimension by stages."""
+        if self.mesh is None: return x
+        
+        dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
+        dims_mapping[dim] = "stage"
+        dims_mapping = tuple(dims_mapping)
+        sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(*dims_mapping))
+        return jax.lax.with_sharding_constraint(x, sharding)
 
     # --- Loop Logic Helpers ---
     def get_microbatch_and_repeat_ids(self, loop_iteration):
@@ -272,13 +298,21 @@ class Pipeline(nnx.Module):
 
         # 1. Reshape Inputs
         inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length, self.config.emb_dim))
-        if positions is not None: positions = positions.reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length))
-        if segment_ids is not None: segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length))
+        
+        # Apply AG Sharding Constraints to Aux Inputs (Matches Linen)
+        ag_sharding = NamedSharding(self.mesh, PartitionSpec(None, None))
+        if positions is not None: 
+            positions = jax.lax.with_sharding_constraint(positions, ag_sharding)
+            positions = positions.reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length))
+            
+        if segment_ids is not None: 
+            segment_ids = jax.lax.with_sharding_constraint(segment_ids, ag_sharding)
+            segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length))
 
-        # --- Fix #2: Apply FSDP All-Gather Once ---
+        # Fix 2: Apply FSDP All-Gather Once using partition_spec
         if self.config.pipeline_fsdp_ag_once:
-             # This forces the model variables to be gathered from FSDP shards
-             self.all_gather_over_fsdp()
+             # Ensure partition_spec is valid (it comes from Decoder.get_pipeline_weight_sharding)
+             self.all_gather_over_fsdp(partition_spec)
 
         # 2. Init Loop State
         loop_state = self.init_loop_state(inputs)
@@ -304,10 +338,13 @@ class Pipeline(nnx.Module):
             s_pos = positions[micro_ids] if positions is not None else None
             s_seg = segment_ids[micro_ids] if segment_ids is not None else None
             
+            if s_pos is not None: s_pos = self.shard_dim_by_stages(s_pos, 0)
+            if s_seg is not None: s_seg = self.shard_dim_by_stages(s_seg, 0)
+            
             in_axes_seg = 0 if s_seg is not None else None
             in_axes_pos = 0 if s_pos is not None else None
 
-            # 5. VMAP with Switch logic to handle heterogeneous stage modules
+            # 5. VMAP with Switch logic
             def run_stage_logic(x, seg, pos, stage_idx, repeat_idx):
                 if self.config.num_pipeline_repeats > 1:
                     target_idx = repeat_idx * self.num_stages + stage_idx
@@ -318,7 +355,7 @@ class Pipeline(nnx.Module):
                 
                 branches = []
                 for mod in flattened_modules:
-                    def _branch(inputs, module=mod): 
+                    def _branch(inputs, module=mod):
                         x_i, seg_i, pos_i = inputs
                         return module(x_i, decoder_segment_ids=seg_i, decoder_positions=pos_i, deterministic=deterministic, model_mode=model_mode)
                     branches.append(_branch)
@@ -331,20 +368,26 @@ class Pipeline(nnx.Module):
             )
             
             if self.config.scan_layers:
-                 # Flattened modules often return (out, kv), we only need out
-                 stages_out = stages_out[0]
+                 if isinstance(stages_out, tuple):
+                     stages_out = stages_out[0]
 
             return self.get_new_loop_state(stages_out, carry), None
 
-        # 6. Execute Scan
+        # 6. Execute Scan or Loop
         total_steps = (self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats) + \
                       self.forwarding_delay * (self.num_stages - 1)
         
+        policy = self.get_pipeline_remat_policy() if self.config.set_remat_policy_on_pipeline_iterations else None
+        
         if self.config.scan_pipeline_iterations:
-             policy = self.get_pipeline_remat_policy() if self.config.set_remat_policy_on_pipeline_iterations else None
-             scan_fn = jax.checkpoint(scan_fn, policy=policy, prevent_cse=not self.config.scan_pipeline_iterations)
-             
-        final_loop_state, _ = jax.lax.scan(scan_fn, loop_state, None, length=total_steps)
+             scan_fn_exec = jax.checkpoint(scan_fn, policy=policy, prevent_cse=not self.config.scan_pipeline_iterations)
+             final_loop_state, _ = jax.lax.scan(scan_fn_exec, loop_state, None, length=total_steps)
+        else:
+             curr_state = loop_state
+             scan_fn_exec = jax.checkpoint(scan_fn, policy=policy) if policy else scan_fn
+             for _ in range(total_steps):
+                 curr_state, _ = scan_fn_exec(curr_state, None)
+             final_loop_state = curr_state
         
         out = self.permute_output_micro_per_stage_dim(final_loop_state["state_io"])
         
