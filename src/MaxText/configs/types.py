@@ -146,6 +146,7 @@ class DatasetType(str, Enum):
   HF = "hf"
   GRAIN = "grain"
   TFDS = "tfds"
+  C4MLPERF = "c4_mlperf"
 
 
 class SamplingStrategy(str, Enum):
@@ -279,9 +280,7 @@ class Checkpointing(BaseModel):
   save_checkpoint_on_completion: bool = Field(
       True, description="If True, saves a final checkpoint upon training completion."
   )
-  enable_continuous_checkpointing: bool = Field(
-      False, description="If True, enables continuous checkpointing."
-  )
+  enable_continuous_checkpointing: bool = Field(False, description="If True, enables continuous checkpointing.")
 
 
 class OrbaxStorage(BaseModel):
@@ -463,9 +462,7 @@ class Attention(BaseModel):
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for TE padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
-  use_jax_splash: bool = Field(
-      False, description="Whether to use jax splash attention."
-  )
+  use_jax_splash: bool = Field(False, description="Whether to use jax splash attention.")
 
 
 class MoBa(BaseModel):
