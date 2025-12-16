@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Reinforcement Learning on multi-most TPUs
+# Reinforcement Learning on multi-host TPUs
 
 This tutorial demonstrates step-by-step instructions for setting up the environment and then training the Llama3.1 70B-IT model on the GSM8K math reasoning dataset using [Pathways for orchestration](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro) on multi-host TPU-VMs such as `v5p-128`.
 
