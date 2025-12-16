@@ -954,7 +954,7 @@ deepstack_visual_indexes_for_vit: []
 subslice_shape: ""
 
 # NNX
-enable_nnx: false
+enable_nnx: true 
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
