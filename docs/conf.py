@@ -59,6 +59,9 @@ myst_enable_extensions = [
 ]
 myst_linkify_fuzzy_links = False
 
+# Notebook execution mode
+nb_execution_mode = "off"
+
 # Theme-specific options
 # https://sphinx-book-theme.readthedocs.io/en/stable/reference.html
 html_theme_options = {

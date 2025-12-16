@@ -18,37 +18,27 @@
 
 Welcome to the MaxText tutorials! If you are new here, we recommend starting with the **Getting Started** guide below.
 
-## 🚀 New to MaxText?
+## New to MaxText?
 
 If you haven't installed MaxText yet, please check our [Installation Guide](install_maxtext.md) first.
 
-Once installed, follow our **First Run** tutorial to get your first model training on a TPU:
-
-*   **[Getting Started: First Run](tutorials/first_run.md)**  
-    *   *Goal:* Train your first LLM model on a single TPU.
-    *   *Time:* ~15 minutes.
-    *   *Topic:* Cloud Storage setup, Running `train.py`, and Verify with `decode.py`.
+Once installed, follow our **[First Run](tutorials/first_run.md)** tutorial to get your first model training on a TPU. This tutorial will guide you through the process of training a model with MaxText and verifying the results.
 
 ---
 
-## All Tutorials
-
 Below is a list of all available tutorials organized by topic.
 
-### Basics
-*   [Getting Started: First Run](tutorials/first_run.md) - The essential starting point.
-
-### Training
+### Additional Tutorials
 *   [Pre-training](tutorials/pretraining.md) - Learn how to run large-scale pre-training jobs.
-
-### Post-Training
 *   [Post-Training Index](tutorials/post_training_index.md) - a collection of guides for fine-tuning, RLHF, and other post-training workflows.
 
 ```{toctree}
 :maxdepth: 1
 :hidden:
+:caption: Tutorials
 
 tutorials/first_run.md
 tutorials/pretraining.md
 tutorials/post_training_index.md
+tutorials/demo_decoding.ipynb
 ```
