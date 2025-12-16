@@ -530,6 +530,7 @@ class MLA(Attention):
       # LoRA path
       low_rank_q = self.wq_a(inputs_q, out_sharding=wqa_out_sharding)  # [B, L, q_lora_rank]
       low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
+      low_rank_q = checkpoint_name(low_rank_q, "mla_q")
       q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads * qk_head_dim]
 
     # Split into non-positional and rotary parts.
@@ -668,7 +669,7 @@ class MLA(Attention):
     low_rank = self.wkv_a(inputs, out_sharding=wkva_out_sharding)
     low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
     low_rank_main = self.kv_norm(low_rank_main)
-
+    low_rank_main = checkpoint_name(low_rank_main, "mla_kv")
     # Apply rotary embedding to key_rope.
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
     key_rope = self.apply_rotary_embedding(key_rope, inputs_positions=inputs_positions)

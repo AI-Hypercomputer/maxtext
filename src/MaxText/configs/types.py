@@ -187,6 +187,7 @@ type ModelName = Literal[
     "deepseek2-16b",
     "deepseek2-236b",
     "deepseek3-671b",
+    "deepseek3-671b-2dfsdp",
     "deepseek3-test",
     "deepseek3-tiny",
     "kimi-k2-1t",
@@ -233,6 +234,10 @@ class RunInfo(BaseModel):
   )
   model_name: ModelName = Field("default", description="The name of the model configuration to use.")
   override_model_config: bool = Field(False, description="If True, allows overriding model parameters via CLI.")
+  override_logical_axis_rules: bool = Field(
+      False,
+      description="If True, logical_axis_rules will be overridden instead of merged.",
+  )
   log_config: bool = Field(
       True,
       description="If True, prints the final configuration after initialization.",
@@ -273,6 +278,9 @@ class Checkpointing(BaseModel):
   )
   save_checkpoint_on_completion: bool = Field(
       True, description="If True, saves a final checkpoint upon training completion."
+  )
+  enable_continuous_checkpointing: bool = Field(
+      False, description="If True, enables continuous checkpointing."
   )
 
 
@@ -455,6 +463,9 @@ class Attention(BaseModel):
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for TE padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
+  use_jax_splash: bool = Field(
+      False, description="Whether to use jax splash attention."
+  )
 
 
 class MoBa(BaseModel):
@@ -562,6 +573,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Shard the MoE weights on the num_expert dimension. Can be performant when "
       "num_experts % fsdp_parallelism != 0.",
+  )
+  use_2d_fsdp_sharding: bool = Field(
+      False,
+      description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
   )
   norm_topk_prob: bool = Field(
       False,
@@ -805,6 +820,14 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the attention output projection.",
   )
+  mla_q: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the mla's query projectiont.",
+  )
+  mla_kv: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the mla's key and value projection.",
+  )
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
 
@@ -851,6 +874,10 @@ class DatasetGeneral(BaseModel):
   packing: bool = Field(
       True,
       description="Whether to pack multiple short examples into a single sequence.",
+  )
+  grain_packing_type: Literal["first_fit", "concat_then_split"] = Field(
+      "first_fit",
+      description="Packing type when using Grain pipeline. 'first_fit' or 'concat_then_split'.",
   )
   max_segments_per_seq: int = Field(
       32,
@@ -1851,6 +1878,8 @@ class MaxTextConfig(
           "query_proj",
           "key_proj",
           "value_proj",
+          "mla_kv",
+          "mla_q",
           "qkv_proj",
           "out_proj",
       ]
@@ -2123,34 +2152,37 @@ class MaxTextConfig(
           self.dcn_autoregressive_parallelism,
       ]
     else:
-      self.ici_parallelism = [
-          self.ici_data_parallelism,
-          self.ici_pipeline_parallelism,
-          self.ici_fsdp_parallelism,
-          self.ici_fsdp_transpose_parallelism,
-          self.ici_sequence_parallelism,
-          self.ici_context_parallelism,
-          self.ici_context_autoregressive_parallelism,
-          self.ici_tensor_parallelism,
-          self.ici_tensor_transpose_parallelism,
-          self.ici_tensor_sequence_parallelism,
-          self.ici_expert_parallelism,
-          self.ici_autoregressive_parallelism,
-      ]
-      self.dcn_parallelism = [
-          self.dcn_data_parallelism,
-          self.dcn_pipeline_parallelism,
-          self.dcn_fsdp_parallelism,
-          self.dcn_fsdp_transpose_parallelism,
-          self.dcn_sequence_parallelism,
-          self.dcn_context_parallelism,
-          self.dcn_context_autoregressive_parallelism,
-          self.dcn_tensor_parallelism,
-          self.dcn_tensor_transpose_parallelism,
-          self.dcn_tensor_sequence_parallelism,
-          self.dcn_expert_parallelism,
-          self.dcn_autoregressive_parallelism,
-      ]
+      ici_map = {
+          "data": self.ici_data_parallelism,
+          "stage": self.ici_pipeline_parallelism,
+          "fsdp": self.ici_fsdp_parallelism,
+          "fsdp_transpose": self.ici_fsdp_transpose_parallelism,
+          "sequence": self.ici_sequence_parallelism,
+          "context": self.ici_context_parallelism,
+          "context_autoregressive": self.ici_context_autoregressive_parallelism,
+          "tensor": self.ici_tensor_parallelism,
+          "tensor_transpose": self.ici_tensor_transpose_parallelism,
+          "tensor_sequence": self.ici_tensor_sequence_parallelism,
+          "expert": self.ici_expert_parallelism,
+          "autoregressive": self.ici_autoregressive_parallelism,
+      }
+      self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+
+      dcn_map = {
+          "data": self.dcn_data_parallelism,
+          "stage": self.dcn_pipeline_parallelism,
+          "fsdp": self.dcn_fsdp_parallelism,
+          "fsdp_transpose": self.dcn_fsdp_transpose_parallelism,
+          "sequence": self.dcn_sequence_parallelism,
+          "context": self.dcn_context_parallelism,
+          "context_autoregressive": self.dcn_context_autoregressive_parallelism,
+          "tensor": self.dcn_tensor_parallelism,
+          "tensor_transpose": self.dcn_tensor_transpose_parallelism,
+          "tensor_sequence": self.dcn_tensor_sequence_parallelism,
+          "expert": self.dcn_expert_parallelism,
+          "autoregressive": self.dcn_autoregressive_parallelism,
+      }
+      self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):

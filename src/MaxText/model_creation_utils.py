@@ -154,7 +154,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
     model = _create_model_partial()
     return nnx.state(model)
 
-  with mesh:
+  with jax.set_mesh(mesh):
     # Create the model with sharded parameters.
     with nn.logical_axis_rules(config.logical_axis_rules):
       sharded_state = create_sharded_state()

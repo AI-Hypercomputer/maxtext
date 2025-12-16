@@ -22,7 +22,7 @@ Arithmetic intensity is calculated as the ratio of floating-point operations (FL
 
 This metric helps determine whether a computation is MXU-bound (high arithmetic intensity) or memory-bound/communication-bound (low arithmetic intensity).
 
-[This sharding document](sharding_on_TPUs) illustrates various sharding strategies and their roofline analysis, through AI analysis.
+[This sharding document](sharding.md) illustrates various sharding strategies and their roofline analysis, through AI analysis.
 
 ## Metrics for benchmark analysis
 
@@ -74,8 +74,7 @@ See [](quantization).
 ### Choose sharding strategy
 
 Sharding is crucial for optimizing model performance. MaxText offers various sharding strategies and hybrid options, including FSDP, TP, EP, CP, and PP, which can be configured through your MaxText settings.
-[This document](sharding_on_TPUs) illustrates in detail how sharding works in maxtext and chooses the right sharding config for your workload.
-[This document](sharding_on_TPUs) illustrates in detail how sharding works in maxtext and chooses the write sharding config for your workload.
+[This document](sharding.md) illustrates in detail how sharding works in maxtext and chooses the right sharding config for your workload.
 
 ### Performance tuning on custom Pallas call
 
