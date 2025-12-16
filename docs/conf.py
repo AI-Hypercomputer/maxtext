@@ -79,4 +79,6 @@ exclude_patterns = [
     "run_maxtext/run_maxtext_via_multihost_job.md",
     "run_maxtext/run_maxtext_via_multihost_runner.md",
     "reference/core_concepts/llm_calculator.ipynb",
+    "jupyter_execute",
+    "_build",
 ]

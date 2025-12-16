@@ -107,7 +107,14 @@ This command uses the checkpoint from the training run. If no checkpoint is foun
 In the same TPU VM where you just installed all the dependencies of MaxText, You can also run training and decoding in MaxText via Notebook (for e.g., via Jupyter or Colab). 
 
 #### Decoding in MaxText via notebook
-You can use [demo_decoding.ipynb](demo_decoding.ipynb) to try out decoding on MaxText's `Llama3.1-8b` model implementation. In this notebook, we give `"I love to"` as the prompt, and the greedily sampled first output token is `" cook"`. Please remember to provide the path to your `Llama3.1-8b` checkpoint for the `load_parameters_path` argument in the config inside the notebook. You can use [to_maxtext.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/to_maxtext.py) to create a MaxText/Orbax checkpoint from a Huggingface checkpoint.
+You can use [demo_decoding.ipynb](demo_decoding) to try out decoding on MaxText's `Llama3.1-8b` model implementation. In this notebook, we give `"I love to"` as the prompt, and the greedily sampled first output token is `" cook"`. Please remember to provide the path to your `Llama3.1-8b` checkpoint for the `load_parameters_path` argument in the config inside the notebook. You can use [to_maxtext.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/to_maxtext.py) to create a MaxText/Orbax checkpoint from a Huggingface checkpoint.
+
+```{toctree}
+:maxdepth: 1
+:hidden:
+
+demo_decoding.ipynb
+```
 
 ### Run MaxText on NVIDIA GPUs
 1. Use `bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu` to build a container with the required dependencies.
