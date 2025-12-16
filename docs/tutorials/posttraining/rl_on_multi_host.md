@@ -39,25 +39,35 @@ Setup following environment variables:
 
 ```bash
 # -- Model configuration --
-export HF_MODEL='llama3.1-70b-Instruct'
-export MODEL='llama3.1-70b'
-export TOKENIZER='meta-llama/Llama-3.1-70B-Instruct'
+export HF_MODEL=<Hugging Face Model> # e.g. 'llama3.1-70b-Instruct'
+export MODEL=<MaxText Model> # e.g. 'llama3.1-70b'
+export TOKENIZER=<Tokenizer> # e.g. 'meta-llama/Llama-3.1-70B-Instruct'
 export HF_TOKEN=<Hugging Face access token>
 
 # -- MaxText configuration --
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
-export RUN_NAME=llama-3-70b-grpo
+export RUN_NAME=<Name for this run> # e.g., llama-3-70b-grpo
 export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/0/items
 
 # -- Workload configuration --
 export WORKLOAD=${RUN_NAME}
-export TPU_TYPE='v5p-128'
+export TPU_TYPE=<TPU Type> # e.g., 'v5p-128'
 export TPU_CLUSTER=<cluster name>
 export PROJECT_ID=<GCP project ID>
 export ZONE=<zone name>
 ```
 
 ## Get your model checkpoint
+
+### Option 1: Using an existing MaxText checkpoint
+
+If you already have a MaxText-compatible model checkpoint, simply set the following environment variable and move on to the next section.
+
+```bash
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+```
+
+### Option 2: Converting from a Hugging Face checkpoint
 
 You can convert a Hugging Face checkpoint to MaxText format using the `src/MaxText/utils/ckpt_conversion/to_maxtext.py` script. This is useful if you have a pre-trained model from Hugging Face that you want to use with MaxText.
 

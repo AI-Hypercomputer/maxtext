@@ -73,7 +73,7 @@ export ZONE=<GKE Cluster Zone>
 # -- Workload Configuration --
 export WORKLOAD_NAME=<Name of Workload> # e.g., sft-$(date +%s)
 export TPU_TYPE=<TPU Type> # e.g., v6e-256
-export TPU_SLICE=1
+export TPU_SLICE=<number of slices>
 export DOCKER_IMAGE="gcr.io/${PROJECT}/${DOCKER_IMAGE_NAME}"
 
 # -- MaxText Configuration --

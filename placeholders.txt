@@ -1,0 +1,31 @@
+<batch size per device>
+<cluster name>
+<data columns to train on>
+<Data Columns to Train on>
+<data split for train>
+<Data Split for Train>
+<Fine-Tuning Steps>
+<Flag to use ocdbt>
+<Flag to use zarr3>
+<GCP project ID>
+<gcs path for MaxText checkpoint>
+<GCS Path for Output/Logs>
+<GKE Cluster Zone>
+<Google Cloud Project ID>
+<Hugging Face access token>
+<Hugging Face Access Token>
+<Hugging Face dataset name>
+<Hugging Face Dataset Name>
+<model name>
+<Model Name>
+<Model Tokenizer>
+<name for this run>
+<Name of GKE Cluster>
+<Name of Workload>
+<number of fine-tuning steps to run>
+<output directory to store run logs>
+<path/to/gcr.io>
+<tokenizer path>
+<TPU Type>
+<your virtual env name>
+<zone name>
