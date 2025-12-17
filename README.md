@@ -42,6 +42,14 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 ## 🔥 Latest news 🔥
 
 * \[December 10, 2025\] DeepSeek V3.1 is now supported. Use existing configs for [DeepSeek V3 671B](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/models/deepseek3-671b.yml) and load in V3.1 checkpoint to use model.
+* \[December 9, 2025\] [New RL and SFT Notebook tutorials](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/MaxText/examples) are available.
+* \[December 4, 2025\] The [ReadTheDocs documentation site](https://maxtext.readthedocs.io/en/latest/index.html) has been reorganized.
+* \[December 3, 2025\] Multi-host support for GSPO and GRPO is now available via [new RL tutorials](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html).
+* \[November 20, 2025\] A new guide, [What is Post Training in MaxText?](https://maxtext.readthedocs.io/en/latest/tutorials/post_training_index.html), is now available.
+* \[November 6, 2025\] Ironwood TPU co-designed AI stack announced. Read the [blog post on its co-design with MaxText](https://cloud.google.com/blog/products/compute/inside-the-ironwood-tpu-codesigned-ai-stack?e=48754805).
+* \[October 29, 2025\] [Optimized models tiering documentation](https://maxtext.readthedocs.io/en/latest/reference/models/tiering.html) has been refreshed.
+* \[October 12, 2025\] Added Versioning. Check out our [first set of release notes](https://maxtext.readthedocs.io/en/latest/release_notes.html)!
+* \[October 10, 2025\] Post-Training (SFT, RL) via [Tunix](https://github.com/google/tunix) is now available.
 * \[September 26, 2025\] Vocabulary tiling ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/2242)) is now supported in MaxText! Adjust config `num_vocab_tiling` to unlock more efficient memory usage.
 * \[September 24, 2025\] The GPT-OSS family of models (20B, 120B) is now supported.
 * \[September 15, 2025\] MaxText is now available as a [PyPI package](https://pypi.org/project/maxtext). Users can now [install maxtext through pip](https://maxtext.readthedocs.io/en/latest/guides/install_maxtext.html).
