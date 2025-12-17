@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 #!/bin/bash
 #
 # This script automates finding the correct pod in a MaxText server workload
@@ -24,14 +23,13 @@
 set -eu # Exit immediately if a command exits with a non-zero status or if an unset variable is used.
 
 # --- Argument Parsing ---
-NAMESPACE="default" # Default namespace
+NAMESPACE="default"
 
 for arg in "$@"
 do
     case $arg in
         job_name=*) 
         JOB_NAME="${arg#*=}"
-        # Shift removes the current argument from the list of positional parameters ($@).
         shift
         ;;
         project=*) 
@@ -54,7 +52,7 @@ do
 done
 
 # --- Validate Arguments ---
-if [ -z "$JOB_NAME" ] || [ -z "$PROJECT" ] || [ -z "$ZONE" ] || [ -z "$CLUSTER" ]; then
+if [ -z "${JOB_NAME:-}" ] || [ -z "${PROJECT:-}" ] || [ -z "${ZONE:-}" ] || [ -z "${CLUSTER:-}" ]; then
     echo "Usage: $0 job_name=<job_name> project=<project> zone=<zone> cluster=<cluster> [namespace=<namespace>]" >&2
     exit 1
 fi
@@ -72,13 +70,23 @@ echo "Fetching cluster credentials..."
 gcloud container clusters get-credentials "$CLUSTER" --zone "$ZONE" --project "$PROJECT" > /dev/null
 
 # --- Find the Server Pod ---
-echo "Searching for pods in namespace '$NAMESPACE' with label 'job-name=$JOB_NAME'..."
-# Use a label selector for an efficient server-side lookup.
-# Read the space-separated pod names safely into a bash array.
-read -r -a PODS <<< "$(kubectl get pods -n "$NAMESPACE" -l "job-name=$JOB_NAME" -o jsonpath='{.items[*].metadata.name}')"
+echo "Searching for pods in namespace '$NAMESPACE'..."
 
-if [ -z "$PODS" ]; then
-    echo "Error: No pods found for job name '$JOB_NAME' in namespace '$NAMESPACE'."
+# Initialize PODS array to prevent unbound variable error
+PODS=()
+
+# Method 1: Try finding by standard Kubernetes Job label
+PODS=($(kubectl get pods -n "$NAMESPACE" -l "job-name=$JOB_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true))
+
+# Method 2: Fallback - if Method 1 returned nothing, search by name prefix
+if [ ${#PODS[@]} -eq 0 ]; then
+    echo "No pods found with label 'job-name=$JOB_NAME'. Trying to match by pod name..."
+    PODS=($(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep "^$JOB_NAME" || true))
+fi
+
+# Check if we still have no pods
+if [ ${#PODS[@]} -eq 0 ]; then
+    echo "Error: No pods found for job name '$JOB_NAME' in namespace '$NAMESPACE' (checked labels and name match)."
     exit 1
 fi
 

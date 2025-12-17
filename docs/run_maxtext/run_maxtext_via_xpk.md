@@ -188,13 +188,13 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
 
 - **List Your Jobs:**
 
-  ```shell
-  xpk workload list --cluster ${CLUSTER_NAME}
-  ```
+    ```shell
+    xpk workload list --cluster ${CLUSTER_NAME}
+    ```
 
 - **Analyze Output:** Checkpoints and other artifacts will be saved to the Google Cloud Storage bucket you specified in `BASE_OUTPUT_DIR`.
 - **Delete a Job:**
 
-  ```shell
-  xpk workload delete --cluster ${CLUSTER_NAME} --workload <your-workload-name>
-  ```
+    ```shell
+    xpk workload delete --cluster ${CLUSTER_NAME} --workload <your-workload-name>
+    ```

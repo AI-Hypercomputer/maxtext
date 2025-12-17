@@ -230,9 +230,14 @@ class RemoteIterator:
         raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
       return dummy_array
 
-    out = jax.device_get(init(self.dummy_array))
-    if out is not None:
-      max_logging.log(f"RemoteIterator initiated. Test output: {out}")
+    max_logging.log("Initiating RemoteIterator")
+    try:
+      out = jax.device_get(init(self.dummy_array))
+      if out is not None:
+        max_logging.log(f"RemoteIterator initiated. Test output: {out}")
+    except Exception as e:
+      max_logging.log(f"RemoteIterator init FAILED with error: {type(e).__name__}: {e}")
+      raise
 
   def __iter__(self):
     return self

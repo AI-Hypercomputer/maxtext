@@ -19,15 +19,14 @@
 import functools
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 
-from flax import linen as nn
 from flax import nnx
 
 from MaxText.inference import page_manager
 from MaxText.common_types import Config
 from MaxText import max_utils
-from MaxText.sharding import maybe_shard_with_logical
+from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from MaxText.layers.linears import Dropout, MlpBlock
 from MaxText.layers import initializers
 from MaxText.layers import nnx_wrappers
@@ -157,7 +156,7 @@ class LlamaDecoderLayer(nnx.Module):
       inputs = inputs[0]
     inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.activation_axis_names))
+    lnx_sharding = create_sharding(self.mesh, self.activation_axis_names)
     lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=lnx_sharding)
     lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
 
@@ -185,9 +184,8 @@ class LlamaDecoderLayer(nnx.Module):
     hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
     # MLP block.
-    mlp_intermediate_sharding = NamedSharding(
-        self.mesh,
-        nn.logical_to_mesh_axes(("activation_batch", "activation_length_no_exp", "activation_mlp")),
+    mlp_intermediate_sharding = create_sharding(
+        self.mesh, ("activation_batch", "activation_length_no_exp", "activation_mlp")
     )
     mlp_lnx = self.mlp(
         hidden_states,

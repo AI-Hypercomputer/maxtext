@@ -43,12 +43,13 @@ gcloud auth application-default login
 gcloud auth configure-docker
 docker run hello-world
 ```
-Then run the following command to create a local Docker image named `maxtext_base_image`.
+Then run the following command to create a local Docker image named `maxtext_base_image`. This build process takes approximately 10 to 15 minutes.
 ```bash
 bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training
 ```
 
 ### 1.3. Upload the Docker image to Artifact Registry
+> **Note:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to your project's Artifact Registry and to allow the cluster to pull them during workload execution. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
 ```bash
 # Replace `$USER_runner` with your desired image name
 export DOCKER_IMAGE_NAME=${USER}_runner
@@ -57,7 +58,7 @@ bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$DOCKER_IMAGE
 The `docker_upload_runner.sh` script uploads your Docker image to Artifact Registry.
 
 ## 2. Install XPK
-Install XPK by following the instructions in the [official documentation](https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#installation-via-pip).
+Install XPK by following the instructions in the [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md). 
 
 ## 3. Create GKE cluster
 Use a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster).

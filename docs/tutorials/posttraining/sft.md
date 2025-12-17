@@ -37,7 +37,7 @@ source $VENV_NAME/bin/activate
 
 # 3. Install dependencies in editable mode
 uv pip install -e .[tpu] --resolution=lowest
-install_maxtext_github_deps
+bash tools/setup/setup_post_training_requirements.sh
 ```
 
 ## Setup environment variables

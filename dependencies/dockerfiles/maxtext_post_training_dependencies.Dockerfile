@@ -27,6 +27,9 @@ RUN pip install aiohttp==3.12.15
 
 RUN pip install numba==0.61.2
 
+# Install Tunix
+RUN pip install google-tunix==0.1.5
+
 # Install vLLM for Jax and TPUs
 RUN pip install vllm-tpu
 

@@ -23,7 +23,7 @@ from jax.sharding import Mesh, NamedSharding
 import jax
 import jax.numpy as jnp
 
-from flax import nnx, linen as nn
+from flax import nnx
 
 from MaxText.common_types import (
     DecoderBlockType,
@@ -53,7 +53,7 @@ from MaxText.common_types import (
     EP_AS_CONTEXT,
     AttentionType,
 )
-from MaxText.sharding import maybe_shard_with_logical
+from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
@@ -1003,7 +1003,7 @@ class Attention(nnx.Module):
 
     inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
     inputs_kv = self._maybe_shard_with_logical(inputs_kv, input_axis_names)
-    qkv_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(input_axis_names))
+    qkv_sharding = create_sharding(self.mesh, input_axis_names)
 
     # apply projection.
     if self.config.fused_qkv:
@@ -1104,9 +1104,6 @@ class Attention(nnx.Module):
           bidirectional_mask,
           self.sinks,
       )
-    if self.is_qwen3_next:
-      out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
-      out = out * jax.nn.sigmoid(gate)
     if model_mode == MODEL_MODE_PREFILL:
       out = self._maybe_shard_with_logical(out, self.prefill_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
@@ -1115,6 +1112,9 @@ class Attention(nnx.Module):
       out = self._maybe_shard_with_logical(out, self.out_axis_names)
     else:
       out = self._maybe_shard_with_logical(out, self.decode_out_axis_names)
+    if self.is_qwen3_next:
+      out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
+      out = out * jax.nn.sigmoid(gate)
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache

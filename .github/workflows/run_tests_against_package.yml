@@ -90,8 +90,6 @@ jobs:
           python3 -m pip freeze
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* src/MaxText/test_assets
-      - name: Display contents of workspace # TODO: Remove
-        run: ls -R
       - name: Run Tests
         shell: bash
         run: |

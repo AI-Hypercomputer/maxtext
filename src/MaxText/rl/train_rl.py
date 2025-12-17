@@ -92,7 +92,7 @@ def get_maxtext_model(config, devices=None):
   # load_parameters_path=/path/to/your/output/directory/0/items
   """
   model, mesh = model_creation_utils.create_nnx_model(config, devices=devices)
-  with mesh:
+  with jax.set_mesh(mesh):
     tunix_model = TunixMaxTextAdapter(base_model=model)
     tunix_model.config = None
   return tunix_model, mesh
@@ -204,6 +204,36 @@ def setup_configs_and_devices(argv: Sequence[str]):
     raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
 
   return trainer_config, sampler_config, trainer_devices, sampler_devices
+
+
+def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices):
+  """Get rollout kwargs for vLLM rollout when using data parallelism."""
+  dp = sampler_config.rollout_data_parallelism
+  if dp == -1:
+    return {}
+
+  rollout_kwargs = {}
+  tp = sampler_config.rollout_tensor_parallelism
+
+  if tp == -1:
+    if num_sampler_devices % dp != 0:
+      raise ValueError(
+          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
+          f"rollout_data_parallelism({dp}) "
+          f"when rollout_tensor_parallelism is -1."
+      )
+    tp = num_sampler_devices // dp
+  elif tp * dp != num_sampler_devices:
+    raise ValueError(
+        f"rollout_tensor_parallelism({tp}) * "
+        f"rollout_data_parallelism({dp}) "
+        f"!= len(sampler_devices)({num_sampler_devices})"
+    )
+  rollout_kwargs["tensor_parallel_size"] = tp
+  rollout_kwargs["data_parallel_size"] = dp
+  rollout_kwargs["rollout_vllm_async_scheduling"] = True
+
+  return rollout_kwargs
 
 
 def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
@@ -331,6 +361,10 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rl_cluster_lib.Role.REFERENCE: reference_mesh,
           rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
       },
+      role_to_logical_axis_rule={
+          rl_cluster_lib.Role.ACTOR: trainer_config.logical_axis_rules,
+          rl_cluster_lib.Role.REFERENCE: trainer_config.logical_axis_rules,
+      },
       rollout_engine="vllm",
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
@@ -360,6 +394,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
           rollout_vllm_tpu_backend_type="jax",
           rollout_vllm_swap_space_size_gb=trainer_config.swap_space_vllm_gb,
+          **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
       ),
   )
   grpo_config = GrpoConfig(

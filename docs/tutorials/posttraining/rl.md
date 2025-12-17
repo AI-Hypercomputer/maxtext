@@ -29,7 +29,7 @@ For efficient model inference and response generation during this process, we re
 Let's get started!
 
 ## Create virtual environment and Install MaxText dependencies
-If you have already completed the [MaxText installation](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/install_maxtext.md), you can skip to the next section for post-training dependencies installations. Otherwise, please install `MaxText` using the following commands before proceeding.
+If you have already completed the [MaxText installation](../../install_maxtext.md), you can skip to the next section for post-training dependencies installations. Otherwise, please install `MaxText` using the following commands before proceeding.
 ```bash
 # 1. Clone the repository
 git clone https://github.com/AI-Hypercomputer/maxtext.git
@@ -78,12 +78,20 @@ export HF_TOKEN=<Hugging Face access token>
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
 
 export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
-export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/0/items
 ```
 
 ## Get your model checkpoint
 
-You can convert a Hugging Face checkpoint to MaxText format using the `src/MaxText/utils/ckpt_conversion/to_maxtext.py` script. This is useful if you have a pre-trained model from Hugging Face that you want to use with MaxText.
+### Option 1: Using an existing MaxText checkpoint
+
+If you already have a MaxText-compatible model checkpoint, simply set the following environment variable and move on to the next section.
+```bash
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+```
+
+### Option 2: Converting from a Hugging Face checkpoint
+
+Otherwise, you can convert a Hugging Face checkpoint to MaxText format using the `src/MaxText/utils/ckpt_conversion/to_maxtext.py` script. This is useful if you have a pre-trained model from Hugging Face that you want to use with MaxText.
 
 First, ensure you have the necessary dependencies installed. Then, run the conversion script on a CPU machine. For large models, it is recommended to use the `--lazy_load_tensors` flag to reduce memory usage during conversion. This command will download the Hugging Face model and convert it to the MaxText format, saving it to the specified GCS bucket.
 
@@ -93,7 +101,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml \
     model_name=${HF_MODEL} \
     hf_access_token=${HF_TOKEN} \
-    base_output_directory=${MAXTEXT_CKPT_PATH} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME} \
     scan_layers=True hardware=cpu skip_jax_distributed_system=true
 
 # Example of converting Llama3.1-70B using --lazy_load_tensor=true which uses around 86GB of RAM
@@ -105,6 +113,11 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
     scan_layers=True \
     hardware=cpu skip_jax_distributed_system=true \
     --lazy_load_tensors=true
+```
+
+The converted checkpoint will be saved at the following location. Set this environment variable to use it in the following GRPO/GSPO training sessions:
+```bash
+export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/0/items
 ```
 
 
@@ -125,7 +138,7 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
 
 The overview of what this run will do is as follows:
 
-1. We load a policy model and a reference model. Both are copies of `Llama3.1-8b-Instruct`.
+1. We load a policy model and a reference model. Both are copies of the model checkpoint you specified (e.g., `Llama3.1-8b-Instruct`).
 2. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
 3. Train the policy model using GRPO.
 4. Evaluate the policy model's performance on GSM8K math reasoning benchmark after the post-training with GRPO. 
@@ -136,18 +149,18 @@ Run the following command for GSPO:
 
 ```
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  model_name=llama3.1-8b \
-  tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
-  load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN \
+  model_name=${MODEL} \
+  tokenizer_path=${TOKENIZER} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH} \
+  run_name=${RUN_NAME} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+  hf_access_token=${HF_TOKEN} \
   loss_algo=gspo-token
 ```
 
 The overview of what this run will do is as follows:
 
-1. We load a policy model and a reference model. Both are copies of `Llama3.1-8b-Instruct`.
+1. We load a policy model and a reference model. Both are copies of the model checkpoint you specified (e.g., `Llama3.1-8b-Instruct`).
 2. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
 3. Train the policy model using GSPO.
 4. Evaluate the policy model's performance on GSM8K math reasoning benchmark after the post-training with GSPO. 

@@ -48,7 +48,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
   dataset_type=synthetic \
   steps=10
 ```
-Optional: If you want to try training on a Hugging Face dataset, see [Data Input Pipeline](data-input-pipeline) for data input options.
+Optional: If you want to try training on a Hugging Face dataset, see [Data Input Pipeline](../guides/data_input_pipeline.md) for data input options.
 
 5. To demonstrate model output, run the following command:
 ```sh
@@ -92,7 +92,7 @@ Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.a
 
 ## Multihost development
 
-Google Kubernetes Engine (GKE) is the recommended way to run MaxText on multiple hosts. It provides a managed environment for deploying and scaling containerized applications, including those that require TPUs or GPUs. See [Running Maxtext with XPK](run-xpk) for details.
+Google Kubernetes Engine (GKE) is the recommended way to run MaxText on multiple hosts. It provides a managed environment for deploying and scaling containerized applications, including those that require TPUs or GPUs. See [Running Maxtext with XPK](../run_maxtext/run_maxtext_via_xpk.md) for details.
 
 ## Next steps: preflight optimizations
 

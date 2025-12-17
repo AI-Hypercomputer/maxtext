@@ -17,6 +17,7 @@
 import dataclasses
 import warnings
 from threading import current_thread
+from typing import Any
 import datasets
 from datasets.distributed import split_dataset_by_node
 import grain.python as grain
@@ -387,6 +388,28 @@ class NormalizeFeatures(grain.MapTransform):
       return {col: element[col].numpy()[0].decode() for col in self.column_names}
     else:
       return {col: element[col].numpy() for col in self.column_names}
+
+
+@dataclasses.dataclass
+class KeepFeatures(grain.MapTransform):
+  """Keep only specified features in the dataset element.
+
+  This transform filters the input dictionary, retaining only the keys
+  that are present in `feature_names`.
+  """
+
+  def __init__(self, feature_names: list[str]):
+    """Initializes the KeepFeatures transform.
+
+    Args:
+      feature_names: A list of strings, where each string is the name of a
+        feature to be kept in the dataset element.
+    """
+    self.feature_names = feature_names
+
+  def map(self, element: dict[str, Any]) -> dict[str, Any]:
+    """Applies the feature filtering to the input element."""
+    return {k: v for k, v in element.items() if k in self.feature_names}
 
 
 @dataclasses.dataclass

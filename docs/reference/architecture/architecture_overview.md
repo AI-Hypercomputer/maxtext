@@ -91,7 +91,7 @@ The modularity of this design is clearly demonstrated by third-party extensions.
 
 ### Data ingestion (`input_pipeline.py`)
 
-[The data ingestion pipeline](data-input-pipeline) is a critical component for performance at scale. In MaxText, the main training loop interfaces with the data pipeline through the create\_data\_iterator function, which is called from train.py. This function acts as a facade, abstracting the specific data loading implementation from the rest of the training logic.
+[The data ingestion pipeline](../../guides/data_input_pipeline.md) is a critical component for performance at scale. In MaxText, the main training loop interfaces with the data pipeline through the create\_data\_iterator function, which is called from train.py. This function acts as a facade, abstracting the specific data loading implementation from the rest of the training logic.
 
 MaxText supports three primary data loading backends:
 
@@ -153,7 +153,7 @@ This logical mesh abstraction enables the implementation of the standard paralle
 
 In MaxText, these strategies are implemented by annotating the model's PyTrees (the nested Python structures of arrays that hold the parameters and state) with sharding specifications. This is done using Flax's partitioning utilities, such as nn\_partitioning. These annotations provide requirements and hints to the compiler, telling it how each tensor should be distributed across the axes of the device mesh. The compiler then generates the appropriate collective communication operations (e.g., all-reduce, all-gather) needed to execute the parallel computation correctly and efficiently.
 
-For more information on sharding see [our sharding documentation](sharding_on_TPUs).
+For more information on sharding see [our sharding documentation](../../guides/optimization/sharding.md).
 
 ### Hardware abstraction and performance via XLA
 

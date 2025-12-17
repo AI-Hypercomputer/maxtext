@@ -75,7 +75,7 @@ def train_loop(config, recorder, state=None):
       config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
   )
 
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
@@ -99,7 +99,7 @@ def train_loop(config, recorder, state=None):
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
@@ -124,7 +124,7 @@ def train_loop(config, recorder, state=None):
         for eval_batch in eval_data_iterator:
           if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
             break
-          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             eval_metrics = p_eval_step(state, eval_batch, nextrng)
           metric_logger.record_eval_metrics(step, metrics=eval_metrics)
           max_logging.log(f"Completed eval step {eval_step_count}")

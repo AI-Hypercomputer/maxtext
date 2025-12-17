@@ -14,21 +14,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Example command:
-# bash docker_build_dependency_image.sh MODE=stable
-# bash docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK BASEIMAGE FROM ARTIFACT REGISTRY}}
-# bash docker_build_dependency_image.sh MODE=nightly
-# bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
-# Nightly build with JAX_VERSION for GPUs. Available versions listed at https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/jax:
-# bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109 # Note: this sets both jax-nightly and jaxlib-nightly
-# MODE=custom_wheels is the same as nightly except that it reinstalls any
-# additional wheels that are present in the maxtext directory.
-# The main use case is to install custom jax or jaxlib wheels but it also
-# works with any custom wheels.
-# bash docker_build_dependency_image.sh MODE=custom_wheels
+# This script is used to build the MaxText Docker image, supporting
+# different environments (stable, nightly) and use cases (pre-training, post-training).
+# IMPORTANT: This script must be executed from the root directory of the MaxText repository.
 
-# bash docker_build_dependency_image.sh MODE=post-training
-# bash docker_build_dependency_image.sh MODE=post-training POST_TRAINING_SOURCE=local
+# ==================================
+# PRE-TRAINING BUILD EXAMPLES
+# ==================================
+
+# Build docker image with stable dependencies
+## bash dependencies/scripts/docker_build_dependency_image.sh MODE=stable
+## bash dependencies/scripts/docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK BASEIMAGE FROM ARTIFACT REGISTRY}}
+
+# Build docker image with nightly dependencies
+## bash dependencies/scripts/docker_build_dependency_image.sh MODE=nightly
+
+# Build docker image with stable dependencies and, a pinned JAX_VERSION for TPUs
+## bash dependencies/scripts/docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
+
+# Build docker image with stable dependencies and, a pinned JAX_VERSION for GPUs
+# Available versions listed at https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/jax
+## bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109
+
+# MODE=custom_wheels builds the nightly environment, then reinstalls any
+# additional wheels present in the maxtext directory.
+# Use this mode to install custom dependencies, such as custom JAX or JAXlib builds.
+## bash dependencies/scripts/docker_build_dependency_image.sh MODE=custom_wheels
+
+# ==================================
+# POST-TRAINING BUILD EXAMPLES
+# ==================================
+
+# Build docker image with stable pre-training dependencies and stable post-training dependencies
+## bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training
+
+# Build docker image with stable pre-training dependencies and post-training dependencies from GitHub head
+## bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training POST_TRAINING_SOURCE=local
 
 if [ "${BASH_SOURCE-}" ]; then
   this_file="${BASH_SOURCE[0]}"

@@ -22,11 +22,11 @@ from jax import lax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 
-from flax import linen as nn
 from flax import nnx
 
 from MaxText import max_logging
 from MaxText import max_utils
+from MaxText.sharding import logical_to_mesh_axes, create_sharding
 from MaxText.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
@@ -169,7 +169,7 @@ class Embed(nnx.Module):
             "activation_embed",
         )
     )
-    out_pspec = nn.logical_to_mesh_axes(output_axis_names)
+    out_pspec = logical_to_mesh_axes(output_axis_names, self.mesh)
 
     out_sharding = NamedSharding(self.mesh, out_pspec) if self.config.shard_mode == ShardMode.EXPLICIT else None
 
@@ -751,7 +751,7 @@ class YarnRotaryEmbedding(nnx.Module):
     self.attention_scaling = attention_scaling
 
     self.freqs_sharding = (
-        NamedSharding(mesh, nn.logical_to_mesh_axes(("activation_batch", "activation_length_no_exp", "q_heads")))
+        create_sharding(mesh, ("activation_batch", "activation_length_no_exp", "q_heads"))
         if shard_mode == ShardMode.EXPLICIT
         else None
     )
@@ -877,7 +877,7 @@ class YarnRotaryEmbedding(nnx.Module):
     inputs_complex = first_half + 1j * second_half  # shape: [B, S, N, half_dim]
     # Apply the rotary transformation via complex multiplication.
     rotated_sharding = (
-        NamedSharding(self.mesh, nn.logical_to_mesh_axes(("activation_batch", "activation_length_no_exp", None, None)))
+        create_sharding(self.mesh, ("activation_batch", "activation_length_no_exp", None, None))
         if self.shard_mode == ShardMode.EXPLICIT
         else None
     )

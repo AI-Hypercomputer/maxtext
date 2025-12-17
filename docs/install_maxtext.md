@@ -99,7 +99,7 @@ Run the following command, replacing `<jax-build-commit-hash>` with the hash you
 
 ```bash
 seed-env \
-  --local-requirements=base_requirements/tpu-base-requirements.txt \
+  --local-requirements=dependencies/requirements/base_requirements/tpu-base-requirements.txt \
   --host-name=MaxText \
   --seed-commit=<jax-build-commit-hash> \
   --python-version=3.12 \
@@ -113,7 +113,7 @@ Similarly, run the command for the GPU requirements.
 
 ```bash
 seed-env \
-  --local-requirements=base_requirements/cuda12-base-requirements.txt \
+  --local-requirements=dependencies/requirements/base_requirements/cuda12-base-requirements.txt \
   --host-name=MaxText \
   --seed-commit=<jax-build-commit-hash> \
   --python-version=3.12 \
@@ -122,7 +122,7 @@ seed-env \
   --output-dir=generated_gpu_artifacts
 ```
 
-## 4. Update Project Files
+## Step 4: Update Project Files
 
 After generating the new requirements, you need to update the files in the MaxText repository.
 
@@ -133,7 +133,7 @@ After generating the new requirements, you need to update the files in the MaxTe
 2.  **Update `extra_deps_from_github.txt` (if necessary):**
     Currently, MaxText uses a few dependencies, such as `mlperf-logging` and `google-jetstream`, that are installed directly from GitHub source. These are defined in `base_requirements/requirements.txt`, and the `seed-env` tool will carry them over to the generated requirements files.
 
-## 5. Verify the New Dependencies
+## Step 5: Verify the New Dependencies
 
 Finally, test that the new dependencies install correctly and that MaxText runs as expected.
 

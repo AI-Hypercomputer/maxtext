@@ -120,7 +120,7 @@ def jit_and_compile(
     logical_axis_rules,
 ):
   """Jit, lower, and compile func."""
-  with mesh, logical_axis_rules:
+  with jax.set_mesh(mesh), logical_axis_rules:
     jitted = jax.jit(
         func,
         in_shardings=in_shardings,

@@ -77,11 +77,7 @@ class RMSNorm(nnx.Module):
 
     scale = jnp.asarray(scale, self.dtype)
     effective_scale = scale + self.scale_offset  # Apply offset
-    # y: (B, S, E)
-    # effective_scale:  (E,) -> (1, 1, E) -> (B, S, E)
-    effective_scale = jnp.expand_dims(effective_scale, axis=tuple(range(y.ndim - effective_scale.ndim)))
-    effective_scale = jnp.broadcast_to(effective_scale, y.shape, out_sharding=out_sharding)
-    return jnp.multiply(y, effective_scale)
+    return jnp.einsum("i...k,...k->i...k", y, effective_scale, out_sharding=out_sharding)
 
 
 def Qwen3NextRMSNorm(num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
@@ -200,3 +196,11 @@ def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
 
   inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) + jnp.array(eps, dtype=x.dtype))
   return x * inv_norm
+
+
+Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
+    RMSNorm,
+    base_metadata_fn=variable_to_logically_partitioned,
+    scale_init=linen_initializers.zeros,
+    scale_offset=1.0,
+)
