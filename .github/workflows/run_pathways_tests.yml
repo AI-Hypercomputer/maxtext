@@ -51,11 +51,14 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.image_type != '' && inputs.image_type || inputs.device_type }}
+      image: gcr.io/tpu-prod-env-multipod/maxtext-unit-test-tpu:${{ inputs.image_type != '' && inputs.image_type }}
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
@@ -64,18 +67,36 @@ jobs:
         JAX_BACKEND_TARGET: "grpc://localhost:29000"
       options: ${{ inputs.container_resource_option }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Run
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Download the maxtext wheel
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: maxtext-wheel
+      - name: Install the maxtext wheel
+        shell: bash
+        run: |
+          python3 -m uv venv --seed
+          source .venv/bin/activate
+          maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
+          uv pip install ${maxtext_wheel}[tpu] --resolution=lowest
+          uv pip install -r src/install_maxtext_extra_deps/extra_deps_from_github.txt
+          python3 --version
+          python3 -m pip freeze
+      - name: Copy test assets files
+        run : gcloud storage cp gs://maxtext-test-assets/* src/MaxText/test_assets
+      - name: Run Tests
         run: |
           if [ "${{ inputs.is_scheduled_run }}" = "true" ]; then
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
           else
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
           fi
-          python3 -m pip install -e . --no-dependencies &&
-          python3 -m pip uninstall -y libtpu &&
+          export MAXTEXT_REPO_ROOT=$(pwd)
+          export MAXTEXT_ASSETS_ROOT=$(pwd)/src/MaxText/assets
+          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
+          export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # TODO(b/454659463): Enable test_default_hlo_match after volume mount is supported.
-          python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0
+          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0
     
     services:
       resource_manager:

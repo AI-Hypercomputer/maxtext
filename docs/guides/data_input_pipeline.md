@@ -19,11 +19,40 @@
 
 Currently MaxText has three data input pipelines:
 
-| Pipeline | Dataset formats | Features | Limitations |
-| -------- | --------------- | -------- | ----------- |
-| **[Grain](data_input_pipeline/data_input_grain.md)** (recommended)| [ArrayRecord](https://github.com/google/array_record) (random access, available through [Tensorflow Datasets](https://www.tensorflow.org/datasets/catalog/overview), or [conversion](https://github.com/google/array_record/tree/main/beam))<br>[Parquet](https://arrow.apache.org/docs/python/parquet.html) (sequential access) | With arrayrecord: fully deterministic, resilient to preemption; global shuffle <br>With parquet: performant; fully deterministic, resilient to preemption; hierarchical shuffle |  |
-| **[Hugging Face](data_input_pipeline/data_input_hf.md)** | datasets in [Hugging Face Hub](https://huggingface.co/datasets)<br>local/Cloud Storage datasets in json, parquet, arrow, csv, txt (sequential access) | no download needed, convenience; <br>multiple formats | limit scalability using the Hugging Face Hub (no limit using Cloud Storage); <br>non-deterministic with preemption<br>(deterministic without preemption)<br> |
-| **[TFDS](data_input_pipeline/data_input_tfds.md)** | TFRecord (sequential access), available through [Tensorflow Datasets](https://www.tensorflow.org/datasets/catalog/overview) | performant | only supports TFRecords; <br>non-deterministic with preemption<br>(deterministic without preemption) |
+::::{grid} 1 2 2 2
+:gutter: 2
+
+:::{grid-item-card} 🌾 Grain (Recommended)
+:link: data_input_pipeline/data_input_grain
+:link-type: doc
+
+**Features**: With arrayrecord: fully deterministic, resilient to preemption; global shuffle. With parquet: performant; fully deterministic, resilient to preemption; hierarchical shuffle.
+
+**Formats**: ArrayRecord, Parquet.
+:::
+
+:::{grid-item-card} 🤗 Hugging Face
+:link: data_input_pipeline/data_input_hf
+:link-type: doc
+
+**Formats**: Hugging Face Hub, local/GCS (json, parquet, arrow, csv, txt).
+:::
+
+:::{grid-item-card} 💾 TFDS
+:link: data_input_pipeline/data_input_hf
+:link-type: doc
+
+**Formats**: TFRecord (via Tensorflow Datasets).
+:::
+
+:::{grid-item-card} ⚡ Optimizing Performance
+:link: data_input_pipeline/data_pipeline_perf
+:link-type: doc
+
+Guide to setting and verifying performance goals to maximize accelerator utilization.
+:::
+
+::::
 
 ## Multihost dataloading best practice
 Training in a multi-host environment presents unique challenges for data input pipelines. An effective data loading strategy must address three key issues:

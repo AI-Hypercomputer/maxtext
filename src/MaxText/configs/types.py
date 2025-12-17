@@ -2094,15 +2094,15 @@ class MaxTextConfig(
             f"({self.interleave_moe_layer_step})"
         )
     if self.decoder_block == DecoderBlockType.QWEN3_NEXT:
-      if self.sparse_matmul:
-        logger.warning(
-            "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference. "
-            "Forcing to False."
-        )
-        self.sparse_matmul = False
+      if int(self.gdn_num_value_heads) % int(self.gdn_num_key_heads) != 0:
+        raise ValueError("gdn_num_value_heads must be divisible by gdn_num_key_heads")
       rotary_dim = int(self.head_dim * self.partial_rotary_factor)
       if rotary_dim % 2 != 0:
         raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
+    else:
+      if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
+        raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
+
     tokenizer_path = getattr(self, "tokenizer_path", None)
     if (
         tokenizer_path

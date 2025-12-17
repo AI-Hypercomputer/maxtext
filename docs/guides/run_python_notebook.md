@@ -6,8 +6,7 @@ This guide provides clear, step-by-step instructions for getting started with py
 
 - [Prerequisites](#prerequisites)
 - [Method 1: Google Colab with TPU](#method-1-google-colab-with-tpu)
-- [Method 2: Local Jupyter Lab with TPU](#method-2-local-jupyter-lab-with-tpu)
-- [Available Examples](#available-examples)
+- [Method 2: Local Jupyter Lab with TPU (Recommended)](#method-2-local-jupyter-lab-with-tpu-recommended)
 - [Common Pitfalls & Debugging](#common-pitfalls--debugging)
 - [Support & Resources](#support-and-resources)
 - [Contributing](#contributing)
@@ -31,6 +30,8 @@ This is the fastest way to run MaxText python notebooks without managing infrast
 
 **⚠️ IMPORTANT NOTE ⚠️**
 The free tier of Google Colab provides access to `v5e-1 TPU`, but this access is not guaranteed and is subject to availability and usage limits.
+
+Currently, this method only supports the **`sft_qwen3_demo.ipynb`** notebook, which demonstrates Qwen3-0.6B SFT training and evaluation on [OpenAI's GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k). If you want to run other notebooks, please use the local Jupyter Lab setup method.
 
 Before proceeding, please verify that the specific notebook you are running works reliably on the free-tier TPU resources. If you encounter frequent disconnections or resource limitations, you may need to:
 
@@ -63,9 +64,9 @@ Before proceeding, please verify that the specific notebook you are running work
 ### Step 4: Run the Notebook
 Follow the instructions within the notebook cells to install dependencies and run the training/inference.
 
-## Method 2: Local Jupyter Lab with TPU
+## Method 2: Local Jupyter Lab with TPU (Recommended)
 
-You can run Python notebooks on a local JupyterLab environment, giving you full control over your computing resources.
+You can run all of our Python notebooks on a local JupyterLab environment, giving you full control over your computing resources.
 
 ### Step 1: Set Up TPU VM
 
