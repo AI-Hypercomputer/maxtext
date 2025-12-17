@@ -573,7 +573,6 @@ class Attention(nnx.Module):
 
     if self.is_qwen3_next:
       out_features = (self.num_query_heads, self.head_dim * 2)
-    assert self.lora_rank > 0
     if self.lora_rank > 0:
       return LoRADenseGeneral(
           in_features_shape=in_features,
@@ -1075,7 +1074,6 @@ class Attention(nnx.Module):
 
     # apply projection.
     if self.config.fused_qkv:
-      assert False
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
     else:
       query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
