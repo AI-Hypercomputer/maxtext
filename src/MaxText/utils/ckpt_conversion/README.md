@@ -9,6 +9,7 @@ The following models are supported:
 - Gemma2 (2B, 9B, 27B).
 - Gemma3 multimodal (4B, 12B, 27B).
 - Qwen3 (0.6B, 4B, 8B, 14B, 32B).
+- Mixtral (8x7B, 8X22B).
 
 ## Prerequisites
 - Hugging Face requires Pytorch.

@@ -380,7 +380,7 @@ def main(config, test_args):  # pylint: disable=W0621
       raise ValueError("run_hf_model requires hf_model_path")
     hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch.bfloat16)
     tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path)
-    if "Llama-3.1" in test_args.hf_model_path:
+    if tokenizer.pad_token is None or "Llama-3.1" in test_args.hf_model_path:
       tokenizer.pad_token = tokenizer.eos_token
 
     init_rng = jax.random.PRNGKey(config.init_weights_seed)

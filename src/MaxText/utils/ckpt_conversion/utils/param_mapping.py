@@ -1424,6 +1424,228 @@ def LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN():
   return hook_fns
 
 
+def MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """
+  Returns the mapping of parameter names from MaxText to Hugging Face for Mixtral.
+
+  Args:
+      config (dict): A model configuration dictionary containing hyperparameters
+                     like 'num_hidden_layers'.
+      scan_layers (bool): If True, the mapping for decoder layers will be a list
+                          of HF paths corresponding to the stacked MaxText tensor.
+                          If False, it will be a direct string-to-string mapping.
+
+  Returns:
+      A dictionary mapping MaxText parameter paths to their Hugging Face equivalents.
+      The value can be a string (for 1-to-1 mapping) or a list of strings (for
+      scanned layers).
+  """
+  mapping = {}
+
+  # Top-level, non-layer-specific parameters
+  mapping["params-token_embedder-embedding"] = "model.embed_tokens.weight"
+  mapping["params-decoder-decoder_norm-scale"] = "model.norm.weight"
+  mapping["params-decoder-logits_dense-kernel"] = "lm_head.weight"
+
+  num_experts = maxtext_config.num_experts
+
+  if scan_layers:
+    # Initialize lists for scanned layer weights
+    mapping.update(
+        {
+            "params-decoder-layers-self_attention-query-kernel": [],
+            "params-decoder-layers-self_attention-key-kernel": [],
+            "params-decoder-layers-self_attention-value-kernel": [],
+            "params-decoder-layers-self_attention-out-kernel": [],
+            "params-decoder-layers-pre_self_attention_layer_norm-scale": [],
+            "params-decoder-layers-post_self_attention_layer_norm-scale": [],
+            "params-decoder-layers-MoeBlock_0-gate-kernel": [],
+            "params-decoder-layers-MoeBlock_0-wi_0": [],
+            "params-decoder-layers-MoeBlock_0-wi_1": [],
+            "params-decoder-layers-MoeBlock_0-wo": [],
+        }
+    )
+
+    for i in range(config["num_hidden_layers"]):
+      hf_prefix = f"model.layers.{i}"
+      # Attention weights
+      mapping["params-decoder-layers-self_attention-query-kernel"].append(f"{hf_prefix}.self_attn.q_proj.weight")
+      mapping["params-decoder-layers-self_attention-key-kernel"].append(f"{hf_prefix}.self_attn.k_proj.weight")
+      mapping["params-decoder-layers-self_attention-value-kernel"].append(f"{hf_prefix}.self_attn.v_proj.weight")
+      mapping["params-decoder-layers-self_attention-out-kernel"].append(f"{hf_prefix}.self_attn.o_proj.weight")
+
+      # RMSNorm weights
+      mapping["params-decoder-layers-pre_self_attention_layer_norm-scale"].append(f"{hf_prefix}.input_layernorm.weight")
+      mapping["params-decoder-layers-post_self_attention_layer_norm-scale"].append(
+          f"{hf_prefix}.post_attention_layernorm.weight"
+      )
+
+      # MoE gate
+      mapping["params-decoder-layers-MoeBlock_0-gate-kernel"].append(f"{hf_prefix}.block_sparse_moe.gate.weight")
+
+      # MoE expert weights (list of lists)
+      w1_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w1.weight" for j in range(num_experts)]
+      w3_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w3.weight" for j in range(num_experts)]
+      w2_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w2.weight" for j in range(num_experts)]
+      mapping["params-decoder-layers-MoeBlock_0-wi_0"].append(w1_experts)
+      mapping["params-decoder-layers-MoeBlock_0-wi_1"].append(w3_experts)
+      mapping["params-decoder-layers-MoeBlock_0-wo"].append(w2_experts)
+
+  else:  # Direct mapping for each layer
+    for i in range(config["num_hidden_layers"]):
+      maxtext_prefix = f"params-decoder-layers_{i}"
+      hf_prefix = f"model.layers.{i}"
+
+      # Attention weights
+      mapping[f"{maxtext_prefix}-self_attention-query-kernel"] = f"{hf_prefix}.self_attn.q_proj.weight"
+      mapping[f"{maxtext_prefix}-self_attention-key-kernel"] = f"{hf_prefix}.self_attn.k_proj.weight"
+      mapping[f"{maxtext_prefix}-self_attention-value-kernel"] = f"{hf_prefix}.self_attn.v_proj.weight"
+      mapping[f"{maxtext_prefix}-self_attention-out-kernel"] = f"{hf_prefix}.self_attn.o_proj.weight"
+
+      # RMSNorm weights
+      mapping[f"{maxtext_prefix}-pre_self_attention_layer_norm-scale"] = f"{hf_prefix}.input_layernorm.weight"
+      mapping[f"{maxtext_prefix}-post_self_attention_layer_norm-scale"] = f"{hf_prefix}.post_attention_layernorm.weight"
+
+      # MoE gate
+      mapping[f"{maxtext_prefix}-MoeBlock_0-gate-kernel"] = f"{hf_prefix}.block_sparse_moe.gate.weight"
+
+      # MoE expert weights (1 MaxText param -> 8 HF params)
+      w1_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w1.weight" for j in range(num_experts)]
+      w3_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w3.weight" for j in range(num_experts)]
+      w2_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w2.weight" for j in range(num_experts)]
+
+      mapping[f"{maxtext_prefix}-MoeBlock_0-wi_0"] = w1_experts
+      mapping[f"{maxtext_prefix}-MoeBlock_0-wi_1"] = w3_experts
+      mapping[f"{maxtext_prefix}-MoeBlock_0-wo"] = w2_experts
+
+  return mapping
+
+
+def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """
+  Generates parameter conversion hooks for Mixtral between MaxText and Hugging Face.
+
+  Args:
+      config: The model configuration dictionary.
+      scan_layers: Whether the model uses scanned layers.
+      saving_to_hf: True if converting from MaxText to HF, False otherwise.
+
+  Returns:
+      A dictionary mapping MaxText parameter names to conversion functions.
+  """
+  hooks = {}
+
+  # Define hook functions within the closure to capture config and saving_to_hf
+
+  def reshape_and_transpose_attention(x: np.ndarray, target_shape: tuple) -> np.ndarray:
+    """
+    Reshapes and transposes attention weights.
+    MaxText: [hidden_size, num_heads, head_dim]
+    HF:      [num_heads * head_dim, hidden_size]
+    """
+    if saving_to_hf:
+      # Reshape from [hidden_size, num_heads, head_dim] to [hidden_size, num_heads * head_dim] then transpose
+      return x.reshape(config["hidden_size"], -1).transpose()
+    else:
+      # Transpose from [num_heads * head_dim, hidden_size] to [hidden_size, num_heads * head_dim] then reshape
+      return x.transpose().reshape(target_shape)
+
+  def split_and_transpose_expert(x: np.ndarray, target_shape: tuple, **kwargs) -> np.ndarray:
+    """
+    Handles weights for a single expert from a stacked tensor.
+    The conversion engine provides the expert_idx.
+    """
+    if saving_to_hf:
+      expert_idx = kwargs.get("expert_idx")
+      if expert_idx is None:
+        raise ValueError("expert_idx is required for split_and_transpose_expert hook")
+
+      # MaxText is stacked: [num_experts, in_dim, out_dim]
+      # HF is separate: [out_dim, in_dim]
+      expert_weights = x[expert_idx]
+      return expert_weights.transpose()
+    else:
+      # HF is separate: [out_dim, in_dim]
+      # MaxText is stacked: [num_experts, in_dim, out_dim]
+      # The conversion script handles stacking. This hook just needs to transpose.
+      return x.transpose()
+
+  def reshape_kernel(x: np.ndarray, target_shape: tuple) -> np.ndarray:
+    return x.transpose()
+
+  def scale_rmsnorm(x: np.ndarray, target_shape: tuple) -> np.ndarray:
+    """
+    Scales RMSNorm weights.
+    MaxText scale = HF weight + 1
+    """
+    if saving_to_hf:
+      return (x - 1.0).reshape(target_shape)
+    else:
+      return (x + 1.0).reshape(target_shape)
+
+  def pad_and_scale_embedding(x: np.ndarray, target_shape: tuple) -> np.ndarray:
+    """Pads and scales the token embedding matrix."""
+    if saving_to_hf:
+      # Scale embeddings by sqrt(hidden_size)
+      scaled = x * np.sqrt(config["hidden_size"])
+      # Pad vocabulary to match target shape
+      pad_width = ((0, target_shape[0] - scaled.shape[0]), (0, 0))
+      return np.pad(scaled, pad_width)
+    else:
+      # Un-pad vocabulary to original size
+      unpadded = x[: config["vocab_size"], :]
+      # Un-scale embeddings
+      return unpadded / np.sqrt(config["hidden_size"])
+
+  # Map operation names from the DSL to the hook functions
+  op_to_fn = {
+      "reshape_and_transpose_attention": reshape_and_transpose_attention,
+      "split_and_transpose_expert": split_and_transpose_expert,
+      "reshape_kernel": reshape_kernel,
+      "scale_rmsnorm": scale_rmsnorm,
+      "pad_and_scale_embedding": pad_and_scale_embedding,
+  }
+
+  # This plan is a direct representation of the DSL for registration logic
+  # {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
+  plan = [
+      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": "reshape_and_transpose_attention"},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
+      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_0", "op": "split_and_transpose_expert"},
+      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_1", "op": "split_and_transpose_expert"},
+      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wo", "op": "split_and_transpose_expert"},
+      {"maxtext": "params-decoder-layers_{i}-pre_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
+      {"maxtext": "params-decoder-layers_{i}-post_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
+      {"maxtext": "params-decoder-decoder_norm-scale", "op": "scale_rmsnorm"},
+      {"maxtext": "params-token_embedder-embedding", "op": "pad_and_scale_embedding"},
+      {"maxtext": "params-decoder-logits_dense-kernel", "op": "reshape_kernel"},
+  ]
+
+  # Register hooks based on the plan
+  for item in plan:
+    maxtext_pattern = item["maxtext"]
+    hook_fn = op_to_fn[item["op"]]
+
+    if "{i}" in maxtext_pattern:
+      if scan_layers:
+        # For scanned layers, the key is singular and doesn't have the layer index
+        scan_key = maxtext_pattern.replace(f"_layers_{'{i}'}_", "-layers-")
+        print(f"scan_key: {scan_key}")
+        if scan_key != "params-decoder-layers-MoeBlock_0-gate-kernel":
+          hooks[scan_key] = hook_fn
+      else:
+        # For non-scanned layers, add a hook for each layer
+        for i in range(config["num_hidden_layers"]):
+          hooks[maxtext_pattern.format(i=i)] = hook_fn
+    else:
+      # For non-layer-specific parameters
+      hooks[maxtext_pattern] = hook_fn
+
+  return hooks
+
+
 # {maxtext model name: {maxtext weight name: hf weight name}}
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -1448,6 +1670,8 @@ PARAM_MAPPING = {
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
@@ -1474,6 +1698,8 @@ HOOK_FNS = {
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
 VLLM_HOOK_FNS = {
