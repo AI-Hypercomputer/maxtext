@@ -16,8 +16,44 @@
 
 # Optimization
 
+Explore techniques for maximizing performance, including model customization, sharding strategies, Pallas kernels, and benchmarking.
+
+::::{grid} 1 2 2 2
+:gutter: 2
+
+:::{grid-item-card} 🛠️ Customizing Model Configs
+:link: optimization/custom_model
+:link-type: doc
+
+Optimize and customize your LLM model configurations for higher performance (MFU) on TPUs.
+:::
+
+:::{grid-item-card} 🥞 Sharding Strategies
+:link: optimization/sharding
+:link-type: doc
+
+Choose efficient sharding strategies (FSDP, TP, EP, PP) using Roofline Analysis and understand arithmetic intensity.
+:::
+
+:::{grid-item-card} ⚡ Pallas Kernels
+:link: optimization/pallas_kernels_performance
+:link-type: doc
+
+Optimize with Pallas kernels for fine-grained control. 
+:::
+
+:::{grid-item-card} 📈 Benchmarking & Tuning
+:link: optimization/benchmark_and_performance
+:link-type: doc
+
+Guide to setting up benchmarks, performing performance tuning, and analyzing metrics.
+:::
+::::
+
 ```{toctree}
+:hidden:
 :maxdepth: 1
+
 optimization/custom_model.md
 optimization/sharding.md
 optimization/pallas_kernels_performance.md

@@ -17,8 +17,63 @@
 
 # Monitoring and debugging
 
+::::{grid} 1 2 2 2
+:gutter: 2
+
+:::{grid-item-card} 🕵️ Features & Diagnostics
+:link: monitoring_and_debugging/features_and_diagnostics
+:link-type: doc
+
+Diagnostic tools and features for monitoring MaxText.
+:::
+
+:::{grid-item-card} ☁️ GCP Observability
+:link: monitoring_and_debugging/gcp_workload_observability
+:link-type: doc
+
+Observability for workloads running on Google Cloud Platform.
+:::
+
+:::{grid-item-card} 🚫 Hang Playbook
+:link: monitoring_and_debugging/megascale_hang_playbook
+:link-type: doc
+
+Troubleshooting guide for training hangs at megascale.
+:::
+
+:::{grid-item-card} 📈 Goodput
+:link: monitoring_and_debugging/monitor_goodput
+:link-type: doc
+
+Monitoring efficient training time (Goodput).
+:::
+
+:::{grid-item-card} 📊 Logs & Metrics
+:link: monitoring_and_debugging/understand_logs_and_metrics
+:link-type: doc
+
+Understanding MaxText logs and performance metrics.
+:::
+
+:::{grid-item-card} 📉 TensorBoard
+:link: monitoring_and_debugging/use_vertex_ai_tensorboard
+:link-type: doc
+
+Using Vertex AI TensorBoard for visualization.
+:::
+
+:::{grid-item-card} ⏱️ XProf
+:link: monitoring_and_debugging/xprof_user_guide
+:link-type: doc
+
+Profiling performance with XProf.
+:::
+::::
+
 ```{toctree}
+:hidden:
 :maxdepth: 1
+
 monitoring_and_debugging/features_and_diagnostics.md
 monitoring_and_debugging/gcp_workload_observability.md
 monitoring_and_debugging/megascale_hang_playbook.md
