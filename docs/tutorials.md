@@ -16,8 +16,26 @@
 
 # Tutorials
 
+Welcome to the MaxText tutorials! If you are new here, we recommend starting with the **Getting Started** guide below.
+
+## New to MaxText?
+
+If you haven't installed MaxText yet, please check our [Installation Guide](install_maxtext.md) first.
+
+Once installed, follow our **[First Run](tutorials/first_run.md)** tutorial to get your first model training on a TPU. This tutorial will guide you through the process of training a model with MaxText and verifying the results.
+
+---
+
+Below is a list of all available tutorials organized by topic.
+
+### Additional Tutorials
+*   [Pre-training](tutorials/pretraining.md) - Learn how to run large-scale pre-training jobs.
+*   [Post-Training Index](tutorials/post_training_index.md) - a collection of guides for fine-tuning, RLHF, and other post-training workflows.
+
 ```{toctree}
 :maxdepth: 1
+:hidden:
+:caption: Tutorials
 
 tutorials/first_run.md
 tutorials/pretraining.md

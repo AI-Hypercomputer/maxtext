@@ -148,3 +148,4 @@ dmypy.json
 # Gemini CLI
 .gemini/
 gha-creds-*.json
+docs/jupyter_execute/
