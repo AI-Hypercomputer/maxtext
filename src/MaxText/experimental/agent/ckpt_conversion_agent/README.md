@@ -1,5 +1,5 @@
 # Checkpoint conversion agent 
-The agent is used to automate the model-specific mappings of checkpoint conversion.  It is designed to cooperate with the new checkpoint conversion [framework](https://github.com/AI-Hypercomputer/maxtext/tree/main/MaxText/utils/ckpt_conversion).
+The agent is used to automate the model-specific mappings of checkpoint conversion.  It is designed to cooperate with the new checkpoint conversion [framework](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/MaxText/utils/ckpt_conversion).
 
 ## Quick starts
 To begin, you'll need:
@@ -16,7 +16,7 @@ pip install -q -U "google-genai>=1.0.0"
 
 ## 1. Prepare the context file
 
-The agent requires context files about the target and source model's parameter names and tensor shapes. You can generate them using the [`save_param.py`](ckpt_conversion/utils/save_param.py) script. The output directory defined by `config.base_output_directory`. The default is `src/MaxText/experimental/agent/ckpt_conversion_agent/context/<model_name>` folder.
+The agent requires context files about the target and source model's parameter names and tensor shapes. You can generate them using the [`save_param.py`](../ckpt_conversion_agent/utils/save_param.py) script. The output directory defined by `config.base_output_directory`. The default is `src/MaxText/experimental/agent/ckpt_conversion_agent/context/<model_name>` folder.
 ```bash
 python3 -m MaxText.experimental.agent.ckpt_conversion_agent.utils.save_param src/MaxText/configs/base.yml \
   per_device_batch_size=1 run_name=param_<model_name> model_name=<model_name> scan_layers=false \
