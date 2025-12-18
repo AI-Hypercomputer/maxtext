@@ -163,6 +163,7 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           tags: |
+            gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:maxtext_${{ steps.vars.outputs.sha_short }}
             gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:${{ steps.date.outputs.image_date }}
             gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:latest
           cache-from: type=gha
