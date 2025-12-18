@@ -35,7 +35,7 @@ from MaxText.layers.embeddings import Embed, embed_as_linen
 from MaxText.layers.encoders import VisionEncoder, vision_encoder_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.multi_token_prediction import multi_token_prediction_block_as_linen
-from MaxText.maxtext_utils import all_gather_over_fsdp
+from MaxText.sharding import all_gather_over_fsdp
 
 # ------------------------------------------------------------------------------
 # The network: Transformer Definitions

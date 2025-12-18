@@ -19,6 +19,7 @@ import functools
 import pickle
 
 from flax import linen as nn
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 
@@ -42,6 +43,7 @@ from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.inference.page_manager import PageState
+from MaxText.layers import models
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -86,24 +88,32 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules):
 def get_functional_train_with_signature(
     train_step, data_sharding, state_mesh_shardings, model, config, params_shardings=None
 ):
-  """Get the shardings (both state and data) for `train_step`."""
+  """Get the shardings (both state and data) for `train_step`.
+
+  The model handles NNX graphdef splitting internally if needed.
+  """
+  # For both Linen and NNX, partial out the model
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
   functional_train.__name__ = "train_step"
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
-  static_argnums = ()  # We partial out the static argnums of model and config
-  donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  static_argnums = ()  # model is partialed out
+  donate_argnums = 0  # state
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
 def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shardings, model, config):
-  """Get the shardings (both state and data) for `eval_step`."""
+  """Get the shardings (both state and data) for `eval_step`.
+
+  The model handles NNX graphdef splitting internally if needed.
+  """
+  # For both Linen and NNX, partial out the model
   functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
-  static_argnums = ()  # We partial out the static argnums of model, config
-  donate_argnums = ()  # state will be kept instead of being donated in eval_step
+  static_argnums = ()  # model is partialed out
+  donate_argnums = ()  # no donation in eval
   return functional_eval, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
@@ -294,9 +304,7 @@ def calculate_llama4_attention_tflops(config):
   num_chunked_layers = num_layers - num_global_layers
 
   # FLOPs for a single global attention layer (full attention, non-causal)
-  global_attention_flops_per_layer = (
-      4 * config.per_device_batch_size * seq_len**2 * config.num_query_heads * config.head_dim
-  )
+  global_attention_flops_per_layer = 4 * config.per_device_batch_size * seq_len**2 * config.num_query_heads * config.head_dim
 
   # FLOPs for a single chunked attention layer (non-causal)
   chunked_attention_flops_per_layer = _calculate_chunked_attention_flops_per_layer(config, seq_len, chunk_size)
@@ -323,9 +331,7 @@ def calculate_mla_tflops_per_device(config):
   else:
     # calculate query down and up flops
     q_flops = (
-        2
-        * batch_len
-        * (config.emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
+        2 * batch_len * (config.emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
     )
   # calculate mla kv projection with down and up flops
   kv_flops = (
@@ -338,9 +344,7 @@ def calculate_mla_tflops_per_device(config):
   )
   qkv_flops = q_flops + kv_flops
 
-  attention_flops = (
-      2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
-  )
+  attention_flops = 2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
   projection_flops = 2 * batch_len * config.emb_dim * config.num_query_heads * config.v_head_dim
   return qkv_flops, attention_flops, projection_flops
 
@@ -726,14 +730,46 @@ def init_training_state(apply_fn, params, tx):
   return state
 
 
+def split_nnx_model(model, mutate=False):
+  """Split NNX model into graphdef, params and apply wrapper."""
+  if hasattr(model, "_nnx_apply_wrapper"):
+    graphdef = model._nnx_graphdef
+    nnx_apply_wrapper = model._nnx_apply_wrapper
+    _, params, _ = nnx.split(model, nnx.Param, ...)
+  else:
+    graphdef, params, _ = nnx.split(model, nnx.Param, ...)
+
+    def nnx_apply_wrapper(params, *args, **kwargs):
+      model_with_vars = nnx.merge(graphdef, params)
+      return model_with_vars(*args, **kwargs)
+
+    if mutate:
+      model._nnx_apply_wrapper = nnx_apply_wrapper
+      model._nnx_graphdef = graphdef
+  return graphdef, params, nnx_apply_wrapper
+
+
 def init_initial_state(model, tx, config, is_training, key):
   """
-  We pass in "static" objects like model, tx, config as JAX compares them by
-  object hash, and instantiating them inside causes pjit top-level annotations
-  to fail to match as pytree prefixes if we re-instantiate.
+  Initialize training or decode state for both NNX and Linen models.
 
-  Args: model, tx, config, is_training, key
+  Args:
+    model: NNX Transformer or Linen model
+    tx: Optimizer transformation
+    config: Configuration object
+    is_training: Whether this is for training or decode
+    key: RNG key for both model types
   """
+  # NNX model path: split model into graphdef and params
+  if isinstance(model, nnx.Module):
+    _, params, nnx_apply_wrapper = split_nnx_model(model)
+
+    if is_training:
+      return init_training_state(nnx_apply_wrapper, params, tx)
+    else:
+      return init_decode_state(nnx_apply_wrapper, params)
+
+  # Linen model path: model + rng key
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
   image_shape = multimodal_utils.get_dummy_image_shape_for_init(
       config.model_name, batch_size=config.micro_batch_size_to_train_on
@@ -743,7 +779,6 @@ def init_initial_state(model, tx, config, is_training, key):
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
       encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
-      # nnx_method="no_op",
   )
   if is_training:
     return init_training_state(model.apply, model_vars, tx)
@@ -897,14 +932,21 @@ def setup_initial_state(
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
-def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
+def get_abstract_state(model, tx, config, key, mesh, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+  if isinstance(model, nnx.Module):
+    split_nnx_model(model, mutate=True)
+
+  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_state = jax.eval_shape(init_state_partial)
+    abstract_state = jax.eval_shape(init_state_partial, key)
 
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  # Use appropriate get_partition_spec for model type
+  if isinstance(model, nnx.Module):
+    state_logical_annotations = nnx.get_partition_spec(abstract_state)
+  else:
+    state_logical_annotations = nn.get_partition_spec(abstract_state)
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
   if is_training and config.shard_optimizer_over_data:
@@ -929,7 +971,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     params = jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params)
     state_mesh_shardings = state_mesh_shardings.replace(params=params)
 
-  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
+  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape(key)
 
   unboxed_abstract_sharded_state = max_utils.unbox_logicallypartioned(abstract_sharded_state)
   # Initialization

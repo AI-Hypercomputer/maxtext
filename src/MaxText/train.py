@@ -35,6 +35,7 @@ import jax
 import jax.numpy as jnp
 
 from flax import linen as nn
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
 from cloud_tpu_diagnostics import diagnostic
@@ -70,6 +71,7 @@ from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
 from MaxText.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
 from MaxText.train_utils import validate_train_config
 from MaxText.metric_logger import record_activation_metrics
+from MaxText.layers import models
 # pylint: disable=too-many-positional-arguments
 
 
@@ -86,11 +88,11 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   """loss_fn for both train and eval.
 
   Args:
-    model: A nn.Module
+    model: A nn.Module or nnx.Module. For NNX models, params are the variables.
     config: Config of parameters
     data: Batch of data to apply to the model
     dropout_rng: A key to use to generate rng for dropout
-    params: Model params
+    params: Model params (or NNX variables)
     is_train: True for train_step and False for eval_step
 
   Returns:
@@ -151,7 +153,11 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       xent = xent * (data["targets_segmentation"] != 0)
       total_loss = jnp.sum(xent)
   else:
-    # Flax NNX model
+    # Flax NNX model - merge GraphDef with parameters
+    if isinstance(model, models.Transformer):
+      # Model is an NNX module instance, split to get GraphDef and state
+      graphdef, _, static_state = nnx.split(model, nnx.Param, ...)
+      model = nnx.merge(graphdef, params, static_state)
     logits = model(
         decoder_input_tokens=data["inputs"],
         decoder_positions=data["inputs_position"],
@@ -216,16 +222,17 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   """
 
   Args:
-    model: A nn.Module
-    state: A pytree of the current state of the model
+    model: A nn.Module or nnx.Module
+    config: Training configuration
+    state_mesh_shardings: Mesh shardings for the state
+    params_shardings: Parameter shardings
+    state: A pytree of the current training state
     data: Batch of data to apply to the model
     dropout_rng: A key to use to generate rng for dropout
 
   Returns:
-    new_state: Same format as state.
+    new_state: Updated training state
     metrics: Dictionary of model metrics such as loss, training rate, etc.
-    rng2: A new rng key that can be used in future calls.
-
   """
   reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = (
       [],
@@ -506,9 +513,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   tf.config.set_visible_devices([], "GPU")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-    )
+    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
   # or fill in here
   config = pyconfig.initialize(argv)

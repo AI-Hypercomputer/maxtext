@@ -94,8 +94,21 @@ def from_config(
   return model
 
 
-def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
+def get_transformer_model(
+    config,
+    mesh,
+    quant,
+    model_mode: str = MODEL_MODE_TRAIN,
+    rngs: nnx.Rngs | None = None,
+):
   """Returns the transformer model based on the configuration."""
+  if config.enable_nnx and rngs is None:
+    rng_key = jax.random.PRNGKey(config.init_weights_seed)
+    if model_mode == MODEL_MODE_TRAIN:
+      rngs = nnx.Rngs(params=rng_key, dropout=1)
+    else:
+      rngs = nnx.Rngs(params=rng_key)  # disable dropout RNG for inference
+
   if config.model_fsdp_ag_once:
     if rngs is not None:
       raise NotImplementedError
@@ -108,7 +121,12 @@ def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAI
       return models.transformer_as_linen(config, mesh, quant=quant, model_mode=model_mode)
 
 
-def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
+def create_model(
+    config,
+    mesh,
+    model_mode: str = MODEL_MODE_TRAIN,
+    rngs: nnx.Rngs | None = None,
+):
   """Instantiates and returns the model object, sharded across the mesh."""
   # Model definition
   quant = quantizations.configure_quantization(config)
@@ -120,7 +138,11 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
 def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
 
-  def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
+  def _create_model(
+      mesh: Mesh | None = None,
+      model_mode: str = MODEL_MODE_TRAIN,
+      rng_key: jax.Array | None = None,
+  ):
     if rng_key is None:
       rng_key = jax.random.PRNGKey(config.init_weights_seed)
 
