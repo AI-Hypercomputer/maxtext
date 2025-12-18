@@ -76,6 +76,7 @@ HF_IDS = {
     "gpt-oss-20b": "openai/gpt-oss-20b",
     "gpt-oss-120b": "openai/gpt-oss-120b",
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+    "qwen3-next-80b-a3b": "Qwen/Qwen3-Next-80B-A3B-Instruct",
 }
 
 
