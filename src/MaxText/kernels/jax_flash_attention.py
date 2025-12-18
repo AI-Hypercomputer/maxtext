@@ -68,8 +68,10 @@ def flash_attention_block_masked(
 
   Returns:
     If save_residuals is True, returns a tuple containing:
-      - The output of the attention computation.
-      - A dict of (logsumexp, max_logits)
+
+    * The output of the attention computation.
+    * A dict of (logsumexp, max_logits)
+
     Otherwise, returns the output of the attention computation.
   """
   batch_size, num_q_heads, q_seq_len, qk_head_dim_size = q.shape

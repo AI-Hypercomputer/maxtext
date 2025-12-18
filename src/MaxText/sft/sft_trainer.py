@@ -18,7 +18,9 @@ using `HuggingFaceH4/ultrachat_200k` dataset. The configurations for the dataset
 are defined inside `src/MaxText/configs/sft.yml`.
 
 Example command:
-Training & Evaluation:
+
+Training & Evaluation::
+
   python3 -m MaxText.sft.sft_trainer src/MaxText/configs/sft.yml \
     run_name=$RUN_NAME base_output_directory=$BASE_OUTPUT_DIRECTORY \
     model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \
@@ -26,7 +28,8 @@ Training & Evaluation:
     per_device_batch_size=1 max_target_length=1024 \
     eval_interval=2 eval_steps=2 steps=10 profiler=xplane weight_dtype=bfloat16
 
-Training:
+Training::
+
   python3 -m MaxText.sft.sft_trainer src/MaxText/configs/sft.yml \
     run_name=$RUN_NAME base_output_directory=$BASE_OUTPUT_DIRECTORY \
     model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \

@@ -29,31 +29,39 @@ def pack_dataset(
   Each example in the output dataset represents several examples in the
   input dataset.
   For each key in the input dataset, two additional keys are created:
-  <key>_segmentation: an int32 tensor identifying the parts
-     representing the original example.
-  <key>_position: an int32 tensor identifying the position within the original
-     example.
+
+  * `<key>_segmentation`: an int32 tensor identifying the parts representing the
+    original example.
+  * `<key>_position`: an int32 tensor identifying the position within the
+    original example.
+
   Example:
   Two input examples get combined to form an output example.
-  The input examples are:
-  {"inputs": [8, 7, 1, 0], "targets":[4, 1, 0]}
-  {"inputs": [2, 3, 4, 1], "targets":[5, 6, 1]}
-  The output example is:
-  {
-                 "inputs": [8, 7, 1, 2, 3, 4, 1, 0, 0, 0]
-    "inputs_segmentation": [1, 1, 1, 2, 2, 2, 2, 0, 0, 0]
-        "inputs_position": [0, 1, 2, 0, 1, 2, 3, 0, 0, 0]
-                "targets": [4, 1, 5, 6, 1, 0, 0, 0, 0, 0]
-   "targets_segmentation": [1, 1, 2, 2, 2, 0, 0, 0, 0, 0]
-       "targets_position": [0, 1, 0, 1, 2, 0, 0, 0, 0, 0]
-  }
+  The input examples are::
+
+    {"inputs": [8, 7, 1, 0], "targets":[4, 1, 0]}
+    {"inputs": [2, 3, 4, 1], "targets":[5, 6, 1]}
+
+  The output example is::
+
+    {
+                  "inputs": [8, 7, 1, 2, 3, 4, 1, 0, 0, 0]
+      "inputs_segmentation": [1, 1, 1, 2, 2, 2, 2, 0, 0, 0]
+          "inputs_position": [0, 1, 2, 0, 1, 2, 3, 0, 0, 0]
+                  "targets": [4, 1, 5, 6, 1, 0, 0, 0, 0, 0]
+    "targets_segmentation": [1, 1, 2, 2, 2, 0, 0, 0, 0, 0]
+        "targets_position": [0, 1, 0, 1, 2, 0, 0, 0, 0, 0]
+    }
+
   0 represents padding in both the inputs and the outputs.
   Sequences in the incoming examples are truncated to length "length", and the
   sequences in the output examples all have fixed (padded) length "length".
+
   Args:
     dataset: a tf.data.Dataset
     key2length: an integer, or a dict from feature-key to integer
     keys: a list of strings (e.g. ["inputs", "targets"])
+
   Returns:
     a tf.data.Dataset
   """

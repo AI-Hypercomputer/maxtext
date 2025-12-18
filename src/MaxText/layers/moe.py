@@ -110,13 +110,11 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
 
   Returns:
     A tuple containing:
-      - top_k_indices: JAX array of shape (batch_size, sequence_length,
-      num_experts_per_tok)
-                       representing the indices of the selected experts for each
-                       token.
-      - top_k_weights: JAX array of shape (batch_size, sequence_length,
-      num_experts_per_tok)
-                       representing the weights for the selected experts.
+
+    * top_k_indices: JAX array of shape `(batch_size, sequence_length, num_experts_per_tok)`
+        representing the indices of the selected experts for each token.
+    * top_k_weights: JAX array of shape `(batch_size, sequence_length, num_experts_per_tok)`
+        representing the weights for the selected experts.
   """
   bs, seq_len, num_experts = gate_logits.shape
   selected_num = bs * seq_len * num_experts_per_tok
@@ -525,9 +523,9 @@ class RoutedMoE(nnx.Module):
       pre_bias_logits: Array of shape `(batch, seq,num_experts)`.
 
     Returns:
-      - top_k_weights: `(batch, seq, num_experts_per_tok)` array of weight values for
+      top_k_weights: `(batch, seq, num_experts_per_tok)` array of weight values for
         each selected expert.
-      - top_k_indices: `(batch, seq, num_experts_per_tok)` array of indices
+      top_k_indices: `(batch, seq, num_experts_per_tok)` array of indices
         identifying the selected experts for each token.
     """
     expert_mask = 1 if self.config.n_routing_groups == -1 else self.expert_group_mask(gate_logits)
@@ -641,18 +639,17 @@ class RoutedMoE(nnx.Module):
     """Permutes tokens locally within an expert shard.
 
     This function prepares the input tokens for processing by the experts
-    located
-    on the current shard. It groups the tokens by their assigned local expert
-    index (0 to local_expert_size - 1).
+    located on the current shard. It groups the tokens by their assigned local
+    expert index (0 to `local_expert_size - 1`).
 
     Args:
       inputs: The input data (tokens) assigned to the experts on this shard.
         Shape `[tokens, emb_dim]`.
       global_group_sizes: The count of tokens assignments for each global expert
-        across all the batch shards. Shape `[num_batch_shards, num_experts].
+        across all the batch shards. Shape `[num_batch_shards, num_experts]`.
       local_expert_size: The number of experts handled by the current shard.
       shard_index: The index of the current expert shard (0 to
-        num_expert_parallelism - 1).
+        `num_expert_parallelism - 1`).
       is_offset: If True, assumes `inputs` are pre-sorted by global expert ID
         and selects the slice relevant to this shard's assigned experts. If
         False, assumes that `inputs` corresponding to the shard's experts start
@@ -662,11 +659,12 @@ class RoutedMoE(nnx.Module):
 
     Returns:
       A tuple containing:
-        sorted_inputs: Input data permuted local expert ID.
-        sorted_indices: Indices used to permute the inputs.
-        local_group_size: Number of tokens assigned to each local expert on this
-          shard.
-        sorted_experts_ids: expert ID corresponding to each token of the permuted
+
+      * `sorted_inputs`: Input data permuted local expert ID.
+      * `sorted_indices`: Indices used to permute the inputs.
+      * `local_group_size`: Number of tokens assigned to each local expert on this
+        shard.
+      * `sorted_experts_ids`: expert ID corresponding to each token of the permuted
         inputs.
     """
 

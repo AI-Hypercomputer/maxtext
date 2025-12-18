@@ -82,13 +82,13 @@ class RMSNorm(nnx.Module):
 
 def Qwen3NextRMSNorm(num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
   """
-  Used for input and post attention layernorms
-  in Qwen3NextDecoderLayer.
+  Used for input and post attention layernorms in `Qwen3NextDecoderLayer`.
 
   This normalization layer is specific to Qwen3-Next. Key characteristics:
-  1.  The learnable scale parameter `scale` is initialized to ZEROS.
-  2.  The scale is applied as `(1.0 + self.scale)`, making the initial scale effectively 1.0.
-      This matches the PyTorch implementation of Qwen3NextRMSNorm.
+
+  1. The learnable scale parameter `scale` is initialized to ZEROS.
+  2. The scale is applied as `(1.0 + self.scale)`, making the initial scale effectively 1.0.
+     This matches the PyTorch implementation of Qwen3NextRMSNorm.
   """
   return nnx.data(
       RMSNorm(

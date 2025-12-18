@@ -113,9 +113,9 @@ def apply_mask_to_logits(logits: Array, mask: Array):
 
   The mask is represented as a tensor with some dtype where 0 represents true and values
   below a large negative number (here set to
-  get_large_negative_number(logits.dtype) / 2) represent false. Applying the mask
+  `get_large_negative_number(logits.dtype) / 2)` represent false. Applying the mask
   leaves the logits alone in the true case and replaces them by
-  get_large_negative_number(logits.dtype) in the false case. Previously, this was
+  `get_large_negative_number(logits.dtype)` in the false case. Previously, this was
   done by adding the logits to the mask; however, this leads to a bad fusion
   decision in the compiler that saves the values in memory rather than
   just the predicate. This implementation avoids that problem.
@@ -219,7 +219,7 @@ def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int,
   within the same chunk, and causally within that chunk).
 
   Args:
-    mask_shape: The desired shape of the mask (q_seq_len, kv_seq_len).
+    mask_shape: The desired shape of the mask `(q_seq_len, kv_seq_len)`.
     chunk_size: The size of the attention chunks.
 
   Returns:
@@ -227,7 +227,7 @@ def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int,
     allowed according to chunked causal rules, and False otherwise.
 
   Raises:
-    ValueError: If chunk_window_size is None or not positive.
+    ValueError: If `chunk_window_size` is None or not positive.
   """
 
   row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0) + q_offset
@@ -245,10 +245,10 @@ def _make_block_mask_indices(bidirectional_mask):
   """Creates block mask identifying segments based on a bidirectional mask.
 
   Args:
-    bidirectional_mask: boolean mask, e.g. [011110011010].
+    bidirectional_mask: boolean mask, e.g. `[011110011010]`.
 
   Returns:
-    block mask for segments, e.g. [011110022030].
+    block mask for segments, e.g. `[011110022030]`.
   """
   # Left pad 0.
   padded_mask = jnp.pad(bidirectional_mask, [(0, 0), (1, 0)], constant_values=0)
@@ -259,18 +259,21 @@ def _make_block_mask_indices(bidirectional_mask):
 
 def _make_bidirectional_block_mask(bidirectional_mask):
   """Creates bidirectional block mask from bidirectional_mask, where True corresponds to image tokens.
-  bidirectional_mask shape: [B, L]
-  bidirectional_block_mask shape: [B, L, L]
-  Examples:
-  bidirectional_mask = [[0, 1, 1, 1, 0, 0]]
-  bidirectional_block_mask = [[
-      [False, False, False, False, False, False],
-      [False,  True,  True,  True, False, False],
-      [False,  True,  True,  True, False, False],
-      [False,  True,  True,  True, False, False],
-      [False, False, False, False, False, False],
-      [False, False, False, False, False, False],
-  ]]
+
+  `bidirectional_mask` shape: [B, L]
+  `bidirectional_block_mask` shape: [B, L, L]
+
+  Examples::
+
+    bidirectional_mask = [[0, 1, 1, 1, 0, 0]]
+    bidirectional_block_mask = [[
+        [False, False, False, False, False, False],
+        [False,  True,  True,  True, False, False],
+        [False,  True,  True,  True, False, False],
+        [False,  True,  True,  True, False, False],
+        [False, False, False, False, False, False],
+        [False, False, False, False, False, False],
+    ]]
   """
   q_block_indices = _make_block_mask_indices(bidirectional_mask)
   kv_block_indices = q_block_indices
@@ -556,23 +559,26 @@ class AttentionOp(nnx.Module):
     allowed to attend to each other.
 
     The masking logic can enforce:
-    1.  **Sequence Separation:** Using `decoder_segment_ids`, attention is
-      confined within distinct sequences in a batch. This is crucial when
-      multiple unrelated sequences are packed together.
-    2.  **Causality:** Preventing attention to future positions. This is
-      standard for autoregressive decoding. For chunked prefill, as
-      described in the SARATHI paper [2], causality is adjusted based
-      on `previous_chunk` information.
-    3.  **Specialized Attention Patterns:** Depending on `self.attention_type`,
-      it can apply:
-      * Local Sliding Window Attention: Restricts attention to a
-          fixed-size window around each query position.
-      * Chunk Attention: Divides sequences into chunks and applies
-          masking at the chunk level.
-    4.  **Bidirectional Attention for Sub-sequences:** If `bidirectional_mask`
-      is provided (e.g., for image tokens in a multimodal model),
-      those parts of the sequence can attend bidirectionally, and this
-      mask is OR-ed with other generated masks.
+
+    1. **Sequence Separation:** Using `decoder_segment_ids`, attention is
+       confined within distinct sequences in a batch. This is crucial when
+       multiple unrelated sequences are packed together.
+    2. **Causality:** Preventing attention to future positions. This is
+       standard for autoregressive decoding. For chunked prefill, as
+       described in the SARATHI paper [2], causality is adjusted based
+       on `previous_chunk` information.
+    3. **Specialized Attention Patterns:** Depending on `self.attention_type`,
+       it can apply:
+
+       * Local Sliding Window Attention: Restricts attention to a
+         fixed-size window around each query position.
+       * Chunk Attention: Divides sequences into chunks and applies
+         masking at the chunk level.
+
+    4. **Bidirectional Attention for Sub-sequences:** If `bidirectional_mask`
+       is provided (e.g., for image tokens in a multimodal model),
+       those parts of the sequence can attend bidirectionally, and this
+       mask is OR-ed with other generated masks.
 
     The overall approach and specific masking techniques are influenced by
     efficient attention mechanisms like those found in the Pallas MHA
@@ -580,30 +586,30 @@ class AttentionOp(nnx.Module):
 
     Args:
       query: The query tensor, typically of shape
-          `[batch_size, q_sequence_length, num_heads, head_dim]`.
-          Used primarily for deriving sequence length.
+        `[batch_size, q_sequence_length, num_heads, head_dim]`.
+        Used primarily for deriving sequence length.
       key: The key tensor, typically of shape
-          `[batch_size, kv_sequence_length, num_heads, head_dim]`.
-          Used primarily for deriving sequence length.
+        `[batch_size, kv_sequence_length, num_heads, head_dim]`.
+        Used primarily for deriving sequence length.
       decoder_segment_ids: Optional `Array` of shape `[batch_size, q_sequence_length]`.
-          Identifies distinct sequences within the batch. Attention is
-          restricted to elements within the same segment ID. In autoregressive
-          mode, specific values (e.g., `common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR`)
-          can mark the currently active sequence for decoding.
+        Identifies distinct sequences within the batch. Attention is
+        restricted to elements within the same segment ID. In autoregressive
+        mode, specific values (e.g., `common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR`)
+        can mark the currently active sequence for decoding.
       model_mode: A string (e.g., `common_types.MODEL_MODE_AUTOREGRESSIVE`,
-          `MODEL_MODE_PREFILL`) indicating the operational
-          mode. This significantly influences mask generation, particularly
-          how causality and segment separation are handled.
+        `MODEL_MODE_PREFILL`) indicating the operational
+        mode. This significantly influences mask generation, particularly
+        how causality and segment separation are handled.
       previous_chunk: Optional. Information about previously processed
-          key/value chunks, often a tensor representing the previous keys/values.
-          Used to correctly offset causal masks in chunked attention or
-          streaming scenarios. Its shape might be
-          `[batch_size, prev_kv_sequence_length, ...]`.
+        key/value chunks, often a tensor representing the previous keys/values.
+        Used to correctly offset causal masks in chunked attention or
+        streaming scenarios. Its shape might be
+        `[batch_size, prev_kv_sequence_length, ...]`.
       bidirectional_mask: Optional `Array` of shape `[batch_size, kv_sequence_length]`.
-          If provided, this boolean mask indicates tokens (e.g., image tokens)
-          that are allowed to attend bidirectionally. The resulting
-          block-wise bidirectional mask is combined with other masks using a
-          logical OR.
+        If provided, this boolean mask indicates tokens (e.g., image tokens)
+        that are allowed to attend bidirectionally. The resulting
+        block-wise bidirectional mask is combined with other masks using a
+        logical OR.
 
     Returns:
       An `Array` representing the attention mask, broadcastable to the shape
@@ -614,10 +620,10 @@ class AttentionOp(nnx.Module):
       the inputs and configuration.
 
     References:
-      [1] JAX Pallas MHA Flash Attention:
-          https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
-      [2] SARATHI: Efficient LLM Inference by Piggybacking Decodes with
-          Chunked Prefills - ArXiv:2308.16369 (https://arxiv.org/abs/2308.16369)
+      [1]: JAX Pallas MHA Flash Attention:
+           https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
+      [2]: SARATHI: Efficient LLM Inference by Piggybacking Decodes with
+           Chunked Prefills - ArXiv:2308.16369 (https://arxiv.org/abs/2308.16369)
     """
     mask = None
     if model_mode == MODEL_MODE_AUTOREGRESSIVE:
@@ -1361,6 +1367,7 @@ class AttentionOp(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> Array:
     """CUDNN Flash Attention with Transformer Engine.
+
     1. Stable API, supports MHA, GQA, SWA, Packing and Context Parallelism
     2. Context Parallelism currently only supports causal masking and no packing
     """
@@ -1496,6 +1503,7 @@ class AttentionOp(nnx.Module):
       sinks: Array | None = None,
   ) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
+
     Local attention results will need to be combined with any other local attentions and normalized
     Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
 
@@ -1843,6 +1851,7 @@ class AttentionOp(nnx.Module):
 # pylint: disable=protected-access
 class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy causal mask, prevents the model from attending to future tokens.
+
   Attributes:
     offset: Offset of q start wrt kv. A positive offset shifts the bottom
       triangle upward, a negative one shifts it downward. A negative offset

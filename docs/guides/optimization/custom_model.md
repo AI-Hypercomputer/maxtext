@@ -83,7 +83,7 @@ Use these general runtime configurations to improve your model's performance.
 
 ## Step 3. Choose efficient sharding strategies using Roofline Analysis
 
-To achieve good performance, it's often necessary to co-design the model's dimensions (like the MLP dimension) along with the sharding strategy. We have included examples for [v5p](https://docs.cloud.google.com/tpu/docs/v5p), [Trillium](https://docs.cloud.google.com/tpu/docs/v6e), and [Ironwood](https://docs.cloud.google.com/tpu/docs/tpu7x) that demonstrate which sharding approaches work well for specific models. We recommend reading [](sharding) and Jax’s [scaling book](https://jax-ml.github.io/scaling-book/sharding/).
+To achieve good performance, it's often necessary to co-design the model's dimensions (like the MLP dimension) along with the sharding strategy. We have included examples for [v5p](https://docs.cloud.google.com/tpu/docs/v5p), [Trillium](https://docs.cloud.google.com/tpu/docs/v6e), and [Ironwood](https://docs.cloud.google.com/tpu/docs/tpu7x) that demonstrate which sharding approaches work well for specific models. We recommend reading [](sharding_on_TPUs) and Jax’s [scaling book](https://jax-ml.github.io/scaling-book/sharding/).
 
 | TPU Type |  ICI Arithmetic Intensity |
 |---|---|

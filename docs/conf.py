@@ -22,6 +22,16 @@ For more information on Sphinx configuration, see the official documentation:
 https://www.sphinx-doc.org/en/master/usage/configuration.html
 """
 
+import os
+import sys
+import logging
+from sphinx.util import logging as sphinx_logging
+
+MAXTEXT_REPO_ROOT = os.environ.get(
+    "MAXTEXT_REPO_ROOT", os.path.join(os.path.dirname(os.path.dirname(__file__)))
+)
+sys.path.insert(0, os.path.abspath(os.path.join(MAXTEXT_REPO_ROOT, "src")))
+
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
@@ -37,6 +47,10 @@ extensions = [
     "myst_nb",
     "sphinx_design",
     "sphinx_copybutton",
+    "sphinx.ext.napoleon",
+    "sphinx.ext.autodoc",
+    "sphinx.ext.autosummary",
+    "sphinx.ext.viewcode",
 ]
 
 templates_path = ["_templates"]
@@ -79,4 +93,114 @@ exclude_patterns = [
     "run_maxtext/run_maxtext_via_multihost_job.md",
     "run_maxtext/run_maxtext_via_multihost_runner.md",
     "reference/core_concepts/llm_calculator.ipynb",
+    "reference/api_generated/modules.rst",
+    "reference/api_generated/install_maxtext_extra_deps.rst",
+    "reference/api_generated/install_maxtext_extra_deps.install_github_deps.rst",
 ]
+
+autosummary_generate = True
+autodoc_typehints = "description"
+autodoc_member_order = "bysource"
+autodoc_mock_imports = ["jetstream", "vllm", "torch", "tensorflow_datasets", "tpu_inference"]
+
+# Suppress specific warnings
+suppress_warnings = [
+    "autodoc.import_object",
+]
+
+# -- Autogenerate API documentation ------------------------------------------
+def run_apidoc(_):
+    """Runs sphinx-apidoc to generate API documentation.
+
+    This function is connected to the Sphinx build process and is triggered to
+    automatically generate the reStructuredText (RST) files for the API
+    documentation from the docstrings in the MaxText source code.
+
+    Args:
+      _: The Sphinx application object. Not used.
+    """
+    # directly within the Sphinx process, especially on macOS, as it avoids
+    # potential multiprocessing/forking issues like the "mutex lock failed" error.
+    # pylint: disable=import-outside-toplevel
+    import subprocess
+
+    os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "1"
+
+    assert os.path.isfile(os.path.join(MAXTEXT_REPO_ROOT, "pyproject.toml"))
+
+    # The path where the generated RST files will be stored
+    output_path = os.path.join(MAXTEXT_REPO_ROOT, "docs", "reference", "api_generated")
+
+    # Command to run sphinx-apidoc
+    # Note: We use `sys.executable -m sphinx.ext.apidoc` to ensure we're using
+    # the apidoc from the same Python environment as Sphinx.
+    command = [
+        sys.executable,
+        "-m",
+        "sphinx.ext.apidoc",
+        "--module-first",
+        "--force",
+        "--separate",
+        "--output-dir",
+        output_path,
+        os.path.join(MAXTEXT_REPO_ROOT, "src"),
+        # Paths to exclude
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "experimental"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_mlperf"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "scratch_code"),
+        # Paths to exclude due to import errors
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "utils"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "decode_multi.py"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "offline_engine.py"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "benchmark_chunked_prefill.py"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "decode.py"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_microbenchmark.py"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_microbenchmark_sweep.py"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "load_and_quantize_checkpoint.py"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "maxengine.py"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "maxengine_config.py"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "maxengine_server.py"),
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "prefill_packing.py"),
+    ]
+
+    # Run the command and check for errors
+    try:
+        print("Running sphinx-apidoc...")
+        subprocess.check_call(
+            command, env={**os.environ, **{"OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "1"}}
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"sphinx-apidoc failed with error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+class FilterSphinxWarnings(logging.Filter):
+  """Filter autosummary 'duplicate object description' warnings.
+
+  These warnings are unnecessary as they do not cause missing documentation
+  or rendering issues, so it is safe to filter them out.
+  """
+
+  def __init__(self, app):
+    self.app = app
+    super().__init__()
+
+  def filter(self, record: logging.LogRecord) -> bool:
+    msg = record.getMessage()
+    filter_out = ("descrição duplicada de objeto",)
+    return not msg.strip().startswith(filter_out)
+
+
+def setup(app):
+  # Connect the apidoc generation to the Sphinx build process
+  run_apidoc(None)
+  print("running:", app)
+
+  # Set up custom logging filters
+  logger = logging.getLogger("sphinx")
+  warning_handler, *_ = [
+    h
+    for h in logger.handlers
+    if isinstance(h, sphinx_logging.WarningStreamHandler)
+  ]
+  warning_handler.filters.insert(0, FilterSphinxWarnings(app))

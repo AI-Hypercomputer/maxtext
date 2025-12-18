@@ -214,12 +214,13 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
   This mapping is derived by matching the provided config dictionary against
   the model's parameter dump.
 
-  To check this mapping, dump the huggingface model shapes:
-  from transformers import AutoModelForCausalLM
-  model_name = "deepseek-ai/DeepSeek-V3"
-  model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
-  for name, val in model.named_parameters():
-    print(name, val.shape)
+  To check this mapping, dump the huggingface model shapes::
+
+    from transformers import AutoModelForCausalLM
+    model_name = "deepseek-ai/DeepSeek-V3"
+    model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
+    for name, val in model.named_parameters():
+        print(name, val.shape)
 
   Args:
       config (dict): Model configuration dictionary (from HF DeepseekV3Config.to_dict())
@@ -436,7 +437,8 @@ def GPT_OSS_HF_WEIGHTS_TO_SHAPE(config):
 def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace Qwen3 weights path and the HuggingFace weights shape.
 
-  To check this mapping, dump the huggingface model shapes:
+  To check this mapping, dump the huggingface model shapes::
+
     from transformers import AutoModelForCausalLM
     model_name = "Qwen/Qwen3-0.6B"
     model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")

@@ -44,7 +44,7 @@ class Pipeline(nn.Module):
     config: Importantly contains num_pipeline_microbatches, num_pipeline_repeats.
     layers: A module instance that each stage can execute. It can either be a single layer such as a
       LlamaDecoderLayer instance or scanned/looped set of decoder layers to execute multiple layers per stage.
-    mesh:  The device mesh of the system.
+    mesh: The device mesh of the system.
     remat_policy: Remat policy to use for the loop iterations
   """
 
@@ -87,14 +87,14 @@ class Pipeline(nn.Module):
 
   def init_states(self, inputs):
     """Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
-    Assumes input has already been reshaped into microbatches: [num_micro_batches, micro_batch_size, sequence, embed]
+    Assumes input has already been reshaped into microbatches: `[num_micro_batches, micro_batch_size, sequence, embed]`
 
     Returns a dictionary with properties
-      shift: zeros shape [num_stages, micro_size, sequence, embed]
-      prev_outputs: same shape as shift, only used when pipeline_delay_activation_forwarding is set to true, else None
-      state_io: reshaped inputs [num_stages, microbatches/stages, micro_size, sequence, embed]
-      circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed] when needed, else None
-      circ_storage_mover: zeros[num_stages, micro_size, sequence, embed] when needed, else None
+      shift: zeros shape `[num_stages, micro_size, sequence, embed]`
+      prev_outputs: same shape as shift, only used when `pipeline_delay_activation_forwarding` is set to true, else None
+      state_io: reshaped inputs `[num_stages, microbatches/stages, micro_size, sequence, embed]`
+      circ_storage: zeros `[num_stages, microbatches, micro_size, sequence, embed]` when needed, else None
+      circ_storage_mover: zeros `[num_stages, micro_size, sequence, embed]` when needed, else None
       loop_iteration: scalar set initially to 0.
     """
 
@@ -167,9 +167,9 @@ class Pipeline(nn.Module):
   def get_iteration_inputs(self, loop_iteration, state_io, circ_storage, shift):
     """
     Construct stages_in: the global array that is operated on for this iteration, shape same as
-    shift=[stages, micro_size, sequence, embed]
+    `shift=[stages, micro_size, sequence, embed]`.
     This is almost a rotated version of the last outputs, except for the first stage which must grab a new batch from
-    state_io or an old one from circ_storage
+    `state_io` or an old one from `circ_storage`
     """
 
     # Setup potential input from state_io, which has a rotating microbatch index (size of microbatches_per_stage)
@@ -230,16 +230,19 @@ class Pipeline(nn.Module):
 
   def vmap_parallel_gather(self, weights, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights):
     """Use vmap to implement a sharded parallel gather.
+
     Parallel gather means each stage has its own weights, and gets one slice from it.
+
     Args:
       weights: Per-stage data to be gathered from.
       repeat_ids: Integer tensor of shape [num_stages], the repeats of the stages.
       repeat_dim_in_weights: The dimension in weights where repeat_ids are applied. The output will not
         have this dimension.
       stages_dim_in_weights: The dimension in weights that represents parallel stages.
+
     Returns:
       The per-stage gathered values. The shape is weights.shape but with repeat_dim_in_weights
-        removed.
+      removed.
     """
 
     def _gather_one(x, repeat_id):
@@ -280,6 +283,7 @@ class Pipeline(nn.Module):
   def get_new_loop_state(self, output, loop_state):
     """
     Update the various buffers given the output of the most recent iteration
+
     * state_io: rotates left/up by 1 (the whole created in the last slot is filled with the most recent pipeline output)
        * Pushing inputs up from top of state_io into first stage of shift
        * Pulling outputs up from last stage of shift into bottom of state_io
@@ -385,7 +389,7 @@ class Pipeline(nn.Module):
   def get_current_stage_weights(self, pipeline_weights, loop_iteration):
     """
     Gets the current weights used for one iteration. Outputs a pytree whose arrays have leading dimension of stages, e.g.
-    {'mlp': 'wo': [stages, mlp, embed]}. Stage 0 will use the 0th index of this pytree, Stage 1 the 1st index, etc.
+    `{'mlp': 'wo': [stages, mlp, embed]}`. Stage 0 will use the 0th index of this pytree, Stage 1 the 1st index, etc.
     For non-circular pipelines, this simply returns all weights - every weight is used in every iteraiton. However
     for circular pipelines each stage grabs only the weights corresponding to the current repeat.
     """

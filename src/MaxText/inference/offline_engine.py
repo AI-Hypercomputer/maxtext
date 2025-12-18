@@ -15,24 +15,25 @@
 """
 Offline Inference Engine
 
-Example usage:
-    offline_engine = OfflineEngine(
-        config=maxtext_config,
-        params=None,
-        enable_batch_prefill=True,
-    )
+Example usage::
 
-    input_data = [
-        jax.numpy.arange(80),
-        jax.numpy.arange(90),
-        jax.numpy.arange(100),
-    ]
+  offline_engine = OfflineEngine(
+      config=maxtext_config,
+      params=None,
+      enable_batch_prefill=True,
+  )
 
-    results = offline_engine.batch_inference(input_data)
+  input_data = [
+      jax.numpy.arange(80),
+      jax.numpy.arange(90),
+      jax.numpy.arange(100),
+  ]
 
-    for completion_output in results:
-        text = offline_engine.tokenizer.decode(completion_output.token_ids)
-        max_logging.log(f"Output: {text}")
+  results = offline_engine.batch_inference(input_data)
+
+  for completion_output in results:
+      text = offline_engine.tokenizer.decode(completion_output.token_ids)
+      max_logging.log(f"Output: {text}")
 """
 
 import os
