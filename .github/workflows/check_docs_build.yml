@@ -17,15 +17,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c  # v6.0.0
+      - name: Install uv and set the Python version
+        uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c  # v7.0.0
         with:
           python-version: '3.12'
-          cache: 'pip' # caching pip dependencies
+          enable-cache: true
+
+      - name: Set venv
+        run: uv venv --python 3.12 $GITHUB_WORKSPACE/venv
 
       - name: Install dependencies
-        run: pip install -r dependencies/requirements/requirements_docs.txt
+        run: . $GITHUB_WORKSPACE/venv/bin/activate && uv pip install -r dependencies/requirements/requirements_docs.txt
 
       - name: Build documentation
         run: |
+          . $GITHUB_WORKSPACE/venv/bin/activate
+          uv pip install -e . --no-deps
           sphinx-build -W -b html docs docs/_build/html
