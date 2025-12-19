@@ -212,6 +212,72 @@ QWEN3_DIMENSION_NUMBER = {
 }
 
 
+# qwen3-next (e.g. 80b-a3b)
+# Hybrid layer structure: 3 GDN layers + 1 Attention layer
+_QWEN3_NEXT_MOE = {
+    "routed_experts": {
+        "gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        # 4D MoE weights: (Experts, Layers, In, Out) -> reduce on In (-2)
+        "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+        "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+        "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+    },
+    "shared_expert": {
+        "wi_0": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "wi_1": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "wo": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    },
+    "shared_expert_gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+}
+
+_QWEN3_NEXT_GDN_LAYER = {
+    "attention": {
+        "A_log": None,
+        "conv1d": {"kernel": None},
+        "dt_bias": None,
+        "in_proj_ba": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "in_proj_qkvz": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "norm": {"rms_norm": {"scale": None}},
+        "out_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    },
+    "input_layernorm": {"scale": None},
+    "mlp": _QWEN3_NEXT_MOE,
+    "post_attention_layernorm": {"scale": None},
+}
+
+_QWEN3_NEXT_ATTN_LAYER = {
+    "attention": {
+        "attention": {
+            "key": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+            "key_norm": {"scale": None},
+            "out": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+            "query": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+            "query_norm": {"scale": None},
+            "value": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+        }
+    },
+    "input_layernorm": {"scale": None},
+    "mlp": _QWEN3_NEXT_MOE,
+    "post_attention_layernorm": {"scale": None},
+}
+
+QWEN3_NEXT_DIMENSION_NUMBER = {
+    "params": {
+        "decoder": {
+            "decoder_norm": {"scale": None},
+            "layers": {
+                "layer_0": _QWEN3_NEXT_GDN_LAYER,
+                "layer_1": _QWEN3_NEXT_GDN_LAYER,
+                "layer_2": _QWEN3_NEXT_GDN_LAYER,
+                "layer_3": _QWEN3_NEXT_ATTN_LAYER,
+            },
+            "logits_dense": {"kernel": None},
+        },
+        "token_embedder": {"embedding": None},
+    }
+}
+
+
 class MuonDimensionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
@@ -224,6 +290,7 @@ class MuonDimensionTest(parameterized.TestCase):
       ("llama3.3-70b", "llama3.3-70b", LLAMA2_DIMENSION_NUMBER),
       ("gemma3-4b", "gemma3-4b", GEMMA3_DIMENSION_NUMBER),
       ("qwen3-0.6b", "qwen3-0.6b", QWEN3_DIMENSION_NUMBER),
+      ("qwen3-next-80b-a3b", "qwen3-next-80b-a3b", QWEN3_NEXT_DIMENSION_NUMBER),
   )
   def test_model_integration(self, model_name, expected_output):
     """
