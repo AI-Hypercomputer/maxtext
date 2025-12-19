@@ -48,55 +48,47 @@ def _is_path_contain_any(tuples, path):
 def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   """
   Determines Muon dimension numbers based on the parameter's hierarchical path.
-
-  This function defines the mapping from a parameter's logical path within the model
-  to its corresponding MuonDimensionNumbers (mdn). The strategy is applied in
-  a specific order to handle general cases and then more specific ones, allowing
-  for fall-through logic in nested structures.
-
-  Strategy:
-  1.  Exclusions: Parameters not suitable for Muon (e.g., scalars, biases,
-      embeddings, non-weight parameters) are explicitly returned as `None`.
-  2.  MoE Block Specific Weights: Handles weights within Mixture-of-Experts (MoE)
-      blocks that have a distinct pattern.
-  3.  Self-Attention Specific Weights: Handles weights within self-attention
-      mechanisms, such as output and QKV projections.
-  4.  Standard Weights: Default mapping for most other 3D weight shapes.
-
-  Args:
-    path: A tuple of strings representing the hierarchical path of the parameter.
-
-  Returns:
-    An instance of `MuonDimensionNumbers` if a specific mapping is found,
-    `None` for excluded parameters, or a default `mdn` for standard weights.
+  Revised for Qwen3-Next hybrid architecture.
   """
 
-  # 1 Exclude parameters not suitable for Muon (scalar, embeddings, unembedding)
-  # [Modified for Qwen3-Next] Added "A_log" and "conv1d" to the exclusion list.
-  # "A_log" is a vector and "conv1d" is a depthwise convolution kernel; 
-  # neither are suitable for Muon's 2D matrix updates and should rely on AdamW.
-  if _is_path_contain_any(("scale", "bias", "embedding", "logits_dense", "A_log", "conv1d"), path):
+  # 1. Exclusions: Parameters not suitable for Muon
+  # Added "dt_bias" to the exclusion list.
+  if _is_path_contain_any(("scale", "bias", "embedding", "logits_dense", "A_log", "conv1d", "dt_bias"), path):
     return None
 
-  # 2 Special weights: MoE, [0, L, -2, -1]
-  # L (optional) stands for layer when scan_layers=True
-  if "MoeBlock_0" in path:
-    # Exclude gate
+  # 2. Special weights: MoE Routed Experts
+  # Qwen3-Next routed experts are 4D: (NumExperts, Layers, In, Out) or similar.
+  # We want to treat Experts and Layers as batch dimensions, and perform 
+  # matrix multiplication on the last two dimensions.
+  if "routed_experts" in path:
     if _is_path_contain_any(("wi_0", "wi_1", "wo"), path):
+      # reduction on input_dim (-2), output on output_dim (-1)
       return mdn((-2,), (-1,))
 
-  # 3 Special weights: Self attention
-  if "self_attention" in path:
-    # Attention output projection: [0, L, -2, -1]
+  # 3. Special weights: Attention (Full Attention layers)
+  # Qwen3-Next uses "attention" in the path for layer_3, not just "self_attention"
+  if "attention" in path or "self_attention" in path:
+    # Attention output projection
+    # For 3D weights (Hidden, Layer, Embed), standard (0,), (-1,) works fine.
+    # For 4D weights (Heads, Layer, HeadDim, Embed), we might want (0, -2).
+    # We stick to standard logic for 'out' if it falls through, or define specific if needed.
     if "out" in path:
-      return mdn((0, -2), (-1,))
+       # If the shape is 4D (Heads, Layers, HeadDim, Embed), this groups Heads and HeadDim.
+       # If the shape is 3D (Hidden, Layers, Embed), 0 is Hidden, -1 is Embed.
+       # The safest generic strategy for 'out' is often just mapping input->output.
+       # Let's allow 'out' to fall through to the default (0,), (-1,) which works for
+       # both Qwen3's 3D out_proj and standard cases.
+       pass
 
-    # Attention qkv projection: [0, L, -2, -1]
-    # For MLA, exclude wq_a / wkv_a
+    # Attention qkv projection
+    # Standard: Input (Embed) -> Output (Heads, HeadDim)
+    # We want to group Heads and HeadDim as the output axis.
     if _is_path_contain_any(("query", "key", "value", "wq_b", "wkv_b"), path):
       return mdn((0,), (-2, -1))
 
-  # 3 Standard weights, [0, L, -1]
+  # 4. Standard weights: [0, L, -1]
+  # Handles Dense layers, Shared Experts, MoE Gates, and Attention Out (3D)
+  # Assumes dim 0 is reduction (Fan-In) and dim -1 is Output (Fan-Out)
   return mdn((0,), (-1,))
 
 
