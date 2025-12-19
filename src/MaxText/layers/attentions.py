@@ -884,8 +884,9 @@ class Attention(nnx.Module):
 
     Returns:
       A list containing two elements:
-      - The prefill key-value cache, or None.
-      - The autoregressive key-value cache, or None.
+
+      * The prefill key-value cache, or None.
+      * The autoregressive key-value cache, or None.
     """
     prefill_kv_cache, ar_kv_cache = self.KVCache_0(
         key=key,

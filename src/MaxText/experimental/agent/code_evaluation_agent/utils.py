@@ -57,11 +57,11 @@ def get_last_defined_module(code_str):
   `ast.ClassDef` node.
 
   Args:
-      code_str: A string containing Python code.
+    code_str: A string containing Python code.
 
   Returns:
-      The name of the last defined function or class, or a syntax error message
-      if the code is invalid.
+    The name of the last defined function or class, or a syntax error message
+    if the code is invalid.
   """
   try:
     tree = ast.parse(code_str)
@@ -87,16 +87,17 @@ def run_pytest_capture_output(test_file: str, code_folder: None | str = None) ->
   to capture all print statements and error messages from the test run.
 
   Args:
-      test_file: The path to the pytest file to run.
-      code_folder: The directory to change into before running the tests.
+    test_file: The path to the pytest file to run.
+    code_folder: The directory to change into before running the tests.
 
   Returns:
-      A tuple containing:
-          - output (str): The complete stdout and stderr from the test run.
-          - exit_code (int): The exit code of the pytest process (0 for success, non-zero otherwise).
-          - is_dependency_error (bool): True if a common dependency error was found in the output.
-          - passed (int): The number of tests that passed.
-          - failed (int): The number of tests that failed.
+    A tuple containing
+
+    * output (str): The complete stdout and stderr from the test run.
+    * exit_code (int): The exit code of the pytest process (0 for success, non-zero otherwise).
+    * is_dependency_error (bool): True if a common dependency error was found in the output.
+    * passed (int): The number of tests that passed.
+    * failed (int): The number of tests that failed.
   """
   current_path = os.path.abspath(".")
   try:

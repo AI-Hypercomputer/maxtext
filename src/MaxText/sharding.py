@@ -164,11 +164,12 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
     valid_target_mesh_axes: A set of mesh axis names that are considered valid targets for sharding.
 
   Returns:
-    A tuple containing:
-      - unsharded_params_total_size (int): The total size (number of elements) of all parameters found to be
-        unsharded on the target axes.
-      - problematic_tensors_details (list): A list of dictionaries, where each
-        dictionary contains details about a tensor that is not sharded on any of the target axes.
+    A tuple containing
+
+    * unsharded_params_total_size (int): The total size (number of elements) of all parameters found to be
+      unsharded on the target axes.
+    * problematic_tensors_details (list): A list of dictionaries, where each
+      dictionary contains details about a tensor that is not sharded on any of the target axes.
   """
   unsharded_params_total_size = 0  # Initialize a counter for the size of unsharded parameters.
   problematic_tensors_details = []  # Initialize a list to store details of problematic tensors.
@@ -355,10 +356,11 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
     state_mesh_shardings: Train state mesh shardings containing params and opt_state
 
   Returns:
-    A tuple of (prev_params_shardings, updated_state_mesh_shardings):
-      - prev_params_shardings: Original parameter shardings before the update
-      - updated_state_mesh_shardings: State mesh shardings with updated params field
-        (unchanged if shard_optimizer_over_data is False)
+    A tuple of (prev_params_shardings, updated_state_mesh_shardings)
+
+    * prev_params_shardings: Original parameter shardings before the update
+    * updated_state_mesh_shardings: State mesh shardings with updated params field
+      (unchanged if shard_optimizer_over_data is False)
   """
   prev_params_shardings = state_mesh_shardings.params
   if config.shard_optimizer_over_data:

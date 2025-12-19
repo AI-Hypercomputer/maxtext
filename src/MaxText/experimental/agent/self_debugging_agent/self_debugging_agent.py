@@ -90,14 +90,15 @@ def get_file_pairs(module_name, pytorch_path, jax_path):
   creates corresponding file paths for the JAX directory.
 
   Args:
-      module_name: Iterable of module name
-      pytorch_path: The path to the directory containing PyTorch files.
-      jax_path: The path to the directory where JAX files will be stored.
+    module_name: Iterable of module name
+    pytorch_path: The path to the directory containing PyTorch files.
+    jax_path: The path to the directory where JAX files will be stored.
 
   Returns:
-      A tuple containing two lists of strings:
-          - The first list contains the full paths to the PyTorch files.
-          - The second list contains the corresponding full paths for the JAX files.
+    A tuple containing two lists of strings
+
+    * The first list contains the full paths to the PyTorch files.
+    * The second list contains the corresponding full paths for the JAX files.
   """
   pytorch_files = list(filter(lambda x: x.endswith(".py"), os.listdir(pytorch_path)))
   if module_name is not None:
@@ -116,15 +117,15 @@ def generate_test_case(python_file, entry_module, python_code, jax_code, jax_fil
   then saved to a specified file path.
 
   Args:
-      python_file: The path to the original PyTorch code file.
-      entry_module: The name of the main module (function or class) to be tested.
-      python_code: The content of the PyTorch code file.
-      jax_code: The content of the JAX code file.
-      jax_file: The path where the JAX code file is or will be saved.
-      test_file_path: The path where the generated test case should be saved.
+    python_file: The path to the original PyTorch code file.
+    entry_module: The name of the main module (function or class) to be tested.
+    python_code: The content of the PyTorch code file.
+    jax_code: The content of the JAX code file.
+    jax_file: The path where the JAX code file is or will be saved.
+    test_file_path: The path where the generated test case should be saved.
 
   Returns:
-      The generated test case code as a string.
+    The generated test case code as a string.
   """
   prompt = CodeEvaluation["TESTCASE"]
   python_code = (
@@ -157,18 +158,19 @@ def save_and_run_test_case(jax_code, test_code, jax_file, test_file_path):
   and test results.
 
   Args:
-      jax_code: The JAX code to be saved.
-      test_code: The test case code to be saved.
-      jax_file: The path to the file where the JAX code will be written.
-      test_file_path: The path to the file where the test case will be written.
+    jax_code: The JAX code to be saved.
+    test_code: The test case code to be saved.
+    jax_file: The path to the file where the JAX code will be written.
+    test_file_path: The path to the file where the test case will be written.
 
   Returns:
-      A tuple containing:
-          - The captured output from the pytest execution.
-          - The exit code of the pytest process.
-          - A boolean indicating if a dependency error occurred.
-          - The number of passed tests.
-          - The number of failed tests.
+    A tuple containing
+
+    * The captured output from the pytest execution.
+    * The exit code of the pytest process.
+    * A boolean indicating if a dependency error occurred.
+    * The number of passed tests.
+    * The number of failed tests.
   """
   with open(jax_file, "wt", encoding="utf-8") as f:
     f.write(jax_code)
@@ -188,20 +190,21 @@ def code_debugging(args, python_file, jax_file, test_file_path, last_output, cod
     multiple times until the tests pass or the retry limit is reached.
 
     Args:
-  c      python_file: The path to the PyTorch reference code.
-        jax_file: The path to the JAX code file being debugged.
-        test_file_path: The path to the test case file.
-        last_output: The output from the last failed test run (stack trace).
-        code_history: A list of dictionaries containing previous code states and
-                      test results.
-        base_try: The current attempt number for debugging.
+      python_file: The path to the PyTorch reference code.
+      jax_file: The path to the JAX code file being debugged.
+      test_file_path: The path to the test case file.
+      last_output: The output from the last failed test run (stack trace).
+      code_history: A list of dictionaries containing previous code states and
+                    test results.
+      base_try: The current attempt number for debugging.
 
     Returns:
-        A tuple containing:
-            - An integer exit code (0 for success, 1 for failure).
-            - The number of passed tests from the final attempt.
-            - The number of failed tests from the final attempt.
-            - The updated code history list.
+      A tuple containing
+
+      * An integer exit code (0 for success, 1 for failure).
+      * The number of passed tests from the final attempt.
+      * The number of failed tests from the final attempt.
+      * The updated code history list.
   """
   try:
     memory_list = []
@@ -266,13 +269,13 @@ def make_code_and_debug(args, python_file, jax_file):
   debugging attempts.
 
   Args:
-      args (argparse.Namespace): CLI arguments
-      python_file: The path to the PyTorch code file.
-      jax_file: The path where the generated JAX code will be stored.
+    args (argparse.Namespace): CLI arguments
+    python_file: The path to the PyTorch code file.
+    jax_file: The path where the generated JAX code will be stored.
 
   Returns:
-      A tuple containing the number of passed and failed test cases
-      from the final successful or best-effort attempt.
+    A tuple containing the number of passed and failed test cases
+    from the final successful or best-effort attempt.
   """
   assert os.path.exists(args.pytorch_path), f"python file {python_file} not exists"
   try:

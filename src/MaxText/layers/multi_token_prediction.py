@@ -140,15 +140,15 @@ class MultiTokenPredictionLayer(nnx.Module):
     """Applies MTP combination, projection, and transformer processing.
 
     Args:
-        prev_hidden_state: Shape [batch, seq_len, hidden_size].
-        target_token_embedding: Embedding for token t+k. Shape [batch, seq_len, embed_dim].
-        position_ids: Shape [batch, seq_len].
-        decoder_segment_ids: Shape [batch, seq_len] or None.
-        deterministic: Whether to disable dropout.
-        model_mode: Operational mode (train, eval, decode).
+      prev_hidden_state: Shape [batch, seq_len, hidden_size].
+      target_token_embedding: Embedding for token t+k. Shape [batch, seq_len, embed_dim].
+      position_ids: Shape [batch, seq_len].
+      decoder_segment_ids: Shape [batch, seq_len] or None.
+      deterministic: Whether to disable dropout.
+      model_mode: Operational mode (train, eval, decode).
 
     Returns:
-        Processed hidden state. Shape [batch, seq_len, hidden_size].
+      Processed hidden state. Shape [batch, seq_len, hidden_size].
     """
     embedding_norm = self.embedding_norm(target_token_embedding)
     hidden_state_norm = self.hidden_state_norm(prev_hidden_state)

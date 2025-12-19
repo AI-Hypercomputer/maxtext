@@ -94,14 +94,14 @@ class TikTokenTokenizer:
     Encodes a string into a list of token IDs.
 
     Args:
-        s (str): The input string to be encoded.
-        bos (bool): Whether to prepend the beginning-of-sequence token.
-        eos (bool): Whether to append the end-of-sequence token.
-        allowed_tokens (`"all"|set[str]`): allowed special tokens in string
-        disallowed_tokens (`"all"|set[str]`): special tokens that raise an error when in string
+      s (str): The input string to be encoded.
+      bos (bool): Whether to prepend the beginning-of-sequence token.
+      eos (bool): Whether to append the end-of-sequence token.
+      allowed_tokens (`"all"|set[str]`): allowed special tokens in string
+      disallowed_tokens (`"all"|set[str]`): special tokens that raise an error when in string
 
     Returns:
-        list[int]: A list of token IDs.
+      list[int]: A list of token IDs.
 
     By default, setting disallowed_special=() encodes a string by ignoring
     special tokens. Specifically:
@@ -150,10 +150,10 @@ class TikTokenTokenizer:
     Decodes a list of token IDs into a string.
 
     Args:
-        t (list[int]): The list of token IDs to be decoded.
+      t (list[int]): The list of token IDs to be decoded.
 
     Returns:
-        str: The decoded string.
+      str: The decoded string.
     """
     # Typecast is safe here. Tiktoken doesn't do anything list-related with the sequence.
     return self.model.decode(t)

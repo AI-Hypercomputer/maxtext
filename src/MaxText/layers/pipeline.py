@@ -270,7 +270,7 @@ class Pipeline(nn.Module):
 
     Returns:
       The per-stage gathered values. The shape is xs.shape but with ids_dim size
-        replaced with [num_stages].
+      replaced with [num_stages].
     """
 
     def _gather_one(x, i):

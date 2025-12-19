@@ -65,15 +65,18 @@ def rekey(ds, key_map=None):
 
   def _rekey(x, key_map=None):
     """Replace the feature keys according to the mapping in `key_map`.
+
     For example, if the dataset returns examples of the format:
     {'foo': 'something', 'bar': 'something else', 'zoo': 'others'}
     and key_map = {'boo': 'foo', 'spar': 'bar', 'zoo': None} then this function will return
     examples with the format
     {'boo': 'something', 'spar': 'something else'}
     If a mapping is to None, then the key will be dropped.
+
     Args:
       x: an example to process.
       key_map: dictionary mapping new keys to original keys
+
     Returns:
       A preprocessed example with the format listed above.
     """
@@ -90,13 +93,16 @@ def reduce_concat_tokens(
     batch_size=128,
 ):
   """Token-preprocessor to concatenate multiple unrelated documents.
+
   If we want to generate examples of exactly the right length,
   (to avoid wasting space on padding), then we use this function, followed by
   split_tokens.
+
   Args:
     dataset: a tf.data.Dataset with dictionaries containing the key feature_key.
     feature_key: an string
     batch_size: an integer - how many documents to concatenate into one
+
   Returns:
     a dataset
   """
@@ -118,14 +124,18 @@ def split_tokens(
     feature_key="targets",
 ):
   """Split examples into multiple examples each.
+
   The intended use case is to break up long examples for use in unsupervised
   transfer-learning.
+
   This function is generally preceded by select_random_chunk.
+
   Args:
     dataset: a tf.data.Dataset with dictionaries containing the key feature_key.
     max_tokens_per_segment: an integer, the maximum number of tokens in each
       segment. Only the final segment may be shorter.
     feature_key: a string, the feature to split
+
   Returns:
     a dataset
   """

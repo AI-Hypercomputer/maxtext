@@ -105,11 +105,14 @@ def _pack_with_tf_ops(
     dataset: tf.data.Dataset, keys: list[str], key2length: dict[str, int], pad_id: int
 ) -> tf.data.Dataset:
   """Helper-function for packing a dataset which has already been batched.
-  Helper for pack_dataset()  Uses tf.while_loop.
+
+  Helper for `pack_dataset()`. Uses `tf.while_loop`.
+
   Args:
     dataset: a dataset containing padded batches of examples.
     keys: a list of strings
     key2length: an dict from feature-key to integer
+
   Returns:
     a dataset.
   """
@@ -132,10 +135,13 @@ def _pack_with_tf_ops(
 
   def map_fn(x):
     """Internal function to flat_map over.
+
     Consumes a batch of input examples and produces a variable number of output
     examples.
+
     Args:
       x: a single example
+
     Returns:
       a tf.data.Dataset
     """
@@ -149,10 +155,12 @@ def _pack_with_tf_ops(
 
     def body_fn(i, partial, outputs):
       """Body function for while_loop.
+
       Args:
         i: integer scalar
         partial: dictionary of Tensor (partially-constructed example)
         outputs: dictionary of TensorArray
+
       Returns:
         A triple containing the new values of the inputs.
       """

@@ -110,68 +110,68 @@ suppress_warnings = [
 
 # -- Autogenerate API documentation ------------------------------------------
 def run_apidoc(_):
-    """Runs sphinx-apidoc to generate API documentation.
+  """Runs sphinx-apidoc to generate API documentation.
 
-    This function is connected to the Sphinx build process and is triggered to
-    automatically generate the reStructuredText (RST) files for the API
-    documentation from the docstrings in the MaxText source code.
+  This function is connected to the Sphinx build process and is triggered to
+  automatically generate the reStructuredText (RST) files for the API
+  documentation from the docstrings in the MaxText source code.
 
-    Args:
-      _: The Sphinx application object. Not used.
-    """
-    # directly within the Sphinx process, especially on macOS, as it avoids
-    # potential multiprocessing/forking issues like the "mutex lock failed" error.
-    # pylint: disable=import-outside-toplevel
-    import subprocess
+  Args:
+    _: The Sphinx application object. Not used.
+  """
+  # directly within the Sphinx process, especially on macOS, as it avoids
+  # potential multiprocessing/forking issues like the "mutex lock failed" error.
+  # pylint: disable=import-outside-toplevel
+  import subprocess
 
-    os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "1"
+  os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "1"
 
-    assert os.path.isfile(os.path.join(MAXTEXT_REPO_ROOT, "pyproject.toml"))
+  assert os.path.isfile(os.path.join(MAXTEXT_REPO_ROOT, "pyproject.toml"))
 
-    # The path where the generated RST files will be stored
-    output_path = os.path.join(MAXTEXT_REPO_ROOT, "docs", "reference", "api_generated")
+  # The path where the generated RST files will be stored
+  output_path = os.path.join(MAXTEXT_REPO_ROOT, "docs", "reference", "api_generated")
 
-    # Command to run sphinx-apidoc
-    # Note: We use `sys.executable -m sphinx.ext.apidoc` to ensure we're using
-    # the apidoc from the same Python environment as Sphinx.
-    command = [
-        sys.executable,
-        "-m",
-        "sphinx.ext.apidoc",
-        "--module-first",
-        "--force",
-        "--separate",
-        "--output-dir",
-        output_path,
-        os.path.join(MAXTEXT_REPO_ROOT, "src"),
-        # Paths to exclude
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "experimental"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_mlperf"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "scratch_code"),
-        # Paths to exclude due to import errors
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "utils"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "decode_multi.py"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "offline_engine.py"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "benchmark_chunked_prefill.py"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "decode.py"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_microbenchmark.py"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_microbenchmark_sweep.py"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "load_and_quantize_checkpoint.py"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "maxengine.py"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "maxengine_config.py"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "maxengine_server.py"),
-        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "prefill_packing.py"),
-    ]
+  # Command to run sphinx-apidoc
+  # Note: We use `sys.executable -m sphinx.ext.apidoc` to ensure we're using
+  # the apidoc from the same Python environment as Sphinx.
+  command = [
+    sys.executable,
+    "-m",
+    "sphinx.ext.apidoc",
+    "--module-first",
+    "--force",
+    "--separate",
+    "--output-dir",
+    output_path,
+    os.path.join(MAXTEXT_REPO_ROOT, "src"),
+    # Paths to exclude
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "experimental"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_mlperf"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "scratch_code"),
+    # Paths to exclude due to import errors
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "utils"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "decode_multi.py"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "offline_engine.py"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "benchmark_chunked_prefill.py"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "decode.py"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_microbenchmark.py"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_microbenchmark_sweep.py"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "load_and_quantize_checkpoint.py"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "maxengine.py"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "maxengine_config.py"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "maxengine_server.py"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "prefill_packing.py"),
+  ]
 
-    # Run the command and check for errors
-    try:
-        print("Running sphinx-apidoc...")
-        subprocess.check_call(
-            command, env={**os.environ, **{"OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "1"}}
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"sphinx-apidoc failed with error: {e}", file=sys.stderr)
-        sys.exit(1)
+  # Run the command and check for errors
+  try:
+    print("Running sphinx-apidoc...")
+    subprocess.check_call(
+      command, env={**os.environ, **{"OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "1"}}
+    )
+  except subprocess.CalledProcessError as e:
+    print(f"sphinx-apidoc failed with error: {e}", file=sys.stderr)
+    sys.exit(1)
 
 
 class FilterSphinxWarnings(logging.Filter):
@@ -192,6 +192,8 @@ class FilterSphinxWarnings(logging.Filter):
 
 
 def setup(app):
+  """Set up the Sphinx application with custom behavior."""
+
   # Connect the apidoc generation to the Sphinx build process
   run_apidoc(None)
   print("running:", app)

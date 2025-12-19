@@ -73,12 +73,11 @@ class GeminiAgent:
     chat dictionary format.
 
     Args:
-        memory_list (str | list): A single message string or a list of
-                                        message dictionaries in the required
-                                        model format.
+      memory_list (str | list): A single message string or a list of message
+        dictionaries in the required model format.
 
     Returns:
-        google.generativeai.types.GenerateContentResponse: The response from the model.
+      google.generativeai.types.GenerateContentResponse: The response from the model.
     """
     if isinstance(memory_list, str):
       memory_list = {"role": "user", "parts": memory_list}

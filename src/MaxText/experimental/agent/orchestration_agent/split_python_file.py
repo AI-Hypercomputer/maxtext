@@ -170,12 +170,12 @@ class DependencyAnalyzer:
     a local file, reads from disk.
 
     Returns:
-        str: The file contents.
+      str: The file contents.
 
     Raises:
-        FileNotFoundError: When the remote file does not exist or a local
-            path is missing.
-        IOError: When a remote file exists but cannot be read.
+      FileNotFoundError: When the remote file does not exist or a local
+        path is missing.
+      IOError: When a remote file exists but cannot be read.
     """
     source_code = ""
     if self.file_path.startswith("https"):
@@ -202,10 +202,10 @@ class DependencyAnalyzer:
          "utils": "src/MaxText/inference.py#utils"}
 
     Args:
-        path (str): A normalized absolute import string.
+      path (str): A normalized absolute import string.
 
     Returns:
-        dict[str, str]: Mapping of imported names to "file.py#name" anchors.
+      dict[str, str]: Mapping of imported names to "file.py#name" anchors.
     """
     path_form, path_imports = path.removeprefix("from ").replace(".", os.path.sep).split(" import ")
     import_dict = {}
@@ -548,7 +548,7 @@ class DependencyAnalyzer:
     """Load cached analysis result if caching is enabled.
 
     Returns:
-        tuple[str|None, dict]: A `(cache_key, search_cache)` pair. When
+      tuple[str|None, dict]: A `(cache_key, search_cache)` pair. When
         caching is disabled, returns `(None, {})`.
     """
     search_cache = {}
@@ -573,10 +573,11 @@ class DependencyAnalyzer:
     """Compute (or load) and return the full sorted structure for the file.
 
     Returns:
-        dict: A dictionary with keys:
-          - "sorted_modules": Mapping of component name to source code.
-          - "component_dependencies": Adjacency lists by component.
-          - "warning": Optional warning message about cycles.
+      dict: A dictionary with keys
+
+        * "sorted_modules": Mapping of component name to source code.
+        * "component_dependencies": Adjacency lists by component.
+        * "warning": Optional warning message about cycles.
     """
     cache_key, search_cache = self.load_cache()
     if cache_key is not None and cache_key in search_cache:
@@ -606,13 +607,13 @@ class DependencyAnalyzer:
     Returns the source code for a given module/component name.
 
     Parameters:
-        module_name (str): The name of the module/component to retrieve.
+      module_name (str): The name of the module/component to retrieve.
 
     Returns:
-        str: The source code of the requested module/component.
+      str: The source code of the requested module/component.
 
     Raises:
-        KeyError: If no component with the provided name exists.
+      KeyError: If no component with the provided name exists.
     """
     # Ensure analysis has been done
     if not hasattr(self, "sorted_components"):
@@ -661,7 +662,7 @@ def parse_args():
   Parses command-line arguments for file or folder processing.
 
   Returns:
-      argparse.Namespace: The parsed command-line arguments.
+    argparse.Namespace: The parsed command-line arguments.
   """
   parser = argparse.ArgumentParser(description="Analyze Python file dependencies and split into components.")
   parser.add_argument(

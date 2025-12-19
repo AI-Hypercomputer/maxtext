@@ -106,10 +106,10 @@ def get_chat_dict(input_message=""):
   Creates a chat dictionary for a user message.
 
   Args:
-      input_message (str, optional): The user's message. Defaults to "".
+    input_message (str, optional): The user's message. Defaults to "".
 
   Returns:
-      dict: A dictionary formatted for the Gemini API.
+    dict: A dictionary formatted for the Gemini API.
   """
   return {"role": "user", "parts": input_message}
 
@@ -119,14 +119,15 @@ def convert_code_from_torch_to_jax(codeComponent, memory_list):
   Converts a single code component from PyTorch to JAX using the LLM agent.
 
   Args:
-      code_component (str): The Python code to be converted.
-      memory_list (list, optional): A list of previous chat messages to provide context.
-                                    Defaults to None.
+    code_component (str): The Python code to be converted.
+    memory_list (list, optional): A list of previous chat messages to provide context.
+      Defaults to None.
 
   Returns:
-      tuple: A tuple containing:
-          - str: The converted JAX code.
-          - list: The updated memory list.
+    tuple: A tuple containing
+
+      * str: The converted JAX code.
+      * list: The updated memory list.
   """
   if memory_list is None:
     memory_list = []
@@ -147,7 +148,7 @@ def parse_args():
   Parses command-line arguments for file or folder processing.
 
   Returns:
-      argparse.Namespace: The parsed command-line arguments.
+    argparse.Namespace: The parsed command-line arguments.
   """
   parser = argparse.ArgumentParser(description="Code Conversion and Test Case Generation Agent")
   group = parser.add_mutually_exclusive_group(required=True)

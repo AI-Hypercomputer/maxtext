@@ -628,9 +628,10 @@ class MLA(Attention):
         chunked prefill.
 
     Returns:
-      A list containing two elements:
-      - The prefill key-value cache, reconstructed from the MLA cache, or None.
-      - The autoregressive key-value cache, reconstructed from the MLA cache, or None.
+      A list containing two elements
+
+      * The prefill key-value cache, reconstructed from the MLA cache, or None.
+      * The autoregressive key-value cache, reconstructed from the MLA cache, or None.
     """
 
     prefill_mla_cache, ar_mla_cache = self.MlaKVCache_0(

@@ -51,6 +51,7 @@ def vocab_tiling_linen_loss(
     model: The Linen model instance.
     params: The model parameters.
     is_train: A boolean indicating if the model is in training mode.
+
   Returns:
     The total cross-entropy loss computed via vocab tiling.
   """

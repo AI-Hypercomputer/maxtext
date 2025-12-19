@@ -76,13 +76,14 @@ def get_file_pairs(pytorch_path, jax_path):
   directories, filtering out any files in the JAX directory that start with "__".
 
   Args:
-      pytorch_path: The path to the directory containing PyTorch files.
-      jax_path: The path to the directory containing JAX files.
+    pytorch_path: The path to the directory containing PyTorch files.
+    jax_path: The path to the directory containing JAX files.
 
   Returns:
-      A tuple containing two lists of strings:
-          - The first list contains the full paths to the common PyTorch files.
-          - The second list contains the full paths to the common JAX files.
+    A tuple containing two lists of strings
+
+    * The first list contains the full paths to the common PyTorch files.
+    * The second list contains the full paths to the common JAX files.
   """
   pytorch_files = os.listdir(pytorch_path)
   jax_files = list(filter(lambda x: not x.startswith("__"), os.listdir(jax_path)))
@@ -99,12 +100,12 @@ def make_test_case_and_run(args, python_file, jax_file):
   a penalty is applied.
 
   Args:
-      args (argparse.Namespace): The command-line arguments.
-      python_file: The path to the PyTorch code file.
-      jax_file: The path to the JAX code file.
+    args (argparse.Namespace): The command-line arguments.
+    python_file: The path to the PyTorch code file.
+    jax_file: The path to the JAX code file.
 
   Returns:
-      A tuple containing the number of passed and failed test cases.
+    A tuple containing the number of passed and failed test cases.
   """
   response = None
   try:
@@ -200,7 +201,7 @@ def parse_args():
   Parses command-line arguments for file or folder processing.
 
   Returns:
-      argparse.Namespace: The parsed command-line arguments.
+    argparse.Namespace: The parsed command-line arguments.
   """
   parser = argparse.ArgumentParser(description="Code Evaluation Agent")
   parser.add_argument(

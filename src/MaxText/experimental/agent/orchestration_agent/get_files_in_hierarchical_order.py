@@ -53,14 +53,13 @@ def find_file_dependencies(file_path_url, base_path_url, exclude_conditional_imp
   Finds all direct Python file dependencies for a given file.
 
   Args:
-      file_path_url (str): The full GitHub URL of the Python file to analyze.
-      base_path_url (str): The base URL of the GitHub repository's source directory.
-      exclude_conditional_imports (bool): If True, imports inside functions,
-                                          classes, or `if TYPE_CHECKING:` blocks
-                                          are ignored.
+    file_path_url (str): The full GitHub URL of the Python file to analyze.
+    base_path_url (str): The base URL of the GitHub repository's source directory.
+    exclude_conditional_imports (bool): If True, imports inside functions,
+      classes, or `if TYPE_CHECKING:` blocks are ignored.
 
   Returns:
-      set: A set of full GitHub URLs of the dependent Python files.
+    set: A set of full GitHub URLs of the dependent Python files.
   """
   dependencies = set()
   flag, content = get_github_file_content(file_path_url)
@@ -122,19 +121,19 @@ def get_dependency_sorted_files(entry_file_path, base_path, exclude_conditional_
   topologically sorted list of all dependent Python files.
 
   Args:
-      entry_file_path (str): The full GitHub URL of the entry Python file.
-      base_path (str): The base URL of the GitHub repository's source directory.
-      exclude_conditional_imports (bool): If True, imports inside functions,
-                                          classes, or `if TYPE_CHECKING:` blocks
-                                          are ignored for dependency analysis.
-      returnDependencies (bool): If True, returns a tuple of (sorted_files,
-                                 dependency_graph), otherwise just sorted_files.
+    entry_file_path (str): The full GitHub URL of the entry Python file.
+    base_path (str): The base URL of the GitHub repository's source directory.
+    exclude_conditional_imports (bool): If True, imports inside functions,
+      classes, or `if TYPE_CHECKING:` blocks are ignored for dependency
+      analysis.
+    returnDependencies (bool): If True, returns a tuple of (sorted_files,
+      dependency_graph), otherwise just sorted_files.
 
   Returns:
-      list: A list of file paths (relative to base_path) in topological order.
-            Returns an empty list if a circular dependency is detected.
-      dict (optional): A dictionary representing the dependency graph if
-                       returnDependencies is True.
+    list: A list of file paths (relative to base_path) in topological order.
+      Returns an empty list if a circular dependency is detected.
+    dict (optional): A dictionary representing the dependency graph if
+      returnDependencies is True.
   """
   dependency_graph = {}
   reverse_graph = {}
@@ -219,7 +218,7 @@ def parse_args():
   Parses command-line arguments for file or folder processing.
 
   Returns:
-      argparse.Namespace: The parsed command-line arguments.
+    argparse.Namespace: The parsed command-line arguments.
   """
   parser = argparse.ArgumentParser(description="Dependency sorter for Python files on GitHub.")
   parser.add_argument(

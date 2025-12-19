@@ -489,10 +489,10 @@ def unbox_logicallypartioned(boxed_pytree):
   """Unboxes the flax.LogicallyPartitioned pieces
 
   Args:
-    boxed_pytree: a pytree that includes LogicallyPartitioned
+    boxed_pytree: a pytree that includes `LogicallyPartitioned`
       leaves.
   Returns:
-    a pytree where all all LogicallyPartitioned leaves have been unboxed.
+    a pytree where all all `LogicallyPartitioned` leaves have been unboxed.
   """
   return jax.tree_util.tree_map(
       lambda x: x.unbox() if isinstance(x, flax.linen.spmd.LogicallyPartitioned) else x,
@@ -965,7 +965,7 @@ def get_batch_seq_len_for_mode(config, model_mode):
                 (e.g., PREFILL, AUTOREGRESSIVE, TRAIN).
 
   Returns:
-    A tuple of (batch_size, seq_len).
+    A tuple of `(batch_size, seq_len)`.
   """
   if model_mode == MODEL_MODE_PREFILL:
     # Prefill mode: Process one full-length prompt.

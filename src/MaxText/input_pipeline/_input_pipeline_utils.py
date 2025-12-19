@@ -167,11 +167,12 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
 
   Returns:
     The modified `example` dictionary.
-      - The `data_column_name` column will be updated to a list of
-        messages, each formatted according to the tokenizer's chat template.
-      - A new column named "is_prompt" will be added, where `True`
-        indicates a user message (prompt) and `False` indicates an assistant
-        message (completion).
+
+    * The `data_column_name` column will be updated to a list of
+      messages, each formatted according to the tokenizer's chat template.
+    * A new column named "is_prompt" will be added, where `True`
+      indicates a user message (prompt) and `False` indicates an assistant
+      message (completion).
   """
   messages = []
   is_prompt = []
@@ -486,25 +487,26 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     items than this maximum, it is padded with zeros.
 
     Args:
-        preprocessed_image (multimodal_utils.PreprocessorOutput): The input numpy arrays to pad.
-            - For masks, the expected shape is (num_masks, num_tiles).
-            - For standard images, the shape is (num_images, H, W, C).
-            - For tiled images, the shape is (num_images, num_tiles, H, W, C).
+      preprocessed_image (multimodal_utils.PreprocessorOutput): The input numpy arrays to pad.
+
+        * For masks, the expected shape is (num_masks, num_tiles).
+        * For standard images, the shape is (num_images, H, W, C).
+        * For tiled images, the shape is (num_images, num_tiles, H, W, C).
 
     Returns:
-        np.ndarray: The tensor, padded with zeros up to the maximum number of
+      np.ndarray: The tensor, padded with zeros up to the maximum number of
         items along the first axis.
 
     Raises:
-        ValueError: If the input tensor's dimension is not 2, 4, or 5.
-        ValueError: If the number of items in the input tensor exceeds the
+      ValueError: If the input tensor's dimension is not 2, 4, or 5.
+      ValueError: If the number of items in the input tensor exceeds the
         allowed maximum.
 
     Notes:
-      - The computation of maximum images ensures that space is reserved in the sequence
-        for at least one text token.
-      - The dummy images used for padding are based on the image shape for initialization
-        of this model (ignoring batch size).
+    * The computation of maximum images ensures that space is reserved in the sequence
+      for at least one text token.
+    * The dummy images used for padding are based on the image shape for initialization
+      of this model (ignoring batch size).
     """
     if not isinstance(preprocessed_image, multimodal_utils.PreprocessorOutput):
       raise TypeError(f"Input must be multimodal_utils.PreprocessorOutput, but got {type(preprocessed_image)}")

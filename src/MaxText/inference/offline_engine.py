@@ -417,10 +417,10 @@ class InferenceWorker:
     """Initialize the MaxEngine.
 
     Args:
-        params: Model parameters
+      params: Model parameters
 
     Returns:
-        tuple of (params, engine)
+      tuple of (params, engine)
     """
     start_time = time.time()
     engine = MaxEngine(self.config, self.devices)
@@ -432,7 +432,7 @@ class InferenceWorker:
     """Initialize the tokenizer.
 
     Returns:
-        Initialized tokenizer
+      Initialized tokenizer
     """
     if self.eos_ids is None and self.tokenizer is None:
       tokenizer_params = self.engine.get_tokenizer()
@@ -726,13 +726,13 @@ class InferenceWorker:
     determines if generation should terminate.
 
     Args:
-        prompt_id: ID of the prompt
-        result_token: Token to emit
-        log_prob: Log probability of the token
-        prompt_logp: Log probabilities for the prompt tokens
+      prompt_id: ID of the prompt
+      result_token: Token to emit
+      log_prob: Log probability of the token
+      prompt_logp: Log probabilities for the prompt tokens
 
     Returns:
-        True if this token signals the end of generation, False otherwise
+      True if this token signals the end of generation, False otherwise
     """
     # Skip if sequence already completed
     if prompt_id in self.completed_sequences:
@@ -857,13 +857,13 @@ class OfflineEngine:
     """Run inference on a batch of inputs.
 
     Args:
-        data: list of InputData objects, or JAX or numpy arrays.
-            If input is JAX or numpy array, it must not contain padding tokens.
-        desc: Description string for logging
-        rng: Random number generator key. If None, the previous key will be used.
+      data: list of InputData objects, or JAX or numpy arrays.
+        If input is JAX or numpy array, it must not contain padding tokens.
+      desc: Description string for logging
+      rng: Random number generator key. If None, the previous key will be used.
 
     Returns:
-        list of CompletionOutput objects, one for each input in data
+      list of CompletionOutput objects, one for each input in data
     """
     data = self.prepare_data(data)
 
@@ -873,10 +873,10 @@ class OfflineEngine:
     """Pad and if batch prefill is enabled, sort data by length.
 
     Args:
-        data: list of InputData objects, or JAX or numpy arrays
+      data: list of InputData objects, or JAX or numpy arrays
 
     Returns:
-        list of prepared InputData objects
+      list of prepared InputData objects
     """
     # Convert JAX arrays to numpy arrays
     if isinstance(data[0], jax.Array):
@@ -906,10 +906,10 @@ class OfflineEngine:
     that is greater than or equal to its true length.
 
     Args:
-        data: list of InputData objects
+      data: list of InputData objects
 
     Returns:
-        list of padded InputData objects
+      list of padded InputData objects
     """
     padded_data = []
 

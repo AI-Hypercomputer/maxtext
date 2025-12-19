@@ -57,10 +57,11 @@ def gradient_accumulation_loss_and_grad(
       extra_dpo_args: A tuple of extra arguments to pass to the loss function.
 
   Returns:
-      A tuple containing:
-      - total_loss (Array): The mean loss, averaged over all microbatches.
-      - final_aux (PyTree): Auxiliary outputs, summed across microbatches.
-      - raw_grads (PyTree): The accumulated and averaged gradients.
+    A tuple containing
+
+    * total_loss (Array): The mean loss, averaged over all microbatches.
+    * final_aux (PyTree): Auxiliary outputs, summed across microbatches.
+    * raw_grads (PyTree): The accumulated and averaged gradients.
   """
 
   def _maybe_shard_with_name(inputs, sharding_names):

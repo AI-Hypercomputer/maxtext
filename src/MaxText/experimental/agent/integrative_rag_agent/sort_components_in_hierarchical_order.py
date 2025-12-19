@@ -84,10 +84,11 @@ def search_similar_dependency(depend, base_path, project_root):
     project_root (str): The root directory of the project.
 
   Returns:
-    tuple: A tuple containing:
-           - A list of tuples, where each tuple contains (distance, name, file, code_text)
-             for similar dependencies found. Returns None if no similar dependencies are found.
-           - The code of the original module.
+    tuple: A tuple containing
+
+      * A list of tuples, where each tuple contains (distance, name, file, code_text)
+        for similar dependencies found. Returns None if no similar dependencies are found.
+      * The code of the original module.
   """
   if enable_cache:
     if os.path.exists(torch_jax_similar_dependency_cache_file):
@@ -252,10 +253,10 @@ def load_status(file_path: str) -> Status:
   (like dequeues and sets) to allow for the continuation of a paused analysis.
 
   Args:
-      file_path (str): The path to the JSON file containing the saved status.
+    file_path (str): The path to the JSON file containing the saved status.
 
   Returns:
-      tuple: A tuple of restored variables representing the analysis state.
+    tuple: A tuple of restored variables representing the analysis state.
   """
   with open(file_path, "rt", encoding="utf-8") as f:
     status = json.load(f)

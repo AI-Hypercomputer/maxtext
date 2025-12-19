@@ -134,10 +134,10 @@ def get_factors(dividend: int):
   no remainder. For example, if dividend=12, it will return {1, 2, 3, 4, 6, 12}.
 
   Args:
-      dividend (int): The number to find factors for.
+    dividend (int): The number to find factors for.
 
   Returns:
-      set: A set containing all factors of the number.
+    set: A set containing all factors of the number.
   """
   factors_set = set()
 
@@ -176,13 +176,13 @@ def get_best_resolution(
   Get the best resolution for the image based on the possible resolutions.
 
   Args:
-      img_height (int): The height of the image.
-      image_width (int): The width of the image.
-      possible_resolutions (list): A list of possible resolutions.
-      resize_to_max_canvas (bool): Whether to resize to max canvas or not.
+    img_height (int): The height of the image.
+    image_width (int): The width of the image.
+    possible_resolutions (list): A list of possible resolutions.
+    resize_to_max_canvas (bool): Whether to resize to max canvas or not.
 
   Returns:
-      tuple: The best resolution for the image.
+    tuple: The best resolution for the image.
   """
   if resize_to_max_canvas:
     return max(possible_resolutions, key=lambda x: x[0] * x[1])
@@ -202,18 +202,18 @@ def pad_to_best_fit_jax(
   If smaller, it's padded on the right and bottom.
 
   Args:
-      images (np.ndarray):
-          The images to process. Expected shape (..., H, W, C).
-      target_size (tuple[int, int]):
-          The target (height, width).
-      background_color (int | tuple[int, ...] | None):
-          The color to use for padding.
-          If int, it's used for the first channel and subsequent channels are padded with 0.
-          If tuple, its length must match the number of channels in the image.
-          Defaults to 0.
+    images (np.ndarray):
+      The images to process. Expected shape (..., H, W, C).
+    target_size (tuple[int, int]):
+      The target (height, width).
+    background_color (int | tuple[int, ...] | None):
+      The color to use for padding.
+      If int, it's used for the first channel and subsequent channels are padded with 0.
+      If tuple, its length must match the number of channels in the image.
+      Defaults to 0.
 
   Returns:
-      np.ndarray: The processed images of shape (..., target_height, target_width, C).
+    np.ndarray: The processed images of shape (..., target_height, target_width, C).
   """
   original_shape = images.shape
   num_dims = len(original_shape)
@@ -277,12 +277,12 @@ def pad_to_max_tiles(images: np.ndarray, max_num_tiles: int = LLAMA4_TILES_PAD_T
   Pads the image tiles to the maximum number of tiles using JAX.
 
   Args:
-      images: The input image tiles with shape (num_tiles, C, H, W).
-      max_num_tiles: The maximum number of tiles to pad to.
+    images: The input image tiles with shape (num_tiles, C, H, W).
+    max_num_tiles: The maximum number of tiles to pad to.
 
   Returns:
-      The padded image tiles with shape (max_num_tiles, C, H, W).
-      The mask indicating valid tiles with shape (max_num_tiles,).
+    The padded image tiles with shape (max_num_tiles, C, H, W).
+    The mask indicating valid tiles with shape (max_num_tiles,).
   """
   num_tiles, num_channels, height, width = images.shape
   if num_tiles > max_num_tiles:
@@ -307,13 +307,13 @@ def split_to_tiles(images: np.ndarray, num_tiles_height: int, num_tiles_width: i
   Splits an image tensor into tiles using JAX.
 
   Args:
-      images: The input image tensor with shape (batch_size, num_channels, height, width).
-      num_tiles_height: The number of tiles along the height dimension.
-      num_tiles_width: The number of tiles along the width dimension.
+    images: The input image tensor with shape (batch_size, num_channels, height, width).
+    num_tiles_height: The number of tiles along the height dimension.
+    num_tiles_width: The number of tiles along the width dimension.
 
   Returns:
-      The tiled image tensor with shape:
-      (batch_size * num_tiles_height * num_tiles_width, num_channels, height // num_tiles_height, width // num_tiles_width).
+    The tiled image tensor with shape:
+    (batch_size * num_tiles_height * num_tiles_width, num_channels, height // num_tiles_height, width // num_tiles_width).
   """
   images = np.transpose(images, (2, 0, 1))  # Change to (num_channels, height, width)
   num_channels, height, width = images.shape
@@ -392,7 +392,7 @@ def pre_process_llama4_image(image: np.ndarray | list[np.ndarray]) -> Preprocess
   Returns:
     The pre-processed image in np.array [N, NUM_TILES, C, TILE_SIZE, TILE_SIZE].
 
-  Example:
+  Example::
 
     image of (536, 640, 3), its best_resolution = (672, 672), image split into 4 tiles of (336, 336)
     Additional global tile of (336, 336) is added, and the final output image_tiles is (1, 5, 3, 336, 336).
@@ -691,7 +691,7 @@ def get_num_tokens_for_this_image(this_aspect_ratio, num_patches_per_chunk):
 
   Args:
     aspect_ratio: A tuple (ratio_h, ratio_w) representing the number of tiles
-                  along height and width.
+      along height and width.
     num_patches_per_chunk: The number of patch tokens per image tile.
 
   Returns:
@@ -775,13 +775,13 @@ def insert_sequence(
   This function is fully vectorized and operates on a batch of token sequences.
 
   Args:
-      tokens: A 1D or 2D array of input tokens.
-      at: The token ID to find and replace with the sequence.
-      sequence: The list of new token IDs to insert.
-      max_num_images: The maximum number of times `at` can appear.
+    tokens: A 1D or 2D array of input tokens.
+    at: The token ID to find and replace with the sequence.
+    sequence: The list of new token IDs to insert.
+    max_num_images: The maximum number of times `at` can appear.
 
   Returns:
-      The modified token array with the sequences inserted.
+    The modified token array with the sequences inserted.
   """
   # Ensure input is a 2D array (batch)
   original_dim = tokens.ndim

@@ -391,12 +391,14 @@ class PagedAttentionOp(nnx.Module):
       page_state: The current state of the page manager.
 
     Returns:
-        A tuple (output, exponentials_max, exponentials_sum) containing:
-        - The attention output tensor.
-        - The max of the exponentials (for prefill mode with dot-product attention).
-        - The sum of the exponentials (for prefill mode with dot-product attention).
-        The latter two are None for autoregressive mode, as this is handled
-        internally by the paged attention kernel.
+      A tuple (output, exponentials_max, exponentials_sum) containing
+
+      * The attention output tensor.
+      * The max of the exponentials (for prefill mode with dot-product attention).
+      * The sum of the exponentials (for prefill mode with dot-product attention).
+
+      The latter two are None for autoregressive mode, as this is handled
+      internally by the paged attention kernel.
     """
 
     key_pages_cache, value_pages_cache = self.get_kv_pages()

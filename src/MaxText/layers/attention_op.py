@@ -974,14 +974,14 @@ class AttentionOp(nnx.Module):
       Wraps the GQA function with appropriate sharding.
 
       Args:
-          q: Query tensor.
-          k: Key tensor.
-          v: Value tensor.
-          lengths: Sequence lengths.
-          block_size: Block size for attention.
+        q: Query tensor.
+        k: Key tensor.
+        v: Value tensor.
+        lengths: Sequence lengths.
+        block_size: Block size for attention.
 
       Returns:
-          A tuple containing the output, max, and sum tensors.
+        A tuple containing the output, max, and sum tensors.
       """
       # Use the original gqa function to get the attention output
       local_out, (local_sum, local_max) = gpu_pallas_decode_attention.gqa(
@@ -1508,15 +1508,16 @@ class AttentionOp(nnx.Module):
     Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
 
     Args:
-        attn_weights (Array): Product of query and key
-        value (Array): Current value
-        aqt_rng (PRNGKey | None): Optional rng
+      attn_weights (Array): Product of query and key
+      value (Array): Current value
+      aqt_rng (PRNGKey | None): Optional rng
 
     Returns:
-        (local_out, local_max,): where
-          local_out is local unnormalized output
-          local_max is the local max of exponentials
-          local_sum is the sum of exponentials for this chunk, divided by exp(local_max).
+      (local_out, local_max,), where
+
+      * local_out is local unnormalized output
+      * local_max is the local max of exponentials
+      * local_sum is the sum of exponentials for this chunk, divided by exp(local_max).
     """
     b, n_kv, g, t, s = attn_weights.shape
     n_q = n_kv * g
@@ -1735,13 +1736,13 @@ class AttentionOp(nnx.Module):
     """Normalize across two cuDNN attentions
 
     Args:
-        local_outs (list): List of outputs entries for each cudnn attention
-          in shape [b, t, n, d].
-        local_stats (list): List of logsumexp entries for each cudnn attention
-          in shape [b, n, t].
+      local_outs (list): List of outputs entries for each cudnn attention
+        in shape [b, t, n, d].
+      local_stats (list): List of logsumexp entries for each cudnn attention
+        in shape [b, n, t].
 
     Returns:
-        Array: Combined attention that has been normalized in shape [b, t, n, d].
+      Array: Combined attention that has been normalized in shape [b, t, n, d].
     """
     # reshape stat to have shape [b, n, t, 1]
     stat0 = local_stats[0].reshape((*local_stats[0].shape, 1))
@@ -1757,12 +1758,12 @@ class AttentionOp(nnx.Module):
     """Normalize across multiple localized attentions
 
     Args:
-        local_outs (list): List of unnormalized outputs entries for each local attention
-        local_maxes (list): List of max exponentials entries for each local attention
-        local_sums (list): List of exponential sum entries for each local attention
+      local_outs (list): List of unnormalized outputs entries for each local attention
+      local_maxes (list): List of max exponentials entries for each local attention
+      local_sums (list): List of exponential sum entries for each local attention
 
     Returns:
-        Array: Combined attention that has been normalized
+      Array: Combined attention that has been normalized
     """
     # Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
     global_max = functools.reduce(jnp.maximum, local_maxes)

@@ -146,10 +146,11 @@ class MaxTextDecoderModel(nnx.Module):
       **kwargs: Arbitrary keyword arguments.
 
     Returns:
-      A tuple containing:
-        - updated_kv_caches: A list of updated KV caches.
-        - hidden: The hidden states (Q, d_model).
-        - aux_hidden_states: A list of auxiliary hidden states.
+      A tuple containing
+
+      * updated_kv_caches: A list of updated KV caches.
+      * hidden: The hidden states (Q, d_model).
+      * aux_hidden_states: A list of auxiliary hidden states.
 
     Raises:
       ValueError: If the model is not an instance of `nnx.Module`.
@@ -245,10 +246,11 @@ class MaxTextForCausalLM(nnx.Module):
       **kwargs: Arbitrary keyword arguments.
 
     Returns:
-      A tuple containing:
-        - updated_kv_caches: A list of updated KV caches.
-        - hidden: The hidden states.
-        - aux_hidden_states: A list of auxiliary hidden states.
+      A tuple containing
+
+      * updated_kv_caches: A list of updated KV caches.
+      * hidden: The hidden states.
+      * aux_hidden_states: A list of auxiliary hidden states.
     """
     with self.mesh:
       kv_caches, hidden, aux_hidden_states = self.model(kv_caches, input_ids, attention_metadata, *args, **kwargs)

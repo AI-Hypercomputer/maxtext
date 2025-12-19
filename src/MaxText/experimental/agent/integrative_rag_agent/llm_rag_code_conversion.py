@@ -59,11 +59,12 @@ def arg_parser():
   """Create and return the CLI argument parser for code conversion.
 
   Returns:
-      argparse.Namespace: Parsed arguments containing:
-          - number_of_maxtext_blocks (int)
-          - module_name (str)
-          - destination_base_directory (str)
-          - destination_source_url (str)
+    argparse.Namespace: Parsed arguments containing
+
+      * number_of_maxtext_blocks (int)
+      * module_name (str)
+      * destination_base_directory (str)
+      * destination_source_url (str)
   """
   parser = argparse.ArgumentParser(description="LLM code conversion utility.")
   parser.add_argument("--number-of-maxtext-blocks", type=int, default=5, help="Number of maxtext blocks to process.")
@@ -100,7 +101,7 @@ def get_exisiting_jax_modules():
   values are textual analyses used as LLM guidance.
 
   Returns:
-      dict[str, str]: Mapping of module key to analysis/description.
+    dict[str, str]: Mapping of module key to analysis/description.
   """
   with open(maxtext_block_description, "rt", encoding="utf-8") as f:
     module_list = json.load(f)
@@ -176,14 +177,14 @@ def convert_given_file(module, jax_modules) -> None | dict:
   returns a description for the generated module.
 
   Args:
-      module (dict): Component metadata with keys like "filepath",
-          "comp_name", and optional "JaxDependencies".
-      jax_modules (dict): Existing JAX module descriptions to provide context
-          to the LLM.
+    module (dict): Component metadata with keys like "filepath",
+      "comp_name", and optional "JaxDependencies".
+    jax_modules (dict): Existing JAX module descriptions to provide context
+      to the LLM.
 
   Returns:
-      dict | None: Mapping of fully-qualified package name to generated
-      description, or None if generation did not produce a detectable module.
+    dict | None: Mapping of fully-qualified package name to generated
+    description, or None if generation did not produce a detectable module.
   """
   maxtext_blocks_code = read_code_blocks(maxtext_code_block, args.number_of_maxtext_blocks)
   module_code, file_code = get_modules_from_file(destination_source_url + module["filepath"], module=module["comp_name"])

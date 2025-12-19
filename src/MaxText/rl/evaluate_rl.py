@@ -53,13 +53,13 @@ def generate_responses(
   Generate responses for a batch of prompts across potentially multiple passes.
 
   Args:
-      tmvp_config: Configuration object
-      prompts: List of prompts to generate responses for
-      rl_cluster: Model cluster for generation
-      num_passes: Number of generation passes
+    tmvp_config: Configuration object
+    prompts: List of prompts to generate responses for
+    rl_cluster: Model cluster for generation
+    num_passes: Number of generation passes
 
   Returns:
-      List of lists containing responses for each prompt across passes
+    List of lists containing responses for each prompt across passes
   """
   multiple_call_responses = [[] for _ in range(len(prompts))]
   eval_strategy = tmvp_config.generation_configs[tmvp_config.eval_sampling_strategy]
@@ -90,13 +90,13 @@ def score_responses(tmvp_config, question, responses, answer):
   Score a set of responses for a single question.
 
   Args:
-      tmvp_config: Configuration object
-      question: The evaluation question
-      responses: List of generated responses for this question
-      answer: The correct answer
+    tmvp_config: Configuration object
+    question: The evaluation question
+    responses: List of generated responses for this question
+    answer: The correct answer
 
   Returns:
-      Tuple of (is_correct, is_partially_correct, has_correct_format)
+    Tuple of (is_correct, is_partially_correct, has_correct_format)
   """
   match_format = utils_rl.get_match_format_regex(tmvp_config)
   match_numbers = utils_rl.get_match_numbers_regex(tmvp_config)
@@ -156,15 +156,15 @@ def evaluate(
   Computes accuracy and percentage of outputs matching the format.
 
   Args:
-      tmvp_config: Configuration object
-      dataset: The evaluation dataset
-      rl_cluster: Model cluster for generation.
-      num_passes: Number of generation passes
-      corr_lst: If True, only include correct responses in the list
-      make_lst: If True, return a list of (question, answer, responses)
+    tmvp_config: Configuration object
+    dataset: The evaluation dataset
+    rl_cluster: Model cluster for generation.
+    num_passes: Number of generation passes
+    corr_lst: If True, only include correct responses in the list
+    make_lst: If True, return a list of (question, answer, responses)
 
   Returns:
-      Tuple of statistics and optionally the response list
+    Tuple of statistics and optionally the response list
   """
   response_lst = []
   corr = 0

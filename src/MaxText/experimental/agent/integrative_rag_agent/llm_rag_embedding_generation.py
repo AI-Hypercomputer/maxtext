@@ -173,11 +173,12 @@ def get_code_description_with_gemini(code_block, full_code_context, user_prompt=
   Analyzes a Python code block using the Gemini API to generate a structured description.
 
   Args:
-      code_block (str): The specific Python function or class to analyze.
-      full_code_context (str): The full source code of the file for context.
-      user_prompt (str): The prompt template for the user message.
+    code_block (str): The specific Python function or class to analyze.
+    full_code_context (str): The full source code of the file for context.
+    user_prompt (str): The prompt template for the user message.
+
   Returns:
-      None | dict: A dictionary containing the structured analysis, or an error message and return `None`.
+    None | dict: A dictionary containing the structured analysis, or an error message and return `None`.
   """
   llm_agent = GeminiAgent(system_instruction=Description_Prompt)
   resp = None
