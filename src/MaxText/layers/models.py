@@ -84,8 +84,8 @@ class TransformerLinenPure(nn.Module):
         config=cfg,
         mesh=self.mesh,
     )
-    self.vision_encoder = vision_encoder_as_linen(config=cfg, mesh=mesh) if cfg.use_multimodal else None
-    self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
+    self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
+    self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=nnx.Rngs(0))
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
       # Get the list of layer blueprints for the current model.
@@ -315,10 +315,12 @@ class Transformer(nnx.Module):
         config=cfg,
         rngs=rngs,
     )
-    self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh, rngs=rngs) if cfg.use_multimodal else None
-
-    decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
-    self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
+    self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
+    if rngs is not None:
+      self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
+    else:
+      decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
+      self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
     self.hidden_states = None
 
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=cfg, model_mode=model_mode)
@@ -343,14 +345,14 @@ class Transformer(nnx.Module):
       )
     else:
       dummy_attention_metadata = None
-
+    """
     self.decoder.lazy_init(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=dummy_decoder_input_tokens,
         decoder_positions=dummy_decoder_positions,
         attention_metadata=dummy_attention_metadata,
     )
-
+    """
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
       # Get the list of layer blueprints for the current model.
