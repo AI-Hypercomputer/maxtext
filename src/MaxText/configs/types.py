@@ -1982,6 +1982,7 @@ class MaxTextConfig(
         DecoderBlockType.QWEN3,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
+        DecoderBlockType.QWEN3_NEXT,
     ]:
       raise ValueError(
           "Muon dimension number haven't been tested for this model. Run this command first: "
