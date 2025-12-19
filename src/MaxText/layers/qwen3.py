@@ -118,7 +118,6 @@ def jax_chunk_gated_delta_rule(
   scale = jax.lax.rsqrt(jnp.array(query.shape[-1]).astype(jnp.float32))
   query = query * scale
 
-  # 3. 预乘 beta
   v_beta = value * jnp.expand_dims(beta, -1)  # (B, H, S_padded, D_v)
   k_beta = key * jnp.expand_dims(beta, -1)  # (B, H, S_padded, D_k)
 

@@ -335,11 +335,12 @@ class KimiDeltaAttention(nnx.Module):
     b, s, _ = g_linear.shape
     g = g_linear + self.dt_bias
     sp = jax.nn.softplus(g.astype(jnp.float32)).reshape(b, s, self.num_heads, self.head_dim)
-    return (-jnp.exp(self.A_log) * sp).astype(self.dtype).reshape(b, s, -1)
+    return (-jnp.exp(self.A_log) * sp).astype(self.dtype)
 
   def __call__(
       self,
       hidden_states: Array,
+      chunk_size: int = 64,
       initial_state: Optional[Array] = None,
       output_final_state: bool = False,
   ) -> Tuple[Array, Optional[Array]]:
@@ -369,8 +370,8 @@ class KimiDeltaAttention(nnx.Module):
 
     # 4. Core Attention Interface
     attn_out, final_state = chunk_parallel_delta_attention(
-        q=q, k=k, v=v, g=g_forget, beta=beta,
-        initial_state=initial_state, scale=self.head_dim**-0.5, output_final_state=output_final_state,
+        query=q, key=k, value=v, g=g_forget, beta=beta,
+        chunk_size=chunk_size, initial_state=initial_state, output_final_state=output_final_state
     )
 
     # 5. Output stage

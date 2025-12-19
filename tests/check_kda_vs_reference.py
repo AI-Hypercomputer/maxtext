@@ -80,38 +80,25 @@ def torch_chunk_kda(
         scale = K ** -0.5
     assert T % BT == 0
 
-    # 1. 重排维度，将序列 T 切分为 NT 个块，每块大小为 BT
     q, k, v, g, beta = map(lambda x: rearrange(x, 'b (n c) h ... -> b h n c ...', c=BT).to(torch.float), [q, k, v, g, beta])
     q = q * scale
-    # 2. 计算门控的前缀和 (Cumsum)
-    # 因为原来的 g 是步进衰减率，cumsum 后的 g_i 对应从序列开始到 i 的总衰减对数
     g = g.cumsum(-2)
 
     # note that diagonal is masked.
     mask = torch.triu(torch.ones(BT, BT, dtype=torch.bool, device=q.device), diagonal=0)
 
-    # 3. 计算块内每个位置之间的加权相似度
     A = torch.zeros(*q.shape[:-1], BT, dtype=torch.float, device=q.device)
     for i in range(BT):
-        k_i = k[..., i, :] # 当前位置 i 的键
-        g_i = g[..., i:i+1, :] # 当前位置 i 的累积门控向量
-        # 核心公式：k_j * exp(g_j - g_i) * k_i
-        # 这计算了位置 j 对位置 i 的影响力，且考虑了每个维度独立的衰减
+        k_i = k[..., i, :]
+        g_i = g[..., i:i+1, :]
         A[..., i] = torch.einsum('... c d, ... d -> ... c', k * (g - g_i).exp(), k_i)
-    # 4. 乘上学习率 beta
     A = A * beta[..., None]
 
-    # 5. 掩码掉上三角（包括对角线），只留严格下三角
     A = -A.masked_fill(mask, 0)
-    # 6. 经典的单位下三角求逆循环 (与 DeltaNet 相同)
-    # 得到 (I - A)^{-1}，即考虑了所有中间步骤修正后的总影响
     for i in range(1, BT):
         A[..., i, :i] = A[..., i, :i].clone() + (A[..., i, :, None].clone() * A[..., :, :i].clone()).sum(-2)
-    # 7. 加上单位阵并应用 beta
     A = (A + torch.eye(BT, dtype=torch.float, device=q.device)) * beta[..., None, :]
 
-    # 8. 计算块内修正后的 w 和 u
-    # w 考虑了门控：A @ (exp(g) * k)
     w = A @ (g.exp() * k)
     u = A @ v
 
@@ -123,27 +110,15 @@ def torch_chunk_kda(
     for i in range(0, NT):
         # [B, H, BT, ...]
         q_i, k_i, u_i, g_i, w_i = q[:, :, i], k[:, :, i], u[:, :, i], g[:, :, i], w[:, :, i]
-        # 9. 计算当前块的并行注意力矩阵 A
-        # 这里 A 的计算包含 (q_i * exp(g_i - g_j)) @ k_j
-        # 意味着从 S 读出信息时，也要考虑查询位置相对于存储位置的衰减
         A = torch.zeros(B, H, BT, BT, dtype=torch.float, device=q.device)
         for j in range(BT):
             k_j = k[:, :, i, j]
             g_j = g[:, :, i, j:j+1, :]
             A[..., j] = torch.einsum('... c d, ... d -> ... c', q_i * (g_i - g_j).exp(), k_j)
         A = A.masked_fill(mask, 0)
-        # 10. 修正当前块的增量值 v_i
-        # v_i = u_i - w_i @ S
-        # 这行代码将历史状态 S 通过修正算子 w 注入到当前块的更新中
         v_i = u_i - w_i @ S
-        # 11. 计算输出：(历史贡献) + (块内增量)
-        # 历史贡献也要乘上当前块内的累积门控 g_i.exp()
         o[:, :, i] = (q_i * g_i.exp()) @ S + A @ v_i
-        # 12. 更新全局状态 S 以供下一个块使用
-        # 首先：让旧状态 S 经历整个块的衰减 (g_i 最后一个位置的衰减值)
         S = S * rearrange(g_i[:, :, -1].exp(), 'b h k -> b h k 1')
-        # 然后：加上当前块新产生的增量
-        # 增量也要根据距离块末尾的距离进行衰减：(g_末尾 - g_当前).exp()
         S += rearrange((g_i[:, :, -1:] - g_i).exp() * k_i, 'b h c k -> b h k c') @ v_i
     if not output_final_state:
         S = None
