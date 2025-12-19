@@ -279,9 +279,7 @@ class Checkpointing(BaseModel):
   save_checkpoint_on_completion: bool = Field(
       True, description="If True, saves a final checkpoint upon training completion."
   )
-  enable_continuous_checkpointing: bool = Field(
-      False, description="If True, enables continuous checkpointing."
-  )
+  enable_continuous_checkpointing: bool = Field(False, description="If True, enables continuous checkpointing.")
 
 
 class OrbaxStorage(BaseModel):
@@ -463,9 +461,7 @@ class Attention(BaseModel):
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for TE padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
-  use_jax_splash: bool = Field(
-      False, description="Whether to use jax splash attention."
-  )
+  use_jax_splash: bool = Field(False, description="Whether to use jax splash attention.")
 
 
 class MoBa(BaseModel):
@@ -880,8 +876,8 @@ class DatasetGeneral(BaseModel):
       description="Packing type when using Grain pipeline. 'first_fit' or 'concat_then_split'.",
   )
   max_segments_per_seq: int = Field(
-      32,
-      description="Maximum number of segments that can be packed into a single sequence.",
+      -1,
+      description="Maximum number of segments that can be packed into a single sequence. -1 or None for no limit.",
   )
   num_epoch: int = Field(1, description="Number of epochs to train for.")
   expansion_factor_real_data: float = Field(-1.0, description="Factor for partial data loading on hosts.")
@@ -2065,6 +2061,8 @@ class MaxTextConfig(
         raise ValueError(
             "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs."
         )
+    if self.hardware == "gpu" and self.packing and self.attention == "cudnn_flash_te" and self.max_segments_per_seq <= 0:
+      raise ValueError("max_segments_per_seq must be set when using TransformerEngine attention and packing")
     dcn_product = (
         self.dcn_data_parallelism
         * self.dcn_pipeline_parallelism
