@@ -61,7 +61,7 @@ class Qwen3OmniPreprocessorOutput(mm_utils.PreprocessorOutput):
   """Holds the output of Qwen3-Omni image preprocessor.
 
   Attributes:
-    Inherited from `mm_utils.PreprocessorOutput`.
+    Inherited from ``mm_utils.PreprocessorOutput``.
   """
 
   # Image attributes.
@@ -85,9 +85,7 @@ def smart_resize(
   """Rescales the image so that the following conditions are met:
 
   1. Both dimensions (height and width) are divisible by 'factor'.
-
-  2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
-
+  2. The total number of pixels is within the range ``['min_pixels', 'max_pixels']``.
   3. The aspect ratio of the image is maintained as closely as possible.
 
   """
@@ -187,15 +185,15 @@ def calculate_video_frame_range(
   Calculate the start and end frame indices based on the given time range.
 
   Args:
-      ele (dict): A dictionary containing optional 'video_start' and 'video_end' keys (in seconds).
-      total_frames (int): Total number of frames in the video.
-      video_fps (float): Frames per second of the video.
+    ele (dict): A dictionary containing optional ``video_start`` and ``video_end`` keys (in seconds).
+    total_frames (int): Total number of frames in the video.
+    video_fps (float): Frames per second of the video.
 
   Returns:
-      tuple: A tuple containing (start_frame, end_frame, frame_count).
+    tuple: A tuple containing ``(start_frame, end_frame, frame_count)``.
 
   Raises:
-      ValueError: If input parameters are invalid or the time range is inconsistent.
+    ValueError: If input parameters are invalid or the time range is inconsistent.
   """
   if video_fps <= 0:
     raise ValueError("video_fps must be a positive number")
@@ -241,17 +239,20 @@ def smart_nframes(
   """Calculate the number of frames for video used for model inputs.
 
   Args:
-      ele (dict): a dict contains the configuration of video.
-          support either `fps` or `nframes`:
-              - nframes: the number of frames to extract for model inputs.
-              - fps: the fps to extract frames for model inputs.
-                  - min_frames: the minimum number of frames of the video, only used when fps is provided.
-                  - max_frames: the maximum number of frames of the video, only used when fps is provided.
-      total_frames (int): the original total number of frames of the video.
-      video_fps (int | float): the original fps of the video.
+    ele (dict): a dict contains the configuration of video.
+      support either ``fps`` or ``nframes``:
+
+      * nframes: the number of frames to extract for model inputs.
+      * fps: the fps to extract frames for model inputs.
+
+        * min_frames: the minimum number of frames of the video, only used when fps is provided.
+        * max_frames: the maximum number of frames of the video, only used when fps is provided.
+
+    total_frames (int): the original total number of frames of the video.
+    video_fps (int | float): the original fps of the video.
 
   Returns:
-      int: the number of frames for video used for model inputs.
+    int: the number of frames for video used for model inputs.
   """
 
   def round_by_factor(number: int, factor: int) -> int:
@@ -284,7 +285,7 @@ def smart_nframes(
 
 
 def _read_video_decord(video_path, video_start=0.0, video_end=None) -> tuple[np.ndarray, float]:
-  """Read video using decord.VideoReader (torch-free version)
+  """Read video using ``decord.VideoReader`` (torch-free version)
 
   Args:
     video: the path of video. support "file://", "http://", "https://" and local path.
@@ -292,7 +293,7 @@ def _read_video_decord(video_path, video_start=0.0, video_end=None) -> tuple[np.
     video_end: the end time of video.
 
   Returns:
-      tuple: (numpy.ndarray with shape (T, C, H, W), sample_fps as float)
+      tuple: (``numpy.ndarray`` with shape ``(T, C, H, W)``, ``sample_fps`` as float)
 
   Raises:
       FileNotFoundError: If the video file does not exist.

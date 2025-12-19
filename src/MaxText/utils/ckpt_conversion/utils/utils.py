@@ -97,27 +97,30 @@ def _get_local_directory(output_dir: str) -> str:
 
 
 def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
-  """Validates param_mapping coverage and filters unused keys, for to_maxtext and to_huggingface.
+  """Validates ``param_mapping`` coverage and filters unused keys, for ``to_maxtext`` and ``to_huggingface``.
 
   Preprocess maxtext keys for transformation.
-  - Ensures every MaxText checkpoint key (`maxtext_state_keys`) is covered by
-    the flattened param_mapping.
-  - Keys in the param_mapping that are not present in the checkpoint (common for
+
+  * Ensures every MaxText checkpoint key (``maxtext_state_keys``) is covered by
+    the flattened ``param_mapping``.
+  * Keys in the ``param_mapping`` that are not present in the checkpoint (common for
     multi-variant maps like gemma3, qwen3, deepseek) are skipped.
 
   Args:
-    param_map_keys: MaxText keys from the `PARAM_MAPPING`. These can be:
-      - `atomic_mt_key`: A single string representing one MaxText parameter that map to HF parameter(s).
-      - `composite_mt_key`: A tuple of strings representing multiple MaxText parameters that map to HF parameter(s).
+    param_map_keys: MaxText keys from the ``PARAM_MAPPING``. These can be:
+
+      * ``atomic_mt_key``: A single string representing one MaxText parameter that map to HF parameter(s).
+      * ``composite_mt_key``: A tuple of strings representing multiple MaxText parameters that map to HF parameter(s).
+
     maxtext_state_keys: Set of MaxText keys loaded from the Orbax checkpoint.
 
   Returns:
     A list of 'filtered' mapping keys (strings or tuples) that are fully present
-    and valid based on `maxtext_state_keys`.
+    and valid based on ``maxtext_state_keys``.
 
   Raises:
-    ValueError: If `maxtext_state_keys` is NOT a subset of the flattened
-      `param_map_keys`.
+    ValueError: If ``maxtext_state_keys`` is NOT a subset of the flattened
+      ``param_map_keys``.
   """
   flattened_map_keys = set()
   for key in param_map_keys:
@@ -173,7 +176,7 @@ def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = Non
       If None, the dtype of the input JAX array is preserved. Defaults to None.
 
   Returns:
-    A NumPy array containing the data from `weight`, cast to `dtype_str` if provided.
+    A NumPy array containing the data from ``weight``, cast to ``dtype_str`` if provided.
   """
   final_dtype_str = str(weight.dtype) if dtype_str is None else dtype_str
   # JAX dtypes like 'bfloat16', 'float32' are understood by np.dtype()
@@ -221,18 +224,20 @@ def process_maxtext_param(
   This function is responsible for taking a MaxText parameter and transforming
   it into one or more Hugging Face compatible parameters. It handles various
   scenarios based on
-  - the MaxText key form (`atomic_mt_key` or `composite_mt_key`)
-  - and the Hugging Face value form (unscanned string, scanned list of strings,
+
+  * the MaxText key form (``atomic_mt_key`` or ``composite_mt_key``)
+  * and the Hugging Face value form (unscanned string, scanned list of strings,
     unscanned with expert stacking, or scanned with expert stacking).
+
   Note: We assume composite_mt_key can only occur for unscanned/scanned HF keys, but not those with expert stacking.
 
   Args:
     maxtext_param_key: The key identifying the MaxText parameter(s). Can be
-      an `atomic_mt_key` (str) or a `composite_mt_key` (tuple of str) mapping
+      an ``atomic_mt_key`` (str) or a ``composite_mt_key`` (tuple of str) mapping
       to HF parameter(s).
     maxtext_param_weight: The actual weight(s) of the MaxText parameter(s).
-      This can be a single `jax.Array` for an `atomic_mt_key` or a list of
-      `jax.Array` for a `composite_mt_key`.
+      This can be a single ``jax.Array`` for an ``atomic_mt_key`` or a list of
+      ``jax.Array`` for a ``composite_mt_key``.
     param_map: A dictionary mapping MaxText parameter keys to their corresponding
       Hugging Face target path(s).
     hook_fn_map: A dictionary mapping MaxText parameter keys to transformation
@@ -240,12 +245,13 @@ def process_maxtext_param(
     hf_shape_map: A dictionary mapping Hugging Face parameter paths to their
       expected shapes.
     maxtext_config: The MaxText configuration object, used to determine
-      details like `param_scan_axis` and `base_num_decoder_layers`.
+      details like ``param_scan_axis`` and ``base_num_decoder_layers``.
 
   Returns:
-    A list of tuples, where each tuple contains:
-    - hf_path (str): The Hugging Face parameter path.
-    - hf_weight (np.ndarray): The transformed Hugging Face compatible weight.
+    A list of tuples, where each tuple contains
+
+    * hf_path (str): The Hugging Face parameter path.
+    * hf_weight (np.ndarray): The transformed Hugging Face compatible weight.
   """
   max_logging.log(f"maxtext param: {maxtext_param_key}")
 
@@ -384,12 +390,12 @@ def shard_checkpoint(
   """Shards a model checkpoint into smaller pieces based on size constraints.
 
   Args:
-      weights_dict: Model weights dictionary to shard
-      max_shard_size: Maximum size in bytes for each shard
-      weights_name: Base filename for the shards
+    weights_dict: Model weights dictionary to shard
+    max_shard_size: Maximum size in bytes for each shard
+    weights_name: Base filename for the shards
 
   Returns:
-      tuple of (sharded weights dict, optional index dict)
+    tuple of (sharded weights dict, optional index dict)
       Index contains metadata and weight mapping information
   """
   # Track current shard and accumulated sizes
@@ -518,7 +524,7 @@ def save_weight_files(
 ):
   """Saves weight files and index if needed.
 
-  Requires local system to have at least `parallel_threads * DEFAULT_MAX_SHARD_SIZE`
+  Requires local system to have at least ``parallel_threads * DEFAULT_MAX_SHARD_SIZE``
   free disk space, as each thread will maintain a local cache of its shard during processing.
   """
   if index is None:
@@ -551,10 +557,12 @@ def save_weight_files(
 def get_local_save_path_manager(output_dir: str):
   """
   Context manager to provide a local path for saving files.
+
   If output_dir is remote (GCS/HF), a temporary local directory is created.
   If output_dir is local, it's used directly.
+
   Yields:
-      tuple: (path_to_use_for_saving: str, is_temporary: bool)
+    tuple: (path_to_use_for_saving: str, is_temporary: bool)
   """
   if output_dir.startswith("gs://") or output_dir.startswith("hf://"):
     with tempfile.TemporaryDirectory(prefix="maxtext_hf_save_") as temp_dir:
@@ -576,8 +584,9 @@ def save_model_files(
 ):
   """
   Saves model files (config and weights) to the specified directory.
-  When uploading to GCS/HF hub,
-          *.safetensors are uploaded from memory to remote, no local storage is used to save disk usage
+
+  When uploading to GCS/HF hub, ``*.safetensors`` are uploaded from memory to
+  remote, no local storage is used to save disk usage
   """
 
   if output_dir.startswith("hf://"):
@@ -648,8 +657,8 @@ def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   """Uploads a state_dict from memory to Google Cloud Storage.
 
   Args:
-      state_dict: A PyTorch model's state_dict.
-      gs_bucket_path: GCS destination (e.g., "gs://my-bucket/models/model.pt").
+    state_dict: A PyTorch model's state_dict.
+    gs_bucket_path: GCS destination (e.g., "gs://my-bucket/models/model.pt").
   """
   # TODO(shuningjin): max retries exceeded when uploading hf checkpoint for deepseek3-671b, b/457821616
   # Standardize bucket path format
@@ -676,8 +685,8 @@ def upload_file_to_gcs(local_file: str, gs_bucket_path: str, remove_local_file_a
   """Uploads a single file to Google Cloud Storage.
 
   Args:
-      local_file: Path to local file
-      gs_bucket_path: GCS destination (e.g. "gs://my-bucket/path/file.txt" or "my-bucket/path/file.txt")
+    local_file: Path to local file
+    gs_bucket_path: GCS destination (e.g. "gs://my-bucket/path/file.txt" or "my-bucket/path/file.txt")
   """
   # Standardize bucket path format
   gs_bucket_path = gs_bucket_path.removeprefix("gs://")
@@ -703,9 +712,9 @@ def upload_folder_to_gcs(local_folder: str, gs_bucket_path: str, num_workers: in
   """Uploads all files from a local folder to Google Cloud Storage.
 
   Args:
-      local_folder: Path to local folder (e.g. "data/images")
-      gs_bucket_path: GCS destination (e.g. "gs://my-bucket/images" or "my-bucket/images")
-      num_workers: Number of parallel upload workers
+    local_folder: Path to local folder (e.g. "data/images")
+    gs_bucket_path: GCS destination (e.g. "gs://my-bucket/images" or "my-bucket/images")
+    num_workers: Number of parallel upload workers
   """
   start_time = time.time()
 
@@ -801,8 +810,8 @@ def load_orbax_checkpoint(config) -> dict:
 def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   """Extract weights from NNX checkpoint structure.
 
-  NNX checkpoints have structure: {'decoder': {'decoder_norm': {'scale': {'value': array}}}}
-  This function flattens it to: {'params-decoder-decoder_norm-scale': array}
+  NNX checkpoints have structure: ``{'decoder': {'decoder_norm': {'scale': {'value': array}}}}``
+  This function flattens it to: ``{'params-decoder-decoder_norm-scale': array}``
 
   Args:
     weights_dict: NNX checkpoint weights dictionary
@@ -830,8 +839,8 @@ def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
 def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   """Extract weights from Linen checkpoint structure.
 
-  Linen checkpoints have structure: {'params': {'decoder': {'decoder_norm': {'scale': array}}}}
-  This function flattens it to: {'params-decoder-decoder_norm-scale': array}
+  Linen checkpoints have structure: ``{'params': {'decoder': {'decoder_norm': {'scale': array}}}}``
+  This function flattens it to: ``{'params-decoder-decoder_norm-scale': array}``
 
   Args:
     weights_dict: Linen checkpoint weights dictionary
@@ -855,9 +864,10 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
   """Detect checkpoint type (Linen vs NNX) and extract weights.
 
   Handles multiple NNX checkpoint variants:
-  - Linen: {'params': {'params': {'decoder': {...}, 'token_embedder': ... {WEIGHT_ARRAY}}}}
-  - NNX-SFT: {'decoder': {...}, 'token_embedder': ... {'value': WEIGHT_ARRAY}}
-  - NNX-RL: {'base': {'decoder': {...}, 'token_embedder': ... {'value': WEIGHT_ARRAY}}}
+
+  * Linen: ``{'params': {'params': {'decoder': {...}, 'token_embedder': ... {WEIGHT_ARRAY}}}}``
+  * NNX-SFT: ``{'decoder': {...}, 'token_embedder': ... {'value': WEIGHT_ARRAY}}``
+  * NNX-RL: ``{'base': {'decoder': {...}, 'token_embedder': ... {'value': WEIGHT_ARRAY}}}``
 
   Currently, we align all extracted weights to MaxText-Linen naming convention
   like "params-decoder-decoder_norm-scale". This allows reusing the same param_mapping

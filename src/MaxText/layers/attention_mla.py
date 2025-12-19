@@ -82,9 +82,10 @@ class Indexer(nnx.Module):
   It computes relevance scores to select the top-k most relevant tokens for attention.
 
   References:
-    DeepSeek-AI, `DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models
-      <https://arxiv.org/pdf/2512.02556>`_, 2025
-    Implementation: https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/main/inference/model.py
+
+  * DeepSeek-AI, `DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models
+    <https://arxiv.org/pdf/2512.02556>`_, 2025
+  * Implementation: https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/main/inference/model.py
   """
 
   def __init__(
@@ -374,7 +375,7 @@ def mla_as_linen(
 ):
   """A factory function to create an MLA as a Linen module.
 
-  This function serves as a bridge to use the NNX-based `MLA` within a
+  This function serves as a bridge to use the NNX-based ``MLA`` within a
   Linen model.
   """
   return nnx_wrappers.to_linen(
@@ -525,8 +526,9 @@ class MLA(Attention):
 
     Args:
       config: The model configuration.
-      ... and other configuration parameters for MLA attention.
-      rngs: The random number generators for initialization, passed by the nnx.to_linen wrapper.
+        ... and other configuration parameters for ``MLA`` attention.
+      rngs: The random number generators for initialization, passed by the
+        ``nnx.to_linen`` wrapper.
     """
     base_kv_cache = config.attention != "paged" and config.mla_naive_kvcache
 
@@ -833,13 +835,13 @@ class MLA(Attention):
     return key, value
 
   def init_mla_kv_caches(self, inputs_kv_shape: Tuple):
-    """Initializes MlaKVCache.
+    """Initializes ``MlaKVCache``.
 
     Args:
       inputs_kv_shape: Key/value inputs shape for initialization.
 
     Returns:
-      An MlaKVCache module instance.
+      An ``MlaKVCache`` module instance.
 
     Raises:
       ValueError: If the configuration is invalid.
@@ -875,9 +877,9 @@ class MLA(Attention):
     """Updates the MLA (Multi-Head Latent Attention) KV caches.
 
     This method is specific to the MLA attention mechanism. It calls the
-    `mla_kv_cache_as_linen` module to update and retrieve the caches, which
-    store latent representations (`low_rank_main`) and RoPE-applied keys
-    (`key_rope`). It then reconstructs the full key and value tensors from
+    ``mla_kv_cache_as_linen`` module to update and retrieve the caches, which
+    store latent representations (``low_rank_main``) and RoPE-applied keys
+    (``key_rope``). It then reconstructs the full key and value tensors from
     the cached components.
 
     Args:
@@ -889,9 +891,10 @@ class MLA(Attention):
         chunked prefill.
 
     Returns:
-      A list containing two elements:
-      - The prefill key-value cache, reconstructed from the MLA cache, or None.
-      - The autoregressive key-value cache, reconstructed from the MLA cache, or None.
+      A list containing two elements
+
+      * The prefill key-value cache, reconstructed from the MLA cache, or None.
+      * The autoregressive key-value cache, reconstructed from the MLA cache, or None.
     """
 
     prefill_mla_cache, ar_mla_cache = self.MlaKVCache_0(
@@ -965,24 +968,27 @@ class MLA(Attention):
       kv_cache: Optional[Array] = None,
       attention_metadata: Optional[dict[str, Any]] = None,
   ) -> tuple[Array, Optional[Array]]:
-    """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
+    """Forward pass for MLA, reusing ``AttentionOp`` for the actual attention.
 
     Args:
-      inputs_q: Query input [batch, q_length, embed_dim].
-      inputs_kv: KV input   [batch, kv_length, embed_dim].
+      inputs_q: Query input ``[batch, q_length, embed_dim]``.
+      inputs_kv: KV input ``[batch, kv_length, embed_dim]``.
       inputs_positions: Positions for rotary embeddings or similar.
       decoder_segment_ids: Segment IDs for masking, if any.
       model_mode: "train", "prefill", or "autoregressive".
       deterministic: Disables dropout if set to True.
-      previous_chunk: Information about previously processed chunks for chunked prefill.
+      previous_chunk: Information about previously processed chunks for chunked
+        prefill.
       slot: The batch slot index for paged attention.
       page_state: The current state of the paged attention manager.
-      bidirectional_mask: A mask for bidirectional attention, used in multimodal models.
+      bidirectional_mask: A mask for bidirectional attention, used in multimodal
+        models.
       kv_cache: Optional key-value cache used when serving models with vLLM.
-      attention_metadata: Optional attention-related metadata used when serving models with vLLM.
+      attention_metadata: Optional attention-related metadata used when serving
+        fmodels with vLLM.
 
     Returns:
-      A tensor of shape [batch, length, embed_dim] containing the
+      A tensor of shape ``[batch, length, embed_dim]`` containing the
       MLA-attended outputs.
     """
     if model_mode == MODEL_MODE_PREFILL:

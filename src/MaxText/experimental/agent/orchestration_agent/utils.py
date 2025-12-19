@@ -15,9 +15,10 @@
 """A collection of utility functions for the orchestration agent.
 
 This module provides tools for file and code manipulation, including:
-- Fetching file content from GitHub URLs and local paths.
-- Parsing and analyzing Python source code (e.g., resolving imports).
-- Detecting cyclical dependencies in graphs.
+
+* Fetching file content from GitHub URLs and local paths.
+* Parsing and analyzing Python source code (e.g., resolving imports).
+* Detecting cyclical dependencies in graphs.
 """
 
 from urllib.parse import urlparse, urljoin
@@ -33,10 +34,10 @@ def github_blob_to_raw(blob_url):
   Converts a GitHub blob URL to its raw content URL.
 
   Args:
-      blob_url (str): The URL of the GitHub blob.
+    blob_url (str): The URL of the GitHub blob.
 
   Returns:
-      str: The URL of the raw content of the GitHub blob.
+    str: The URL of the raw content of the GitHub blob.
   """
   parsed = urlparse(blob_url)
   if "github.com" not in parsed.netloc or "/blob/" not in parsed.path:
@@ -60,12 +61,13 @@ def check_github_file_exists(blob_url):
   Checks if a file exists on GitHub given its blob URL.
 
   Args:
-      blob_url (str): The URL of the GitHub blob.
+    blob_url (str): The URL of the GitHub blob.
 
   Returns:
-      bool: True if the file exists, False otherwise.
-      str: The raw URL of the file if it exists, or an error message.
-
+    bool
+      True if the file exists, False otherwise.
+    str
+      The raw URL of the file if it exists, or an error message.
   """
   raw_url = github_blob_to_raw(blob_url)
   if not raw_url:
@@ -82,13 +84,15 @@ def get_github_file_content(blob_url):
   Retrieves the content of a file from GitHub given its blob URL.
 
   Args:
-      blob_url (str): The URL of the GitHub blob.
+    blob_url (str): The URL of the GitHub blob.
 
   Returns:
-      tuple: A tuple containing:
-          - bool: True if the content was retrieved successfully, False otherwise.
-          - str: The content of the file if successful, or an error message if not.
+    tuple: A tuple containing
 
+      bool
+        True if the content was retrieved successfully, False otherwise.
+      str
+        The content of the file if successful, or an error message if not.
   """
   exists, raw_url_or_error = check_github_file_exists(blob_url)
   if not exists:
@@ -112,8 +116,9 @@ def check_if_file_exists(url):
 
   Returns:
     tuple[bool, str]:
-      - True with the resolved raw URL/path if the file exists
-      - False with an error message otherwise
+
+      * True with the resolved raw URL/path if the file exists
+      * False with an error message otherwise
   """
   if "http" in url and "github.com" in url:
     return check_github_file_exists(url)
@@ -131,8 +136,9 @@ def get_file_content(url):
 
   Returns:
     tuple[bool, str]:
-      - (True, contents) on success
-      - (False, error_message) on failure
+
+      * ``(True, contents)`` on success
+      * ``(False, error_message)`` on failure
   """
   if "http" in url and "github.com" in url:
     return get_github_file_content(url)
@@ -167,12 +173,11 @@ def find_cycle(graph):
   Finds a cycle in a directed graph using DFS.
 
   Args:
-      graph (dict): A dictionary representing the graph where keys are nodes
-                    and values are lists of their direct dependencies.
+    graph (dict): A dictionary representing the graph where keys are nodes
+      and values are lists of their direct dependencies.
 
   Returns:
-      list: A list of nodes forming a cycle if one is found, otherwise None.
-
+    list: A list of nodes forming a cycle if one is found, otherwise None.
   """
   visited = set()
   stack = set()
@@ -210,21 +215,25 @@ def remove_local_imports(source_code, filepath=None):
 
   This function parses the provided source code and removes import statements
   that are considered 'local'. Local imports are defined as:
-  1. Relative imports (e.g., `from . import my_module`).
-  2. Imports from the base module if a `filepath` is provided (e.g., if
-     filepath is 'my_project/module.py', then `import my_project.utils`
+
+  1. Relative imports (e.g., ``from . import my_module``).
+  2. Imports from the base module if a ``filepath`` is provided (e.g., if
+     filepath is ``my_project/module.py``, then ``import my_project.utils``
      would be removed).
 
   Args:
-      source_code (str): The Python source code as a string.
-      filepath (str, optional): The path to the file containing the source
-                                code. Used to determine the base module for
-                                identifying local imports. Defaults to None.
+    source_code (str): The Python source code as a string.
+    filepath (str, optional): The path to the file containing the source code.
+      Used to determine the base module for identifying local imports. Defaults
+      to None.
 
   Returns:
-      tuple: A tuple containing:
-          - str: The modified source code with local imports removed.
-          - str: A newline-separated string of the names of the removed imports.
+    tuple: A tuple containing
+
+      str
+        The modified source code with local imports removed.
+      str
+        A newline-separated string of the names of the removed imports.
   """
   if filepath is not None:
     # Determine the base module from the filepath
@@ -260,7 +269,10 @@ def _process_node(
     node: ast.Import | ast.ImportFrom,
     removed_imports: list[ast.Import | ast.ImportFrom],
 ) -> int:
-  """Process node in order to remove local imports. Private, for use by `remove_local_imports`."""
+  """Process node in order to remove local imports.
+  
+  Private, for use by ``remove_local_imports``.
+  """
   # Detect multi-line import (parenthesis)
   if "(" in line.strip() and ")" not in line:
     # Detect multi-line import (parenthesis)
@@ -333,11 +345,11 @@ def parse_python_code(code):
   It supports both '```python' and generic '```' delimiters.
 
   Args:
-      code (str): The input string potentially containing Python code blocks.
+    code (str): The input string potentially containing Python code blocks.
 
   Returns:
-      str: The extracted Python code. Returns the original string if no
-           code blocks are found.
+    str: The extracted Python code. Returns the original string if no
+      code blocks are found.
   """
   if "```python" in code:
     code = code.split("```python")[1]
@@ -353,12 +365,15 @@ def have_module(target_name, file_url):
   Checks if a given module (function, class, or variable) exists in a Python file.
 
   Args:
-      target_name (str): The name of the module to search for.
-      file_url (str): The URL of the Python file to check.
+    target_name (str): The name of the module to search for.
+    file_url (str): The URL of the Python file to check.
 
   Returns:
-      bool: True if the module is found, False otherwise.
-      tuple: ("ImportFrom", full_module) if the target_name is an alias from an import statement.
+    bool
+      True if the module is found, False otherwise.
+    tuple
+      ``(ImportFrom, full_module)`` if the ``target_name`` is an alias from an
+      import statement.
   """
   flag, content = get_file_content(file_url)
   if not flag:
@@ -388,30 +403,32 @@ def have_module(target_name, file_url):
 def resolve_complex_import(module_path_base_url, importPackage, base_url, current_dir_url, num_try=0, Message=""):
   """
   Resolves a complex import statement, looking for the imported package/module
-  within a directory structure. This handles cases where 'importPackage' might
-  refer to a file or a directory (package) with an __init__.py.
+  within a directory structure. This handles cases where ``importPackage`` might
+  refer to a file or a directory (package) with an ``__init__.py``.
 
   Args:
-      module_path_base_url (str): The base URL for the module path
-         (ex. 'https://github.com/.../transformers/models/llama').
-      importPackage (str): The specific name being imported (e.g., 'modeling_llama', 'configuration_llama').
-      base_url (str): The base URL of the repository.
-      current_dir_url (str): The URL of the directory containing the original import statement.
-      num_try (int): Counter for recursion depth.
-      Message (str): Accumulates error messages for recursion depth.
+    module_path_base_url (str): The base URL for the module path
+      (ex. 'https://github.com/.../transformers/models/llama').
+    importPackage (str): The specific name being imported (e.g.,
+      ``modeling_llama``, ``configuration_llama``).
+    base_url (str): The base URL of the repository.
+    current_dir_url (str): The URL of the directory containing the original
+      import statement.
+    num_try (int): Counter for recursion depth.
+    Message (str): Accumulates error messages for recursion depth.
 
   Returns:
-      str: The resolved full GitHub URL of the imported file, or None if not found.
+    str: The resolved full GitHub URL of the imported file, or None if not found.
 
   Example:
-      If `module_path_base_url` is "https://github.com/org/repo/blob/main/src/transformers/models/llama",
-      `importPackage` is "modeling_llama", `base_url` is "https://github.com/org/repo/blob/main/src/",
-      and `current_dir_url` is "https://github.com/org/repo/blob/main/src/transformers/models/llama",
-      this function would first check for "https://github.com/org/repo/blob/main/src/transformers/models/llama.py".
-      If not found, it would then check for
-      "https://github.com/org/repo/blob/main/src/transformers/models/llama/__init__.py".
-      If `__init__.py` exists and contains `from . import modeling_llama`, it would then check for
-      "https://github.com/org/repo/blob/main/src/transformers/models/llama/modeling_llama.py".
+    If ``module_path_base_url`` is "https://github.com/org/repo/blob/main/src/transformers/models/llama",
+    ``importPackage`` is "modeling_llama", ``base_url`` is "https://github.com/org/repo/blob/main/src/",
+    and ``current_dir_url`` is "https://github.com/org/repo/blob/main/src/transformers/models/llama",
+    this function would first check for "https://github.com/org/repo/blob/main/src/transformers/models/llama.py".
+    If not found, it would then check for
+    "https://github.com/org/repo/blob/main/src/transformers/models/llama/__init__.py".
+    If ``__init__.py`` exists and contains ``from . import modeling_llama``, it would then check for
+    "https://github.com/org/repo/blob/main/src/transformers/models/llama/modeling_llama.py".
   """
 
   message = ""
@@ -449,14 +466,14 @@ def resolve_import_path(importer_url, module_name, level, base_url, importPackag
   Resolves an import statement to a full GitHub URL.
 
   Args:
-      importer_url (str): The URL of the file containing the import statement.
-      module_name (str): The name of the module being imported (e.g., 'os', 'transformers.models.llama').
-      level (int): The level of the import (0 for absolute, 1+ for relative).
-      base_url (str): The base URL of the repository (e.g., 'https://github.com/huggingface/transformers/blob/main/src/').
-      importPackage (str, optional): The specific package or module being imported from a 'from ... import ...' statement.
+    importer_url (str): The URL of the file containing the import statement.
+    module_name (str): The name of the module being imported (e.g., ``os``, ``transformers.models.llama``).
+    level (int): The level of the import (0 for absolute, 1+ for relative).
+    base_url (str): The base URL of the repository (e.g., ``https://github.com/huggingface/transformers/blob/main/src/``).
+    importPackage (str, optional): The specific package or module being imported from a ``from ... import ...`` statement.
 
   Returns:
-      str: The resolved full GitHub URL of the imported file, or None if not found.
+    str: The resolved full GitHub URL of the imported file, or None if not found.
   """
   current_dir_url = importer_url[: importer_url.rfind("/")]
   if level > 0:  # Relative import
@@ -476,19 +493,20 @@ def resolve_import_path(importer_url, module_name, level, base_url, importPackag
 
 
 def get_absolute_imports(import_line, file_url, project_root="transformers"):
-  """Resolve a relative 'from ... import ...' into absolute import lines.
+  """Resolve a relative ``from ... import ...`` into absolute import lines.
 
-  This converts relative imports found in `import_line` into absolute imports
-  anchored at `project_root`, using `file_url` (GitHub blob URL or local path)
+  This converts relative imports found in ``import_line`` into absolute imports
+  anchored at ``project_root``, using ``file_url`` (GitHub blob URL or local path)
   to determine the base location. Multi-line parenthesized imports are
   flattened before resolution.
 
   Behavior:
-    - If `import_line` does not start with 'from ', it is returned unchanged.
-    - If `import_line` is already absolute (no leading dots), it is returned unchanged.
-    - On successful resolution, returns one or more absolute import lines
-      joined by newlines.
-    - If resolution fails, returns None.
+
+  * If ``import_line`` does not start with 'from ', it is returned unchanged.
+  * If ``import_line`` is already absolute (no leading dots), it is returned unchanged.
+  * On successful resolution, returns one or more absolute import lines
+    joined by newlines.
+  * If resolution fails, returns None.
 
   Args:
     import_line (str): The original import statement text.
@@ -497,7 +515,7 @@ def get_absolute_imports(import_line, file_url, project_root="transformers"):
 
   Returns:
     str | None: The converted absolute import line(s), the original line if
-    unchanged, or None if resolution failed.
+      unchanged, or None if resolution failed.
   """
   if not import_line.startswith("from "):
     return import_line

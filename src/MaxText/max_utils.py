@@ -78,7 +78,7 @@ def calculate_num_params_from_pytree(params):
 
 
 def device_space():
-  """Version guard for jax.memory.Space.Device."""
+  """Version guard for ``jax.memory.Space.Device``."""
   # See b/436565838 for more.
   if jax.__version__ >= "0.7.1":
     return jax.memory.Space.Device  # pytype: disable=module-attr
@@ -100,6 +100,7 @@ def calculate_total_params_per_chip(params):
 
 def _bytes_of(x):
   """Return the number of bytes used by a single leaf in a pytree.
+
   Handles concrete arrays (NumPy/JAX), abstract shapes, scalars, and None.
   Unknown types default to 0.
   """
@@ -126,7 +127,7 @@ def _bytes_of(x):
 def calculate_bytes_from_pytree(params):
   """Return the total memory footprint (in bytes) of all leaves in a pytree.
 
-  Each leaf is measured using `_bytes_of`. Non-array or unsupported types
+  Each leaf is measured using ``_bytes_of``. Non-array or unsupported types
   contribute 0 unless they are scalars.
   """
   return sum(map(_bytes_of, jax.tree_util.tree_leaves(params)))
@@ -158,9 +159,9 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   """The best recipe to initialize the Jax Distributed System has varied over time. We keep a layer of
   indirection in MaxText to avoid breaking the call sites unnecessarily.
 
-  Currently jax.distributed.initialize() fully works as expected!
+  Currently ``jax.distributed.initialize()`` fully works as expected!
 
-  For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
+  For CPUs, we call ``jax.distributed.initialize()`` explicitly, with the specified arguments.
   """
   if raw_keys["skip_jax_distributed_system"]:
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
@@ -247,6 +248,7 @@ def initialize_jax_for_cpu(raw_keys):
 
 def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
   """Initialize JAX distributed runtime for TPUs when emergency checkpointing is used.
+
   The information required to initialize JAX distributed runtime will be written by GKE to
   the local checkpoint directory. This function retrieves that information and initializes
   JAX distributed runtime.
@@ -486,13 +488,14 @@ def optimize_mesh_for_tpu_v6e(mesh, devices):
 
 
 def unbox_logicallypartioned(boxed_pytree):
-  """Unboxes the flax.LogicallyPartitioned pieces
+  """Unboxes the ``flax.LogicallyPartitioned`` pieces
 
   Args:
-    boxed_pytree: a pytree that includes LogicallyPartitioned
+    boxed_pytree: a pytree that includes ``LogicallyPartitioned``
       leaves.
+
   Returns:
-    a pytree where all all LogicallyPartitioned leaves have been unboxed.
+    a pytree where all all ``LogicallyPartitioned`` leaves have been unboxed.
   """
   return jax.tree_util.tree_map(
       lambda x: x.unbox() if isinstance(x, flax.linen.spmd.LogicallyPartitioned) else x,
@@ -510,22 +513,29 @@ def cross_entropy_with_logits(
     z_loss: float = 0.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Computes cross entropy loss with stable custom gradient.
+
   Computes a stabilized-gradient version of:
-    -jnp.sum(targets * nn.log_softmax(logits), axis=-1)
-  If z_loss > 0, then an auxiliary loss equal to z_loss*log(z)^2
+
+  ``-jnp.sum(targets * nn.log_softmax(logits), axis=-1)``
+
+  If ``z_loss > 0``, then an auxiliary loss equal to ``z_loss*log(z)^2``
   will be added to the cross entropy loss (z = softmax normalization constant).
-  The two uses of z_loss are:
+  The two uses of ``z_loss`` are:
+
   1. To keep the logits from drifting too far from zero, which can cause
      unacceptable roundoff errors in bfloat16.
   2. To encourage the logits to be normalized log-probabilities.
+
   Args:
-    logits: [batch, length, num_classes] float array.
-    targets: categorical one-hot targets [batch, length, num_classes] float
+    logits: ``[batch, length, num_classes]`` float array.
+    targets: categorical one-hot targets ``[batch, length, num_classes]`` float
       array.
     z_loss: coefficient for auxiliary z-loss loss term.
+
   Returns:
-    tuple with the total loss and the z_loss, both
-    float arrays with shape [batch, length].
+
+    * tuple with the total loss and the ``z_loss``, both
+    * float arrays with shape ``[batch, length]``.
   """
   logits_sum = jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
   log_softmax = logits - logits_sum
@@ -548,7 +558,7 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
         jnp.ndarray,
     ],
 ]:
-  """Forward-mode of `cross_entropy_with_logits`."""
+  """Forward-mode of ``cross_entropy_with_logits``."""
   max_logit = logits.max(axis=-1, keepdims=True)
   shifted = logits - max_logit
   exp_shifted = jnp.exp(shifted)
@@ -580,7 +590,7 @@ def _cross_entropy_with_logits_bwd(
     ],
     g: tuple[jnp.ndarray, jnp.ndarray],
 ) -> tuple[jnp.ndarray, None, None]:
-  """Backward-mode of `cross_entropy_with_logits`."""
+  """Backward-mode of ``cross_entropy_with_logits``."""
   g = g[0]  # Ignore z_loss component as that is only used for logging.
   logits, targets, z_loss, exp_shifted, sum_exp, log_z = res
   # z-loss term adds the (2 * z_loss * log_z) factor.
@@ -700,6 +710,7 @@ def print_compiled_memory_stats(compiled_stats):
 
 def print_system_information():
   """Print system information of the current environment.
+
   Note that this will initialize the JAX backend."""
   max_logging.log(f"System Information: Jax Version: {jax.__version__}")
   max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
@@ -729,10 +740,15 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
 
 @partial(jax.jit, static_argnames=("cp_size", "seq_dim", "to_contiguous"))
 def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool = False):
-  """Reorders the sequence of the tensor. For example, with cp_size=2,
-  [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]
+  """Reorders the sequence of the tensor.
+  
+  For example, with ``cp_size=2``,
+
+  ``[0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]``
+
   and backward
-  [0, 1, 6, 7, 2, 3, 4, 5] -> [0, 1, 2, 3, 4, 5, 6, 7]
+
+  ``[0, 1, 6, 7, 2, 3, 4, 5] -> [0, 1, 2, 3, 4, 5, 6, 7]``
   """
 
   if tensor is None:
@@ -810,10 +826,11 @@ def reorder_causal_load_balanced(batch, cp_size):
 def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
   """
   Reorders a tensor for load balancing the compute of causal attention.
+
   This function works on numpy arrays instead of jax.numpy arrays.
   This is needed because we need the mask to be statically computable.
-  So, we need to redefine the same logic as reorder_causal_load_balancing.
-  We are still doing [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]
+  So, we need to redefine the same logic as ``reorder_causal_load_balancing``.
+  We are still doing ``[0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]``
 
   Args:
     tensor: The tensor to reorder.
@@ -877,11 +894,11 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
   Unrolls scanned parameter groups into per-layer entries.
 
   Args:
-    train_state: training state with scanned `params`
+    train_state: training state with scanned ``params``
     mesh: the mesh to use for sharding output
     scan_axis: axis along which scanning was applied (usually 0)
     layer_groups: list of tuples like:
-      [("dense_layers", 4), ("moe_layers", 12)]
+      ``[("dense_layers", 4), ("moe_layers", 12)]``
   """
   params_copy = params.unfreeze() if hasattr(params, "unfreeze") else params
   decoder = params_copy["params"]["decoder"]
@@ -889,7 +906,7 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
 
   # Helper function to remove the scan axis from a PartitionSpec
   def strip_scan_axis(pspec: P) -> P:
-    """Removes the element at `scan_axis` from a PartitionSpec tuple."""
+    """Removes the element at ``scan_axis`` from a ``PartitionSpec`` tuple."""
     spec_tuple = tuple(pspec)
     return P(*(spec_tuple[:scan_axis] + spec_tuple[scan_axis + 1 :]))
 
@@ -925,10 +942,10 @@ def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups)
   Reconstruct scanned layers from per-layer entries using minimal HBM.
 
   Args:
-    train_state: training state with unrolled {layer_name}_{i} entries
+    train_state: training state with unrolled ``{layer_name}_{i}`` entries
     scan_axis: axis to scan over
-    layer_groups: list of (layer_name, num_layers)
-    mesh: jax.sharding.Mesh for out_shardings
+    layer_groups: list of ``(layer_name, num_layers)``
+    mesh: ``jax.sharding.Mesh`` for ``out_shardings``
   """
   decoder = params["params"]["decoder"]
   sharding = source_shardings["params"]["decoder"]
@@ -962,10 +979,10 @@ def get_batch_seq_len_for_mode(config, model_mode):
   Args:
     config: A configuration object with model parameters.
     model_mode: The current operational mode
-                (e.g., PREFILL, AUTOREGRESSIVE, TRAIN).
+      (e.g., ``PREFILL``, ``AUTOREGRESSIVE``, ``TRAIN``).
 
   Returns:
-    A tuple of (batch_size, seq_len).
+    A tuple of ``(batch_size, seq_len)``.
   """
   if model_mode == MODEL_MODE_PREFILL:
     # Prefill mode: Process one full-length prompt.
@@ -1015,7 +1032,7 @@ def dummy_context_manager():
 
 @contextmanager
 def transformer_engine_context():
-  """If TransformerEngine is available, this context manager will provide
+  """If ``TransformerEngine`` is available, this context manager will provide
   the library with MaxText-specific details needed for correcct operation."""
   try:
     from transformer_engine.jax.sharding import global_shard_guard, MeshResource  # pylint: disable=import-outside-toplevel

@@ -389,10 +389,11 @@ class Decoder(nn.Module):
     return policy
 
   def get_decoder_layers(self):
-    """Retrieves a list of decoder layer classes based on the `decoder_block` config.
+    """Retrieves a list of decoder layer classes based on the ``decoder_block``
+    config.
 
     Returns:
-        A list containing one or more `nn.Module` classes for the decoder.
+      A list containing one or more ``nn.Module`` classes for the decoder.
     """
     match self.config.decoder_block:
       case DecoderBlockType.DEFAULT:
@@ -496,7 +497,7 @@ class Decoder(nn.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
   def scan_decoder_layers(self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, **kwargs):
-    """scan decoder layers, calls `flax.linen.transforms.scan`"""
+    """scan decoder layers, calls ``flax.linen.transforms.scan``"""
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
     cache_spec = 0

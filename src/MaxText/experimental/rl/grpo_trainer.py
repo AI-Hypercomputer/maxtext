@@ -13,17 +13,19 @@
 # limitations under the License.
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with, attribute-error
+
 """
 This script implements Group Relative Policy Optimization (GRPO) training
 using JAX. It optimizes a language model with reinforcement learning by
 updating policy gradients based on reward functions.
 
 The training process involves a producer-consumer pattern:
-  - A "producer" thread continuously generates text completions from prompts
-    using an offline inference engine. These completions, along with their
-    log-probabilities, are stored in a shared buffer.
-  - The main "consumer" thread fetches these generated samples from the buffer
-    and uses them to perform GRPO training steps.
+
+* A "producer" thread continuously generates text completions from prompts
+  using an offline inference engine. These completions, along with their
+  log-probabilities, are stored in a shared buffer.
+* The main "consumer" thread fetches these generated samples from the buffer
+  and uses them to perform GRPO training steps.
 
 This decoupling allows the training process (consumer) to proceed without
 being blocked by the potentially slower generation process (producer).
@@ -108,12 +110,15 @@ def _split_grpo_state(state):
 
   Args:
     state: The combined training state, expected to contain a 'reference_params'
-      key within its `params` attribute.
+      key within its ``params`` attribute.
 
   Returns:
-    A tuple containing:
-      - new_state: The training state with 'reference_params' removed.
-      - reference_params: The extracted reference parameters.
+    A tuple containing
+
+    new_state
+      The training state with ``reference_params`` removed.
+    reference_params
+      The extracted reference parameters.
   """
   reference_params = state.params["reference_params"]
   new_state = state.replace(params={k: v for k, v in state.params.items() if k != "reference_params"})
@@ -123,15 +128,15 @@ def _split_grpo_state(state):
 def _merge_grpo_state(state, reference_params):
   """Merges the reference parameters back into the training state.
 
-  This is the inverse operation of `_split_grpo_state`, used to reconstruct
+  This is the inverse operation of ``_split_grpo_state``, used to reconstruct
   the full state object after a training step.
 
   Args:
-    state: The training state, without 'reference_params'.
+    state: The training state, without ``reference_params``.
     reference_params: The frozen reference parameters to be added back.
 
   Returns:
-    A new state object with the 'reference_params' re-integrated.
+    A new state object with the ``reference_params`` re-integrated.
   """
   return state.replace(params=dict(state.params, reference_params=reference_params))
 
@@ -170,46 +175,54 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
   This function performs the following steps:
 
-    1. Compute the per-token log-probabilities for the full sequence (prompt + completion) both with
-         the current model (policy) and the reference model.
-    2. Compute a scalar reward for each generated completion via reward_fn.
-    3. Group the rewards (each prompt yields “G = num_generations” completions), compute the mean and std,
-       and then compute a normalized advantage.
-    4. Compute a per-token loss that is given by
-        - [min(exp(policy_logp - old_logp), clip(exp(policy_logp - old_logp), 1-e, 1+e)) * advantage - beta * kl
-        Where:
-        - `policy_logp`: The log probability of the current policy's output.
-        - `old_logp`: The log probability of the behavior policy's output
-          (i.e., the policy used to generate the samples).
-        - For on-policy training, `old_logp` is a stop-gradient of the current `policy_logp`,
-          ensuring that only the advantage term contributes to the gradients. This is because
-          the samples are generated using the current policy.
-        - For off-policy training, `old_logp` is obtained directly from the
-          `data["completions_logprobs"]`, which stores the log probabilities
-          from the behavior policy that generated the samples.
-        - `advantage`: The advantage, representing how much better a given
-          action is compared to the average action.
-        - `beta`: A hyperparameter that controls the strength of the KL divergence penalty.
-        - `kl_divergence`: The Kullback-Leibler divergence between the current
-          policy and the behavior policy.
-    5. Compute a per-token KL divergence:
-         kl = exp(ref_logp - policy_logp) - (ref_logp - policy_logp) - 1.
-    6. Restrict the loss calculations to the generated completion tokens.
-    7. Finally the loss is the average (over examples) of the mean per-token loss - where only tokens before the
-       first eos (according to tokenizer.eos_id) are taken into account.
+  1. Compute the per-token log-probabilities for the full sequence (prompt + completion) both with
+     the current model (policy) and the reference model.
+  2. Compute a scalar reward for each generated completion via ``reward_fn``.
+  3. Group the rewards (each prompt yields ``G = num_generations`` completions), compute the mean and std,
+     and then compute a normalized advantage.
+  4. Compute a per-token loss that is given by
+
+     ``- [min(exp(policy_logp - old_logp), clip(exp(policy_logp - old_logp), 1-e, 1+e)) * advantage - beta * kl``
+
+     Where:
+
+     * ``policy_logp``: The log probability of the current policy's output.
+     * ``old_logp``: The log probability of the behavior policy's output
+       (i.e., the policy used to generate the samples).
+     * For on-policy training, ``old_logp`` is a stop-gradient of the current ``policy_logp``,
+       ensuring that only the advantage term contributes to the gradients. This is because
+       the samples are generated using the current policy.
+     * For off-policy training, ``old_logp`` is obtained directly from the
+       ``data["completions_logprobs"]``, which stores the log probabilities
+       from the behavior policy that generated the samples.
+     * ``advantage``: The advantage, representing how much better a given
+       action is compared to the average action.
+     * ``beta``: A hyperparameter that controls the strength of the KL divergence penalty.
+     * ``kl_divergence``: The Kullback-Leibler divergence between the current
+      policy and the behavior policy.
+
+  5. Compute a per-token KL divergence:
+
+     ``kl = exp(ref_logp - policy_logp) - (ref_logp - policy_logp) - 1.``
+
+  6. Restrict the loss calculations to the generated completion tokens.
+  7. Finally the loss is the average (over examples) of the mean per-token loss - where only tokens before the
+     first eos (according to ``tokenizer.eos_id``) are taken into account.
 
   Args:
     model: A nn.Module.
     config: The training configuration (contains hyper-parameters and reward and tokenizer objects).
-    data: A batch dict with key "prompt" containing prompts as token-ids of shape [B, L_prompt].
+    data: A batch dict with key "prompt" containing prompts as token-ids of shape ``[B, L_prompt]``.
     dropout_rng: a PRNGKey.
     params: The current model parameters.
     reference_params: The reference model parameters.
     is_train: Boolean indicating training mode.
 
   Returns:
-    loss: A scalar loss.
-    aux: A dictionary with auxiliary metrics.
+    loss
+      A scalar loss.
+    aux
+      A dictionary with auxiliary metrics.
   """
 
   # completions shape: [B x G, max_target_length - max_prefill_length]
@@ -350,16 +363,19 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     config: The training configuration object.
     state_mesh_shardings: Pytree of sharding specifications for the training state.
     params_shardings: Pytree of sharding specifications for the model parameters.
-                      This argument is not used and is kept to match the signature of other trainers.
+      This argument is not used and is kept to match the signature of other trainers.
     state: The current training state, including parameters and optimizer state.
     data: A batch of training data, including prompts and generated completions.
     dropout_rng: JAX PRNG key for dropout.
 
   Returns:
-    A tuple containing:
-      - new_state: The updated training state after applying gradients.
-      - metrics: A dictionary of metrics for logging, including loss, reward,
-        and gradient norms.
+    A tuple containing
+
+    new_state
+      The updated training state after applying gradients.
+    metrics
+      A dictionary of metrics for logging, including loss, reward,
+      and gradient norms.
   """
   state, reference_params = _split_grpo_state(state)
   state_mesh_shardings, reference_params_sharding = _split_grpo_state(state_mesh_shardings)
@@ -526,19 +542,32 @@ def setup_train_loop(
     recorder: A GoodputRecorder for performance tracking.
 
   Returns:
-    A tuple containing:
-      - init_rng: The initial JAX PRNG key.
-      - checkpoint_manager: The Orbax checkpoint manager.
-      - state_mesh_shardings: Sharding specifications for the training state.
-      - inference_state_mesh_shardings: Sharding specs for the inference state.
-      - model: The training model instance.
-      - inference_model: The inference model instance.
-      - mesh: The device mesh for training.
-      - inference_mesh: The device mesh for inference.
-      - learning_rate_schedule: The learning rate schedule function.
-      - data_iterator: The iterator for the input prompt dataset.
-      - eval_data_iterator: The iterator for the evaluation dataset (or None).
-      - state: The initialized training state.
+    A tuple containing
+
+    init_rng
+      The initial JAX PRNG key.
+    checkpoint_manager
+      The Orbax checkpoint manager.
+    state_mesh_shardings
+      Sharding specifications for the training state.
+    inference_state_mesh_shardings
+      Sharding specs for the inference state.
+    model
+      The training model instance.
+    inference_model
+      The inference model instance.
+    mesh
+      The device mesh for training.
+    inference_mesh
+      The device mesh for inference.
+    learning_rate_schedule
+      The learning rate schedule function.
+    data_iterator
+      The iterator for the input prompt dataset.
+    eval_data_iterator
+      The iterator for the evaluation dataset (or None).
+    state
+      The initialized training state.
   """
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     max_logging.log("Training mesh used for the workload")
@@ -635,6 +664,7 @@ def train_loop(config, config_inference, recorder, state=None):
   and then enters a loop to perform training steps.
 
   The loop consists of:
+
   1. Fetching pre-generated prompt-completion pairs from a shared buffer.
   2. Executing a training step with the fetched batch.
   3. Periodically resharding the updated policy parameters to the inference engine.
@@ -901,7 +931,7 @@ def main(argv: Sequence[str]) -> None:
 
   This function parses command-line arguments, initializes configurations for
   training and inference, sets up system environment variables, and launches
-  the `train_loop`.
+  the ``train_loop``.
   """
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")

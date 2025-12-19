@@ -81,11 +81,12 @@ def make_group_metadata(
   """Create the metadata needed for grouped matmul computation.
 
   Args:
-    group_sizes: A 1d, jnp.ndarray with shape [num_groups] and jnp.int32 dtype.
+    group_sizes: A 1d, ``jnp.ndarray`` with shape ``[num_groups]`` and
+      ``jnp.int32`` dtype.
     m: The number of rows in lhs.
     tm: The m-dimension tile size being used.
     start_group: The group in group sizes to start computing from. This is
-      particularly useful for when rhs num_groups is sharded.
+      particularly useful for when rhs ``num_groups`` is sharded.
     num_nonzero_groups: Number of groups in group sizes to compute on. Useful in
       combination with group_offset.
     visit_empty_groups: If True, do not squeeze tiles for empty groups out of
@@ -93,17 +94,22 @@ def make_group_metadata(
       the output for each group.
 
   Returns:
-    tuple of:
-      group_offsets: A 1d, jnp.ndarray with shape [num_groups+1] and jnp.int32
-        dtype. group_offsets[i] indicates the row at which group [i] starts in
-        the lhs matrix and group_offsets[i-1] = m.
-      group_ids: A 1d, jnp.ndarray with shape [m_tiles + num_groups] and
-        jnp.int32 dtype. group_ids[i] indicates which group grid index 'i' will
-        work on.
-      m_tile_ids: A 1d, jnp.ndarray with shape [m_tiles + num_groups] and
-        jnp.int32. m_tile_ids[i] indicates which m-dimension tile grid index 'i'
-        will work on.
-    num_tiles: The number of m-dimension tiles to execute.
+    ``(group_offsets, group_ids, m_tile_ids), num_titles``, where
+
+    * ``group_offsets``
+        A 1d, ``jnp.ndarray`` with shape ``[num_groups+1]`` and ``jnp.int32``
+        dtype. ``group_offsets[i]`` indicates the row at which group ``[i]``
+        starts in the lhs matrix and ``group_offsets[i-1] = m``.
+    * ``group_ids``
+        A 1d, ``jnp.ndarray`` with shape ``[m_tiles + num_groups]`` and
+        ``jnp.int32`` dtype. ``group_ids[i]`` indicates which group grid index
+        ``i`` will work on.
+    * ``m_tile_ids``
+        A 1d, ``jnp.ndarray`` with shape ``[m_tiles + num_groups]`` and
+        ``jnp.int32``. ``m_tile_ids[i]`` indicates which m-dimension tile grid
+        index ``i`` will work on.
+    * ``num_tiles``
+        The number of m-dimension tiles to execute.
   """
   num_groups = group_sizes.shape[0]
   end_group = start_group + num_nonzero_groups - 1
@@ -311,23 +317,23 @@ def gmm(
     transpose_rhs: bool = False,
     interpret: bool = False,
 ) -> jnp.ndarray:
-  """Compute lhs[sizes[i-1]:sizes[i], :] @ rhs for each group 'i'.
+  """Compute ``lhs[sizes[i-1]:sizes[i], :] @ rhs`` for each group ``i``.
 
   Args:
-    lhs: A 2d, jnp.ndarray with shape [m, k].
-    rhs: A 3d, jnp.ndarray with shape [num_groups, k, n].
-    group_sizes: A 1d, jnp.ndarray with shape [num_groups] and jnp.int32 dtype.
-    preferred_element_type: jnp.dtype, the element type for the output matrix.
+    lhs: A 2d, ``jnp.ndarray`` with shape ``[m, k]``.
+    rhs: A 3d, ``jnp.ndarray`` with shape ``[num_groups, k, n]``.
+    group_sizes: A 1d, ``jnp.ndarray`` with shape ``[num_groups]`` and ``jnp.int32`` dtype.
+    preferred_element_type: ``jnp.dtype``, the element type for the output matrix.
     tiling: 3-tuple of ints. The m, k and n-dimension tile sizes.
     group_offset: The group in group sizes to start computing from. This is
-      particularly useful for when rhs num_groups is sharded.
+      particularly useful for when rhs ``num_groups`` is sharded.
     existing_out: Existing output to write to.
     transpose_rhs: True if the rhs needs to be transposed.
     interpret: Whether or not to run the kernel in interpret mode, helpful for
       testing and debugging.
 
   Returns:
-    A 2d, jnp.ndarray with shape [m, n].
+    A 2d, ``jnp.ndarray`` with shape ``[m, n]``.
   """
 
   if existing_out is not None:
@@ -578,24 +584,26 @@ def tgmm(
     existing_out: jnp.ndarray | None = None,
     interpret: bool = False,
 ) -> jnp.ndarray:
-  """Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :].
+  """Compute ``lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :]``.
 
   Args:
-    lhs: A 2d, jnp.ndarray with shape [k, m].
-    rhs: A 2d, jnp.ndarray with shape [m, n].
-    group_sizes: A 1d, jnp.ndarray with shape [num_groups] and jnp.int32 dtype.
-    preferred_element_type: jnp.dtype, the element type for the output matrix.
+    lhs: A 2d, ``jnp.ndarray`` with shape ``[k, m]``.
+    rhs: A 2d, ``jnp.ndarray`` with shape ``[m, n]``.
+    group_sizes: A 1d, ``jnp.ndarray`` with shape ``[num_groups]`` and
+      ``jnp.int32`` dtype.
+    preferred_element_type: ``jnp.dtype``, the element type for the output
+      matrix.
     tiling: 3-tuple of ints. The m, k and n-dimension tile sizes.
     group_offset: The group in group sizes to start computing from. This is
-      particularly useful for when rhs num_groups is sharded.
-    num_actual_groups: For when num_groups is sharded and we should only compute
-      the groups that are local, starting from group_offset.
+      particularly useful for when rhs ``num_groups`` is sharded.
+    num_actual_groups: For when ``num_groups`` is sharded and we should only
+      compute the groups that are local, starting from ``group_offset``.
     existing_out: Existing output to write to.
     interpret: Whether or not to run the kernel in interpret mode, helpful for
       testing and debugging.
 
   Returns:
-    A  3d, jnp.ndarray with shape [num_groups, k, n].
+    A 3d ``jnp.ndarray`` with shape ``[num_groups, k, n]``.
   """
   if group_offset is None:
     group_offset = jnp.array([0], dtype=jnp.int32)

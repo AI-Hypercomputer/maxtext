@@ -20,7 +20,8 @@ for various MaxText models. These dimension numbers are crucial for the Muon
 optimizer to correctly apply its update rules.
 
 This module can also be run as a script to inspect the generated dimension
-numbers for a specific model. Example:
+numbers for a specific model. Example::
+
   python3 -m MaxText.muon_utils qwen3-4b True
 """
 
@@ -55,6 +56,7 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   for fall-through logic in nested structures.
 
   Strategy:
+
   1. Exclusions: Parameters not suitable for Muon (e.g., scalars, embeddings,
      unembedding) are explicitly returned as `None`.
   2. Special Weights:
@@ -66,8 +68,8 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
     path: A tuple of strings representing the hierarchical path of the parameter.
 
   Returns:
-    An instance of `MuonDimensionNumbers` if a specific mapping is found,
-    `None` for excluded parameters, or a default `mdn` for standard weights.
+    An instance of ``MuonDimensionNumbers`` if a specific mapping is found,
+    ``None`` for excluded parameters, or a default ``mdn`` for standard weights.
   """
 
   # 1 Exclude parameters not suitable for Muon (scalar, embeddings, unembedding)

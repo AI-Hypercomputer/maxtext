@@ -42,7 +42,7 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   """Generates a MaxText configuration from a vLLM configuration.
 
   This function takes a vLLM configuration object and translates relevant
-  parameters into a MaxText `HyperParameters` object. It handles loading
+  parameters into a MaxText ``HyperParameters`` object. It handles loading
   paths and model names from the vLLM config, and applies a base MaxText
   vLLM configuration file.
 
@@ -51,10 +51,10 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       parameters.
 
   Returns:
-    A `pyconfig.HyperParameters` object configured for MaxText.
+    A ``pyconfig.HyperParameters`` object configured for MaxText.
 
   Raises:
-    ValueError: If `hf_config_path` is not provided in the vLLM model config.
+    ValueError: If ``hf_config_path`` is not provided in the vLLM model config.
   """
   if "maxtext_config" in vllm_config.additional_config:
     overrides = vllm_config.additional_config["maxtext_config"]
@@ -89,7 +89,7 @@ class MaxTextForCausalLM(nnx.Module):
   """
 
   def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array, mesh: Mesh):
-    """Initializes the MaxTextForCausalLM model.
+    """Initializes the ``MaxTextForCausalLM`` model.
 
     Args:
       vllm_config: The vLLM configuration object.
@@ -133,13 +133,17 @@ class MaxTextForCausalLM(nnx.Module):
       **kwargs: Arbitrary keyword arguments.
 
     Returns:
-      A tuple containing:
-        - updated_kv_caches: A list of updated KV caches.
-        - hidden: The hidden states.
-        - aux_hidden_states: A list of auxiliary hidden states.
+      A tuple containing
+
+      updated_kv_caches
+        A list of updated KV caches.
+      hidden
+        The hidden states.
+      aux_hidden_states
+        A list of auxiliary hidden states.
 
     Raises:
-      ValueError: If the model is not an instance of `nnx.Module`.
+      ValueError: If the model is not an instance of ``nnx.Module``.
     """
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model must be an instance of type nnx.Module.")
@@ -165,14 +169,14 @@ class MaxTextForCausalLM(nnx.Module):
     return updated_kv_caches, hidden, aux_hidden_states
 
   def forward(self, *args, **kwargs):
-    """Alias for __call__ for compatibility.
+    """Alias for ``__call__`` for compatibility.
 
     Args:
       *args: Variable length argument list.
       **kwargs: Arbitrary keyword arguments.
 
     Returns:
-      The result of the `__call__` method.
+      The result of the ``__call__`` method.
     """
     return self(*args, **kwargs)
 

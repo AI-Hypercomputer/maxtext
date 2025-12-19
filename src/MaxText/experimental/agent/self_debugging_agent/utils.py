@@ -1,18 +1,16 @@
-"""
-Copyright 2025 Google LLC
+# Copyright 2025 Google LLC
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 
-     https://www.apache.org/licenses/LICENSE-2.0
+#      https://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import json
 import os.path
@@ -27,13 +25,14 @@ def check_code_syntax(file_path: str):
   If an error occurs during compilation, it means there is a syntax error.
 
   Args:
-      file_path: The path to the Python file to be checked.
+    file_path: The path to the Python file to be checked.
 
   Returns:
-      A tuple containing:
-          - An integer exit code (0 for success, 1 for error).
-          - A string message indicating the result (e.g., "Syntax OK"
-            or a detailed error message).
+    A tuple containing
+
+    * An integer exit code (0 for success, 1 for error).
+    * A string message indicating the result (e.g., "Syntax OK"
+      or a detailed error message).
   """
   try:
     py_compile.compile(file_path, doraise=True)
@@ -46,17 +45,18 @@ def save_in_file_and_check_code_syntax(code, file_path):
   """Saves a string of code to a file and then checks its syntax.
 
   This utility function first writes the provided code string to a file at the
-  specified path. After the file is created, it calls `check_code_syntax`
+  specified path. After the file is created, it calls ``check_code_syntax``
   to validate the syntax of the newly written file.
 
   Args:
-      code: A string containing the Python code to be saved and checked.
-      file_path: The path where the code should be saved.
+    code: A string containing the Python code to be saved and checked.
+    file_path: The path where the code should be saved.
 
   Returns:
-      A tuple containing:
-          - An integer exit code (0 for success, 1 for error).
-          - A string message indicating the result.
+    A tuple containing
+
+    * An integer exit code (0 for success, 1 for error).
+    * A string message indicating the result.
   """
   with open(file_path, "wt", encoding="utf-8") as f:
     f.write(code)
@@ -72,11 +72,11 @@ def parse_json_response(response):
   of that block as a JSON dictionary.
 
   Args:
-      Response: The string containing the JSON code block.
+    Response: The string containing the JSON code block.
 
   Returns:
-      A dictionary containing the parsed JSON data. Returns an empty
-      dictionary if no JSON block is found or if parsing fails.
+    A dictionary containing the parsed JSON data. Returns an empty
+    dictionary if no JSON block is found or if parsing fails.
   """
   response_dict = {}
   if "```json" in response:
@@ -97,15 +97,15 @@ def smartly_copy_code(filename, base_jax_path, base_testcase_path, dest_jax_path
   to reflect the new location.
 
   Args:
-      filename: Name of the Python file to be copied.
-      base_jax_path: Path to the source JAX module directory.
-      base_testcase_path: Path to the source test files directory.
-      dest_jax_path: Path to the destination JAX module directory.
-      dest_testcase_path: Path to the destination test files directory.
+    filename: Name of the Python file to be copied.
+    base_jax_path: Path to the source JAX module directory.
+    base_testcase_path: Path to the source test files directory.
+    dest_jax_path: Path to the destination JAX module directory.
+    dest_testcase_path: Path to the destination test files directory.
 
   Returns:
-      True if both the module file and the test file exist in the
-      destination after copying, otherwise False.
+    True if both the module file and the test file exist in the
+    destination after copying, otherwise False.
   """
   base_jax_package = base_jax_path.removeprefix("../").removeprefix("./").replace(os.path.sep, ".")
   dest_jax_package = dest_jax_path.removeprefix("../").removeprefix("./").replace(os.path.sep, ".")

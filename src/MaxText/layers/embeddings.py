@@ -56,8 +56,8 @@ def embed_as_linen(
 ):
   """Initializes the Embed NNX module and returns it as a Linen module.
 
-  This function serves as a bridge to use the NNX-based `Embed` module within
-  a Linen model. It wraps the `Embed` module using `nnx.bridge.to_linen`,
+  This function serves as a bridge to use the NNX-based ``Embed`` module within
+  a Linen model. It wraps the ``Embed`` module using ``nnx.bridge.to_linen``,
   making it compatible with the Linen API.
 
   Args:
@@ -66,12 +66,12 @@ def embed_as_linen(
     config: The model configuration.
     cast_input_dtype: The dtype to cast the input to, if any.
     dtype: The dtype of the embedding vectors.
-    attend_dtype: The dtype for the `attend` method.
+    attend_dtype: The dtype for the ``attend`` method.
     embedding_init: The initializer for the embedding matrix.
     name: The name of the Linen module.
 
   Returns:
-    A Linen module that wraps the NNX `Embed` module.
+    A Linen module that wraps the NNX ``Embed`` module.
   """
   return nnx_wrappers.to_linen(
       Embed,
@@ -114,7 +114,7 @@ class Embed(nnx.Module):
       config: The model configuration.
       cast_input_dtype: The dtype to cast the input to, if any.
       dtype: The dtype of the embedding vectors.
-      attend_dtype: The dtype for the `attend` method.
+      attend_dtype: The dtype for the ``attend`` method.
       embedding_init: The initializer for the embedding matrix.
       rngs: The random number generators for initialization.
     """
@@ -142,8 +142,8 @@ class Embed(nnx.Module):
       inputs: input data, all dimensions are considered batch dimensions.
 
     Returns:
-      Output which is embedded input data.  The output shape follows the input,
-      with an additional `num_features` dimension appended.
+      Output which is embedded input data. The output shape follows the input,
+      with an additional ``num_features`` dimension appended.
     """
     cfg = self.config
     if self.cast_input_dtype:
@@ -186,12 +186,13 @@ class Embed(nnx.Module):
     """Attend over the embedding using a query array.
 
     Args:
-      query: array with last dimension equal the feature depth `num_features` of the
-        embedding.
-      out_sharding: NamedSharding object indicating how the output gets sharded
+      query: array with last dimension equal the feature depth ``num_features``
+        of the embedding.
+      out_sharding: ``NamedSharding`` object indicating how the output gets
+        sharded
 
     Returns:
-      An array with final dim `num_embeddings` corresponding to the batched
+      An array with final dim ``num_embeddings`` corresponding to the batched
       inner-product of the array of query vectors against each embedding.
       Commonly used for weight-sharing between embeddings and logit transform
       in NLP models.
@@ -213,15 +214,16 @@ def attend_on_embedding(
   TODO: Remove this method when Embed bridge to Linen is no longer needed
 
   Args:
-    query: An array with a last dimension equal to the feature depth of the embedding.
+    query: An array with a last dimension equal to the feature depth of the
+      embedding.
     embedding_table: The embedding table to attend over.
     attend_dtype: The data type for the attention computation.
     config: The model configuration, used to check for parameter offloading.
-    out_sharding: NamedSharding object indicating the output sharding
+    out_sharding: ``NamedSharding`` object indicating the output sharding
 
   Returns:
-    An array with a final dimension equal to `num_embeddings`, corresponding to the
-    batched inner-product of the query vectors against each embedding.
+    An array with a final dimension equal to ``num_embeddings``, corresponding
+    to the batched inner-product of the query vectors against each embedding.
   """
   # out_sharding must be None under auto shard_mode
   if config.shard_mode != ShardMode.EXPLICIT:
@@ -285,7 +287,7 @@ class RotaryEmbedding(nnx.Module):
       rope_linear_scaling_factor: float = 1.0,
       rngs: nnx.Rngs = None,
   ):
-    """Initializes the RotaryEmbedding module.
+    """Initializes the ``RotaryEmbedding`` module.
 
     Args:
       min_timescale: Start of the geometric index. Determines the periodicity of
@@ -295,7 +297,7 @@ class RotaryEmbedding(nnx.Module):
       embedding_dims: Dimension of the embedding to be generated.
       cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
       fprop_dtype: The dtype of the output.
-      rngs: rng keys passed in by nnx.bridge.to_linen.
+      rngs: rng keys passed in by ``nnx.bridge.to_linen``.
     """
     self.min_timescale = min_timescale
     self.max_timescale = max_timescale
@@ -324,19 +326,19 @@ class RotaryEmbedding(nnx.Module):
       inputs: jax.Array,
       position: None | jax.Array = None,
   ) -> jax.Array:
-    """Generates a jax.Array of sinusoids with different frequencies.
+    """Generates a ``jax.Array`` of sinusoids with different frequencies.
 
     Args:
       inputs: The input sequence on which to apply the Rotary position
         embedding. Since rotary position embeddings are applied to query and
-        keys after projection, it is assumed of shape [B, S, N, H].
+        keys after projection, it is assumed of shape ``[B, S, N, H]``.
       position: Optional position jax.Array which denotes the position of each
         token in the sequence. This only needs to be supplied when the sequence
-        is packed. It is of shape [B, S].
+        is packed. It is of shape ``[B, S]``.
 
     Returns:
-      a jax.Array of shape [B, S, N, H] which includes the inputs together with
-      the rotary position embedding incorporated in it.
+      a ``jax.Array`` of shape ``[B, S, N, H]`` which includes the inputs
+      together with the rotary position embedding incorporated in it.
     """
     assert position is not None
     if len(inputs.shape) != 4:
@@ -460,7 +462,7 @@ class Qwen3NextRotaryEmbedding(RotaryEmbedding):
         added signal.
       embedding_dims: Dimension of the embedding to be generated.
       partial_rotary_factor: Ratio of dimensions to apply ROPE to
-      rngs: rng keys passed in by nnx.bridge.to_linen.
+      rngs: rng keys passed in by ``nnx.bridge.to_linen``.
     """
     self.head_dim = embedding_dims
     self.partial_rotary_factor = partial_rotary_factor
@@ -482,12 +484,13 @@ class Qwen3NextRotaryEmbedding(RotaryEmbedding):
 
     Args:
       inputs: The input sequence on which to apply the Rotary position
-        embedding. It is assumed of shape [B, S, H, D].
-      position: Optional position array [B, S]. Only needed when the sequence
-        is packed.
+        embedding. It is assumed of shape ``[B, S, H, D]``.
+      position: Optional position array ``[B, S]``. Only needed when the
+        sequence is packed.
 
     Returns:
-      A jax.Array of shape [B, S, H, D - rotary_dim] with rotary position embeddings applied.
+      A ``jax.Array`` of shape ``[B, S, H, D - rotary_dim]`` with rotary
+      position embeddings applied.
     """
     inputs_rot, inputs_pass = jnp.split(inputs, [self.rotary_dim], axis=-1)
     inputs_rot = super().__call__(inputs_rot, position)
@@ -523,7 +526,7 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
       cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
       fprop_dtype: The dtype of the output.
       use_scale: Whether to apply LLaMA3.1 scaling factor.
-      rngs: rng keys passed in by nnx.bridge.to_linen.
+      rngs: rng keys passed in by ``nnx.bridge.to_linen``.
     """
     super().__init__(
         min_timescale=min_timescale,
@@ -587,12 +590,13 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
 
     Args:
       inputs: The input sequence on which to apply the Rotary position
-        embedding. It is assumed of shape [B, S, N, H].
-      position: Optional position array [B, S]. Only needed when the sequence
-        is packed.
+        embedding. It is assumed of shape ``[B, S, N, H]``.
+      position: Optional position array ``[B, S]``. Only needed when the
+        sequence is packed.
 
     Returns:
-      A jax.Array of shape [B, S, N, H] with rotary position embeddings applied.
+      A ``jax.Array`` of shape ``[B, S, N, H]`` with rotary position embeddings
+      applied.
     """
     # Ensure input is 4D
     if len(inputs.shape) != 4:
@@ -656,7 +660,8 @@ def yarn_rotary_embedding_as_linen(
     attention_scaling: bool = False,
     shard_mode: ShardMode = ShardMode.AUTO,
 ):
-  """Initializes the YarnRotaryEmbedding module and returns it as a Linen module.
+  """Initializes the ``YarnRotaryEmbedding`` module and returns it as a Linen
+  module.
 
   Args:
     embedding_dims: The dimension of the embeddings.
@@ -666,7 +671,7 @@ def yarn_rotary_embedding_as_linen(
     beta_slow: The slow beta parameter for YaRN.
     rope_theta: The base for the rotary frequencies.
     rope_factor: The scaling factor for RoPE.
-    cast_as_fprop_dtype: Whether to cast the output to `fprop_dtype`.
+    cast_as_fprop_dtype: Whether to cast the output to ``fprop_dtype``.
     fprop_dtype: The forward pass dtype.
     name: The name of the module.
   """
@@ -699,17 +704,21 @@ class YarnRotaryEmbedding(nnx.Module):
   https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L294
 
   Implementation Notes:
-  - YaRN vs. Standard RoPE:
+
+  * YaRN vs. Standard RoPE:
+
     1. Frequency Initialization: YaRN modifies how frequencies are computed.
-    2. Attention Scaling: YaRN typically scales embeddings by `0.1 * ln(rope_factor) + 1.0`
-       when `rope_factor > 1`. This scaling can be applied within this layer (if `attention_scaling=True`)
+    2. Attention Scaling: YaRN typically scales embeddings by ``0.1 * ln(rope_factor) + 1.0``
+       when ``rope_factor > 1``. This scaling can be applied within this layer (if ``attention_scaling=True``)
        or externally.
-  - RoPE Implementation Details (General):
-    - Arithmetic: Uses complex number arithmetic. Real number arithmetic is not implemented here,
+
+  * RoPE Implementation Details (General):
+
+    * Arithmetic: Uses complex number arithmetic. Real number arithmetic is not implemented here,
       though the resulting embeddings would be equivalent.
-    - Input Layout: Supports both interleaved (`interleave=True`, e.g., [real1, img1, real2, img2]) and
-      concatenated (`interleave=False`, e.g., [real1, real2, img1, img2]) formats.
-    - Output Layout: Always returns concatenated format ([real, imag]). Interleaved output is not
+    * Input Layout: Supports both interleaved (``interleave=True``, e.g., [real1, img1, real2, img2]) and
+      concatenated (``interleave=False``, e.g., [real1, real2, img1, img2]) formats.
+    * Output Layout: Always returns concatenated format ([real, imag]). Interleaved output is not
       implemented: While the embedding is different, attention scores are invariant, as long as we apply
       the same output layout for Q and K.
 
@@ -721,12 +730,12 @@ class YarnRotaryEmbedding(nnx.Module):
     beta_slow: Upper bound parameter for correction.
     rope_theta: The base theta value for the frequency computation.
     rope_factor: Factor applied to adjust the frequencies.
-    cast_as_fprop_dtype: Whether to cast the output to `fprop_dtype`.
+    cast_as_fprop_dtype: Whether to cast the output to ``fprop_dtype``.
     fprop_dtype: The forward pass dtype.
     rope_interleave: Whether complex representation is interleaved or concatenated.
     rope_truncate: Whether or not to floor lower bound and ceil upper bound for correction range.
     rope_attention_scaling: Whether or not to scale the rotary embedding output.
-    rngs: rng keys passed in by nnx.bridge.to_linen.
+    rngs: rng keys passed in by ``nnx.bridge.to_linen``.
   """
 
   def __init__(
@@ -818,15 +827,15 @@ class YarnRotaryEmbedding(nnx.Module):
     """Computes the range of correction dimensions for rotary positional embeddings.
 
     Args:
-        low_rot (float): Lower bound for the number of rotations.
-        high_rot (float): Upper bound for the number of rotations.
-        dim (int): Dimensionality of the embedding space.
-        base (float): Base value for the exponential computation.
-        max_position_embeddings (int): Maximum sequence length.
-        truncate (bool): Whether to floor lower bound and ceil upper bound.
+      low_rot (float): Lower bound for the number of rotations.
+      high_rot (float): Upper bound for the number of rotations.
+      dim (int): Dimensionality of the embedding space.
+      base (float): Base value for the exponential computation.
+      max_position_embeddings (int): Maximum sequence length.
+      truncate (bool): Whether to floor lower bound and ceil upper bound.
 
     Returns:
-        tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
+      tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
     """
     low = self._find_correction_dim(low_rot, dim, base, max_position_embeddings)
     high = self._find_correction_dim(high_rot, dim, base, max_position_embeddings)
@@ -851,11 +860,11 @@ class YarnRotaryEmbedding(nnx.Module):
     """Applies the rotary positional embedding using the precomputed complex frequencies.
 
     Args:
-      inputs: jax.Array of shape [B, S, N, H]. (H must equal self.embedding_dims.)
-      position: jax.Array of shape [B, S] with integer positions (indexes into precomputed freqs).
+      inputs: jax.Array of shape ``[B, S, N, H]``. (H must equal self.embedding_dims.)
+      position: jax.Array of shape ``[B, S]`` with integer positions (indexes into precomputed freqs).
 
     Returns:
-      jax.Array of shape [B, S, N, H] with the rotary embedding applied.
+      jax.Array of shape ``[B, S, N, H]`` with the rotary embedding applied.
     """
     if len(inputs.shape) != 4:
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [batch, sequence, heads, dims].")
@@ -925,8 +934,8 @@ def positional_embedding_as_linen(
   Args:
     embedding_dims: The dimension of the embeddings.
     max_wavelength: The maximum wavelength for the sinusoidal positional embeddings.
-    cast_as_fprop_dtype: Whether to cast output to fprop_dtype.
-    fprop_dtype: The dtype of the output when cast_as_fprop_dtype is True.
+    cast_as_fprop_dtype: Whether to cast output to ``fprop_dtype``.
+    fprop_dtype: The dtype of the output when ``cast_as_fprop_dtype`` is True.
   """
   return nnx_wrappers.to_linen(
       PositionalEmbedding,
@@ -945,15 +954,19 @@ class PositionalEmbedding(nnx.Module):
   This module computes sinusoidal positional embeddings and supports two use cases:
 
   1. Uniform positions across batch: All batch elements share the same position sequence.
-     Pass position as 1D array (seq_len,) or None for sequential [0,1,2,...].
-     Returns (seq_len, embedding_dims), caller broadcasts to batch.
-     Example: pos_emb = layer(seq_len)  # Sequential positions
-              pos_emb = layer(seq_len, position_1d)  # Custom 1D positions
+     Pass position as 1D array ``(seq_len,)`` or None for sequential [0,1,2,...].
+     Returns ``(seq_len, embedding_dims)``, caller broadcasts to batch.
+     Example::
+
+       pos_emb = layer(seq_len)  # Sequential positions
+       pos_emb = layer(seq_len, position_1d)  # Custom 1D positions
 
   2. Per-batch positions (packed sequences): Each batch element has different positions.
-     Pass position as 2D array (batch, seq_len).
-     Returns (batch, seq_len, embedding_dims).
-     Example: pos_emb = layer(seq_len, position_2d)
+     Pass position as 2D array ``(batch, seq_len)``.
+     Returns ``(batch, seq_len, embedding_dims)``.
+     Example::
+
+       pos_emb = layer(seq_len, position_2d)
 
   As a side effect, the uniform case is more efficient since sin/cos are computed once
   and broadcasted, rather than per batch element.
@@ -1034,7 +1047,7 @@ def llama_vision_rotary_embedding_as_linen(
     fprop_dtype: DType = jnp.bfloat16,
     name: str | None = None,
 ):
-  """Initializes the LlamaVisionRotaryEmbedding module and returns it as a Linen module.
+  """Initializes the ``LlamaVisionRotaryEmbedding`` module and returns it as a Linen module.
 
   Args:
     image_size: The size of the input image.
@@ -1126,7 +1139,8 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
     """Applies rotary embeddings to the input tensor for Llama4 vision encoder.
 
     Args:
-      inputs: Input tensor of shape [batch_size_times_tiles, num_patches_incl_cls, num_heads, head_dim]
+      inputs: Input tensor of shape ``[batch_size_times_tiles,
+        num_patches_incl_cls, num_heads, head_dim]``
 
     Returns:
       Tensor with rotary embeddings applied, maintaining the same shape as input.
@@ -1173,7 +1187,7 @@ class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
     rope_theta: Base theta for frequency computation (default 10000.0)
     cast_as_fprop_dtype: Whether to cast to fprop dtype
     fprop_dtype: Output dtype
-    rngs: RNG state passed in by nnx.bridge.to_linen, not used in this module
+    rngs: RNG state passed in by ``nnx.bridge.to_linen``, not used in this module
   """
 
   def __init__(
@@ -1193,9 +1207,9 @@ class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
       num_attention_heads: Number of attention heads
       spatial_merge_size: Spatial merge block size (e.g., 2 for 2x2 blocks)
       rope_theta: Base theta for frequency computation (default 10000.0)
-      cast_as_fprop_dtype: Whether to cast to fprop dtype
+      cast_as_fprop_dtype: Whether to cast to ``fprop_dtype``
       fprop_dtype: Output dtype
-      rngs: RNG state passed in by nnx.bridge.to_linen, not used in this module
+      rngs: RNG state passed in by ``nnx.bridge.to_linen``, not used in this module
     """
     self.hidden_size = hidden_size
     self.num_attention_heads = num_attention_heads
@@ -1207,13 +1221,13 @@ class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
     self.head_dim = self.hidden_size // self.num_attention_heads
 
   def _compute_freq_table(self, max_hw: int) -> Array:
-    """Precompute frequency table for positions up to max_hw.
+    """Precompute frequency table for positions up to ``max_hw``.
 
     Args:
       max_hw: Maximum height or width dimension
 
     Returns:
-      Array of shape [max_hw, head_dim//4] containing frequencies for each position
+      Array of shape ``[max_hw, head_dim//4]`` containing frequencies for each position
     """
 
     inv_freq = 1.0 / (self.rope_theta ** (jnp.arange(0, self.head_dim // 2, 2, dtype=jnp.float32) / (self.head_dim // 2)))
@@ -1231,7 +1245,7 @@ class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
       width: Width in patches
 
     Returns:
-      Array of shape [num_frames * height * width, 2] with (row_id, col_id)
+      Array of shape ``[num_frames * height * width, 2]`` with ``(row_id, col_id)``
     """
     merge_size = self.spatial_merge_size
     merged_h = height // merge_size
@@ -1272,7 +1286,7 @@ class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
       width: Width in patches
 
     Returns:
-      Tuple of (cos_emb, sin_emb) each of shape [num_frames * height * width, head_dim]
+      Tuple of ``(cos_emb, sin_emb)`` each of shape ``[num_frames * height * width, head_dim]``
     """
     max_hw = max(height, width)
     freq_table = self._compute_freq_table(max_hw)  # [max_hw, head_dim//4]
@@ -1303,7 +1317,7 @@ class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
       x: Input tensor of any shape with last dimension divisible by 2
 
     Returns:
-      Rotated tensor where (x1, x2) -> (-x2, x1)
+      Rotated tensor where ``(x1, x2) -> (-x2, x1)``
     """
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
@@ -1313,14 +1327,14 @@ class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
     """Apply rotary position embeddings directly to inputs (Q or K tensors).
 
     Args:
-      inputs: Input tensor of shape [B, T*H*W, N, head_dim] (batch, sequence, heads, head_dim)
+      inputs: Input tensor of shape ``[B, T*H*W, N, head_dim]`` (batch, sequence, heads, head_dim)
              where T=num_frames, H=height, W=width (all static)
       num_frames: Number of temporal frames (static)
       height: Height in patches (static)
       width: Width in patches (static)
 
     Returns:
-      Rotated inputs with same shape [B, T*H*W, N, head_dim]
+      Rotated inputs with same shape ``[B, T*H*W, N, head_dim]``
     """
     cos_emb, sin_emb = self.compute_cos_sin(num_frames, height, width)
 
@@ -1363,7 +1377,7 @@ def qwen3omnimoe_vision_pos_embed_interpolate_as_linen(
     name: Module name
 
   Returns:
-    A Linen module that wraps the NNX Qwen3OmniMoeVisionPosEmbedInterpolate module.
+    A Linen module that wraps the NNX ``Qwen3OmniMoeVisionPosEmbedInterpolate`` module.
   """
   return nnx_wrappers.to_linen(
       Qwen3OmniMoeVisionPosEmbedInterpolate,
@@ -1390,9 +1404,9 @@ class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
     hidden_size: Hidden dimension size
     spatial_merge_size: Spatial merge block size
     dtype: Data type for embeddings
-    cast_as_fprop_dtype: Whether to cast to fprop dtype
+    cast_as_fprop_dtype: Whether to cast to ``fprop_dtype``
     fprop_dtype: Output dtype
-    rngs: RNG state passed in by nnx.bridge.to_linen
+    rngs: RNG state passed in by ``nnx.bridge.to_linen``
   """
 
   def __init__(
@@ -1405,16 +1419,17 @@ class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
       fprop_dtype: DType = jnp.bfloat16,
       rngs: nnx.Rngs = None,
   ):
-    """Initializes the Qwen3OmniMoe vision position embedding interpolation module.
+    """Initializes the ``Qwen3OmniMoe`` vision position embedding interpolation
+    module.
 
     Args:
       num_position_embeddings: Number of position embeddings in the fixed grid
       hidden_size: Hidden dimension size
       spatial_merge_size: Spatial merge block size
       dtype: Data type for embeddings
-      cast_as_fprop_dtype: Whether to cast to fprop dtype
+      cast_as_fprop_dtype: Whether to cast to ``fprop_dtype``
       fprop_dtype: Output dtype
-      rngs: RNG state passed in by nnx.bridge.to_linen
+      rngs: RNG state passed in by ``nnx.bridge.to_linen``
     """
     self.num_position_embeddings = num_position_embeddings
     self.hidden_size = hidden_size
@@ -1446,9 +1461,10 @@ class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
       w: Target width in patches
 
     Returns:
-      Tuple of (indices, weights) where:
-        - indices: [4, h*w] indices into pos_embed for 4 corners
-        - weights: [4, h*w] bilinear weights for 4 corners
+      Tuple of (indices, weights) where
+
+      * indices: ``[4, h*w]`` indices into pos_embed for 4 corners
+      * weights: ``[4, h*w]`` bilinear weights for 4 corners
     """
     N = self.num_grid_per_side
 
@@ -1503,7 +1519,7 @@ class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
       width: Width in patches (static)
 
     Returns:
-      Interpolated positional embeddings of shape [num_frames * height * width, hidden_size]
+      Interpolated positional embeddings of shape ``[num_frames * height * width, hidden_size]``
     """
     # Get interpolation indices and weights
     indices, weights = self._interpolate_single(num_frames, height, width)  # [4, h*w], [4, h*w]

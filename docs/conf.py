@@ -150,7 +150,6 @@ def run_apidoc(_):
   # Note: We use `sys.executable -m sphinx.ext.apidoc` to ensure we're using
   # the apidoc from the same Python environment as Sphinx.
   command = [
-<<<<<<< HEAD
       sys.executable,
       "-m",
       "sphinx.ext.apidoc",
@@ -168,21 +167,6 @@ def run_apidoc(_):
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "utils", "ckpt_conversion"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "rl"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "multimodal_utils.py"),
-=======
-    sys.executable,
-    "-m",
-    "sphinx.ext.apidoc",
-    "--module-first",
-    "--force",
-    "--separate",
-    "--output-dir",
-    output_path,
-    os.path.join(MAXTEXT_REPO_ROOT, "src"),
-    # Paths to exclude
-    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "experimental"),
-    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_mlperf"),
-    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "scratch_code"),
->>>>>>> 1f2bbd7c7 (Fix mock imports)
   ]
 
   # Run the command and check for errors

@@ -89,7 +89,7 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
 def get_functional_train_with_signature(
     train_step, data_sharding, state_mesh_shardings, model, config, params_shardings=None
 ):
-  """Get the shardings (both state and data) for `train_step`."""
+  """Get the shardings (both state and data) for ``train_step``."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
   functional_train.__name__ = "train_step"
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
@@ -100,7 +100,7 @@ def get_functional_train_with_signature(
 
 
 def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shardings, model, config):
-  """Get the shardings (both state and data) for `eval_step`."""
+  """Get the shardings (both state and data) for ``eval_step``."""
   functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
@@ -126,8 +126,11 @@ def get_reorder_callable(cp_size, shard_mode):
 
 
 def get_shaped_batch(config):
-  """Return the shape of the batch - this is what eval_shape would return for the
-  output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
+  """Return the shape of the batch
+
+  This is what ``eval_shape`` would return for the output of
+  ``create_data_iterator``, but ``eval_shape`` doesn't work, see b/306901078.
+  """
   batch_shape = (config.global_batch_size_to_load, config.max_target_length)
   shaped_batch = {}
   shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
@@ -154,11 +157,12 @@ def should_prevent_cse_in_remat(config):
   """Determines whether to prevent common subexpression elimination (CSE) in remat.
 
   CSE should not be prevented when:
-  1. Layers are being scanned (scan_layers=True), OR
-  2. Gradient accumulation is enabled (gradient_accumulation_steps > 1) on GPU hardware
+
+  1. Layers are being scanned (``scan_layers=True``), OR
+  2. Gradient accumulation is enabled (``gradient_accumulation_steps > 1``) on GPU hardware
 
   Args:
-    config: Configuration object with scan_layers, gradient_accumulation_steps, and hardware
+    config: Configuration object with ``scan_layers``, ``gradient_accumulation_steps``, and ``hardware``
 
   Returns:
     bool: True if CSE should be prevented, False otherwise
@@ -173,7 +177,7 @@ def should_prevent_cse_in_remat(config):
 
 
 def load_compiled(config, partial_train, state, execution_devices):
-  """# Loading a serialized compiled train step function."""
+  """Loading a serialized compiled train step function."""
 
   # Currently partial_train and state  are needed to reconstruct
   # input/output shapes to construct the in_trees and out_trees for load API
@@ -206,8 +210,8 @@ def calculate_tokens_training_per_device(config):
 
 def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops):
   """
-  Calculate training TFLOP for Gemma2 as in Gemma2 we combine [local_attention, global_attention] into one decoder
-  layer and we use sliding window attention in local_attention
+  Calculate training TFLOP for Gemma2 as in Gemma2 we combine ``[local_attention, global_attention]`` into one decoder
+  layer and we use sliding window attention in ``local_attention``.
   """
   noncausal_attention_flops = (
       # global attention
@@ -455,9 +459,10 @@ def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim):
   """Helper function to calculate matmul TFLOP in ffn based on MLP dimension.
 
   Applies to:
-    - Dense FFN layers (mlp_dim = config.mlp_dim).
-    - MoE FFN layers (mlp_dim = config.moe_mlp_dim),
-      need to scale by shared_experts or num_experts_per_tok.
+
+  * Dense FFN layers ``(mlp_dim = config.mlp_dim)``.
+  * MoE FFN layers ``(mlp_dim = config.moe_mlp_dim)``, need to scale by
+    ``shared_experts`` or ``num_experts_per_tok``.
   """
   ffn1_flops = (
       2 * config.per_device_batch_size * config.max_target_length * mlp_dim * config.emb_dim * len(config.mlp_activations)
@@ -497,10 +502,14 @@ def get_dense_moe_layers(config):
 def calculate_gemma3_vision_layers_tflops_per_device(config):
   """
   Estimate TFLOPs for Gemma3 vision encoder (ViT-style).
+
   Returns:
-      total_tflops: Total TFLOPs (counts for fwd + bwd + optimizer)
-      learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
-      attention_tflops: TFLOPs from attention multiplications
+    total_tflops
+      Total TFLOPs (counts for fwd + bwd + optimizer)
+    learnable_weight_tflops
+      TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
+    attention_tflops
+      TFLOPs from attention multiplications
   """
   # Config values
   B = config.per_device_batch_size
@@ -551,10 +560,14 @@ def calculate_gemma3_vision_layers_tflops_per_device(config):
 def calculate_llama4_vision_layers_tflops_per_device(config):
   """
   Estimate TFLOPs for Llama4 vision encoder (ViT-style).
+
   Returns:
-      total_tflops: Total TFLOPs (counts for fwd + bwd + optimizer)
-      learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
-      attention_tflops: TFLOPs from attention multiplications
+    total_tflops
+      Total TFLOPs (counts for fwd + bwd + optimizer)
+    learnable_weight_tflops
+      TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
+    attention_tflops
+      TFLOPs from attention multiplications
   """
   # Config values
   B = config.per_device_batch_size
@@ -804,12 +817,12 @@ def get_nested_value(dictionary, nested_key, default=None):
   Retrieves a value from a nested key in a dictionary.
 
   Args:
-      dictionary: The dictionary to search in.
-      nested_key: A tuple representing the nested key, e.g., ('level1', 'level2', 'key').
-      default: The value to return if the nested key is not found.
+    dictionary: The dictionary to search in.
+    nested_key: A tuple representing the nested key, e.g., ('level1', 'level2', 'key').
+    default: The value to return if the nested key is not found.
 
   Returns:
-      The value associated with the nested key, or the default value if not found.
+    The value associated with the nested key, or the default value if not found.
   """
   current_level = dictionary
 
@@ -822,12 +835,12 @@ def get_nested_value(dictionary, nested_key, default=None):
 
 def update_state_param(state, target_path, value):
   """
-  Updates a specific parameter in state.params at the given path.
+  Updates a specific parameter in ``state.params`` at the given path.
 
   Args:
-      state: The current TrainState.
-      target_path: A tuple of keys matching the structure inside state.params.
-      value: The value to apply.
+    state: The current TrainState.
+    target_path: A tuple of keys matching the structure inside ``state.params``.
+    value: The value to apply.
   """
 
   def create_jax_path(target_path):
@@ -914,16 +927,19 @@ def get_abstract_param(model, config):
 
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   """Setup decode state by loading params from a checkpoint.
+
   Args:
     model: the flax model to initialize
     config: config object
-    rng: jax.prng key
-    mesh: jax.devices() mesh
+    rng: ``jax.prng`` key
+    mesh: ``jax.devices()`` mesh
     checkpoint_manager: Checkpoint manager
 
   Returns:
-    state: state with decode params loaded from the checkpoint
-    state_mesh_annotations: the mesh annotations for the state
+    state
+      state with decode params loaded from the checkpoint
+    state_mesh_annotations
+      the mesh annotations for the state
   """
   if not config.load_parameters_path:
     # generate random params
@@ -978,16 +994,18 @@ def setup_initial_state(
 
   Args:
     model: the flax model to initialize
-    tx: the optax.GradientTransformation
+    tx: the ``optax.GradientTransformation``
     config: config object
-    rng: jax.prng key
-    mesh: jax.devices() mesh
-    checkpoint_manager: an Orbax checkpointing.CheckpointManager object
+    rng: ``jax.prng`` key
+    mesh: ``jax.devices()`` mesh
+    checkpoint_manager: an Orbax ``checkpointing.CheckpointManager`` object
     is_training: True to initialize training state, False for decode state
 
   Returns:
-    state: the initialized train state
-    state_mesh_annotations: the mesh annotations for the train state
+    state
+      the initialized train state
+    state_mesh_annotations
+      the mesh annotations for the train state
   """
 
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
@@ -1267,16 +1285,21 @@ def create_learning_rate_schedule(config):
   """Creates a learning rate schedule with warmup and decay.
 
   Supports two schedule types:
-  - Cosine: Inspired by Llama2's learning rate schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
-  - WSD (Warmup-Stable-Decay): Maintains constant learning rate for most of training before final decay
+
+  * Cosine: Inspired by Llama2's learning rate schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+  * WSD (Warmup-Stable-Decay): Maintains constant learning rate for most of training before final decay
 
   Schedule structure:
-  1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
-  2) Decay from [learning_rate] to a final value until learning_rate_schedule_steps
-     - Cosine: decays to [learning_rate * learning_rate_final_fraction]
-     - WSD: maintains [learning_rate] for a stable phase, then decays to [learning_rate * learning_rate_final_fraction]
+
+  1. Linear warmup from 0 to ``[learning_rate]`` over steps 0 to ``[learning_rate_schedule_steps * warmup_steps_fraction]``
+  2. Decay from ``[learning_rate]`` to a final value until ``learning_rate_schedule_steps``
+
+     * Cosine: decays to ``[learning_rate * learning_rate_final_fraction]``
+     * WSD: maintains ``[learning_rate]`` for a stable phase, then decays to ``[learning_rate * learning_rate_final_fraction]``
        using either linear or cosine decay based on wsd_decay_style
-  3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
+
+  3. Constant learning rate of 0 from ``learning_rate_schedule_steps`` to ``steps``.
+
   The zero learning rate section can be used to more accurately measure the fully trained model's performance.
   """
 

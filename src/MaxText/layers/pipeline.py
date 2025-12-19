@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Pipeline layer wrapping a decoder layer(s). Supports circular pipelining """
+"""Pipeline layer wrapping a decoder layer(s). Supports circular pipelining"""
 
 import functools
 from typing import Any
@@ -146,15 +146,23 @@ class Pipeline(nn.Module):
 
   def init_states(self, inputs):
     """Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
-    Assumes input has already been reshaped into microbatches: [num_micro_batches, micro_batch_size, sequence, embed]
+    Assumes input has already been reshaped into microbatches: ``[num_micro_batches, micro_batch_size, sequence, embed]``
 
-    Returns a dictionary with properties
-      shift: zeros shape [num_stages, micro_size, sequence, embed]
-      prev_outputs: same shape as shift, only used when pipeline_delay_activation_forwarding is set to true, else None
-      state_io: reshaped inputs [num_stages, microbatches/stages, micro_size, sequence, embed]
-      circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed] when needed, else None
-      circ_storage_mover: zeros[num_stages, micro_size, sequence, embed] when needed, else None
-      loop_iteration: scalar set initially to 0.
+    Returns:
+      A dictionary with properties
+
+      shift
+        zeros shape ``[num_stages, micro_size, sequence, embed]``
+      prev_outputs
+        same shape as shift, only used when pipeline_delay_activation_forwarding is set to true, else None
+      state_io
+        reshaped inputs ``[num_stages, microbatches/stages, micro_size, sequence, embed]``
+      circ_storage
+        zeros ``[num_stages, microbatches, micro_size, sequence, embed]`` when needed, else None
+      circ_storage_mover
+        zeros``[num_stages, micro_size, sequence, embed]`` when needed, else None
+      loop_iteration
+        scalar set initially to 0.
     """
 
     # Shift is used to rotate the output of each pipeline into the input of the next
@@ -212,9 +220,10 @@ class Pipeline(nn.Module):
   def get_iteration_inputs(self, loop_iteration, state_io, circ_storage, shift):
     """
     Construct stages_in: the global array that is operated on for this iteration, shape same as
-    shift=[stages, micro_size, sequence, embed]
+    ``shift=[stages, micro_size, sequence, embed]``
+
     This is almost a rotated version of the last outputs, except for the first stage which must grab a new batch from
-    state_io or an old one from circ_storage
+    ``state_io`` or an old one from ``circ_storage``
     """
 
     # Setup potential input from state_io, which has a rotating microbatch index (size of microbatches_per_stage)
@@ -281,7 +290,7 @@ class Pipeline(nn.Module):
     return self._maybe_shard_with_name(x, sharding)
 
   def get_microbatch_and_repeat_ids(self, loop_iteration):
-    """Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and
+    """Gets the ``microbatch_ids`` and ``repeat_ids`` for all stages on this ``loop_iteration``. Works for both circular and
     non-circular"""
     # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is 1 behind due to bubble, etc for other stages
     microbatches_processed = jnp.maximum(loop_iteration - self.forwarding_delay * jnp.arange(self.num_stages), 0)
@@ -293,18 +302,20 @@ class Pipeline(nn.Module):
       self, weights, physical_partition_spec, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights
   ):
     """Use vmap to implement a sharded parallel gather.
+
     Parallel gather means each stage has its own weights, and gets one slice from it.
+
     Args:
       weights: Per-stage data to be gathered from.
       physical_partition_spec: Physical partition spec of the input weight.
-      repeat_ids: Integer tensor of shape [num_stages], the repeats of the stages.
-      repeat_dim_in_weights: The dimension in weights where repeat_ids are applied. The output will not
+      repeat_ids: Integer tensor of shape ``[num_stages]``, the repeats of the stages.
+      repeat_dim_in_weights: The dimension in weights where ``repeat_ids`` are applied. The output will not
         have this dimension.
       stages_dim_in_weights: The dimension in weights that represents parallel stages.
 
     Returns:
-      The per-stage gathered values. The shape is weights.shape but with repeat_dim_in_weights
-        removed.
+      The per-stage gathered values. The shape is ``weights.shape`` but with ``repeat_dim_in_weights``
+      removed.
     """
 
     def _gather_one(x, repeat_id):
@@ -332,13 +343,13 @@ class Pipeline(nn.Module):
 
     Args:
       xs: Data shared by all stages, to be gathered from.
-      ids: Integer tensor of shape [num_stages], the offsets of the stages.
+      ids: Integer tensor of shape ``[num_stages]``, the offsets of the stages.
       ids_dim: The dimension in xs where ids are applied. In the output, this
-        dimension will be [num_stages], since each stage gets one slice.
+        dimension will be ``[num_stages]``, since each stage gets one slice.
 
     Returns:
-      The per-stage gathered values. The shape is xs.shape but with ids_dim size
-        replaced with [num_stages].
+      The per-stage gathered values. The shape is ``xs.shape`` but with
+      ``ids_dim`` size replaced with ``[num_stages]``.
     """
 
     def _gather_one(x, i):
@@ -353,14 +364,17 @@ class Pipeline(nn.Module):
   def get_new_loop_state(self, output, loop_state):
     """
     Update the various buffers given the output of the most recent iteration
-    * state_io: rotates left/up by 1 (the whole created in the last slot is filled with the most recent pipeline output)
-       * Pushing inputs up from top of state_io into first stage of shift
-       * Pulling outputs up from last stage of shift into bottom of state_io
-    * shift: rotate output (or prev_outputs if using delay) right/down by 1 - we imagine the pipeline moves to
-               right/down
-    * circ_storage: pushes circ_storage_mover (the output of the previous iteration) into rotating index of circ_storage
-    * circ_storage_mover: assigned to rotated output and pushed into circ_storage on the next iteration
-    * prev_outputs: is set to the current output
+
+    * ``state_io``: rotates left/up by 1 (the whole created in the last slot is filled with the most recent pipeline output)
+
+      * Pushing inputs up from top of ``state_io`` into first stage of shift
+      * Pulling outputs up from last stage of shift into bottom of ``state_io``
+
+    * ``shift``: rotate output (or ``prev_outputs`` if using delay) right/down by 1 - we imagine the pipeline moves to
+      right/down
+    * ``circ_storage``: pushes ``circ_storage_mover`` (the output of the previous iteration) into rotating index of ``circ_storage``
+    * ``circ_storage_mover``: assigned to rotated output and pushed into ``circ_storage`` on the next iteration
+    * ``prev_outputs``: is set to the current output
     """
 
     old_state_io = loop_state["state_io"]
@@ -485,8 +499,10 @@ class Pipeline(nn.Module):
 
   def get_current_stage_weights(self, pipeline_weights, loop_iteration, physical_partition_spec=None):
     """
-    Gets the current weights used for one iteration. Outputs a pytree whose arrays have leading dimension of stages, e.g.
-    {'mlp': 'wo': [stages, mlp, embed]}. Stage 0 will use the 0th index of this pytree, Stage 1 the 1st index, etc.
+    Gets the current weights used for one iteration.
+    
+    Outputs a pytree whose arrays have leading dimension of stages, e.g.
+    ``{'mlp': 'wo': [stages, mlp, embed]}``. Stage 0 will use the 0th index of this pytree, Stage 1 the 1st index, etc.
     For non-circular pipelines, this simply returns all weights - every weight is used in every iteraiton. However
     for circular pipelines each stage grabs only the weights corresponding to the current repeat.
     """
@@ -533,7 +549,7 @@ class Pipeline(nn.Module):
     """This vmap func is used to initialize the weights only on init."""
 
     def func_to_vmap(body_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
-      """nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance."""
+      """``nn.vmap`` requires either a ``nn.module`` class or a function whose first argument is a ``nn.module`` instance."""
       return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
     vmap_func = nn.vmap(
@@ -554,14 +570,15 @@ class Pipeline(nn.Module):
   def get_main_vmap_func_for_iterations(self):
     """
     Returns main stage function vmapped by number of stages.
-    This becomes a vmap over a single layer instance if body_instance is a single layer,
-    else a set of layers if body_instance is a set of layers.
+
+    This becomes a vmap over a single layer instance if ``body_instance`` is a single layer,
+    else a set of layers if ``body_instance`` is a set of layers.
     """
 
     def func_to_vmap(
         body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
     ):
-      """nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance."""
+      """``nn.vmap`` requires either a ``nn.module`` class or a function whose first argument is a ``nn.module`` instance."""
       weights = meta.remove_axis(
           weights,
           0,
@@ -738,7 +755,7 @@ class Pipeline(nn.Module):
 
   @staticmethod
   def _remove_fsdp_from_physical_partition_spec(pps):
-    """Removes 'fsdp' and 'fsdp_transpose' from a physical PartitionSpec."""
+    """Removes ``fsdp`` and ``fsdp_transpose`` from a physical ``PartitionSpec``."""
     if isinstance(pps, P):
       new_spec = []
       # Iterate through each axis in the original PartitionSpec.
@@ -785,8 +802,9 @@ class Pipeline(nn.Module):
       logical_partition_spec=None,  # Pytree of sharding specifications of the weights (aka self.layers.variables)
   ) -> jnp.ndarray:
     """The main method that maps the series of decoder layer inputs to final layer outputs.
+
     Has the same signature of a single decoder layer, and expects the same shapes, e.g. the inputs should have shape
-    [global_batch], and internally this will be reshapped into microbatches.
+    ``[global_batch]``, and internally this will be reshaped into microbatches.
     """
     # Reshape inputs of [global_batch, ...] to [microbatches, pipeline_microbatch_sizes, ...]
     inputs = inputs.reshape(

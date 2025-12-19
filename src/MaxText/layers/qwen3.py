@@ -63,26 +63,33 @@ def jax_chunk_gated_delta_rule(
   A JAX implementation of the chunked Gated Delta Rule, a parallel scan algorithm.
   This function implements the core recurrent logic of the Gated Delta Network in
   a hardware-efficient way by splitting the sequence into chunks and using
-  jax.lax.scan for the recurrent part.
+  ``jax.lax.scan`` for the recurrent part.
 
   Tensor Shape Abbreviations:
-    B: batch_size, S: sequence_length, H: num_heads,
-    D_k: key/query_head_dim, D_v: value_head_dim,
-    N: num_chunks, C: chunk_size
+
+  * ``B``: ``batch_size``
+  * ``S``: ``sequence_length``
+  * ``H``: ``num_heads``
+  * ``D_k``: ``key/query_head_dim``
+  * ``D_v``: ``value_head_dim``
+  * ``N``: ``num_chunks``
+  * ``C``: ``chunk_size``
 
   Args:
-    query: Query tensor. Shape (B, S, H, D_k)
-    key: Key tensor. Shape (B, S, H, D_k)
-    value: Value tensor. Shape (B, S, H, D_v)
-    g: Log decay tensor. Shape (B, S, H)
-    beta: Gate tensor. Shape (B, S, H)
+    query: Query tensor. Shape ``(B, S, H, D_k)``
+    key: Key tensor. Shape ``(B, S, H, D_k)``
+    value: Value tensor. Shape ``(B, S, H, D_v)``
+    g: Log decay tensor. Shape ``(B, S, H)``
+    beta: Gate tensor. Shape ``(B, S, H)``
     chunk_size: The size of each chunk for processing.
-    initial_state: Optional initial state for the recurrence. Shape (B, H, D_k, D_v)
+    initial_state: Optional initial state for the recurrence. Shape ``(B, H, D_k, D_v)``
     use_qk_norm_in_gdn: Whether to apply L2 normalization to query and key.
 
   Returns:
-    Output tensor. Shape (B, S, H, D_v)
-    Final recurrent state. Shape (B, H, D_k, D_v) or None
+    Output tensor
+      Shape ``(B, S, H, D_v)``
+    Final recurrent state
+      Shape ``(B, H, D_k, D_v)`` or None
   """
 
   # =========================================================================
@@ -287,30 +294,34 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
   This module implements the full end-to-end logic of a Gated Delta Network layer.
 
   End-to-End Equations Implemented:
-  Let `x` be the input `hidden_states`.
+  Let ``x`` be the input ``hidden_states``.
 
   Step A: Input Projections
-  1. (q_raw, k_raw, v_raw, z) = Linear_qkvz(x)
-  2. (b, a) = Linear_ba(x)
+
+  1. ``(q_raw, k_raw, v_raw, z) = Linear_qkvz(x)``
+  2. ``(b, a) = Linear_ba(x)``
 
   Step B: 1D Convolution
-  1. qkv_conv = silu(Conv1D(concatenate(q_raw, k_raw, v_raw)))
-  2. (q, k, v) = split(qkv_conv)
+
+  1. ``qkv_conv = silu(Conv1D(concatenate(q_raw, k_raw, v_raw)))``
+  2. ``(q, k, v) = split(qkv_conv)``
 
   Step C: Gated Delta Rule (Recurrent Core)
-  1. Gates: β=sigmoid(b), g = -exp(A_log) * softplus(a + dt_bias)
-  2. Core Calculation: core_attn_out = jax_chunk_gated_delta_rule(q, k, v, g, β)
+
+  1. Gates: ``β=sigmoid(b), g = -exp(A_log) * softplus(a + dt_bias)``
+  2. Core Calculation: ``core_attn_out = jax_chunk_gated_delta_rule(q, k, v, g, β)``
 
   Step D: Final Output Stage
-  1. y = RMSNorm(core_attn_out) * silu(z)
-  2. output = Linear_out(y)
+
+  1. ``y = RMSNorm(core_attn_out) * silu(z)``
+  2. ``output = Linear_out(y)``
   """
 
   def __init__(self, config: Config, *, rngs: nnx.Rngs):
     """
     Args:
       config: MaxText configuration object.
-      rngs: The random number generators for initialization, passed by the nnx.to_linen wrapper.
+      rngs: The random number generators for initialization, passed by the ``nnx.to_linen`` wrapper.
     """
     self.config = config
     cfg = self.config
@@ -525,15 +536,16 @@ class Qwen3NextFullAttention(nnx.Module):
 
   This module implements the full self-attention mechanism as used in
   Qwen3-Next models for layers that do not use the Gated Delta Network.
-  It wraps the main `attentions.Attention` class, which handles the core attention operation,
+  It wraps the main ``attentions.Attention`` class, which handles the core attention operation,
   including the query, key, value, and output projections.
 
   Qwen3 Next Attention differs from standard attention by the following features:
-    - Query and Gate splitting from a single q projection.
-    - Application of a sigmoid gate to the attention output.
-    - Usage of `Qwen3NextRMSNorm` for query and key normalization.
-    - Usage of `Qwen3NextRotaryEmbedding` for partial rotary position embeddings.
-      - Partial ROPE is applied to the first 25% of head dimensions
+
+  * Query and Gate splitting from a single q projection.
+  * Application of a sigmoid gate to the attention output.
+  * Usage of ``Qwen3NextRMSNorm`` for query and key normalization.
+  * Usage of ``Qwen3NextRotaryEmbedding`` for partial rotary position embeddings.
+    * Partial ROPE is applied to the first 25% of head dimensions
 
   Attributes:
     config: MaxText configuration object.
@@ -541,9 +553,9 @@ class Qwen3NextFullAttention(nnx.Module):
     model_mode: The operational mode (e.g., 'train', 'prefill').
     layer_idx: The index of the current layer.
     quant: Optional quantization configuration.
-    attention: An instance of `attentions.Attention` which contains the
+    attention: An instance of ``attentions.Attention`` which contains the
       learnable parameters for query, key, value, and output projections
-      (e.g., `attention.query`, `attention.key`, etc.), and performs
+      (e.g., ``attention.query``, ``attention.key``, etc.), and performs
       the attention calculation.
   """
 
@@ -611,6 +623,7 @@ class Qwen3NextFullAttention(nnx.Module):
 class Qwen3NextSparseMoeBlock(nnx.Module):
   """
   This module encapsulates the unique MoE structure of Qwen3-Next, which includes:
+
   1. A set of routed experts, where each token is sent to a subset of experts.
   2. A single shared expert, which all tokens pass through.
   3. A learnable gate that determines the contribution of the shared expert.
@@ -674,13 +687,14 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
     Applies the sparse MoE block to the input hidden states.
 
     Args:
-      hidden_states: The input array from the previous layer. Shape: (batch, seq, embed_dim)
+      hidden_states: The input array from the previous layer. Shape: ``(batch, seq, embed_dim)``
       deterministic: If True, disables dropout.
 
     Returns:
-      A tuple containing:
-        - The output array of the MoE block.
-        - The load balancing loss from the routed experts, if applicable during training.
+      A tuple containing
+
+      * The output array of the MoE block.
+      * The load balancing loss from the routed experts, if applicable during training.
     """
     # 1. Apply the routed experts block.
     routed_output, load_balance_loss, _ = self.routed_experts(hidden_states)
@@ -701,8 +715,8 @@ class Qwen3NextScannableBlock(nnx.Module):
   """A scannable block of Qwen3-Next decoder layers.
 
   This module contains a fixed number of heterogeneous decoder layers that form
-  a repeating pattern, as defined by `config.inhomogeneous_layer_cycle_interval`. It is
-  intended to be the body of an `nn.scan` transformation to construct the full
+  a repeating pattern, as defined by ``config.inhomogeneous_layer_cycle_interval``. It is
+  intended to be the body of an ``nn.scan`` transformation to construct the full
   decoder stack efficiently.
 
   Attributes:
@@ -753,7 +767,7 @@ class Qwen3NextScannableBlock(nnx.Module):
 
     Returns:
       A tuple containing the output of the block (the new carry) and an empty
-      value for the scan's `y` collection.
+      value for the scan's ``y`` collection.
     """
     cfg = self.config
     x = carry
@@ -781,11 +795,12 @@ class Qwen3NextScannableBlock(nnx.Module):
 class Qwen3NextDecoderLayer(nnx.Module):
   """
   This layer is a hybrid, capable of functioning as either:
+
   1. A standard attention + MoE layer.
   2. A linear attention + MoE layer.
 
   NOTE: This implementation assumes every layer contains a MoE block, which is true for
-  models like Qwen3-Next-80B-A3B where `decoder_sparse_step=1`. For models that
+  models like Qwen3-Next-80B-A3B where ``decoder_sparse_step=1``. For models that
   interleave dense and sparse MLP layers, conditional logic would be needed here.
 
   Attributes:
@@ -1157,16 +1172,16 @@ class Qwen3OmniMoeVisionPatchMerger(nnx.Module):
   """Vision patch merger that spatially merges patches using an MLP.
 
   Attributes:
-      config: Config containing model parameters
-      hidden_size: Hidden dimension after spatial merging
-      use_postshuffle_norm: Whether to apply normalization after spatial shuffle
-      dtype: Data type for computation
-      weight_dtype: Data type for weights
-      kernel_init: Initializer for kernel weights
-      rngs: RNG state for initialization
-      ln_q: LayerNorm before MLP
-      mlp_0: First MLP layer
-      mlp_2: Second MLP layer
+    config: Config containing model parameters
+    hidden_size: Hidden dimension after spatial merging
+    use_postshuffle_norm: Whether to apply normalization after spatial shuffle
+    dtype: Data type for computation
+    weight_dtype: Data type for weights
+    kernel_init: Initializer for kernel weights
+    rngs: RNG state for initialization
+    ln_q: LayerNorm before MLP
+    mlp_0: First MLP layer
+    mlp_2: Second MLP layer
   """
 
   def __init__(
@@ -1181,12 +1196,12 @@ class Qwen3OmniMoeVisionPatchMerger(nnx.Module):
     """Initializes the Qwen3Omni vision patch merger.
 
     Args:
-        config: Config containing model parameters
-        use_postshuffle_norm: Whether to apply normalization after spatial shuffle
-        dtype: Data type for computation
-        weight_dtype: Data type for weights
-        kernel_init: Initializer for kernel weights
-        rngs: RNG state for initialization
+      config: Config containing model parameters
+      use_postshuffle_norm: Whether to apply normalization after spatial shuffle
+      dtype: Data type for computation
+      weight_dtype: Data type for weights
+      kernel_init: Initializer for kernel weights
+      rngs: RNG state for initialization
     """
     self.config = config
     self.use_postshuffle_norm = use_postshuffle_norm
@@ -1237,10 +1252,10 @@ class Qwen3OmniMoeVisionPatchMerger(nnx.Module):
   def __call__(self, hidden: Array) -> Array:
     """
     Args:
-        hidden: Input tensor of shape (batch, seq_len, base_hidden_size) after spatial reordering
+      hidden: Input tensor of shape ``(batch, seq_len, base_hidden_size)`` after spatial reordering
 
     Returns:
-        Output tensor of shape (batch, seq_len//merge_size**2, out_hidden_size) - spatially merged
+      Output tensor of shape ``(batch, seq_len//merge_size**2, out_hidden_size)`` - spatially merged
     """
     # Get dimensions
     spatial_merge_size = self.config.spatial_merge_size_for_vit
@@ -1273,15 +1288,15 @@ class Qwen3OmniMoeVisionMLP(nnx.Module):
   """Vision MLP block with GELU activation.
 
   Attributes:
-      config: Config containing model parameters
-      hidden_size: Hidden dimension size
-      intermediate_size: Intermediate dimension size
-      dtype: Data type for computation
-      weight_dtype: Data type for weights
-      kernel_init: Initializer for kernel weights
-      rngs: RNG state for initialization
-      linear_fc1: First linear layer
-      linear_fc2: Second linear layer
+    config: Config containing model parameters
+    hidden_size: Hidden dimension size
+    intermediate_size: Intermediate dimension size
+    dtype: Data type for computation
+    weight_dtype: Data type for weights
+    kernel_init: Initializer for kernel weights
+    rngs: RNG state for initialization
+    linear_fc1: First linear layer
+    linear_fc2: Second linear layer
   """
 
   def __init__(
@@ -1295,11 +1310,11 @@ class Qwen3OmniMoeVisionMLP(nnx.Module):
     """Initializes the Qwen3Omni vision MLP.
 
     Args:
-        config: Config containing model parameters
-        dtype: Data type for computation
-        weight_dtype: Data type for weights
-        kernel_init: Initializer for kernel weights
-        rngs: RNG state for initialization
+      config: Config containing model parameters
+      dtype: Data type for computation
+      weight_dtype: Data type for weights
+      kernel_init: Initializer for kernel weights
+      rngs: RNG state for initialization
     """
     self.config = config
     self.dtype = dtype
@@ -1335,10 +1350,10 @@ class Qwen3OmniMoeVisionMLP(nnx.Module):
   def __call__(self, hidden_state: Array) -> Array:
     """
     Args:
-        hidden_state: Input tensor of shape (..., hidden_size) - supports packed sequences
+      hidden_state: Input tensor of shape (..., hidden_size) - supports packed sequences
 
     Returns:
-        Output tensor of shape (..., hidden_size)
+      Output tensor of shape (..., hidden_size)
     """
     hidden_state = self.linear_fc1(hidden_state)
     hidden_state = jax.nn.gelu(hidden_state)
@@ -1350,15 +1365,15 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
   """3D convolution-based patch embedding for vision inputs.
 
   Attributes:
-      config: Config containing model parameters
-      patch_size: Spatial patch size
-      temporal_patch_size: Temporal patch size
-      in_channels: Number of input channels
-      embed_dim: Embedding dimension
-      dtype: Data type for computation
-      weight_dtype: Data type for weights
-      rngs: RNG state for initialization
-      proj: Convolution projection layer
+    config: Config containing model parameters
+    patch_size: Spatial patch size
+    temporal_patch_size: Temporal patch size
+    in_channels: Number of input channels
+    embed_dim: Embedding dimension
+    dtype: Data type for computation
+    weight_dtype: Data type for weights
+    rngs: RNG state for initialization
+    proj: Convolution projection layer
   """
 
   def __init__(
@@ -1372,10 +1387,10 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
     """Initializes the Qwen3Omni vision patch embedding.
 
     Args:
-        config: Config containing model parameters
-        dtype: Data type for computation (defaults to float32 for numerical stability)
-        weight_dtype: Data type for weights (defaults to float32 for numerical stability)
-        rngs: RNG state for initialization
+      config: Config containing model parameters
+      dtype: Data type for computation (defaults to float32 for numerical stability)
+      weight_dtype: Data type for weights (defaults to float32 for numerical stability)
+      rngs: RNG state for initialization
     """
     self.config = config
     self.dtype = dtype
@@ -1403,9 +1418,10 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
   def __call__(self, hidden_states: Array) -> Array:
     """
     Args:
-        hidden_states: Input tensor of shape (batch, in_channels, temporal*patch_size, height*patch_size, width*patch_size)
+      hidden_states: Input tensor of shape ``(batch, in_channels, temporal*patch_size, height*patch_size, width*patch_size)``
+
     Returns:
-        Output tensor of shape (batch, T*H*W, embed_dim) where T, H, W are the number of patches
+      Output tensor of shape ``(batch, T*H*W, embed_dim)`` where T, H, W are the number of patches
     """
     hidden_states = jnp.transpose(hidden_states, (0, 2, 3, 4, 1))
     hidden_states = self.proj(hidden_states)
@@ -1419,17 +1435,17 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
   """Vision attention layer wrapper.
 
   Attributes:
-      config: Config containing model parameters
-      attn: Underlying attention module
+    config: Config containing model parameters
+    attn: Underlying attention module
   """
 
   def __init__(self, config: Config, *, mesh=None, rngs: nnx.Rngs = None):
     """Initializes the Qwen3Omni vision attention layer.
 
     Args:
-        config: Config containing model parameters
-        mesh: JAX device mesh for sharding
-        rngs: RNG state for initialization
+      config: Config containing model parameters
+      mesh: JAX device mesh for sharding
+      rngs: RNG state for initialization
     """
     self.config = config
     head_dim = self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit
@@ -1469,14 +1485,14 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
   ) -> Array:
     """
     Args:
-        hidden_states: Input tensor of shape (batch, T*H*W, hidden_size)
-        num_frames: Number of temporal frames (static)
-        height: Height in patches (static)
-        width: Width in patches (static)
-        deterministic: Whether to use deterministic mode (disable dropout)
+      hidden_states: Input tensor of shape ``(batch, T*H*W, hidden_size)``
+      num_frames: Number of temporal frames (static)
+      height: Height in patches (static)
+      width: Width in patches (static)
+      deterministic: Whether to use deterministic mode (disable dropout)
 
     Returns:
-        Output tensor of shape (batch, T*H*W, hidden_size)
+      Output tensor of shape ``(batch, T*H*W, hidden_size)``
     """
     # Pass through attention with static dimensions via rope_kwargs
     rope_kwargs = {
@@ -1498,21 +1514,21 @@ class Qwen3OmniMoeVisionBlock(nnx.Module):
   """Vision transformer block with attention and MLP.
 
   Attributes:
-      config: Config containing model parameters
-      ln1: LayerNorm before attention
-      ln2: LayerNorm before MLP
-      attn: Attention module
-      mlp: First MLP layer
-      mlp_out: Second MLP layer
+    config: Config containing model parameters
+    ln1: LayerNorm before attention
+    ln2: LayerNorm before MLP
+    attn: Attention module
+    mlp: First MLP layer
+    mlp_out: Second MLP layer
   """
 
   def __init__(self, config: Config, *, mesh=None, rngs: nnx.Rngs = None):
     """Initializes the Qwen3Omni vision transformer block.
 
     Args:
-        config: Config containing model parameters
-        mesh: JAX device mesh for sharding
-        rngs: RNG state for initialization
+      config: Config containing model parameters
+      mesh: JAX device mesh for sharding
+      rngs: RNG state for initialization
     """
     self.config = config
     hs = self.config.hidden_size_for_vit
@@ -1543,13 +1559,13 @@ class Qwen3OmniMoeVisionBlock(nnx.Module):
   ) -> Array:
     """
     Args:
-        x: Input tensor of shape (batch, T*H*W, hidden_size)
-        num_frames: Number of temporal frames (static)
-        height: Height in patches (static)i
-        width: Width in patches (static)
+      x: Input tensor of shape ``(batch, T*H*W, hidden_size)``
+      num_frames: Number of temporal frames (static)
+      height: Height in patches (static)
+      width: Width in patches (static)
 
     Returns:
-        Output tensor of shape (batch, T*H*W, hidden_size)
+      Output tensor of shape ``(batch, T*H*W, hidden_size)``
     """
     x = x + self.attn(self.ln1(x), num_frames=num_frames, height=height, width=width)
     y = self.ln2(x)
@@ -1563,22 +1579,22 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
   """Vision encoder with patch embedding, positional embedding, and transformer blocks.
 
   Attributes:
-      config: Config containing model parameters
-      patch_embed: Patch embedding module
-      pos_embed_interpolate: Position embedding interpolation module
-      blocks: List of transformer blocks
-      merger_list: List of patch mergers for deep supervision
-      spatial_merge_size: Size of spatial merging
-      deep_idx: Indices of layers to extract deep features from
+    config: Config containing model parameters
+    patch_embed: Patch embedding module
+    pos_embed_interpolate: Position embedding interpolation module
+    blocks: List of transformer blocks
+    merger_list: List of patch mergers for deep supervision
+    spatial_merge_size: Size of spatial merging
+    deep_idx: Indices of layers to extract deep features from
   """
 
   def __init__(self, config: Config, *, mesh=None, rngs: nnx.Rngs = None):
     """Initializes the Qwen3Omni vision encoder.
 
     Args:
-        config: Config containing model parameters
-        mesh: JAX device mesh for sharding
-        rngs: RNG state for initialization
+      config: Config containing model parameters
+      mesh: JAX device mesh for sharding
+      rngs: RNG state for initialization
     """
     self.config = config
     self.patch_embed = Qwen3OmniMoeVisionPatchEmbed(config=config, rngs=rngs)
@@ -1616,13 +1632,16 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
   ):
     """
     Args:
-        hidden_states: Input visual tokens of shape (batch, in_channels, T*patch_size, H*patch_size, W*patch_size)
-        deterministic: Whether to use deterministic mode
+      hidden_states: Input visual tokens of shape ``(batch, in_channels, T*patch_size, H*patch_size, W*patch_size)``
+      deterministic: Whether to use deterministic mode
 
     Returns:
-        Tuple of:
-        - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
-        - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
+      Tuple of
+
+      encoder_output
+        shape ``(batch, T*H*W, hidden_size_for_vit)``
+      deep_features
+        List of intermediate features, each of shape ``(batch, T*H*W, out_hidden_size)``
     """
     _, _, num_frames, height, width = hidden_states.shape
     num_frames = num_frames // self.config.temporal_patch_size_for_vit
@@ -1657,16 +1676,16 @@ class Qwen3OmniMoeVisionProjector(nnx.Module):
   """Projection layer that converts vision encoder output to model embedding space.
 
   Attributes:
-      config: Config containing model parameters
-      merger: Patch merger for spatial reduction
+    config: Config containing model parameters
+    merger: Patch merger for spatial reduction
   """
 
   def __init__(self, config: Config, *, rngs: nnx.Rngs = None):
     """Initializes the Qwen3Omni vision projector.
 
     Args:
-        config: Config containing model parameters
-        rngs: RNG state for initialization
+      config: Config containing model parameters
+      rngs: RNG state for initialization
     """
     self.config = config
     self.merger = Qwen3OmniMoeVisionPatchMerger(config=config, use_postshuffle_norm=False, rngs=rngs)
@@ -1674,10 +1693,10 @@ class Qwen3OmniMoeVisionProjector(nnx.Module):
   def __call__(self, hidden_states: Array) -> Array:
     """
     Args:
-        hidden_states: Encoder output of shape (batch, T*H*W, hidden_size_for_vit)
+      hidden_states: Encoder output of shape ``(batch, T*H*W, hidden_size_for_vit)``
 
     Returns:
-        Projected output of shape (batch, T*H*W//merge_size**2, out_hidden_size_for_vit)
+      Projected output of shape ``(batch, T*H*W//merge_size**2, out_hidden_size_for_vit)``
     """
     output = self.merger(hidden_states)
     return output

@@ -43,11 +43,12 @@ def flash_attention_block_masked(
   """Computes masked flash attention using block-sparse masking.
 
   Args:
-    q: Query tensor with shape (batch_size, num_kv_heads,
-      num_q_heads_per_kv_head, q_seq_len, head_dim).
-    k: Key tensor with shape (batch_size, num_kv_heads, kv_seq_len, head_dim).
-    v: Value tensor with shape (batch_size, num_kv_heads, kv_seq_len,
-      v_head_dim).
+    q: Query tensor with shape ``(batch_size, num_kv_heads,
+      num_q_heads_per_kv_head, q_seq_len, head_dim)``.
+    k: Key tensor with shape
+      ``(batch_size, num_kv_heads, kv_seq_len, head_dim)``.
+    v: Value tensor with shape
+      ``(batch_size, num_kv_heads, kv_seq_len, v_head_dim)``.
     segment_ids: SegmentIds are a mechanism to ensure that there is no
       cross-attention between segments (fraction of a sequence) that have been
       concatenated together into a sequence. Each array is a list of ids
@@ -55,21 +56,23 @@ def flash_attention_block_masked(
       other. It stores the segment ids of the query and key/value sequences.
     block_kv: Block size for the key/value sequence dimension.
     block_q: Block size for the query sequence dimension.
-    mask: The full attention mask with shape of (q_seq_len, kv_seq_len). This
-      mask will be used for all batches.
+    mask: The full attention mask with shape of ``(q_seq_len, kv_seq_len)``.
+      This mask will be used for all batches.
     mask_value: The value to use for masked-out attention scores.
     cap: Optional cap for attention logits. This helps to prevent extremely
-      large logits: capped_logits = jnp.tanh(logits / attn_logits_soft_cap) *
-      attn_logits_soft_cap
+      large logits: ``capped_logits = jnp.tanh(logits / attn_logits_soft_cap) *
+      attn_logits_soft_cap``
     save_residuals: Whether to save residuals. If True, returns a tuple of
-      (output, dict=(logsumexp, max_logits)). Both `logsumexp` and `max_logits`
-      are of shape (batch_size, num_kv_heads, num_q_heads // num_kv_heads,
-      q_seq_len).
+      ``(output, dict=(logsumexp, max_logits))``. Both ``logsumexp`` and
+      ``max_logits`` are of shape
+      ``(batch_size, num_kv_heads, num_q_heads // num_kv_heads, q_seq_len)``.
 
   Returns:
-    If save_residuals is True, returns a tuple containing:
-      - The output of the attention computation.
-      - A dict of (logsumexp, max_logits)
+    If ``save_residuals`` is True, returns a tuple containing
+
+    * The output of the attention computation.
+    * A dict of (logsumexp, max_logits)
+
     Otherwise, returns the output of the attention computation.
   """
   batch_size, num_q_heads, q_seq_len, qk_head_dim_size = q.shape
@@ -257,7 +260,8 @@ def mask_blocker(mask: jnp.ndarray, block_q: int, block_kv: int) -> jnp.ndarray:
   """Creates a blocked mask from a full mask.
 
   Args:
-    mask: The attention mask with shape of (batch_size, q_seq_len, kv_seq_len).
+    mask: The attention mask with shape of
+      ``(batch_size, q_seq_len, kv_seq_len)``.
     block_q: Block size for the query sequence dimension.
     block_kv: Block size for the key/value sequence dimension.
 

@@ -41,8 +41,8 @@ def get_input_data_sharding(config, mesh):
 
 def maybe_shard_with_name(inputs, named_sharding, shard_mode, debug_sharding=False, extra_stack_level=0):
   """
-  In auto shardmode, this function hints inputs follow given named_sharding.
-  In explicit shardmode, this function enforces inputs following named_sharding.
+  In auto shardmode, this function hints inputs follow given ``named_sharding``.
+  In explicit shardmode, this function enforces inputs following ``named_sharding``.
   """
   if inputs is None:
     return None
@@ -64,7 +64,7 @@ def maybe_shard_with_logical(
     inputs, logical_axes, mesh, shard_mode, rules=None, debug_sharding=False, extra_stack_level=0
 ):
   """
-  A wrapper of maybe_shard_with_name when logical axes are inputs
+  A wrapper of ``maybe_shard_with_name`` when logical axes are inputs
   """
   if inputs is None:
     return None
@@ -92,7 +92,7 @@ def remove_size_one_mesh_axis(spec, mesh):
   Removes mesh axes from a PartitionSpec (P) where the axis size is 1.
 
   This is a common optimization to simplify sharding by excluding redundant axes.
-  Function originally from jax._src.core:
+  Function originally from ``jax._src.core``:
   https://github.com/jax-ml/jax/blob/main/jax/_src/core.py
   """
   if spec is None:
@@ -143,14 +143,14 @@ def create_sharding(mesh, logical_names, rules=None):
 
 def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
   """
-  Extracts the set of mesh axis names that a tensor's PartitionSpec uses.
+  Extracts the set of mesh axis names that a tensor's ``PartitionSpec`` uses.
 
-  This function inspects a tensor's sharding specification (PartitionSpec) and
+  This function inspects a tensor's sharding specification (``PartitionSpec``) and
   identifies which mesh axes are actively used for sharding. If a tensor is not
   sharded (i.e., fully replicated), the resulting set will be empty.
 
   Args:
-    tensor_sharding_spec: The PartitionSpec of a tensor, which defines how it's partitioned across the mesh.
+    tensor_sharding_spec: The ``PartitionSpec`` of a tensor, which defines how it's partitioned across the mesh.
     It can be None or contain strings and iterables representing the mesh axes.
     all_mesh_axis_names: A collection of all available mesh axis names in the current device mesh.
 
@@ -217,11 +217,14 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
     valid_target_mesh_axes: A set of mesh axis names that are considered valid targets for sharding.
 
   Returns:
-    A tuple containing:
-      - unsharded_params_total_size (int): The total size (number of elements) of all parameters found to be
-        unsharded on the target axes.
-      - problematic_tensors_details (list): A list of dictionaries, where each
-        dictionary contains details about a tensor that is not sharded on any of the target axes.
+    A tuple containing
+
+    unsharded_params_total_size: int
+      The total size (number of elements) of all parameters found to be
+      unsharded on the target axes.
+    problematic_tensors_details: list
+      A list of dictionaries, where each dictionary contains details about a
+      tensor that is not sharded on any of the target axes.
   """
   unsharded_params_total_size = 0  # Initialize a counter for the size of unsharded parameters.
   problematic_tensors_details = []  # Initialize a list to store details of problematic tensors.
@@ -267,7 +270,7 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
 
 def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance, problematic_tensors_details):
   """
-  Raises an AssertionError if the percentage of unsharded parameters exceeds the given tolerance.
+  Raises an ``AssertionError`` if the percentage of unsharded parameters exceeds the given tolerance.
 
   This function calculates the proportion of model parameters that are unsharded
   and compares it against a specified tolerance. If the tolerance is exceeded,
@@ -361,13 +364,13 @@ def add_data_to_sharding(mesh, path, aval, sharding):
     mesh: The device mesh
     path: JAX tree path to the value being sharded
     aval: Abstract value with shape information
-    sharding: Current NamedSharding to potentially augment
+    sharding: Current ``NamedSharding`` to potentially augment
 
   Returns:
     NamedSharding: Updated sharding with 'data' dimension added, or original if unchanged
 
   Raises:
-    AssertionError: If sharding is not NamedSharding or shape cannot be sharded
+    AssertionError: If sharding is not ``NamedSharding`` or shape cannot be sharded
   """
   if not isinstance(sharding, jax.sharding.NamedSharding):
     raise AssertionError(f"Expected NamedSharding, found {sharding} of {type(sharding)=} at {jax.tree_util.keystr(path)}")
@@ -408,10 +411,11 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
     state_mesh_shardings: Train state mesh shardings containing params and opt_state
 
   Returns:
-    A tuple of (prev_params_shardings, updated_state_mesh_shardings):
-      - prev_params_shardings: Original parameter shardings before the update
-      - updated_state_mesh_shardings: State mesh shardings with updated params field
-        (unchanged if shard_optimizer_over_data is False)
+    A tuple of ``(prev_params_shardings, updated_state_mesh_shardings)``
+
+    * prev_params_shardings: Original parameter shardings before the update
+    * updated_state_mesh_shardings: State mesh shardings with updated params field
+      (unchanged if ``shard_optimizer_over_data`` is False)
   """
   prev_params_shardings = state_mesh_shardings.params
   if config.shard_optimizer_over_data:
@@ -557,12 +561,12 @@ def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
   specification is used as a target layout for an all-gather operation.
 
   Args:
-    full_logical: A PyTree of logical PartitionSpecs for the model parameters.
+    full_logical: A PyTree of logical ``PartitionSpecs`` for the model parameters.
     mesh: The JAX device mesh.
     logical_axis_rules: Rules for converting logical axes to physical mesh axes.
 
   Returns:
-    A PyTree of physical `jax.sharding.NamedSharding` objects that describe a
+    A PyTree of physical ``jax.sharding.NamedSharding`` objects that describe a
     layout where parameters are fully gathered (replicated) across the 'fsdp'
     mesh axis.
   """
@@ -576,17 +580,18 @@ def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
 
 def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, shard_mode):
   """Performs an all-gather on FSDP-sharded variables via a sharding constraint.
+
   This function triggers an all-gather operation on the model's parameters.
   It does so by applying a sharding constraint that specifies a fully
   replicated layout.
 
   The JAX compiler satisfies this constraint by automatically inserting the
-  necessary `all-gather` collective communication operations into the
+  necessary ``all-gather`` collective communication operations into the
   computation graph, effectively gathering the sharded weights.
 
   Args:
     variables: The PyTree of model parameters, currently sharded across devices.
-    sharding_info: The logical partition spec of the currently sharded `variables`.
+    sharding_info: The logical partition spec of the currently sharded ``variables``.
     mesh: The JAX device mesh.
     logical_axis_rules: Rules for converting logical axes to physical mesh axes.
     shard_mode: auto or explicit shard mode.

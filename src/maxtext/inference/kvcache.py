@@ -201,7 +201,7 @@ def kv_cache_as_linen(
     name: The name of the Linen module.
 
   Returns:
-    A Linen module that wraps the NNX `KVCache` module.
+    A Linen module that wraps the NNX ``KVCache`` module.
   """
   return nnx_wrappers.to_linen(
       KVCache,
@@ -638,14 +638,15 @@ class KVCache(nnx.Module):
     """Adds a single token's results to the ar kv cache
 
     Args:
-        one_token_key (Array): Key of one token to add to the cache
-        one_token_value (Array): Value of one token to add to the cache
-        cached_ar_key (tuple[nnx.Cache, nnx.Cache|None],): Cached keys to add new token key to, possibly with scale
-        cached_ar_value (tuple[nnx.Cache, nnx.Cache|None],: Cached values to add new token value to, possible with scale
-        one_hot_indices (Array): Location of the new token within the cache
+      one_token_key (Array): Key of one token to add to the cache
+      one_token_value (Array): Value of one token to add to the cache
+      cached_ar_key (tuple[nnx.Cache, nnx.Cache|None],): Cached keys to add new token key to, possibly with scale
+      cached_ar_value (tuple[nnx.Cache, nnx.Cache|None],): Cached values to add new token value to, possible with scale
+      one_hot_indices (Array): Location of the new token within the cache
 
     Returns:
-        tuple[Array, Array]: Updated caches for key and value with new token info added
+      tuple[Array, Array]:
+        Updated caches for key and value with new token info added
     """
 
     cached_key, cached_key_scale = key_caches
@@ -750,7 +751,7 @@ class KVCache(nnx.Module):
       use_ragged_attention: bool = False,
   ):
     """In autoregressive mode, we update the cache for this entry and
-       then return the full cache.
+    then return the full cache.
 
     Args:
       key: in shape [b, 1, n, d].
@@ -758,7 +759,8 @@ class KVCache(nnx.Module):
       decoder_segment_ids: [b, 1] -- marking segment ids for tokens
 
     Returns:
-      tuple of (key, value, segment_id) for both prefill and ar cache,
+      tuple of ``(key, value, segment_id)`` for both prefill and ar cache
+
     Raises:
       ValueError: when key/value shape is not [batch, 1, num_heads, heads_dim].
     """
@@ -818,8 +820,8 @@ class KVCache(nnx.Module):
   ) -> tuple:
     """KV cache takes the current state and updates the state accordingly.
 
-    The key and value have dimension [b, s, n_kv, d],
-    but we cache them with a reshape as defined in *_axis_order config as a TPU
+    The key and value have dimension ``[b, s, n_kv, d]``,
+    but we cache them with a reshape as defined in ``*_axis_order`` config as a TPU
     fusion optimization. This also enables the "scatter via one-hot
     broadcast" trick, which means we do a one-hot broadcast instead of a
     scatter/gather operations, resulting in a 3-4x speedup in practice.
@@ -884,7 +886,7 @@ def mla_kv_cache_as_linen(
     name: The name of the Linen module.
 
   Returns:
-    A Linen module that wraps the NNX `MlaKVCache` module.
+    A Linen module that wraps the NNX ``MlaKVCache`` module.
   """
   return nnx_wrappers.to_linen(
       MlaKVCache,

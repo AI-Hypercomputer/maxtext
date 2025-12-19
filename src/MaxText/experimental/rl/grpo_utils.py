@@ -51,7 +51,7 @@ def compute_log_probs(
 ):
   """Computes per-token log-probabilities for a sequence of tokens.
 
-  This helper calls model.apply (with dropout enabled if is_train) to obtain
+  This helper calls ``model.apply`` (with dropout enabled if is_train) to obtain
   logits and then computes per-token log-probabilities.
 
   Note: We assume that tokens have been already appropriately padded.
@@ -69,11 +69,12 @@ def compute_log_probs(
     rngs: JAX PRNG keys for dropout.
 
   Returns:
-    A tuple containing:
-      - token_log_probs: A [B, L-1] array of log-probabilities for each token
-        in the completion.
-      - intermediate_outputs: A dictionary of intermediate activations from the
-        model.
+    A tuple containing
+
+    token_log_probs
+      A [B, L-1] array of log-probabilities for each token in the completion.
+    intermediate_outputs
+      A dictionary of intermediate activations from the model.
   """
   if not is_train:
     params = jax.lax.stop_gradient(params)
@@ -122,7 +123,7 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
     data: A dictionary containing the input prompts and their true lengths.
 
   Returns:
-    The input `data` dictionary updated with the generated completions,
+    The input ``data`` dictionary updated with the generated completions,
     segmentations, positions, and log-probabilities.
   """
   data[config.train_data_columns] = np.asarray(
@@ -253,7 +254,7 @@ def concatenate_prompt_with_completions(config, tokenizer_model, data, completio
       prompts.
 
   Returns:
-    The `data` dictionary updated with the concatenated sequences and new
+    The ``data`` dictionary updated with the concatenated sequences and new
     segmentation and position information.
   """
 
@@ -305,7 +306,7 @@ def pad_or_trim(arr, max_target_length, pad_token):
     pad_token: The token ID to use for padding.
 
   Returns:
-    A 2D numpy array of shape `(len(arr), max_target_length)`.
+    A 2D numpy array of shape ``(len(arr), max_target_length)``.
   """
   padded = np.array(
       [
@@ -332,7 +333,7 @@ def filter_and_split(config, example_batch, num_groups, global_batch_size_per_gr
 
   Returns:
     A list of dictionaries. Each dictionary has the same keys as
-    `example_batch` but with values being arrays sliced for that group.
+    ``example_batch`` but with values being arrays sliced for that group.
     Returns an empty list if not enough samples to form the required groups.
   """
   if not example_batch:  # Handles None or empty dict

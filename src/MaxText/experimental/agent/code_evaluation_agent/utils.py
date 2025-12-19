@@ -32,7 +32,7 @@ def get_assigned_names(node):
   reconstruct a readable string.
 
   Args:
-    node: An ast.Assign node whose `targets` will be inspected.
+    node: An ``ast.Assign`` node whose `targets` will be inspected.
 
   Returns:
     A list of strings representing targets in left-to-right order.
@@ -50,18 +50,19 @@ def get_assigned_names(node):
 
 
 def get_last_defined_module(code_str):
-  """Returns the name of the last defined class or function in a string of Python code.
+  """Returns the name of the last defined class or function in a string of
+  Python code.
 
-  This function parses the provided code string into an Abstract Syntax Tree (AST)
-  and iterates through the top-level nodes to find the last `ast.FunctionDef` or
-  `ast.ClassDef` node.
+  This function parses the provided code string into an Abstract Syntax Tree
+  (AST) and iterates through the top-level nodes to find the last
+  ``ast.FunctionDef`` or ``ast.ClassDef`` node.
 
   Args:
-      code_str: A string containing Python code.
+    code_str: A string containing Python code.
 
   Returns:
-      The name of the last defined function or class, or a syntax error message
-      if the code is invalid.
+    The name of the last defined function or class, or a syntax error message
+    if the code is invalid.
   """
   try:
     tree = ast.parse(code_str)
@@ -81,22 +82,29 @@ def get_last_defined_module(code_str):
 def run_pytest_capture_output(test_file: str, code_folder: None | str = None) -> tuple[str, int, bool, int, int]:
   """Runs a specified pytest test file and captures the output.
 
-  This function temporarily changes the current working directory to the specified
-  `code_folder` to ensure tests can find the code they need to import, then
-  changes back upon completion. It uses `redirect_stdout` and `redirect_stderr`
-  to capture all print statements and error messages from the test run.
+  This function temporarily changes the current working directory to the
+  specified ``code_folder`` to ensure tests can find the code they need to
+  import, then changes back upon completion. It uses ``redirect_stdout`` and
+  ``redirect_stderr`` to capture all print statements and error messages from
+  the test run.
 
   Args:
-      test_file: The path to the pytest file to run.
-      code_folder: The directory to change into before running the tests.
+    test_file: The path to the pytest file to run.
+    code_folder: The directory to change into before running the tests.
 
   Returns:
-      A tuple containing:
-          - output (str): The complete stdout and stderr from the test run.
-          - exit_code (int): The exit code of the pytest process (0 for success, non-zero otherwise).
-          - is_dependency_error (bool): True if a common dependency error was found in the output.
-          - passed (int): The number of tests that passed.
-          - failed (int): The number of tests that failed.
+    A tuple containing
+
+    output: str
+      The complete stdout and stderr from the test run.
+    exit_code: int
+      The exit code of the pytest process (0 for success, non-zero otherwise).
+    is_dependency_error: bool
+      True if a common dependency error was found in the output.
+    passed: int
+      The number of tests that passed.
+    failed: int
+      The number of tests that failed.
   """
   current_path = os.path.abspath(".")
   try:

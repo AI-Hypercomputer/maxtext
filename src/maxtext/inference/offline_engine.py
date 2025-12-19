@@ -15,24 +15,25 @@
 """
 Offline Inference Engine
 
-Example usage:
-    offline_engine = OfflineEngine(
-        config=maxtext_config,
-        params=None,
-        enable_batch_prefill=True,
-    )
+Example::
 
-    input_data = [
-        jax.numpy.arange(80),
-        jax.numpy.arange(90),
-        jax.numpy.arange(100),
-    ]
+  offline_engine = OfflineEngine(
+      config=maxtext_config,
+      params=None,
+      enable_batch_prefill=True,
+  )
 
-    results = offline_engine.batch_inference(input_data)
+  input_data = [
+      jax.numpy.arange(80),
+      jax.numpy.arange(90),
+      jax.numpy.arange(100),
+  ]
 
-    for completion_output in results:
-        text = offline_engine.tokenizer.decode(completion_output.token_ids)
-        max_logging.log(f"Output: {text}")
+  results = offline_engine.batch_inference(input_data)
+
+  for completion_output in results:
+      text = offline_engine.tokenizer.decode(completion_output.token_ids)
+      max_logging.log(f"Output: {text}")
 """
 
 import os
@@ -152,11 +153,11 @@ class PrefillHelper:
     """Initialize the PrefillHelper.
 
     Args:
-        type: The type of prefill processor to use ("default" or "batch")
-        engine: The MaxEngine instance to use for prefill operations
-        prefill_lengths: list of prompt lengths to support
-        batch_prefill_max_batch_size: Maximum number of prompts in one packed
-            sequence for batch prefill
+      type: The type of prefill processor to use ("default" or "batch")
+      engine: The MaxEngine instance to use for prefill operations
+      prefill_lengths: list of prompt lengths to support
+      batch_prefill_max_batch_size: Maximum number of prompts in one packed
+        sequence for batch prefill
     """
     self._type = prefill_type
     self.engine = engine
@@ -212,13 +213,13 @@ class PrefillHelper:
     """Process an input through the appropriate prefill processor.
 
     Args:
-        model_params: Model parameters for inference
-        decode_state: Current decode state
-        decode_slot: The decode slot index to use for this input
-        input_id: Unique identifier for this input
-        input_tokens_padded: Padded token array for the input
-        input_true_length: Actual length of the input before padding
-        prefill_done: Callback function called when prefill completes
+      model_params: Model parameters for inference
+      decode_state: Current decode state
+      decode_slot: The decode slot index to use for this input
+      input_id: Unique identifier for this input
+      input_tokens_padded: Padded token array for the input
+      input_true_length: Actual length of the input before padding
+      prefill_done: Callback function called when prefill completes
     """
     padded_length = len(input_tokens_padded)
     # Use default processor if configured or if input is already at max length
@@ -259,9 +260,9 @@ class PrefillHelper:
     """Finalize prefill operations, flushing any pending inputs.
 
     Args:
-        model_params: Model parameters for inference
-        decode_state: Current decoder state
-        prefill_done: Callback function called when prefill completes
+      model_params: Model parameters for inference
+      decode_state: Current decoder state
+      prefill_done: Callback function called when prefill completes
     """
     if self._type == PrefillType.DEFAULT:
       # No finalization needed for default processor
@@ -276,34 +277,37 @@ class InferenceWorker:
   InferenceWorker runs continuous batching over
   a queue of inputs.
 
-    Continuous batching workflow:
-    1. Process inputs one at a time from queue
-    2. Prefill input and insert into KV cache
-    3. Continue prefilling until enough samples for batch decode
-    4. Decode until at least one sequence completes
-    5. Refill newly available decode slots with prefill
-    6. Repeat until all sequences complete
+  Continuous batching workflow:
 
-    Prefill Packing:
-        When enable_batch_prefill is True, the prefill processor
-        will pack multiple inputs into a single sequence before
-        doing the prefill.
+  1. Process inputs one at a time from queue
+  2. Prefill input and insert into KV cache
+  3. Continue prefilling until enough samples for batch decode
+  4. Decode until at least one sequence completes
+  5. Refill newly available decode slots with prefill
+  6. Repeat until all sequences complete
 
-        There are multiple buckets for packed sequences, where each bucket
-        contains inputs with the same padded length. Only inputs with the same
-        padded length can be packed together.
+  **Prefill Packing:**
 
-        It is important to sort the inputs by padded length so that the
-        buckets fill up quickly.
+  When ``enable_batch_prefill`` is True, the prefill processor
+  will pack multiple inputs into a single sequence before
+  doing the prefill.
 
-        When a decode slot frees up, the prefill processor will add the
-        sequence to a bucket. If the bucket becomes full, the packed sequence
-        will be prefilled.
+  There are multiple buckets for packed sequences, where each bucket
+  contains inputs with the same padded length. Only inputs with the same
+  padded length can be packed together.
 
-        E.g.
-        Bucket for length 64: [...seq1, ...seq2, ...seq3, ...seq4]
-        Bucket for length 128: [...seq1, ...seq2]
-        Bucket for length 256: [...seq1]
+  It is important to sort the inputs by padded length so that the
+  buckets fill up quickly.
+
+  When a decode slot frees up, the prefill processor will add the
+  sequence to a bucket. If the bucket becomes full, the packed sequence
+  will be prefilled.
+
+  E.g.
+
+  * Bucket for length 64: ``[...seq1, ...seq2, ...seq3, ...seq4]``
+  * Bucket for length 128: ``[...seq1, ...seq2]``
+  * Bucket for length 256: ``[...seq1]``
 
   """
 
@@ -326,20 +330,20 @@ class InferenceWorker:
   ):
     """
     Args:
-        config: MaxText configuration
-        params: Model parameters, if None, the params will be loaded from the config
-        min_decode_steps: Minimum number of decode steps to run at once
-        enable_batch_prefill: Whether to enable batch prefill
-        devices: JAX devices to use for this worker
-        tokenizer: Tokenizer to use
-        eos_ids: End-of-sequence token IDs
-        prefill_lengths: list of supported prefill lengths
-        max_decode_length: Maximum tokens to generate per sequence
-        batch_prefill_max_batch_size: Maximum batch size for batch prefill
-        run_as_a_thread: Whether to run in a separate thread
-        rng: Random number generator key
-        mesh: JAX mesh for distributed computation
-        is_pw_reshard: Whether to use Pathways for resharding
+      config: MaxText configuration
+      params: Model parameters, if None, the params will be loaded from the config
+      min_decode_steps: Minimum number of decode steps to run at once
+      enable_batch_prefill: Whether to enable batch prefill
+      devices: JAX devices to use for this worker
+      tokenizer: Tokenizer to use
+      eos_ids: End-of-sequence token IDs
+      prefill_lengths: list of supported prefill lengths
+      max_decode_length: Maximum tokens to generate per sequence
+      batch_prefill_max_batch_size: Maximum batch size for batch prefill
+      run_as_a_thread: Whether to run in a separate thread
+      rng: Random number generator key
+      mesh: JAX mesh for distributed computation
+      is_pw_reshard: Whether to use Pathways for resharding
     """
     # Configurations
     self.config = config
@@ -403,10 +407,10 @@ class InferenceWorker:
     """Initialize the MaxEngine.
 
     Args:
-        params: Model parameters
+      params: Model parameters
 
     Returns:
-        tuple of (params, engine)
+      tuple of (params, engine)
     """
     start_time = time.time()
     engine = MaxEngine(self.config, self.devices)
@@ -418,7 +422,7 @@ class InferenceWorker:
     """Initialize the tokenizer.
 
     Returns:
-        Initialized tokenizer
+      Initialized tokenizer
     """
     if self.eos_ids is None and self.tokenizer is None:
       tokenizer_params = self.engine.get_tokenizer()
@@ -438,7 +442,7 @@ class InferenceWorker:
     """Reset all worker state for a new inference run.
 
     This allows reusing the same InferenceWorker instance across multiple
-    batch_inference calls without recreating the expensive engine components.
+    ``batch_inference`` calls without recreating the expensive engine components.
     """
     max_logging.log("Resetting InferenceWorker state")
 
@@ -460,8 +464,8 @@ class InferenceWorker:
     """Start the inference process.
 
     Args:
-        data: list of InputData objects containing input sequences
-        rng: Random number generator key. If None, the previous key will be used.
+      data: list of InputData objects containing input sequences
+      rng: Random number generator key. If None, the previous key will be used.
     """
 
     # Reset state for new inference run
@@ -488,7 +492,7 @@ class InferenceWorker:
     """Run inference on a batch of inputs.
 
     Args:
-        data: list of InputData objects containing input sequences
+      data: list of InputData objects containing input sequences
     """
 
     # Start detokenization thread
@@ -574,9 +578,9 @@ class InferenceWorker:
     This function queues the prefill data for background processing.
 
     Args:
-        prefill_result: list of (token, slot) tuples
-        prompt_ids: list of prompt IDs
-        decode_state: Updated decode state
+      prefill_result: list of (token, slot) tuples
+      prompt_ids: list of prompt IDs
+      decode_state: Updated decode state
     """
     # Update decode state
     self.decode_state = decode_state
@@ -605,8 +609,8 @@ class InferenceWorker:
   def decode(self):
     """Run decode steps on current decoder state.
 
-    Performs `self.min_decode_steps` decode operations
-    and queues results for background processing.
+    Performs ``self.min_decode_steps`` decode operations and queues results for
+    background processing.
     """
 
     for i in range(self.min_decode_steps):
@@ -633,7 +637,7 @@ class InferenceWorker:
   def background_detokenization(self):
     """Background thread that handles all GPU-to-CPU transfers and token emission.
 
-    This thread processes DetokenizationTask objects from the queue,
+    This thread processes ``DetokenizationTask`` objects from the queue,
     performs the numpy conversions, emits tokens, and manages decode slots.
     """
     max_logging.log("Inference worker: starting detokenization thread")
@@ -712,13 +716,13 @@ class InferenceWorker:
     determines if generation should terminate.
 
     Args:
-        prompt_id: ID of the prompt
-        result_token: Token to emit
-        log_prob: Log probability of the token
-        prompt_logp: Log probabilities for the prompt tokens
+      prompt_id: ID of the prompt
+      result_token: Token to emit
+      log_prob: Log probability of the token
+      prompt_logp: Log probabilities for the prompt tokens
 
     Returns:
-        True if this token signals the end of generation, False otherwise
+      True if this token signals the end of generation, False otherwise
     """
     # Skip if sequence already completed
     if prompt_id in self.completed_sequences:
@@ -758,29 +762,29 @@ class OfflineEngine:
     """Initialize the OfflineEngine.
 
     Args:
-        config: The MaxText config object which will be used to
-          create MaxEngine instance(s).
-        params: Model parameters (loaded from engine if None)
-        enable_batch_prefill: Whether to use prefill packing.
-            config.scan_layers must be False if this is True
-        min_decode_steps: Number of decode steps to perform at a time,
-            before checking for completion.
-        eos_ids: list of EOS token IDs for checking sequence completion.
-          If None, the tokenizer's EOS token will be used.
-        tokenizer: Tokenizer instance for encoding/decoding text. If None,
-          will be created using the config if eos_ids is not provided.
-        prefill_lengths: list of expected prefill lengths, or "auto" to
-            automatically determine appropriate lengths from the engine
-            config. Input sequences will be padded to the nearest length
-            in this list.
-        batch_prefill_max_batch_size: Maximum number of inputs to pack
-          into a single prefill. This is only used when enable_batch_prefill
-          is True.
-        mesh: JAX Mesh object. Use this
-          argument if you want to use only some of the devices for OfflineEngine and
-          reserve the rest for other tasks. If None, OfflineEngine will create the mesh
-          automatically.
-        rng: Random number generator key. If None, a new key will be created.
+      config: The MaxText config object which will be used to
+        create MaxEngine instance(s).
+      params: Model parameters (loaded from engine if None)
+      enable_batch_prefill: Whether to use prefill packing.
+          config.scan_layers must be False if this is True
+      min_decode_steps: Number of decode steps to perform at a time,
+          before checking for completion.
+      eos_ids: list of EOS token IDs for checking sequence completion.
+        If None, the tokenizer's EOS token will be used.
+      tokenizer: Tokenizer instance for encoding/decoding text. If None,
+        will be created using the config if eos_ids is not provided.
+      prefill_lengths: list of expected prefill lengths, or "auto" to
+          automatically determine appropriate lengths from the engine
+          config. Input sequences will be padded to the nearest length
+          in this list.
+      batch_prefill_max_batch_size: Maximum number of inputs to pack
+        into a single prefill. This is only used when enable_batch_prefill
+        is True.
+      mesh: JAX Mesh object. Use this
+        argument if you want to use only some of the devices for OfflineEngine and
+        reserve the rest for other tasks. If None, OfflineEngine will create the mesh
+        automatically.
+      rng: Random number generator key. If None, a new key will be created.
     """
     max_logging.log("Initializing OfflineEngine")
     # Configurations
@@ -843,13 +847,13 @@ class OfflineEngine:
     """Run inference on a batch of inputs.
 
     Args:
-        data: list of InputData objects, or JAX or numpy arrays.
-            If input is JAX or numpy array, it must not contain padding tokens.
-        desc: Description string for logging
-        rng: Random number generator key. If None, the previous key will be used.
+      data: list of InputData objects, or JAX or numpy arrays.
+        If input is JAX or numpy array, it must not contain padding tokens.
+      desc: Description string for logging
+      rng: Random number generator key. If None, the previous key will be used.
 
     Returns:
-        list of CompletionOutput objects, one for each input in data
+      list of ``CompletionOutput`` objects, one for each input in data
     """
     data = self.prepare_data(data)
 
@@ -859,10 +863,10 @@ class OfflineEngine:
     """Pad and if batch prefill is enabled, sort data by length.
 
     Args:
-        data: list of InputData objects, or JAX or numpy arrays
+      data: list of InputData objects, or JAX or numpy arrays
 
     Returns:
-        list of prepared InputData objects
+      list of prepared InputData objects
     """
     # Convert JAX arrays to numpy arrays
     if isinstance(data[0], jax.Array):
@@ -888,14 +892,14 @@ class OfflineEngine:
     return data
 
   def pad_data(self, data: list[InputData]) -> list[InputData]:
-    """For each input, pad it to the next length in self.prefill_lengths
+    """For each input, pad it to the next length in ``self.prefill_lengths``
     that is greater than or equal to its true length.
 
     Args:
-        data: list of InputData objects
+      data: list of InputData objects
 
     Returns:
-        list of padded InputData objects
+      list of padded InputData objects
     """
     padded_data = []
 

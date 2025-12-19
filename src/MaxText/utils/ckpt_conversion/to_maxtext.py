@@ -17,24 +17,29 @@ This script converts a HuggingFace model checkpoint to a MaxText-compatible
 Orbax checkpoint.
 
 Key Parameters (to be set in the config file or as command-line overrides):
-  model_name: (Required) The name of the model to convert (e.g., "gemma2-2b").
-              Must be a key in `MaxText.utils.ckpt_conversion.utils.utils.HF_IDS`.
-  base_output_directory: (Optional) The directory where the converted HuggingFace
-                         checkpoint will be saved. Can be a local path, a GCS
-                         path (gs://...), or a HuggingFace Hub repo ID (hf://...).
-                         Defaults to "./mt_output/".
-  scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
-               This must match the training configuration of the checkpoint.
-  lazy_load: (bool) If True, uses an on-demand loading strategy to minimize RAM
-             usage during conversion. Recommended if, 2 * model_size (GB) >= system RAM
-             Defaults to False.
+
+model_name (Required)
+  The name of the model to convert (e.g., "gemma2-2b"). Must be a key in
+  ``MaxText.utils.ckpt_conversion.utils.utils.HF_IDS``.
+base_output_directory (Optional)
+  The directory where the converted HuggingFace checkpoint will be saved. Can be
+  a local path, a GCS path (gs://...), or a HuggingFace Hub repo ID (hf://...).
+  Defaults to "./mt_output/".
+scan_layers: bool
+  Whether the MaxText model was trained with scanned layers. This must match the
+  training configuration of the checkpoint.
+lazy_load: bool
+  If True, uses an on-demand loading strategy to minimize RAM usage during
+  conversion. Recommended if, 2 * model_size (GB) >= system RAM Defaults to
+  False.
 
 Environment Variables:
-  HF_AUTH_TOKEN: (Required) HuggingFace authentication token, needed to
-                 download models from HuggingFace Hub.
+  HF_AUTH_TOKEN (Required)
+    HuggingFace authentication token, needed to download models from HuggingFace
+    Hub.
 
 Example Usage:
-  To convert a gemma2-2b model and save it to a specific directory:
+  To convert a gemma2-2b model and save it to a specific directory::
 
     /usr/bin/time -v python src/MaxText/utils/ckpt_conversion/to_maxtext.py \
     MaxText/configs/base.yml model_name="gemma2-2b" \
@@ -45,7 +50,7 @@ Example Usage:
   For models with scanned layers (e.g., some custom architectures), you might
   need to set scan_layers=True and param_scan_axis accordingly.
 
-  To convert a 70B model with minimal RAM usage:
+  To convert a 70B model with minimal RAM usage::
 
    /usr/bin/time -v python src/MaxText/utils/ckpt_conversion/to_maxtext.py \
     MaxText/configs/base.yml model_name="meta-llama/Llama-3.1-70B" \
@@ -129,17 +134,18 @@ class LazyHFLoader:
 
   This class is the core of the "lazy loading" feature. Instead of loading the
   entire model into memory at once, it reads the model's index file (e.g.,
-  `model.safetensors.index.json`) to understand the mapping between tensor names
+  ``model.safetensors.index.json``) to understand the mapping between tensor names
   and the shard files they belong to.
 
-  When a specific tensor is requested via `get_tensor`, this class:
+  When a specific tensor is requested via ``get_tensor``, this class:
+
   1. Identifies the correct shard file.
-  2. Downloads the shard file if not already cached by `huggingface_hub`.
+  2. Downloads the shard file if not already cached by ``huggingface_hub``.
   3. Opens the shard and extracts *only* the requested tensor into memory.
 
-  This approach is highly memory-efficient, especially for `safetensors`, as
+  This approach is highly memory-efficient, especially for ``safetensors``, as
   it avoids loading entire multi-gigabyte shard files when only a small piece
-  is needed. A threading lock (`_ram_lock`) is used to ensure that memory-intensive
+  is needed. A threading lock (``_ram_lock``) is used to ensure that memory-intensive
   file-opening operations are serialized to prevent RAM spikes, while downloads
   can still occur in parallel.
   """
@@ -231,7 +237,7 @@ class LazyHFLoader:
 class LazyTensor:
   """
   A proxy object that looks like a NumPy array but delays actual loading
-  and transformation until __array__ is called (e.g., by Orbax during save).
+  and transformation until ``__array__`` is called (e.g., by Orbax during save).
   """
 
   def __init__(self, load_fn: Callable[[], np.ndarray], shape: tuple, dtype, name: str = "unknown"):
@@ -259,7 +265,7 @@ class LazyTensor:
     """
     Materializes the tensor data.
 
-    When this method is invoked, it finally calls the `_load_fn` that was
+    When this method is invoked, it finally calls the ``_load_fn`` that was
     provided during initialization. This function executes the actual loading
     and transformation of the tensor from the Hugging Face checkpoint. The
     resulting NumPy array is then returned to the caller.
@@ -317,10 +323,12 @@ def get_maxtext_model_info(config):
     config: The MaxText configuration object.
 
   Returns:
-    maxtext_abstract_dict: A dictionary mapping MaxText parameter keys to a tuple
-      (index, target_shape), where 'index' is the position of the parameter in the
+    maxtext_abstract_dict
+      A dictionary mapping MaxText parameter keys to a tuple
+      ``(index, target_shape)``, where ``index`` is the position of the parameter in the
       flattened parameter list.
-    abstract_params_treedef: The tree structure definition of the abstract model parameters.
+    abstract_params_treedef
+      The tree structure definition of the abstract model parameters.
   """
   # Setup JAX distributed system and mesh
   devices_array = maxtext_utils.create_device_mesh(config)
@@ -368,15 +376,15 @@ def _build_multi_axis_stacked_tensor(
   with the shape (num_experts, num_layers, ...).
 
   Args:
-      hf_source_keys: A nested (2D) list of Hugging Face parameter names.
-                      Outer list iterates experts, inner list iterates layers.
-      tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
-      hook_fns: The hook function(s) to apply to each individual weight.
-      target_shape: The final shape of the target MaxText tensor.
-      config: The MaxText pyconfig object.
+    hf_source_keys: A nested (2D) list of Hugging Face parameter names.
+      Outer list iterates experts, inner list iterates layers.
+    tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
+    hook_fns: The hook function(s) to apply to each individual weight.
+    target_shape: The final shape of the target MaxText tensor.
+    config: The MaxText pyconfig object.
 
   Returns:
-      The final, assembled NumPy array for the MaxText parameter.
+    The final, assembled NumPy array for the MaxText parameter.
   """
   all_expert_tensors = []
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
@@ -408,14 +416,14 @@ def _build_single_axis_stacked_tensor(
   unscanned MoE layers (which are stacked along the expert axis).
 
   Args:
-      hf_source_keys: A 1D list of Hugging Face parameter names.
-      tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
-      hook_fns: The hook function(s) to apply to each individual weight.
-      target_shape: The final shape of the target MaxText tensor.
-      config: The MaxText pyconfig object.
+    hf_source_keys: A 1D list of Hugging Face parameter names.
+    tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
+    hook_fns: The hook function(s) to apply to each individual weight.
+    target_shape: The final shape of the target MaxText tensor.
+    config: The MaxText pyconfig object.
 
   Returns:
-      The final, assembled NumPy array for the MaxText parameter.
+    The final, assembled NumPy array for the MaxText parameter.
   """
   tensors_to_stack = []
 
@@ -443,11 +451,13 @@ def _build_single_axis_stacked_tensor(
 
 def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape_or_shapes, config):
   """Determine the loading function for HF keys.
+
   HF keys can take four forms:
-    Case 1: Unscanned (single string)
-    Case 2: Scanned (list of strings)
-    Case 3: Unscanned with expert stacking (list of strings)
-    Case 4: Scanned with expert stacking (nested list of strings)
+
+  * Case 1: Unscanned (single string)
+  * Case 2: Scanned (list of strings)
+  * Case 3: Unscanned with expert stacking (list of strings)
+  * Case 4: Scanned with expert stacking (nested list of strings)
   """
   load_fn = None
   if not isinstance(hf_source_keys_or_key, list):
@@ -486,8 +496,9 @@ def _get_maxtext_indices_and_shapes(mt_param_key_or_keys, maxtext_abstract_dict)
 
   The index is the parameter's order in `maxtext_abstract_dict.keys()`.
   This function handles two forms of MaxText keys:
-  - `atomic_mt_key`: A single string representing one MaxText parameter that map to HF parameter(s).
-  - `composite_mt_key`: A tuple of strings for multiple MaxText parameters that map to HF parameter(s).
+
+  * ``atomic_mt_key``: A single string representing one MaxText parameter that map to HF parameter(s).
+  * ``composite_mt_key``: A tuple of strings for multiple MaxText parameters that map to HF parameter(s).
   """
   is_composite_mt_key = isinstance(mt_param_key_or_keys, tuple)
   # atomic_mt_key
@@ -515,7 +526,7 @@ def _get_maxtext_weight(
   """Loads Hugging Face parameters and converts them to MaxText parameters.
 
   This function handles loading based on tensor mode (eager or lazy) and
-  processes MaxText keys, which can be `atomic_mt_key` or `composite_mt_key`.
+  processes MaxText keys, which can be ``atomic_mt_key`` or ``composite_mt_key``.
   """
   is_composite_mt_key = isinstance(mt_param_key_or_keys, tuple)
   if not use_lazy_load:

@@ -24,13 +24,14 @@ def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
 
   Args:
     config (dict): The Hugging Face model configuration dictionary. It must
-      contain 'text_config' and 'vision_config' sub-dictionaries with all
-      necessary architectural details (e.g., hidden_size, num_layers).
+      contain ``text_config`` and ``vision_config`` sub-dictionaries with all
+      necessary architectural details (e.g., ``hidden_size``, ``num_layers``).
 
   Returns:
-    dict: A dictionary where keys are Hugging Face parameter names (e.g.,
-    'model.language_model.embed_tokens.weight') and values are lists of
-    integers representing the tensor's shape.
+    dict
+      A dictionary where keys are Hugging Face parameter names (e.g.,
+      ``model.language_model.embed_tokens.weight``) and values are lists of
+      integers representing the tensor's shape.
   """
   shapes = {}
 
@@ -157,12 +158,14 @@ def GEMMA2_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace weights path and weights shape.
 
   Args:
-      config (dict): Model configuration dictionary, defined in `model_configs.py`
+    config (dict): Model configuration dictionary, defined in ``model_configs.py``
 
   Returns:
-      dict: A mapping where:
-          - Keys are HuggingFace model parameter paths
-          - Values are parameter shape as a list
+    dict
+      A mapping where:
+
+      * Keys are HuggingFace model parameter paths
+      * Values are parameter shape as a list
   """
 
   mapping = {
@@ -214,21 +217,24 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
   This mapping is derived by matching the provided config dictionary against
   the model's parameter dump.
 
-  To check this mapping, dump the huggingface model shapes:
-  from transformers import AutoModelForCausalLM
-  model_name = "deepseek-ai/DeepSeek-V3"
-  model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
-  for name, val in model.named_parameters():
-    print(name, val.shape)
+  To check this mapping, dump the huggingface model shapes::
+
+    from transformers import AutoModelForCausalLM
+    model_name = "deepseek-ai/DeepSeek-V3"
+    model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
+    for name, val in model.named_parameters():
+        print(name, val.shape)
 
   Args:
-      config (dict): Model configuration dictionary (from HF DeepseekV3Config.to_dict())
-                     Expected keys: https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json
+    config (dict): Model configuration dictionary (from HF DeepseekV3Config.to_dict())
+      Expected keys: https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json
 
   Returns:
-      dict: A mapping where:
-          - Keys are HuggingFace model parameter paths
-          - Values are parameter shape as a list
+    dict
+      A mapping where:
+
+      * Keys are HuggingFace model parameter paths
+      * Values are parameter shape as a list
   """
   # --- Extract Core Config Values ---
   hidden_size = config["hidden_size"]
@@ -436,7 +442,8 @@ def GPT_OSS_HF_WEIGHTS_TO_SHAPE(config):
 def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace Qwen3 weights path and the HuggingFace weights shape.
 
-  To check this mapping, dump the huggingface model shapes:
+  To check this mapping, dump the huggingface model shapes::
+
     from transformers import AutoModelForCausalLM
     model_name = "Qwen/Qwen3-0.6B"
     model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
@@ -444,13 +451,15 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
       print(name, val.shape)
 
   Args:
-      config (dict): Model configuration dictionary (from HF Qwen3TextConfig.to_dict())
-                     Expected keys: https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/config.json
+    config (dict): Model configuration dictionary (from HF Qwen3TextConfig.to_dict())
+      Expected keys: https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/config.json
 
   Returns:
-      dict: A mapping where:
-          - Keys are HuggingFace model parameter paths
-          - Values are parameter shape as a list
+    dict
+      A mapping where:
+
+      * Keys are HuggingFace model parameter paths
+      * Values are parameter shape as a list
   """
   hidden_size = config["hidden_size"]
   num_hidden_layers = config["num_hidden_layers"]
@@ -531,12 +540,14 @@ def LLAMA31_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace weights path and weights shape.
 
   Args:
-      config (dict): Model configuration dictionary, defined in `model_configs.py`
+    config (dict): Model configuration dictionary, defined in ``model_configs.py``
 
   Returns:
-      dict: A mapping where:
-          - Keys are HuggingFace model parameter paths
-          - Values are parameter shape as a List
+    dict
+      A mapping where:
+
+      * Keys are HuggingFace model parameter paths
+      * Values are parameter shape as a List
   """
 
   mapping = {

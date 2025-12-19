@@ -13,9 +13,10 @@
 # limitations under the License.
 
 """
-This file defines the `GemeiniAgent` class, which acts as an interface for interacting 
-with the Google Gemini model. It handles model initialization, configuration, and robust 
-API calls with retry mechanisms. Please add your API key and chosen model name in .env file. 
+This file defines the `GemeiniAgent` class, which acts as an interface for
+interacting with the Google Gemini model. It handles model initialization,
+configuration, and robust API calls with retry mechanisms. Please add your API
+key and chosen model name in .env file.
 """
 import logging
 import os
@@ -55,7 +56,8 @@ class GeminiAgent:
     Initializes the GeminiAgent with a specific system instruction.
 
     Args:
-        system_instruction (str): The system prompt to guide the model's behavior.
+        system_instruction (str): The system prompt to guide the model's
+          behavior.
     """
     self.client = genai.GenerativeModel(
         os.environ["Model"], generation_config=self.generation_config, system_instruction=system_instruction
@@ -73,12 +75,12 @@ class GeminiAgent:
     chat dictionary format.
 
     Args:
-        memory_list (str | list): A single message string or a list of
-                                        message dictionaries in the required
-                                        model format.
+      memory_list (str | list): A single message string or a list of message
+        dictionaries in the required model format.
 
     Returns:
-        google.generativeai.types.GenerateContentResponse: The response from the model.
+      google.generativeai.types.GenerateContentResponse
+        The response from the model.
     """
     if isinstance(memory_list, str):
       memory_list = {"role": "user", "parts": memory_list}

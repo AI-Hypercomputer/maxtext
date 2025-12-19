@@ -41,16 +41,17 @@ def vocab_tiling_linen_loss(
 
   This function implements a memory-efficient approach for calculating loss when the
   vocabulary is too large to fit in memory. It works by breaking the computation
-  into chunks (tiles) and processing them sequentially using `jax.lax.scan`.
+  into chunks (tiles) and processing them sequentially using ``jax.lax.scan``.
   A custom VJP rule is defined to handle the backward pass efficiently.
 
   Args:
     hidden_states: The final hidden states from the decoder.
-    data: A dictionary containing the input data, including 'targets' and 'targets_segmentation'.
+    data: A dictionary containing the input data, including ``targets`` and ``targets_segmentation``.
     config: The model and training configuration.
     model: The Linen model instance.
     params: The model parameters.
     is_train: A boolean indicating if the model is in training mode.
+
   Returns:
     The total cross-entropy loss computed via vocab tiling.
   """

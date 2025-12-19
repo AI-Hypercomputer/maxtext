@@ -14,12 +14,12 @@
 
 """Page Managers for implementing paged attention in MaxText.
 
-This module provides the `PageManager` class and associated `PageState` dataclass
-for managing the paged attention mechanism. The paging system allows efficient
-handling of variable-length sequences by dividing the attention context into
-fixed-size pages, similar to virtual memory systems. Pages are managed globally
-(not per-layer) and assigned to page groups, where each group typically
-represents an individual request or sequence.
+This module provides the ``PageManager`` class and associated ``PageState``
+dataclass for managing the paged attention mechanism. The paging system allows
+efficient handling of variable-length sequences by dividing the attention
+context into fixed-size pages, similar to virtual memory systems. Pages are
+managed globally (not per-layer) and assigned to page groups, where each group
+typically represents an individual request or sequence.
 """
 
 from functools import partial
@@ -45,7 +45,7 @@ ScalarBool = Bool[Array, ""]
 
 @struct.dataclass
 class PageState:
-  """Represents the global state of memory pages managed by the `PageManager`.
+  """Represents the global state of memory pages managed by the ``PageManager``.
 
   This dataclass tracks the allocation status of each page across the entire system,
   the mapping of pages to page groups (requests), and the current position within
@@ -67,7 +67,7 @@ def initialize_page_state(
     max_page_groups: int,
     max_pages_per_group: int,
 ) -> PageState:
-  """Creates and initializes a global `PageState` object.
+  """Creates and initializes a global ``PageState`` object.
 
   All pages in the global pool are initially marked as free (status 0), except
   for page 0 which is marked used as a workaround. No pages are assigned to any
@@ -79,10 +79,10 @@ def initialize_page_state(
     max_page_groups: The maximum number of page groups (concurrent sequences/requests)
       the system can track.
     max_pages_per_group: The maximum number of pages that can be allocated to
-      a single page group (determines the size of the second dimension of `page_map`).
+      a single page group (determines the size of the second dimension of ``page_map``).
 
   Returns:
-    An initialized `PageState` object with all values set to their defaults (zeros/False).
+    An initialized ``PageState`` object with all values set to their defaults (zeros/False).
   """
   # TODO(patemotter): Produces garbage output for any request that uses page 0
   initial_page_status = jnp.zeros((num_pages,), dtype=jnp.int32)
@@ -102,16 +102,16 @@ def initialize_page_state(
 def _find_next_free_page_index(page_status: PagesInt1d) -> ScalarInt:
   """Finds the index of the next available free page in the global pool.
 
-  Searches the `page_status` array for the first occurrence of 0 (indicating
+  Searches the ``page_status`` array for the first occurrence of 0 (indicating
   a free page), skipping index 0 due to potential issues.
 
   Args:
-    page_status: A 1D `jnp.ndarray` representing the global status of pages
+    page_status: A 1D ``jnp.ndarray`` representing the global status of pages
       (0 for free, 1 for allocated). Should have shape [num_pages].
 
   Returns:
-    A scalar `jnp.int32` array containing the index of the next free page
-    (the lowest index >= 1 where `page_status` is 0).
+    A scalar ``jnp.int32`` array containing the index of the next free page
+    (the lowest index >= 1 where ``page_status`` is 0).
     Returns -1 if no free pages (at index >= 1) are found.
   """
   # TODO(patemotter): Produces garbage output for any request that uses page 0
@@ -137,21 +137,21 @@ def _release_pages_for_group(
   """Releases all pages associated with a given page group.
 
   This function iterates through the potential pages allocated to the specified
-  `page_group_id` (up to `max_pages_per_group`). For each page index actually
-  used by the group (determined by `num_pages_used`), it retrieves the global
-  page index from `page_map` and resets its status to 0 (free) in the global
-  `page_status` array. It also resets all state fields related to the
-  `page_group_id` (length, count, active status, etc.) to their initial values.
+  ``page_group_id`` (up to ``max_pages_per_group``). For each page index actually
+  used by the group (determined by ``num_pages_used``), it retrieves the global
+  page index from ``page_map`` and resets its status to 0 (free) in the global
+  ``page_status`` array. It also resets all state fields related to the
+  ``page_group_id`` (length, count, active status, etc.) to their initial values.
 
   Args:
-    page_state: The current global `PageState`.
+    page_state: The current global ``PageState``.
     page_group_id: The index of the page group whose pages are to be released.
     max_pages_per_group: The maximum number of pages a group can hold (used as
       the loop bound).
 
   Returns:
-    A new `PageState` object where the specified group's pages are marked as free
-    in `page_status`, and the group's specific state entries are reset.
+    A new ``PageState`` object where the specified group's pages are marked as
+    free in ``page_status``, and the group's specific state entries are reset.
   """
   current_page_status = page_state.page_status
   current_page_map = page_state.page_map
@@ -185,29 +185,29 @@ def _reserve_pages_for_group(
     tokens_per_page: int,
     max_pages_per_group: int,
 ) -> PageState:
-  """Reserves pages for a specific group, assuming true_length > 0.
+  """Reserves pages for a specific group, assuming ``true_length > 0``.
 
-  PRECONDITION: `true_length` must be > 0. This function assumes the caller
-  (e.g., `PageManager.update_prefill_pages`) has validated this.
+  PRECONDITION: ``true_length`` must be > 0. This function assumes the caller
+  (e.g., ``PageManager.update_prefill_pages``) has validated this.
 
-  Calculates the number of pages required for `true_length`. Checks if enough
+  Calculates the number of pages required for ``true_length``. Checks if enough
   free pages exist globally and if the group has capacity based on the state
-  provided in `released_state`. If resources are sufficient, it iteratively
+  provided in ``released_state``. If resources are sufficient, it iteratively
   finds free pages, marks them allocated, records them in the map, and updates
   the group's state fields. If resources are insufficient, it returns the
-  `released_state` unchanged (effectively leaving the group empty).
+  ``released_state`` unchanged (effectively leaving the group empty).
 
   Args:
-      released_state: The global `PageState` after pages for `page_group_id`
-          have already been released.
-      page_group_id: The index of the page group to allocate pages for.
-      true_length: The target sequence length for the prefill. MUST BE > 0.
-      tokens_per_page: The capacity of each page.
-      max_pages_per_group: The maximum number of pages the group can hold.
+    released_state: The global ``PageState`` after pages for ``page_group_id``
+      have already been released.
+    page_group_id: The index of the page group to allocate pages for.
+    true_length: The target sequence length for the prefill. MUST BE > 0.
+    tokens_per_page: The capacity of each page.
+    max_pages_per_group: The maximum number of pages the group can hold.
 
   Returns:
-      A new `PageState` with pages allocated for the group and its state updated,
-      or the input `released_state` if allocation failed due to resource limits.
+    A new ``PageState`` with pages allocated for the group and its state updated,
+    or the input ``released_state`` if allocation failed due to resource limits.
   """
   num_pages_needed = (true_length + tokens_per_page - 1) // tokens_per_page
   last_token_abs_idx = true_length - 1
@@ -294,7 +294,7 @@ def _release_and_reserve_for_group(
 ) -> PageState:
   """Releases existing pages and reserves new pages for a group during prefill.
 
-  Assumes true_length > 0. Caller MUST validate inputs.
+  Assumes ``true_length > 0``. Caller MUST validate inputs.
   """
   released_state = _release_pages_for_group(page_state, page_group_id, max_pages_per_group)
   final_state = _reserve_pages_for_group(released_state, page_group_id, true_length, tokens_per_page, max_pages_per_group)
@@ -310,23 +310,24 @@ def _update_decode_pages_global(
   """Updates pages globally for one step of autoregressive decoding.
 
   This function performs the following steps for all page groups simultaneously:
-  1. Increments `sequence_lengths` for groups marked as `has_active_page`.
-  2. Calculates the new `active_page_position` based on the incremented length.
+
+  1. Increments ``sequence_lengths`` for groups marked as ``has_active_page``.
+  2. Calculates the new ``active_page_position`` based on the incremented length.
   3. Determines which active groups now require a new page because their sequence
-     length has crossed a page boundary (`required_pages > num_pages_used`) and
-     they still have capacity (`required_pages <= max_pages_per_group`).
+     length has crossed a page boundary (``required_pages > num_pages_used``) and
+     they still have capacity (``required_pages <= max_pages_per_group``).
   4. For each group identified in step 3, it attempts to find a free page globally and
-     allocate it, updating `page_status`, `page_map`, `num_pages_used`, and
-     `active_page` for that group.
+     allocate it, updating ``page_status``, ``page_map``, ``num_pages_used``, and
+     ``active_page`` for that group.
 
   Args:
-    page_state: The current global `PageState`.
+    page_state: The current global ``PageState``.
     tokens_per_page: The capacity of each page.
     max_pages_per_group: The maximum number of pages allowed per group.
 
   Returns:
-    A new `PageState` object reflecting the state after the decode step, potentially
-    with new pages allocated to groups that crossed page boundaries.
+    A new ``PageState`` object reflecting the state after the decode step,
+    potentially with new pages allocated to groups that crossed page boundaries.
   """
   max_page_groups = page_state.sequence_lengths.shape[0]
 
@@ -392,11 +393,11 @@ class PageManager:
   This class provides an interface for reserving pages during prefill and
   decoding, and for releasing pages when a sequence (page group) is complete.
   It encapsulates the logic for tracking page allocation globally and managing
-  the `PageState`. It uses the concept of page groups, where each group typically
-  corresponds to a single request or sequence being processed.
+  the ``PageState``. It uses the concept of page groups, where each group
+  typically corresponds to a single request or sequence being processed.
 
-  Example:
-    ```python
+  Example::
+
     # Initialize a PageManager from configuration
     config = YourConfig(...) # Set pagedattn_num_pages, etc.
     page_manager = PageManager(config)
@@ -419,20 +420,19 @@ class PageManager:
         page_state=state,
         page_group_id=0
     )
-    ```
   """
 
   def __init__(self, config: Config):
-    """Initializes the `PageManager` from a configuration object.
+    """Initializes the ``PageManager`` from a configuration object.
 
     Args:
-      config: A `Config` object containing the necessary parameters:
-        * `max_target_length`: The maximum sequence length supported.
-        * `pagedattn_num_pages`: The total number of pages available globally.
-        * `pagedattn_tokens_per_page`: The number of tokens each page can hold.
-        * `global_batch_size_to_load`: Used to determine the maximum number of concurrent
-          page groups (`max_page_groups`) the system can manage.
-        * `pagedattn_max_pages_per_group`: The maximum number of pages that can be
+      config: A ``Config`` object containing the necessary parameters:
+        * ``max_target_length``: The maximum sequence length supported.
+        * ``pagedattn_num_pages``: The total number of pages available globally.
+        * ``pagedattn_tokens_per_page``: The number of tokens each page can hold.
+        * ``global_batch_size_to_load``: Used to determine the maximum number of concurrent
+          page groups (``max_page_groups``) the system can manage.
+        * ``pagedattn_max_pages_per_group``: The maximum number of pages that can be
           allocated to a single page group.
 
     Raises:
@@ -468,37 +468,36 @@ class PageManager:
     """Reserves pages for a specific page group during prefill (global state).
 
     This method first releases any pages currently allocated to the given
-    `page_group_id`. It then attempts to allocate the necessary number of pages
-    from the global pool to accommodate a sequence of `true_length`. If successful,
-    it updates the `PageState` to reflect the new allocation and marks the group
+    ``page_group_id``. It then attempts to allocate the necessary number of pages
+    from the global pool to accommodate a sequence of ``true_length``. If successful,
+    it updates the ``PageState`` to reflect the new allocation and marks the group
     as active. If there are not enough free pages globally or the group exceeds
-    its `max_pages_per_group` limit, the group's state remains cleared (as after
-    the initial release). Input validation ensures `page_group_id` and `true_length`
+    its ``max_pages_per_group`` limit, the group's state remains cleared (as after
+    the initial release). Input validation ensures ``page_group_id`` and ``true_length``
     are within valid ranges.
 
     Args:
-      page_state: The current global `PageState`.
+      page_state: The current global ``PageState``.
       page_group_id: The ID of the page group (request) to allocate pages for. Must
-        be between 0 and `max_page_groups - 1`.
+        be between 0 and ``max_page_groups - 1``.
       true_length: The sequence length to allocate pages for. Must be between 0
-        and `max_target_length`.
+        and ``max_target_length``.
 
     Returns:
-      The updated `PageState`. If allocation fails due to resource limits, the
-      returned state will have the specified `page_group_id` cleared.
+      The updated ``PageState``. If allocation fails due to resource limits, the
+      returned state will have the specified ``page_group_id`` cleared.
 
     Raises:
-      ValueError: If `page_group_id` or `true_length` are outside their valid ranges.
+      ValueError: If ``page_group_id`` or ``true_length`` are outside their valid ranges.
 
-    Example:
-      ```python
+    Example::
+
       # Reserve pages for a 16-token sequence in group 0
       state = page_manager.update_prefill_pages(
           page_state=state,
           page_group_id=0,
           true_length=16
       )
-      ```
     """
     if page_group_id < 0 or page_group_id >= self.max_page_groups:
       raise ValueError(f"PageManager: page_group_id ({page_group_id}) out of range [0, {self.max_page_groups})")
@@ -517,22 +516,21 @@ class PageManager:
     active page. If this increment causes a sequence to cross a page boundary
     (i.e., it needs more pages than currently allocated), this method attempts
     to allocate a new page from the global pool, provided the group has not
-    reached its `max_pages_per_group` limit and free pages are available.
+    reached its ``max_pages_per_group`` limit and free pages are available.
 
     Args:
-      page_state: The current global `PageState`.
+      page_state: The current global ``PageState``.
 
     Returns:
-      The updated `PageState` reflecting the state after the decode step.
+      The updated ``PageState`` reflecting the state after the decode step.
       Sequence lengths and active positions are updated for all active groups.
       Groups that required and successfully obtained a new page will have their
-      `num_pages_used`, `page_map`, and `active_page` updated.
+      ``num_pages_used``, ``page_map``, and ``active_page`` updated.
 
-    Example:
-      ```python
+    Example::
+
       # Advance state for all active sequences by one decode step
       state = page_manager.update_decode_pages(state)
-      ```
     """
     return _update_decode_pages_global(page_state, self.tokens_per_page, self.max_pages_per_group)
 
@@ -540,53 +538,51 @@ class PageManager:
     """Releases all pages associated with a given page group (global state).
 
     This method identifies all pages currently allocated to the specified
-    `page_group_id` using the `page_map` and `num_pages_used`. It marks these
-    pages as free (status 0) in the global `page_status` array. It also resets
-    all state information specific to the `page_group_id` (sequence length,
+    ``page_group_id`` using the ``page_map`` and ``num_pages_used``. It marks these
+    pages as free (status 0) in the global ``page_status`` array. It also resets
+    all state information specific to the ``page_group_id`` (sequence length,
     page count, active status, etc.) to their initial zero/False values.
-    Input validation ensures the `page_group_id` is within the valid range.
+    Input validation ensures the ``page_group_id`` is within the valid range.
 
     Args:
-      page_state: The current global `PageState`.
+      page_state: The current global ``PageState``.
       page_group_id: The ID of the page group (request) to release. Must be
-        between 0 and `max_page_groups - 1`.
+        between 0 and ``max_page_groups - 1``.
 
     Returns:
-      The updated `PageState` after releasing the pages and resetting the group's
+      The updated ``PageState`` after releasing the pages and resetting the group's
       state.
 
     Raises:
-      ValueError: If `page_group_id` is outside its valid range.
+      ValueError: If ``page_group_id`` is outside its valid range.
 
-    Example:
-      ```python
+    Example::
+
       # Release all pages currently held by group 0
       state = page_manager.release_pages(
           page_state=state,
           page_group_id=0
       )
-      ```
     """
     if page_group_id < 0 or page_group_id >= self.max_page_groups:
       raise ValueError(f"PageManager: page_group_id ({page_group_id}) out of range [0, {self.max_page_groups})")
     return _release_pages_for_group(page_state, page_group_id, self.max_pages_per_group)
 
   def get_initial_page_state(self) -> PageState:
-    """Creates and returns an initial global `PageState`.
+    """Creates and returns an initial global ``PageState``.
 
-    This is a convenience method that calls `initialize_page_state` with
-    the parameters (`num_pages`, `max_page_groups`, `max_pages_per_group`)
-    stored during the `PageManager` initialization.
+    This is a convenience method that calls ``initialize_page_state`` with
+    the parameters (``num_pages``, ``max_page_groups``, ``max_pages_per_group``)
+    stored during the ``PageManager`` initialization.
 
     Returns:
-      An initialized `PageState` object where all pages are free (except possibly 0)
+      An initialized ``PageState`` object where all pages are free (except possibly 0)
       and no groups are active.
 
-    Example:
-      ```python
+    Example::
+
       # Get a fresh, empty page state
       initial_state = page_manager.get_initial_page_state()
-      ```
     """
     return initialize_page_state(
         num_pages=self.num_pages,
