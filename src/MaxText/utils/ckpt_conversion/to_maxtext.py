@@ -368,7 +368,13 @@ def _build_single_axis_stacked_tensor(
   # If the number of items to stack equals the number of layers, it's a standard
   # scanned layer, and we use the configured param_scan_axis. Otherwise, it's
   # an unscanned MoE layer, and we stack along the expert axis (0).
-  axis_to_stack = config.param_scan_axis if len(hf_source_keys) == config.base_num_decoder_layers else 0
+  num_stacked_layers = len(hf_source_keys)
+  expected_layers_per_block = config.base_num_decoder_layers // config.inhomogeneous_layer_cycle_interval
+  if num_stacked_layers == expected_layers_per_block:
+    axis_to_stack = config.param_scan_axis
+  else:
+    # Fallback to axis 0 for MoE experts or other non-layer stacking
+    axis_to_stack = 0
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
