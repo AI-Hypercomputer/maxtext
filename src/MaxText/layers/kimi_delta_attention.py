@@ -118,15 +118,15 @@ class KimiDeltaAttention(nnx.Module):
 
     # Projections
     self.q_proj = DenseGeneral(
-        in_features_shape=(hidden_size,), out_features_shape=(num_heads, head_dim),
+        in_features_shape=(hidden_size,), out_features_shape=(num_heads*head_dim,),
         kernel_init=kernel_init, dtype=dtype, weight_dtype=weight_dtype, use_bias=False, rngs=rngs,
     )
     self.k_proj = DenseGeneral(
-        in_features_shape=(hidden_size,), out_features_shape=(num_heads, head_dim),
+        in_features_shape=(hidden_size,), out_features_shape=(num_heads*head_dim,),
         kernel_init=kernel_init, dtype=dtype, weight_dtype=weight_dtype, use_bias=False, rngs=rngs,
     )
     self.v_proj = DenseGeneral(
-        in_features_shape=(hidden_size,), out_features_shape=(num_heads, head_dim),
+        in_features_shape=(hidden_size,), out_features_shape=(num_heads*head_dim,),
         kernel_init=kernel_init, dtype=dtype, weight_dtype=weight_dtype, use_bias=False, rngs=rngs,
     )
 
@@ -158,7 +158,7 @@ class KimiDeltaAttention(nnx.Module):
         kernel_init=kernel_init, dtype=dtype, weight_dtype=weight_dtype, use_bias=False, rngs=rngs,
     )
     self.f_b_proj = DenseGeneral(
-        in_features_shape=(head_dim,), out_features_shape=(num_heads, head_dim),
+        in_features_shape=(head_dim,), out_features_shape=(num_heads*head_dim),
         kernel_init=kernel_init, dtype=dtype, weight_dtype=weight_dtype, use_bias=False, rngs=rngs,
     )
     self.g_a_proj = DenseGeneral(
@@ -166,7 +166,7 @@ class KimiDeltaAttention(nnx.Module):
         kernel_init=kernel_init, dtype=dtype, weight_dtype=weight_dtype, use_bias=False, rngs=rngs,
     )
     self.g_b_proj = DenseGeneral(
-        in_features_shape=(head_dim,), out_features_shape=(num_heads, head_dim),
+        in_features_shape=(head_dim,), out_features_shape=(num_heads*head_dim),
         kernel_init=kernel_init, dtype=dtype, weight_dtype=weight_dtype, use_bias=False, rngs=rngs,
     )
 
@@ -174,8 +174,8 @@ class KimiDeltaAttention(nnx.Module):
     def a_log_init(key, shape, dtype=jnp.float32):
       return jnp.log(jax.random.uniform(key, shape=shape, dtype=dtype, minval=1e-9, maxval=16.0))
 
-    self.A_log = nnx.Param(a_log_init(rngs.params(), (num_heads,)))
-    self.dt_bias = nnx.Param(nnx.initializers.ones(rngs.params(), (num_heads, head_dim)))
+    self.A_log = nnx.Param(a_log_init(rngs.params(), (1,1,num_heads,1)))
+    self.dt_bias = nnx.Param(nnx.initializers.ones(rngs.params(), (num_heads*head_dim), dtype=jnp.float32))
 
     # Output stage
     self.o_norm = FusedRMSNormGated(
@@ -188,9 +188,10 @@ class KimiDeltaAttention(nnx.Module):
 
   def apply_fused_kda_gate(self, g_linear: Array) -> Array:
     """Computes log-space forget gate."""
+    b, s, _ = g_linear.shape
     g = g_linear + self.dt_bias
-    sp = jax.nn.softplus(g.astype(jnp.float32))
-    return (-jnp.exp(self.A_log[None, None, :, None]) * sp).astype(self.dtype)
+    sp = jax.nn.softplus(g.astype(jnp.float32)).reshape(b, s, self.num_heads, self.head_dim)
+    return (-jnp.exp(self.A_log) * sp).astype(self.dtype).reshape(b, s, -1)
 
   def __call__(
       self,
@@ -201,9 +202,9 @@ class KimiDeltaAttention(nnx.Module):
     batch, seq_len, _ = hidden_states.shape
 
     # 1. Projections and L2 Norm (Reusing normalizations.l2norm)
-    q = l2norm(self.q_proj(hidden_states), dim=-1, eps=1e-6)
-    k = l2norm(self.k_proj(hidden_states), dim=-1, eps=1e-6)
-    v = self.v_proj(hidden_states)
+    q = l2norm(self.q_proj(hidden_states).reshape(batch, seq_len, self.num_heads, -1), dim=-1, eps=1e-6)
+    k = l2norm(self.k_proj(hidden_states).reshape(batch, seq_len, self.num_heads, -1), dim=-1, eps=1e-6)
+    v = self.v_proj(hidden_states).reshape(batch, seq_len, self.num_heads, -1)
 
     # 2. Causal Conv (Applied per channel)
     def apply_conv(x, conv_layer):
@@ -229,9 +230,8 @@ class KimiDeltaAttention(nnx.Module):
     )
 
     # 5. Output stage
-    g_output = self.g_b_proj(self.g_a_proj(hidden_states))
+    g_output = self.g_b_proj(self.g_a_proj(hidden_states)).reshape(batch, seq_len, self.num_heads, self.head_dim)
     out = self.o_norm(attn_out, g_output)
     out = out.reshape(batch, seq_len, -1)
-    print(f"{out.shape=} {self.o_proj.kernel.get_value().shape=}")
     
     return self.o_proj(out), final_state

@@ -355,7 +355,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         precision=cfg.matmul_precision,
         rngs=rngs,
     )
-
     # Initialize A_log to match torch.log(torch.uniform(0, 16))
     def a_log_init(key, shape, dtype=jnp.float32):
       # Sample from Uniform(epsilon, 16) to avoid log(0)
