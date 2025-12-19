@@ -664,7 +664,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
         dtype=cfg.dtype,
         kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", "vocab"),
+        kernel_axes=("embed", ),
         rngs=rngs,
     )
 
@@ -760,18 +760,16 @@ class Qwen3NextScannableBlock(nnx.Module):
     # Loop over the number of sub-layers that make up one repeating pattern.
     for i in range(cfg.inhomogeneous_layer_cycle_interval):
       layer = getattr(self, f"layer_{i}")
-      # The second return value is kv_cache, which we ignore here because
-      # it is not passed as a carry in scannable layers.
       x, _ = layer(
-          x,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk,
-          page_state,
-          slot,
-      )
+                x,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+                previous_chunk,
+                page_state,
+                slot,
+            )
 
     # The output of the block is the carry for the next scan iteration.
     return x, None
