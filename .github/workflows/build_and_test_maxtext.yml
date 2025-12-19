@@ -73,9 +73,9 @@ jobs:
           image_type: ["py312"]
     with:
       device_type: tpu
-      device_name: v4-8
+      device_name: v6e-4
       image_type: ${{ matrix.image_type }}
-      cloud_runner: linux-x86-ct4p-240-4tpu
+      cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
@@ -91,9 +91,9 @@ jobs:
           image_type: ["py312"]
     with:
       device_type: tpu
-      device_name: v4-8
+      device_name: v6e-4
       image_type: ${{ matrix.image_type }}
-      cloud_runner: linux-x86-ct4p-240-4tpu
+      cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and integration_test'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
@@ -109,9 +109,9 @@ jobs:
           image_type: ["py312"]
     with:
       device_type: tpu
-      device_name: v4-8
+      device_name: v6e-4
       image_type: ${{ matrix.image_type }}
-      cloud_runner: linux-x86-ct4p-240-4tpu
+      cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
@@ -127,9 +127,9 @@ jobs:
           image_type: ["py312"]
     with:
       device_type: tpu
-      device_name: v4-8
+      device_name: v6e-4
       image_type: ${{ matrix.image_type }}
-      cloud_runner: linux-x86-ct4p-240-4tpu
+      cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and integration_test'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
