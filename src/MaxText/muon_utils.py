@@ -48,47 +48,71 @@ def _is_path_contain_any(tuples, path):
 def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   """
   Determines Muon dimension numbers based on the parameter's hierarchical path.
-  Revised for Qwen3-Next hybrid architecture.
+  
+  Strategy:
+  1. Exclusions: Skip vectors/biases/embeddings (AdamW).
+  2. MoE: Handle both DeepSeek style (MoeBlock_0) and Qwen3-Next style (routed_experts).
+  3. Attention: 
+     - "self_attention" (Llama/DeepSeek): 'out' is 4D -> (0, -2) reduction.
+     - "attention" (Qwen3-Next): 'out' is 3D -> (0,) reduction.
+  4. Standard: Default 3D weights -> (0,) reduction.
   """
 
-  # 1. Exclusions: Parameters not suitable for Muon
-  # Added "dt_bias" to the exclusion list.
+  # 1. Exclusions
   if _is_path_contain_any(("scale", "bias", "embedding", "logits_dense", "A_log", "conv1d", "dt_bias"), path):
     return None
 
-  # 2. Special weights: MoE Routed Experts
-  # Qwen3-Next routed experts are 4D: (NumExperts, Layers, In, Out) or similar.
-  # We want to treat Experts and Layers as batch dimensions, and perform 
-  # matrix multiplication on the last two dimensions.
-  if "routed_experts" in path:
+  # 2. MoE Weights
+  # Case A: DeepSeek / Standard MoE (MoeBlock_0)
+  if "MoeBlock_0" in path:
+    # DeepSeek/Standard MoE experts: (Experts, Layers, In, Out) -> reduce on In (-2)
     if _is_path_contain_any(("wi_0", "wi_1", "wo"), path):
-      # reduction on input_dim (-2), output on output_dim (-1)
       return mdn((-2,), (-1,))
+    # Gate is usually (Layers, In, Experts) or similar standard 3D
+    if "gate" in path:
+      return mdn((0,), (-1,))
+  
+  # Case B: Qwen3-Next MoE (routed_experts)
+  if "routed_experts" in path:
+    # Qwen3-Next experts: (Experts, Layers, In, Out) -> reduce on In (-2)
+    if _is_path_contain_any(("wi_0", "wi_1", "wo"), path):
+      return mdn((-2,), (-1,))
+    # Gate
+    if "gate" in path:
+      return mdn((0,), (-1,))
 
-  # 3. Special weights: Attention (Full Attention layers)
-  # Qwen3-Next uses "attention" in the path for layer_3, not just "self_attention"
-  if "attention" in path or "self_attention" in path:
-    # Attention output projection
-    # For 3D weights (Hidden, Layer, Embed), standard (0,), (-1,) works fine.
-    # For 4D weights (Heads, Layer, HeadDim, Embed), we might want (0, -2).
-    # We stick to standard logic for 'out' if it falls through, or define specific if needed.
+  # 3. Attention Weights
+  # Case A: Standard Llama/DeepSeek (uses "self_attention" in path)
+  if "self_attention" in path:
+    # Attention Output: usually 4D (Heads, Layers, HeadDim, Embed)
+    # We reduce on Heads (0) and HeadDim (-2) to get back to Embed (-1)
     if "out" in path:
-       # If the shape is 4D (Heads, Layers, HeadDim, Embed), this groups Heads and HeadDim.
-       # If the shape is 3D (Hidden, Layers, Embed), 0 is Hidden, -1 is Embed.
-       # The safest generic strategy for 'out' is often just mapping input->output.
-       # Let's allow 'out' to fall through to the default (0,), (-1,) which works for
-       # both Qwen3's 3D out_proj and standard cases.
-       pass
+      return mdn((0, -2), (-1,))
 
-    # Attention qkv projection
-    # Standard: Input (Embed) -> Output (Heads, HeadDim)
-    # We want to group Heads and HeadDim as the output axis.
-    if _is_path_contain_any(("query", "key", "value", "wq_b", "wkv_b"), path):
+    # QKV / MLA Projections
+    # Input (Embed) -> Output (Heads, HeadDim)
+    # Reduce on Embed (0), Output on Heads (-2) and HeadDim (-1)
+    if _is_path_contain_any(("query", "key", "value", "wq_a", "wq_b", "wkv_a", "wkv_b"), path):
       return mdn((0,), (-2, -1))
 
-  # 4. Standard weights: [0, L, -1]
-  # Handles Dense layers, Shared Experts, MoE Gates, and Attention Out (3D)
-  # Assumes dim 0 is reduction (Fan-In) and dim -1 is Output (Fan-Out)
+  # Case B: Qwen3-Next (uses "attention" in path, but NOT "self_attention")
+  # Qwen3-Next's structure is typically 'layer_x' -> 'attention' (wrapper) -> 'attention' (inner)
+  elif "attention" in path:
+    # Attention Output: Qwen3-Next 'out' is 3D (Hidden, Layers, Embed) -> Standard reduction
+    if "out" in path:
+      return mdn((0,), (-1,))
+    
+    # QKV Projections
+    if _is_path_contain_any(("query", "key", "value"), path):
+      return mdn((0,), (-2, -1))
+    
+    # GDN Projections (in_proj_ba, in_proj_qkvz, out_proj) -> Standard 3D
+    if _is_path_contain_any(("in_proj", "out_proj"), path):
+      return mdn((0,), (-1,))
+
+  # 4. Standard Weights (Default Fallback)
+  # Handles Dense layers (mlp), Shared Experts, and other 3D projections.
+  # Assumes (In, Layers, Out) or similar where 0 is Input/Reduction and -1 is Output.
   return mdn((0,), (-1,))
 
 
