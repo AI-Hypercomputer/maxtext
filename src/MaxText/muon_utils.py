@@ -72,7 +72,10 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   """
 
   # 1 Exclude parameters not suitable for Muon (scalar, embeddings, unembedding)
-  if _is_path_contain_any(("scale", "bias", "embedding", "logits_dense"), path):
+  # [Modified for Qwen3-Next] Added "A_log" and "conv1d" to the exclusion list.
+  # "A_log" is a vector and "conv1d" is a depthwise convolution kernel; 
+  # neither are suitable for Muon's 2D matrix updates and should rely on AdamW.
+  if _is_path_contain_any(("scale", "bias", "embedding", "logits_dense", "A_log", "conv1d"), path):
     return None
 
   # 2 Special weights: MoE, [0, L, -2, -1]
