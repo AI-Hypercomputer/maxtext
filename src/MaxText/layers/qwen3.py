@@ -612,7 +612,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
         dtype=cfg.dtype,
         kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", "vocab"),
+        kernel_axes=("embed", ),
         rngs=rngs,
     )
 
