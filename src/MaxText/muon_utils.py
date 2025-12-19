@@ -53,9 +53,14 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   1. Exclusions: Skip vectors/biases/embeddings (AdamW).
   2. MoE: Handle both DeepSeek style (MoeBlock_0) and Qwen3-Next style (routed_experts).
   3. Attention: 
-     - "self_attention" (Llama/DeepSeek): 'out' is 4D -> (0, -2) reduction.
-     - "attention" (Qwen3-Next): 'out' is 3D -> (0,) reduction.
-  4. Standard: Default 3D weights -> (0,) reduction.
+     - "self_attention" (Llama/DeepSeek/Gemma): 
+         - 'out' is 4D -> reduction_axis=(0, -2).
+         - 'wkv_a'/'wq_a' (Compression) -> output_axis=(-1,).
+         - 'q/k/v'/'wkv_b'/'wq_b' (Expansion) -> output_axis=(-2, -1).
+     - "attention" (Qwen3-Next): 
+         - 'out' is 3D -> reduction_axis=(0,).
+         - 'q/k/v' -> output_axis=(-2, -1).
+  4. Standard: Default 3D weights -> reduction_axis=(0,).
   """
 
   # 1. Exclusions
@@ -63,46 +68,39 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
     return None
 
   # 2. MoE Weights
-  # Case A: DeepSeek / Standard MoE (MoeBlock_0)
-  if "MoeBlock_0" in path:
-    # DeepSeek/Standard MoE experts: (Experts, Layers, In, Out) -> reduce on In (-2)
+  # Matches both "MoeBlock_0" (DeepSeek) and "routed_experts" (Qwen3-Next)
+  if "MoeBlock_0" in path or "routed_experts" in path:
+    # Expert weights: (Experts, Layers, In, Out) -> reduce on In (-2)
     if _is_path_contain_any(("wi_0", "wi_1", "wo"), path):
       return mdn((-2,), (-1,))
-    # Gate is usually (Layers, In, Experts) or similar standard 3D
-    if "gate" in path:
-      return mdn((0,), (-1,))
-  
-  # Case B: Qwen3-Next MoE (routed_experts)
-  if "routed_experts" in path:
-    # Qwen3-Next experts: (Experts, Layers, In, Out) -> reduce on In (-2)
-    if _is_path_contain_any(("wi_0", "wi_1", "wo"), path):
-      return mdn((-2,), (-1,))
-    # Gate
+    # Gate: (Layers, In, Experts) -> standard reduction on In (0)
     if "gate" in path:
       return mdn((0,), (-1,))
 
   # 3. Attention Weights
-  # Case A: Standard Llama/DeepSeek (uses "self_attention" in path)
+  # Case A: Standard / DeepSeek / Gemma (uses "self_attention")
   if "self_attention" in path:
-    # Attention Output: usually 4D (Heads, Layers, HeadDim, Embed)
-    # We reduce on Heads (0) and HeadDim (-2) to get back to Embed (-1)
+    # Attention Output: 4D (Heads, Layers, HeadDim, Embed) -> reduce on Heads(0) and HeadDim(-2)
     if "out" in path:
       return mdn((0, -2), (-1,))
 
-    # QKV / MLA Projections
-    # Input (Embed) -> Output (Heads, HeadDim)
-    # Reduce on Embed (0), Output on Heads (-2) and HeadDim (-1)
-    if _is_path_contain_any(("query", "key", "value", "wq_a", "wq_b", "wkv_a", "wkv_b"), path):
+    # DeepSeek MLA Compression (Hidden -> Latent)
+    # These produce a flat latent vector, not Heads x HeadDim
+    if _is_path_contain_any(("wkv_a", "wq_a"), path):
+      return mdn((0,), (-1,))
+
+    # Head Expansion/Projection (Latent/Hidden -> Heads * Dim)
+    # Includes standard query/key/value and DeepSeek wkv_b/wq_b
+    if _is_path_contain_any(("query", "key", "value", "wkv_b", "wq_b"), path):
       return mdn((0,), (-2, -1))
 
-  # Case B: Qwen3-Next (uses "attention" in path, but NOT "self_attention")
-  # Qwen3-Next's structure is typically 'layer_x' -> 'attention' (wrapper) -> 'attention' (inner)
+  # Case B: Qwen3-Next (uses "attention", but NOT "self_attention")
   elif "attention" in path:
-    # Attention Output: Qwen3-Next 'out' is 3D (Hidden, Layers, Embed) -> Standard reduction
+    # Qwen3-Next 'out' is 3D (Hidden, Layers, Embed) -> Standard reduction
     if "out" in path:
       return mdn((0,), (-1,))
     
-    # QKV Projections
+    # QKV Projections -> Split Heads
     if _is_path_contain_any(("query", "key", "value"), path):
       return mdn((0,), (-2, -1))
     
@@ -112,7 +110,7 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
 
   # 4. Standard Weights (Default Fallback)
   # Handles Dense layers (mlp), Shared Experts, and other 3D projections.
-  # Assumes (In, Layers, Out) or similar where 0 is Input/Reduction and -1 is Output.
+  # Assumes (In, Layers, Out) where 0 is Input/Reduction and -1 is Output.
   return mdn((0,), (-1,))
 
 
