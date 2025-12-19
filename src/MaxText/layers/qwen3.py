@@ -118,6 +118,7 @@ def jax_chunk_gated_delta_rule(
   scale = jax.lax.rsqrt(jnp.array(query.shape[-1]).astype(jnp.float32))
   query = query * scale
 
+  # 3. 预乘 beta
   v_beta = value * jnp.expand_dims(beta, -1)  # (B, H, S_padded, D_v)
   k_beta = key * jnp.expand_dims(beta, -1)  # (B, H, S_padded, D_k)
 
@@ -150,7 +151,7 @@ def jax_chunk_gated_delta_rule(
 
   # The result g_diff_exp is already lower triangular and serves as the decay_mask.
   # decay_mask shape: (B, H, N, C, C)
-  decay_mask = g_diff_exp
+  decay_mask = g_diff_exp 
 
   # --- Precompute within-chunk attention ---
   # NOTE: Precision set to HIGHEST for numerical accuracy.
@@ -280,7 +281,6 @@ def jax_chunk_gated_delta_rule(
   core_attn_out = jnp.transpose(core_attn_out, (0, 2, 1, 3)).astype(initial_dtype)
 
   return core_attn_out, final_state if output_final_state else None
-
 
 class Qwen3NextGatedDeltaNet(nnx.Module):
   """

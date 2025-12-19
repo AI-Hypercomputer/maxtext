@@ -994,3 +994,16 @@ use_jax_splash: false
 vllm_hf_config_path: ""
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
+################################## KDA Specific Configs ##################################
+# Kernel size for the 1D convolution in the KDA
+kda_conv_kernel_dim: 4
+# Head dimension for the key/query in the KDA
+kda_key_head_dim: 128
+# Head dimension for the value in the KDA
+kda_value_head_dim: 128
+# Number of key/query heads in the KDA
+kda_num_key_heads: 16
+# Number of value heads in the KDA
+kda_num_value_heads: 32
+# Chunk size for the parallel scan algorithm in the KDA.
+kda_chunk_size: 64
