@@ -708,16 +708,16 @@ class Qwen3NextScannableBlock(nnx.Module):
     # Loop over the number of sub-layers that make up one repeating pattern.
     for i in range(cfg.inhomogeneous_layer_cycle_interval):
       layer = getattr(self, f"layer_{i}")
-      x = layer(
-          x,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk,
-          page_state,
-          slot,
-      )
+      x, _ = layer(
+                x,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+                previous_chunk,
+                page_state,
+                slot,
+            )
 
     # The output of the block is the carry for the next scan iteration.
     return x, None
