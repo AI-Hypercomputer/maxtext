@@ -670,6 +670,18 @@ class Qwen3Next(BaseModel):
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
 
 
+class KimiLinear(BaseModel):
+  kda_conv_kernel_dim: int = Field(4, description="Kernel size for the 1D convolution in the KDA.")
+  kda_key_head_dim: int = Field(128, description="Head dimension for the key/query in the KDA.")
+  kda_value_head_dim: int = Field(128, description="Head dimension for the value in the KDA.")
+  kda_num_key_heads: int = Field(16, description="Number of key/query heads in the KDA.")
+  kda_num_value_heads: int = Field(32, description="Number of value heads in the KDA.")
+  kda_chunk_size: int = Field(
+      64,
+      description="Chunk size for the parallel scan algorithm in the KDA.",
+  )
+
+
 class HardwareAndMesh(BaseModel):
   """Configuration for hardware and parallelism mesh."""
 
@@ -1620,6 +1632,7 @@ class MaxTextConfig(
     MoEKernels,
     DeepSeekMoE,
     Qwen3Next,
+    KimiLinear,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
