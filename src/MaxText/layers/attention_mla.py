@@ -21,7 +21,6 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh, NamedSharding
 import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
 
 from MaxText.common_types import (
@@ -38,10 +37,12 @@ from MaxText.common_types import (
     EMBED,
     EP_AS_CONTEXT,
     HEAD,
+    Q_LORA_UP_PROJ,
     KV_BATCH,
     KV_BATCH_NO_EXP,
     KV_HEAD,
     KV_HEAD_DIM,
+    KV_LORA_UP_PROJ,
     LENGTH,
     LENGTH_NO_EXP,
     MODEL_MODE_PREFILL,
@@ -54,6 +55,7 @@ from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
 from MaxText.inference.kvcache import KVQuant
+from MaxText.sharding import create_sharding
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.attentions import Attention
 from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
@@ -389,6 +391,7 @@ class MLA(Attention):
           weight_dtype=self.weight_dtype,
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
     else:
@@ -403,6 +406,7 @@ class MLA(Attention):
           weight_dtype=self.weight_dtype,
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
       self.q_norm = RMSNorm(
@@ -423,6 +427,7 @@ class MLA(Attention):
           weight_dtype=self.weight_dtype,
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
 
@@ -437,6 +442,7 @@ class MLA(Attention):
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
         rngs=self.rngs,
     )
     self.kv_norm = RMSNorm(
@@ -460,6 +466,7 @@ class MLA(Attention):
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
         rngs=self.rngs,
     )
 
@@ -498,6 +505,18 @@ class MLA(Attention):
 
   def mla_query_projection(self, inputs_q: Array, inputs_positions: Array, model_mode) -> Array:
     """Query projection for MLA, e.g. includes LoRA if q_lora_rank > 0."""
+    # specify query logical name
+    if model_mode == MODEL_MODE_PREFILL:
+      query_logical_name = self.prefill_query_axis_names
+      wqa_logical_name = (PREFILL_KV_BATCH, PREFILL_LENGTH, Q_LORA_UP_PROJ)
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      query_logical_name = self.ep_query_axis_names
+      wqa_logical_name = (KV_BATCH_NO_EXP, LENGTH, Q_LORA_UP_PROJ)
+    else:
+      query_logical_name = self.query_axis_names
+      wqa_logical_name = (KV_BATCH, LENGTH_NO_EXP, Q_LORA_UP_PROJ)
+    query_sharding = create_sharding(self.mesh, query_logical_name)
+    wqa_out_sharding = create_sharding(self.mesh, wqa_logical_name)
     # Set softmax scaling.
     self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
     self.softmax_scale = self.qk_head_dim**-0.5
@@ -506,47 +525,50 @@ class MLA(Attention):
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
     if self.q_lora_rank == 0:
-      q = self.query(inputs_q)
+      q = self.query(inputs_q, out_sharding=query_sharding)
     else:
       # LoRA path
-      low_rank_q = self.wq_a(inputs_q)  # [B, L, q_lora_rank]
+      low_rank_q = self.wq_a(inputs_q, out_sharding=wqa_out_sharding)  # [B, L, q_lora_rank]
       low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
-      q = self.wq_b(low_rank_q)  # [B, L, n_heads * qk_head_dim]
+      low_rank_q = checkpoint_name(low_rank_q, "mla_q")
+      q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads * qk_head_dim]
 
     # Split into non-positional and rotary parts.
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
+    q_nope = self._maybe_shard_with_logical(q_nope, query_logical_name)
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions)
+    q_pe = self._maybe_shard_with_logical(q_pe, query_logical_name)
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
-
-    if model_mode == MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
-    else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
+    query = self._maybe_shard_with_logical(query, query_logical_name)
     return query
 
   def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
     """get (key,value) pair from mla"""
-    kv_out = self.wkv_b(low_rank_main)
+    if model_mode == MODEL_MODE_PREFILL:
+      key_logical_name = self.prefill_key_axis_names
+      value_logical_name = self.prefill_value_axis_names
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      key_logical_name = self.ep_key_axis_names
+      value_logical_name = self.ep_value_axis_names
+    else:
+      key_logical_name = self.key_axis_names
+      value_logical_name = self.value_axis_names
+
+    wkva_out_sharding = create_sharding(self.mesh, key_logical_name)
+    kv_out = self.wkv_b(low_rank_main, out_sharding=wkva_out_sharding)
 
     # Split kv_out into key_nope and value parts.
     key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
     key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
+    key_nope = self._maybe_shard_with_logical(key_nope, key_logical_name)
+    key_rope = self._maybe_shard_with_logical(key_rope, key_logical_name)
 
     key = jnp.concatenate([key_nope, key_rope], axis=-1)
 
-    if model_mode == MODEL_MODE_PREFILL:
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
-      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
-    else:
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
+    key = self._maybe_shard_with_logical(key, key_logical_name)
+    value = self._maybe_shard_with_logical(value, value_logical_name)
     return key, value
 
   def init_mla_kv_caches(self, inputs_kv_shape: Tuple):
@@ -637,10 +659,17 @@ class MLA(Attention):
 
   def mla_kv_projection(self, inputs: Array, inputs_positions: Array, decoder_segment_ids, model_mode, previous_chunk):
     """MLA key/value projection with integrated rotary embedding."""
-    low_rank = self.wkv_a(inputs)
+    if model_mode == MODEL_MODE_PREFILL:
+      wka_logical_name = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_LORA_UP_PROJ)
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      wka_logical_name = (KV_BATCH_NO_EXP, LENGTH, KV_LORA_UP_PROJ)
+    else:
+      wka_logical_name = (KV_BATCH, LENGTH_NO_EXP, KV_LORA_UP_PROJ)
+    wkva_out_sharding = create_sharding(self.mesh, wka_logical_name)
+    low_rank = self.wkv_a(inputs, out_sharding=wkva_out_sharding)
     low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
     low_rank_main = self.kv_norm(low_rank_main)
-
+    low_rank_main = checkpoint_name(low_rank_main, "mla_kv")
     # Apply rotary embedding to key_rope.
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
     key_rope = self.apply_rotary_embedding(key_rope, inputs_positions=inputs_positions)
@@ -696,14 +725,17 @@ class MLA(Attention):
       MLA-attended outputs.
     """
     if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.prefill_input_axis_names)
+      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.prefill_input_axis_names)
+      out_logical_name = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.ep_input_axis_names)
+      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.ep_input_axis_names)
+      out_logical_name = (BATCH_NO_EXP, LENGTH, HEAD, D_KV)
     else:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.input_axis_names)
+      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.input_axis_names)
+      out_logical_name = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
 
     query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
     key, value, cached_values = self.mla_kv_projection(
@@ -724,10 +756,11 @@ class MLA(Attention):
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
 
     if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      out = nn.with_logical_constraint(out, self.ep_out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)
     else:
-      out = nn.with_logical_constraint(out, self.out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.out_axis_names)
 
-    out = self.out_projection(out)
+    out_sharding = create_sharding(self.mesh, out_logical_name)
+    out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache

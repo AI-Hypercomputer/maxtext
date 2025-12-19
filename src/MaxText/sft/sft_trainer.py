@@ -161,7 +161,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
-  with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
     trainer.train(trainer.data_hooks.train_data_iterator, trainer.data_hooks.eval_data_iterator)
   return trainer
 

@@ -15,7 +15,7 @@
 -->
 
 (data-input-pipeline)=
-# Manage the data input pipeline
+# Data pipelines
 
 Currently MaxText has three data input pipelines:
 

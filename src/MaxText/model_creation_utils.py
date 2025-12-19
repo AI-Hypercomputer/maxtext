@@ -133,7 +133,8 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
 
   _create_model_partial = partial(_create_model, mesh=mesh, model_mode=model_mode, rng_key=rng_key)
 
-  abstract_model = nnx.eval_shape(_create_model_partial)
+  with nn.logical_axis_rules(config.logical_axis_rules):
+    abstract_model = nnx.eval_shape(_create_model_partial)
   graphdef, abstract_state = nnx.split(abstract_model)
   specs = nnx.get_partition_spec(abstract_state)
 
@@ -153,9 +154,10 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
     model = _create_model_partial()
     return nnx.state(model)
 
-  with mesh:
+  with jax.set_mesh(mesh):
     # Create the model with sharded parameters.
-    sharded_state = create_sharded_state()
+    with nn.logical_axis_rules(config.logical_axis_rules):
+      sharded_state = create_sharded_state()
     model = nnx.merge(graphdef, sharded_state)
 
     if config.load_parameters_path:

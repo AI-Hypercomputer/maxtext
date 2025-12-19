@@ -934,7 +934,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 
   unboxed_abstract_sharded_state = max_utils.unbox_logicallypartioned(abstract_sharded_state)
   # Initialization
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return (
       unboxed_abstract_sharded_state,
@@ -970,7 +970,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
     init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
     abstract_state = jax.eval_shape(init_kv_cache_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return state_mesh_annotations
 
@@ -999,7 +999,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
     init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
     abstract_state = jax.eval_shape(init_kv_cache_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return state_mesh_annotations
 

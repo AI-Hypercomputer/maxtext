@@ -297,10 +297,12 @@ class MoeLoopBlock(nnx.Module):
     self.gate = moe.GateLogit(
         in_features_shape=self.inputs_shape[-1],
         out_features_shape=self.num_experts,
+        mesh=self.mesh,
         model_name=self.config.model_name,
         dtype=self.dtype,
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
+        shard_mode=config.shard_mode,
         rngs=rngs,
     )
     for k in range(self.num_experts):
@@ -635,6 +637,69 @@ class RoutedMoeTest(unittest.TestCase):
         sparse_matmul=True,
         per_device_batch_size=1,
         ici_context_parallelism=4,
+    )
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
+      actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  @pytest.mark.tpu_only
+  def test_megablox_expert_context_parallelism(self):
+    cfg = pyconfig.initialize(
+        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        run_name="moe_block_megablox_ep_cp_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=True,
+        sparse_matmul=True,
+        per_device_batch_size=4,
+        ici_context_parallelism=2,
+        ici_expert_parallelism=2,
+        packing=False,
+    )
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
+      actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  @pytest.mark.tpu_only
+  def test_megablox_expert_tensor_parallelism(self):
+    cfg = pyconfig.initialize(
+        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        run_name="moe_block_megablox_ep_tp_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=True,
+        sparse_matmul=True,
+        per_device_batch_size=4,
+        ici_tensor_parallelism=2,
+        ici_expert_parallelism=2,
     )
 
     rng = jax.random.PRNGKey(2345)

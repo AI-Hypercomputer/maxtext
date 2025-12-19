@@ -124,6 +124,8 @@ def elastic_handler(
         learning_rate_schedule,
         data_iterator,
         _,
+        _,
+        _,
         state,
     ) = setup_train_loop(config, recorder, elastic_manager.good_devices)
 
@@ -178,11 +180,13 @@ def train_loop(config, elastic_manager, recorder, state=None):
       learning_rate_schedule,
       data_iterator,
       _,
+      _,
+      _,
       state,
   ) = setup_train_loop(config, recorder)
 
   p_train_step, _ = train_utils.jit_train_and_eval_step(config, model, mesh, state, state_mesh_shardings, train_step)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()

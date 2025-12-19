@@ -193,6 +193,9 @@ class Gemma3DecoderLayer(nnx.Module):
       attention_metadata=None,
   ):
     cfg = self.config
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
@@ -382,7 +385,7 @@ class MlpBlockViT(nnx.Module):
         matmul_precision=self.config.matmul_precision,
         rngs=self.rngs,
     )
-    self.Dropout_0 = nnx.Dropout(rate=self.config.dropout_rate)
+    self.Dropout_0 = Dropout(rate=self.config.dropout_rate, rngs=self.rngs)
     self.Dense_1 = DenseGeneral(
         in_features_shape=self.config.intermediate_size_for_vit,
         out_features_shape=self.config.hidden_size_for_vit,
@@ -452,12 +455,12 @@ class Encoder1DBlock(nnx.Module):
         config=self.config,
         rngs=self.rngs,
     )
-    self.Dropout_0 = nnx.Dropout(self.config.dropout_rate, rngs=self.rngs)
+    self.Dropout_0 = Dropout(rate=self.config.dropout_rate, rngs=self.rngs)
 
   def __call__(self, x: jax.Array, deterministic: bool = False) -> jax.Array:
     y = self.LayerNorm_0(x)
 
-    y = self.MultiHeadDotProductAttention_0(inputs_q=y, inputs_kv=y, deterministic=deterministic)
+    y, _ = self.MultiHeadDotProductAttention_0(inputs_q=y, inputs_kv=y, deterministic=deterministic)
     y = self.Dropout_0(y, deterministic=deterministic)
     x = x + y
 
@@ -634,7 +637,7 @@ class Gemma3VisionEncoderLayer(nnx.Module):
         width=self.config.hidden_size_for_vit,
         dtype=self.config.dtype_mm,
     )
-    self.Dropout_0 = nnx.Dropout(self.config.dropout_rate, rngs=self.rngs)
+    self.Dropout_0 = Dropout(rate=self.config.dropout_rate, rngs=self.rngs)
     self.Transformer = Encoder(
         config=self.config,
         mesh=self.mesh,

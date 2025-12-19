@@ -16,6 +16,8 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+from functools import partial
+
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -30,6 +32,7 @@ from MaxText.layers.normalizations import rms_norm
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from MaxText.inference import page_manager
 from MaxText.common_types import MODEL_MODE_PREFILL
 
@@ -67,7 +70,13 @@ def self_attention_with_norm(
   else:
     logical_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
-  lnx = nn.with_logical_constraint(lnx, logical_axis_names)
+  _maybe_shard_with_logical = partial(
+      maybe_shard_with_logical,
+      mesh=mesh,
+      shard_mode=cfg.shard_mode,
+  )
+  lnx_sharding = create_sharding(mesh, logical_axis_names)
+  lnx = _maybe_shard_with_logical(lnx, logical_axis_names)
 
   attention_layer = attention_mla.mla_as_linen(
       config=cfg,
@@ -97,6 +106,7 @@ def self_attention_with_norm(
       mscale=cfg.mscale,
       rope_factor=cfg.rope_factor,
       model_mode=model_mode,
+      attn_logits_soft_cap=cfg.attn_logits_soft_cap,
   )
 
   attention_lnx, _ = attention_layer(
@@ -106,12 +116,13 @@ def self_attention_with_norm(
       decoder_segment_ids=decoder_segment_ids,
       deterministic=deterministic,
       model_mode=model_mode,
+      out_sharding=lnx_sharding,
       previous_chunk=previous_chunk,
       page_state=page_state,
       slot=slot,
   )
 
-  attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
+  attention_lnx = _maybe_shard_with_logical(attention_lnx, logical_axis_names)
   intermediate_inputs = inputs + attention_lnx
 
   # Normalization
@@ -123,7 +134,7 @@ def self_attention_with_norm(
       kernel_axes=("norm",),
       epsilon=cfg.normalization_layer_epsilon,
   )(intermediate_inputs)
-  hidden_states = nn.with_logical_constraint(hidden_states, logical_axis_names)
+  hidden_states = _maybe_shard_with_logical(hidden_states, logical_axis_names)
   return hidden_states, intermediate_inputs
 
 
@@ -169,9 +180,19 @@ class DeepSeekDenseLayer(nn.Module):
     cfg = self.config
     if model_mode == MODEL_MODE_PREFILL:
       logical_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+      mlp_logical_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_mlp")
     else:
       logical_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
-    inputs = nn.with_logical_constraint(inputs, logical_axis_names)
+      mlp_logical_axis_names = ("activation_batch", "activation_norm_length", "activation_mlp")
+
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
+
+    _maybe_shard_with_logical = partial(maybe_shard_with_logical, mesh=self.mesh, shard_mode=self.config.shard_mode)
+    lnx_out_sharding = create_sharding(self.mesh, logical_axis_names)
+    mlp_intermediate_sharding = create_sharding(self.mesh, mlp_logical_axis_names)
+    inputs = _maybe_shard_with_logical(inputs, logical_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     hidden_states, intermediate_inputs = self_attention_with_norm(
@@ -198,12 +219,17 @@ class DeepSeekDenseLayer(nn.Module):
         config=cfg,
         mesh=self.mesh,
         quant=self.quant,
-    )(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
+    )(
+        hidden_states,
+        deterministic=deterministic,
+        intermediate_sharding=mlp_intermediate_sharding,
+        out_sharding=lnx_out_sharding,
+    )
+    mlp_lnx = _maybe_shard_with_logical(mlp_lnx, logical_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
-    layer_output = nn.with_logical_constraint(
+    layer_output = _maybe_shard_with_logical(
         layer_output,
         logical_axis_names,
     )
@@ -238,9 +264,19 @@ class DeepSeekMoELayer(nn.Module):
     cfg = self.config
     if model_mode == MODEL_MODE_PREFILL:
       logical_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+      mlp_logical_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_mlp")
     else:
       logical_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
-    inputs = nn.with_logical_constraint(inputs, logical_axis_names)
+      mlp_logical_axis_names = ("activation_batch", "activation_norm_length", "activation_mlp")
+
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
+
+    _maybe_shard_with_logical = partial(maybe_shard_with_logical, mesh=self.mesh, shard_mode=self.config.shard_mode)
+    lnx_out_sharding = create_sharding(self.mesh, logical_axis_names)
+    lnx_intermediate_sharding = create_sharding(self.mesh, mlp_logical_axis_names)
+    inputs = _maybe_shard_with_logical(inputs, logical_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     hidden_states, intermediate_inputs = self_attention_with_norm(
@@ -269,12 +305,12 @@ class DeepSeekMoELayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         quant=self.quant,
-    )(hidden_states)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
+    )(hidden_states, intermediate_sharding=lnx_intermediate_sharding, out_sharding=lnx_out_sharding)
+    mlp_lnx = _maybe_shard_with_logical(mlp_lnx, logical_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
-    layer_output = nn.with_logical_constraint(
+    layer_output = _maybe_shard_with_logical(
         layer_output,
         logical_axis_names,
     )

@@ -824,7 +824,7 @@ def train_loop(config, config_inference, recorder, state=None):
               continue
         train_rng, rng = random.split(init_rng)
         example_batch = jax.device_put(example_batch, data_sharding)
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
           state, metrics = p_train_step(state, example_batch, train_rng)
       with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
         if step != 0 and step % config.inference_rollouts == 0:
@@ -862,7 +862,7 @@ def train_loop(config, config_inference, recorder, state=None):
         for eval_batch in eval_data_iterator:
           if 0 < config.eval_steps <= eval_step_count:
             break
-          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             eval_metrics = p_eval_step(state, eval_batch, rng)
           metric_logger.record_eval_metrics(step, metrics=eval_metrics)
           max_logging.log(f"Completed eval step {eval_step_count}")

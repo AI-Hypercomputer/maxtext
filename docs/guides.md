@@ -14,25 +14,14 @@
  limitations under the License.
  -->
 
-# How-to Guides
+# How-to guides
 
 ```{toctree}
 :maxdepth: 1
 
-guides/checkpointing_solutions.md
-guides/custom_model.md
-guides/gcp_workload_observability.md
-guides/features_and_diagnostics.md
-guides/install_maxtext.md
-guides/knowledge_distillation.md
+guides/optimization.md
 guides/data_input_pipeline.md
-guides/monitor_goodput.md
-guides/megascale_hang_playbook.md
-guides/multimodal.md
-guides/pallas_kernels_performance.md
-guides/run_maxtext.md
-guides/understand_logs_and_metrics.md
-guides/update_dependencies.md
-guides/use_vertex_ai_tensorboard.md
-guides/xprof_user_guide.md
+guides/checkpointing_solutions.md
+guides/monitoring_and_debugging.md
+guides/run_python_notebook.md
 ```
