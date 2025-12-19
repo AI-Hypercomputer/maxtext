@@ -121,10 +121,21 @@ def get_muon_weight_dimension_numbers(model, config, verbose=False):
 
 def _print_structure_debug(abstract_param, muon_weight_dimension_numbers):
   """Pretty prints the model structure and the resulting Muon config."""
+  
+  def _get_leaf_info(leaf):
+    # Case 1: flax.linen.LogicallyPartitioned (Wrapped)
+    if hasattr(leaf, "value") and hasattr(leaf.value, "shape"):
+      return {"shape": leaf.value.shape, "names": getattr(leaf, "names", None)}
+    # Case 2: jax.ShapeDtypeStruct or raw Array (Unwrapped)
+    elif hasattr(leaf, "shape"):
+      return {"shape": leaf.shape, "names": None}
+    # Fallback
+    return {"shape": "unknown", "names": None}
+
   # Access the shape from the inner ShapeDtypeStruct and names from the wrapper
   # Return a new tree with the same structure containing only shapes/names
   info_tree = jax.tree_util.tree_map(
-      lambda leaf: {"shape": leaf.value.shape, "names": leaf.names},
+      _get_leaf_info,
       abstract_param,
       is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
   )
