@@ -423,7 +423,7 @@ class Attention(nnx.Module):
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
         self.init_kv_caches(inputs_kv_shape=inputs_kv_shape)
-        if self.model_mode != MODEL_MODE_TRAIN and base_kv_cache
+        if self.model_mode != MODEL_MODE_TRAIN and base_kv_cache and config.attention != "vllm_rpa"
         else None
     )
 
@@ -909,7 +909,7 @@ class Attention(nnx.Module):
     try:
       # pylint: disable=import-outside-toplevel
       # pytype: disable=import-error
-      from tpu_inference.layers.jax.attention_interface import sharded_ragged_paged_attention as rpa_ops
+      from tpu_inference.layers.common.attention_interface import sharded_ragged_paged_attention as rpa_ops
     except ImportError as e:
       raise ImportError(
           "vLLM RPA attention ops require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
@@ -930,7 +930,8 @@ class Attention(nnx.Module):
 
     md = rpa_metadata
 
-    output, kv_cache = rpa_ops(1.0, self.mesh, attention_chunk_size, q_scale, k_scale, v_scale)(
+    output, kv_cache = rpa_ops(
+        self.mesh,
         query,
         key,
         value,
@@ -939,6 +940,12 @@ class Attention(nnx.Module):
         md.block_tables,
         md.query_start_loc,
         md.request_distribution,
+        None,
+        1.0,
+        attention_chunk_size,
+        q_scale,
+        k_scale,
+        v_scale,
     )
     return kv_cache, output
 

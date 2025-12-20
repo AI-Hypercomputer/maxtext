@@ -979,3 +979,9 @@ use_tokamax_gmm: false
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.
 use_jax_splash: false
+
+# vLLM Adapter Configurations
+# Path to the HuggingFace-style config directory for the adapter (e.g. src/MaxText/integration/vllm/maxtext_vllm_adapter)
+vllm_hf_config_path: ""
+# JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
+vllm_additional_config: {}

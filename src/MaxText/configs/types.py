@@ -1373,6 +1373,8 @@ class VLLM(BaseModel):
   kv_cache_buffer: int = Field(256, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, description="Swap space in GB for vLLM.")
+  vllm_additional_config: dict[str, Any] = Field(default_factory=dict, description="Additional vLLM config options.")
+  vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
 
 
 class GRPO(BaseModel):
@@ -2160,6 +2162,7 @@ class MaxTextConfig(
           "tensor": self.ici_tensor_parallelism,
           "tensor_transpose": self.ici_tensor_transpose_parallelism,
           "tensor_sequence": self.ici_tensor_sequence_parallelism,
+          "model": self.ici_tensor_parallelism,
           "expert": self.ici_expert_parallelism,
           "autoregressive": self.ici_autoregressive_parallelism,
       }
@@ -2176,6 +2179,7 @@ class MaxTextConfig(
           "tensor": self.dcn_tensor_parallelism,
           "tensor_transpose": self.dcn_tensor_transpose_parallelism,
           "tensor_sequence": self.dcn_tensor_sequence_parallelism,
+          "model": self.dcn_tensor_parallelism,
           "expert": self.dcn_expert_parallelism,
           "autoregressive": self.dcn_autoregressive_parallelism,
       }
