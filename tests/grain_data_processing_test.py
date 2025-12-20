@@ -209,10 +209,55 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessing
   def setUp(self):
     super().setUp()
     temp_dir = tempfile.gettempdir()
-    mixture_config = {
-        "ds1": {"path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0000*", "weight": 0.3},
-        "ds2": {"path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0001*", "weight": 0.7},
-    }
+    decoupled = is_decoupled()
+
+    if decoupled:
+      mixture_config = {
+        "ds1": {
+          "path": os.path.join(
+            MAXTEXT_PKG_DIR,
+            "..",
+            "local_datasets",
+            "c4_en_dataset_minimal",
+            "c4",
+            "en",
+            "3.0.1",
+            "c4-train.array_record-*",
+          ),
+          "weight": 0.3,
+        },
+        "ds2": {
+          "path": os.path.join(
+            MAXTEXT_PKG_DIR,
+            "..",
+            "local_datasets",
+            "c4_en_dataset_minimal",
+            "c4",
+            "en",
+            "3.0.1",
+            "c4-train.array_record-*",
+          ),
+          "weight": 0.7,
+        },
+      }
+      base_output_directory = os.path.join(
+        MAXTEXT_PKG_DIR,
+        "..",
+        "local_datasets",
+        "gcloud_decoupled_test_logs",
+      )
+    else:
+      mixture_config = {
+        "ds1": {
+          "path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0000*",
+          "weight": 0.3,
+        },
+        "ds2": {
+          "path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0001*",
+          "weight": 0.7,
+        },
+      }
+      base_output_directory = "gs://max-experiments/"
     self.mixture_config_path = os.path.join(temp_dir, "mixture_config.json")
     with open(self.mixture_config_path, "w", encoding="utf-8") as f:
       json.dump(mixture_config, f)
@@ -224,7 +269,7 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessing
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
+        base_output_directory=base_output_directory,
         dataset_type="grain",
         grain_train_mixture_config_path=self.mixture_config_path,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
@@ -246,8 +291,38 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
   """Test grain data processing with auto-tuning enabled (grain_worker_count=-1)."""
 
   def setUp(self):
-    super().setUp()
     temp_dir = tempfile.gettempdir()
+    decoupled = is_decoupled()
+
+    if decoupled:
+      grain_train_files = os.path.join(
+          MAXTEXT_PKG_DIR,
+          "..",
+          "local_datasets",
+          "c4_en_dataset_minimal",
+          "c4",
+          "en",
+          "3.0.1",
+          "c4-train.array_record-*",
+      )
+      base_output_directory = os.path.join(
+        MAXTEXT_PKG_DIR,
+        "..",
+        "local_datasets",
+        "gcloud_decoupled_test_logs",
+      )
+    else:
+      grain_train_files = os.path.join(
+          temp_dir,
+          "gcsfuse",
+          "array-record",
+          "c4",
+          "en",
+          "3.0.1",
+          "c4-train.array_record*",
+      )
+      base_output_directory = "gs://max-experiments/"
+
     self.config = pyconfig.initialize(
         [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1,
@@ -255,12 +330,10 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
+        base_output_directory=base_output_directory,
         dataset_type="grain",
         grain_ram_budget_mb=512,
-        grain_train_files=os.path.join(
-            temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"
-        ),
+        grain_train_files=grain_train_files,
         grain_worker_count=-1,  # Enable auto-tuning
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
         enable_checkpointing=False,
@@ -421,3 +494,4 @@ def mount_gcsfuse():
 if __name__ == "__main__":
   mount_gcsfuse()
   unittest.main()
+

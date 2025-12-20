@@ -510,6 +510,54 @@ def vertex_tensorboard_components():
 
 __all__.append("vertex_tensorboard_components")
 
+# ---------------- ML Diagnostics (google_cloud_mldiagnostics) -----------------
+
+
+def _mldiagnostics_stub():  # pragma: no cover - simple placeholder
+  """Return stub for google_cloud_mldiagnostics."""
+
+  class _StubXprof:
+    """Stub of mldiag.xprof context manager."""
+
+    def __init__(self, *a, **k):  # pylint: disable=unused-argument
+      pass
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *a, **k):  # pylint: disable=unused-argument
+      pass
+
+  class _StubMldiag:
+    """Stub of mldiag module."""
+
+    def xprof(self, *a, **k):  # pylint: disable=unused-argument
+      """Return a stub context manager."""
+      return _StubXprof()
+
+  return _StubMldiag(), True
+
+
+def mldiagnostics_modules():
+  """Return (mldiag, is_stub) centralizing stub logic.
+
+  If decoupled OR import fails, returns stub object; otherwise real module.
+  """
+  if is_decoupled():  # fast path: never attempt heavy import
+    print("[DECOUPLED NO-OP] mldiagnostics: using stub.")
+    return _mldiagnostics_stub()
+
+  try:
+    import google_cloud_mldiagnostics as mldiag  # type: ignore  # pylint: disable=import-outside-toplevel
+
+    return mldiag, False
+  except Exception:  # ModuleNotFoundError / ImportError  # pylint: disable=broad-exception-caught
+    print("[NO-OP] mldiagnostics dependency missing; using stub.")
+    return _mldiagnostics_stub()
+
+
+__all__.append("mldiagnostics_modules")
+
 # ------------------------- TensorBoardX --------------------------
 
 try:
