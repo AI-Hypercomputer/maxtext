@@ -69,11 +69,12 @@ def compute_log_probs(
     rngs: JAX PRNG keys for dropout.
 
   Returns:
-    A tuple containing:
-      - token_log_probs: A [B, L-1] array of log-probabilities for each token
-        in the completion.
-      - intermediate_outputs: A dictionary of intermediate activations from the
-        model.
+    A tuple containing
+
+    * token_log_probs: A [B, L-1] array of log-probabilities for each token
+      in the completion.
+    * intermediate_outputs: A dictionary of intermediate activations from the
+      model.
   """
   if not is_train:
     params = jax.lax.stop_gradient(params)

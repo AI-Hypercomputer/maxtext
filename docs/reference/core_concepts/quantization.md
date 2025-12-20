@@ -13,14 +13,14 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  -->
-(quantization)=
+(quantization-doc)=
 # Quantization
 
 Quantization in deep learning is the process of reducing the precision of numbers used to represent a model's weights and/or activations. Instead of using higher-precision floating-point formats like 32-bit floats (`float32`) or 16-bit brain floats (`bfloat16`), quantization maps these values to lower-precision numerical formats, most commonly 8-bit integers (`int8`) or floats (`fp8`).
 
 MaxText supports quantization via both the [AQT](https://github.com/google/aqt) and [Qwix](https://github.com/google/qwix) libraries. Qwix is the recommended approach, providing a non-intrusive way to apply Quantized Training (QT).
 
-## Why use quantization? 
+## Why use quantization?
 
 The drive to use lower-precision formats like `int8` or `fp8` stems from significant performance advantages:
 

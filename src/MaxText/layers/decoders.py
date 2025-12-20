@@ -390,7 +390,7 @@ class Decoder(nn.Module):
     """Retrieves a list of decoder layer classes based on the `decoder_block` config.
 
     Returns:
-        A list containing one or more `nn.Module` classes for the decoder.
+      A list containing one or more `nn.Module` classes for the decoder.
     """
     match self.config.decoder_block:
       case DecoderBlockType.DEFAULT:

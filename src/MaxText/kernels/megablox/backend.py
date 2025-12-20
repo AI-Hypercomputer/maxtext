@@ -93,16 +93,18 @@ def make_group_metadata(
       the output for each group.
 
   Returns:
-    tuple of:
-      group_offsets: A 1d, jnp.ndarray with shape [num_groups+1] and jnp.int32
-        dtype. group_offsets[i] indicates the row at which group [i] starts in
-        the lhs matrix and group_offsets[i-1] = m.
-      group_ids: A 1d, jnp.ndarray with shape [m_tiles + num_groups] and
-        jnp.int32 dtype. group_ids[i] indicates which group grid index 'i' will
-        work on.
-      m_tile_ids: A 1d, jnp.ndarray with shape [m_tiles + num_groups] and
-        jnp.int32. m_tile_ids[i] indicates which m-dimension tile grid index 'i'
-        will work on.
+    tuple of
+
+    * group_offsets: A 1d, jnp.ndarray with shape [num_groups+1] and jnp.int32
+      dtype. group_offsets[i] indicates the row at which group [i] starts in
+      the lhs matrix and group_offsets[i-1] = m.
+    * group_ids: A 1d, jnp.ndarray with shape [m_tiles + num_groups] and
+      jnp.int32 dtype. group_ids[i] indicates which group grid index 'i' will
+      work on.
+    * m_tile_ids: A 1d, jnp.ndarray with shape [m_tiles + num_groups] and
+      jnp.int32. m_tile_ids[i] indicates which m-dimension tile grid index 'i'
+      will work on.
+
     num_tiles: The number of m-dimension tiles to execute.
   """
   num_groups = group_sizes.shape[0]
@@ -595,7 +597,7 @@ def tgmm(
       testing and debugging.
 
   Returns:
-    A  3d, jnp.ndarray with shape [num_groups, k, n].
+    A 3d, jnp.ndarray with shape [num_groups, k, n].
   """
   if group_offset is None:
     group_offset = jnp.array([0], dtype=jnp.int32)

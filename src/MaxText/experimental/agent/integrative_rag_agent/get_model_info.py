@@ -38,13 +38,14 @@ def get_model_info(model_id: str):
   `transformers` package, and the model type token.
 
   Args:
-      model_id (str): A Hugging Face model identifier (e.g., "meta-llama/Llama-3-8B").
+    model_id (str): A Hugging Face model identifier (e.g., "meta-llama/Llama-3-8B").
 
   Returns:
-      dict: A dictionary with keys:
-          - "class_name" (str | None): The architecture class name, if available.
-          - "file_path" (str): The canonical `transformers` path to the modeling file.
-          - "model_type" (str): The model type string from the config.
+    dict: A dictionary with keys
+
+      * "class_name" (str | None): The architecture class name, if available.
+      * "file_path" (str): The canonical `transformers` path to the modeling file.
+      * "model_type" (str): The model type string from the config.
   """
   # Load config only (very lightweight, no weights)
   config = AutoConfig.from_pretrained(model_id)
@@ -64,7 +65,7 @@ def parse_args():
   Parses command-line arguments for file or folder processing.
 
   Returns:
-      argparse.Namespace: The parsed command-line arguments.
+    argparse.Namespace: The parsed command-line arguments.
   """
   parser = argparse.ArgumentParser(description="Get model info from HuggingFace model id")
   parser.add_argument(

@@ -349,9 +349,10 @@ def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim):
   """Helper function to calculate matmul TFLOP in ffn based on MLP dimension.
 
   Applies to:
-    - Dense FFN layers (mlp_dim = config.mlp_dim).
-    - MoE FFN layers (mlp_dim = config.moe_mlp_dim),
-      need to scale by shared_experts or num_experts_per_tok.
+
+  * Dense FFN layers (mlp_dim = config.mlp_dim).
+  * MoE FFN layers (mlp_dim = config.moe_mlp_dim),
+    need to scale by shared_experts or num_experts_per_tok.
   """
   ffn1_flops = (
       2 * config.per_device_batch_size * config.max_target_length * mlp_dim * config.emb_dim * len(config.mlp_activations)
@@ -391,10 +392,11 @@ def get_dense_moe_layers(config):
 def calculate_gemma3_vision_layers_tflops_per_device(config):
   """
   Estimate TFLOPs for Gemma3 vision encoder (ViT-style).
+
   Returns:
-      total_tflops: Total TFLOPs (counts for fwd + bwd + optimizer)
-      learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
-      attention_tflops: TFLOPs from attention multiplications
+    total_tflops: Total TFLOPs (counts for fwd + bwd + optimizer)
+    learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
+    attention_tflops: TFLOPs from attention multiplications
   """
   # Config values
   B = config.per_device_batch_size
@@ -445,10 +447,11 @@ def calculate_gemma3_vision_layers_tflops_per_device(config):
 def calculate_llama4_vision_layers_tflops_per_device(config):
   """
   Estimate TFLOPs for Llama4 vision encoder (ViT-style).
+
   Returns:
-      total_tflops: Total TFLOPs (counts for fwd + bwd + optimizer)
-      learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
-      attention_tflops: TFLOPs from attention multiplications
+    total_tflops: Total TFLOPs (counts for fwd + bwd + optimizer)
+    learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
+    attention_tflops: TFLOPs from attention multiplications
   """
   # Config values
   B = config.per_device_batch_size
@@ -698,12 +701,12 @@ def get_nested_value(dictionary, nested_key, default=None):
   Retrieves a value from a nested key in a dictionary.
 
   Args:
-      dictionary: The dictionary to search in.
-      nested_key: A tuple representing the nested key, e.g., ('level1', 'level2', 'key').
-      default: The value to return if the nested key is not found.
+    dictionary: The dictionary to search in.
+    nested_key: A tuple representing the nested key, e.g., ('level1', 'level2', 'key').
+    default: The value to return if the nested key is not found.
 
   Returns:
-      The value associated with the nested key, or the default value if not found.
+    The value associated with the nested key, or the default value if not found.
   """
   current_level = dictionary
 
@@ -769,6 +772,7 @@ def get_abstract_param(model, config):
 
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   """Setup decode state by loading params from a checkpoint.
+
   Args:
     model: the flax model to initialize
     config: config object
@@ -1102,12 +1106,16 @@ def create_device_mesh(config, devices=None):
 
 
 def create_learning_rate_schedule(config):
-  """Creates a warmup and cosine decay learning rate schedule:
+  """Creates a warmup and cosine decay learning rate schedule
+
   We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+
   Learning rate schedule has either two or three parts:
-  1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
-  2) Cosine from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] until learning_rate_schedule_steps
-  3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
+
+  1. Linear warmup from 0 to `[learning_rate]` over steps 0 to `[learning_rate_schedule_steps * warmup_steps_fraction]`
+  2. Cosine from `[learning_rate]` to `[learning_rate * cosine_learning_rate_final_fraction]` until learning_rate_schedule_steps
+  3. Constant learning rate of 0 from `learning_rate_schedule_steps` to steps.
+
   The zero learning rate section can be used to more accurately measure the fully trained model's performance.
   """
 

@@ -803,15 +803,15 @@ class YarnRotaryEmbedding(nnx.Module):
     """Computes the range of correction dimensions for rotary positional embeddings.
 
     Args:
-        low_rot (float): Lower bound for the number of rotations.
-        high_rot (float): Upper bound for the number of rotations.
-        dim (int): Dimensionality of the embedding space.
-        base (float): Base value for the exponential computation.
-        max_position_embeddings (int): Maximum sequence length.
-        truncate (bool): Whether to floor lower bound and ceil upper bound.
+      low_rot (float): Lower bound for the number of rotations.
+      high_rot (float): Upper bound for the number of rotations.
+      dim (int): Dimensionality of the embedding space.
+      base (float): Base value for the exponential computation.
+      max_position_embeddings (int): Maximum sequence length.
+      truncate (bool): Whether to floor lower bound and ceil upper bound.
 
     Returns:
-        tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
+      tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
     """
     low = self._find_correction_dim(low_rot, dim, base, max_position_embeddings)
     high = self._find_correction_dim(high_rot, dim, base, max_position_embeddings)
@@ -1002,6 +1002,7 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
     cast_as_fprop_dtype: bool = True whether to cast the output to the fprop dtype
     fprop_dtype: DType = jnp.bfloat16 the dtype of the output
     rngs: RNG state passed in by nnx.bridge.to_linen, not used in this module.
+
   Returns:
     jax.Array of shape [batch_size_times_tiles, num_patches_incl_cls, num_heads, head_dim]
     where vision rotary position embeddings are applied.
@@ -1375,9 +1376,10 @@ class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
       w: Target width in patches
 
     Returns:
-      Tuple of (indices, weights) where:
-        - indices: [4, h*w] indices into pos_embed for 4 corners
-        - weights: [4, h*w] bilinear weights for 4 corners
+      Tuple of (indices, weights) where
+
+      * indices: [4, h*w] indices into pos_embed for 4 corners
+      * weights: [4, h*w] bilinear weights for 4 corners
     """
     N = self.num_grid_per_side
 

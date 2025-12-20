@@ -286,8 +286,9 @@ def determine_is_moe_layer(layer_id: int, interleave_moe_layer_step: int) -> boo
   Determines whether the given layer at `layer_id` is MoE layer.
 
   This function implements a striding pattern. For example:
-  - If moe_layer_stride is 1, all layers are MoE layers.
-  - If moe_layer_stride is 2, layers with index 1, 3, 5, ... are MoE layers.
+
+  * If moe_layer_stride is 1, all layers are MoE layers.
+  * If moe_layer_stride is 2, layers with index 1, 3, 5, ... are MoE layers.
 
   Args:
     layer_id: The 0-based index of the layer being checked.
@@ -764,8 +765,8 @@ class Llama4VisionModel(nnx.Module):
       deterministic: Whether to use deterministic mode (disables dropout)
 
     Returns:
-      Final hidden states from the vision encoder of shape:
-      [batch_size * num_images, num_tiles, num_patches, vision_output_dim_for_vit]
+      Final hidden states from the vision encoder of shape
+      `[batch_size * num_images, num_tiles, num_patches, vision_output_dim_for_vit]`
     """
     # Reshape pixel values to combine batch and num_tiles dimensions
     b, t, c, h, w = pixel_values.shape

@@ -638,14 +638,14 @@ class KVCache(nnx.Module):
     """Adds a single token's results to the ar kv cache
 
     Args:
-        one_token_key (Array): Key of one token to add to the cache
-        one_token_value (Array): Value of one token to add to the cache
-        cached_ar_key (tuple[nnx.Cache, nnx.Cache|None],): Cached keys to add new token key to, possibly with scale
-        cached_ar_value (tuple[nnx.Cache, nnx.Cache|None],: Cached values to add new token value to, possible with scale
-        one_hot_indices (Array): Location of the new token within the cache
+      one_token_key (Array): Key of one token to add to the cache
+      one_token_value (Array): Value of one token to add to the cache
+      cached_ar_key (tuple[nnx.Cache, nnx.Cache|None],): Cached keys to add new token key to, possibly with scale
+      cached_ar_value (tuple[nnx.Cache, nnx.Cache|None],): Cached values to add new token value to, possible with scale
+      one_hot_indices (Array): Location of the new token within the cache
 
     Returns:
-        tuple[Array, Array]: Updated caches for key and value with new token info added
+      tuple[Array, Array]: Updated caches for key and value with new token info added
     """
 
     cached_key, cached_key_scale = key_caches
@@ -758,7 +758,8 @@ class KVCache(nnx.Module):
       decoder_segment_ids: [b, 1] -- marking segment ids for tokens
 
     Returns:
-      tuple of (key, value, segment_id) for both prefill and ar cache,
+      tuple of (key, value, segment_id) for both prefill and ar cache
+
     Raises:
       ValueError: when key/value shape is not [batch, 1, num_heads, heads_dim].
     """

@@ -225,16 +225,16 @@ def _reserve_pages_for_group(
   `released_state` unchanged (effectively leaving the group empty).
 
   Args:
-      released_state: The global `PageState` after pages for `page_group_id`
-          have already been released.
-      page_group_id: The index of the page group to allocate pages for.
-      true_length: The target sequence length for the prefill. MUST BE > 0.
-      tokens_per_page: The capacity of each page.
-      max_pages_per_group: The maximum number of pages the group can hold.
+    released_state: The global `PageState` after pages for `page_group_id`
+      have already been released.
+    page_group_id: The index of the page group to allocate pages for.
+    true_length: The target sequence length for the prefill. MUST BE > 0.
+    tokens_per_page: The capacity of each page.
+    max_pages_per_group: The maximum number of pages the group can hold.
 
   Returns:
-      A new `PageState` with pages allocated for the group and its state updated,
-      or the input `released_state` if allocation failed due to resource limits.
+    A new `PageState` with pages allocated for the group and its state updated,
+    or the input `released_state` if allocation failed due to resource limits.
   """
   num_pages_needed = (true_length + tokens_per_page - 1) // tokens_per_page
   last_token_abs_idx = true_length - 1
@@ -336,6 +336,7 @@ def _update_decode_pages_global(
   """Updates pages globally for one step of autoregressive decoding.
 
   This function performs the following steps for all page groups simultaneously:
+
   1. Increments `sequence_lengths` for groups marked as `has_active_page`.
   2. Calculates the new `active_page_position` based on the incremented length.
   3. Determines which active groups now require a new page because their sequence
@@ -420,8 +421,8 @@ class PageManager:
   the `PageState`. It uses the concept of page groups, where each group typically
   corresponds to a single request or sequence being processed.
 
-  Example:
-    ```python
+  Example::
+
     # Initialize a PageManager from configuration
     config = YourConfig(...) # Set pagedattn_num_pages, etc.
     page_manager = PageManager(config)
@@ -444,7 +445,6 @@ class PageManager:
         page_state=state,
         page_group_id=0
     )
-    ```
   """
 
   def __init__(self, config: Config):
@@ -515,15 +515,14 @@ class PageManager:
     Raises:
       ValueError: If `page_group_id` or `true_length` are outside their valid ranges.
 
-    Example:
-      ```python
+    Example::
+
       # Reserve pages for a 16-token sequence in group 0
       state = page_manager.update_prefill_pages(
           page_state=state,
           page_group_id=0,
           true_length=16
       )
-      ```
     """
     if page_group_id < 0 or page_group_id >= self.max_page_groups:
       raise ValueError(f"PageManager: page_group_id ({page_group_id}) out of range [0, {self.max_page_groups})")
@@ -553,11 +552,10 @@ class PageManager:
       Groups that required and successfully obtained a new page will have their
       `num_pages_used`, `page_map`, and `active_page` updated.
 
-    Example:
-      ```python
+    Example::
+
       # Advance state for all active sequences by one decode step
       state = page_manager.update_decode_pages(state)
-      ```
     """
     return _update_decode_pages_global(page_state, self.tokens_per_page, self.max_pages_per_group)
 
@@ -583,14 +581,13 @@ class PageManager:
     Raises:
       ValueError: If `page_group_id` is outside its valid range.
 
-    Example:
-      ```python
+    Example::
+
       # Release all pages currently held by group 0
       state = page_manager.release_pages(
           page_state=state,
           page_group_id=0
       )
-      ```
     """
     if page_group_id < 0 or page_group_id >= self.max_page_groups:
       raise ValueError(f"PageManager: page_group_id ({page_group_id}) out of range [0, {self.max_page_groups})")
@@ -607,11 +604,10 @@ class PageManager:
       An initialized `PageState` object where all pages are free (except possibly 0)
       and no groups are active.
 
-    Example:
-      ```python
+    Example::
+
       # Get a fresh, empty page state
       initial_state = page_manager.get_initial_page_state()
-      ```
     """
     return initialize_page_state(
         num_pages=self.num_pages,

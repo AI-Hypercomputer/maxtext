@@ -50,6 +50,11 @@ Key concepts including checkpointing strategies, quantization, tiling, and Mixtu
 :::
 ::::
 
+## 📚 API Reference
+
+Find comprehensive API documentation for MaxText modules, classes, and functions in the [API Reference page](reference/api_reference).
+
+
 ```{toctree}
 :hidden:
 :maxdepth: 1
@@ -58,4 +63,5 @@ reference/performance_metrics.md
 reference/models.md
 reference/architecture.md
 reference/core_concepts.md
+reference/api_reference.rst
 ```

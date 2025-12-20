@@ -114,9 +114,10 @@ def _split_grpo_state(state):
       key within its `params` attribute.
 
   Returns:
-    A tuple containing:
-      - new_state: The training state with 'reference_params' removed.
-      - reference_params: The extracted reference parameters.
+    A tuple containing
+
+    * new_state: The training state with 'reference_params' removed.
+    * reference_params: The extracted reference parameters.
   """
   reference_params = state.params["reference_params"]
   new_state = state.replace(params={k: v for k, v in state.params.items() if k != "reference_params"})
@@ -359,10 +360,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     dropout_rng: JAX PRNG key for dropout.
 
   Returns:
-    A tuple containing:
-      - new_state: The updated training state after applying gradients.
-      - metrics: A dictionary of metrics for logging, including loss, reward,
-        and gradient norms.
+    A tuple containing
+
+    * new_state: The updated training state after applying gradients.
+    * metrics: A dictionary of metrics for logging, including loss, reward,
+      and gradient norms.
   """
   state, reference_params = _split_grpo_state(state)
   state_mesh_shardings, reference_params_sharding = _split_grpo_state(state_mesh_shardings)
@@ -529,19 +531,20 @@ def setup_train_loop(
     recorder: A GoodputRecorder for performance tracking.
 
   Returns:
-    A tuple containing:
-      - init_rng: The initial JAX PRNG key.
-      - checkpoint_manager: The Orbax checkpoint manager.
-      - state_mesh_shardings: Sharding specifications for the training state.
-      - inference_state_mesh_shardings: Sharding specs for the inference state.
-      - model: The training model instance.
-      - inference_model: The inference model instance.
-      - mesh: The device mesh for training.
-      - inference_mesh: The device mesh for inference.
-      - learning_rate_schedule: The learning rate schedule function.
-      - data_iterator: The iterator for the input prompt dataset.
-      - eval_data_iterator: The iterator for the evaluation dataset (or None).
-      - state: The initialized training state.
+    A tuple containing
+
+    * init_rng: The initial JAX PRNG key.
+    * checkpoint_manager: The Orbax checkpoint manager.
+    * state_mesh_shardings: Sharding specifications for the training state.
+    * inference_state_mesh_shardings: Sharding specs for the inference state.
+    * model: The training model instance.
+    * inference_model: The inference model instance.
+    * mesh: The device mesh for training.
+    * inference_mesh: The device mesh for inference.
+    * learning_rate_schedule: The learning rate schedule function.
+    * data_iterator: The iterator for the input prompt dataset.
+    * eval_data_iterator: The iterator for the evaluation dataset (or None).
+    * state: The initialized training state.
   """
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     max_logging.log("Training mesh used for the workload")

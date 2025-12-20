@@ -55,16 +55,17 @@ def is_torch_function_or_class(node):
   Checks if an AST node represents a PyTorch-related function or class.
 
   This is determined by:
-  - A class inheriting from 'nn.Module'.
-  - A function having 'torch' in its annotations.
-  - A function body containing references to 'torch'.
+
+  * A class inheriting from 'nn.Module'.
+  * A function having 'torch' in its annotations.
+  * A function body containing references to 'torch'.
 
   Args:
-      node: An AST node (ast.FunctionDef or ast.ClassDef).
+    node: An AST node (ast.FunctionDef or ast.ClassDef).
 
   Returns:
-      bool: True if the node is a PyTorch-related function or class,
-            False otherwise.
+    bool: True if the node is a PyTorch-related function or class,
+      False otherwise.
   """
   if isinstance(node, ast.FunctionDef):
     # Look for 'torch' in annotations or function body
@@ -93,10 +94,10 @@ def file_uses_torch(tree):
   Checks if a file's AST contains any top-level imports of the 'torch' module.
 
   Args:
-      tree: The AST of the entire file.
+    tree: The AST of the entire file.
 
   Returns:
-      bool: True if 'torch' is imported, False otherwise.
+    bool: True if 'torch' is imported, False otherwise.
   """
   for node in ast.walk(tree):
     if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -118,16 +119,15 @@ def has_external_dependencies(code, removed_names=None, local_components=None):
   filtered out.
 
   Args:
-      code (str): The source code of the component to check.
-      removed_names (list, optional): A list of names (functions, classes)
-                                      that were removed by `remove_local_imports`.
-                                      Defaults to None.
-      local_components (list, optional): A list of names of other components
-                                         in the same file. Defaults to None.
+    code (str): The source code of the component to check.
+    removed_names (list, optional): A list of names (functions, classes)
+      that were removed by `remove_local_imports`. Defaults to None.
+    local_components (list, optional): A list of names of other components
+      in the same file. Defaults to None.
 
   Returns:
-      bool: True if a dependency on a removed or local name is found,
-            False otherwise.
+    bool: True if a dependency on a removed or local name is found, False
+      otherwise.
   """
   if not removed_names and not local_components:
     return False

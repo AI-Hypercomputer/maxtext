@@ -21,12 +21,13 @@ def GEMMA2_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace weights path and weights shape.
 
   Args:
-      config (dict): Model configuration dictionary, defined in `model_configs.py`
+    config (dict): Model configuration dictionary, defined in `model_configs.py`
 
   Returns:
-      dict: A mapping where:
-          - Keys are HuggingFace model parameter paths
-          - Values are parameter shape as a List
+    dict: A mapping where:
+
+      * Keys are HuggingFace model parameter paths
+      * Values are parameter shape as a List
   """
 
   mapping = {

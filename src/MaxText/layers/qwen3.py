@@ -1236,10 +1236,10 @@ class Qwen3OmniMoeVisionPatchMerger(nnx.Module):
   def __call__(self, hidden: Array) -> Array:
     """
     Args:
-        hidden: Input tensor of shape (batch, seq_len, base_hidden_size) after spatial reordering
+      hidden: Input tensor of shape (batch, seq_len, base_hidden_size) after spatial reordering
 
     Returns:
-        Output tensor of shape (batch, seq_len//merge_size**2, out_hidden_size) - spatially merged
+      Output tensor of shape (batch, seq_len//merge_size**2, out_hidden_size) - spatially merged
     """
     # Get dimensions
     spatial_merge_size = self.config.spatial_merge_size_for_vit
@@ -1334,10 +1334,10 @@ class Qwen3OmniMoeVisionMLP(nnx.Module):
   def __call__(self, hidden_state: Array) -> Array:
     """
     Args:
-        hidden_state: Input tensor of shape (..., hidden_size) - supports packed sequences
+      hidden_state: Input tensor of shape (..., hidden_size) - supports packed sequences
 
     Returns:
-        Output tensor of shape (..., hidden_size)
+      Output tensor of shape (..., hidden_size)
     """
     hidden_state = self.linear_fc1(hidden_state)
     hidden_state = jax.nn.gelu(hidden_state)
@@ -1401,9 +1401,10 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
   def __call__(self, hidden_states: Array) -> Array:
     """
     Args:
-        hidden_states: Input tensor of shape (batch, in_channels, temporal*patch_size, height*patch_size, width*patch_size)
+      hidden_states: Input tensor of shape (batch, in_channels, temporal*patch_size, height*patch_size, width*patch_size)
+
     Returns:
-        Output tensor of shape (batch, T*H*W, embed_dim) where T, H, W are the number of patches
+      Output tensor of shape (batch, T*H*W, embed_dim) where T, H, W are the number of patches
     """
     hidden_states = jnp.transpose(hidden_states, (0, 2, 3, 4, 1))
     hidden_states = self.proj(hidden_states)
@@ -1467,14 +1468,14 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
   ) -> Array:
     """
     Args:
-        hidden_states: Input tensor of shape (batch, T*H*W, hidden_size)
-        num_frames: Number of temporal frames (static)
-        height: Height in patches (static)
-        width: Width in patches (static)
-        deterministic: Whether to use deterministic mode (disable dropout)
+      hidden_states: Input tensor of shape (batch, T*H*W, hidden_size)
+      num_frames: Number of temporal frames (static)
+      height: Height in patches (static)
+      width: Width in patches (static)
+      deterministic: Whether to use deterministic mode (disable dropout)
 
     Returns:
-        Output tensor of shape (batch, T*H*W, hidden_size)
+      Output tensor of shape (batch, T*H*W, hidden_size)
     """
     # Pass through attention with static dimensions via rope_kwargs
     rope_kwargs = {
@@ -1541,13 +1542,13 @@ class Qwen3OmniMoeVisionBlock(nnx.Module):
   ) -> Array:
     """
     Args:
-        x: Input tensor of shape (batch, T*H*W, hidden_size)
-        num_frames: Number of temporal frames (static)
-        height: Height in patches (static)i
-        width: Width in patches (static)
+      x: Input tensor of shape (batch, T*H*W, hidden_size)
+      num_frames: Number of temporal frames (static)
+      height: Height in patches (static)i
+      width: Width in patches (static)
 
     Returns:
-        Output tensor of shape (batch, T*H*W, hidden_size)
+      Output tensor of shape (batch, T*H*W, hidden_size)
     """
     x = x + self.attn(self.ln1(x), num_frames=num_frames, height=height, width=width)
     y = self.ln2(x)
@@ -1614,13 +1615,13 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
   ):
     """
     Args:
-        hidden_states: Input visual tokens of shape (batch, in_channels, T*patch_size, H*patch_size, W*patch_size)
-        deterministic: Whether to use deterministic mode
+      hidden_states: Input visual tokens of shape (batch, in_channels, T*patch_size, H*patch_size, W*patch_size)
+      deterministic: Whether to use deterministic mode
 
     Returns:
-        Tuple of:
-        - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
-        - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
+      Tuple of:
+      - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
+      - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
     """
     _, _, num_frames, height, width = hidden_states.shape
     num_frames = num_frames // self.config.temporal_patch_size_for_vit
@@ -1672,10 +1673,10 @@ class Qwen3OmniMoeVisionProjector(nnx.Module):
   def __call__(self, hidden_states: Array) -> Array:
     """
     Args:
-        hidden_states: Encoder output of shape (batch, T*H*W, hidden_size_for_vit)
+      hidden_states: Encoder output of shape (batch, T*H*W, hidden_size_for_vit)
 
     Returns:
-        Projected output of shape (batch, T*H*W//merge_size**2, out_hidden_size_for_vit)
+      Projected output of shape (batch, T*H*W//merge_size**2, out_hidden_size_for_vit)
     """
     output = self.merger(hidden_states)
     return output

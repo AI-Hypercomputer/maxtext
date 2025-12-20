@@ -119,9 +119,10 @@ def process_maxtext_param(
   a single tensor or a list of tensors for N-to-1 mappings) and transforming
   it into one or more Hugging Face compatible parameters. It handles various
   scenarios including:
-  - 1-to-1 mappings (single MaxText param to single HF param).
-  - N-to-1 mappings (multiple MaxText params combined into a single HF param).
-  - Stacked MaxText parameters (e.g., scanned layers or MoE experts) that need
+
+  * 1-to-1 mappings (single MaxText param to single HF param).
+  * N-to-1 mappings (multiple MaxText params combined into a single HF param).
+  * Stacked MaxText parameters (e.g., scanned layers or MoE experts) that need
     to be unstacked into individual Hugging Face parameters.
 
   Args:
@@ -505,8 +506,8 @@ def save_model_files(
 ):
   """
   Saves model files (config and weights) to the specified directory.
-  When uploading to GCS/HF hub,
-          *.safetensors are uploaded from memory to remote, no local storage is used to save disk usage
+  When uploading to GCS/HF hub, `*.safetensors` are uploaded from memory to
+  remote, no local storage is used to save disk usage
   """
 
   if output_dir.startswith("hf://"):

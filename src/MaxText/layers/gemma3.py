@@ -665,8 +665,10 @@ class Gemma3VisionEncoderLayer(nnx.Module):
 
   def __call__(self, inputs, deterministic, train=False):
     """ViT model that transforms image inputs to image embeddings.
+
     Args:
       inputs: jnp.array shaped [B, N, H, W, C], e.g. [4, 1, 896, 896, 3]
+
     Returns:
       jnp.array for image embeddings, shaped [B, N, P, D], e.g. [4, 1, 256, 1152]
     """

@@ -514,13 +514,13 @@ def load_state_if_possible(
     enable_orbax_v1: bool flag for enabling Orbax v1.
     checkpoint_conversion_fn: function for converting checkpoint to Orbax v1.
     source_checkpoint_layout: Optional checkpoint context to use for loading,
-    provided in string format with the default being "orbax".
+      provided in string format with the default being "orbax".
 
   Returns:
-    A tuple of (train_state, train_state_params) where full_train_state captures
-     a full reload and train_state_params just the params for a partial reload.
-     At most one will be non-None. Both can be None if neither checkpoint is
-     set.
+    A tuple of `(train_state, train_state_params)`
+      where full_train_state captures a full reload and `train_state_params`
+      just the params for a partial reload. At most one will be non-None. Both
+      can be None if neither checkpoint is set.
   """
 
   if checkpoint_manager is not None:
@@ -615,8 +615,10 @@ def load_state_if_possible(
 
 def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-error
   """Setup checkpoint logger.
+
   Args:
     config
+
   Returns:
     CloudLogger
   """

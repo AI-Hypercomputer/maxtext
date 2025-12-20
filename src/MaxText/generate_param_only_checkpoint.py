@@ -14,11 +14,14 @@
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Transforms a "full state" including optimizer state to a bfloat16 "parameter state" without optimizer state.
-   This typically used for turning a state output by training.py into a state than can be consumed by decode.py.
 
-   The input "fullstate" is passed in via:
-     load_full_state_path.
-   The output "parameter state" is output to the checkpoint directory. Additionally it is cast down to bf16.
+This typically used for turning a state output by training.py into a state than can be consumed by decode.py.
+
+The input "fullstate" is passed in via::
+
+  load_full_state_path.
+
+The output "parameter state" is output to the checkpoint directory. Additionally it is cast down to bf16.
 """
 
 import os.path
@@ -157,8 +160,9 @@ def _save_decode_checkpoint(config, state, checkpoint_manager):
 def generate_decode_checkpoint(config):
   """
   Generate an decode checkpoint from a given training checkpoint.
-  - Training checkpoint is loaded from config.load_full_state_path.
-  - Inference checkpoint will be saved at the config's checkpoint directory.
+
+  * Training checkpoint is loaded from config.load_full_state_path.
+  * Inference checkpoint will be saved at the config's checkpoint directory.
   """
 
   devices_array = maxtext_utils.create_device_mesh(config)
