@@ -82,6 +82,7 @@ def run_checkpoint_compatibility(hardware, attention_type):
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
+@pytest.mark.skip(reason="Flaky test b/470704234")
 def test_autoselected_attention():
   run_checkpoint_compatibility("tpu", "autoselected")
 
