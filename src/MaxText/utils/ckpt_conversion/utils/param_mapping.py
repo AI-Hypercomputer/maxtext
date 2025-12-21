@@ -1616,6 +1616,7 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_0", "op": "split_and_transpose_expert"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_1", "op": "split_and_transpose_expert"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wo", "op": "split_and_transpose_expert"},
+      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
       {"maxtext": "params-decoder-layers_{i}-pre_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
       {"maxtext": "params-decoder-layers_{i}-post_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
       {"maxtext": "params-decoder-decoder_norm-scale", "op": "scale_rmsnorm"},
@@ -1633,8 +1634,8 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
         # For scanned layers, the key is singular and doesn't have the layer index
         scan_key = maxtext_pattern.replace(f"_layers_{'{i}'}_", "-layers-")
         print(f"scan_key: {scan_key}")
-        if scan_key != "params-decoder-layers-MoeBlock_0-gate-kernel":
-          hooks[scan_key] = hook_fn
+        # if scan_key != "params-decoder-layers-MoeBlock_0-gate-kernel":
+        #   hooks[scan_key] = hook_fn
       else:
         # For non-scanned layers, add a hook for each layer
         for i in range(config["num_hidden_layers"]):
