@@ -27,6 +27,7 @@ from jax.sharding import Mesh
 from MaxText.data_loader import DataLoader, RampUpDataLoader
 from MaxText.rampup_batch import RampupBatchManager
 from MaxText.maxtext_utils import create_device_mesh
+from MaxText.gcloud_stub import is_decoupled
 from MaxText import exceptions
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
@@ -58,6 +59,14 @@ class DataLoaderTest(unittest.TestCase):
         "reuse_example_batch": reuse_example_batch,
     }
     args.update(kwargs)
+
+    # In decoupled mode, adapt mesh/ICI parallelism so that the
+    # product of ICI parallelism matches the available devices for
+    # this test only.
+    if is_decoupled():
+      args.setdefault("mesh_axes", ["data"])
+      args.setdefault("ici_data_parallelism", -1)
+
     return pyconfig.initialize(
         [None, get_test_config_path()],
         **args,
@@ -170,9 +179,26 @@ class DataLoaderTest(unittest.TestCase):
     data_loader = RampUpDataLoader(self.config_rampup, self.mesh, self.mock_data_iterator, None)
 
     # Expected batch sizes based on test config.
-    # The end global batch size is self.num_devices * per_device_batch_size
-    # The rampup should be: 3 steps of size 8, 2 steps of size 12, then size 16.
-    expected_batch_sizes = [8, 8, 8, 12, 12, 16, 16]
+    # The end global batch size is self.num_devices * per_device_batch_size.
+    # In decoupled mode, derive the schedule from a fresh RampupBatchManager
+    # so it matches the actual global batch sizes on the host.
+    if is_decoupled():
+      tmp_manager = RampupBatchManager(self.config_rampup, checkpoint_step)
+      expected_batch_sizes = []
+      # Collect sizes for the ramp-up phase.
+      while True:
+        expected_batch_sizes.append(tmp_manager.global_batch_size_current)
+        rampup_active = tmp_manager.update()
+        if not rampup_active:
+          break
+      # Add a couple of post-ramp-up steps at the final size, mirroring
+      # the original test's intent.
+      for _ in range(2):
+        expected_batch_sizes.append(tmp_manager.global_batch_size_current)
+        tmp_manager.update()
+    else:
+      # The rampup should be: 3 steps of size 8, 2 steps of size 12, then size 16.
+      expected_batch_sizes = [8, 8, 8, 12, 12, 16, 16]
     for i, expected_size in enumerate(expected_batch_sizes):
       batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
       expected_shape = (expected_size, self.config_rampup.max_target_length)
