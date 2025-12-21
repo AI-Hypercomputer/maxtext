@@ -124,7 +124,7 @@ def main() -> None:
   )
   args = ap.parse_args()
 
-  # Use the version directory directly (no symlink logic)
+  # Use the version directory directly
   version_dir = os.path.join(args.root, "c4", "en", args.version)
   if not os.path.isdir(version_dir):
     raise FileNotFoundError(f"Version directory not found: {version_dir}")
