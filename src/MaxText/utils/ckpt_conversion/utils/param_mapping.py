@@ -1581,12 +1581,18 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       depth_scale = np.dtype("float32").type(1 / np.sqrt(config["head_dim"]))
       return (input_tensor * depth_scale).astype(input_tensor.dtype)
 
+  def permute_to_match_maxtext_rope(input_tensor, target_shape):
+    evens = input_tensor[..., ::2]
+    odds = input_tensor[..., 1::2]
+    return np.concatenate((evens, odds), axis=input_tensor.ndim - 1)
+
   # Map operation names from the DSL to the hook functions
   op_to_fn = {
       "reshape_and_transpose_attention": reshape_and_transpose_attention,
       "split_and_transpose_expert": split_and_transpose_expert,
       "reshape_kernel": reshape_kernel,
       "scale_query_layer": scale_query_layer,
+      "permute_to_match_maxtext_rope": permute_to_match_maxtext_rope,
   }
 
   # This plan is a direct representation of the DSL for registration logic
@@ -1596,8 +1602,8 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   # {"maxtext": "params-decoder-layers_{i}-post_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
   # {"maxtext": "params-decoder-decoder_norm-scale", "op": "scale_rmsnorm"},
   plan = [
-      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention"]},
-      {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer", "permute_to_match_maxtext_rope"]},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": ["reshape_and_transpose_attention", "permute_to_match_maxtext_rope"]},
       {"maxtext": "params-decoder-layers_{i}-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_0", "op": "split_and_transpose_expert"},
