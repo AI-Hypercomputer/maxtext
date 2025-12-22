@@ -1471,14 +1471,6 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       # MoE gate
       mapping["params-decoder-layers-MoeBlock_0-gate-kernel"].append(f"{hf_prefix}.block_sparse_moe.gate.weight")
 
-      # MoE expert weights (list of lists)
-      # w1_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w1.weight" for j in range(num_experts)]
-      # w3_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w3.weight" for j in range(num_experts)]
-      # w2_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w2.weight" for j in range(num_experts)]
-      # mapping["params-decoder-layers-MoeBlock_0-wi_0"].append(w1_experts)
-      # mapping["params-decoder-layers-MoeBlock_0-wi_1"].append(w3_experts)
-      # mapping["params-decoder-layers-MoeBlock_0-wo"].append(w2_experts)
-
     # Outer loop as experts and inner loop as layers to align with logic in _build_multi_axis_stacked_tensor()
     for j in range(num_experts):
       # Collect this specific expert's weights across all layers
@@ -1558,11 +1550,6 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       depth_scale = np.dtype("float32").type(1 / np.sqrt(maxtext_config.head_dim))
       return (input_tensor * depth_scale).astype(input_tensor.dtype)
 
-  # def permute_to_match_maxtext_rope(input_tensor, target_shape):
-  #   evens = input_tensor[..., ::2]
-  #   odds = input_tensor[..., 1::2]
-  #   return np.concatenate((evens, odds), axis=input_tensor.ndim - 1)
-
   # Map operation names from the DSL to the hook functions
   op_to_fn = {
       "reshape_and_transpose_attention": reshape_and_transpose_attention,
@@ -1607,8 +1594,7 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       if scan_layers:
         # For scanned layers, the key is singular and doesn't have the layer index
         # scan_key = maxtext_pattern.replace(f"_layers_{'{i}'}_", "-layers-")  
-        hooks[maxtext_pattern] = hook_fn  
-        print(f"maxtext_pattern: {maxtext_pattern}")
+        hooks[maxtext_pattern] = hook_fn
       else:
         # For non-scanned layers, add a hook for each layer
         for i in range(config["num_hidden_layers"]):
