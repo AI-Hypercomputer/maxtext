@@ -1534,7 +1534,7 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
 
   # Define hook functions within the closure to capture config and saving_to_hf
 
-  def reshape_and_transpose_attention(x: np.ndarray, target_shape: tuple) -> np.ndarray:
+  def reshape_and_transpose_attention(x, target_shape):
     """
     Reshapes and transposes attention weights.
     MaxText: [hidden_size, num_heads, head_dim]
@@ -1547,27 +1547,7 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       # Transpose from [num_heads * head_dim, hidden_size] to [hidden_size, num_heads * head_dim] then reshape
       return x.transpose().reshape(target_shape)
 
-  def split_and_transpose_expert(x: np.ndarray, target_shape: tuple, **kwargs) -> np.ndarray:
-    """
-    Handles weights for a single expert from a stacked tensor.
-    The conversion engine provides the expert_idx.
-    """
-    if saving_to_hf:
-      expert_idx = kwargs.get("expert_idx")
-      if expert_idx is None:
-        raise ValueError("expert_idx is required for split_and_transpose_expert hook")
-
-      # MaxText is stacked: [num_experts, in_dim, out_dim]
-      # HF is separate: [out_dim, in_dim]
-      expert_weights = x[expert_idx]
-      return expert_weights.transpose()
-    else:
-      # HF is separate: [out_dim, in_dim]
-      # MaxText is stacked: [num_experts, in_dim, out_dim]
-      # The conversion script handles stacking. This hook just needs to transpose.
-      return x.transpose()
-
-  def reshape_kernel(x: np.ndarray, target_shape: tuple) -> np.ndarray:
+  def reshape_kernel(x, target_shape):
     return x.transpose()
 
   def scale_query_layer(input_tensor, target_shape):
@@ -1578,18 +1558,16 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       depth_scale = np.dtype("float32").type(1 / np.sqrt(maxtext_config.head_dim))
       return (input_tensor * depth_scale).astype(input_tensor.dtype)
 
-  def permute_to_match_maxtext_rope(input_tensor, target_shape):
-    evens = input_tensor[..., ::2]
-    odds = input_tensor[..., 1::2]
-    return np.concatenate((evens, odds), axis=input_tensor.ndim - 1)
+  # def permute_to_match_maxtext_rope(input_tensor, target_shape):
+  #   evens = input_tensor[..., ::2]
+  #   odds = input_tensor[..., 1::2]
+  #   return np.concatenate((evens, odds), axis=input_tensor.ndim - 1)
 
   # Map operation names from the DSL to the hook functions
   op_to_fn = {
       "reshape_and_transpose_attention": reshape_and_transpose_attention,
-      "split_and_transpose_expert": split_and_transpose_expert,
       "reshape_kernel": reshape_kernel,
       "scale_query_layer": scale_query_layer,
-      "permute_to_match_maxtext_rope": permute_to_match_maxtext_rope,
   }
 
   plan = [
@@ -1597,17 +1575,17 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
-      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_0", "op": "split_and_transpose_expert"},
-      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_1", "op": "split_and_transpose_expert"},
-      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wo", "op": "split_and_transpose_expert"},
+      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_0", "op": "reshape_kernel"},
+      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_1", "op": "reshape_kernel"},
+      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wo", "op": "reshape_kernel"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
       {"maxtext": "params-decoder-layers-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer"]},
       {"maxtext": "params-decoder-layers-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
-      {"maxtext": "params-decoder-layers-MoeBlock_0-wi_0", "op": "split_and_transpose_expert"},
-      {"maxtext": "params-decoder-layers-MoeBlock_0-wi_1", "op": "split_and_transpose_expert"},
-      {"maxtext": "params-decoder-layers-MoeBlock_0-wo", "op": "split_and_transpose_expert"},
+      {"maxtext": "params-decoder-layers-MoeBlock_0-wi_0", "op": "reshape_kernel"},
+      {"maxtext": "params-decoder-layers-MoeBlock_0-wi_1", "op": "reshape_kernel"},
+      {"maxtext": "params-decoder-layers-MoeBlock_0-wo", "op": "reshape_kernel"},
       {"maxtext": "params-decoder-layers-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
       {"maxtext": "params-decoder-logits_dense-kernel", "op": "reshape_kernel"},
   ]

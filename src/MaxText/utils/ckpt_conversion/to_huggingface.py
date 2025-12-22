@@ -249,6 +249,7 @@ def main(argv: Sequence[str]) -> None:
   processed_params_list = []
 
   for key in tqdm(filtered_map_keys, total=len(filtered_map_keys)):
+    print(f"key: {key}")
     if isinstance(key, tuple):
       # if key is tuple of param names, weight is list of param weights
       weight = [maxtext_state_dict[subkey] for subkey in key]

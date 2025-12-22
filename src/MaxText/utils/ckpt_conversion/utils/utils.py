@@ -161,6 +161,7 @@ def process_maxtext_param(
 
   # Case 1: Unscan
   if not isinstance(hf_target_paths, list):
+    print(f"hf_target_paths: {hf_target_paths}")
     max_logging.log("\tunscan")
     hf_path = hf_target_paths
     _process(hf_path, maxtext_param_weight, output_weights, current_hook_fns, hf_shape_map)
@@ -197,7 +198,8 @@ def process_maxtext_param(
 
   # Case 3 or 4: The source tensor is stacked on a single axis.
   # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
-  is_unscanned_moe = "moe_block" in maxtext_param_key and any(
+  moe_block_list = ["moe_block", "MoeBlock_0"]
+  is_unscanned_moe = any(block in maxtext_param_key for block in moe_block_list) and any(
       f"_{i}-" in maxtext_param_key for i in range(maxtext_config.base_num_decoder_layers)
   )
 
