@@ -1142,3 +1142,14 @@ def create_learning_rate_schedule(config):
     boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
 
   return optax.join_schedules(pieces, boundaries)
+
+
+def print_state_mesh_shardings_params(state, state_sharding, mesh):
+  """Print state shardings."""
+  leaves_params, _ = jax.tree_util.tree_flatten_with_path(state.params)
+  leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(state_sharding.params)
+  for (path, leaf_val), (_, leaf_sharding) in zip(leaves_params, leaves_sharding):
+    path_str = "/".join(str(p.key) for p in path)
+    shape = jax.typeof(leaf_val)
+    pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
+    print(f"{path_str:.<80} {shape} {pspec}", flush=True)

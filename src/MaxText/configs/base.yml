@@ -832,6 +832,7 @@ enable_jax_profiler: False
 jax_profiler_port: 9999
 
 log_config: True # Prints the config (after defaults have been set by pyconfig logic)
+debug_sharding: False # Prints model weights sharding info
 
 # Checkpoint Structured logging
 enable_checkpoint_cloud_logger: False

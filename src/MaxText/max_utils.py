@@ -989,6 +989,13 @@ def get_batch_seq_len_for_mode(config, model_mode):
   return batch_size, seq_len
 
 
+def print_non_trivial_mesh_axis(mesh):
+  """Print mesh axis if its axis size is larger than one."""
+  for mesh_axis, axis_size in mesh.shape.items():
+    if axis_size > 1:
+      print(f"{mesh_axis}: {axis_size}", flush=True)
+
+
 @contextmanager
 def maybe_get_transformer_engine_context(config):
   """Runs a transformer engine context engine manager for GPUs only."""

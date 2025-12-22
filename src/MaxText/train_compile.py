@@ -29,7 +29,7 @@ from absl import app
 
 import jax
 from jax.experimental.topologies import get_topology_desc
-from jax.sharding import Mesh
+from jax.sharding import Mesh, AxisType
 from jax.experimental.serialize_executable import serialize
 
 from flax.linen import partitioning as nn_partitioning
@@ -41,7 +41,7 @@ from MaxText import optimizers
 from MaxText import max_utils
 from MaxText import pyconfig
 from MaxText import sharding
-from MaxText.common_types import MODEL_MODE_TRAIN
+from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.utils import gcs_utils
@@ -77,8 +77,11 @@ def get_topology_mesh(config):
         num_slices=config.compile_topology_num_slices,
         wrap=target_hardware.wrap,
     ).devices
+  if config.shard_mode == ShardMode.EXPLICIT:
+    jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
   topology_device_mesh = maxtext_utils.create_device_mesh(config, topology_devices)
-  topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
+  mesh_axis_type = AxisType.Explicit if config.shard_mode == ShardMode.EXPLICIT else AxisType.Auto
+  topology_mesh = Mesh(topology_device_mesh, config.mesh_axes, axis_types=(mesh_axis_type,) * len(config.mesh_axes))
   return topology_mesh
 
 
@@ -220,6 +223,11 @@ def main(argv: Sequence[str]) -> None:
           train.train_step, data_sharding, state_mesh_shardings, model, config
       )
   )
+
+  # print weights sharding info under debug sharding mode
+  if config.debug_sharding:
+    max_utils.print_non_trivial_mesh_axis(topology_mesh)
+    maxtext_utils.print_state_mesh_shardings_params(shaped_train_args[0], state_mesh_shardings, topology_mesh)
 
   # Compile
   print("Jitting and compiling train step...", flush=True)

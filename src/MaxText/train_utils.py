@@ -19,6 +19,7 @@ import os
 import jax
 from MaxText import checkpointing
 from MaxText import max_logging
+from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import sharding
 from MaxText import optimizers
@@ -107,6 +108,11 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
         static_argnums=static_argnums,
         donate_argnums=donate_argnums,
     )
+
+  # print weights sharding info under debug sharding mode
+  if config.debug_sharding:
+    max_utils.print_non_trivial_mesh_axis(model.mesh)
+    maxtext_utils.print_state_mesh_shardings_params(state, state_mesh_shardings, model.mesh)
 
   return p_train_step
 
