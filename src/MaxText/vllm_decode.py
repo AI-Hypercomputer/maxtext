@@ -26,17 +26,13 @@ Example usage with Tunix:
   
 Or without Tunix using the MaxText vLLM integration:
   python3 -m MaxText.vllm_decode \
-    --model-name qwen3-30b-a3b \
-    --hf-model-name Qwen/Qwen3-30B-A3B \
-    --hf-config-path src/MaxText/integration/vllm/maxtext_vllm_adapter \
-    --load-parameters-path <your_checkpoint_path> \
-    --ici_data_parallelism 1 \
-    --ici-tensor-parallelism 4 \
-    --ici-expert-parallelism 1 \
-    --max-model-len 4096 \
-    --max-num-batched-tokens 262144 \
-    --gpu-memory-utilization 0.5 \
-    --prompt "Suggest some famous landmarks in London." \
+    --model_name qwen3-30b-a3b \
+    --hf_model_name Qwen/Qwen3-30B-A3B \
+    --hf_config_path src/MaxText/integration/vllm/maxtext_vllm_adapter \
+    --load_parameters_path <your_checkpoint_path> \
+    --ici_tensor_parallelism 4 \
+    --gpu_memory_utilization 0.5 \
+    --prompt "Suggest some famous landmarks in London."
 """
 
 import os

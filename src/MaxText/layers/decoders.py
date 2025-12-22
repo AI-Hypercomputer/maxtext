@@ -902,11 +902,16 @@ class Decoder(nn.Module):
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     hidden_state = y
 
+    # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
+    if cfg.attention == "vllm_rpa":
+      logits = None
+
     # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
     # Instead, we keep track on the hidden states, which has smaller size compared to full logits
-    if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+    elif cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow("intermediates", "hidden_states", hidden_state)
+
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
