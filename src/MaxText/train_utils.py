@@ -109,11 +109,6 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
         donate_argnums=donate_argnums,
     )
 
-  # print weights sharding info under debug sharding mode
-  if config.debug_sharding:
-    max_utils.print_non_trivial_mesh_axis(model.mesh)
-    maxtext_utils.print_state_mesh_shardings_params(state, state_mesh_shardings, model.mesh)
-
   return p_train_step
 
 
@@ -218,6 +213,11 @@ def setup_train_loop(config, recorder, devices=None):
     if not config.using_pipeline_parallelism and not config.use_multimodal:
       # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
       sharding.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+
+    # print weights sharding info under debug sharding mode
+    if config.debug_sharding:
+      max_utils.print_non_trivial_mesh_axis(model.mesh)
+      maxtext_utils.print_state_mesh_shardings_params(state, state_mesh_shardings, model.mesh)
 
     if config.use_dpo:
       abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
