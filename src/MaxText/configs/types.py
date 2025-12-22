@@ -121,6 +121,7 @@ class OptimizerType(str, Enum):
   ADAMW = "adamw"
   ADAM_PAX = "adam_pax"
   SGD = "sgd"
+  MUON = "muon"
 
 
 class RopeType(str, Enum):
@@ -1040,6 +1041,18 @@ class AdamW(BaseModel):
   )
 
 
+class Muon(BaseModel):
+  """Configuration specific to the Muon optimizer."""
+
+  muon_beta: float = Field(0.95, description="Decay rate for the exponentially weighted average of grads.")
+  muon_weight_decay: float = Field(
+      0, description="Strength of the weight decay regularization. This is multiplied with the learning rate."
+  )
+  muon_consistent_rms: None | float = Field(
+      None, description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2)."
+  )
+
+
 class PositionalEmbedding(BaseModel):
   """General configuration for positional embeddings."""
 
@@ -1617,6 +1630,7 @@ class MaxTextConfig(
     TrainingLoop,
     Optimizer,
     AdamW,
+    Muon,
     FineTuning,
     # Reinforcement Learning
     RLHardware,
@@ -2118,6 +2132,16 @@ class MaxTextConfig(
       self.use_grpo = True
     else:
       self.use_grpo = False
+    if self.opt_type == "muon" and self.decoder_block not in [
+        DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.QWEN3,
+        DecoderBlockType.GEMMA3,
+        DecoderBlockType.LLAMA2,
+    ]:
+      raise ValueError(
+          "Muon dimension numbers haven't been tested for this model. Run this command first: "
+          f"`python3 -m MaxText.muon_utils {self.model_name} True`"
+      )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
