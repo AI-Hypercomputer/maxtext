@@ -363,6 +363,8 @@ def _build_single_axis_stacked_tensor(
   Returns:
       The final, assembled NumPy array for the MaxText parameter.
   """
+  print(f"hf_source_keys: {hf_source_keys}")
+  print(f"hook_fns: {hook_fns}")
   tensors_to_stack = []
   # Heuristic to determine if we are stacking layers or experts.
   # If the number of items to stack equals the number of layers, it's a standard
@@ -473,23 +475,22 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
 
   # RANRAN
-  # print(".........Maxtext abstract_params_treedef.....")
-  # print(f"abstract_params_flat: {abstract_params_flat}")
-  # for path, val in abstract_params_flat:
-  #   names = []
-  #   for p in path:
-  #     # Check which type of key it is and extract the name accordingly
-  #     if hasattr(p, "key"):
-  #       names.append(str(p.key))  # For Dicts
-  #     elif hasattr(p, "name"):
-  #       names.append(str(p.name))  # For NamedTuples / Dataclasses
-  #     elif hasattr(p, "idx"):
-  #       names.append(str(p.idx))  # For Lists / Tuples
-  #     else:
-  #       names.append(str(p))  # Fallback
+  print(".........Maxtext abstract_params_treedef.....")
+  for path, val in abstract_params_flat:
+    names = []
+    for p in path:
+      # Check which type of key it is and extract the name accordingly
+      if hasattr(p, "key"):
+        names.append(str(p.key))  # For Dicts
+      elif hasattr(p, "name"):
+        names.append(str(p.name))  # For NamedTuples / Dataclasses
+      elif hasattr(p, "idx"):
+        names.append(str(p.idx))  # For Lists / Tuples
+      else:
+        names.append(str(p))  # Fallback
 
-  #   key_str = "/".join(names)
-  #   print(f"{key_str}: {val.shape}")
+    key_str = "/".join(names)
+    print(f"{key_str}: {val.shape}")
 
   # Standardize abstract tree for later unflattening
   abstract_params_tree = jax.tree.map(
@@ -517,8 +518,6 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   max_logging.log("Parameter mappings and hooks obtained.")
 
   max_logging.log("Starting weight transformation...")
-  # print(f"....param_map_mt_to_hf: {param_map_mt_to_hf}")
-  # print(f"....hook_fn_map_mt: {hook_fn_map_mt}")
   final_mt_weights = []
 
   # Define the appropriate tensor getter based on mode

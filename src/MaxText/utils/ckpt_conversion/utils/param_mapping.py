@@ -1427,18 +1427,6 @@ def LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN():
 def MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """
   Returns the mapping of parameter names from MaxText to Hugging Face for Mixtral.
-
-  Args:
-      config (dict): A model configuration dictionary containing hyperparameters
-                     like 'num_hidden_layers'.
-      scan_layers (bool): If True, the mapping for decoder layers will be a list
-                          of HF paths corresponding to the stacked MaxText tensor.
-                          If False, it will be a direct string-to-string mapping.
-
-  Returns:
-      A dictionary mapping MaxText parameter paths to their Hugging Face equivalents.
-      The value can be a string (for 1-to-1 mapping) or a list of strings (for
-      scanned layers).
   """
   mapping = {}
 
@@ -1465,7 +1453,7 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
             "params-decoder-layers-MoeBlock_0-wo": [],
         }
     )
-
+  
     for i in range(config["num_hidden_layers"]):
       hf_prefix = f"model.layers.{i}"
       # Attention weights
@@ -1484,12 +1472,29 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       mapping["params-decoder-layers-MoeBlock_0-gate-kernel"].append(f"{hf_prefix}.block_sparse_moe.gate.weight")
 
       # MoE expert weights (list of lists)
-      w1_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w1.weight" for j in range(num_experts)]
-      w3_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w3.weight" for j in range(num_experts)]
-      w2_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w2.weight" for j in range(num_experts)]
-      mapping["params-decoder-layers-MoeBlock_0-wi_0"].append(w1_experts)
-      mapping["params-decoder-layers-MoeBlock_0-wi_1"].append(w3_experts)
-      mapping["params-decoder-layers-MoeBlock_0-wo"].append(w2_experts)
+      # w1_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w1.weight" for j in range(num_experts)]
+      # w3_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w3.weight" for j in range(num_experts)]
+      # w2_experts = [f"{hf_prefix}.block_sparse_moe.experts.{j}.w2.weight" for j in range(num_experts)]
+      # mapping["params-decoder-layers-MoeBlock_0-wi_0"].append(w1_experts)
+      # mapping["params-decoder-layers-MoeBlock_0-wi_1"].append(w3_experts)
+      # mapping["params-decoder-layers-MoeBlock_0-wo"].append(w2_experts)
+
+    # Outer loop as experts and inner loop as layers to align with logic in _build_multi_axis_stacked_tensor()
+    for j in range(num_experts):
+      # Collect this specific expert's weights across all layers
+      w1_layers = []
+      w3_layers = []
+      w2_layers = []
+      
+      for i in range(config["num_hidden_layers"]):
+        hf_prefix = f"model.layers.{i}"
+        w1_layers.append(f"{hf_prefix}.block_sparse_moe.experts.{j}.w1.weight")
+        w3_layers.append(f"{hf_prefix}.block_sparse_moe.experts.{j}.w3.weight")
+        w2_layers.append(f"{hf_prefix}.block_sparse_moe.experts.{j}.w2.weight")
+
+      mapping["params-decoder-layers-MoeBlock_0-wi_0"].append(w1_layers)
+      mapping["params-decoder-layers-MoeBlock_0-wi_1"].append(w3_layers)
+      mapping["params-decoder-layers-MoeBlock_0-wo"].append(w2_layers)
 
   else:
     for i in range(config["num_hidden_layers"]):
@@ -1524,14 +1529,6 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
 def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """
   Generates parameter conversion hooks for Mixtral between MaxText and Hugging Face.
-
-  Args:
-      config: The model configuration dictionary.
-      scan_layers: Whether the model uses scanned layers.
-      saving_to_hf: True if converting from MaxText to HF, False otherwise.
-
-  Returns:
-      A dictionary mapping MaxText parameter names to conversion functions.
   """
   hooks = {}
 
@@ -1595,29 +1592,28 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       "permute_to_match_maxtext_rope": permute_to_match_maxtext_rope,
   }
 
-  # This plan is a direct representation of the DSL for registration logic
-  # {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
-  # {"maxtext": "params-token_embedder-embedding", "op": "pad_and_scale_embedding"},
-  # {"maxtext": "params-decoder-layers_{i}-pre_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
-  # {"maxtext": "params-decoder-layers_{i}-post_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
-  # {"maxtext": "params-decoder-decoder_norm-scale", "op": "scale_rmsnorm"},
   plan = [
-      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer", "permute_to_match_maxtext_rope"]},
-      {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": ["reshape_and_transpose_attention", "permute_to_match_maxtext_rope"]},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer"]},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_0", "op": "split_and_transpose_expert"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_1", "op": "split_and_transpose_expert"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wo", "op": "split_and_transpose_expert"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
+      {"maxtext": "params-decoder-layers-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer"]},
+      {"maxtext": "params-decoder-layers-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
+      {"maxtext": "params-decoder-layers-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
+      {"maxtext": "params-decoder-layers-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
+      {"maxtext": "params-decoder-layers-MoeBlock_0-wi_0", "op": "split_and_transpose_expert"},
+      {"maxtext": "params-decoder-layers-MoeBlock_0-wi_1", "op": "split_and_transpose_expert"},
+      {"maxtext": "params-decoder-layers-MoeBlock_0-wo", "op": "split_and_transpose_expert"},
+      {"maxtext": "params-decoder-layers-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
       {"maxtext": "params-decoder-logits_dense-kernel", "op": "reshape_kernel"},
   ]
 
-  # Register hooks based on the plan
   for item in plan:
     maxtext_pattern = item["maxtext"]
-    # hook_fn = op_to_fn[item["op"]]
-
     op_val = item["op"]
     op_names = op_val if isinstance(op_val, list) else [op_val]
 
@@ -1629,13 +1625,12 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       return chained_hook
     hook_fn = create_chained_hook(op_names)
 
-    if "{i}" in maxtext_pattern:
+    if "{i}" in maxtext_pattern:     
       if scan_layers:
         # For scanned layers, the key is singular and doesn't have the layer index
-        scan_key = maxtext_pattern.replace(f"_layers_{'{i}'}_", "-layers-")
-        print(f"scan_key: {scan_key}")
-        # if scan_key != "params-decoder-layers-MoeBlock_0-gate-kernel":
-        #   hooks[scan_key] = hook_fn
+        # scan_key = maxtext_pattern.replace(f"_layers_{'{i}'}_", "-layers-")  
+        hooks[maxtext_pattern] = hook_fn  
+        print(f"maxtext_pattern: {maxtext_pattern}")
       else:
         # For non-scanned layers, add a hook for each layer
         for i in range(config["num_hidden_layers"]):
