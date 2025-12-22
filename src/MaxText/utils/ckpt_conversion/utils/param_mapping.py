@@ -1491,7 +1491,7 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       mapping["params-decoder-layers-MoeBlock_0-wi_1"].append(w3_experts)
       mapping["params-decoder-layers-MoeBlock_0-wo"].append(w2_experts)
 
-  else:  # Direct mapping for each layer
+  else:
     for i in range(config["num_hidden_layers"]):
       maxtext_prefix = f"params-decoder-layers_{i}"
       hf_prefix = f"model.layers.{i}"
@@ -1573,30 +1573,6 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   def reshape_kernel(x: np.ndarray, target_shape: tuple) -> np.ndarray:
     return x.transpose()
 
-  def scale_rmsnorm(x: np.ndarray, target_shape: tuple) -> np.ndarray:
-    """
-    Scales RMSNorm weights.
-    MaxText scale = HF weight + 1
-    """
-    if saving_to_hf:
-      return (x - 1.0).reshape(target_shape)
-    else:
-      return (x + 1.0).reshape(target_shape)
-
-  def pad_and_scale_embedding(x: np.ndarray, target_shape: tuple) -> np.ndarray:
-    """Pads and scales the token embedding matrix."""
-    if saving_to_hf:
-      # Scale embeddings by sqrt(hidden_size)
-      scaled = x * np.sqrt(config["hidden_size"])
-      # Pad vocabulary to match target shape
-      pad_width = ((0, target_shape[0] - scaled.shape[0]), (0, 0))
-      return np.pad(scaled, pad_width)
-    else:
-      # Un-pad vocabulary to original size
-      unpadded = x[: config["vocab_size"], :]
-      # Un-scale embeddings
-      return unpadded / np.sqrt(config["hidden_size"])
-
   def scale_query_layer(input_tensor, target_shape):
     if saving_to_hf:
       depth_scale = np.dtype("float32").type(np.sqrt(config["head_dim"]))
@@ -1610,8 +1586,6 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       "reshape_and_transpose_attention": reshape_and_transpose_attention,
       "split_and_transpose_expert": split_and_transpose_expert,
       "reshape_kernel": reshape_kernel,
-      "scale_rmsnorm": scale_rmsnorm,
-      "pad_and_scale_embedding": pad_and_scale_embedding,
       "scale_query_layer": scale_query_layer,
   }
 
@@ -1622,7 +1596,7 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   # {"maxtext": "params-decoder-layers_{i}-post_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
   # {"maxtext": "params-decoder-decoder_norm-scale", "op": "scale_rmsnorm"},
   plan = [
-      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer"]},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention"]},
       {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
