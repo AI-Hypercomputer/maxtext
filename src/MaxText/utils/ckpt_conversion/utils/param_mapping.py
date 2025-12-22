@@ -1602,8 +1602,8 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   # {"maxtext": "params-decoder-layers_{i}-post_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
   # {"maxtext": "params-decoder-decoder_norm-scale", "op": "scale_rmsnorm"},
   plan = [
-      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer", "permute_to_match_maxtext_rope"]},
-      {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": ["reshape_and_transpose_attention", "permute_to_match_maxtext_rope"]},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer"]},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": ["reshape_and_transpose_attention"]},
       {"maxtext": "params-decoder-layers_{i}-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_0", "op": "split_and_transpose_expert"},
@@ -1625,7 +1625,7 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       def chained_hook(x, shape):
         for name in names:
           x = op_to_fn[name](x, shape) 
-          return x
+        return x
       return chained_hook
     hook_fn = create_chained_hook(op_names)
 
