@@ -1575,10 +1575,10 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
 
   def scale_query_layer(input_tensor, target_shape):
     if saving_to_hf:
-      depth_scale = np.dtype("float32").type(np.sqrt(config["head_dim"]))
+      depth_scale = np.dtype("float32").type(np.sqrt(maxtext_config.head_dim))
       return (input_tensor * depth_scale).astype(input_tensor.dtype)
     else:
-      depth_scale = np.dtype("float32").type(1 / np.sqrt(config["head_dim"]))
+      depth_scale = np.dtype("float32").type(1 / np.sqrt(maxtext_config.head_dim))
       return (input_tensor * depth_scale).astype(input_tensor.dtype)
 
   def permute_to_match_maxtext_rope(input_tensor, target_shape):
@@ -1602,8 +1602,8 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   # {"maxtext": "params-decoder-layers_{i}-post_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
   # {"maxtext": "params-decoder-decoder_norm-scale", "op": "scale_rmsnorm"},
   plan = [
-      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer"]},
-      {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": ["reshape_and_transpose_attention"]},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer", "permute_to_match_maxtext_rope"]},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": ["reshape_and_transpose_attention", "permute_to_match_maxtext_rope"]},
       {"maxtext": "params-decoder-layers_{i}-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_0", "op": "split_and_transpose_expert"},
