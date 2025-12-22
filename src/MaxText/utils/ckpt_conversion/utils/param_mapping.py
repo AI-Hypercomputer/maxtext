@@ -1551,57 +1551,83 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       return (input_tensor * depth_scale).astype(input_tensor.dtype)
 
   # Map operation names from the DSL to the hook functions
-  op_to_fn = {
-      "reshape_and_transpose_attention": reshape_and_transpose_attention,
-      "reshape_kernel": reshape_kernel,
-      "scale_query_layer": scale_query_layer,
-  }
-
+  # op_to_fn = {
+  #     "reshape_and_transpose_attention": reshape_and_transpose_attention,
+  #     "reshape_kernel": reshape_kernel,
+  #     "scale_query_layer": scale_query_layer,
+  # }
+  # this is the set
   plan = [
-      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer"]},
-      {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
-      {"maxtext": "params-decoder-layers_{i}-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
-      {"maxtext": "params-decoder-layers_{i}-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
-      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_0", "op": "reshape_kernel"},
-      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_1", "op": "reshape_kernel"},
-      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wo", "op": "reshape_kernel"},
-      {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
-      {"maxtext": "params-decoder-layers-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer"]},
-      {"maxtext": "params-decoder-layers-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
-      {"maxtext": "params-decoder-layers-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
-      {"maxtext": "params-decoder-layers-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
-      {"maxtext": "params-decoder-layers-MoeBlock_0-wi_0", "op": "reshape_kernel"},
-      {"maxtext": "params-decoder-layers-MoeBlock_0-wi_1", "op": "reshape_kernel"},
-      {"maxtext": "params-decoder-layers-MoeBlock_0-wo", "op": "reshape_kernel"},
-      {"maxtext": "params-decoder-layers-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
-      {"maxtext": "params-decoder-logits_dense-kernel", "op": "reshape_kernel"},
+      ("params-decoder-layers_{i}-self_attention-query-kernel", [reshape_and_transpose_attention, scale_query_layer]),
+      ("params-decoder-layers_{i}-self_attention-key-kernel", reshape_and_transpose_attention),
+      ("params-decoder-layers_{i}-self_attention-value-kernel", reshape_and_transpose_attention),
+      ("params-decoder-layers_{i}-self_attention-out-kernel", reshape_and_transpose_attention),
+      ("params-decoder-layers_{i}-MoeBlock_0-wi_0", reshape_kernel),
+      ("params-decoder-layers_{i}-MoeBlock_0-wi_1", reshape_kernel),
+      ("params-decoder-layers_{i}-MoeBlock_0-wo", reshape_kernel),
+      ("params-decoder-layers_{i}-MoeBlock_0-gate-kernel", reshape_kernel),
+      ("params-decoder-layers-self_attention-query-kernel", [reshape_and_transpose_attention, scale_query_layer]),
+      ("params-decoder-layers-self_attention-key-kernel", reshape_and_transpose_attention),
+      ("params-decoder-layers-self_attention-value-kernel", reshape_and_transpose_attention),
+      ("params-decoder-layers-self_attention-out-kernel", reshape_and_transpose_attention),
+      ("params-decoder-layers-MoeBlock_0-wi_0", reshape_kernel),
+      ("params-decoder-layers-MoeBlock_0-wi_1", reshape_kernel),
+      ("params-decoder-layers-MoeBlock_0-wo", reshape_kernel),
+      ("params-decoder-layers-MoeBlock_0-gate-kernel", reshape_kernel),
+      ("params-decoder-logits_dense-kernel", reshape_kernel),
   ]
+  # plan = [
+  #     {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer"]},
+  #     {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
+  #     {"maxtext": "params-decoder-layers_{i}-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
+  #     {"maxtext": "params-decoder-layers_{i}-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
+  #     {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_0", "op": "reshape_kernel"},
+  #     {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_1", "op": "reshape_kernel"},
+  #     {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wo", "op": "reshape_kernel"},
+  #     {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
+  #     {"maxtext": "params-decoder-layers-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer"]},
+  #     {"maxtext": "params-decoder-layers-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
+  #     {"maxtext": "params-decoder-layers-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
+  #     {"maxtext": "params-decoder-layers-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
+  #     {"maxtext": "params-decoder-layers-MoeBlock_0-wi_0", "op": "reshape_kernel"},
+  #     {"maxtext": "params-decoder-layers-MoeBlock_0-wi_1", "op": "reshape_kernel"},
+  #     {"maxtext": "params-decoder-layers-MoeBlock_0-wo", "op": "reshape_kernel"},
+  #     {"maxtext": "params-decoder-layers-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
+  #     {"maxtext": "params-decoder-logits_dense-kernel", "op": "reshape_kernel"},
+  # ]
 
-  for item in plan:
-    maxtext_pattern = item["maxtext"]
-    op_val = item["op"]
-    op_names = op_val if isinstance(op_val, list) else [op_val]
+  for maxtext_pattern, op_val in plan:
+    # maxtext_pattern = item["maxtext"]
+    # op_val = item["op"]
+    op_funcs = op_val if isinstance(op_val, list) else [op_val]
 
-    def create_chained_hook(names):
+    def create_chained_hook(funcs):
       def chained_hook(x, shape):
-        for name in names:
-          x = op_to_fn[name](x, shape) 
+        for fn in funcs:
+          x = fn(x, shape) 
         return x
       return chained_hook
-    hook_fn = create_chained_hook(op_names)
+    hook_fn = create_chained_hook(op_funcs)
 
-    if "{i}" in maxtext_pattern:     
-      if scan_layers:
-        # For scanned layers, the key is singular and doesn't have the layer index
-        # scan_key = maxtext_pattern.replace(f"_layers_{'{i}'}_", "-layers-")  
-        hooks[maxtext_pattern] = hook_fn
-      else:
-        # For non-scanned layers, add a hook for each layer
-        for i in range(config["num_hidden_layers"]):
-          hooks[maxtext_pattern.format(i=i)] = hook_fn
+    if "{i}" in maxtext_pattern:
+      for i in range(config["num_hidden_layers"]):
+        hooks[maxtext_pattern.format(i=i)] = hook_fn
     else:
       # For non-layer-specific parameters
       hooks[maxtext_pattern] = hook_fn
+
+    # if "{i}" in maxtext_pattern:     
+    #   if scan_layers:
+    #     # For scanned layers, the key is singular and doesn't have the layer index
+    #     # scan_key = maxtext_pattern.replace(f"_layers_{'{i}'}_", "-layers-")  
+    #     hooks[maxtext_pattern] = hook_fn
+    #   else:
+    #     # For non-scanned layers, add a hook for each layer
+    #     for i in range(config["num_hidden_layers"]):
+    #       hooks[maxtext_pattern.format(i=i)] = hook_fn
+    # else:
+    #   # For non-layer-specific parameters
+    #   hooks[maxtext_pattern] = hook_fn
 
   return hooks
 
