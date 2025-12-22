@@ -448,7 +448,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     # Convert all to numpy immediately in eager mode
     for k, v in hf_state_dict_numpy.items():
       hf_state_dict_numpy[k] = v.numpy()
-      print(f"Key: {k} | Shape: {hf_state_dict_numpy[k].shape}")
+      # print(f"Key: {k} | Shape: {hf_state_dict_numpy[k].shape}")
     del hf_model
     max_logging.log("HuggingFace model loaded and converted to NumPy.")
     print_ram_usage("After full HF model load")
@@ -473,23 +473,23 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
 
   # RANRAN
-  print(".........Maxtext abstract_params_treedef.....")
-  print(f"abstract_params_flat: {abstract_params_flat}")
-  for path, val in abstract_params_flat:
-    names = []
-    for p in path:
-      # Check which type of key it is and extract the name accordingly
-      if hasattr(p, "key"):
-        names.append(str(p.key))  # For Dicts
-      elif hasattr(p, "name"):
-        names.append(str(p.name))  # For NamedTuples / Dataclasses
-      elif hasattr(p, "idx"):
-        names.append(str(p.idx))  # For Lists / Tuples
-      else:
-        names.append(str(p))  # Fallback
+  # print(".........Maxtext abstract_params_treedef.....")
+  # print(f"abstract_params_flat: {abstract_params_flat}")
+  # for path, val in abstract_params_flat:
+  #   names = []
+  #   for p in path:
+  #     # Check which type of key it is and extract the name accordingly
+  #     if hasattr(p, "key"):
+  #       names.append(str(p.key))  # For Dicts
+  #     elif hasattr(p, "name"):
+  #       names.append(str(p.name))  # For NamedTuples / Dataclasses
+  #     elif hasattr(p, "idx"):
+  #       names.append(str(p.idx))  # For Lists / Tuples
+  #     else:
+  #       names.append(str(p))  # Fallback
 
-    key_str = "/".join(names)
-    print(f"{key_str}: {val.shape}")
+  #   key_str = "/".join(names)
+  #   print(f"{key_str}: {val.shape}")
 
   # Standardize abstract tree for later unflattening
   abstract_params_tree = jax.tree.map(
@@ -498,17 +498,6 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
       is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
   )
   abstract_params_treedef = jax.tree_util.tree_structure(abstract_params_tree)
-
-  # RANRAN
-  # print(".........Maxtext abstract_params_treedef.....")
-  # paths_and_leaves, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
-  # for path, leaf in paths_and_leaves:
-  #   path_str = jax.tree_util.keystr(path)
-  #   if hasattr(leaf, "shape"):
-  #     leaf_info = leaf.shape
-  #   else:
-  #     leaf_info = f"Scalar/Value: {leaf}"
-  #   print(f"Key: {path_str} | Info: {leaf_info}")
 
   del abstract_params_tree
 
@@ -528,6 +517,8 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   max_logging.log("Parameter mappings and hooks obtained.")
 
   max_logging.log("Starting weight transformation...")
+  # print(f"....param_map_mt_to_hf: {param_map_mt_to_hf}")
+  # print(f"....hook_fn_map_mt: {hook_fn_map_mt}")
   final_mt_weights = []
 
   # Define the appropriate tensor getter based on mode
@@ -613,7 +604,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   # Create final MaxText parameters tree
   jax_weights = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
   del final_mt_weights, abstract_params_treedef
-  print(f"jax_weights: {jax_weights}")
+  # print(f"jax_weights: {jax_weights}")
 
   # Create TrainState for saving.
   final_params_for_state = {"params": jax_weights}

@@ -1597,6 +1597,14 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       # Un-scale embeddings
       return unpadded / np.sqrt(config["hidden_size"])
 
+  def scale_query_layer(input_tensor, target_shape):
+    if saving_to_hf:
+      depth_scale = np.dtype("float32").type(np.sqrt(config["head_dim"]))
+      return (input_tensor * depth_scale).astype(input_tensor.dtype)
+    else:
+      depth_scale = np.dtype("float32").type(1 / np.sqrt(config["head_dim"]))
+      return (input_tensor * depth_scale).astype(input_tensor.dtype)
+
   # Map operation names from the DSL to the hook functions
   op_to_fn = {
       "reshape_and_transpose_attention": reshape_and_transpose_attention,
@@ -1604,12 +1612,17 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       "reshape_kernel": reshape_kernel,
       "scale_rmsnorm": scale_rmsnorm,
       "pad_and_scale_embedding": pad_and_scale_embedding,
+      "scale_query_layer": scale_query_layer,
   }
 
   # This plan is a direct representation of the DSL for registration logic
   # {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
+  # {"maxtext": "params-token_embedder-embedding", "op": "pad_and_scale_embedding"},
+  # {"maxtext": "params-decoder-layers_{i}-pre_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
+  # {"maxtext": "params-decoder-layers_{i}-post_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
+  # {"maxtext": "params-decoder-decoder_norm-scale", "op": "scale_rmsnorm"},
   plan = [
-      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": "reshape_and_transpose_attention"},
+      {"maxtext": "params-decoder-layers_{i}-self_attention-query-kernel", "op": ["reshape_and_transpose_attention", "scale_query_layer"]},
       {"maxtext": "params-decoder-layers_{i}-self_attention-key-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-self_attention-value-kernel", "op": "reshape_and_transpose_attention"},
       {"maxtext": "params-decoder-layers_{i}-self_attention-out-kernel", "op": "reshape_and_transpose_attention"},
@@ -1617,17 +1630,24 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wi_1", "op": "split_and_transpose_expert"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-wo", "op": "split_and_transpose_expert"},
       {"maxtext": "params-decoder-layers_{i}-MoeBlock_0-gate-kernel", "op": "reshape_kernel"},
-      {"maxtext": "params-decoder-layers_{i}-pre_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
-      {"maxtext": "params-decoder-layers_{i}-post_self_attention_layer_norm-scale", "op": "scale_rmsnorm"},
-      {"maxtext": "params-decoder-decoder_norm-scale", "op": "scale_rmsnorm"},
-      {"maxtext": "params-token_embedder-embedding", "op": "pad_and_scale_embedding"},
       {"maxtext": "params-decoder-logits_dense-kernel", "op": "reshape_kernel"},
   ]
 
   # Register hooks based on the plan
   for item in plan:
     maxtext_pattern = item["maxtext"]
-    hook_fn = op_to_fn[item["op"]]
+    # hook_fn = op_to_fn[item["op"]]
+
+    op_val = item["op"]
+    op_names = op_val if isinstance(op_val, list) else [op_val]
+
+    def create_chained_hook(names):
+      def chained_hook(x, shape):
+        for name in names:
+          x = op_to_fn[name](x, shape) 
+          return x
+      return chained_hook
+    hook_fn = create_chained_hook(op_names)
 
     if "{i}" in maxtext_pattern:
       if scan_layers:
