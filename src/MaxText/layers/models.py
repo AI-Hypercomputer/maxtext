@@ -211,7 +211,7 @@ class TransformerLinenPure(nn.Module):
 
     if self.config.attention == "vllm_rpa":
       # In vLLM, logits are computed separately after updating the KV cache.
-      return logits, hidden_state, kv_caches
+      return hidden_state, kv_caches
 
     return logits
 
@@ -514,7 +514,7 @@ class Transformer(nnx.Module):
 
     if self.config.attention == "vllm_rpa":
       # In vLLM, logits are computed separately after updating the KV cache.
-      return logits, hidden_state, kv_caches
+      return hidden_state, kv_caches
 
     return logits
 

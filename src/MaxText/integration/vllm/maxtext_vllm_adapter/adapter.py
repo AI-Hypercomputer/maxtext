@@ -14,9 +14,8 @@
 
 """vLLM adapter for MaxText models."""
 
-import jax
-import jax.numpy as jnp
 import os
+import jax
 
 from flax import nnx
 import flax.linen as nn
@@ -72,16 +71,17 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   return maxtext_config
 
 
-class MaxTextDecoderModel(nnx.Module):
-  """A vLLM-compatible decoder model wrapper for MaxText.
+class MaxTextForCausalLM(nnx.Module):
+  """A vLLM-compatible causal language model wrapper for MaxText.
 
-  This class adapts a MaxText model for use within the vLLM framework,
-  handling configuration generation, model initialization, and execution
+  This class serves as the primary interface for integrating MaxText models
+  into the vLLM serving framework, specifically for causal language modeling
+  tasks. It handles configuration generation, model initialization, and execution
   of the decoding step.
   """
 
-  def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array, mesh: Mesh) -> None:
-    """Initializes the MaxTextDecoderModel.
+  def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array, mesh: Mesh):
+    """Initializes the MaxTextForCausalLM model.
 
     Args:
       vllm_config: The vLLM configuration object.
@@ -89,20 +89,20 @@ class MaxTextDecoderModel(nnx.Module):
       mesh: The JAX mesh device for model sharding.
     """
     self.vllm_config = vllm_config
+    self.cfg = vllm_config.model_config
     self.maxtext_config = generate_maxtext_config(vllm_config)
 
     # Model configuration
     self.mesh = mesh
     self.model_mode = MODEL_MODE_AUTOREGRESSIVE
+    self.is_text_generation_model = True
 
     # Model creation
     self.model: nnx.Module | None = None
-    self.logits: jax.Array | None = None
 
     # Handle dummy weight loading during initialization
     if vllm_config.load_config.load_format == "dummy":
-      with self.mesh:
-        self.load_weights(rng_key)
+      self.load_weights(rng_key)
 
     elif self.maxtext_config.load_parameters_path is None:
       max_logging.log("Warning: No load_parameters_path provided. The model will be initialized with random weights.")
@@ -115,110 +115,6 @@ class MaxTextDecoderModel(nnx.Module):
       *args,
       **kwargs,
   ) -> tuple[list[jax.Array], jax.Array, list[jax.Array]]:
-    """Performs a forward pass through the decoder model.
-
-    Args:
-      kv_caches: A list of JAX arrays representing the KV caches.
-      input_ids: A JAX array of input token IDs.
-      attention_metadata: Attention metadata for the decoding process.
-      *args: Variable length argument list.
-      **kwargs: Arbitrary keyword arguments.
-
-    Returns:
-      A tuple containing:
-        - updated_kv_caches: A list of updated KV caches.
-        - hidden: The hidden states (Q, d_model).
-        - aux_hidden_states: A list of auxiliary hidden states.
-
-    Raises:
-      ValueError: If the model is not an instance of `nnx.Module`.
-    """
-    if not isinstance(self.model, nnx.Module):
-      raise ValueError("Model must be an instance of type nnx.Module.")
-
-    if input_ids.ndim < 2:
-      input_ids = jnp.expand_dims(input_ids, axis=0)
-
-    input_positions = attention_metadata.input_positions
-    if input_positions.ndim < 2:
-      input_positions = jnp.expand_dims(input_positions, axis=0)
-
-    with nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
-      aux_hidden_states = []
-      logits, hidden, kv_caches = self.model(
-          decoder_input_tokens=input_ids,
-          decoder_positions=input_positions,
-          kv_caches=kv_caches,
-          attention_metadata=attention_metadata,
-          model_mode=self.model_mode,
-          **kwargs,
-      )
-
-    if hidden.ndim > 1:
-      hidden = jnp.squeeze(hidden, axis=0)
-      logits = jnp.squeeze(logits, axis=0)
-
-    self.logits = nnx.data(logits)  # cache logits for compute_logits call
-
-    return kv_caches, hidden, aux_hidden_states
-
-  def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-    """Computes the logits from the hidden states.
-
-    Args:
-      hidden_states: A JAX array of hidden states.
-
-    Returns:
-      A JAX array of logits (Q, vocab_size).
-    """
-    if self.logits is not None:
-      return self.logits
-
-    with nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
-      embeddings = self.model.token_embedder
-      return self.model.decoder.apply_output_head(embeddings, hidden_states, True, self.model_mode)
-
-  def load_weights(self, rng_key: jax.Array) -> None:
-    """Loads model parameters on the provided mesh.
-
-    Args:
-      rng_key: A JAX random key for model initialization.
-    """
-    if self.model is not None:
-      return
-
-    with nn.logical_axis_rules(""):
-      model, _ = model_creation_utils.create_nnx_model(
-          self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
-      )
-      self.model = nnx.data(model)
-
-
-class MaxTextForCausalLM(nnx.Module):
-  """A vLLM-compatible causal language model wrapper for MaxText.
-
-  This class serves as the primary interface for integrating MaxText models
-  into the vLLM serving framework, specifically for causal language modeling
-  tasks. It wraps the `MaxTextDecoderModel` and exposes methods expected
-  by vLLM.
-  """
-
-  def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array, mesh: Mesh):
-    """Initializes the MaxTextForCausalLM model.
-
-    Args:
-      vllm_config: The vLLM configuration object.
-      rng_key: A JAX random key for model initialization.
-      mesh: The JAX mesh device for model sharding.
-    """
-    self.cfg = vllm_config.model_config
-    self.mesh = mesh
-    self.model = MaxTextDecoderModel(vllm_config, rng_key, mesh)
-    self.is_text_generation_model = True
-
-  def __call__(
-      self, kv_caches: list[jax.Array], input_ids: jax.Array, attention_metadata: AttentionMetadata, *args, **kwargs
-  ) -> tuple[list[jax.Array], jax.Array]:
     """Performs a forward pass through the causal language model.
 
     Args:
@@ -233,9 +129,34 @@ class MaxTextForCausalLM(nnx.Module):
         - updated_kv_caches: A list of updated KV caches.
         - hidden: The hidden states.
         - aux_hidden_states: A list of auxiliary hidden states.
+
+    Raises:
+      ValueError: If the model is not an instance of `nnx.Module`.
     """
-    with self.mesh:
-      kv_caches, hidden, aux_hidden_states = self.model(kv_caches, input_ids, attention_metadata, *args, **kwargs)
+    if not isinstance(self.model, nnx.Module):
+      raise ValueError("Model must be an instance of type nnx.Module.")
+
+    if input_ids.ndim < 2:
+      input_ids = input_ids[None, :]
+
+    input_positions = attention_metadata.input_positions
+    if input_positions.ndim < 2:
+      input_positions = input_positions[None, :]
+
+    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+      aux_hidden_states = []
+      hidden, kv_caches = self.model(
+          decoder_input_tokens=input_ids,
+          decoder_positions=input_positions,
+          kv_caches=kv_caches,
+          attention_metadata=attention_metadata,
+          model_mode=self.model_mode,
+          **kwargs,
+      )
+
+      if hidden.ndim > 1:
+        hidden = hidden.squeeze(0)
+
     return kv_caches, hidden, aux_hidden_states
 
   def forward(self, *args, **kwargs):
@@ -256,8 +177,11 @@ class MaxTextForCausalLM(nnx.Module):
     Returns:
       A JAX array representing the input embeddings.
     """
-    with self.mesh:
-      return self.model.model.token_embedder.embedding
+    if not isinstance(self.model, nnx.Module):
+      raise ValueError("Model is not initialized.")
+
+    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+      return self.model.token_embedder.embedding
 
   def embed_input_ids(self, input_ids: jax.Array) -> jax.Array:
     """Embeds the input token IDs using the model's token embedder.
@@ -268,8 +192,11 @@ class MaxTextForCausalLM(nnx.Module):
     Returns:
       A JAX array of embedded input tokens.
     """
-    with self.mesh:
-      return self.model.model.token_embedder(input_ids)
+    if not isinstance(self.model, nnx.Module):
+      raise ValueError("Model is not initialized.")
+
+    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+      return self.model.token_embedder(input_ids)
 
   def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
     """Computes the logits from the hidden states using the underlying decoder model.
@@ -280,8 +207,12 @@ class MaxTextForCausalLM(nnx.Module):
     Returns:
       A JAX array of logits.
     """
-    with self.mesh:
-      return self.model.compute_logits(hidden_states)
+    if not isinstance(self.model, nnx.Module):
+      raise ValueError("Model is not initialized.")
+
+    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+      embeddings = self.model.token_embedder
+      return self.model.decoder.apply_output_head(embeddings, hidden_states, True, self.model_mode)
 
   def load_weights(self, rng_key: jax.Array) -> None:
     """Loads model weights using the underlying decoder model.
@@ -289,5 +220,11 @@ class MaxTextForCausalLM(nnx.Module):
     Args:
       rng_key: A JAX random key for model initialization.
     """
-    with self.mesh:
-      self.model.load_weights(rng_key)
+    if self.model is not None:
+      return
+
+    with self.mesh, nn.logical_axis_rules(""):
+      model, _ = model_creation_utils.create_nnx_model(
+          self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
+      )
+      self.model = nnx.data(model)
