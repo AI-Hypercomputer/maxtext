@@ -890,10 +890,11 @@ class Decoder(nn.Module):
                   kv_cache = (k_cache, v_cache)
                 else:
                   # For GDN layers, the cache is a dictionary.
-                  conv_state = kv_caches["conv_states"][lyr]
-                  recurrent_state = kv_caches["recurrent_states"][lyr]
-                  gdn_cache = {"conv_state": conv_state, "recurrent_state": recurrent_state}
-                  kv_cache = {"gdn_cache": gdn_cache}
+                  # conv_state = kv_caches["conv_states"][lyr]
+                  # recurrent_state = kv_caches["recurrent_states"][lyr]
+                  # gdn_cache = {"conv_state": conv_state, "recurrent_state": recurrent_state}
+                  # kv_cache = {"gdn_cache": gdn_cache}
+                  kv_cache = None
 
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
@@ -920,10 +921,11 @@ class Decoder(nn.Module):
                   kv_caches["key_cache"][lyr] = returned_cache[0]
                   kv_caches["value_cache"][lyr] = returned_cache[1]
                 else:
-                  gdn_cache = returned_cache.get("gdn_cache")
-                  if gdn_cache:
-                    kv_caches["conv_states"][lyr] = gdn_cache["conv_state"]
-                    kv_caches["recurrent_states"][lyr] = gdn_cache["recurrent_state"]
+                  # gdn_cache = returned_cache.get("gdn_cache")
+                  # if gdn_cache:
+                  #   kv_caches["conv_states"][lyr] = gdn_cache["conv_state"]
+                  #   kv_caches["recurrent_states"][lyr] = gdn_cache["recurrent_state"]
+                  pass
               else:
                 kv_caches[lyr] = returned_cache
 

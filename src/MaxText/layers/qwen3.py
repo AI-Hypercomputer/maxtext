@@ -28,7 +28,7 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText import max_utils
-from MaxText.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED
+from MaxText.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 from MaxText.layers import attentions
 from MaxText.layers import initializers as max_initializers
 from MaxText.layers import linears
@@ -42,6 +42,7 @@ from MaxText.inference import page_manager
 from MaxText.layers.attentions import Attention
 from MaxText.layers.linears import DenseGeneral, MlpBlock
 from MaxText.layers.moe import RoutedMoE
+from MaxText.inference import kvcache
 
 
 # -----------------------------------------
@@ -326,6 +327,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     conv_kernel_size = cfg.gdn_conv_kernel_dim
     self.v_heads_per_k_head = self.num_v_heads // self.num_k_heads
 
+    if config.model_mode != MODEL_MODE_TRAIN:
+      self.cache = kvcache.GatedDeltaNetCache(
+          batch=config.per_device_batch_size, # Or appropriate batch dim
+          num_heads=self.num_v_heads,
+          k_head_dim=self.head_k_dim,
+          v_head_dim=self.head_v_dim,
+          conv_kernel_size=self.config.gdn_conv_kernel_dim,
+          conv_dim=conv_dim, # Make sure conv_dim is calculated before this
+          dtype=dtype,
+      )
+
     # Submodule instantiations
     self.in_proj_qkvz = linears.DenseGeneral(
         in_features_shape=in_features,
@@ -381,7 +393,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         rngs=rngs,
     )
 
-  def __call__(self, hidden_states: Array, cache: dict[str, Array] | None = None) -> tuple[Array, dict[str, Array]]:
+  def __call__(self, hidden_states: Array, model_mode: str = MODEL_MODE_TRAIN, kv_cache = None, **kwargs) -> tuple[Array, dict[str, Array]]:
     # hidden_states: (B, S, E)
     cfg = self.config
     batch, seq_len, _ = hidden_states.shape
@@ -457,17 +469,29 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     qkv = jnp.concatenate([q, k, v], axis=-1)
     conv_kernel_size = self.config.gdn_conv_kernel_dim
 
-    if cache is not None and "conv_state" in cache:
-      # Decoding mode: use and update the rolling buffer for convolution.
-      conv_state = cache["conv_state"]
-      # Concatenate the previous state with the new input.
-      conv_input = jnp.concatenate([conv_state, qkv], axis=1)
-      # The new state is the last `K-1` tokens of the input.
-      new_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
+    conv_state = None
+    if model_mode == MODEL_MODE_AUTOREGRESSIVE:
+        # Retrieve state from self.cache instead of input arg
+        conv_state = self.cache.conv_state.value
+        
+        # Concatenate previous state with new input
+        conv_input = jnp.concatenate([conv_state, qkv], axis=1)
+        new_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
+        
+        # Update self.cache in place
+        self.cache.conv_state.value = new_conv_state
     else:
-      # Prefill/training mode: pad with zeros for the initial convolution.
-      conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
-      new_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
+        # Prefill/Train: pad with zeros
+        conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
+        
+        # For prefill, we must initialize the cache for the subsequent decode steps
+        if model_mode == MODEL_MODE_PREFILL:
+             # Store the last K-1 tokens as the initial state for decoding
+             new_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
+             self.cache.conv_state.value = new_conv_state
+        else:
+             # Just a placeholder for return
+             new_conv_state = None
 
     # Perform the convolution.
     conv_out = self.conv1d(conv_input)
@@ -508,8 +532,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       pass  # No repeating needed for query/key in this case
 
     # TODO(parambole): Pass and update cache state for jax_chunk_gated_delta_rule
-    recurrent_state = cache["recurrent_state"] if cache and "recurrent_state" in cache else None
-    # core_attn_out shape: (B, S, H_v, D_v)
+    recurrent_state = None
+    if model_mode == MODEL_MODE_AUTOREGRESSIVE:
+        # Retrieve state from self.cache
+        recurrent_state = self.cache.recurrent_state.value
+
     core_attn_out, recurrent_state_out = jax_chunk_gated_delta_rule(
         query,
         key,
@@ -520,7 +547,16 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         initial_state=recurrent_state,
         use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
     )
-    new_cache = {"conv_state": new_conv_state, "recurrent_state": recurrent_state_out}
+    
+    if model_mode != MODEL_MODE_TRAIN:
+        # Update self.cache in place for both prefill and decode
+        self.cache.recurrent_state.value = recurrent_state_out
+        
+    # Construct return dictionary for compatibility with decoders.py (optional but safer)
+    new_cache = {
+        "conv_state": self.cache.conv_state.value if model_mode != MODEL_MODE_TRAIN else None, 
+        "recurrent_state": self.cache.recurrent_state.value if model_mode != MODEL_MODE_TRAIN else None
+    }
 
     # =========================================================================
     # STEP D: Final Output Stage
@@ -899,8 +935,12 @@ class Qwen3NextDecoderLayer(nnx.Module):
       )
     elif isinstance(self.attention, Qwen3NextGatedDeltaNet):
       gdn_cache = kv_cache.get("gdn_cache") if kv_cache is not None else None
-      attention_output, new_gdn_cache = cast(Qwen3NextGatedDeltaNet, self.attention)(hidden_states, cache=gdn_cache)
-      new_kv_cache = {"gdn_cache": new_gdn_cache}
+      attention_output, _ = cast(Qwen3NextGatedDeltaNet, self.attention)(
+        hidden_states, 
+        model_mode=model_mode,
+        kv_cache=None,
+      )
+      new_kv_cache = None
 
     # First residual connection after attention
     hidden_states = residual + attention_output
