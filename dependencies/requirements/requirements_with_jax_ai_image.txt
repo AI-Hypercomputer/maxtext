@@ -3,6 +3,7 @@
 datasets @ https://github.com/huggingface/datasets/archive/6790e138c00b87a1ddc72184f89e7814cf784360.zip
 flax>=0.11.0
 google-api-python-client
+google-cloud-mldiagnostics
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
 grain[parquet]>=0.2.15
 jaxtyping

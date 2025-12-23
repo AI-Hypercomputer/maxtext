@@ -15,10 +15,11 @@
 """ Simple decoder layers for testing and debugging purposes."""
 
 from jax import numpy as jnp
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 
-from flax import nnx, linen as nn
+from flax import nnx
 from MaxText.common_types import Config, ShardMode
+from MaxText.sharding import create_sharding
 from MaxText.layers import quantizations, nnx_wrappers
 from MaxText.layers.initializers import variable_to_logically_partitioned
 
@@ -53,14 +54,15 @@ class SimpleDecoderLayer(nnx.Module):
 
     activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
     self.out_sharding = (
-        NamedSharding(self.mesh, nn.logical_to_mesh_axes(activation_axis_names))
-        if config.shard_mode == ShardMode.EXPLICIT
-        else None
+        create_sharding(self.mesh, activation_axis_names) if config.shard_mode == ShardMode.EXPLICIT else None
     )
 
   def __call__(
       self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
   ):
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
     if self.config.scan_layers:
       return jnp.dot(inputs, self.weights.astype(inputs.dtype), out_sharding=self.out_sharding), None
     return jnp.dot(inputs, self.weights.astype(inputs.dtype), out_sharding=self.out_sharding)
@@ -104,14 +106,10 @@ class SimpleMlpDecoderLayer(nnx.Module):
 
     activation_axes_names = ("activation_batch", "activation_norm_length", "activation_embed")
     self.activation_sharding = (
-        NamedSharding(mesh, nn.logical_to_mesh_axes(activation_axes_names))
-        if config.shard_mode == ShardMode.EXPLICIT
-        else None
+        create_sharding(mesh, activation_axes_names) if config.shard_mode == ShardMode.EXPLICIT else None
     )
     mlp_axes_names = ("activation_batch", "activation_norm_length", "activation_mlp")
-    self.mlp_sharding = (
-        NamedSharding(mesh, nn.logical_to_mesh_axes(mlp_axes_names)) if config.shard_mode == ShardMode.EXPLICIT else None
-    )
+    self.mlp_sharding = create_sharding(mesh, mlp_axes_names) if config.shard_mode == ShardMode.EXPLICIT else None
 
   def __call__(
       self,
@@ -124,6 +122,9 @@ class SimpleMlpDecoderLayer(nnx.Module):
       page_state=None,
       slot=0,
   ):
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
     intermediate = jnp.dot(inputs, self.ff_1.astype(inputs.dtype), out_sharding=self.mlp_sharding)
     output = jnp.dot(intermediate, self.ff_2.astype(inputs.dtype), out_sharding=self.activation_sharding)
     if self.config.scan_layers:

@@ -24,12 +24,14 @@ import jax
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
-from MaxText.multihost_dataloading import MultiHostDataLoadIterator
+from MaxText.multihost_dataloading import MultiHostDataLoadIterator, RemoteIterator
 from MaxText.input_pipeline.input_pipeline_interface import PlaceHolderDataIterator
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint import v1 as ocp_v1
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
+from orbax.checkpoint._src.checkpoint_managers import preservation_policy as preservation_policy_lib
+from orbax.checkpoint._src.checkpoint_managers import save_decision_policy as save_decision_policy_lib
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 # pylint: disable=too-many-positional-arguments
@@ -56,7 +58,7 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
       self,
       directory: epath.Path,
       # `item` is for backwards compatibility with older Orbax API, see
-      # https://orbax.readthedocs.io/en/latest/api_refactor.html.
+      # https://orbax.readthedocs.io/en/latest/guides/checkpoint/api_refactor.html.
       item: Optional[Any] = None,
       args: Any = None,
   ):
@@ -126,6 +128,15 @@ class GrainCheckpointRestore(ocp.args.CheckpointArgs):
   process_count: Optional[int] = None
 
 
+def _is_remote_iterator(data_iterator):
+  """Check if data_iterator is a RemoteIterator or contains RemoteIterator instances."""
+  if isinstance(data_iterator, RemoteIterator):
+    return True
+  if isinstance(data_iterator, list):
+    return any(isinstance(item, RemoteIterator) for item in data_iterator)
+  return False
+
+
 def _load_full_state_from_path(
     path,
     abstract_unboxed_pre_state,
@@ -185,7 +196,8 @@ def create_orbax_checkpoint_manager(
     orbax_logger: Any = None,  # pytype: disable=attribute-error
     use_ocdbt: bool = True,
     use_zarr3: bool = True,
-    max_to_keep: int = 5,
+    enable_continuous_checkpointing: bool = False,
+    max_num_checkpoints_to_keep: int = 10,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -206,16 +218,28 @@ def create_orbax_checkpoint_manager(
   # local storage checkpoint needs parent directory created
   p = epath.Path(checkpoint_dir)
   p.mkdir(exist_ok=True, parents=True)
+  if enable_continuous_checkpointing:
+    save_decision_policy = save_decision_policy_lib.ContinuousCheckpointingPolicy()
+    preservation_policy = preservation_policy_lib.LatestN(
+        max_num_checkpoints_to_keep
+    )
+  else:
+    save_decision_policy = save_decision_policy_lib.FixedIntervalPolicy(
+        interval=save_interval_steps
+    )
+    preservation_policy = preservation_policy_lib.LatestN(
+        max_num_checkpoints_to_keep
+    )
   manager = CheckpointManager(
       p,
       item_names=item_names,
       item_handlers=item_handlers,
       options=CheckpointManagerOptions(
           create=True,
-          save_interval_steps=save_interval_steps,
           enable_async_checkpointing=use_async,
-          max_to_keep = max_to_keep,
-      ),
+          save_decision_policy=save_decision_policy,
+          preservation_policy=preservation_policy,
+          ),
       logger=orbax_logger,
   )
 
@@ -252,8 +276,12 @@ def create_orbax_emergency_checkpoint_manager(
       global_mesh=global_mesh,
       abstract_state=abstract_state,
       options=emergency_checkpoint_manager.CheckpointManagerOptions(
-          local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
-          persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
+          local=LocalCheckpointOptions(
+              save_interval_steps=local_save_interval_steps
+          ),
+          persistent=PersistentCheckpointOptions(
+              save_interval_steps=persistent_save_interval_steps
+          ),
       ),
       logger=orbax_logger,
   )
@@ -541,7 +569,7 @@ def load_state_if_possible(
               None,
           )
         # Case 2: Matches if dataset type is "grain" and the data iterator is not a
-        # PlaceHolderDataIterator and a specific checkpoint file exists for the iterator
+        # PlaceHolderDataIterator or RemoteIterator and a specific checkpoint file exists for the iterator
         case (
             checkpoint_manager,
             dataset_type,
@@ -550,6 +578,7 @@ def load_state_if_possible(
             dataset_type == "grain"
             and data_iterator
             and not isinstance(data_iterator, PlaceHolderDataIterator)
+            and not _is_remote_iterator(data_iterator)
             and (checkpoint_manager.directory / str(step) / "iter").exists()
         ):
           return _restore_grain_iterator(
@@ -707,7 +736,12 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   )
   save_args_composite = {"items": checkpoint_args}
 
-  if config and config.dataset_type == "grain" and not isinstance(data_iterator, PlaceHolderDataIterator):
+  if (
+      config
+      and config.dataset_type == "grain"
+      and not isinstance(data_iterator, PlaceHolderDataIterator)
+      and not _is_remote_iterator(data_iterator)
+  ):
     if not isinstance(data_iterator, list):
       data_iterator = [data_iterator]
     grain_iters_to_save = []

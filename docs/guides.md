@@ -14,25 +14,56 @@
  limitations under the License.
  -->
 
-# How-to Guides
+# How-to guides
+
+Explore our how-to guides for optimizing, debugging, and managing your MaxText workloads.
+
+::::{grid} 1 2 2 2
+:gutter: 2
+
+:::{grid-item-card} ⚡ Optimization
+:link: guides/optimization
+:link-type: doc
+
+Techniques for maximizing performance, including sharding strategies, Pallas kernels, and benchmarking.
+:::
+
+:::{grid-item-card} 💾 Data Pipelines
+:link: guides/data_input_pipeline
+:link-type: doc
+
+Configure input pipelines using **Grain** (recommended for determinism), **HuggingFace**, or **TFDS**.
+:::
+
+:::{grid-item-card} 🔄 Checkpointing
+:link: guides/checkpointing_solutions
+:link-type: doc
+
+Manage GCS checkpoints, handle preemption with emergency checkpointing, and configure multi-tier storage.
+:::
+
+:::{grid-item-card} 🔍 Monitoring & Debugging
+:link: guides/monitoring_and_debugging
+:link-type: doc
+
+Tools for observability: goodput monitoring, hung job debugging, and Vertex AI TensorBoard integration.
+:::
+
+:::{grid-item-card} 🐍 Python Notebooks
+:link: guides/run_python_notebook
+:link-type: doc
+
+Interactive development guides for running MaxText on Google Colab or local JupyterLab environments.
+:::
+::::
 
 ```{toctree}
+:hidden:
 :maxdepth: 1
 
-guides/checkpointing_solutions.md
-guides/custom_model.md
-guides/gcp_workload_observability.md
-guides/features_and_diagnostics.md
-guides/install_maxtext.md
-guides/knowledge_distillation.md
+guides/optimization.md
 guides/data_input_pipeline.md
-guides/monitor_goodput.md
-guides/megascale_hang_playbook.md
-guides/multimodal.md
-guides/pallas_kernels_performance.md
-guides/run_maxtext.md
-guides/understand_logs_and_metrics.md
-guides/update_dependencies.md
-guides/use_vertex_ai_tensorboard.md
-guides/xprof_user_guide.md
+guides/checkpointing_solutions.md
+guides/monitoring_and_debugging.md
+guides/run_python_notebook.md
 ```

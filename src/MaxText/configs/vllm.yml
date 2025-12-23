@@ -20,36 +20,42 @@ enable_nnx: True
 skip_jax_distributed_system: True
 # Scanned layers are not supported with vLLM integration
 scan_layers: False
+# Set weight dtype to bfloat16 as is done in vLLM
+weight_dtype: bfloat16
 
 
 # -------------- Logical Axis Rules --------------
 mesh_axes: ['data', 'model', 'expert']
 logical_axis_rules: [
-                      ['activation_batch', ['data', 'expert']],
-                      ['activation_batch_no_exp', ['data']],
-                      ['activation_embed_and_logits_batch', ['data', 'expert']],
-                      ['activation_embed_and_logits_batch_sequence', ['data', 'expert']],
+                      ['activation_batch', ['expert']],
+                      ['activation_batch_no_exp', []],
+                      ['activation_embed_and_logits_batch', ['expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['expert']],
                       ['activation_heads', ['model']],
                       ['activation_kv_heads', ['model']],
-                      ['activation_length', ['expert']],
-                      ['activation_q_length', ['expert']],
+                      ['activation_length', ['data', 'expert']],
+                      ['activation_q_length', ['data', 'expert']],
                       ['activation_embed', ['model']],
                       ['activation_mlp', ['model']],
                       ['activation_kv', ['model']],
-                      ['activation_prefill_kv_batch', ['data', 'expert']],
-                      ['activation_kv_batch', ['data', 'expert']],
-                      ['activation_kv_batch_no_exp', ['data']],
+                      ['activation_prefill_kv_batch', ['expert']],
+                      ['activation_kv_batch', ['expert']],
+                      ['activation_kv_batch_no_exp', []],
                       ['activation_kv_head_dim', ['model']],
                       ['activation_vocab', ['model']],
+                      ['activation_embed', ['model']],
                       ['activation_exp', ['expert']],
-                      ['decode_batch', ['data', 'expert']],
+                      ['decode_batch', ['expert']],
                       ['mlp', ['model']],
                       ['mlp_no_fsdp', ['model']],
                       ['vocab', ['model']],
                       ['heads', ['model']],
                       ['q_heads', ['model']],
                       ['kv_heads', ['model']],
+                      ['kv_head_dim', []],
+                      ['kv', []],
                       ['embed', ['expert']],
+                      ['embed_no_exp', []],
                       ['q_lora', ['expert']],
                       ['kv_lora', ['expert']],
                       ['norm', ['model']],

@@ -402,7 +402,7 @@ def train_loop(config, recorder, state=None):
       params_shardings,
   )
 
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data:
       state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
@@ -434,7 +434,7 @@ def train_loop(config, recorder, state=None):
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             if config.shard_optimizer_over_data:
               state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
             state, metrics = p_train_step(state, example_batch, nextrng)
@@ -467,7 +467,7 @@ def train_loop(config, recorder, state=None):
         for eval_batch in eval_data_iterator:
           if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
             break
-          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             eval_metrics = p_eval_step(state, eval_batch, nextrng)
           metric_logger.record_eval_metrics(step, metrics=eval_metrics)
           max_logging.log(f"Completed eval step {eval_step_count}")

@@ -30,7 +30,7 @@ from MaxText.common_types import ShardMode
 
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
-  return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
+  return create_sharding(mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules)
 
 
 def maybe_shard_with_name(inputs, named_sharding, shard_mode):
@@ -38,18 +38,54 @@ def maybe_shard_with_name(inputs, named_sharding, shard_mode):
   In auto shardmode, this function hints inputs follow given named_sharding.
   In explicit shardmode, this function enforces inputs following named_sharding.
   """
+  if inputs is None:
+    return None
   if shard_mode == ShardMode.EXPLICIT:
     return reshard(inputs, named_sharding)
   else:
     return jax.lax.with_sharding_constraint(inputs, named_sharding)
 
 
-def maybe_shard_with_logical(inputs, logical_axes, mesh, shard_mode):
+def maybe_shard_with_logical(inputs, logical_axes, mesh, shard_mode, rules=None):
   """
   A wrapper of maybe_shard_with_name when logical axes are inputs
   """
-  named_sharding = NamedSharding(mesh, nn.logical_to_mesh_axes(logical_axes))
+  if inputs is None:
+    return None
+  named_sharding = create_sharding(mesh, logical_axes, rules=rules)
   return maybe_shard_with_name(inputs, named_sharding, shard_mode)
+
+
+def remove_size_one_mesh_axis(spec, mesh):
+  """
+  Removes mesh axes from a PartitionSpec (P) where the axis size is 1.
+
+  This is a common optimization to simplify sharding by excluding redundant axes.
+  Function originally from jax._src.core:
+  https://github.com/jax-ml/jax/blob/main/jax/_src/core.py
+  """
+  if spec is None:
+    return None
+  new_spec = []  # type: ignore
+  for s in spec:
+    if s is None:
+      new_spec.append(s)  # type: ignore
+    elif isinstance(s, tuple):
+      new_spec.append(tuple(i for i in s if mesh.shape[i] != 1))
+    else:
+      new_spec.append(None if mesh.shape[s] == 1 else s)  # type: ignore
+  return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
+
+
+def logical_to_mesh_axes(logical_names, mesh, rules=None):
+  """Remove size one mesh axes given logical names."""
+  tensor_spec = nn.logical_to_mesh_axes(logical_names, rules=rules)
+  return remove_size_one_mesh_axis(tensor_spec, mesh)
+
+
+def create_sharding(mesh, logical_names, rules=None):
+  """Create NamedSharding with given logical names."""
+  return NamedSharding(mesh, logical_to_mesh_axes(logical_names, mesh, rules=rules))
 
 
 def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):

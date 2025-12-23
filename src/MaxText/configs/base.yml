@@ -18,6 +18,7 @@ run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
 override_model_config: False # When set to true allows overriding model parameters via CLI for the purpose of debugging/testing.
+override_logical_axis_rules: False # When set overrides logical axis rules instead of merging them.
 debug:
   rl: False # RL-specific debugging
 
@@ -51,6 +52,7 @@ save_checkpoint_on_completion: True
 async_checkpointing: True
 checkpoint_period: 10_000
 max_num_checkpoints_to_keep: None
+enable_continuous_checkpointing: False
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
 
@@ -70,72 +72,72 @@ checkpoint_storage_concurrent_gb: 96
 
 # Bool flag for enabling Orbax v1.
 enable_orbax_v1: False
-# Function for processing loaded checkpoint dict into a format MaxText can understand. (for other formats, i.e. SafeTensors)
-checkpoint_conversion_fn: None
-# Optional checkpoint context to use for loading. Options: "orbax", "safetensors"
+# function for processing loaded checkpoint dict into a format maxtext can understand. (for other formats, i.e. safetensors)
+checkpoint_conversion_fn: none
+# optional checkpoint context to use for loading. options: "orbax", "safetensors"
 source_checkpoint_layout: "orbax"
-############################### END CHECKPOINTING ##################################
+############################### end checkpointing ##################################
 
 
-reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
+reuse_example_batch: 0 # for testing tpu performance, this options repeated uses the same batch.
 
 
-metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
-# If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
-gcs_metrics: False
+metrics_file: "" # for testing, local file that stores scalar metrics. if empty, no metrics are written.
+# if true save metrics such as loss and tflops to gcs in {base_output_directory}/{run_name}/metrics/
+gcs_metrics: false
 
-# If true save config to GCS in {base_output_directory}/{run_name}/
-save_config_to_gcs: False
+# if true save config to gcs in {base_output_directory}/{run_name}/
+save_config_to_gcs: false
 
-# Gradient dtype
+# gradient dtype
 grad_dtype: "float32"
 
-# Activation dtypes.
+# activation dtypes.
 dtype: "bfloat16"
-# Used to configure quantization in the transformer layers, defaults to null implying bf16.
-# Possible alternative settings are as follows:
+# used to configure quantization in the transformer layers, defaults to null implying bf16.
+# possible alternative settings are as follows:
 # 'int8' for dynamic range quantization using 8-bits
-# 'intmp' for mixed precision quantization for inference as described here: src/MaxText/configs/quantization/README.md
-# 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
-# 'nanoo_fp8' for 8-bit floating-point GeMMs on AMD MI300/MI325 GPUs.
-# 'fp8_full' for FP8 quantization with static scaling.
+# 'intmp' for mixed precision quantization for inference as described here: src/MaxText/configs/quantization/readme.md
+# 'fp8' for 8-bit floating-point gemms on nvidia gpus.
+# 'nanoo_fp8' for 8-bit floating-point gemms on amd mi300/mi325 gpus.
+# 'fp8_full' for fp8 quantization with static scaling.
 quantization: ""
-# Used to configure constant_bound_config in aqt lib for static scaling, e.g. constant_bound_config='0.5, 0.5, 0.5, 0.5, 0.5, 0.5'
+# used to configure constant_bound_config in aqt lib for static scaling, e.g. constant_bound_config='0.5, 0.5, 0.5, 0.5, 0.5, 0.5'
 constant_bound_config: ""
-# Choose one of default, high, and highest.
-# https://kolonist26-jax-kr.readthedocs.io/en/latest/jax.lax.html#jax.lax.Precision
+# choose one of default, high, and highest.
+# https://kolonist26-jax-kr.readthedocs.io/en/latest/jax.lax.html#jax.lax.precision
 matmul_precision: "default"
-activations_in_float32: False # Sets activations to float32 before nonlinearity it true, else dtype
-# Used to replicate the quantization scale to avoid the inefficient XLA fusion for 2d sharding.
-replicate_quant_scale: False
-# Path to file with quantization config for intmp.
+activations_in_float32: false # sets activations to float32 before nonlinearity it true, else dtype
+# used to replicate the quantization scale to avoid the inefficient xla fusion for 2d sharding.
+replicate_quant_scale: false
+# path to file with quantization config for intmp.
 quant_cfg_path: ""
-quantize_kvcache: False # Set to True to quantize KV Cache values, defaults to False
-# Valid kv_quant_axis values:
-#   - "" is valid only when quantize_kvcache is False
+quantize_kvcache: false # set to true to quantize kv cache values, defaults to false
+# valid kv_quant_axis values:
+#   - "" is valid only when quantize_kvcache is false
 #   - "dkv" indicates quantize kv cache over the cache_kv, i.e. kv dimension axis
 #   - "heads_and_dkv" indicates quantize kv cache over cache_heads and cache_kv axes
-# Default to "heads_and_dkv" for faster compution, kv_quant_axis is not used when quantize_kvcache is False
+# default to "heads_and_dkv" for faster compution, kv_quant_axis is not used when quantize_kvcache is false
 #   - "dkv" is expected with better accuracy but degraded computation
 kv_quant_axis: "heads_and_dkv"
 kv_quant_dtype: "int8"
-checkpoint_is_quantized: False # Set to True if reading from a saved aqt quantized checkpoint
-# Saves params quantized on fly at following path
+checkpoint_is_quantized: false # set to true if reading from a saved aqt quantized checkpoint
+# saves params quantized on fly at following path
 save_quantized_params_path: ""
-#Used to configure the mode in which model is called
+#used to configure the mode in which model is called
 # when left as is, corresponds to training
 # accepted values are "inference"
 model_call_mode: ""
-use_qwix_quantization: False # Whether to use qwix for quantization. If set to True, the model will be quantized using qwix.
-# Quantization calibration method used for weights and activations. Supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#L70-L80
+use_qwix_quantization: false # whether to use qwix for quantization. if set to true, the model will be quantized using qwix.
+# quantization calibration method used for weights and activations. supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#l70-l80
 weight_quantization_calibration_method: "absmax"
 act_quantization_calibration_method: "absmax"
 bwd_quantization_calibration_method: "absmax"
-# Shard the range finding operation for quantization. By default this is set to number of slices.
+# shard the range finding operation for quantization. by default this is set to number of slices.
 quantization_local_shard_count: -1
 
-decoder_block: "llama2" # which style of DecoderBlock to use.
-# Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
+decoder_block: "llama2" # which style of decoderblock to use.
+# global parameter scale needs to be a power of 2. if you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 weight_dtype: "float32"
@@ -149,38 +151,40 @@ head_dim: 128
 mlp_activations: ["silu", "linear"]
 mlp_activations_limit: -1.0
 dropout_rate: 0.0
-logits_via_embedding: False
-normalize_embedding_logits: True  # whether to normalize pre-softmax logits if logits_via_embedding is true
-logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
-cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
-float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
-float32_logits: False # in dot_product attention, whether to cast to fp32 the inputs to softmax
-float32_weight_sum: True # whether to use full fp32 precision for weight_sum during final unpermute in moe
+logits_via_embedding: false
+normalize_embedding_logits: true  # whether to normalize pre-softmax logits if logits_via_embedding is true
+logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
+cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
+float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
+float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
+float32_weight_sum: true # whether to use full fp32 precision for weight_sum during final unpermute in moe
 
-# Multi-Token Prediction Configs
-# The number of auxiliary prediction layers to use for MTP.
-# Set to 0 to disable the feature.
+# multi-token prediction configs
+# the number of auxiliary prediction layers to use for mtp.
+# set to 0 to disable the feature.
 mtp_num_layers: 0
-# The scaling factor (lambda) for the MTP auxiliary loss. The final loss is:
+# the scaling factor (lambda) for the mtp auxiliary loss. the final loss is:
 # main_loss + mtp_loss_scaling_factor * avg_mtp_loss
 mtp_loss_scaling_factor: 0.1
-# Specifies which MTP layer (1-indexed) is used to calculate metrics like the
-# acceptance rate during evaluation. For example, a value of `1` targets the
-# first auxiliary prediction head. Set to 0 to disable this specific evaluation
+# specifies which mtp layer (1-indexed) is used to calculate metrics like the
+# acceptance rate during evaluation. for example, a value of `1` targets the
+# first auxiliary prediction head. set to 0 to disable this specific evaluation
 mtp_eval_target_module: 0
 
 # mixture of experts (moe)
 num_experts: 1
 num_experts_per_tok: 1
-megablox: True
-sparse_matmul: True
+megablox: true
+sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
 expert_balance: False # whether or not to do expert balancing
-use_random_routing: False # whether to use random routing for debug/test purpose
-use_custom_sort_vjp: True # whether to use a custom sort vjp for sparse matmul ops
-use_ring_of_experts: False # whether to use ring of experts for sparse matmul expert parallelism
-# Tunable tiling dimensions used for MLP GMM, includes Tokamax ragged_dot and Megablox
+use_random_routing: false # whether to use random routing for debug/test purpose
+use_custom_sort_vjp: true # whether to use a custom sort vjp for sparse matmul ops
+use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
+# tunable tiling dimensions used for mlp gmm
+# megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
+# tokamax ragged dot - supports all 18 configs
 wi_tile_fwd_batch_seq: 512
 wi_tile_fwd_embed_dim: 1024
 wi_tile_fwd_mlp_dim: 1024
@@ -200,17 +204,19 @@ wo_tile_dlhs_mlp_dim: 1024
 wo_tile_drhs_batch_seq: 512
 wo_tile_drhs_embed_dim: 1024
 wo_tile_drhs_mlp_dim: 1024
-norm_topk_prob: False # Boolean to enable the top-k probability normalization. Qwen3-specific normalization of router weights.
+norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
-# How the expert axis is used to shard attention weights and activations
+# how the expert axis is used to shard attention weights and activations
 # "fsdp" (ep acts as fsdp parallelism)
 # "context" (ep acts as context parallelism, training only)
 expert_shard_attention_option: "fsdp"
 
-# When MoE weight matrices are sharded on both FSDP and FSDP-transpose axes, use two separate All-Gather calls
-moe_fsdp_use_two_stage_all_gather: False
+# when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
+moe_fsdp_use_two_stage_all_gather: false
 # shard the moe weights on num_expert_dim. this can be performanct when num_expert % fdsp_parallisum
 fsdp_shard_on_exp: False
+# use fsdp and fsdp_transpose axes for sharding the moe weights
+use_2d_fsdp_sharding: False
 
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
@@ -257,7 +263,7 @@ pipeline_delay_activation_forwarding: False # This delays the activation forward
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
 model_fsdp_ag_once: False # This controls whether the Zero-1 optimization is active.
-# This is a memory/time tradeoff - True: This is Zero-1 Sharding. Use ZeroOneTransformer to gather weights once per gradient step. 
+# This is a memory/time tradeoff - True: This is Zero-1 Sharding. Use ZeroOneTransformer to gather weights once per gradient step.
 # False: This is Zero-3 Sharing. Use the standard Transformer, which gathers for each microbatch's fwd/bwd pass.
 pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
 # This is a memory/time tradeoff - we now have to store the FSDP gathered weights and gradients (typically in bf16), as opposed
@@ -297,6 +303,8 @@ key_proj: 'remat'
 value_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
+mla_q: 'remat'
+mla_kv: 'remat'
 
 optimizer_memory_host_offload: False
 parameter_memory_host_offload: False
@@ -307,7 +315,7 @@ param_scan_axis: 1
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
-attention_bias: False # If True, adds a learnable bias to the query, key, and value projections 
+attention_bias: False # If True, adds a learnable bias to the query, key, and value projections
 attention_sink: False
 sliding_window_size: 0
 chunk_attn_window_size: 0
@@ -425,7 +433,7 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
                       ['embed_no_exp', ['fsdp', 'sequence', 'context']],
-                      ['embed_tensor_transpose', ['tensor_transpose']],           
+                      ['embed_tensor_transpose', ['tensor_transpose']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
@@ -448,6 +456,7 @@ logical_axis_rules: [
                       ['cache_kv', []],
                       ['cache_sequence', []],
                       ['exp', 'expert'],
+                      ['exp_with_fsdp', 'fsdp'],
                       ['paged_kv_heads', ['tensor']],
                       ['num_pages', []],
                       ['tokens_per_page', []],
@@ -530,8 +539,8 @@ per_device_batch_size: 12.0
 # When expansion_factor_real_data is set to > 1, total_hosts//expansion_factor_real_data will load data.
 # Each data-loading host will load per_device_batch_size * expansion_factor_real_data.
 # When set to between 0 and 1, it's for grain pipeline to use a smaller chip count to read checkpoint from a larger chip count job.
-# Details in https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_grain.md#using-grain
-expansion_factor_real_data: -1.0 
+# Details in https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/data_input_grain.md#using-grain
+expansion_factor_real_data: -1.0
 eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
@@ -571,7 +580,7 @@ use_sft: False
 sft_train_on_completion_only: False
 
 # dataset_type must be synthetic, hf, grain, tfds
-# details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
+# details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
 dataset_type: tfds
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
@@ -596,14 +605,18 @@ grain_train_files: ''
 grain_eval_files: ''
 grain_train_mixture_config_path: '' # Path to a JSON file specifying the mixture weights for Grain training data.
 grain_file_type: 'arrayrecord' # arrayrecord or parquet
-grain_worker_count: 1
+grain_packing_type: 'first_fit' # 'first_fit' or 'concat_then_split'. See details of the corresponding module in https://google-grain.readthedocs.io/en/latest/grain.experimental.html
+grain_worker_count: 1 # Set to -1 to enable auto-tuning: automatically determines optimal worker count. See https://google-grain.readthedocs.io/en/latest/_autosummary/grain.experimental.pick_performance_config.html
 grain_per_worker_buffer_size: 1
-# num_threads and prefetch_buffer_size are per-worker per-dataset. Used in ReadOptions (https://google-grain.readthedocs.io/en/latest/tutorials/data_loader_tutorial.html#per-worker-readoptions)
+# num_threads and prefetch_buffer_size are per-worker per-dataset. 
+# When using array_records, they are used in ReadOptions (https://google-grain.readthedocs.io/en/latest/tutorials/data_loader_tutorial.html#per-worker-readoptions)
 # The default value matches that in the Grain package. If mixing multiple data sources, consider lowering these values to reduce memory usage.
-grain_num_threads: 16  
+# When using parquet, grain_num_threads is the number of files to read and interleave in parallel
+grain_num_threads: 16
 grain_prefetch_buffer_size: 500
 grain_worker_count_eval: 1
 grain_per_worker_buffer_size_eval: 1
+grain_ram_budget_mb: 1024 # RAM budget (MB) for auto-tuning worker count. Only used when grain_worker_count is -1.
 grain_num_threads_eval: 16
 grain_prefetch_buffer_size_eval: 500
 grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
@@ -612,7 +625,7 @@ colocated_python_data_input: False  # experimental feature, under testing
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
-log_period: 100 # Flushes Tensorboard
+log_period: 100 # The frequency of Tensorboard flush, gcs metrics writing, and managed profiler metrics updating.
 
 jax_distributed_initialization_timeout: 300 # This is the default timeout in https://github.com/jax-ml/jax/blob/main/jax/_src/distributed.py
 # Note there are two separate initializations - the jax coordination service (aka jax.distributed.initialize) and the backend (e.g. PjRT), the timeout above refers
@@ -658,6 +671,12 @@ profile_cleanly: True # If set to true, adds a block_until_ready on train state 
 profile_periodically_period: -1 # If set to a positive integer, profile every profile_periodically_period steps.
 # This is useful to debug scenarios where performance is changing.
 
+# Managed ML diagnostics settings. If the feature is enabled, it will
+# - create a managed ML diagnostics run with all the MaxText configs
+# - upload xplane profiling, if it is enabled.
+# - upload training metrics, at the defined log_period interval.
+managed_mldiagnostics: False # Whether to enable the managed diagnostics
+managed_mldiagnostics_run_group: ""  # Optional. Used to group multiple runs.
 
 # Dump HLO options
 dump_hlo: False
@@ -931,7 +950,7 @@ temporal_patch_size_for_vit: 2
 num_position_embeddings_for_vit: 1024
 deepstack_visual_indexes_for_vit: []
 
-# Subslice shape in the form of "x,y,z" when using pathways (single controller). 
+# Subslice shape in the form of "x,y,z" when using pathways (single controller).
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""
 
@@ -959,3 +978,11 @@ partial_rotary_factor: 1.0
 # Use tokamax library for gmm kernel implementation
 use_tokamax_gmm: false
 use_tokamax_splash: false
+# Setting this flag will use a non-pallas implementation.
+use_jax_splash: false
+
+# vLLM Adapter Configurations
+# Path to the HuggingFace-style config directory for the adapter (e.g. src/MaxText/integration/vllm/maxtext_vllm_adapter)
+vllm_hf_config_path: ""
+# JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
+vllm_additional_config: {}

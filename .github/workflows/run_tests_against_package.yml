@@ -90,8 +90,6 @@ jobs:
           python3 -m pip freeze
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* src/MaxText/test_assets
-      - name: Display contents of workspace # TODO: Remove
-        run: ls -R
       - name: Run Tests
         shell: bash
         run: |
@@ -111,4 +109,4 @@ jobs:
           fi
           # TODO: Fix the skipped tests and remove the deselect flags
           [ "${{ inputs.total_workers }}" -gt 1 ] && .venv/bin/python3 -m pip install --quiet pytest-split && SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}" || SPLIT_ARGS=""
-          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize" $SPLIT_ARGS
+          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize" $SPLIT_ARGS

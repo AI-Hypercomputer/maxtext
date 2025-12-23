@@ -37,7 +37,9 @@ LENGTH_NO_EXP = "activation_length_no_exp"
 PREFILL_LENGTH = "prefill_activation_length"
 Q_LENGTH = "activation_q_length"
 Q_LENGTH_NO_EXP = "activation_q_length_no_exp"
+Q_LORA_UP_PROJ = "q_lora_up_proj"
 KV_LENGTH = "activation_kv_length"
+KV_LORA_UP_PROJ = "kv_lora_up_proj"
 EMBED = "activation_embed"
 HEAD = "activation_heads"
 PREFILL_KV_BATCH = "activation_prefill_kv_batch"
@@ -65,6 +67,7 @@ MODEL_MODE_TRAIN = "train"
 
 # expert_shard_attention_option
 EP_AS_CONTEXT = "context"
+EP_AS_FSDP = "fsdp"
 
 DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 
