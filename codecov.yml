@@ -24,6 +24,8 @@
 # During PRs, the 'scheduled' flag is carried forward from the last full run on 'main' to keep the score stable.
 
 # Exclude non-source code, deprecated and experimental folders from coverage tracking
+codecov: 
+ token: 35742a22-fb1f-4839-97ff-b54da5588689
 ignore:
   - "src/MaxText/assets"
   - "src/MaxText/configs"
