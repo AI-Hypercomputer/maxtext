@@ -76,6 +76,8 @@ HF_IDS = {
     "gpt-oss-20b": "openai/gpt-oss-20b",
     "gpt-oss-120b": "openai/gpt-oss-120b",
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+    "mixtral-8x7b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "mixtral-8x22b": "mistralai/Mixtral-8x22B-Instruct-v0.1",
 }
 
 
@@ -195,7 +197,10 @@ def process_maxtext_param(
 
   # Case 3 or 4: The source tensor is stacked on a single axis.
   # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
-  is_unscanned_moe = "moe_block" in maxtext_param_key and any(
+  # `w` is needed for weights, and except for gate.
+  # Gate values are stack in layers only, but weights are stack in both expert and layer.
+  moe_block_list = ["moe_block", "MoeBlock_0-w"]
+  is_unscanned_moe = any(block in maxtext_param_key for block in moe_block_list) and any(
       f"_{i}-" in maxtext_param_key for i in range(maxtext_config.base_num_decoder_layers)
   )
 
