@@ -979,6 +979,14 @@ class Decoder(nn.Module):
               }
             if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
               layer_kwargs = {"layer_idx": lyr}
+            kv_cache = None
+            if kv_caches is not None and cfg.decoder_block != DecoderBlockType.QWEN3_NEXT:
+              kv_cache = kv_caches[lyr]
+            elif kv_caches is not None and cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+              # For Qwen3Next, kv_caches is a dictionary of lists of caches.
+              if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
+                kv_cache = (kv_caches["key_cache"][lyr], kv_caches["value_cache"][lyr])
+
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             if cfg.decoder_block == DecoderBlockType.OLMO3:
@@ -986,8 +994,7 @@ class Decoder(nn.Module):
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
-            kv_cache = kv_caches[lyr] if kv_caches is not None else None
-            y, kv_cache = layer(
+            y, returned_cache = layer(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
@@ -1000,8 +1007,12 @@ class Decoder(nn.Module):
                 attention_metadata=attention_metadata,
                 **layer_call_kwargs,
             )
-            if kv_caches is not None and kv_cache is not None:
-              kv_caches[lyr] = kv_cache
+            if kv_caches is not None and returned_cache is not None:
+              if cfg.decoder_block != DecoderBlockType.QWEN3_NEXT:
+                kv_caches[lyr] = returned_cache
+              elif (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
+                kv_caches["key_cache"][lyr] = returned_cache[0]
+                kv_caches["value_cache"][lyr] = returned_cache[1]
 
             if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
               visual_embeds = deepstack_visual_embeds[lyr]
