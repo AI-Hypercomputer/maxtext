@@ -1118,6 +1118,9 @@ class MaxEngine(engine_api.Engine):
             "cached_prefill_value_scale",
         ]:
           full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+        elif path_key in ["recurrent_state", "conv_state"]:
+           # Direct update for fixed-size linear attention states
+           full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
         else:
           raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
@@ -1230,6 +1233,10 @@ class MaxEngine(engine_api.Engine):
           "cached_prefill_value_scale",
       ]:
         return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+      elif path_key in ["recurrent_state", "conv_state"]:
+         # For linear attention, the state is fixed size. We simply copy the result 
+         # from the prefill step (partial_cache) into the decode state (full_cache).
+         return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
       else:
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
