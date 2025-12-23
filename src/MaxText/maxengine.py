@@ -1616,7 +1616,11 @@ class MaxEngine(engine_api.Engine):
     def is_lp(k):
       return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
-    self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
+    self.kv_cache_annotations_named = jax.tree_util.tree_map(
+      lambda x: tuple(x.names) if hasattr(x, 'names') else (), 
+      cache, 
+      is_leaf=is_lp
+    )
     zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed
 
