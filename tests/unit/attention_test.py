@@ -39,6 +39,7 @@ from MaxText.common_types import (
 from maxtext.layers.attention_mla import MLA
 from maxtext.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
 from maxtext.layers.attentions import Attention
+from maxtext.models.qwen3 import Qwen3NextGatedDeltaNet
 import numpy as np
 import pytest
 
@@ -1502,6 +1503,92 @@ class MLATest(attention_test_util.MLATestBase):
         f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
         f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
     )
+
+
+class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
+  """Test for the Gated Delta Net in Qwen3-Next"""
+
+  def setUp(self):
+    super().setUp()
+    self.config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "max_prefill_predict_length": 16,
+        "max_target_length": 32,
+        "base_emb_dim": 128,  # changed to base_emb_dim so it properly overrides the default 2048
+        "gdn_num_value_heads": 4,
+        "gdn_num_key_heads": 4,
+        "gdn_key_head_dim": 32,
+        "gdn_value_head_dim": 32,
+        "gdn_conv_kernel_dim": 4,
+        "gdn_chunk_size": 16,
+        "dtype": "bfloat16",
+    }
+    self.cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **self.config_arguments,
+    )
+    self.rng = jax.random.PRNGKey(0)
+    self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
+
+  def get_structured_data(self, dtype):
+    """get structured data for GDN (only requires hidden states)"""
+    lnx = jax.random.normal(
+        self.rng,
+        shape=(self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length, self.cfg.emb_dim),
+        dtype=dtype,
+    )
+    return lnx
+
+  @pytest.mark.tpu_only
+  def test_autoregression(self):
+    cfg = self.cfg
+    prefill_length = cfg.max_prefill_predict_length
+    decode_total_length = cfg.max_target_length
+
+    # 1. Init Data
+    lnx = self.get_structured_data(cfg.dtype)
+
+    # 2. Init GDN Layer
+    gdn = Qwen3NextGatedDeltaNet(
+        config=cfg,
+        dtype=cfg.dtype,
+        model_mode=MODEL_MODE_PREFILL,
+        rngs=self.nnx_rng,
+    )
+
+    # 3. Full / Train mode
+    gdn_full = gdn(
+        lnx,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    # 4. Prefill mode
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+
+    gdn_prefill = gdn(
+        lnx_prefill,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(gdn_prefill, gdn_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
+    )
+
+    # 5. Autoregressive mode
+    for idx in range(prefill_length, decode_total_length):
+      lnx_idx = lnx[:, idx : idx + 1, :]
+
+      gdn_idx = gdn(
+          lnx_idx,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+
+      gdn_full_this_idx = gdn_full[:, idx : idx + 1, :]
+      self.assertEqual(gdn_full_this_idx.shape, gdn_idx.shape)
+
+      self.assertTrue(jax.numpy.allclose(gdn_full_this_idx, gdn_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
 
 
 if __name__ == "__main__":

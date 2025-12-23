@@ -43,7 +43,10 @@ from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 from maxtext.inference import page_manager
+
 from maxtext.utils import max_utils
+from maxtext.inference import page_manager, kvcache
+
 
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
@@ -379,7 +382,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
   2. output = Linear_out(y)
   """
 
-  def __init__(self, config: Config, *, rngs: nnx.Rngs):
+  def __init__(self, config: Config, dtype: DType = jnp.float32, model_mode: str = MODEL_MODE_TRAIN, *, rngs: nnx.Rngs):
     """
     Args:
       config: MaxText configuration object.
@@ -398,6 +401,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     conv_dim = self.key_dim * 2 + self.value_dim
     conv_kernel_size = cfg.gdn_conv_kernel_dim
     self.v_heads_per_k_head = self.num_v_heads // self.num_k_heads
+
+    if model_mode != MODEL_MODE_TRAIN:
+      self.cache = kvcache.GatedDeltaNetCache(
+          batch=config.per_device_batch_size,
+          num_heads=self.num_v_heads,
+          k_head_dim=self.head_k_dim,
+          v_head_dim=self.head_v_dim,
+          conv_kernel_size=self.config.gdn_conv_kernel_dim,
+          conv_dim=conv_dim,
+          dtype=dtype,
+      )
 
     # Submodule instantiations
     self.in_proj_qkvz = DenseGeneral(
@@ -458,7 +472,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         rngs=rngs,
     )
 
-  def __call__(self, hidden_states: Array) -> Array:
+  def __call__(
+      self, hidden_states: Array, model_mode: str = MODEL_MODE_TRAIN, kv_cache=None, **kwargs
+  ) -> tuple[Array, dict[str, Array]]:
     # hidden_states: (B, S, E)
     cfg = self.config
     batch, seq_len, _ = hidden_states.shape
@@ -529,15 +545,35 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # STEP B: 1D Convolution
     # =========================================================================
-    # conv_dim = 2 * K_dim + V_dim
-    # qkv: (B, S, 2 * K_dim + V_dim)
     qkv = jnp.concatenate([q, k, v], axis=-1)
+    batch, seq_len, _ = qkv.shape
+    conv_kernel_size = self.config.gdn_conv_kernel_dim
 
-    # TODO(parambole): Implement caching logic for conv_state and recurrent_state
+    conv_state = None
+    if model_mode != MODEL_MODE_TRAIN:
+      # Retrieve state from self.cache
+      conv_state = self.cache.conv_state.value
 
-    # Input to conv_layer should be (B, S, C)
-    # qkv_conv shape: (B, S, conv_dim)
-    conv_out = self.conv1d(qkv)
+      if conv_state.shape[0] != batch:
+        if conv_state.shape[0] == 1:
+          conv_state = jnp.broadcast_to(conv_state, (batch,) + conv_state.shape[1:])
+        else:
+          conv_state = conv_state[:batch]
+
+      # Concatenate previous state with new input
+      conv_input = jnp.concatenate([conv_state, qkv], axis=1)
+      new_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
+
+      # Update self.cache in place
+      self.cache.conv_state.value = new_conv_state
+    else:
+      # Train: pad with zeros
+      conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
+
+    # Perform the convolution.
+    conv_out = self.conv1d(conv_input)
+    # Slice the output to match the original input sequence length.
+    conv_out = conv_out[:, -seq_len:, :]
     qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(cfg.dtype)
     # q_conv shape: (B, S, key_dim), k_conv shape: (B, S, key_dim), v_conv shape: (B, S, value_dim)
     q_conv, k_conv, v_conv = jnp.split(qkv_conv, [self.key_dim, 2 * self.key_dim], axis=-1)
@@ -568,21 +604,34 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # key shape after repeat: (B, S, H_v, D_k)
       key = jnp.repeat(key, repeats, axis=2)
     elif self.num_k_heads > self.num_v_heads and self.num_k_heads % self.num_v_heads == 0:
-      # This case might occur if key/query heads are more than value heads.
-      pass  # No repeating needed for query/key in this case
+      pass
 
-    # TODO(parambole): Pass and update cache state for jax_chunk_gated_delta_rule
-    # core_attn_out shape: (B, S, H_v, D_v)
-    core_attn_out, _ = jax_chunk_gated_delta_rule(
+    recurrent_state = None
+    if model_mode != MODEL_MODE_TRAIN:
+      # Retrieve state from self.cache
+      recurrent_state = self.cache.recurrent_state.value
+
+      if recurrent_state.shape[0] != batch:
+        if recurrent_state.shape[0] == 1:
+          recurrent_state = jnp.broadcast_to(recurrent_state, (batch,) + recurrent_state.shape[1:])
+        else:
+          recurrent_state = recurrent_state[:batch]
+
+    core_attn_out, recurrent_state_out = jax_chunk_gated_delta_rule(
         query,
         key,
         value,
         g,
         beta,
         chunk_size=cfg.gdn_chunk_size,
+        initial_state=recurrent_state,
         use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
         compute_dtype=cfg.dtype,
     )
+
+    if model_mode != MODEL_MODE_TRAIN:
+      # Update self.cache in place for both prefill and decode
+      self.cache.recurrent_state.value = recurrent_state_out
 
     # =========================================================================
     # STEP D: Final Output Stage
@@ -913,7 +962,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
           rngs=rngs,
       )
     else:
-      self.attention = Qwen3NextGatedDeltaNet(config=cfg, rngs=rngs)
+      self.attention = Qwen3NextGatedDeltaNet(config=cfg, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs)
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
@@ -937,7 +986,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
-      kv_cache: None | jnp.ndarray = None,
+      kv_cache: None | dict[str, Array] = None,
       attention_metadata: None | dict[str, Any] = None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
@@ -951,7 +1000,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # Conditionally apply either the Linear Attention or Full Attention block.
     if isinstance(self.attention, Qwen3NextFullAttention):
-      attention_output, kv_cache = cast(Qwen3NextFullAttention, self.attention)(
+      attention_output, new_kv_cache = cast(Qwen3NextFullAttention, self.attention)(
           hidden_states,
           decoder_segment_ids,
           decoder_positions,
@@ -960,10 +1009,13 @@ class Qwen3NextDecoderLayer(nnx.Module):
           kv_cache=kv_cache,
           attention_metadata=attention_metadata,
       )
-    elif isinstance(self.attention, Qwen3NextGatedDeltaNet):
-      attention_output = cast(Qwen3NextGatedDeltaNet, self.attention)(hidden_states)
     else:
-      raise TypeError(f"Unexpected type for self.attention: {type(self.attention)}")
+      attention_output = cast(Qwen3NextGatedDeltaNet, self.attention)(
+          hidden_states,
+          model_mode=model_mode,
+          kv_cache=None,
+      )
+      new_kv_cache = None
 
     # First residual connection after attention
     hidden_states = residual + attention_output
@@ -990,8 +1042,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
         layer_output,
         self.activation_axis_names,
     )
-
-    return layer_output, kv_cache
+    return layer_output, new_kv_cache
 
 
 # -----------------------------------------

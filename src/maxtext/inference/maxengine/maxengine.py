@@ -1146,6 +1146,9 @@ class MaxEngine(_BaseEngine):
             "cached_prefill_value_scale",
         ]:
           full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+        elif path_key in ["recurrent_state", "conv_state"]:
+          # Direct update for fixed-size linear attention states
+          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
         else:
           raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
@@ -1257,6 +1260,10 @@ class MaxEngine(_BaseEngine):
           "cached_prefill_key_scale",
           "cached_prefill_value_scale",
       ]:
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+      elif path_key in ["recurrent_state", "conv_state"]:
+        # For linear attention, the state is fixed size. We simply copy the result
+        # from the prefill step (partial_cache) into the decode state (full_cache).
         return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
       else:
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
@@ -1446,6 +1453,15 @@ class MaxEngine(_BaseEngine):
           partial_cache = jnp.concatenate([partial_cache, pad], axis=seqlen_index)
         partial_cache = jax.lax.dynamic_slice(partial_cache, start_indices, slice_size)
 
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+      elif path_key in ["recurrent_state", "conv_state"]:
+        # SSM states are the "final state" after prefill, so we just overwrite the slot.
+        # We don't need to slice by sequence length like we do for KV cache.
+        if num_prompts > 1:
+          raise NotImplementedError(
+              "Packed prefill is currently incompatible with linear attention states (GDN). "
+              "Prompt memory will bleed into adjacent prompts. Please disable packed prefill."
+          )
         return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
       else:
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
@@ -1660,7 +1676,13 @@ class MaxEngine(_BaseEngine):
     def is_lp(k):
       return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
-    self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
+    self.kv_cache_annotations_named = jax.tree_util.tree_map(
+        lambda x: tuple(x.logical_axes)
+        if hasattr(x, "logical_axes")
+        else (tuple(x.names) if hasattr(x, "names") else ()),
+        cache,
+        is_leaf=is_lp,
+    )
     zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed
 
