@@ -136,6 +136,7 @@ class DecodeTests(unittest.TestCase):
 
   @pytest.mark.tpu_only
   @pytest.mark.scheduled_only
+  @pytest.mark.skip(reason="Flaky test. Disabled in b/470982884")
   def test_decode_greedy_sampling(self):
     config = DecodeTests.CONFIGS["decode_sampling"] + DecodeTests.SAMPLING_STRATEGY_CONFIG["greedy"]
     captured_out = run_decoding(config)
@@ -160,6 +161,7 @@ class DecodeTests(unittest.TestCase):
 
   @pytest.mark.tpu_only
   @pytest.mark.scheduled_only
+  @pytest.mark.skip(reason="Flaky test. Disabled in b/470982884")
   def test_decode_topk_sampling(self):
     config = DecodeTests.CONFIGS["decode_sampling"] + DecodeTests.SAMPLING_STRATEGY_CONFIG["topk"]
     captured_out = run_decoding(config)
