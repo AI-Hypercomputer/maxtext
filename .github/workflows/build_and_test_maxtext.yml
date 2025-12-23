@@ -36,6 +36,7 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write
 jobs:
   build_and_upload_maxtext_package:
     uses: ./.github/workflows/build_package.yml

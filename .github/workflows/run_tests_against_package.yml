@@ -61,6 +61,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
@@ -128,6 +129,5 @@ jobs:
         uses: codecov/codecov-action@v5
         continue-on-error: true
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
           # If scheduled, upload to BOTH flags. If PR, upload ONLY to regular.
           flags: ${{ inputs.is_scheduled_run == 'true' && 'regular,scheduled' || 'regular' }}
