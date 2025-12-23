@@ -311,7 +311,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     dtype: The datatype of the computation.
   """
 
-  def __init__(self, config: Config, dtype: DType = jnp.float32, *, rngs: nnx.Rngs):
+  def __init__(self, config: Config, dtype: DType = jnp.float32, model_mode: str = MODEL_MODE_TRAIN, *, rngs: nnx.Rngs):
     self.config = config
     self.dtype = dtype
     cfg = self.config
@@ -327,7 +327,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     conv_kernel_size = cfg.gdn_conv_kernel_dim
     self.v_heads_per_k_head = self.num_v_heads // self.num_k_heads
 
-    if config.model_mode != MODEL_MODE_TRAIN:
+    if model_mode != MODEL_MODE_TRAIN:
       self.cache = kvcache.GatedDeltaNetCache(
           batch=config.per_device_batch_size, # Or appropriate batch dim
           num_heads=self.num_v_heads,
@@ -886,7 +886,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
           rngs=rngs,
       )
     else:
-      self.attention = Qwen3NextGatedDeltaNet(config=cfg, dtype=cfg.dtype, rngs=rngs)
+      self.attention = Qwen3NextGatedDeltaNet(config=cfg, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs)
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
