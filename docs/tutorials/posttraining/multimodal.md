@@ -25,7 +25,14 @@ Multimodal Large Language Models (LLMs) extend traditional text-only models by i
 
 ## Checkpoint Conversion
 
-Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace ([README](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md)). This tool is used for the Gemma3 model family. Use this command to convert an unscanned checkpoint from HuggingFace to MaxText, and save it to `MAXTEXT_CKPT_GCS_PATH`:
+Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace ([README](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md)). This tool is used for the Gemma3 model family. 
+
+Install pytorch:
+```
+pip install torch
+```
+
+Then use this command to convert an unscanned checkpoint from HuggingFace to MaxText, and save it to `MAXTEXT_CKPT_GCS_PATH`:
 
 ```shell
 export HF_ACCESS_TOKEN=hf_...
@@ -66,7 +73,7 @@ python -m MaxText.decode \
     MaxText/configs/base.yml \
     model_name=gemma3-4b \
     hf_access_token=$HF_ACCESS_TOKEN \
-    tokenizer_path=assets/tokenizer.gemma3 \
+    tokenizer_path=src/MaxText/assets/tokenizer.gemma3 \
     load_parameters_path=$MAXTEXT_CKPT_GCS_PATH/0/items \
     per_device_batch_size=1 \
     run_name=ht_test \
@@ -77,7 +84,7 @@ python -m MaxText.decode \
     scan_layers=false \
     use_multimodal=true \
     prompt='Describe image <start_of_image>' \
-    image_path='MaxText/test_assets/test_image.jpg' \
+    image_path='src/MaxText/test_assets/test_image.jpg' \
     attention='dot_product'
 ```
 
@@ -98,6 +105,8 @@ python -m MaxText.decode \
     MaxText/configs/base.yml \
     model_name=gemma3-4b \
     ... \
+    max_prefill_predict_length=predict_length  # Adjust to fit image tokens + text prompt \
+    max_target_length=target_length            # Adjust to fit expected output length \
     image_path=/path/to/image1.jpg,/path/to/image2.jpg \
     prompt="Describe each image in a short sentence." # <start_of_image> will be added to prompt if not provided
     # or prompt="Describe each image in a short sentence: <start_of_image> and <start_of_image>"
@@ -114,12 +123,36 @@ Here, we use [ChartQA](https://huggingface.co/datasets/HuggingFaceM4/ChartQA) as
 
 ```shell
 python -m MaxText.sft_trainer \
-    $MAXTEXT_REPO_ROOT/configs/sft-vision-chartqa.yml \
+    src/MaxText/configs/sft-vision-chartqa.yml \
     run_name="chartqa-sft" \
     model_name=gemma3-4b \
     tokenizer_path="google/gemma-3-4b-it" \
     hf_access_token=$HF_ACCESS_TOKEN \
     load_parameters_path=$UNSCANNED_CKPT_PATH \
+    base_output_directory=$BASE_OUTPUT_DIRECTORY \
+    per_device_batch_size=1 \
+    steps=$STEPS \
+    max_prefill_predict_length=1024 \
+    max_target_length=2048 \
+    checkpoint_period=1000 \
+    scan_layers=False \
+    async_checkpointing=True \
+    enable_checkpointing=True \
+    attention=dot_product \
+    max_num_images_per_example=1 \
+    dataset_type=hf profiler=xplane
+```
+
+Also, we can use the converted unscanned checkpoint from previous `Checkpoint Conversion` section.
+
+```
+python -m MaxText.sft_trainer \
+    $MAXTEXT_REPO_ROOT/configs/sft-vision-chartqa.yml \
+    run_name="chartqa-sft" \
+    model_name=gemma3-4b \
+    tokenizer_path="google/gemma-3-4b-it" \
+    hf_access_token=$HF_ACCESS_TOKEN \
+    load_parameters_path=$MAXTEXT_CKPT_GCS_PATH/0/items \
     base_output_directory=$BASE_OUTPUT_DIRECTORY \
     per_device_batch_size=1 \
     steps=$STEPS \
