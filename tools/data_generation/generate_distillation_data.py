@@ -20,7 +20,7 @@ The script runs inference on a teacher model to create output samples.
 This generated dataset can be used to fine-tune a student model.
 
 Example command:
-  python3 -m MaxText.generate_distillation_data \
+  python3 -m tools.data_generation.generate_distillation_data \
     --dataset-path HuggingFaceH4/ultrachat_200k --data-split train_sft --data-columns messages \
     --tokenizer-path deepseek-ai/DeepSeek-V2-Lite-chat \
     --hf-access-token <access token> \
@@ -37,7 +37,7 @@ Some prompts may be filtered out if prompt tokens are longer than `max-prefill-l
 `max-target-length` is the max length of prompt tokens and expected completion tokens.
 Set `--remove-local-dataset-files` to remove dataset files created locally after uploading to Hugging Face or GCS.
 `upload-to-hf` will upload the dataset to Hugging Face and `upload-to-gcs` will upload the dataset to GCS.
-For more information, check out `python3 -m MaxText.generate_distillation_data --help`.
+For more information, check out `python3 -m tools.data_generation.generate_distillation_data --help`.
 Note:
 Make sure to run maxengine server in a new terminal before executing this command. Example command to run maxengine server:
   python3 -m MaxText.maxengine_server src/MaxText/configs/base.yml \

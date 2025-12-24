@@ -752,8 +752,12 @@ class MaxEngine(engine_api.Engine):
         # pytype: disable=attribute-error
         token_logps.append(inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token))
     first_generated_tokens = jnp.concatenate(first_generated_tokens, axis=0)
+
     if self.config.return_log_prob:
       token_logps = jnp.concatenate(token_logps, axis=0)
+    else:
+      # If logprobs are disabled, create Zeros matching the token shape.
+      token_logps = jnp.zeros(first_generated_tokens.shape, dtype=jnp.float32)
 
     all_valid = jnp.ones((num_samples, 1), dtype=jnp.int8)
     generated_tokens = jnp.zeros((num_samples, 1), dtype=jnp.int32)
@@ -780,6 +784,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": first_generated_tokens,
+        "token_logp": token_logps,
     }, result
 
   @functools.partial(

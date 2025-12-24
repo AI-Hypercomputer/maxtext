@@ -503,6 +503,35 @@ class MLA(Attention):
           rngs=self.rngs,
       )
 
+  def init_kv_caches(self, inputs_kv_shape: Tuple):
+    """Initializes KVCache for MLA when using naive caching strategy.
+
+    Overrides Attention.init_kv_caches to account for the specific
+    key dimensions of DeepSeek MLA (Content + RoPE).
+    """
+    batch_size, _, _ = inputs_kv_shape
+    # Placeholder sequence length for initialization
+    placeholder_seq_len = 1
+
+    return kvcache.KVCache(
+        max_prefill_length=self.max_prefill_predict_length,
+        max_target_length=self.max_target_length,
+        batch=batch_size,
+        key_seq_len=placeholder_seq_len,
+        value_seq_len=placeholder_seq_len,
+        key_heads=self.num_kv_heads,
+        value_heads=self.num_kv_heads,
+        key_head_size=self.qk_head_dim,
+        value_head_size=self.v_head_dim,
+        dtype=self.dtype,
+        kv_quant=self.kv_quant,
+        prefill_cache_axis_order=self.prefill_cache_axis_order,
+        ar_cache_axis_order=self.ar_cache_axis_order,
+        use_chunked_prefill=self.config.use_chunked_prefill,
+        model_mode=self.model_mode,
+        rngs=self.rngs,
+    )
+
   def mla_query_projection(self, inputs_q: Array, inputs_positions: Array, model_mode) -> Array:
     """Query projection for MLA, e.g. includes LoRA if q_lora_rank > 0."""
     # specify query logical name
