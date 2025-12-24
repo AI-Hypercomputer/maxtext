@@ -1,0 +1,12 @@
+{
+  "__default__": {"w_bits": 4, "a_bits": 8, "w_scale": 1.0, "a_scale": 1.0, "tile_size": -1},
+  ".*/query": {"w_bits": 4, "tile_size": 512},
+  ".*/key": {"w_bits": 4, "tile_size": 512},
+  ".*/value": {"w_bits": 4, "tile_size": 512},
+  ".*/out": {"w_bits": 4},
+  ".*/gate": {"w_bits": 4},
+  ".*/wi_0": {"w_bits": 4},
+  ".*/wi_1": {"w_bits": 4},
+  ".*/wo": {"w_bits": 4}
+}
+  
