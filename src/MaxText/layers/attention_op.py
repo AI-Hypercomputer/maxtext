@@ -1362,7 +1362,9 @@ class AttentionOp(nnx.Module):
   ) -> Array:
     """CUDNN Flash Attention with Transformer Engine.
     1. Stable API, supports MHA, GQA, SWA, Packing and Context Parallelism
-    2. Context Parallelism currently only supports causal masking and no packing
+    2. Context Parallelism currently only supports causal masking
+    3. Only Ring attention has packing support with striped load balancing
+      (context_parallel_strategy="ring" and context_parallel_load_balance=true)
     """
     # These imports are only meant to work in a GPU build.
     # pylint: disable=import-outside-toplevel
@@ -1372,6 +1374,7 @@ class AttentionOp(nnx.Module):
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
     using_context_parallelism = self.mesh.shape["context"] > 1
+    using_load_balanced_ring_cp = using_context_parallelism and self.config.context_parallel_strategy == "ring" and self.config.context_parallel_load_balance
 
     # Initialize default attention configuration
     sliding_window_size = None
@@ -1385,6 +1388,8 @@ class AttentionOp(nnx.Module):
 
     # Handle packing configurations
     if self.config.packing and self.config.dataset_type != "synthetic":
+      if using_context_parallelism and not using_load_balanced_ring_cp:
+        raise AssertionError("Packing is only supported for load balanced ring attention with context parallelism.")
       qkv_layout = "THD_THD_THD"  # Packed format: 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
       if decoder_segment_ids is None:
         decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
@@ -1395,8 +1400,8 @@ class AttentionOp(nnx.Module):
       max_segments_per_seq = self.config.max_segments_per_seq
     elif using_context_parallelism:
       if self.attention_type == AttentionType.LOCAL_SLIDING:
-        raise AssertionError("Sliding window attention is not supported for context parallelism")
-      # Context parallelism without packing: only supports causal masking
+        raise AssertionError("Sliding window attention is only supported for load balanced ring attention with context parallelism.")
+      # Context parallelism without packing: only supports causal masking, but not sliding window attention
       attn_mask = None
       dummy_attn_mask = None
       mask_type = "causal"
