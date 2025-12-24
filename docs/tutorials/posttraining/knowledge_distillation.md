@@ -49,11 +49,24 @@ export RUN_NAME = <unique name for the run>
 
 ```sh
 git clone https://github.com/AI-Hypercomputer/maxtext.git
-python3 -m venv ~/venv-maxtext
-source ~/venv-maxtext/bin/activate
+python3 -m venv ~/maxtext_venv
+source ~/maxtext_venv/bin/activate
 python3 -m pip install uv
 cd maxtext
 uv pip install -r dependencies/requirements/requirements.txt
+```
+
+---
+
+**⚠️ Warning: PyTorch Installation Required for Checkpoint Scripts**
+
+The checkpoint conversion scripts located under `MaxText/utils/ckpt_scripts/` (e.g., `llama_or_mistral_ckpt.py`, `convert_deepseek_family_unscanned_ckpt.py`) have a dependency on PyTorch (`torch`). These scripts are used for converting model checkpoints from other formats to be compatible with MaxText.
+
+If you intend to use these conversion scripts, you must install PyTorch. We recommend using `uv` for a fast and efficient installation:
+
+```bash
+# Example command to install torch
+uv pip install torch
 ```
 
 ### 1. Obtain and prepare the teacher model
@@ -94,7 +107,8 @@ JAX_PLATFORMS=cpu \
 python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt \
   --base-model-path ~/llama2-7b-chat \
   --maxtext-model-path ${BASE_DIRECTORY}/llama2-7b-chat/scanned \
-  --model-size llama2-7b
+  --model-size llama2-7b \
+  --huggingface-checkpoint true
 ```
 
 ### 3. Generate dataset using the teacher model
