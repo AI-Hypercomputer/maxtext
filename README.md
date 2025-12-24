@@ -126,3 +126,7 @@ MaxText aims to provide you with the best OSS models, whether as a reference imp
 ## Get involved
 
 Please join our [Discord Channel](https://discord.com/invite/2H9PhvTcDU) and if you have feedback, you can file a feature request, documentation request, or bug report [here](https://github.com/AI-Hypercomputer/maxtext/issues/new/choose).
+
+## License
+
+[Apache License 2.0](LICENSE)
