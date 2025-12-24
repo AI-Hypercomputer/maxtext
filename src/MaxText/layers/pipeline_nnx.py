@@ -1,7 +1,8 @@
 """
 Pipeline Parallelism Module for MaxText using Flax NNX.
-Refactored to use VMAP over a single template module for memory/speed efficiency.
+Native NNX Vectorized version for memory/speed efficiency.
 """
+
 import functools
 from typing import Any, Optional, Dict, Type, Tuple, List
 
@@ -10,324 +11,447 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec, NamedSharding
 from flax import nnx
-import flax.linen as nn_linen 
+import flax.linen as nn_linen
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN, EP_AS_CONTEXT
 
-# --- Helpers ---
 
-def _strip_spec(spec):
-    """Removes 'fsdp' and 'fsdp_transpose' from a PartitionSpec."""
-    if spec is None: return None
-    new_axes = []
-    for axis in spec:
-        if axis in ("fsdp", "fsdp_transpose"):
-            new_axes.append(None)
-        elif isinstance(axis, (list, tuple)):
-            new_sub_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
-            new_axes.append(tuple(new_sub_axis) if new_sub_axis else None)
-        else:
-            new_axes.append(axis)
-    return PartitionSpec(*new_axes)
+# --- Helpers ---
+def debug_pytree_stats(name, tree):
+  """Prints the number of leaves and total memory footprint of a Pytree."""
+  leaves = jax.tree_util.tree_leaves(tree)
+  num_leaves = len(leaves)
+
+  # Calculate size in GB (assuming most are BF16/FP32)
+  total_bytes = sum(x.nbytes if hasattr(x, "nbytes") else 0 for x in leaves)
+  total_gb = total_bytes / (1024**3)
+
+  # Only print on Lead Host to avoid log spam
+  if jax.process_index() == 0:
+    print(f"--- [DEBUG] {name} ---")
+    print(f"  Count: {num_leaves} arrays")
+    print(f"  Size:  {total_gb:.4f} GB")
+
+    # Look for unexpected non-array leaves (potential overhead)
+    non_arrays = [type(x) for x in leaves if not isinstance(x, (jnp.ndarray, jax.Array))]
+    if non_arrays:
+      print(f"  Warning: Found {len(non_arrays)} non-array leaves: {set(non_arrays)}")
+
+
+def cast_to_dtype(node, dtype):
+  """Recursively casts all floating point arrays in a Pytree/State to the target dtype."""
+
+  def _cast(leaf):
+    if isinstance(leaf, (jax.Array, jnp.ndarray)) and jnp.issubdtype(leaf.dtype, jnp.floating):
+      return leaf.astype(dtype)
+    return leaf
+
+  return jax.tree_util.tree_map(_cast, node)
+
+
+def to_pure_dict(x):
+  """Recursively converts any nnx.State or custom mapping into a plain Python dict."""
+  if hasattr(x, "items") and not isinstance(x, (jnp.ndarray, jax.Array)):
+    return {k: to_pure_dict(v) for k, v in x.items()}
+  return x
+
 
 def with_logical_constraint(x, logical_axis_names, rules, mesh):
-    if mesh is None: return x
-    sharding_or_spec = nn_linen.logical_to_mesh_sharding(
-        PartitionSpec(*logical_axis_names), mesh=mesh, rules=rules
-    )
-    if isinstance(sharding_or_spec, NamedSharding):
-        return jax.lax.with_sharding_constraint(x, sharding_or_spec)
-    elif isinstance(sharding_or_spec, PartitionSpec):
-        return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, sharding_or_spec))
+  if mesh is None:
     return x
+  sharding_or_spec = nn_linen.logical_to_mesh_sharding(PartitionSpec(*logical_axis_names), mesh=mesh, rules=rules)
+  if isinstance(sharding_or_spec, NamedSharding):
+    return jax.lax.with_sharding_constraint(x, sharding_or_spec)
+  elif isinstance(sharding_or_spec, PartitionSpec):
+    return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, sharding_or_spec))
+  return x
+
 
 # --- NNX Pipeline Module ---
 
+
+class InternalMetrics(nnx.Variable):
+  """Custom variable for diagnostic metrics."""
+
+  pass
+
+
 class Pipeline(nnx.Module):
-    def __init__(
-        self, 
-        layers: nnx.Module, 
-        config: Config, 
-        mesh: Mesh, 
-        remat_policy: Any = None, 
-        rngs: nnx.Rngs | None = None
-    ):
-        self.config = config
-        self.mesh = mesh
-        self.remat_policy = remat_policy
-        
-        # Dimensions
-        self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
-        self.forwarding_delay = 2 if self.config.pipeline_delay_activation_forwarding else 1
-        self.pipeline_microbatch_size = self.config.micro_batch_size_to_train_on // self.config.num_pipeline_microbatches
-        self.microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
-        self.use_circ_storage = self.need_circ_storage()
 
-        # Logical Axis Names
-        if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-            self.batch_axis_name = "activation_batch_no_exp"
-            self.seq_len_axis_name = "activation_length"
-        else:
-            self.batch_axis_name = "activation_batch"
-            self.seq_len_axis_name = "activation_length_no_exp"
+  def __init__(
+      self, layers: nnx.Module, config: Config, mesh: Mesh, remat_policy: Any = None, rngs: nnx.Rngs | None = None
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.remat_policy = remat_policy
+    self.rngs = rngs
 
-        if rngs is None:
-            raise ValueError("Pipeline requires 'rngs' to initialize stage parameters.")
+    # 1. Pipeline Dimensions
+    self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
+    self.forwarding_delay = 2 if self.config.pipeline_delay_activation_forwarding else 1
+    self.pipeline_microbatch_size = self.config.micro_batch_size_to_train_on // self.config.num_pipeline_microbatches
+    self.microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
 
-        # --- OPTIMIZED INITIALIZATION (VMAP) ---
-        num_repeats = self.config.num_pipeline_repeats if self.config.num_pipeline_repeats > 1 else 1
-        LayerCls = type(layers)
-        
-        # Extract init kwargs
-        kwargs = {}
-        for attr in ['decoder_layer', 'num_decoder_layers', 'quant', 'model_mode', 'scan_layers']:
-            if hasattr(layers, attr):
-                kwargs[attr] = getattr(layers, attr)
+    num_repeats = self.config.num_pipeline_repeats if self.config.num_pipeline_repeats > 1 else 1
+    self.total_instances = num_repeats * self.num_stages
 
-        # Helper to instantiate a single stage
-        def create_stage(key_s):
-            stage_rngs = nnx.Rngs(params=key_s) 
-            return LayerCls(config=self.config, mesh=self.mesh, rngs=stage_rngs, **kwargs)
+    # 2. Logical Axis Setup
+    if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      self.batch_axis_name, self.seq_len_axis_name = "activation_batch_no_exp", "activation_length"
+    else:
+      self.batch_axis_name, self.seq_len_axis_name = "activation_batch", "activation_length_no_exp"
+    self.use_circ_storage = self.need_circ_storage()
 
-        # Generate keys
-        total_instances = num_repeats * self.num_stages
-        root_key = rngs.params()
-        keys = jax.random.split(root_key, total_instances)
-        
-        # 1. Instantiate the template
-        template_module = create_stage(keys[0])
-        self.graphdef, _ = nnx.split(template_module)
-        
-        # 2. VMAP Initialization to get Stacked States
-        def get_layer_state(k):
-            m = create_stage(k)
-            return nnx.state(m)
+    if rngs is None:
+      raise ValueError("Pipeline requires 'rngs' for initialization.")
+    v_rngs = self.rngs.fork(split=self.total_instances)
 
-        stacked_state_raw = jax.vmap(get_layer_state)(keys)
-        
-        # 3. Apply Sharding (FIXED: Incorporate FSDP Logical Axes)
-        if self.mesh is not None:
-            # We map 'template_module' state to get the logical axes of every param
-            # Note: This relies on the params in template_module having 'sharding' attribute or similar.
-            # IF layers/linears.py is not updated to store this, this will still default to None.
-            
-            def get_leaf_logical_axes(leaf):
-                # Try to extract logical axes metadata if it exists
-                # Future-proof for when we fix linears.py to add sharding metadata
-                if hasattr(leaf, 'sharding_axes'): 
-                    return leaf.sharding_axes
-                return None
+    factory_kwargs = {
+        "config": self.config,
+        "mesh": self.mesh,
+        "decoder_layer": getattr(layers, "decoder_layer", None),
+        "num_decoder_layers": getattr(layers, "num_decoder_layers", 0),
+        "model_mode": getattr(layers, "model_mode", MODEL_MODE_TRAIN),
+        "quant": getattr(layers, "quant", None),
+        "scan_layers": getattr(layers, "scan_layers", False),
+        "dtype": self.config.dtype,
+    }
+    LayerCls = type(layers)
 
-            template_logical_axes = jax.tree.map(get_leaf_logical_axes, nnx.state(template_module))
+    # Warm-up Probe to define the structural template
+    def get_full_metadata():
+      m = LayerCls(rngs=nnx.Rngs(0), **factory_kwargs)
+      # Run dummy pass to create metric slots
+      m(
+          jnp.zeros((1, 1, self.config.emb_dim), dtype=self.config.dtype),
+          jnp.zeros((1, 1), dtype=jnp.int32),
+          jnp.zeros((1, 1), dtype=jnp.int32),
+          deterministic=False,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      # POP RNGs: This makes the GraphDef smaller and memory-clean
+      nnx.pop(m, nnx.RngStream)
+      m_def, m_state = nnx.split(m)
+      # Capture sharding names for hierarchical distribution
+      names = jax.tree_util.tree_map(lambda x: getattr(x, "sharding_names", None), m_state)
+      return m_def, to_pure_dict(names)
 
-            def shard_leading_dim(leaf, logical_axes):
-                # 1. Start with Stage Axis
-                axes = ["stage"]
-                
-                # 2. Append Logical Axes (mapped to physical mesh axes via config rules)
-                if logical_axes is not None:
-                    # Convert logical names (e.g. 'embed') to mesh names (e.g. 'data')
-                    # We reuse nn_linen.logical_to_mesh_sharding logic conceptually
-                    # But here we need to construct the PartitionSpec explicitly.
-                    
-                    # We can use the helper to get the physical spec for the inner dims
-                    inner_spec = PartitionSpec(*logical_axes)
-                    physical_sharding = nn_linen.logical_to_mesh_sharding(
-                        inner_spec, mesh=self.mesh, rules=self.config.logical_axis_rules
-                    )
-                    
-                    if isinstance(physical_sharding, NamedSharding):
-                        # Append the inner specs
-                        axes.extend(physical_sharding.spec)
-                    else:
-                        # Fallback if no specific rule
-                        axes.extend([None] * (leaf.ndim - 1))
-                else:
-                    # No metadata found (current state of linears.py), replicate inner
-                    axes.extend([None] * (leaf.ndim - 1))
-                
-                # 3. Apply
-                # Ensure spec length matches leaf dimensions (leaf has +1 dim for stack)
-                # If logical axes were provided, they account for leaf.ndim-1.
-                
-                spec = PartitionSpec(*tuple(axes))
-                sharding = NamedSharding(self.mesh, spec)
-                return jax.device_put(leaf, sharding)
-            
-            # Apply using structure of template to guide the structure of stacked_state
-            self.stacked_state = jax.tree.map(shard_leading_dim, stacked_state_raw, template_logical_axes)
-        else:
-            self.stacked_state = stacked_state_raw
+    # graphdef is now "structurally complete" (has slots for metrics)
+    # sharding_state_abstract contains the keys for every variable
+    self.stage_graphdef, self.sharding_metadata = jax.eval_shape(get_full_metadata)
 
-        # Register as Data
-        self.stacked_state = nnx.data(self.stacked_state)
+    v_rngs = self.rngs.fork(split=self.total_instances)
 
-    # ... (Helpers need_circ_storage to get_pipeline_remat_policy remain same) ...
-    def need_circ_storage(self):
-        return (self.config.num_pipeline_repeats > 1 and 
-                self.config.num_pipeline_microbatches > self.num_stages * self.forwarding_delay)
+    def create_sharded_stage(r):
+      m = type(layers)(rngs=r, **factory_kwargs)
+      m(
+          jnp.zeros((1, 1, self.config.emb_dim)),
+          jnp.zeros((1, 1), dtype=jnp.int32),
+          jnp.zeros((1, 1), dtype=jnp.int32),
+          deterministic=False,
+          model_mode=MODEL_MODE_TRAIN,
+      )
 
-    def iterations_to_complete_first_microbatch_one_repeat(self):
-        return self.forwarding_delay * (self.num_stages - 1)
+      _, state = nnx.split(m)
+      bf16_state = cast_to_dtype(state, self.config.dtype)
+      nnx.update(m, bf16_state)
 
-    def iterations_to_complete_first_microbatch(self):
-        return (self.config.num_pipeline_microbatches * (self.config.num_pipeline_repeats - 1) + 
-                self.iterations_to_complete_first_microbatch_one_repeat())
+      nnx.pop(m, nnx.RngStream)
+      return m
 
-    def get_pipeline_remat_policy(self):
-        if self.config.remat_policy == "custom": return self.remat_policy
-        save_input = jax.checkpoint_policies.save_only_these_names("iteration_input", "decoder_layer_input")
-        return (jax.checkpoint_policies.save_from_both_policies(self.remat_policy, save_input) 
-                if self.remat_policy else save_input)
+    with self.mesh:
+      self.layers = nnx.vmap(create_sharded_stage, in_axes=0, spmd_axis_name="stage")(v_rngs)
 
-    def get_weight_sharding(self, *args, **kwargs):
-        def get_spec(leaf):
-            if hasattr(leaf, 'sharding') and isinstance(leaf.sharding, NamedSharding):
-                return leaf.sharding.spec
-            return None
-        return jax.tree.map(get_spec, self.stacked_state)
+  # --- MISSING HELPER: Determine active tokens and weights ---
+  def get_microbatch_and_repeat_ids(self, loop_iteration):
+    """Determines which data and weights are active for the current step."""
+    # Calculate how many microbatches each physical stage has processed
+    # This accounts for the bubble iterations (forwarding delay)
+    processed = jnp.maximum(loop_iteration - self.forwarding_delay * jnp.arange(self.num_stages), 0)
+    microbatch_ids = processed % self.config.num_pipeline_microbatches
+    repeat_ids = processed // self.config.num_pipeline_microbatches
+    return microbatch_ids, repeat_ids
 
-    def all_gather_over_fsdp(self):
-        def apply_ag(leaf):
-            if hasattr(leaf, 'sharding') and isinstance(leaf.sharding, NamedSharding):
-                new_spec = _strip_spec(leaf.sharding.spec)
-                target = NamedSharding(leaf.sharding.mesh, new_spec)
-                return jax.lax.with_sharding_constraint(leaf, target)
-            return leaf
-        
-        # Returns new view
-        return jax.tree.map(apply_ag, self.stacked_state)
+  def get_pipeline_remat_policy(self):
+    """
+    Returns the JAX rematerialization policy for this pipeline.
+    This policy ensures that 'iteration_input' is saved to memory
+    to avoid redundant recomputation of stages during the backward pass.
+    """
+    # 1. Check if the user has a custom override in the config
+    if self.config.remat_policy == "custom":
+      return self.remat_policy
 
-    def shard_dim_by_stages(self, x, dim: int):
-        if self.mesh is None: return x
-        dims = [PartitionSpec.UNCONSTRAINED] * x.ndim
-        dims[dim] = "stage"
-        sharding = NamedSharding(self.mesh, PartitionSpec(*dims))
-        return jax.lax.with_sharding_constraint(x, sharding)
+    # 2. Define the Base Policy
+    # We MUST save 'iteration_input' and 'decoder_layer_input'.
+    # These names must match the 'jax.ad_checkpoint.checkpoint_name' calls
+    # we added inside our scan_fn and Decoder layers.
+    save_input_policy = jax.checkpoint_policies.save_only_these_names("iteration_input", "decoder_layer_input")
 
-    # ... (Loop Helpers init_loop_state, get_iteration_inputs... COPY FROM PREVIOUS) ...
-    def get_microbatch_and_repeat_ids(self, loop_iteration):
-        processed = jnp.maximum(loop_iteration - self.forwarding_delay * jnp.arange(self.num_stages), 0)
-        return processed % self.config.num_pipeline_microbatches, processed // self.config.num_pipeline_microbatches
+    # 3. Combine with the Layer-Specific Policy
+    # If the Pipeline was initialized with a remat_policy (e.g., 'minimal'),
+    # we merge them so we save BOTH the inputs and the dots.
+    if self.remat_policy is not None:
+      # save_from_both_policies is the standard JAX utility for this.
+      return jax.checkpoint_policies.save_from_both_policies(self.remat_policy, save_input_policy)
 
-    def init_loop_state(self, inputs):
-        shift = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
-        shift = with_logical_constraint(shift, ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"), self.config.logical_axis_rules, self.mesh)
-        prev_outputs = jnp.zeros_like(shift) if self.config.pipeline_delay_activation_forwarding else None
-        if prev_outputs is not None:
-            prev_outputs = with_logical_constraint(prev_outputs, ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"), self.config.logical_axis_rules, self.mesh)
-        state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])
-        state_io = with_logical_constraint(state_io, ("activation_stage", None, self.batch_axis_name, self.seq_len_axis_name, "activation_embed"), self.config.logical_axis_rules, self.mesh)
-        circ_storage = jnp.zeros((self.num_stages,) + inputs.shape, dtype=inputs.dtype) if self.use_circ_storage else None
-        circ_mover = shift if self.use_circ_storage else None
-        return {"state_io": state_io, "shift": shift, "circ_storage": circ_storage, "circ_storage_mover": circ_mover, "loop_iteration": jnp.array(0, dtype=jnp.int32), "prev_outputs": prev_outputs}
+    return save_input_policy
 
-    def get_iteration_inputs(self, loop_iter, state_io, circ_storage, shift):
-        state_io_slice = state_io[:, loop_iter % self.microbatches_per_stage]
-        circ_in = circ_storage[:, loop_iter % self.config.num_pipeline_microbatches] if self.use_circ_storage else shift
-        first_in = jnp.where(loop_iter < self.config.num_pipeline_microbatches, state_io_slice, circ_in)
-        stages_in = jnp.where(jax.lax.broadcasted_iota("int32", shift.shape, 0) == 0, first_in, shift)
-        return with_logical_constraint(stages_in, ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"), self.config.logical_axis_rules, self.mesh)
+  def __call__(self, inputs, segment_ids=None, positions=None, deterministic=False, model_mode=MODEL_MODE_TRAIN):
+    # 1. Inputs conversion (Same as before)
+    inputs = jnp.asarray(inputs).reshape(
+        (
+            self.config.num_pipeline_microbatches,
+            self.pipeline_microbatch_size,
+            self.config.max_target_length,
+            self.config.emb_dim,
+        )
+    )
 
-    def get_new_loop_state(self, output, loop_state):
-        loop_iter = loop_state["loop_iteration"]
-        def _rotate_right(a): return jnp.concatenate([jax.lax.slice_in_dim(a, self.num_stages - 1, self.num_stages, axis=0), jax.lax.slice_in_dim(a, 0, self.num_stages - 1, axis=0)], axis=0)
-        def _shift_right(a): return jax.lax.slice(jnp.pad(a, [[1, 0]] + [[0, 0]] * (a.ndim - 1)), [0] * a.ndim, a.shape)
-        shift_out = _shift_right(output) if (self.config.num_pipeline_repeats == 1 or self.use_circ_storage) else _rotate_right(output)
-        new_prev = output if self.config.pipeline_delay_activation_forwarding else None
-        new_shift = _shift_right(loop_state["prev_outputs"]) if self.config.pipeline_delay_activation_forwarding else shift_out
-        new_circ = loop_state["circ_storage"]
-        new_mover = loop_state["circ_storage_mover"]
-        if self.use_circ_storage:
-            rot_mover = jnp.expand_dims(_rotate_right(new_mover), 1)
-            off = (loop_iter - self.iterations_to_complete_first_microbatch_one_repeat() - 1) % self.config.num_pipeline_microbatches
-            new_circ = jax.lax.dynamic_update_slice_in_dim(new_circ, rot_mover, off, axis=1)
-            new_mover = output
-        stream_idx = loop_iter % self.microbatches_per_stage
-        stream_slice = loop_state["state_io"][:, stream_idx]
-        padding = [[0, 1]] + [[0, 0]] * (stream_slice.ndim - 1)
-        padded_stream = jnp.pad(stream_slice, padding)
-        stream_slice = jax.lax.slice_in_dim(padded_stream, 1, stream_slice.shape[0] + 1, axis=0)
-        stream_slice = jnp.where(jax.lax.broadcasted_iota("int32", stream_slice.shape, 0) == self.num_stages - 1, output, stream_slice)
-        new_state_io = jax.lax.dynamic_update_slice_in_dim(loop_state["state_io"], jnp.expand_dims(stream_slice, 1), stream_idx, axis=1)
-        return {"state_io": new_state_io, "shift": new_shift, "circ_storage": new_circ, "circ_storage_mover": new_mover, "loop_iteration": loop_iter + 1, "prev_outputs": new_prev}
+    # Symmetrical Reshaping for Metadata
+    # We must turn [Total_Batch, Length] into [Micro, Micro_Size, Length]
+    if segment_ids is not None:
+      segment_ids = jnp.asarray(segment_ids).reshape(
+          (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
+      )
 
-    def permute_output_micro_per_stage_dim(self, output):
-        idx0 = self.iterations_to_complete_first_microbatch() % self.microbatches_per_stage
-        perm = (np.arange(self.microbatches_per_stage) + idx0) % self.microbatches_per_stage
-        return output[:, perm]
+    if positions is not None:
+      positions = jnp.asarray(positions).reshape(
+          (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
+      )
 
-    # --- MAIN CALL ---
+    # 2. Split State into Weights (Broadcast) and Metrics (Carry)
+    # We separate things that change (Metrics) from things that are constant (Params)
+    layers_def, layers_state = nnx.split(self.layers)
 
-    def __call__(self, inputs, segment_ids=None, positions=None, deterministic=False, model_mode=MODEL_MODE_TRAIN, partition_spec=None):
-        inputs = jnp.asarray(inputs).reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length, self.config.emb_dim))
-        
-        ag_sharding = NamedSharding(self.mesh, PartitionSpec(None, None))
-        if positions is not None:
-            positions = jax.lax.with_sharding_constraint(jnp.asarray(positions), ag_sharding).reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length))
-        if segment_ids is not None:
-            segment_ids = jax.lax.with_sharding_constraint(jnp.asarray(segment_ids), ag_sharding).reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length))
+    # Bucket 1: Params (24)
+    # Bucket 2: Metrics (Small)
+    # Bucket 3: Remainder (The 30 internal RNG counters we need for the blueprint)
+    params_state, metrics_state, remainder_state = layers_state.split(nnx.Param, InternalMetrics, ...)
 
-        # Get effective state
-        if self.config.pipeline_fsdp_ag_once: 
-            current_stacked_state = self.all_gather_over_fsdp()
-        else:
-            current_stacked_state = self.stacked_state
+    # --- MISSION 42 DIAGNOSTICS ---
+    debug_pytree_stats("BUCKET 1: Params (Weights)", params_state)
+    debug_pytree_stats("BUCKET 2: Metrics (Diagnostic)", metrics_state)
+    debug_pytree_stats("BUCKET 3: Remainder (RNGs/Metadata)", remainder_state)
+    # ------------------------------
+    rng_def, rng_state = nnx.split(self.rngs)
 
-        loop_state = self.init_loop_state(inputs)
+    # The Carry now ONLY contains small tensors
+    scan_carry = {
+        "loop_state": self.init_loop_state(inputs),
+        "metrics_state": to_pure_dict(metrics_state),  # Small metrics
+        "rng_state": to_pure_dict(rng_state),
+    }
 
-        # --- OPTIMIZED SCAN ---
-        def scan_fn(carry, _):
-            loop_iter = carry["loop_iteration"]
-            stages_inputs = self.get_iteration_inputs(loop_iter, carry["state_io"], carry["circ_storage"], carry["shift"])
-            stages_inputs = jax.ad_checkpoint.checkpoint_name(stages_inputs, "iteration_input")
-            
-            micro_ids, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iter)
-            
-            s_pos = positions[micro_ids] if positions is not None else None
-            s_seg = segment_ids[micro_ids] if segment_ids is not None else None
-            if s_pos is not None: s_pos = self.shard_dim_by_stages(s_pos, 0)
-            if s_seg is not None: s_seg = self.shard_dim_by_stages(s_seg, 0)
+    # The weights are passed as a closure (Broadcasted)
+    # JAX will only keep ONE copy of params_pure_dict in memory
+    params_pure_dict = to_pure_dict(params_state)
+    remainder_pure_dict = to_pure_dict(remainder_state)
 
-            stage_indices = jnp.arange(self.num_stages)
-            target_indices = stage_indices 
-            if self.config.num_pipeline_repeats > 1:
-                target_indices = repeat_ids * self.num_stages + stage_indices
-            
-            def gather_state(stacked, idxs):
-                # Vectorized gather using vmap indexing
-                return jax.vmap(lambda i: jax.tree.map(lambda l: l[i], stacked))(idxs)
-            
-            current_states = jax.tree.map(lambda leaf: gather_state(leaf, target_indices), current_stacked_state)
+    def scan_fn(carry, _):
+      l_state = carry["loop_state"]
+      loop_iter = l_state["loop_iteration"]
 
-            def run_layer(state, x, seg, pos):
-                model = nnx.merge(self.graphdef, state)
-                out = model(x, decoder_segment_ids=seg, decoder_positions=pos, deterministic=deterministic, model_mode=model_mode)
-                return out
+      # (it_inputs, indices, and RNG fork logic same as Mission 25)
+      micro_ids, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iter)
+      it_inputs = self.get_iteration_inputs(loop_iter, l_state["state_io"], l_state["circ_storage"], l_state["shift"])
+      it_inputs = jax.ad_checkpoint.checkpoint_name(it_inputs, "iteration_input")
 
-            in_axes_seg = 0 if s_seg is not None else None
-            in_axes_pos = 0 if s_pos is not None else None
-            
-            stages_out = jax.vmap(run_layer, in_axes=(0, 0, in_axes_seg, in_axes_pos))(
-                current_states, stages_inputs, s_seg, s_pos
-            )
+      it_pos = jnp.take(positions, micro_ids, axis=0) if positions is not None else None
+      it_seg = jnp.take(segment_ids, micro_ids, axis=0) if segment_ids is not None else None
+      if it_pos is not None:
+        it_pos = self.shard_dim_by_stages(it_pos, 0)
+      if it_seg is not None:
+        it_seg = self.shard_dim_by_stages(it_seg, 0)
 
-            if self.config.scan_layers and isinstance(stages_out, tuple):
-                stages_out = stages_out[0]
+      it_rngs = nnx.merge(rng_def, nnx.State(carry["rng_state"]))
+      vmap_rngs_obj = it_rngs.fork(split=self.num_stages)
+      _, next_rng_state = nnx.split(it_rngs)
+      _, vmap_rng_state = nnx.split(vmap_rngs_obj)
 
-            return self.get_new_loop_state(stages_out, carry), None
+      stage_indices = jnp.arange(self.num_stages)
+      target_indices = (
+          stage_indices if self.config.num_pipeline_repeats <= 1 else (repeat_ids * self.num_stages + stage_indices)
+      )
 
-        total_steps = (self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats) + self.forwarding_delay * (self.num_stages - 1)
-        policy = self.get_pipeline_remat_policy() if self.config.set_remat_policy_on_pipeline_iterations else None
-        
-        if self.config.scan_pipeline_iterations:
-             scan_fn = jax.checkpoint(scan_fn, policy=policy, prevent_cse=not self.config.scan_pipeline_iterations)
-             final_loop_state, _ = jax.lax.scan(scan_fn, loop_state, None, length=total_steps)
-        else:
-             curr = loop_state
-             scan_fn = jax.checkpoint(scan_fn, policy=policy) if policy else scan_fn
-             for _ in range(total_steps): curr, _ = scan_fn(curr, None)
-             final_loop_state = curr
-        
-        out = self.permute_output_micro_per_stage_dim(final_loop_state["state_io"])
-        return jnp.reshape(out, (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim))
+      # --- GATHER SLICES ---
+      # Gather slices for both weights and stats
+      active_params = jax.tree_util.tree_map(lambda x: x[target_indices], params_pure_dict)
+      active_metrics = jax.tree_util.tree_map(lambda x: x[target_indices], carry["metrics_state"])
+      active_remainder = jax.tree_util.tree_map(lambda x: x[target_indices], remainder_pure_dict)
+
+      def run_stage(p_raw, m_raw, r_raw, x, seg, pos, r_keys):
+        # Only merge what is necessary for the call
+        m = nnx.merge(layers_def, nnx.State(p_raw), nnx.State(m_raw), nnx.State(r_raw))
+
+        # Reseed using a more direct method to save Python cycles
+        # it_m_rngs_state = nnx.State(r_keys)
+        nnx.update(m, nnx.State(r_keys))
+
+        # EXECUTE
+        out, _ = m(x, decoder_segment_ids=seg, decoder_positions=pos, deterministic=deterministic, model_mode=model_mode)
+
+        # Split back ONLY metrics.
+        # Discarding GraphDef/Params/Remainder here is what allows 129 tokens/s.
+        _, _, final_metrics, _ = nnx.split(m, nnx.Param, InternalMetrics, ...)
+        return out, to_pure_dict(final_metrics)
+
+      # VMAP execution
+      stages_out, updated_metrics = nnx.vmap(run_stage)(
+          active_params, active_metrics, active_remainder, it_inputs, it_seg, it_pos, to_pure_dict(vmap_rng_state)
+      )
+
+      # Update the metrics carry
+      new_metrics_state = jax.tree_util.tree_map(
+          lambda full, sub: full.at[target_indices].set(sub), carry["metrics_state"], updated_metrics
+      )
+
+      new_carry = {
+          "loop_state": self.get_new_loop_state(stages_out, l_state),
+          "metrics_state": new_metrics_state,
+          "rng_state": to_pure_dict(next_rng_state),
+      }
+      return new_carry, None
+
+    # 4. Execute Scan with Checkpointing
+    policy = self.get_pipeline_remat_policy()
+    scannable_fn = (
+        jax.checkpoint(scan_fn, policy=policy) if self.config.set_remat_policy_on_pipeline_iterations else scan_fn
+    )
+
+    total_steps = (self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats) + self.forwarding_delay * (
+        self.num_stages - 1
+    )
+
+    final_carry, _ = jax.lax.scan(scannable_fn, scan_carry, None, length=total_steps)
+
+    # 5. SYNC BACK TO OBJECT
+    # Re-combine the constant params and the updated stats for the final object sync
+
+    nnx.update(self.layers, nnx.State(final_carry["metrics_state"]))
+    nnx.update(self.rngs, nnx.State(final_carry["rng_state"]))
+
+    out = self.permute_output_micro_per_stage_dim(final_carry["loop_state"]["state_io"])
+    return jnp.reshape(
+        out, (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim)
+    )
+
+  def need_circ_storage(self):
+    return (
+        self.config.num_pipeline_repeats > 1
+        and self.config.num_pipeline_microbatches > self.num_stages * self.forwarding_delay
+    )
+
+  def iterations_to_complete_first_microbatch_one_repeat(self):
+    return self.forwarding_delay * (self.num_stages - 1)
+
+  def iterations_to_complete_first_microbatch(self):
+    return (
+        self.config.num_pipeline_microbatches * (self.config.num_pipeline_repeats - 1)
+        + self.iterations_to_complete_first_microbatch_one_repeat()
+    )
+
+  def shard_dim_by_stages(self, x, dim: int):
+    if self.mesh is None:
+      return x
+    dims = [PartitionSpec.UNCONSTRAINED] * x.ndim
+    dims[dim] = "stage"
+    sharding = NamedSharding(self.mesh, PartitionSpec(*dims))
+    return jax.lax.with_sharding_constraint(x, sharding)
+
+  def init_loop_state(self, inputs):
+    shift = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
+    shift = with_logical_constraint(
+        shift,
+        ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
+        self.config.logical_axis_rules,
+        self.mesh,
+    )
+    prev_outputs = jnp.zeros_like(shift) if self.config.pipeline_delay_activation_forwarding else None
+    state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])
+    state_io = with_logical_constraint(
+        state_io,
+        ("activation_stage", None, self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
+        self.config.logical_axis_rules,
+        self.mesh,
+    )
+    circ_storage = jnp.zeros((self.num_stages,) + inputs.shape, dtype=inputs.dtype) if self.use_circ_storage else None
+    circ_mover = shift if self.use_circ_storage else None
+    return {
+        "state_io": state_io,
+        "shift": shift,
+        "circ_storage": circ_storage,
+        "circ_storage_mover": circ_mover,
+        "loop_iteration": jnp.array(0, dtype=jnp.int32),
+        "prev_outputs": prev_outputs,
+    }
+
+  def get_iteration_inputs(self, loop_iter, state_io, circ_storage, shift):
+    state_io_slice = state_io[:, loop_iter % self.microbatches_per_stage]
+    circ_in = circ_storage[:, loop_iter % self.config.num_pipeline_microbatches] if self.use_circ_storage else shift
+    first_in = jnp.where(loop_iter < self.config.num_pipeline_microbatches, state_io_slice, circ_in)
+    stages_in = jnp.where(jax.lax.broadcasted_iota("int32", shift.shape, 0) == 0, first_in, shift)
+    return with_logical_constraint(
+        stages_in,
+        ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
+        self.config.logical_axis_rules,
+        self.mesh,
+    )
+
+  def get_new_loop_state(self, output, loop_state):
+    loop_iter = loop_state["loop_iteration"]
+
+    def _rotate_right(a):
+      return jnp.concatenate(
+          [
+              jax.lax.slice_in_dim(a, self.num_stages - 1, self.num_stages, axis=0),
+              jax.lax.slice_in_dim(a, 0, self.num_stages - 1, axis=0),
+          ],
+          axis=0,
+      )
+
+    def _shift_right(a):
+      return jax.lax.slice(jnp.pad(a, [[1, 0]] + [[0, 0]] * (a.ndim - 1)), [0] * a.ndim, a.shape)
+
+    shift_out = (
+        _shift_right(output)
+        if (self.config.num_pipeline_repeats == 1 or self.use_circ_storage)
+        else _rotate_right(output)
+    )
+    new_prev = output if self.config.pipeline_delay_activation_forwarding else None
+    new_shift = (
+        _shift_right(loop_state["prev_outputs"]) if self.config.pipeline_delay_activation_forwarding else shift_out
+    )
+    new_circ = loop_state["circ_storage"]
+    new_mover = loop_state["circ_storage_mover"]
+    if self.use_circ_storage:
+      rot_mover = jnp.expand_dims(_rotate_right(new_mover), 1)
+      off = (
+          loop_iter - self.iterations_to_complete_first_microbatch_one_repeat() - 1
+      ) % self.config.num_pipeline_microbatches
+      new_circ = jax.lax.dynamic_update_slice_in_dim(new_circ, rot_mover, off, axis=1)
+      new_mover = output
+    stream_idx = loop_iter % self.microbatches_per_stage
+    stream_slice = loop_state["state_io"][:, stream_idx]
+    padding = [[0, 1]] + [[0, 0]] * (stream_slice.ndim - 1)
+    padded_stream = jnp.pad(stream_slice, padding)
+    stream_slice = jax.lax.slice_in_dim(padded_stream, 1, stream_slice.shape[0] + 1, axis=0)
+    stream_slice = jnp.where(
+        jax.lax.broadcasted_iota("int32", stream_slice.shape, 0) == self.num_stages - 1, output, stream_slice
+    )
+    new_state_io = jax.lax.dynamic_update_slice_in_dim(
+        loop_state["state_io"], jnp.expand_dims(stream_slice, 1), stream_idx, axis=1
+    )
+    return {
+        "state_io": new_state_io,
+        "shift": new_shift,
+        "circ_storage": new_circ,
+        "circ_storage_mover": new_mover,
+        "loop_iteration": loop_iter + 1,
+        "prev_outputs": new_prev,
+    }
+
+  def permute_output_micro_per_stage_dim(self, output):
+    idx0 = self.iterations_to_complete_first_microbatch() % self.microbatches_per_stage
+    perm = (np.arange(self.microbatches_per_stage) + idx0) % self.microbatches_per_stage
+    return output[:, perm]
