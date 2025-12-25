@@ -23,7 +23,9 @@ import contextlib
 import jax
 from MaxText import max_logging
 from enum import Enum
-from ml_goodput_measurement import goodput, monitoring
+from MaxText.gcloud_stub import goodput_modules
+
+goodput, monitoring, _GOODPUT_STUB = goodput_modules()
 
 
 class GoodputEvent(Enum):
@@ -36,6 +38,10 @@ class GoodputEvent(Enum):
 
 @contextlib.contextmanager
 def maybe_monitor_goodput(config):
+  if _GOODPUT_STUB:
+    if config.monitor_goodput and jax.process_index() == 0:
+      max_logging.log("[GOODPUT NO-OP] monitoring disabled (decoupled stub).")
+    return
   """Monitor cumulative goodput if enabled."""
   if not config.monitor_goodput or jax.process_index() != 0:
     yield
@@ -96,6 +102,10 @@ def record_goodput(recorder, event_name, *args):
 
 def create_goodput_recorder(config):
   """Create goodput recorder if `enable_goodput_recording=True`."""
+  if _GOODPUT_STUB:
+    if config.enable_goodput_recording and jax.process_index() == 0:
+      max_logging.log("[GOODPUT NO-OP] recorder skipped (decoupled stub).")
+    return None
   if config.enable_goodput_recording:
     logger_name = f"goodput_{config.run_name}"
     recorder = goodput.GoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)

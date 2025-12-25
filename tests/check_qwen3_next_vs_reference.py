@@ -619,7 +619,7 @@ class TestQwen3Next(unittest.TestCase):
     self.cfg = pyconfig.initialize(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             # Base settings for the test
             "run_name=qwen3_next_test",
             "dtype=float32",
@@ -1074,7 +1074,7 @@ class TestQwen3Next(unittest.TestCase):
     cfg = pyconfig.initialize(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             # Base settings for the test
             "run_name=qwen3_next_test",
             "dtype=float32",

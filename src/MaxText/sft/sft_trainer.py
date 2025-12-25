@@ -46,7 +46,7 @@ from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
 
-from tunix.sft import metrics_logger, peft_trainer, profiler
+from tunix.sft import peft_trainer, profiler
 
 from MaxText import max_utils
 from MaxText import max_logging

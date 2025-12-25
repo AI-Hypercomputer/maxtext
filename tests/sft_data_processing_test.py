@@ -17,6 +17,7 @@
 import subprocess
 import unittest
 import os.path
+import pytest
 
 import numpy as np
 
@@ -87,7 +88,7 @@ MESSAGES_DATA = [
     ],
 ]
 
-
+@pytest.mark.external_training # Uses gsutil to pull tokenizer.
 class SFTDataProcessingTest(unittest.TestCase):
 
   @classmethod

@@ -25,6 +25,7 @@ Usage:
 """
 
 import os.path
+import pytest
 
 import jsonlines
 import pytest
@@ -145,6 +146,7 @@ def get_token_log_probs(logits, inputs):
   return token_log_probs
 
 
+@pytest.mark.external_training # setUpClass does gsutil tokenizer
 class SFTTrainerCorrectnessTest(unittest.TestCase):
 
   @classmethod

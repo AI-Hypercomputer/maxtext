@@ -37,10 +37,9 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+from MaxText.gcloud_stub import cloud_diagnostics as _cloud_diag, is_decoupled
+_diag_modules = _cloud_diag()
+diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = _diag_modules
 
 from MaxText import checkpointing
 from MaxText import exceptions
@@ -62,7 +61,8 @@ from MaxText.utils.goodput_utils import (
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
-from MaxText.vertex_tensorboard import VertexTensorboardManager
+from MaxText.gcloud_stub import vertex_tensorboard_components
+VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_components()
 # Placeholder: internal
 
 from MaxText.gradient_accumulation import gradient_accumulation_loss_and_grad
@@ -521,7 +521,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
-    vertex_tensorboard_manager.configure_vertex_tensorboard(config)
+    if _vertex_tb_is_stub:
+      max_logging.log("[DECOUPLED NO-OP] skipping Vertex Tensorboard configuration.")
+    else:
+      vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
   # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
@@ -539,15 +542,25 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
 
 
 def run(config, recorder, diagnostic_config):
-  """Run the job given hyperparameters and utilities"""
-  with (
-      diagnostic.diagnose(diagnostic_config),
-      maybe_record_goodput(recorder, GoodputEvent.JOB),
-      max_utils.maybe_get_transformer_engine_context(config),
-      maybe_monitor_goodput(config),
-  ):
-    train_loop(config, recorder)
+  """Run the job given hyperparameters and utilities.
 
+  In decoupled mode (DECOUPLE_GCLOUD=TRUE) cloud diagnostics may be stubbed; if so, skip wrapping.
+  """
+  if is_decoupled() or getattr(diagnostic, "__class__", None).__name__ == "_StubDiag":  # runtime skip
+    max_logging.log("[DECOUPLED NO-OP] skipping cloud diagnostics wrapper.")
+    with (
+        maybe_record_goodput(recorder, GoodputEvent.JOB),
+        max_utils.maybe_get_transformer_engine_context(config),
+    ):
+        train_loop(config, recorder)
+  else:
+    with (
+        diagnostic.diagnose(diagnostic_config),
+        maybe_record_goodput(recorder, GoodputEvent.JOB),
+        max_utils.maybe_get_transformer_engine_context(config),
+        maybe_monitor_goodput(config),
+    ):
+        train_loop(config, recorder)
 
 def main(argv: Sequence[str]) -> None:
   config, recorder, diagnostic_config = initialize(argv)

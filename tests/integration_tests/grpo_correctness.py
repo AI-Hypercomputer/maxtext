@@ -40,7 +40,9 @@ from MaxText.experimental.rl.grpo_utils import compute_log_probs
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models
+import pytest
 
+pytestmark = [pytest.mark.external_serving] # uses pre-generated checkpoint
 
 class GRPOTest(unittest.TestCase):
 

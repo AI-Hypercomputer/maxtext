@@ -31,6 +31,7 @@ from MaxText import elastic_train
 from MaxText import max_utils
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
 
 logging.basicConfig()
 logging.getLogger("pathwaysutils.elastic.manager").setLevel(logging.INFO)
@@ -116,7 +117,7 @@ class ElasticTrainTest(parameterized.TestCase):
     config = pyconfig.initialize(
         argv=[
             "test",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
         ],
         per_device_batch_size=base_number,
         checkpoint_period=1234,

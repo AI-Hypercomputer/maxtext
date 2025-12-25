@@ -18,6 +18,7 @@
 from typing import Sequence
 
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
 from tests.sharding_dump import TEST_CASES
 import os
 import subprocess
@@ -31,7 +32,7 @@ def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
           "python3",
           "-m",
           "tests.sharding_dump",
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          get_test_config_path(),
           f"compile_topology={topology}",
           f"compile_topology_num_slices={num_slice}",
           f"model_name={model_name}",

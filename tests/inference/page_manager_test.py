@@ -23,6 +23,7 @@ import jax.numpy as jnp
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
 from MaxText.inference.page_manager import PageManager, PageState
 
 
@@ -38,7 +39,7 @@ class TestPageManager(unittest.TestCase):
     self.max_pages_per_group = (self.max_target_length + self.tokens_per_page - 1) // self.tokens_per_page
 
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
