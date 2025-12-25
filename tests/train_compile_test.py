@@ -19,6 +19,8 @@ model configurations and parallelism strategies can be successfully compiled
 for different hardware topologies.
 """
 
+# python3 -m pytest -v --pyargs tests.train_compile_test -rP -s
+
 import unittest
 import os.path
 from tempfile import gettempdir
@@ -375,7 +377,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
+  # @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.cpu_only
   def test_moe_dropping_int8(self):
     temp_dir = gettempdir()
@@ -423,6 +425,29 @@ class TrainCompile(unittest.TestCase):
     )
 
   @pytest.mark.cpu_only
+  def test_moe_megablox_int8(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_megablox_bf16.pickle")
+    train_compile_main(
+        (
+            "",
+            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=mixtral-8x7b",
+            "sparse_matmul=True",
+            "megablox=True",
+            "per_device_batch_size=4",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+            "quantization=int8",
+        )
+    )
+
+  @pytest.mark.cpu_only
   def test_moe_ragged_dot_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_ragged_dot_bf16.pickle")
@@ -466,7 +491,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
+  # @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.cpu_only
   def test_moe_dense_int8(self):
     temp_dir = gettempdir()
@@ -693,7 +718,7 @@ class TrainCompile(unittest.TestCase):
             "scan_layers=True",
             "sparse_matmul=True",
             "megablox=True",
-            "attention=dot_product",  # flash attention: need JAX version >= 0.7.2.dev20250824
+            "attention=flash",
         )
     )
 
@@ -715,7 +740,7 @@ class TrainCompile(unittest.TestCase):
             "scan_layers=True",
             "sparse_matmul=False",
             "capacity_factor=-1",
-            "attention=dot_product",  # flash attention: need JAX version >= 0.7.2.dev20250824
+            "attention=flash",
         )
     )
 
