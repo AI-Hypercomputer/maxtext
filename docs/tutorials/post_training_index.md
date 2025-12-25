@@ -18,6 +18,8 @@ MaxText was co-designed with key Google led innovations to provide a unified pos
 
 ## Supported techniques & models
 
+Supported models for RL and SFT include Llama 3.1 8B and Llama 3.1 70B.
+
 - **SFT (Supervised Fine-Tuning)**
   * [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft.html)
   * [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html)
