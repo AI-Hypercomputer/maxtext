@@ -18,9 +18,11 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 MODEL_VARIATION='8x7b'
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
-    # Non-Googlers please remember to point BASE_OUTPUT_PATH to GCS buckets that you own, this script uses internal buckets for testing.
-    export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/$(date +%Y-%m-%d)
-    echo "BASE_OUTPUT_PATH is not set, using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
+  # Non-Googlers please remember to point BASE_OUTPUT_PATH to GCS buckets that you own, this script uses internal buckets for testing.
+  export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/$(date +%Y-%m-%d)
+  echo "BASE_OUTPUT_PATH is not set, using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
+else
+  BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
 fi
 
 export DATASET_PATH=gs://maxtext-dataset
