@@ -1,6 +1,6 @@
 /* Base file modifications */
-body:has(.hero) .bd-sidebar-primary,
-body:has(.hero) .sidebar-toggle,
+/* body:has(.hero) .bd-sidebar-primary,
+body:has(.hero) .sidebar-toggle, */
 body:has(.hero) .bd-sidebar-secondary {
     display: none !important;
 }
@@ -38,7 +38,6 @@ body:has(.hero) .bd-article > section > h1 {
 
     body:has(.hero) .header-article-items,
     body:has(.hero) .doc-body > section {
-        max-width: 80% !important;
         align-self: center;
         width: -moz-available;
         width: -webkit-fill-available;
@@ -156,6 +155,7 @@ body:has(.hero) .bd-article > section > h1 {
     gap: 24px;
     padding-inline: 60px;
     margin-top: 20px;
+    max-width: 80%;
 }
 
 .text-body {
