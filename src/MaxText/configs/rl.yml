@@ -33,23 +33,25 @@ data_shuffle_seed: 42
 
 # ====== GRPO ======
 
-# The number of times the policy generates multiple responses for a given prompt
-# within a single training step. This corresponds to `G` in Algorithm 1 in the
-# paper. The "group" in GRPO comes from here.
-num_generations: 2
+grpo:
 
-# === other GRPO configs ===
-# The number of iterations per batch (𝜇 in GRPO algo 1).
-num_iterations: 1
+  # The number of times the policy generates multiple responses for a given prompt
+  # within a single training step. This corresponds to `G` in Algorithm 1 in the
+  # paper. The "group" in GRPO comes from here.
+  num_generations: 2
 
-# The coefficient for the KL divergence penalty (𝛽) in the GRPO loss function.
-# Important to keep a high enough value for this, otherwise, the KL divergence
-# can increase unchecked.
-grpo_beta: 0.08
-# Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
-# stable updates.
-grpo_epsilon: 0.2
-loss_algo: 'grpo' # grpo or gspo-token
+  # === other GRPO configs ===
+  # The number of iterations per batch (𝜇 in GRPO algo 1).
+  num_iterations: 1
+
+  # The coefficient for the KL divergence penalty (𝛽) in the GRPO loss function.
+  # Important to keep a high enough value for this, otherwise, the KL divergence
+  # can increase unchecked.
+  grpo_beta: 0.08
+  # Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
+  # stable updates.
+  grpo_epsilon: 0.2
+  loss_algo: 'grpo' # grpo or gspo-token
 
 
 # ====== Models ======
