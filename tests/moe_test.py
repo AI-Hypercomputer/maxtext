@@ -266,6 +266,21 @@ class DeepSeekRoutingTest(unittest.TestCase):
         jax.numpy.allclose(expected_top_k_weights, actual_top_k_weights, rtol=1e-05, atol=1e-05, equal_nan=False)
     )
 
+  def test_deepseek_bias_updates(self):
+    num_experts = 4
+    rate = 0.01
+    # total tokens = 16, average tokens = 16 / 4 = 4
+    # expert 0 assigned 5 tokens --> overload, update: -0.01
+    # expert 1 assigned 4 tokens --> same, update: 0.0
+    # expert 2 assigned 3 tokens --> underload, update: 0.01
+    # expert 3 assigned 4 tokens --> same, update: 0.0
+    # [batch, sequence, top_k] = [2, 4, 2]
+    top_k_indices = jnp.array([[[0, 1], [3, 0], [3, 1], [1, 0]], [[0, 3], [2, 0], [1, 2], [2, 3]]])
+    expected_updates = jnp.array([-0.01, 0.0, 0.01, 0.0])
+    actual_updates = moe.calculate_load_balance_updates(top_k_indices, num_experts, rate)
+
+    self.assertTrue(jax.numpy.allclose(expected_updates, actual_updates, rtol=1e-05, atol=1e-05, equal_nan=False))
+
 
 class MoeLoopBlock(nnx.Module):
   """Reference implementation from https://github.com/mistralai/mistral-inference.

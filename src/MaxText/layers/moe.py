@@ -133,6 +133,30 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
   return top_k_weights, top_k_indices
 
 
+def calculate_load_balance_updates(top_k_indices, num_experts, rate):
+  """
+  Computes a bias adjustment update based on expert load.
+  Used in DeepSeek V3: https://arxiv.org/html/2412.19437v1.
+  Implementation reference: https://arxiv.org/pdf/2408.15664.
+
+  Args:
+      top_k_indices: Shape (batch, sequence, top_k).
+      num_experts: Total number of experts.
+      rate: The update rate.
+
+  Returns:
+      update: The value to add to the expert bias. Shape (num_experts,).
+  """
+  flat_indices = top_k_indices.ravel()
+  expert_counts = jnp.bincount(flat_indices, length=num_experts)
+
+  total_tokens = flat_indices.size
+  average_load = total_tokens / num_experts
+  direction = jnp.sign(average_load - expert_counts)
+  output = direction * rate
+  return output
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -436,6 +460,10 @@ class RoutedMoE(nnx.Module):
   def get_context_autoregressive_parallelism_size(self):
     return self.mesh.shape.get("context_autoregressive", 1)
 
+  def should_update_load_balance(self):
+    """Determines if loss-free load balancing updates should be applied."""
+    return self.config.routed_bias and self.config.routed_bias_update_rate > 0.0
+
   def get_topk(self, gate_logits, pre_bias_logits, rngs=None):
     """get topk."""
     # shape of top_k_weights & top_k_indices:
@@ -560,6 +588,18 @@ class RoutedMoE(nnx.Module):
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs)
 
+    lb_loss = None
+    if self.config.load_balance_loss_weight > 0.0:
+      softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+      lb_loss = self.load_balance_loss(selected_experts, softmax_probs)
+
+    if self.should_update_load_balance():
+      bias_updates = calculate_load_balance_updates(
+          selected_experts, self.config.num_experts, self.config.routed_bias_update_rate
+      )
+    else:
+      bias_updates = None
+
     if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
       # weights will be of shape (batch_size, seq_len, num_experts_per_tok)
       router_scores = jax.nn.sigmoid(weights.astype(jnp.float32))  # weights are top_k_weights here
@@ -589,6 +629,8 @@ class RoutedMoE(nnx.Module):
         weights,
         group_size,
         sorted_experts,
+        lb_loss,
+        bias_updates,
     )
 
   def unpermute(
@@ -1012,7 +1054,11 @@ class RoutedMoE(nnx.Module):
             wo_bias_pspec,
             None,
         ),
-        out_specs=(self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))),
+        out_specs=(
+            self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed")),
+            None,
+            self._logical_to_mesh_axes((None,)),
+        ),
         check_vma=False,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
@@ -1035,7 +1081,7 @@ class RoutedMoE(nnx.Module):
 
         # "Route" tokens within each shard.
         num_experts_per_shard = self.config.num_experts // num_expert_parallelism
-        x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(
+        x, sorted_selected_experts, weights, group_sizes, selected_experts, lb_loss, bias_updates = self.permute(
             x,
             logits,
             pre_bias_logits,
@@ -1049,7 +1095,7 @@ class RoutedMoE(nnx.Module):
         mask = jnp.arange(x.shape[0]) < jnp.sum(group_sizes)
         x = jnp.where(mask[:, None], x, 0)
       else:
-        x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(
+        x, sorted_selected_experts, weights, group_sizes, selected_experts, lb_loss, bias_updates = self.permute(
             x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs
         )
 
@@ -1264,7 +1310,7 @@ class RoutedMoE(nnx.Module):
             use_custom_sort_vjp=self.config.use_custom_sort_vjp,
         )
 
-      return output, None
+      return output, lb_loss, bias_updates
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
@@ -1581,11 +1627,23 @@ class RoutedMoE(nnx.Module):
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = jax.lax.Precision(self.config.matmul_precision)
 
+    # Calculate load balance loss
     if self.config.model_call_mode != "inference":
       softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
-      loss = self.load_balance_loss(top_k_indices, softmax_probs)
+      lb_loss = (
+          self.load_balance_loss(top_k_indices, softmax_probs) if self.config.load_balance_loss_weight > 0.0 else None
+      )
     else:
-      loss = None
+      lb_loss = None
+
+    # Calculate routed bias updates (loss-free)
+    if self.should_update_load_balance():
+      bias_updates = calculate_load_balance_updates(
+          top_k_indices, self.config.num_experts, self.config.routed_bias_update_rate
+      )
+    else:
+      bias_updates = None
+
     batch_size = inputs.shape[0]
     seq_len = inputs.shape[1]
 
@@ -1783,7 +1841,7 @@ class RoutedMoE(nnx.Module):
                   output.shape[3],
               ),
           )
-      return output, loss
+      return output, lb_loss, bias_updates
     else:
       inputs = self._maybe_shard_with_logical(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
       with jax.named_scope("wi_0"):
@@ -1831,7 +1889,7 @@ class RoutedMoE(nnx.Module):
             weights,
             precision=matmul_precision,
         ).astype(self.dtype)
-      return output, None
+      return output, lb_loss, bias_updates
 
   def retrieve_quantized_weight(
       self,
@@ -1893,13 +1951,14 @@ class RoutedMoE(nnx.Module):
             w1_bias,
             wo_bias,
         )
-      return self.sparse_matmul(
+      output, lb_loss, bias_updates = self.sparse_matmul(
           inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
       )
     else:
-      return self.dense_matmul(
+      output, lb_loss, bias_updates = self.dense_matmul(
           inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
       )
+    return output, lb_loss, bias_updates
 
 
 class RoutedAndSharedMoE(nnx.Module):
@@ -1916,7 +1975,7 @@ class RoutedAndSharedMoE(nnx.Module):
       dtype: ctypes.DType = jnp.float32,
       quant: Optional[quantizations.AqtQuantization] = None,
   ):
-    """nitializes the RoutedAndSharedMoE module.
+    """Initializes the RoutedAndSharedMoE module.
 
     Attributes:
       config: The main config setting.
@@ -1974,9 +2033,9 @@ class RoutedAndSharedMoE(nnx.Module):
       intermediate_sharding: NamedSharding | None = None,
       out_sharding: NamedSharding | None = None,
   ) -> jax.Array:
-    routed_experts, _ = self.routed_moe(inputs, out_sharding=out_sharding)
+    routed_experts, load_balance_loss, moe_bias_updates = self.routed_moe(inputs, out_sharding=out_sharding)
     shared_experts = self.shared_experts(inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding)
-    return routed_experts + shared_experts
+    return routed_experts + shared_experts, load_balance_loss, moe_bias_updates
 
 
 def get_gate_logit(

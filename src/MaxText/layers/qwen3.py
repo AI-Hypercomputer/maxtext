@@ -682,7 +682,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         - The load balancing loss from the routed experts, if applicable during training.
     """
     # 1. Apply the routed experts block.
-    routed_output, load_balance_loss = self.routed_experts(hidden_states)
+    routed_output, load_balance_loss, _ = self.routed_experts(hidden_states)
 
     # 2. Apply the shared expert.
     shared_expert_output = self.shared_expert(hidden_states, deterministic=deterministic)
@@ -897,7 +897,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # We sow the load balancing loss so it can be collected and added to the total loss
     # during training.
-    if load_balance_loss is not None:
+    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.sow("intermediates", "moe_lb_loss", load_balance_loss)
 
     # Final residual connection (after the MoE block)
@@ -1138,9 +1138,9 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
         attention_metadata=attention_metadata,
     )
 
-    mlp_lnx, load_balance_loss = self.moe_block(hidden_states)
+    mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
-    if load_balance_loss is not None:
+    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.sow("intermediates", "moe_lb_loss", load_balance_loss)
 
     layer_output = intermediate_inputs + mlp_lnx
