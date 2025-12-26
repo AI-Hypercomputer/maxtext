@@ -177,7 +177,7 @@ num_experts_per_tok: 1
 megablox: true
 sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
-load_balance_loss_weight: 0.01 # weight for the load balance loss
+load_balance_loss_weight: 0.0 # weight for the load balance loss
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom sort vjp for sparse matmul ops
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
@@ -224,6 +224,7 @@ shared_experts: 1
 routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
 routed_bias: False # a flag if a learnable bias is added for routing
+routed_bias_update_rate: 0.0 # a flag indicate the update rate applied to the router bias term
 mlp_bias: False # a flag if a learnable bias is added for MLP matmul
 n_routing_groups: -1 # number of groups for routing, disabled by default
 topk_routing_group: -1 # number of top groups to route inputs. For EP,

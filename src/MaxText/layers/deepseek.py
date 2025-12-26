@@ -138,8 +138,14 @@ def self_attention_with_norm(
   return hidden_states, intermediate_inputs
 
 
-def post_process(cfg, layer_output, sow, kv_cache=None):
+def post_process(cfg, layer_output, load_balance_loss, moe_bias_updates, sow, kv_cache=None):
   """postprocessing."""
+  if cfg.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+    sow("intermediates", "moe_lb_loss", load_balance_loss)
+
+  if cfg.routed_bias and cfg.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
+    sow("intermediates", "moe_bias_updates", moe_bias_updates)
+
   if cfg.record_internal_nn_metrics:
     sow("intermediates", "activation_mean", jnp.mean(layer_output))
     sow("intermediates", "activation_stdev", jnp.std(layer_output))
@@ -233,7 +239,7 @@ class DeepSeekDenseLayer(nn.Module):
         layer_output,
         logical_axis_names,
     )
-    return post_process(cfg, layer_output, self.sow)
+    return post_process(cfg, layer_output, None, None, self.sow)
 
 
 class DeepSeekMoELayer(nn.Module):
@@ -296,7 +302,7 @@ class DeepSeekMoELayer(nn.Module):
     # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
     # The `name` represents the weight name in JAX/checkpoints and so the class name
     # is just for readability.
-    mlp_lnx = moe.get_routed_and_shared_moe(
+    mlp_lnx, load_balance_loss, moe_bias_updates = moe.get_routed_and_shared_moe(
         name="DeepSeekMoeBlock_0",
         config=cfg,
         mesh=self.mesh,
@@ -314,4 +320,4 @@ class DeepSeekMoELayer(nn.Module):
         layer_output,
         logical_axis_names,
     )
-    return post_process(cfg, layer_output, self.sow)
+    return post_process(cfg, layer_output, load_balance_loss, moe_bias_updates, self.sow)
