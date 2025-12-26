@@ -966,6 +966,7 @@ class AttentionWithNorm(nnx.Module):
         use_ragged_attention=config.use_ragged_attention,
         ragged_block_size=config.ragged_block_size,
         use_qk_norm=config.use_qk_norm,
+        use_bias_in_projections=config.attention_bias,
         query_pre_attn_scalar=query_pre_attn_scalar,
         model_mode=model_mode,
         rngs=rngs,

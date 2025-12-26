@@ -455,6 +455,7 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
   hidden_size = config["hidden_size"]
   num_hidden_layers = config["num_hidden_layers"]
   num_attention_heads = config["num_attention_heads"]
+  attention_bias = config.get("attention_bias", False)
   num_key_value_heads = config["num_key_value_heads"]
   head_dim = config.get(
       "head_dim", config["hidden_size"] // config["num_attention_heads"]
@@ -483,6 +484,15 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
         f"{layer_prefix}.self_attn.q_norm.weight": [head_dim],
         f"{layer_prefix}.self_attn.k_norm.weight": [head_dim],
     }
+
+    if attention_bias:
+        layer_mapping.update(
+            {
+                f"{layer_prefix}.self_attn.q_proj.bias": [num_attention_heads * head_dim],
+                f"{layer_prefix}.self_attn.k_proj.bias": [num_key_value_heads * head_dim],
+                f"{layer_prefix}.self_attn.v_proj.bias": [num_key_value_heads * head_dim],
+            }
+        )
 
     if num_experts > 1:
       # MoE MLP layers
@@ -660,6 +670,8 @@ HF_SHAPE = {
     "gemma3-4b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "gemma3-12b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
+    "qwen2.5-7b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+    "qwen2.5-14b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-0.6b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-4b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-4b-thinking-2507": QWEN3_HF_WEIGHTS_TO_SHAPE,
@@ -678,3 +690,4 @@ HF_SHAPE = {
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x22b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
 }
+

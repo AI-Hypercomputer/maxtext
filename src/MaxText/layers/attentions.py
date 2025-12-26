@@ -416,6 +416,7 @@ class Attention(nnx.Module):
     self.model_mode = model_mode
     self.rngs = rngs
 
+    self.is_qwen2 = self.config.decoder_block == DecoderBlockType.QWEN2
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
 
     # Module attribute names must match names previously passed to Linen for checkpointing
@@ -689,7 +690,7 @@ class Attention(nnx.Module):
         quant=self.quant,
         shard_mode=self.config.shard_mode,
         matmul_precision=self.config.matmul_precision,
-        use_bias=self.use_bias_in_projections,
+        use_bias=False if self.is_qwen2 else self.use_bias_in_projections,
         rngs=self.rngs,
     )
 

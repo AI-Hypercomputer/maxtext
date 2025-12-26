@@ -617,6 +617,15 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
             "params-decoder-layers-self_attention-value-kernel": [
                 f"model.layers.{i}.self_attn.v_proj.weight" for i in range(n_layers)
             ],
+            "params-decoder-layers-self_attention-query-bias": [
+                f"model.layers.{i}.self_attn.q_proj.bias" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-key-bias": [
+                f"model.layers.{i}.self_attn.k_proj.bias" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-value-bias": [
+                f"model.layers.{i}.self_attn.v_proj.bias" for i in range(n_layers)
+            ],
             "params-decoder-layers-self_attention-out-kernel": [
                 f"model.layers.{i}.self_attn.o_proj.weight" for i in range(n_layers)
             ],
@@ -674,6 +683,11 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
               f"params-decoder-layers_{i}-self_attention-key-kernel": f"model.layers.{i}.self_attn.k_proj.weight",
               f"params-decoder-layers_{i}-self_attention-value-kernel": f"model.layers.{i}.self_attn.v_proj.weight",
               f"params-decoder-layers_{i}-self_attention-out-kernel": f"model.layers.{i}.self_attn.o_proj.weight",
+              
+              f"params-decoder-layers_{i}-self_attention-query-bias": f"model.layers.{i}.self_attn.q_proj.bias",
+              f"params-decoder-layers_{i}-self_attention-key-bias": f"model.layers.{i}.self_attn.k_proj.bias",
+              f"params-decoder-layers_{i}-self_attention-value-bias": f"model.layers.{i}.self_attn.v_proj.bias",
+              
               f"params-decoder-layers_{i}-self_attention-query_norm-scale": f"model.layers.{i}.self_attn.q_norm.weight",
               f"params-decoder-layers_{i}-self_attention-key_norm-scale": f"model.layers.{i}.self_attn.k_norm.weight",
               f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
@@ -751,6 +765,15 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False,
       return input_tensor.reshape(flipped_target_shape).T
     else:
       return input_tensor.T.reshape(target_shape)
+    
+  def reshape_bias(input_tensor, target_shape=None):
+    """Reshapes biases between MaxText 2D (heads, dim) and HF 1D (hidden)."""
+    if saving_to_hf:
+      # MaxText [heads, head_dim] -> HF [hidden_dim] (flatten)
+      return input_tensor.reshape(target_shape)
+    else:
+      # HF [hidden_dim] -> MaxText [heads, head_dim]
+      return input_tensor.reshape(target_shape)
 
   mapping = {
       "params-token_embedder-embedding": pad_embedding_layer,
@@ -766,6 +789,11 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False,
       "mlp-wi_1-kernel",
       "mlp-wo-kernel",
   ]
+  bias_hooks = [
+      "self_attention-query-bias",
+      "self_attention-key-bias",
+      "self_attention-value-bias",
+  ]
   moe_kernel_hooks = [
       "moe_block-gate-kernel",
       "moe_block-wi_0-kernel",
@@ -779,6 +807,8 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False,
   if scan_layers:
     for key in kernel_hooks:
       mapping[f"params-decoder-layers-{key}"] = reshape_kernel
+    for key in bias_hooks:
+      mapping[f"params-decoder-layers-{key}"] = reshape_bias
     if num_experts > 1:
       for key in moe_kernel_hooks:
         mapping[f"params-decoder-layers-{key}"] = reshape_kernel
@@ -786,6 +816,8 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False,
     for i in range(n_layers):
       for key in kernel_hooks:
         mapping[f"params-decoder-layers_{i}-{key}"] = reshape_kernel
+      for key in bias_hooks:
+        mapping[f"params-decoder-layers_{i}-{key}"] = reshape_bias
       if num_experts > 1:
         for key in moe_kernel_hooks:
           mapping[f"params-decoder-layers_{i}-{key}"] = reshape_kernel
@@ -1577,6 +1609,11 @@ PARAM_MAPPING = {
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-0.5b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-1.5b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-3b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-7b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-14b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-0.6b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-4b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-4b-thinking-2507": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -1605,6 +1642,11 @@ HOOK_FNS = {
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-0.5b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-1.5b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-3b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-7b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-14b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-0.6b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-4b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-4b-thinking-2507": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
