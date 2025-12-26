@@ -529,8 +529,8 @@ def GPT_OSS_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
-def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
-  """Returns mapping between HuggingFace Qwen3 weights path and the HuggingFace weights shape.
+def QWEN_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace Qwen weights path and the HuggingFace weights shape.
 
   To check this mapping, dump the huggingface model shapes:
     from transformers import AutoModelForCausalLM
@@ -555,6 +555,7 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
   head_dim = config.get(
       "head_dim", config["hidden_size"] // config["num_attention_heads"]
   )  # head_dim might not always be present
+  attention_bias = config.get("attention_bias", False)
 
   mapping = {
       "model.embed_tokens.weight": [config["vocab_size"], hidden_size],
@@ -579,6 +580,15 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
         f"{layer_prefix}.self_attn.q_norm.weight": [head_dim],
         f"{layer_prefix}.self_attn.k_norm.weight": [head_dim],
     }
+
+    if attention_bias:
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.self_attn.q_proj.bias": [num_attention_heads * head_dim],
+              f"{layer_prefix}.self_attn.k_proj.bias": [num_key_value_heads * head_dim],
+              f"{layer_prefix}.self_attn.v_proj.bias": [num_key_value_heads * head_dim],
+          }
+      )
 
     if num_experts > 1:
       # MoE MLP layers
@@ -756,18 +766,20 @@ HF_SHAPE = {
     "gemma3-4b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "gemma3-12b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-0.6b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-4b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-4b-thinking-2507": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-8b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-14b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-32b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+    "qwen2.5-7b": QWEN_HF_WEIGHTS_TO_SHAPE,
+    "qwen2.5-14b": QWEN_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-0.6b": QWEN_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-4b": QWEN_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-4b-thinking-2507": QWEN_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-8b": QWEN_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-14b": QWEN_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-32b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-8b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-70b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-405b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-30b-a3b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-235b-a22b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-480b-a35b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-30b-a3b": QWEN_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-235b-a22b": QWEN_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-480b-a35b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "deepseek3-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
