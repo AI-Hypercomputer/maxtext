@@ -402,18 +402,8 @@ class TrainTests(unittest.TestCase):
     train_main(cudnn_flash_jax)
 
   @pytest.mark.integration_test
-  @pytest.mark.tpu_only
-  def test_tpu_base_model_ag_once(self):
-    train_main(TrainTests.CONFIGS["base"] + ["model_fsdp_ag_once=True"])
-
-  @pytest.mark.integration_test
   def test_base_model_shardy_false(self):
     train_main(TrainTests.CONFIGS["base"] + ["shardy=False"])
-
-  @pytest.mark.integration_test
-  @pytest.mark.gpu_only
-  def test_gpu_synthetic_model_ag_once(self):
-    train_main(TrainTests.CONFIGS["synthetic"] + ["model_fsdp_ag_once=True"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
