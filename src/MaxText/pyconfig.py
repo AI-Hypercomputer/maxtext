@@ -91,9 +91,9 @@ def _load_config(config_name: str) -> omegaconf.DictConfig:
     base_path = cfg[_BASE_CONFIG_ATTR]
     if not os.path.isabs(base_path):
       # Search relative to current config, then in the default configs folder
-      loaded_parent_config_filename = os.path.join(os.path.dirname(config_name), base_path)
+      loaded_parent_config_filename = resolve_config_path(os.path.join(os.path.dirname(config_name), base_path))
       if not os.path.isfile(loaded_parent_config_filename):
-        loaded_parent_config_filename = os.path.join(MAXTEXT_CONFIGS_DIR, base_path)
+        loaded_parent_config_filename = resolve_config_path(os.path.join(MAXTEXT_CONFIGS_DIR, base_path))
     else:
       loaded_parent_config_filename = base_path
 
@@ -235,8 +235,7 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
     model_config_path = os.path.join(os.path.dirname(config_path), "models", f"{model_name}.yml")
     if not os.path.isfile(model_config_path):
       # Fallback to default location within package
-      dir_path = os.path.dirname(os.path.realpath(__file__))
-      model_config_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
+      model_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "models", f"{model_name}.yml")
 
     if os.path.exists(model_config_path):
       model_loaded_cfg = omegaconf.OmegaConf.load(model_config_path)

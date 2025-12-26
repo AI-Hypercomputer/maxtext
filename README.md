@@ -103,6 +103,7 @@ MaxText aims to provide you with the best OSS models, whether as a reference imp
   * Gemma 2 (2B, 9B, 27B)
   * Gemma 1 (2B, 7B)
 * Alibaba
+  * Qwen 2.5 (7B, 14B)
   * Qwen 3 MoE 2507 (235B, 480B)
   * Qwen 3 MoE (30B, 235B)
   * Qwen 3 Dense (0.6B, 1.7B, 4B, 8B, 14B, 32B)
