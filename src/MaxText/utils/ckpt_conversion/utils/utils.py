@@ -92,6 +92,59 @@ def _get_local_directory(output_dir: str) -> str:
   return local_dir
 
 
+def check_param_map_keys(param_map_keys, maxtext_state_keys):
+  """Validates map coverage, handles N-to-1 mappings, and filters unused keys.
+
+  Ensures every MaxText checkpoint key (`maxtext_state_keys`) is covered by
+  the flattened parameter map. Keys in the map that are not present in the
+  checkpoint (common for multi-variant maps like gemma3, qwen3, deepseek) are skipped.
+
+  Tuple keys represent N-to-1 mappings (multiple MaxText keys combining into one
+  target key) and are only returned if all constituent keys exist in the checkpoint.
+
+  Args:
+    param_map_keys: Keys from the parameter mapping (strings or N-to-1 tuples).
+    maxtext_state_keys: Set of parameter keys loaded from the MaxText checkpoint.
+
+  Returns:
+    A list of 'filtered' mapping keys (strings or tuples) that are fully present
+    and valid based on `maxtext_state_keys`.
+
+  Raises:
+    ValueError: If `maxtext_state_keys` is NOT a subset of the flattened
+      `param_map_keys`.
+  """
+  flattened_map_keys = set()
+  for key in param_map_keys:
+    if isinstance(key, tuple):
+      flattened_map_keys.update(key)
+    else:
+      flattened_map_keys.add(key)
+
+  # every maxtext state key must be covered by param map
+  missing_keys = maxtext_state_keys - flattened_map_keys
+  if missing_keys:
+    raise ValueError(
+        "maxtext_state_dict must be a subset of flattened param_map"
+        + f"\nparam map\n{param_map_keys}"
+        + f"\nmaxtext:\n{maxtext_state_keys}"
+    )
+
+  # param map may have extra keys
+  extra_keys = flattened_map_keys - maxtext_state_keys
+  if extra_keys:
+    max_logging.log(f"Warning: extra keys in param_map are skipped: {extra_keys}")
+
+  # skip extra keys in param map
+  filtered_map_keys = []
+  for key in param_map_keys:
+    if (isinstance(key, str) and key in maxtext_state_keys) or (
+        isinstance(key, tuple) and all(k in maxtext_state_keys for k in key)
+    ):
+      filtered_map_keys.append(key)
+  return filtered_map_keys
+
+
 def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map):
   """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list."""
   if hf_path not in hf_shape_map:

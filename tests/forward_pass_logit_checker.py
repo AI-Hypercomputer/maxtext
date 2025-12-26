@@ -39,6 +39,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from absl import logging
 
 import numpy as np
 import jax
@@ -61,6 +62,8 @@ from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_
 from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
 from MaxText.layers import models
 from MaxText.layers import quantizations
+
+logging.set_verbosity(logging.INFO)
 
 
 def upload_blob(bucket_name, source_file_name, destination_blob_name):
