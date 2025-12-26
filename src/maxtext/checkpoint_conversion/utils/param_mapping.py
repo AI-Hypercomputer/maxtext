@@ -659,29 +659,22 @@ def QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
       # This follows the (experts, layers, ...) tensor layout.
       mapping.update(
           {
-              "params-decoder-layers-moe_block-gate-kernel": [
-                  f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)
-              ],
+              "params-decoder-layers-moe_block-gate-kernel": [f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)],
               "params-decoder-layers-moe_block-wi_0": [
-                  [f"model.layers.{l}.mlp.experts.{e}.gate_proj.weight" for l in range(n_layers)]
-                  for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.gate_proj.weight" for l in range(n_layers)] for e in range(num_experts)
               ],
               "params-decoder-layers-moe_block-wi_1": [
-                  [f"model.layers.{l}.mlp.experts.{e}.up_proj.weight" for l in range(n_layers)]
-                  for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.up_proj.weight" for l in range(n_layers)] for e in range(num_experts)
               ],
               "params-decoder-layers-moe_block-wo": [
-                  [f"model.layers.{l}.mlp.experts.{e}.down_proj.weight" for l in range(n_layers)]
-                  for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.down_proj.weight" for l in range(n_layers)] for e in range(num_experts)
               ],
           }
       )
     else:  # Dense MLP
       mapping.update(
           {
-              "params-decoder-layers-mlp-wi_0-kernel": [
-                  f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)
-              ],
+              "params-decoder-layers-mlp-wi_0-kernel": [f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)],
               "params-decoder-layers-mlp-wi_1-kernel": [f"model.layers.{i}.mlp.up_proj.weight" for i in range(n_layers)],
               "params-decoder-layers-mlp-wo-kernel": [f"model.layers.{i}.mlp.down_proj.weight" for i in range(n_layers)],
           }
@@ -780,9 +773,12 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
 
   def reshape_bias(input_tensor, target_shape=None):
     """Reshapes biases between MaxText 2D (heads, dim) and HF 1D (hidden)."""
-    # saving_to_hf: MaxText [heads, head_dim] -> HF [hidden_dim] (flatten)
-    # loading_to_maxtext: HF [hidden_dim] -> MaxText [heads, head_dim]
-    return input_tensor.reshape(target_shape)
+    if saving_to_hf:
+      # MaxText [heads, head_dim] -> HF [hidden_dim] (flatten)
+      return input_tensor.reshape(target_shape)
+    else:
+      # HF [hidden_dim] -> MaxText [heads, head_dim]
+      return input_tensor.reshape(target_shape)
 
   mapping = {
       "params-token_embedder-embedding": pad_embedding_layer,
@@ -900,12 +896,8 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
                 f"{prefix}-attention-conv1d-kernel": [f"model.layers.{i}.linear_attn.conv1d.weight" for i in hf_indices],
                 f"{prefix}-attention-A_log": [f"model.layers.{i}.linear_attn.A_log" for i in hf_indices],
                 f"{prefix}-attention-dt_bias": [f"model.layers.{i}.linear_attn.dt_bias" for i in hf_indices],
-                f"{prefix}-attention-norm-rms_norm-scale": [
-                    f"model.layers.{i}.linear_attn.norm.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-out_proj-kernel": [
-                    f"model.layers.{i}.linear_attn.out_proj.weight" for i in hf_indices
-                ],
+                f"{prefix}-attention-norm-rms_norm-scale": [f"model.layers.{i}.linear_attn.norm.weight" for i in hf_indices],
+                f"{prefix}-attention-out_proj-kernel": [f"model.layers.{i}.linear_attn.out_proj.weight" for i in hf_indices],
             }
         )
 
@@ -1237,9 +1229,7 @@ def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       prefix = f"params-decoder-layers-layers_{block_idx}"
       block_mapping = {
           # Layer Norms
-          f"{prefix}-pre_self_attention_layer_norm-scale": [
-              f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
-          ],
+          f"{prefix}-pre_self_attention_layer_norm-scale": [f"model.layers.{i}.input_layernorm.weight" for i in hf_indices],
           f"{prefix}-post_self_attention_layer_norm-scale": [
               f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
           ],
@@ -1429,9 +1419,7 @@ def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_laye
   mapping["params-vision_encoder-Qwen3OmniMoeVisionEncoder_0-patch_embed-proj-kernel"] = (
       "thinker.visual.patch_embed.proj.weight"
   )
-  mapping["params-vision_encoder-Qwen3OmniMoeVisionEncoder_0-patch_embed-proj-bias"] = (
-      "thinker.visual.patch_embed.proj.bias"
-  )
+  mapping["params-vision_encoder-Qwen3OmniMoeVisionEncoder_0-patch_embed-proj-bias"] = "thinker.visual.patch_embed.proj.bias"
 
   # Vision positional embedding
   mapping["params-vision_encoder-Qwen3OmniMoeVisionEncoder_0-pos_embed_interpolate-pos_embed"] = (
@@ -1482,13 +1470,9 @@ def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_laye
   # Vision projector (final merger)
   mapping["params-vision_encoder-Qwen3OmniMoeVisionProjector_0-merger-ln_q-scale"] = "thinker.visual.merger.ln_q.weight"
   mapping["params-vision_encoder-Qwen3OmniMoeVisionProjector_0-merger-ln_q-bias"] = "thinker.visual.merger.ln_q.bias"
-  mapping["params-vision_encoder-Qwen3OmniMoeVisionProjector_0-merger-mlp_0-kernel"] = (
-      "thinker.visual.merger.mlp.0.weight"
-  )
+  mapping["params-vision_encoder-Qwen3OmniMoeVisionProjector_0-merger-mlp_0-kernel"] = "thinker.visual.merger.mlp.0.weight"
   mapping["params-vision_encoder-Qwen3OmniMoeVisionProjector_0-merger-mlp_0-bias"] = "thinker.visual.merger.mlp.0.bias"
-  mapping["params-vision_encoder-Qwen3OmniMoeVisionProjector_0-merger-mlp_2-kernel"] = (
-      "thinker.visual.merger.mlp.2.weight"
-  )
+  mapping["params-vision_encoder-Qwen3OmniMoeVisionProjector_0-merger-mlp_2-kernel"] = "thinker.visual.merger.mlp.2.weight"
   mapping["params-vision_encoder-Qwen3OmniMoeVisionProjector_0-merger-mlp_2-bias"] = "thinker.visual.merger.mlp.2.bias"
 
   # Audio mapping
@@ -2359,24 +2343,21 @@ PARAM_MAPPING = {
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-0.5b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-1.5b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-3b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen2.5-7b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen2.5-14b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-0.6b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-1.7b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-1.7b-base": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-4b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-4b-base": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-4b-thinking-2507": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-8b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-8b-base": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-14b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-14b-base": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-30b-a3b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-30b-a3b-base": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-235b-a22b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-coder-480b-a35b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -2399,24 +2380,21 @@ HOOK_FNS = {
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-0.5b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-1.5b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-3b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen2.5-7b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen2.5-14b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-0.6b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-1.7b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-1.7b-base": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-4b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-4b-base": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-4b-thinking-2507": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-8b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-8b-base": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-14b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-14b-base": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-30b-a3b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-30b-a3b-base": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-235b-a22b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-coder-480b-a35b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
