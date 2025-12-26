@@ -80,4 +80,3 @@ python3 -m tests.forward_pass_logit_checker ${MAXTEXT_PKG_DIR}/configs/base.yml 
 
 # Run decoding - matmul implementation
 python3 -m MaxText.decode ${MAXTEXT_PKG_DIR}/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=decode per_device_batch_size=1 enable_checkpointing=false model_name=${MODEL_NAME} max_prefill_predict_length=100 max_target_length=1024 tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} hf_access_token=${HF_TOKEN} attention=dot_product dtype=bfloat16 weight_dtype=bfloat16 megablox=False sparse_matmul=False ici_tensor_parallelism=128 ici_fsdp_parallelism=1 prompt="I love to" scan_layers=False
-

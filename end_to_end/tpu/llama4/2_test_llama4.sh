@@ -14,6 +14,13 @@
 set -ex
 idx=$(date +%Y-%m-%d)
 
+# By default, we'll use "llama4-17b-16e"
+if [ -z "${MODEL_VARIATION}" ]; then
+    export MODEL_VARIATION="llama4-17b-16e"
+    echo "MODEL_VARIATION is not set, using MODEL_VARIATION = ${MODEL_VARIATION}"
+    export TOKENIZER_PATH=meta-llama/Llama-4-Scout-17B-16E
+fi
+
 # Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
@@ -24,14 +31,8 @@ if [ -z "${BASE_OUTPUT_PATH}" ]; then
 BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
 echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 
-# By default, we'll use "llama4-17b-16e"
-if [ -z "${MODEL_VARIATION}" ]; then
-    export MODEL_VARIATION="llama4-17b-16e"
-    echo "MODEL_VARIATION is not set, using MODEL_VARIATION = ${MODEL_VARIATION}"
-    export TOKENIZER_PATH=meta-llama/Llama-4-Scout-17B-16E
-fi
 
 export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/unscanned/0/items
 
 # Step 2: run logit checking
-python3 -m tests.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${UNSCANNED_CKPT_PATH} ici_expert_parallelism=16 run_name=forward_pass_test_${MODEL_VARIATION} attention=dot_product per_device_batch_size=1 model_name=${MODEL_VARIATION} max_prefill_predict_length=4 max_target_length=4 scan_layers=false --atol=0.01 --rtol=0.01 async_checkpointing=false sparse_matmul=false weight_dtype=float32 dtype=float32 activations_in_float32=true matmul_precision=float32 float32_logits=true float32_qk_product=true
+python3 -m tests.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_${MODEL_VARIATION} attention=dot_product per_device_batch_size=1 model_name=${MODEL_VARIATION} max_prefill_predict_length=4 max_target_length=4 scan_layers=false --atol=0.01 --rtol=0.01 async_checkpointing=false sparse_matmul=false weight_dtype=float32 dtype=float32 activations_in_float32=true matmul_precision=float32 float32_logits=true float32_qk_product=true ici_expert_parallelism=16
