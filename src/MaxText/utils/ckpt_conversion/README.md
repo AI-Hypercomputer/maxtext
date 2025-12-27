@@ -6,10 +6,14 @@ This guide provides instructions for using the scripts that convert model checkp
 
 The following models are supported:
 
-- Gemma2 (2B, 9B, 27B).
-- Gemma3 multimodal (4B, 12B, 27B).
-- Qwen3 (0.6B, 4B, 8B, 14B, 32B).
-- Mixtral (8x7B, 8x22B).
+| Model Family | Sizes | HF $\to$ Orbax (scan) | HF $\to$ Orbax (unscan) | Orbax (scan) $\to$ HF | Orbax (unscan) $\to$ HF |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Gemma2** | 2B, 9B, 27B | √  | √ | √ | √ |
+| **Gemma3** (Multimodal) | 4B, 12B, 27B | - | √ | - | √ |
+| **Qwen3** | 0.6B, 4B, 8B, 14B, 32B | √ | √ | √ | √ |
+| **Mixtral** | 8x7B, 8x22B | √ | √ | √ | √ |
+| **GPT-OSS** | 20B, 120B | √ | √ | √ | √ |
+| **DeepSeek3** | 671B | - | - | √ | - |
 
 ## Prerequisites
 - Hugging Face requires Pytorch.
@@ -87,11 +91,11 @@ python3 -m tests.forward_pass_logit_checker src/MaxText/configs/base.yml \
     model_name=<MODEL_NAME> \
     scan_layers=false \
     max_prefill_predict_length=4 \
-     max_target_length=8 \
+    max_target_length=8 \
     use_multimodal=false \
     --run_hf_model=True \
     --hf_model_path=<path-to-HF-checkpoint> \
-    --max_kl_div=0.015 \
+    --max_kl_div=0.015
 ```
 
 **Key arguments:**
