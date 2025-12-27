@@ -879,8 +879,8 @@ class DatasetGeneral(BaseModel):
       description="Packing type when using Grain pipeline. 'first_fit' or 'concat_then_split'.",
   )
   max_segments_per_seq: int = Field(
-      32,
-      description="Maximum number of segments that can be packed into a single sequence.",
+      -1,
+      description="Maximum number of segments that can be packed into a single sequence. -1 or None for no limit.",
   )
   num_epoch: int = Field(1, description="Number of epochs to train for.")
   expansion_factor_real_data: float = Field(-1.0, description="Factor for partial data loading on hosts.")
@@ -2079,6 +2079,8 @@ class MaxTextConfig(
         raise ValueError(
             "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs."
         )
+    if self.hardware == "gpu" and self.packing and self.attention == "cudnn_flash_te" and self.max_segments_per_seq <= 0:
+      raise ValueError("max_segments_per_seq must be set when using TransformerEngine attention and packing")
     dcn_product = (
         self.dcn_data_parallelism
         * self.dcn_pipeline_parallelism

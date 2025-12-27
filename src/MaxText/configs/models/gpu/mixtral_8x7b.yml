@@ -33,3 +33,4 @@ scan_layers: False
 tokenizer_path: "/deps/src/MaxText/assets/tokenizer.mistral-v1"
 profiler: "nsys"
 capacity_factor: 1.0
+max_segments_per_seq: 32

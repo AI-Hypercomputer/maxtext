@@ -52,5 +52,5 @@ python3 -m MaxText.$EXECUTABLE ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src
     dcn_fsdp_parallelism=128 \
     ici_fsdp_parallelism=8 \
     base_output_directory=$OUTPUT_PATH \
+    max_segments_per_seq=32 \
     profiler=xplane
-
