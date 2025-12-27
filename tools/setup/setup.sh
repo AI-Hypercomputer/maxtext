@@ -33,6 +33,9 @@
 # Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + specified jax-nightly, jaxlib-nightly + latest libtpu-nightly
 ## bash tools/setup/setup.sh MODE=nightly JAX_VERSION=0.8.2.dev20251211
 
+# Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + specified jax-nightly, jaxlib-nightly + specific libtpu-nightly
+## bash tools/setup/setup.sh MODE=nightly JAX_VERSION=0.8.1 LIBTPU_VERSION=0.0.31.dev20251119+nightly
+
 # Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + jax-nightly, jaxlib-nightly + custom libtpu
 ## bash tools/setup/setup.sh MODE=nightly LIBTPU_GCS_PATH=gs://my_custom_libtpu/libtpu.so
 
@@ -153,7 +156,7 @@ fi
 
 # Unset optional variables if set to NONE
 unset_optional_vars() {
-    local optional_vars=("JAX_VERSION" "LIBTPU_GCS_PATH")
+    local optional_vars=("JAX_VERSION" "LIBTPU_VERSION" "LIBTPU_GCS_PATH")
     for var_name in "${optional_vars[@]}"; do
         if [[ ${!var_name} == NONE ]]; then
             unset "$var_name"
@@ -221,6 +224,10 @@ if [[ "$MODE" == "stable" ]]; then
         fi
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             install_custom_libtpu
+        elif [[ -n "$LIBTPU_VERSION" ]]; then
+            echo -e "\nInstalling libtpu ${LIBTPU_VERSION}"
+            version_mismatch_warning "libtpu"
+            python3 -m uv pip install -U --no-deps libtpu==${LIBTPU_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         fi
     elif [[ $DEVICE == "gpu" ]]; then
         if [[ -n "$JAX_VERSION" ]]; then
@@ -249,9 +256,12 @@ if [[ $MODE == "nightly" ]]; then
             echo -e "\nInstalling the latest jax-nightly, jaxlib-nightly"
             python3 -m uv pip install --pre -U --no-deps jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
         fi
-
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             install_custom_libtpu
+        elif [[ -n "$LIBTPU_VERSION" ]]; then
+            echo -e "\nInstalling libtpu ${LIBTPU_VERSION}"
+            version_mismatch_warning "libtpu"
+            python3 -m uv pip install -U --no-deps libtpu==${LIBTPU_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         else
             echo -e "\nInstalling the latest libtpu-nightly"
             python3 -m uv pip install -U --pre --no-deps libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
