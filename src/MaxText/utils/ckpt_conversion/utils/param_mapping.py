@@ -1092,7 +1092,6 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
       wi_0_1[..., 1::2] = wi_1
       return wi_0_1
     else:
-      # NOTE: array order must be same as key order, stack at axis -1
       wi_0_1 = input_tensor
       wi_0 = wi_0_1[..., ::2]
       wi_1 = wi_0_1[..., 1::2]
