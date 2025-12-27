@@ -150,7 +150,7 @@ def jax_chunk_gated_delta_rule(
 
   # The result g_diff_exp is already lower triangular and serves as the decay_mask.
   # decay_mask shape: (B, H, N, C, C)
-  decay_mask = g_diff_exp
+  decay_mask = g_diff_exp 
 
   # --- Precompute within-chunk attention ---
   # NOTE: Precision set to HIGHEST for numerical accuracy.
@@ -281,7 +281,6 @@ def jax_chunk_gated_delta_rule(
 
   return core_attn_out, final_state if output_final_state else None
 
-
 class Qwen3NextGatedDeltaNet(nnx.Module):
   """
   This module implements the full end-to-end logic of a Gated Delta Network layer.
@@ -355,7 +354,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         precision=cfg.matmul_precision,
         rngs=rngs,
     )
-
     # Initialize A_log to match torch.log(torch.uniform(0, 16))
     def a_log_init(key, shape, dtype=jnp.float32):
       # Sample from Uniform(epsilon, 16) to avoid log(0)
