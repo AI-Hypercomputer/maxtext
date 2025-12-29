@@ -25,6 +25,7 @@ import random
 import os.path
 
 from MaxText.train import main as train_main
+from MaxText.sft_trainer import main as sft_main
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
 
 
@@ -84,8 +85,14 @@ class GradientAccumulationTest(unittest.TestCase):
     ):
       accum_run_loss = json.loads(accum_run.readlines()[-1])["learning/loss"]
       regular_run_loss = json.loads(regular_run.readlines()[-1])["learning/loss"]
-      print(f"[Gradient Accumulation Test] Loss with gradient accumulation: {accum_run_loss}", flush=True)
-      print(f"[Gradient Accumulation Test] Loss without gradient accumulation: {regular_run_loss}", flush=True)
+      print(
+          f"[Gradient Accumulation Test] Loss with gradient accumulation: {accum_run_loss}",
+          flush=True,
+      )
+      print(
+          f"[Gradient Accumulation Test] Loss without gradient accumulation: {regular_run_loss}",
+          flush=True,
+      )
       # Not identical due to an epsilon addition in loss denominator.
       np.testing.assert_allclose(accum_run_loss, regular_run_loss, rtol=0.01)
 
@@ -96,8 +103,14 @@ class GradientAccumulationTest(unittest.TestCase):
     ):
       accum_run_grad_norm = json.loads(accum_run.readlines()[-1])["learning/raw_grad_norm"]
       regular_run_grad_norm = json.loads(regular_run.readlines()[-1])["learning/raw_grad_norm"]
-      print(f"[Gradient Accumulation Test] Grad norm with gradient accumulation: {accum_run_grad_norm}", flush=True)
-      print(f"[Gradient Accumulation Test] Grad norm without gradient accumulation: {regular_run_grad_norm}", flush=True)
+      print(
+          f"[Gradient Accumulation Test] Grad norm with gradient accumulation: {accum_run_grad_norm}",
+          flush=True,
+      )
+      print(
+          f"[Gradient Accumulation Test] Grad norm without gradient accumulation: {regular_run_grad_norm}",
+          flush=True,
+      )
       # Not identical due to an epsilon addition in loss denominator.
       np.testing.assert_allclose(accum_run_grad_norm, regular_run_grad_norm, rtol=0.01)
 
@@ -109,10 +122,32 @@ class GradientAccumulationTest(unittest.TestCase):
       accum_device_tflops = json.loads(accum_run.readlines()[-1])["perf/per_device_tflops"]
       regular_device_tflops = json.loads(regular_run.readlines()[-1])["perf/per_device_tflops"]
       print(
-          f"[Gradient Accumulation Test] per_device_tflops with gradient accumulation: {accum_device_tflops}", flush=True
+          f"[Gradient Accumulation Test] per_device_tflops with gradient accumulation: {accum_device_tflops}",
+          flush=True,
       )
       print(
           f"[Gradient Accumulation Test] per_device_tflops without gradient accumulation: {regular_device_tflops}",
           flush=True,
       )
       np.testing.assert_equal(accum_device_tflops, regular_device_tflops)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_sft_grad_accumulate_same_loss(self):
+    sft_main(
+        [
+            None,
+            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            "base_output_directory=gs://runner-maxtext-logs",
+            "dataset_path=gs://maxtext-dataset",
+            "gradient_clipping_threshold=0",  # Ensures we are testing raw scales of gradients (clipping off).
+            "enable_checkpointing=False",
+            "enable_goodput_recording=False",
+            "base_emb_dim=256",
+            "base_num_decoder_layers=4",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            "steps=3",
+            "gradient_accumulation_steps=2",
+            "use_sft=True",
+        ]
+    )
