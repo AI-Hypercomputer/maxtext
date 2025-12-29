@@ -33,18 +33,35 @@ on:
           - tpu
           - gpu
 
-jobs:
-  build:
-    name: Build ${{ matrix.device }}-${{ matrix.build_mode }} Image
-    runs-on: linux-x86-n2-16-buildkit
-    container: google/cloud-sdk:524.0.0
+permissions:
+  contents: read
 
-    # Use Github Actions matrix to run image builds in parallel
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
+      image_date: ${{ steps.vars.outputs.image_date }}
+    steps:
+     - name: Checkout MaxText
+       uses: actions/checkout@v5
+
+     - name: Get metadata
+       id: vars
+       run: |
+        # MaxText SHA
+        echo "maxtext_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+        # Image date
+        echo "image_date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+  tpu-pre-training:
+    name: ${{ matrix.image_name }}
+    needs: setup
     strategy:
       fail-fast: false
       matrix:
         include:
-          # TPU Image Builds
           - device: tpu
             build_mode: stable
             image_name: maxtext_jax_stable
@@ -53,7 +70,47 @@ jobs:
             build_mode: nightly
             image_name: maxtext_jax_nightly
             dockerfile: ./dependencies/dockerfiles/maxtext_dependencies.Dockerfile
-          # GPU Image Builds
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ matrix.image_name }}
+      device: ${{ matrix.device }}
+      build_mode: ${{ matrix.build_mode }}
+      dockerfile: ${{ matrix.dockerfile }}
+      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
+      image_date: ${{ needs.setup.outputs.image_date }}
+
+  tpu-post-training:
+    name: ${{ matrix.image_name }}
+    needs: [setup, tpu-pre-training]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: tpu
+            build_mode: post-training
+            image_name: maxtext_post_training_stable
+            dockerfile: ./dependencies/dockerfiles/maxtext_post_training_dependencies.Dockerfile
+          - device: tpu
+            build_mode: post-training
+            image_name: maxtext_post_training_nightly
+            dockerfile: ./dependencies/dockerfiles/maxtext_post_training_local_dependencies.Dockerfile
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ matrix.image_name }}
+      device: ${{ matrix.device }}
+      build_mode: ${{ matrix.build_mode }}
+      dockerfile: ${{ matrix.dockerfile }}
+      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
+      image_date: ${{ needs.setup.outputs.image_date }}
+      is_post_training: true
+
+  gpu-pre-training:
+    name: ${{ matrix.image_name }}
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - device: gpu
             build_mode: stable
             image_name: maxtext_gpu_jax_stable
@@ -62,74 +119,11 @@ jobs:
             build_mode: nightly
             image_name: maxtext_gpu_jax_nightly
             dockerfile: ./dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile
-
-    if: >
-      github.event_name == 'schedule' ||
-      github.event_name == 'pull_request' ||
-      github.event_name == 'workflow_dispatch' && (
-        github.event.inputs.target_device == 'all' ||
-        github.event.inputs.target_device == 'tpu' ||
-        github.event.inputs.target_device == 'gpu'
-      )
-
-    # Setup for GKE runners per b/412986220#comment82 and b/412986220#comment90
-    steps:
-      - name: Check if build should run
-        id: check
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.target_device }}" != "all" && "${{ github.event.inputs.target_device }}" != "${{ matrix.device }}" ]]; then
-            echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Skipping build for device: ${{ matrix.device }} in ${{ matrix.build_mode }} mode."
-          else
-            echo "should_run=true" >> $GITHUB_OUTPUT
-            echo "Building for device: ${{ matrix.device }} in ${{ matrix.build_mode }} mode."
-          fi
-
-      - name: Checkout git repository
-        uses: actions/checkout@v5
-        if: steps.check.outputs.should_run == 'true'
-
-      - name: Mark git repository as safe
-        if: steps.check.outputs.should_run == 'true'
-        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
-
-      - name: Configure Docker
-        if: steps.check.outputs.should_run == 'true'
-        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
-
-      - name: Set up Docker BuildX
-        uses: docker/setup-buildx-action@v3.11.1
-        if: steps.check.outputs.should_run == 'true'
-        with:
-          driver: remote
-          endpoint: tcp://localhost:1234
-
-      # Env variables to be passed to Dockerfile
-      - name: Get metadata
-        id: vars
-        if: steps.check.outputs.should_run == 'true'
-        run: |
-          echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          echo "image_date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
-
-      # Docker BuildX command config
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v6
-        if: steps.check.outputs.should_run == 'true'
-        with:
-          push: true
-          context: .
-          file: ${{ matrix.dockerfile }}
-          tags: |
-            gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:maxtext_${{ steps.vars.outputs.commit_hash }}
-            gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:${{ steps.vars.outputs.image_date }}
-            gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
-          build-args: |
-            DEVICE=${{ matrix.device }}
-            MODE=${{ matrix.build_mode }}
-            JAX_VERSION=NONE
-            LIBTPU_GCS_PATH=NONE
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ matrix.image_name }}
+      device: ${{ matrix.device }}
+      build_mode: ${{ matrix.build_mode }}
+      dockerfile: ${{ matrix.dockerfile }}
+      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
+      image_date: ${{ needs.setup.outputs.image_date }}
