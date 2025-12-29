@@ -84,7 +84,6 @@ For example, converting a Llama3.1-70B model with `--lazy_load_tensors=true` use
 ```bash
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-# using --lazy_load_tensors=true here will reduce the memory usage. eg, Llama3.1-70B conversion takes around 86GB of RAM
 python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
     model_name=${HF_MODEL} \
     hf_access_token=${HF_TOKEN} \
@@ -148,7 +147,7 @@ Ensure you have a Pathways-ready GKE cluster (as mentioned in Prerequisites) and
 ### Submit GRPO workload
 ```
 xpk workload create-pathways --workload $WORKLOAD \
---docker-image $CLOUD_IMAGE_NAME --cluster $TPU_CLUSTER \
+--docker-image gcr.io/$PROJECT_ID/$CLOUD_IMAGE_NAME --cluster $TPU_CLUSTER \
 --tpu-type=$TPU_TYPE --num-slices=1  --zone=$ZONE \
 --project=$PROJECT_ID --priority=high \
 --command "HF_TOKEN=${HF_TOKEN} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
@@ -164,7 +163,7 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
 ### Submit GSPO workload
 ```
 xpk workload create-pathways --workload $WORKLOAD \
---docker-image $CLOUD_IMAGE_NAME --cluster $TPU_CLUSTER \
+--docker-image gcr.io/$PROJECT_ID/$CLOUD_IMAGE_NAME --cluster $TPU_CLUSTER \
 --tpu-type=$TPU_TYPE --num-slices=1  --zone=$ZONE \
 --project=$PROJECT_ID --priority=high \
 --command "HF_TOKEN=${HF_TOKEN} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
