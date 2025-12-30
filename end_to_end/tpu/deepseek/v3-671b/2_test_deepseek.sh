@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# This file is documentation for how to get started with DeepSeek v3 on v5p-128.
+# This file is documentation for how to get started with DeepSeek v3.
 
-# The flow of this file is as follows:
+# This file runs Step 2 on v5p-128 on a daily basis.
 # 1. Convert the HuggingFace checkpoint (bf16) to MaxText-compatible checkpoint (bf16): 
 #    Scanned format is better for training; unscanned format is better for decoding.
 # 2. Run logit check, pre-training, fine-tuning, and decoding.
@@ -15,7 +15,7 @@ set -ex
 export MODEL_NAME='deepseek3-671b'
 export TOKENIZER_PATH='deepseek-ai/DeepSeek-V3'
 
-# Installing torch for deps in forward_pass_logit_checker.py
+# Installing torch for checkpoint conversion and forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # e.g., $HOME/maxtext/src/MaxText
@@ -29,23 +29,6 @@ if [ -z "${BASE_OUTPUT_PATH}" ]; then
 fi
 BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
 echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
-
-# Step 1: Checkpoint conversion
-# You can use the HuggingFace checkpoint at https://huggingface.co/deepseek-ai/DeepSeek-V3, and dequantize it to bf16
-# Assume HF checkpoints are uploaded to GCS bucket at CKPT_BUCKET 
-# Non-Googlers please remember to point `CKPT_BUCKET` to GCS buckets that you own
-# Copying the HF checkpoint into a local directory `/tmp` -- you are free to use a different directory
-if [ -z "${CKPT_DISK_LOCATION}" ]; then
-  export CKPT_BUCKET=gs://maxtext-deepseek/deepseek3-671b/hf
-  gcloud storage cp -r ${CKPT_BUCKET} /tmp
-  export CKPT_DISK_LOCATION=/tmp/hf
-fi
-
-# 1.1 Convert checkpoint to `scanned` format, more suitable for training 
-JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/scanned --model_size ${MODEL_NAME}
-
-# 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
-JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_unscanned_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/unscanned --model_size ${MODEL_NAME}
 
 # Step 2: 
 # We define the checkpoint paths. This way it is easier to use these paths in the `train.py` and `decode.py` commands

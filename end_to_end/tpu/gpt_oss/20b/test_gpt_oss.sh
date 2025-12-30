@@ -25,7 +25,7 @@ fi
 BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
 echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 
-# Installing torch for deps in forward_pass_logit_checker.py
+# Installing torch for checkpoint conversion and forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Step 1: Checkpoint conversion
