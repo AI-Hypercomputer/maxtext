@@ -714,6 +714,32 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
+def update_state_param(state, target_path, value):
+  """
+  Updates a specific parameter in state.params at the given path.
+
+  Args:
+      state: The current TrainState.
+      target_path: A tuple of keys matching the structure inside state.params.
+      value: The value to apply.
+  """
+
+  def create_jax_path(target_path):
+    path = []
+    for k in target_path:
+      path.append(jax.tree_util.DictKey(key=k))
+    return tuple(path)
+
+  def _apply_update(path, param):
+    if path == updated_target_path:
+      return param + value
+    return param
+
+  updated_target_path = create_jax_path(target_path)
+  new_params = jax.tree_util.tree_map_with_path(_apply_update, state.params)
+  return state.replace(params=new_params)
+
+
 def init_decode_state(apply_fn, params) -> train_state.TrainState:
   """Init train state with null opt state for decode."""
   state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore

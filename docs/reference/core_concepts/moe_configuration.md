@@ -59,6 +59,8 @@ Dropping:
 
 `routed_bias`: If enabled, adds a learnable bias term to the gate logits to facilitate load balancing.
 
+`routed_bias_update_rate`: Defines the update rate to routed bias term above. Applicable only to the DeepSeek decoder block.
+
 `routed_score_func`: Defines the scoring function for the router.
 
 `routed_scaling_factor`: A scalar multiplier applied to the expert weights.
