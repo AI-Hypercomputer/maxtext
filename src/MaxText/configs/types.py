@@ -1494,10 +1494,6 @@ class DerivedValues(BaseModel):
       None,
       description="Boolean flag indicating if pipeline parallelism is active across ICI or DCN.",
   )
-  model_fsdp_ag_once: bool = Field(
-      False,
-      description="An alias for `pipeline_fsdp_ag_once` for backward compatibility.",
-  )
 
   context_parallel_size: None | int = Field(
       None,
@@ -1989,8 +1985,6 @@ class MaxTextConfig(
           "te_fp8_delayedscaling",
       ):
         self.logical_axis_rules.append(["aqt_amax_history", ("stage",)])
-
-    self.model_fsdp_ag_once = self.pipeline_fsdp_ag_once  # Backward compatibility alias
 
     # H. RUN ALL CROSS-FIELD VALIDATIONS
     if self.load_parameters_path and self.load_full_state_path:

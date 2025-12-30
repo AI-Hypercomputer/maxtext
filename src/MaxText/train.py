@@ -268,7 +268,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         )
         extra_dpo_args = [reference_params]
     if config.shard_optimizer_over_data:
-      params = jax.tree.map(jax.lax.with_sharding_constraint, params, params_shardings)
+      params = jax.tree.map(
+          functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
+          params,
+          params_shardings,
+      )
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
 
