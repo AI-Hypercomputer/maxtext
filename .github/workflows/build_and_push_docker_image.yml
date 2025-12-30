@@ -113,7 +113,7 @@ jobs:
             DEVICE=${{ inputs.device }}
             MODE=${{ inputs.build_mode }}
             JAX_VERSION=NONE
-            LIBTPU_GCS_PATH=NONE
+            LIBTPU_VERSION=NONE
             BASEIMAGE=gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:${{ inputs.image_date }}
 
       - name: Add tags to Docker image
