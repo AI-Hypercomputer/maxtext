@@ -72,8 +72,12 @@ from MaxText.utils.ckpt_conversion.utils.param_mapping import (
 )
 from MaxText.utils.ckpt_conversion.utils.hf_shape import HF_SHAPE
 from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
-from MaxText.utils.ckpt_conversion.utils.utils import process_maxtext_param, save_model_files, HF_IDS
-
+from MaxText.utils.ckpt_conversion.utils.utils import (
+    check_param_map_keys,
+    process_maxtext_param,
+    save_model_files,
+    HF_IDS,
+)
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
@@ -107,59 +111,6 @@ def _get_model_mappings(
   }
 
 
-def _check_param_map_keys(param_map_keys, maxtext_state_keys):
-  """Validates map coverage, handles N-to-1 mappings, and filters unused keys.
-
-  Ensures every MaxText checkpoint key (`maxtext_state_keys`) is covered by
-  the flattened parameter map. Keys in the map that are not present in the
-  checkpoint (common for multi-variant maps like gemma3, qwen3, deepseek) are skipped.
-
-  Tuple keys represent N-to-1 mappings (multiple MaxText keys combining into one
-  target key) and are only returned if all constituent keys exist in the checkpoint.
-
-  Args:
-    param_map_keys: Keys from the parameter mapping (strings or N-to-1 tuples).
-    maxtext_state_keys: Set of parameter keys loaded from the MaxText checkpoint.
-
-  Returns:
-    A list of 'filtered' mapping keys (strings or tuples) that are fully present
-    and valid based on `maxtext_state_keys`.
-
-  Raises:
-    ValueError: If `maxtext_state_keys` is NOT a subset of the flattened
-      `param_map_keys`.
-  """
-  flattened_map_keys = set()
-  for key in param_map_keys:
-    if isinstance(key, tuple):
-      flattened_map_keys.update(key)
-    else:
-      flattened_map_keys.add(key)
-
-  # every maxtext state key must be covered by param map
-  missing_keys = maxtext_state_keys - flattened_map_keys
-  if missing_keys:
-    raise ValueError(
-        "maxtext_state_dict must be a subset of flattened param_map"
-        + f"\nparam map\n{param_map_keys}"
-        + f"\nmaxtext:\n{maxtext_state_keys}"
-    )
-
-  # param map may have extra keys
-  extra_keys = flattened_map_keys - maxtext_state_keys
-  if extra_keys:
-    max_logging.log(f"Warning: extra keys in param_map are skipped: {extra_keys}")
-
-  # skip extra keys in param map
-  filtered_map_keys = []
-  for key in param_map_keys:
-    if (isinstance(key, str) and key in maxtext_state_keys) or (
-        isinstance(key, tuple) and all(k in maxtext_state_keys for k in key)
-    ):
-      filtered_map_keys.append(key)
-  return filtered_map_keys
-
-
 def main(argv: Sequence[str]) -> None:
   """Main function to convert a MaxText checkpoint to HuggingFace format.
 
@@ -180,6 +131,7 @@ def main(argv: Sequence[str]) -> None:
       config.load_full_state_path == ""
   ), "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
   max_utils.print_system_information()
+  overall_start = time.time()
 
   # Load Maxtext checkpoint
   max_logging.log("\nLoading Orbax checkpoint...")
@@ -189,7 +141,7 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_load_params = jax.random.split(rng)
   # load params from maxengine
   loaded_params_from_engine = engine.load_params(rng_load_params)
-  max_logging.log(f"Elapse: {(time.time() - start) / 60:.2f} min")
+  max_logging.log(f"Elapse for checkpoint load: {(time.time() - start) / 60:.2f} min")
 
   if not config.base_output_directory:
     output_directory = f"tmp/{config.run_name}"
@@ -239,7 +191,7 @@ def main(argv: Sequence[str]) -> None:
   # The param_map may contain tuples as keys, which represent N-to-1 mappings from maxtext to huggingface
   # Check maxtext_state_dict is a subset of flattened param_map
   # Skip extra keys from param_map
-  filtered_map_keys = _check_param_map_keys(param_map.keys(), maxtext_state_dict.keys())
+  filtered_map_keys = check_param_map_keys(param_map.keys(), maxtext_state_dict.keys())
 
   # Iterate through the parameter map to transform and collect weights.
   # This loop handles both simple 1-to-1 mappings and complex N-to-1 mappings
@@ -260,7 +212,7 @@ def main(argv: Sequence[str]) -> None:
     processed_params_list.extend(processed_params)
 
   transformed_hf_weights = dict(processed_params_list)
-  max_logging.log(f"Elapse: {(time.time() - start) / 60:.2f} min")
+  max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
 
   # 5. Save in HuggingFace Format
   if not transformed_hf_weights:
@@ -277,7 +229,8 @@ def main(argv: Sequence[str]) -> None:
       output_dir=output_directory,
   )
   max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
-  max_logging.log(f"Elapse: {(time.time() - start) / 60:.2f} min")
+  max_logging.log(f"Elapse for save: {(time.time() - start) / 60:.2f} min")
+  max_logging.log(f"Overall Elapse: {(time.time() - overall_start) / 60:.2f} min")
 
 
 if __name__ == "__main__":

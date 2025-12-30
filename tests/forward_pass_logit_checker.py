@@ -39,6 +39,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from absl import logging
 
 import numpy as np
 import jax
@@ -61,6 +62,8 @@ from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_
 from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
 from MaxText.layers import models
 from MaxText.layers import quantizations
+
+logging.set_verbosity(logging.INFO)
 
 
 def upload_blob(bucket_name, source_file_name, destination_blob_name):
@@ -379,7 +382,12 @@ def main(config, test_args):  # pylint: disable=W0621
     if test_args.hf_model_path == "":
       raise ValueError("run_hf_model requires hf_model_path")
     hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch.bfloat16)
-    tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path)
+
+    if os.path.isdir(test_args.hf_model_path):
+      tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path)
+    else:
+      tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path)
+
     pad_token_models = ["Llama-3.1", "Mixtral-8x"]
     if any(model in test_args.hf_model_path for model in pad_token_models):
       tokenizer.pad_token = tokenizer.eos_token
