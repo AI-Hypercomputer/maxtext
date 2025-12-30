@@ -37,6 +37,10 @@ on:
       image_date:
         required: true
         type: string
+      base_image:
+        required: false
+        type: string
+        default: ''
       is_post_training:
         required: false
         type: boolean
@@ -114,7 +118,8 @@ jobs:
             MODE=${{ inputs.build_mode }}
             JAX_VERSION=NONE
             LIBTPU_VERSION=NONE
-            BASEIMAGE=gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:${{ inputs.image_date }}
+            INCLUDE_TEST_ASSETS=true
+            ${{ inputs.base_image != '' && format('BASEIMAGE={0}', inputs.base_image) || '' }}
 
       - name: Add tags to Docker image
         if: steps.check.outputs.should_run == 'true'

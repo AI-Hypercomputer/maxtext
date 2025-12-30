@@ -102,6 +102,7 @@ jobs:
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
       image_date: ${{ needs.setup.outputs.image_date }}
+      base_image: gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:${{ needs.setup.outputs.image_date }}
       is_post_training: true
 
   gpu-pre-training:
