@@ -29,11 +29,11 @@ For efficient model inference and response generation during this process, we re
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
-- [Create Virtual Environment and Install MaxText Dependencies](#create-virtual-environment-and-install-maxtext-dependencies)
 - [Setup Environment Variables](#setup-environment-variables)
 - [Get Your Model Checkpoint](#get-your-model-checkpoint)
 - [Build and Upload MaxText Docker Image](#build-and-upload-maxtext-docker-image)
 - [Submit your RL workload via Pathways](#submit-your-rl-workload-via-pathways)
+- [Managing Workloads](#managing-workloads)
 
 ## Prerequisites
 
@@ -43,10 +43,6 @@ Before starting, ensure you have:
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
 - XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md)).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
-
-## Create Virtual Environment and Install MaxText Dependencies
-
-Follow the instructions in [Install MaxText](https://maxtext.readthedocs.io/en/latest/install_maxtext.html). We recommend creating the virtual environment outside the `maxtext` directory to avoid conflicts.
 
 ## Setup Environment Variables
 
@@ -61,12 +57,11 @@ export HF_TOKEN=<Hugging Face access token>
 
 # -- MaxText configuration --
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
-export RUN_NAME=llama-3-70b-grpo
-export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/0/items
+export WORKLOAD=llama-3-70b-grpo
+export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${WORKLOAD}/0/items
 
 # -- Workload configuration --
-export WORKLOAD=${RUN_NAME}
-export TPU_TYPE='v5p-128'
+export TPU_TYPE='v5p-128' 
 export TPU_CLUSTER=<cluster name>
 export PROJECT_ID=<GCP project ID>
 export ZONE=<zone name>
@@ -87,7 +82,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
     model_name=${HF_MODEL} \
     hf_access_token=${HF_TOKEN} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/${WORKLOAD} \
     scan_layers=true checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false \
     skip_jax_distributed_system=true --lazy_load_tensors=true
 ```
@@ -142,6 +137,8 @@ bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE
 
 ## Submit your RL workload via Pathways
 
+See the **Troubleshooting** section for concise instructions on how to retry or resume a failed workload.
+
 Ensure you have a Pathways-ready GKE cluster (as mentioned in Prerequisites) and submit the `train_rl.py` script via XPK.
 
 ### Submit GRPO workload
@@ -155,7 +152,7 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   model_name=${MODEL} \
   tokenizer_path=${TOKENIZER} \
   load_parameters_path=${MAXTEXT_CKPT_PATH} \
-  run_name=${RUN_NAME} \
+  run_name=${WORKLOAD} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   hf_access_token=${HF_TOKEN}"
 ```
@@ -171,11 +168,29 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   model_name=${MODEL} \
   tokenizer_path=${TOKENIZER} \
   load_parameters_path=${MAXTEXT_CKPT_PATH} \
-  run_name=${RUN_NAME} \
+  run_name=${WORKLOAD} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   hf_access_token=${HF_TOKEN} \
   loss_algo=gspo-token"
 ```
+
+## Managing Workloads
+
+- **Monitor workload status**: Check Pathways job status:
+  ```bash
+  kubectl get pathwaysjob
+  ```
+  Check pod status:
+  ```bash
+  kubectl get pods
+  ```
+- **Delete a workload**: To remove a failed or unwanted Pathways job, use XPK:
+  ```bash
+  xpk workload delete \
+      --workload $WORKLOAD \
+      --cluster $TPU_CLUSTER \
+      --project $PROJECT_ID
+  ```
 
 ## Troubleshooting
 
@@ -183,5 +198,21 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
 - **Resource Quotas**: Verify you have sufficient TPU quotas in your GCP project.
 - **Docker Build Failures**: Check that all dependencies are correctly installed and authentication is configured.
 - **Workload Failures**: Review the logs for specific error messages and ensure all environment variables are properly set.
+- **Workload retry / resume**:
+  - **Retry (fresh run)**: Use a unique workload name to avoid overwriting outputs:
+    ```bash
+    export WORKLOAD=${WORKLOAD}-retry1
+    export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${WORKLOAD}/0/items
+    ```
+    Re-submit the XPK workload. If "workload already exists" error occurs, pick a new name or list jobs:
+    ```bash
+    kubectl get pathwaysjob
+    ```
+  - **Resume from checkpoint**: Keep the same `WORKLOAD` and set the checkpoint path:
+    ```bash
+    export load_parameters_path=${MAXTEXT_CKPT_PATH}/checkpoint-0000
+    ```
+    Then re-submit the job.
+  - **Tip**: Verify checkpoint exists in GCS with read access before resuming.
 
 For more detailed troubleshooting, refer to the [MaxText documentation](https://maxtext.readthedocs.io) and [XPK documentation](https://github.com/AI-Hypercomputer/xpk).
