@@ -967,6 +967,24 @@ class FineTuning(BaseModel):
   use_grpo: None | bool = Field(None, description="If True, enables Group Relative Policy Optimization.")
 
 
+class Distillation(BaseModel):
+  """Configuration for Knowledge Distillation."""
+
+  # --- Overrides ---
+  # These dictionaries allow flexible configuration injection for Student/Teacher
+  # without needing to duplicate the entire MaxText schema here.
+  student_overrides: dict[str, Any] = Field(
+      default_factory=dict, description="Overrides specific to the Student model (e.g., {'num_query_heads': 16})."
+  )
+  teacher_overrides: dict[str, Any] = Field(
+      default_factory=dict, description="Overrides specific to the Teacher model (e.g., {'num_query_heads': 64})."
+  )
+
+  # --- Loss Params ---
+  distill_alpha: float = Field(0.5, description="Weight for the distillation loss component.")
+  distill_temperature: float = Field(1.0, description="Temperature for distillation softening.")
+
+
 class TrainingLoop(BaseModel):
   """Configuration for the main training loop, evaluation, and reproducibility."""
 
@@ -1634,6 +1652,7 @@ class MaxTextConfig(
     AdamW,
     Muon,
     FineTuning,
+    Distillation,
     # Reinforcement Learning
     RLHardware,
     VLLM,
