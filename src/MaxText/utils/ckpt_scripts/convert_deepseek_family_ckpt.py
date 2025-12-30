@@ -43,6 +43,10 @@ from MaxText import max_logging
 from MaxText.inference_utils import str2bool
 from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
 
+# for max_logging.log
+import absl
+absl.logging.set_verbosity(absl.logging.INFO)
+
 
 MODEL_PARAMS_DICT = {
     "deepseek2-16b": {

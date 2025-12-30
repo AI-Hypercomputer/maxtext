@@ -34,17 +34,17 @@ echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 # Assume HF checkpoints are uploaded to GCS bucket at CKPT_BUCKET 
 # Non-Googlers please remember to point `CKPT_BUCKET` to GCS buckets that you own
 # Copying the HF checkpoint into a local directory `/tmp` -- you are free to use a different directory
-# if [ -z "${CKPT_DISK_LOCATION}" ]; then
-#   export CKPT_BUCKET=gs://maxtext-deepseek/deepseek3-671b/hf
-#   gcloud storage cp -r ${CKPT_BUCKET} /tmp
-#   export CKPT_DISK_LOCATION=/tmp/hf-bf16
-# fi
+if [ -z "${CKPT_DISK_LOCATION}" ]; then
+  export CKPT_BUCKET=gs://maxtext-deepseek/deepseek3-671b/hf
+  gcloud storage cp -r ${CKPT_BUCKET} /tmp
+  export CKPT_DISK_LOCATION=/tmp/hf
+fi
 
 # 1.1 Convert checkpoint to `scanned` format, more suitable for training 
-# JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/scanned --model_size ${MODEL_NAME}
+JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/scanned --model_size ${MODEL_NAME}
 
 # 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
-# JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_unscanned_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/unscanned --model_size ${MODEL_NAME}
+JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_unscanned_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/unscanned --model_size ${MODEL_NAME}
 
 
 # Step 2: 

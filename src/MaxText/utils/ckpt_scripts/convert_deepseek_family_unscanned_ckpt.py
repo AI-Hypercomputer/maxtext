@@ -41,6 +41,10 @@ from MaxText import max_logging
 from MaxText.inference_utils import str2bool
 from safetensors import safe_open
 
+# for max_logging.log
+import absl
+absl.logging.set_verbosity(absl.logging.INFO)
+
 
 def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info) -> dict:
   """Convert Huggingface Checkpoint to Jax."""

@@ -62,6 +62,10 @@ from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
+# for max_logging.log
+import absl
+absl.logging.set_verbosity(absl.logging.INFO)
+
 
 def upload_blob(bucket_name, source_file_name, destination_blob_name):
   """Uploads a file to the bucket."""

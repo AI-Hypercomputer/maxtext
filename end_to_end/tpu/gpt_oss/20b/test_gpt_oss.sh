@@ -21,6 +21,7 @@ if [ -z "${BASE_OUTPUT_PATH}" ]; then
   # Non-Googlers please remember to point `BASE_OUTPUT_PATH` to GCS buckets that you own, this script uses internal buckets for testing.
   export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/$(date +%Y-%m-%d-%H-%M)
   echo "BASE_OUTPUT_PATH is not set"
+fi
 BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
 echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 
