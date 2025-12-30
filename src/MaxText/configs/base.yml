@@ -552,9 +552,10 @@ generate_padding_batch_train: False
 generate_padding_batch_eval: False
 # Maximum number of segments that can be packed into a single sequence
 # This needs to be passed to TransformerEngine's DotProductAttention layer for packing
-# NOTE: This parameter is only relevant for GPU packed attention.
-# When using TPU, this parameter will be ignored.
-max_segments_per_seq: 32
+# This also affects packing for grain, since TransformerEngine may crash or cause
+# data corruption if there are more segments packed than specified
+# Set this to something like 32 for GPUs when using TransformerEngine
+max_segments_per_seq: -1
 # Rampup batch size, similar to Megatron-LM, see
 # https://github.com/NVIDIA/Megatron-LM/blob/2a01637aa54ccdaf7ea9afc1f1b80f58c53d7f3c/megatron/core/num_microbatches_calculator.py#L233-L237
 # The ramp-up proceeds in stages from `per_device_batch_size_start` up to
