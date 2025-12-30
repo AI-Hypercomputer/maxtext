@@ -32,7 +32,6 @@ fi
 BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
 echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 
-
 # Step 1: Checkpoint conversion
 # You can use the HuggingFace checkpoint at https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite, and dequantize it to bf16
 # Assume HF checkpoints are uploaded to GCS bucket at CKPT_BUCKET 
@@ -49,7 +48,6 @@ JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_
 
 # 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
 JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_unscanned_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/unscanned --model_size ${MODEL_NAME}
-
 
 # Step 2: 
 # We define the checkpoint paths. This way it is easier to use these paths in the `train.py` and `decode.py` commands
