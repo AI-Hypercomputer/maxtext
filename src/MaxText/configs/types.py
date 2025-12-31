@@ -583,7 +583,7 @@ class MoEGeneral(BaseModel):
   )
   float32_weight_sum: bool = Field(
       True,
-      description="Whether to use full fp32 precision for weight_sum during final unpermute in MoE.",
+      description="Whether to use full fp32 precision to sum expert weights for numerical stability.",
   )
 
 
