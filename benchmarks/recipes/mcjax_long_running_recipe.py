@@ -27,6 +27,7 @@ import benchmarks.recipes.args_helper as helper
 import benchmarks.maxtext_trillium_model_configs as model_configs
 import benchmarks.maxtext_xpk_runner as mxr
 from benchmarks.xpk_configs import XpkClusterConfig
+from . import user_configs
 
 # Cluster Params
 CLUSTER = "v6e-256-cluster"
@@ -57,7 +58,7 @@ def main() -> None:
   )
 
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=XPK_PATH)
+  should_continue = helper.handle_cmd_args(cluster_config, user_configs.USER_CONFIG.delete, user_configs.USER_CONFIG.user)
 
   if not should_continue:
     return
