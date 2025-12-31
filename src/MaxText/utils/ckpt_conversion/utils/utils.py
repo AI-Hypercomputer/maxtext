@@ -92,19 +92,19 @@ def _get_local_directory(output_dir: str) -> str:
   return local_dir
 
 
-def check_param_map_keys(param_map_keys, maxtext_state_keys):
-  """Validates map coverage, handles N-to-1 mappings, and filters unused keys.
+def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
+  """Validates param_mapping coverage and filters unused keys.
 
-  Ensures every MaxText checkpoint key (`maxtext_state_keys`) is covered by
-  the flattened parameter map. Keys in the map that are not present in the
-  checkpoint (common for multi-variant maps like gemma3, qwen3, deepseek) are skipped.
-
-  Tuple keys represent N-to-1 mappings (multiple MaxText keys combining into one
-  target key) and are only returned if all constituent keys exist in the checkpoint.
+  Preprocess maxtext keys for transformation in to_maxtext.py and to_huggingface.py.
+  - Ensures every MaxText checkpoint key (`maxtext_state_keys`) is covered by
+    the flattened param_mapping.
+  - Keys in the param_mapping that are not present in the checkpoint (common for
+    multi-variant maps like gemma3, qwen3, deepseek) are skipped.
 
   Args:
-    param_map_keys: Keys from the parameter mapping (strings or N-to-1 tuples).
-    maxtext_state_keys: Set of parameter keys loaded from the MaxText checkpoint.
+    param_map_keys: MaxText keys from the param_mapping. Keys can be strings
+      (1-to-1 mapping) or tuples (N-to-1 mapping).
+    maxtext_state_keys: Set of MaxText keys loaded from the Orbax checkpoint.
 
   Returns:
     A list of 'filtered' mapping keys (strings or tuples) that are fully present
@@ -121,7 +121,7 @@ def check_param_map_keys(param_map_keys, maxtext_state_keys):
     else:
       flattened_map_keys.add(key)
 
-  # every maxtext state key must be covered by param map
+  # 1 Validate: every maxtext state key must be covered by param map
   missing_keys = maxtext_state_keys - flattened_map_keys
   if missing_keys:
     raise ValueError(
@@ -130,7 +130,7 @@ def check_param_map_keys(param_map_keys, maxtext_state_keys):
         + f"\nmaxtext:\n{maxtext_state_keys}"
     )
 
-  # param map may have extra keys
+  # 2 Filter: param map may have extra keys
   extra_keys = flattened_map_keys - maxtext_state_keys
   if extra_keys:
     max_logging.log(f"Warning: extra keys in param_map are skipped: {extra_keys}")

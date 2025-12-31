@@ -46,6 +46,8 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml
   * `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
   * `hf_access_token`: Your Hugging Face token.
   * `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Googld Cloud Storage (GCS) or local. If not set, the default output directory is `Maxtext/tmp`.
+  * `--lazy_load_tensors` (optional): If true, load HF tensor lazily to reduce RAM usage.
+  * `--hf_model_path` (optional): Specify a local HF path, rather than the default repo `HF_IDS[model_name]`. Useful for locally dequantized HF model like gpt-oss or deepseek.
 
 \*\**It only converts the official version of Hugging Face model. You can refer the supported official version in HF_IDS in `src/MaxText/utils/ckpt_conversion/utils/utils.py`*
 

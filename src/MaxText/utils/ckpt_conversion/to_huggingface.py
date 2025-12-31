@@ -73,7 +73,7 @@ from MaxText.utils.ckpt_conversion.utils.param_mapping import (
 from MaxText.utils.ckpt_conversion.utils.hf_shape import HF_SHAPE
 from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from MaxText.utils.ckpt_conversion.utils.utils import (
-    check_param_map_keys,
+    validate_and_filter_param_map_keys,
     process_maxtext_param,
     save_model_files,
     HF_IDS,
@@ -191,7 +191,7 @@ def main(argv: Sequence[str]) -> None:
   # The param_map may contain tuples as keys, which represent N-to-1 mappings from maxtext to huggingface
   # Check maxtext_state_dict is a subset of flattened param_map
   # Skip extra keys from param_map
-  filtered_map_keys = check_param_map_keys(param_map.keys(), maxtext_state_dict.keys())
+  filtered_map_keys = validate_and_filter_param_map_keys(param_map.keys(), maxtext_state_dict.keys())
 
   # Iterate through the parameter map to transform and collect weights.
   # This loop handles both simple 1-to-1 mappings and complex N-to-1 mappings

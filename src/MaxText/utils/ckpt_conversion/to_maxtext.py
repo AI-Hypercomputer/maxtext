@@ -84,7 +84,7 @@ from MaxText.inference_utils import str2bool
 from MaxText.layers import models, quantizations
 from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.utils import check_param_map_keys, apply_hook_fns, HF_IDS
+from MaxText.utils.ckpt_conversion.utils.utils import validate_and_filter_param_map_keys, apply_hook_fns, HF_IDS
 
 jax.config.update("jax_platform_name", "cpu")
 
@@ -555,7 +555,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   final_mt_weights = [None] * len(maxtext_abstract_dict)
 
   # preprocess key
-  filtered_map_keys = check_param_map_keys(param_map_mt_to_hf.keys(), maxtext_abstract_dict.keys())
+  filtered_map_keys = validate_and_filter_param_map_keys(param_map_mt_to_hf.keys(), maxtext_abstract_dict.keys())
 
   for mt_param_key in MemoryMonitorTqdm(
       filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
@@ -569,6 +569,9 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
       raise ValueError(f"MaxText parameter {mt_param_key} not found in mapping.")
     hook_fn = hook_fn_map_mt.get(mt_param_key)
 
+    # Condition A: maxtext_key form
+    # Case 1: str, single mt key
+    # Case 2: tuple, multiple mt key
     # idx: order in maxtext_abstract_dict.keys()
     if not is_many_mt_key:
       idx, mt_target_shape = maxtext_abstract_dict[mt_param_key]
@@ -579,6 +582,11 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
         idx.append(sub_idx)
         mt_target_shape.append(sub_mt_target_shape)
 
+    # Condition B: hf_key form
+    # Case 1: str, unscanned
+    # Case 2: nested list, scanned expert
+    # Case 3: (un-nested) list, scanned
+    # Case 4: (un-nested) list, unscanned expert
     # Determine the loading function for this specific parameter
     load_fn = None
     if not isinstance(hf_source_keys_or_key, list):
@@ -599,7 +607,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
           config,
       )
     else:
-      # Case 3: Single-Axis Stacked hf keys
+      # Case 3 or 4: Single-Axis Stacked hf keys
       load_fn = partial(
           _build_single_axis_stacked_tensor,
           hf_source_keys_or_key,
@@ -609,7 +617,9 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
           config,
       )
 
-    # Execute based on mode
+    # Condition C: tensor load mode
+    # Case 1: Eager mode
+    # Case 2: Lazy mode
     if not use_lazy_load:
       # Case 1: Eager mode
       # In eager mode, we execute the function immediately to get the
@@ -641,10 +651,10 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
       # on this object during the saving process.
       final_mt_tensor_numpy = LazyTensor(load_fn, mt_target_shape, config.weight_dtype, name=mt_param_key)
       if not is_many_mt_key:
-        # Case 2.1, one mt key
+        # Case 2.1: Lazy mode, one mt key
         final_mt_weights[idx] = final_mt_tensor_numpy
       else:
-        # Case 2.2, many mt key
+        # Case 2.2: Lazy mode, many mt key
         # This block handles 1-to-N mappings (one HF tensor to multiple MaxText tensors)
         # The hook function is expected to return a list/tuple of tensors.
         # For lazy loading, we can't split the tensor until it's loaded.
