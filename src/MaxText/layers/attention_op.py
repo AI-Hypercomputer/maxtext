@@ -1376,7 +1376,11 @@ class AttentionOp(nnx.Module):
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
     using_context_parallelism = self.mesh.shape["context"] > 1
-    using_load_balanced_ring_cp = using_context_parallelism and self.config.context_parallel_strategy == "ring" and self.config.context_parallel_load_balance
+    using_load_balanced_ring_cp = (
+        using_context_parallelism
+        and self.config.context_parallel_strategy == "ring"
+        and self.config.context_parallel_load_balance
+    )
 
     # Initialize default attention configuration
     sliding_window_size = None
@@ -1395,14 +1399,20 @@ class AttentionOp(nnx.Module):
       qkv_layout = "THD_THD_THD"  # Packed format: 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
       if decoder_segment_ids is None:
         decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=segment_positions)
+      attn_mask = SequenceDescriptor.from_segment_ids_and_pos(
+          segment_ids=decoder_segment_ids, segment_pos=segment_positions
+      )
       # Create dummy SequenceDescriptor for lazy_init
       dummy_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=dummy_segment_ids, segment_pos=segment_positions)
+      dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(
+          segment_ids=dummy_segment_ids, segment_pos=segment_positions
+      )
       max_segments_per_seq = self.config.max_segments_per_seq
     elif using_context_parallelism:
       if self.attention_type == AttentionType.LOCAL_SLIDING:
-        raise AssertionError("Sliding window attention is only supported for load balanced ring attention with context parallelism.")
+        raise AssertionError(
+            "Sliding window attention is only supported for load balanced ring attention with context parallelism."
+        )
       # Context parallelism without packing: only supports causal masking, but not sliding window attention
       attn_mask = None
       dummy_attn_mask = None
@@ -1782,7 +1792,7 @@ class AttentionOp(nnx.Module):
       value,
       decoder_segment_ids,
       inputs_positions,
-      model_mode, 
+      model_mode,
       cached_values=None,
       previous_chunk=None,
       bidirectional_mask=None,

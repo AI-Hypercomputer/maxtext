@@ -187,12 +187,18 @@ def setup_train_loop(config, recorder, devices=None):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
     context_parallel_size = mesh.shape["context"]
-    # Check if all_gather context parallelism is being used with sequence packing
-    if context_parallel_size > 1 and config.packing and config.context_parallel_strategy != "ring":
-      raise ValueError(
-          "Context parallelism with 'all_gather' strategy cannot be used with sequence packing."
-          "Please use 'ring' strategy instead."
-      )
+    # Validate context parallelism with packing configuration
+    if context_parallel_size > 1 and config.packing:
+      if config.dataset_type == "synthetic":
+        raise ValueError(
+            "Context parallelism with sequence packing is not supported with synthetic data. "
+            "Please disable sequence packing (set packing=False)."
+        )
+      if config.context_parallel_strategy != "ring":
+        raise ValueError(
+            "Context parallelism with 'all_gather' strategy cannot be used with sequence packing. "
+            "Please use 'ring' strategy instead."
+        )
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
     with jax.set_mesh(mesh):
@@ -202,7 +208,10 @@ def setup_train_loop(config, recorder, devices=None):
         # DualChunkSwap (0) for non-packed, Striped (1) for packed/THD
         reorder_strategy = 1 if config.packing else 0
 
-        data_iterator = map(maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode, reorder_strategy), data_iterator)
+        data_iterator = map(
+            maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode, reorder_strategy),
+            data_iterator,
+        )
         if eval_data_iterator:
           eval_data_iterator = map(
               maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode, reorder_strategy),

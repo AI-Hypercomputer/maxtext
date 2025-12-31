@@ -117,7 +117,7 @@ def shard_reorder_causal_load_balanced(batch, cp_size, shard_mode, reorder_strat
   return reordered
 
 
-def get_reorder_callable(cp_size, shard_mode, reorder_strategy=0): # 0=DualChunkSwap, 1=Striped
+def get_reorder_callable(cp_size, shard_mode, reorder_strategy=0):  # 0=DualChunkSwap, 1=Striped
   """Creates a callable that can be used with map() to reorder batches."""
   return functools.partial(
       shard_reorder_causal_load_balanced,
