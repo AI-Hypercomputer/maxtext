@@ -818,6 +818,7 @@ class AttentionOp(nnx.Module):
       key: Array | KVTensor,
       value: Array | KVTensor,
       decoder_segment_ids: Array | None,
+      segment_positions: Array | None,
       lengths: Array | None,
       model_mode: str,
       use_ragged_attention: bool = False,
@@ -929,7 +930,7 @@ class AttentionOp(nnx.Module):
             """Decode not supported with flash attention.
                            Use `dot_product` instead."""
         )
-      return self.cudnn_flash_attention(query, key, value, decoder_segment_ids, model_mode), None, None
+      return self.cudnn_flash_attention(query, key, value, decoder_segment_ids, segment_positions, model_mode), None, None
     elif self.attention_kernel == "cudnn_flash_jax":
       validate_flash_attention_with_sinks_on_gpu(sinks)
       if isinstance(key, KVTensor):
@@ -1358,6 +1359,7 @@ class AttentionOp(nnx.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array | None,
+      segment_positions: Array | None,
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> Array:
     """CUDNN Flash Attention with Transformer Engine.
@@ -1393,10 +1395,10 @@ class AttentionOp(nnx.Module):
       qkv_layout = "THD_THD_THD"  # Packed format: 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
       if decoder_segment_ids is None:
         decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=None)
+      attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=segment_positions)
       # Create dummy SequenceDescriptor for lazy_init
       dummy_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=dummy_segment_ids, segment_pos=None)
+      dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=dummy_segment_ids, segment_pos=segment_positions)
       max_segments_per_seq = self.config.max_segments_per_seq
     elif using_context_parallelism:
       if self.attention_type == AttentionType.LOCAL_SLIDING:
@@ -1779,7 +1781,8 @@ class AttentionOp(nnx.Module):
       key,
       value,
       decoder_segment_ids,
-      model_mode,
+      inputs_positions,
+      model_mode, 
       cached_values=None,
       previous_chunk=None,
       bidirectional_mask=None,
@@ -1800,6 +1803,7 @@ class AttentionOp(nnx.Module):
         key=key,
         value=value,
         decoder_segment_ids=decoder_segment_ids,
+        segment_positions=inputs_positions,
         lengths=None,
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
@@ -1822,6 +1826,7 @@ class AttentionOp(nnx.Module):
         key=key,
         value=value,
         decoder_segment_ids=decoder_segment_ids,
+        segment_positions=inputs_positions,
         lengths=lengths,
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,

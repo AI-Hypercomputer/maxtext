@@ -186,13 +186,12 @@ def setup_train_loop(config, recorder, devices=None):
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
-    data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
     context_parallel_size = mesh.shape["context"]
     # Check if all_gather context parallelism is being used with sequence packing
     if context_parallel_size > 1 and config.packing and config.context_parallel_strategy != "ring":
       raise ValueError(
           "Context parallelism with 'all_gather' strategy cannot be used with sequence packing."
-          " Please use 'ring' strategy instead."
+          "Please use 'ring' strategy instead."
       )
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
@@ -209,6 +208,9 @@ def setup_train_loop(config, recorder, devices=None):
               maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode, reorder_strategy),
               eval_data_iterator,
           )
+
+    # Create data_loader AFTER reordering wrapper is applied
+    data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
 
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
         model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
