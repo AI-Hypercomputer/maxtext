@@ -124,6 +124,20 @@ class OptimizerType(str, Enum):
   MUON = "muon"
 
 
+class LearningRateScheduleType(str, Enum):
+  """Supported learning rate schedule types."""
+
+  COSINE = "cosine"
+  WSD = "wsd"
+
+
+class WsdDecayStyle(str, Enum):
+  """Supported decay styles for WSD schedule."""
+
+  LINEAR = "linear"
+  COSINE = "cosine"
+
+
 class RopeType(str, Enum):
   """Supported Rotary Positional Embedding (RoPE) implementations."""
 
@@ -1006,8 +1020,20 @@ class Optimizer(BaseModel):
       1.0, description="The threshold for gradient clipping. 0 disables clipping."
   )
   learning_rate: NonNegativeFloat = Field(3.0e-5, description="The peak learning rate.")
+  lr_schedule_type: LearningRateScheduleType = Field(
+      LearningRateScheduleType.COSINE, description="The type of learning rate schedule to use."
+  )
   cosine_learning_rate_final_fraction: float = Field(
       0.1, description="Final LR as a fraction of peak LR in cosine decay."
+  )
+  wsd_learning_rate_final_fraction: float = Field(
+      0.1, description="Final LR as a fraction of peak LR in WSD decay phase."
+  )
+  wsd_decay_steps_fraction: float = Field(
+      0.1, ge=0.0, le=1.0, description="Fraction of total steps for decay phase in WSD schedule."
+  )
+  wsd_decay_style: WsdDecayStyle = Field(
+      WsdDecayStyle.LINEAR, description="The decay style for WSD schedule ('linear' or 'cosine')."
   )
   warmup_steps_fraction: float = Field(0.1, ge=0.0, le=1.0, description="Fraction of total steps for LR warmup.")
   learning_rate_schedule_steps: int = Field(
