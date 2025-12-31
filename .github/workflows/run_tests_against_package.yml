@@ -130,4 +130,4 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           # If scheduled, upload to BOTH flags. If PR, upload ONLY to regular.
-          flags: ${{ inputs.is_scheduled_run == 'true' && 'regular,scheduled' || 'regular' }}
+          flags: ${{ inputs.is_scheduled_run == 'true' && 'scheduled' || 'regular' }}
