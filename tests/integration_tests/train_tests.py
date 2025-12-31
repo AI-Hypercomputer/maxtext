@@ -495,6 +495,35 @@ class TrainTests(unittest.TestCase):
     ]
     train_main(ring_attention)
 
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_ring_attention_with_packing(self):
+    gpu_device = jax.devices("gpu")[0]
+    compute_capability = gpu_device.compute_capability
+    if float(compute_capability) < 9.0:
+      pytest.skip("Ring attention with packing is only supported on sm90+!")
+    os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
+    os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"  # Disable scan for ring attention
+    thd_ring_attention = [  # tests base config on GPU with ring attention + packing
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        "base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_test",
+        "dataset_path=gs://maxtext-dataset",
+        "steps=10",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "attention=cudnn_flash_te",
+        "ici_fsdp_parallelism=-1",
+        "ici_context_parallelism=2",
+        "context_parallel_load_balance=True",
+        "context_parallel_strategy=ring",
+        "packing=True",
+        "hardware=gpu",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+    ]
+    train_main(thd_ring_attention)
+
 
 if __name__ == "__main__":
   absltest.main()
