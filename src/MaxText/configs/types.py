@@ -1,5 +1,5 @@
 # Copyright 2023–2025 Google LLC
-#
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -1303,8 +1303,8 @@ class Tensorboard(BaseModel):
 
   enable_tensorboard: bool = Field(True, description="Enable Tensorboard logging.")
   use_vertex_tensorboard: bool = Field(False, description="Set to True for GCE, False if running via XPK.")
-  vertex_tensorboard_project: str = Field("", description="GCP project for Vertex AI Tensorboard.")
-  vertex_tensorboard_region: str = Field("", description="Region for Vertex AI Tensorboard.")
+  vertex_tensorboard_project: Optional[str] = Field("", description="GCP project for Vertex AI Tensorboard.")
+  vertex_tensorboard_region: Optional[str] = Field("", description="Region for Vertex AI Tensorboard.")
 
 
 class MultimodalGeneral(BaseModel):
