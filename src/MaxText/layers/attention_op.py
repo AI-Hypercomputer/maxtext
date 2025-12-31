@@ -1395,7 +1395,7 @@ class AttentionOp(nnx.Module):
     # Handle packing configurations
     if self.config.packing and self.config.dataset_type != "synthetic":
       if using_context_parallelism and not using_load_balanced_ring_cp:
-        raise AssertionError("Packing is only supported for load balanced ring attention with context parallelism.")
+        raise ValueError("Packing is only supported for load balanced ring attention with context parallelism.")
       qkv_layout = "THD_THD_THD"  # Packed format: 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
       if decoder_segment_ids is None:
         decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)

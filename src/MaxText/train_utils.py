@@ -30,6 +30,7 @@ from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.utils.goodput_utils import GoodputEvent
 from MaxText.utils.goodput_utils import maybe_record_goodput
 from MaxText import model_creation_utils
+from MaxText.common_types import ReorderStrategy
 
 
 def create_training_tools(config, model, mesh):
@@ -205,8 +206,10 @@ def setup_train_loop(config, recorder, devices=None):
       if context_parallel_size > 1 and config.context_parallel_load_balance:
 
         # Determine load balancing reorder strategy based on whether packing is enabled
-        # DualChunkSwap (0) for non-packed, Striped (1) for packed/THD
-        reorder_strategy = 1 if config.packing else 0
+        if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
+          reorder_strategy = ReorderStrategy.STRIPED if config.packing else ReorderStrategy.DUAL_CHUNK_SWAP
+        else:
+          reorder_strategy = config.context_parallel_reorder_strategy
 
         data_iterator = map(
             maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode, reorder_strategy),

@@ -798,20 +798,20 @@ def reorder_causal_load_balanced(batch, cp_size, reorder_strategy):
   Args:
     batch: The batch to reorder.
     cp_size: The size of the compute parallelism.
-    reorder_strategy: The strategy to use for reordering the batch. 0=DualChunkSwap, 1=Striped
+    reorder_strategy: The ReorderStrategy enum value (DUAL_CHUNK_SWAP or STRIPED).
 
   Returns:
     The reordered batch.
 
   Reorder Strategy:
-  - DualChunkSwap: This strategy splits each query into two chunks and do the mirror swap between
+  - DUAL_CHUNK_SWAP: This strategy splits each query into two chunks and do the mirror swap between
     GPUs. This is currently used for non-THD load balance. It requires the max_seqlens be the
     multiple of 2 * cp_size.
     Examples:
     - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; GPU2: [8, 9, 10, 11]; GPU3: [12, 13, 14, 15];
     - After reorder: GPU0: [0, 1, 14, 15]; GPU1: [4, 5, 10, 11]; GPU2: [8, 9, 6, 7]; GPU3: [12, 13, 2, 3]
 
-  - Striped: This strategy distributes the tokens in a striped (interleaved) manner across
+  - STRIPED: This strategy distributes the tokens in a striped (interleaved) manner across
     the sequence. This is currently used for THD load balance.
     Example: Consider 4 GPUs with seqlens=16.
     - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; ...; GPU3: [12, 13, 14, 15]
@@ -820,11 +820,13 @@ def reorder_causal_load_balanced(batch, cp_size, reorder_strategy):
   See: https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py
   """
   # pylint: disable=import-outside-toplevel
-  from transformer_engine.jax.attention import ReorderStrategy, reorder_causal_load_balancing
+  from transformer_engine.jax.attention import ReorderStrategy as TE_ReorderStrategy
+  from transformer_engine.jax.attention import reorder_causal_load_balancing
+  from MaxText.common_types import ReorderStrategy
 
   reorder_strategy_map = {
-      0: ReorderStrategy.DualChunkSwap,
-      1: ReorderStrategy.Striped,
+      ReorderStrategy.DUAL_CHUNK_SWAP: TE_ReorderStrategy.DualChunkSwap,
+      ReorderStrategy.STRIPED: TE_ReorderStrategy.Striped,
   }
 
   return {
