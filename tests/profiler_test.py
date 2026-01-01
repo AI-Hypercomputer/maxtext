@@ -21,6 +21,7 @@ import os.path
 from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
 
 
 class ProfilerTest(unittest.TestCase):
@@ -30,7 +31,7 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_starts(self):
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
         profiler="xplane",
@@ -46,7 +47,7 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_not_start_middle_period(self):
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
         profiler="xplane",
@@ -62,7 +63,7 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_ends(self):
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
         profiler="xplane",
@@ -78,7 +79,7 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_middle_not_end(self):
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
         profiler="xplane",

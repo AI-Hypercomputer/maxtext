@@ -45,10 +45,8 @@ import time
 
 from absl import app
 
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+from MaxText.gcloud_stub import cloud_diagnostics as _cloud_diag
+diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = _cloud_diag()
 
 import jax
 
@@ -80,7 +78,10 @@ from MaxText.utils.goodput_utils import (
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
-from MaxText.vertex_tensorboard import VertexTensorboardManager
+from MaxText.gcloud_stub import vertex_tensorboard_components, is_decoupled
+from MaxText.gcloud_stub import cloud_diagnostics as _cloud_diag
+VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_components()
+diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = _cloud_diag()
 
 logging.basicConfig()
 logging.getLogger("pathwaysutils.elastic.manager").setLevel(logging.INFO)
@@ -386,7 +387,10 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
-    vertex_tensorboard_manager.configure_vertex_tensorboard(config)
+    if _vertex_tb_is_stub:
+      max_logging.log("[DECOUPLED NO-OP] skipping Vertex Tensorboard configuration.")
+    else:
+      vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
   # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
@@ -401,9 +405,15 @@ def main(argv: Sequence[str]) -> None:
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
 
-  with diagnostic.diagnose(diagnostic_config):
-    with maybe_record_goodput(recorder, GoodputEvent.JOB), maybe_monitor_goodput(config):
+  # In decoupled mode or when diagnostics are stubbed, skip the diagnose wrapper
+  if is_decoupled() or getattr(diagnostic, "__class__", None).__name__ == "_StubDiag":
+    max_logging.log("[DECOUPLED NO-OP] skipping cloud diagnostics wrapper.")
+    with maybe_record_goodput(recorder, GoodputEvent.JOB):
       train_loop(config, elastic_manager, recorder)
+  else:
+    with diagnostic.diagnose(diagnostic_config):
+      with maybe_record_goodput(recorder, GoodputEvent.JOB):
+        train_loop(config, elastic_manager, recorder)
 
 
 if __name__ == "__main__":

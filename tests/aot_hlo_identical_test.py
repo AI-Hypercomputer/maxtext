@@ -22,11 +22,13 @@ import tempfile
 import unittest
 import pytest
 import os
+from MaxText.gcloud_stub import is_decoupled
 import shutil
 import hashlib
 import re
 import jax
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
 from MaxText import train_compile
 from MaxText import train
 
@@ -39,8 +41,23 @@ class AotHloIdenticalTest(unittest.TestCase):
     Fix the dump dir and xla flags
     """
     jax.config.update("jax_enable_compilation_cache", False)
-    temp_dir = tempfile.gettempdir()
-    self.dump_dir = os.path.join(temp_dir, "aot_test_dump")
+    decoupled = is_decoupled()
+    if decoupled:
+      logs_root = os.path.join(
+          MAXTEXT_PKG_DIR,
+          "..",
+          "local_datasets",
+          "gcloud_decoupled_test_logs",
+          "aot_hlo_identical_test",
+      )
+      os.makedirs(logs_root, exist_ok=True)
+      self._aot_logs_root = logs_root
+    else:
+      self._aot_logs_root = os.path.join(tempfile.gettempdir(), "compile_test_xla_dump")
+      os.makedirs(self._aot_logs_root, exist_ok=True)
+    
+    self.dump_dir = os.path.join(self._aot_logs_root, "aot_test_dump")
+
     xla_dump_options = "--xla_dump_hlo_as_text --xla_dump_hlo_module_re=jit_train_step"
     os.environ["XLA_FLAGS"] = f"--xla_dump_to={self.dump_dir} {xla_dump_options}"
 
@@ -105,10 +122,17 @@ class AotHloIdenticalTest(unittest.TestCase):
 
   def assert_compile_and_real_match_hlo(self, test_name, *extra_args):
     """check that AOT compiled and trained HLO files are identical for a given test"""
-    temp_dir = tempfile.gettempdir()
-    compile_dump_dir = os.path.join(temp_dir, "compile_test_xla_dump", test_name, "aot", "")
+    decoupled = is_decoupled()
+    if decoupled:
+      root = self._aot_logs_root  # set in setUp
+      base_output_directory = root
+    else:
+      root = os.path.join(tempfile.gettempdir(), "compile_test_xla_dump")
+      os.makedirs(root, exist_ok=True)
+      base_output_directory = "gs://runner-maxtext-logs"
+    compile_dump_dir = os.path.join(root, test_name, "aot")
     shared_args = [
-        "base_output_directory=gs://runner-maxtext-logs",
+        f"base_output_directory={base_output_directory}",
         "run_name=compile_equivalent_test",
         "dataset_type=synthetic",
         "steps=1",
@@ -117,12 +141,12 @@ class AotHloIdenticalTest(unittest.TestCase):
     if extra_args is not None:
       shared_args.extend(extra_args)
 
-    train_dump_dir = os.path.join(temp_dir, "compile_test_xla_dump", test_name, "real", "")
-    train_argv = (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")) + tuple(shared_args)
+    train_dump_dir = os.path.join(root, test_name, "real")
+    train_argv = (None, get_test_config_path()) + tuple(shared_args)
     topology = self.get_device_user_facing_name()
     aot_args = [f"compile_topology={topology}", "compile_topology_num_slices=1"]
-    compile_argv = (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")) + tuple(shared_args) + tuple(aot_args)
-    compile_dump_dir = os.path.join(temp_dir, "compile_test_xla_dump", test_name, "aot", "")
+    compile_argv = (None, get_test_config_path()) + tuple(shared_args) + tuple(aot_args)
+    compile_dump_dir = os.path.join(root, test_name, "aot")
 
     # Cleanup directories before use
     self.delete_dir(self.dump_dir, compile_dump_dir, train_dump_dir)

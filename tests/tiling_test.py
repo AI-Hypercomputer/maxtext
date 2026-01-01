@@ -24,6 +24,7 @@ import os
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from maxtext.tests.test_utils import get_test_config_path
 from flax import linen as nn
 
 from MaxText import maxtext_utils
@@ -66,7 +67,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
     """
     Set up common configurations and dummy data for the tests.
     """
-    self.base_config = [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")]
+    self.base_config = [None, get_test_config_path()]
     self.rng = jax.random.PRNGKey(1234)
     self.batch_size = 1
     self.seq_len = 64

@@ -39,6 +39,8 @@ from MaxText import inference_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
+from MaxText.gcloud_stub import is_decoupled
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
@@ -224,7 +226,7 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
 
   def setUp(self):
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
+        [None, get_test_config_path()], enable_checkpointing=False
     )
     self.model = ModelWithMultipleCollections(self.config.max_target_length, nnx.Rngs(0))
     self.key = random.key(0)
@@ -275,8 +277,10 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
   """Tests initialization of transformer states in max_utils.py"""
 
   def setUp(self):
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
+        [None, get_test_config_path()], enable_checkpointing=False, **extra_args
     )
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
@@ -405,7 +409,8 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     multi-dimensional mesh passes the assertion.
     """
     # Create a mesh shape for a 5D mesh.
-    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    num_devices = jax.device_count()
+    devices = np.array(jax.devices()).reshape((num_devices, 1, 1, 1, 1))
     mesh = Mesh(devices, self.mesh_axes)
 
     # Shard across multiple axes, including the valid 'fsdp' axis.
@@ -420,7 +425,8 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     Tests that a tensor on a complex mesh fails if it's not sharded along any
     of the primary valid axes (like 'fsdp').
     """
-    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    num_devices = jax.device_count()
+    devices = np.array(jax.devices()).reshape((num_devices, 1, 1, 1, 1))
     mesh = Mesh(devices, self.mesh_axes)
     pspec = PartitionSpec(("sequence", "context"), "stage", "tensor", None)
     params = {"complex_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, pspec))}
@@ -432,7 +438,8 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     """
     Tests that a mix of sharded (correctly) and unsharded tensors on a complex mesh fails.
     """
-    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    num_devices = jax.device_count()
+    devices = np.array(jax.devices()).reshape((num_devices, 1, 1, 1, 1))
     mesh = Mesh(devices, self.mesh_axes)
     sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
     sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, sharded_pspec))
@@ -459,7 +466,8 @@ class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
       self.skipTest("This test suite requires at least 4 TPU devices")
 
     self.mesh_axes = ("fsdp", "sequence", "tensor", "stage", "context")
-    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    num_devices = jax.device_count()
+    devices = np.array(jax.devices()).reshape((num_devices, 1, 1, 1, 1))
     self.mesh = Mesh(devices, self.mesh_axes)
 
   def test_multi_axis_mixed_formating(self):

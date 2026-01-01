@@ -17,6 +17,7 @@
 import sys
 import unittest
 import os.path
+import pytest
 
 import jax
 import jax.numpy as jnp
@@ -25,6 +26,8 @@ from MaxText.inference.offline_engine import OfflineEngine, InputData, Completio
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
 
+pytestmark = [pytest.mark.external_serving]
+from maxtext.tests.test_utils import get_test_config_path
 
 class OfflineEngineTest(unittest.TestCase):
   """Tests for JetStream Offline Engine.
@@ -59,7 +62,7 @@ class OfflineEngineTest(unittest.TestCase):
         "skip_jax_distributed_system": True,
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **init_kwargs,
     )
     return config

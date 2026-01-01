@@ -21,6 +21,7 @@ import os
 from MaxText.maxtext_utils import calculate_tflops_training_per_device
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
+from maxtext.tests.test_utils import get_test_config_path
 
 
 class FlopCalculation(unittest.TestCase):
@@ -127,7 +128,7 @@ class FlopCalculation(unittest.TestCase):
     golden_param_size = 6.74e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         **kwargs,
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
@@ -165,7 +166,7 @@ class FlopCalculation(unittest.TestCase):
     golden_param_size = 7.50e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         **kwargs,
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
@@ -203,7 +204,7 @@ class FlopCalculation(unittest.TestCase):
     golden_param_size = 12.9e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         **kwargs,
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
@@ -248,7 +249,7 @@ class FlopCalculation(unittest.TestCase):
     golden_param_size = 2.4e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         **kwargs,
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
@@ -287,7 +288,7 @@ class FlopCalculation(unittest.TestCase):
     golden_param_size = 3.6e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         **kwargs,
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)

@@ -17,11 +17,10 @@
 import os
 import sys
 
-import pathwaysutils  # pylint: disable=unused-import
-
-from jetstream.core import server_lib, config_lib
+from MaxText import gcloud_stub
 
 import jax
+from typing import Any
 
 from MaxText import pyconfig
 from MaxText import maxengine_config
@@ -37,7 +36,7 @@ from MaxText import maxengine_config
 # )
 
 
-def _create_prefix_caching_config(config) -> config_lib.PrefixCachingConfig | None:
+def _create_prefix_caching_config(config):
   if not config.enable_prefix_caching:
     return None
 
@@ -51,13 +50,30 @@ def _create_prefix_caching_config(config) -> config_lib.PrefixCachingConfig | No
 
 
 def main(config):
+  # Obtain the jetstream helper modules (or stubs if appropriate).
+  config_lib, _engine_api, _token_utils, _tokenizer_api, _token_params_ns = gcloud_stub.jetstream()
+
+  # If running decoupled and gcloud_stub returned lightweight stubs, skip
+  # starting the real server. Use the explicit _IS_STUB marker when present.
+  config_lib_is_stub = getattr(config_lib, "_IS_STUB", False)
+  engine_api_is_stub = getattr(_engine_api, "_IS_STUB", False)
+  if gcloud_stub.is_decoupled() and (config_lib_is_stub or engine_api_is_stub):
+    raise RuntimeError(
+        "JetStream helper modules are stubbed or DECOUPLE_GCLOUD=TRUE; server cannot be started in decoupled mode. "
+        "Unset DECOUPLE_GCLOUD or install JetStream to run the server."
+    )
+
+  # Import the real server_lib now that it's known present.
+  from jetstream.core import server_lib  # type: ignore
+  import pathwaysutils  # pylint: disable=unused-import
+
   pathwaysutils.initialize()
 
   # No devices for local cpu test. A None for prefill and a None for generate.
   devices = server_lib.get_devices()
   server_config = maxengine_config.get_server_config(config.inference_server, config)
 
-  metrics_server_config: config_lib.MetricsServerConfig | None = None
+  metrics_server_config: Any | None = None
   if config.prometheus_port != 0:
     metrics_server_config = config_lib.MetricsServerConfig(port=config.prometheus_port)
 

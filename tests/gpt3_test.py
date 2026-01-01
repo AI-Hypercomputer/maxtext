@@ -27,6 +27,7 @@ import jax
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -59,7 +60,7 @@ class GPT3(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         run_name="test",
         enable_checkpointing=False,
         model_name="gpt3-52k",

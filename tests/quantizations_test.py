@@ -33,6 +33,8 @@ from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
+from MaxText.gcloud_stub import is_decoupled
 from MaxText import pyconfig
 from MaxText.layers import nnx_wrappers, quantizations
 from MaxText import maxtext_utils
@@ -42,6 +44,7 @@ from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
+MAXTEXT_PKG_DIR = os.path.join("src", MAXTEXT_PKG_DIR)
 
 
 class QuantTestModule(nnx.Module):
@@ -105,7 +108,7 @@ class QuantTestModule(nnx.Module):
 
 def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
   config = pyconfig.initialize(
-      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      [None, get_test_config_path()],
       enable_checkpointing=False,
       quantization=quant_str,
       quant_cfg_path=quant_cfg_path,
@@ -298,6 +301,8 @@ class QuantTest(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     init_kwargs = {
         "run_name": "test",
         "dataset_type": "synthetic",
@@ -312,9 +317,9 @@ class QuantTest(unittest.TestCase):
         "base_num_kv_heads": 8,
         "base_mlp_dim": 4096,
         "base_num_decoder_layers": 12,
-    } | kwargs
+    } | kwargs | extra_args
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **init_kwargs,
     )
     return config
@@ -419,10 +424,12 @@ class QuantTest(unittest.TestCase):
     self.quantization_config("fp8_full")
 
   @pytest.mark.gpu_only
+  @pytest.mark.external_serving
   def test_fp8_gpu_quantization(self):
     self.quantization_config("fp8_gpu", grad_tolerance=1.0)
 
   @pytest.mark.gpu_only
+  @pytest.mark.external_serving
   def test_fp8_nanoo_quantization(self):
     self.quantization_config("fp8_nanoo", grad_tolerance=1.0)
 

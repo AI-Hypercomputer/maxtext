@@ -18,6 +18,7 @@ import argparse
 import os
 import subprocess
 import unittest
+import pytest
 
 import transformers
 
@@ -69,7 +70,7 @@ def add_arguments_to_parser(parser):
   )
   return parser
 
-
+@pytest.mark.external_training # Calls gsutil to pull tokenizer.
 class DistillationDataProcessingTest(unittest.TestCase):
 
   @classmethod

@@ -15,13 +15,14 @@
 """CLI utility for running inference on a single/multi stream(s)."""
 
 import os
-from typing import Sequence
+from typing import Sequence, Any
 import jax
 import jax.numpy as jnp
 
 from absl import app
 
-from jetstream.engine import engine_api
+from MaxText.gcloud_stub import jetstream, is_decoupled
+_config_lib, engine_api, _token_utils, _tokenizer_api, _token_params_ns = jetstream()
 
 from MaxText import max_utils
 from MaxText import maxengine
@@ -34,7 +35,7 @@ from MaxText import multimodal_utils
 _NUM_STREAMS = 1
 
 
-def _batch_first_result_token(first_tokens: list[engine_api.ResultTokens], batch_size: int):
+def _batch_first_result_token(first_tokens: list[Any], batch_size: int):
   """Batches together a list of first result tokens from prefill calls.
 
   This is needed because prefill currently returns the first token as a batch of size 1
@@ -112,6 +113,14 @@ def main(argv: Sequence[str]) -> None:
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
+  token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
+  engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+  if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
+    raise RuntimeError(
+        "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; decode requires the JetStream tokenizer. "
+        "Unset DECOUPLE_GCLOUD or install JetStream to run decode."
+    )
+
   try:
     # TODO: update jetstream.engine.tokenizer_api.Tokenizer to maintain tokenizer state.
     has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)  # pytype: disable=attribute-error
