@@ -20,6 +20,7 @@ from typing import Any, Optional
 from absl import flags
 from etils import epath
 from flax.training import train_state
+import datetime
 import jax
 from MaxText import exceptions
 from MaxText import max_logging
@@ -50,6 +51,7 @@ LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
 PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointOptions
 EmergencyReplicatorCheckpointManager = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager
 
+ASYNC_SAVE_TIMEOUT = datetime.timedelta(minutes=60)
 
 class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
   """A CheckpointHandler that allows specifying process_index and process_count."""
@@ -230,6 +232,11 @@ def create_orbax_checkpoint_manager(
     preservation_policy = preservation_policy_lib.LatestN(
         max_num_checkpoints_to_keep
     )
+  async_options = None
+  if enable_continuous_checkpointing:
+    async_options = ocp.AsyncOptions(
+        timeout_secs=int(ASYNC_SAVE_TIMEOUT.total_seconds()),
+    )
   manager = CheckpointManager(
       p,
       item_names=item_names,
@@ -239,7 +246,8 @@ def create_orbax_checkpoint_manager(
           enable_async_checkpointing=use_async,
           save_decision_policy=save_decision_policy,
           preservation_policy=preservation_policy,
-          ),
+          async_options=async_options,
+      ),
       logger=orbax_logger,
   )
 
@@ -711,7 +719,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   if config and config.enable_checkpointing:
     if (
         force
-        or (step % config.checkpoint_period == 0)
+        or (step % config.checkpoint_period == 0 and not config.enable_continuous_checkpointing)
         or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
     ):
       blocking_until_ready_start = time.time()
