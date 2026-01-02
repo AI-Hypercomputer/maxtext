@@ -114,7 +114,6 @@ jobs:
           cache-from: type=gha
           outputs: type=image,compression=zstd,force-compression=true
           build-args: |
-            DEVICE=${{ inputs.device }}
             MODE=${{ inputs.build_mode }}
             JAX_VERSION=NONE
             LIBTPU_VERSION=NONE

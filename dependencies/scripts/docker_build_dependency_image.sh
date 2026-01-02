@@ -104,10 +104,14 @@ fi
 if [[ -z ${DEVICE} ]]; then
   export DEVICE=tpu
 fi
+if [[ -z ${WORKFLOW} ]]; then
+  export WORKFLOW=pre-training
+fi
 
 # Create docker build arguments array
 docker_build_args=(
   "DEVICE=${DEVICE}"
+  "WORKFLOW=${WORKFLOW}"
   "MODE=${MODE}"
   "JAX_VERSION=${JAX_VERSION}"
 )
