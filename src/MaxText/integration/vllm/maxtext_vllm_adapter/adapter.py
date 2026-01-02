@@ -19,6 +19,7 @@ import jax
 
 from flax import nnx
 import flax.linen as nn
+from jax import numpy as jnp
 from jax.sharding import Mesh
 from MaxText import model_creation_utils
 from MaxText import max_logging
@@ -136,16 +137,13 @@ class MaxTextForCausalLM(nnx.Module):
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model must be an instance of type nnx.Module.")
 
-    if input_ids.ndim < 2:
-      input_ids = input_ids[None, :]
-
-    input_positions = attention_metadata.input_positions
-    if input_positions.ndim < 2:
-      input_positions = input_positions[None, :]
+    # Ensure inputs are at least 2D with a batch dimension
+    input_ids = jnp.atleast_2d(input_ids)
+    input_positions = jnp.atleast_2d(attention_metadata.input_positions)
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
-      hidden, kv_caches = self.model(
+      hidden, updated_kv_caches = self.model(
           decoder_input_tokens=input_ids,
           decoder_positions=input_positions,
           kv_caches=kv_caches,
@@ -154,10 +152,10 @@ class MaxTextForCausalLM(nnx.Module):
           **kwargs,
       )
 
-      if hidden.ndim > 1:
-        hidden = hidden.squeeze(0)
+      # To be compatible with vLLM, we reshape to (batch * seq, dim).
+      hidden = hidden.reshape((-1, hidden.shape[-1]))
 
-    return kv_caches, hidden, aux_hidden_states
+    return updated_kv_caches, hidden, aux_hidden_states
 
   def forward(self, *args, **kwargs):
     """Alias for __call__ for compatibility.
@@ -211,8 +209,14 @@ class MaxTextForCausalLM(nnx.Module):
       raise ValueError("Model is not initialized.")
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
-      embeddings = self.model.token_embedder
-      return self.model.decoder.apply_output_head(embeddings, hidden_states, True, self.model_mode)
+      # Reshape to (num_tokens, 1, hidden_dim) for decoder output head
+      y = hidden_states[:, jnp.newaxis, :]
+
+      # Compute logits using the MaxText decoder's output head
+      logits = self.model.decoder.apply_output_head(self.model.token_embedder, y, True, self.model_mode)
+
+      # Reshape back to (num_tokens, vocab_size)
+      return logits.squeeze(1)
 
   def load_weights(self, rng_key: jax.Array) -> None:
     """Loads model weights using the underlying decoder model.
