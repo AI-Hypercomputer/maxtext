@@ -76,8 +76,11 @@ class DeepSeekGenericLayer(nn.Module):
         page_state,
         slot,
     )
-
-    x += self.mlp(self.post_attention_norm(x), deterministic)
+    mlp_output = self.mlp(self.post_attention_norm(x), deterministic)
+    if isinstance(mlp_output, tuple):
+      x += mlp_output[0]
+    else:
+      x += mlp_output
     x = self.dropout(x, deterministic)
     return self.post_process(x, kv_cache)
 
@@ -279,7 +282,8 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       )
 
     def _moe(x):
-      return self.mlp(self.post_attention_norm(x), deterministic)
+      output, _, _ = self.mlp(self.post_attention_norm(x), deterministic)
+      return output
 
     # Split the inputs into micro-batches.
     x = _split(x)

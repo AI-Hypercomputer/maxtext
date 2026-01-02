@@ -37,6 +37,10 @@ on:
       image_date:
         required: true
         type: string
+      base_image:
+        required: false
+        type: string
+        default: ''
       is_post_training:
         required: false
         type: boolean
@@ -113,8 +117,9 @@ jobs:
             DEVICE=${{ inputs.device }}
             MODE=${{ inputs.build_mode }}
             JAX_VERSION=NONE
-            LIBTPU_GCS_PATH=NONE
-            BASEIMAGE=gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:${{ inputs.image_date }}
+            LIBTPU_VERSION=NONE
+            INCLUDE_TEST_ASSETS=true
+            ${{ inputs.base_image != '' && format('BASEIMAGE={0}', inputs.base_image) || '' }}
 
       - name: Add tags to Docker image
         if: steps.check.outputs.should_run == 'true'
@@ -125,16 +130,19 @@ jobs:
           # Add date tag
           gcloud container images add-tag "$SOURCE_IMAGE:latest" "$SOURCE_IMAGE:${{ inputs.image_date }}" --quiet
 
+          # Convert date to YYYYMMDD format
+          clean_date=$(echo "${{ inputs.image_date }}" | sed 's/[-:]//g' | cut -c1-8)
+
           # Add MaxText tag
           maxtext_hash=$(git rev-parse --short HEAD)
-          gcloud container images add-tag "$SOURCE_IMAGE:latest" "$SOURCE_IMAGE:maxtext_${maxtext_hash}" --quiet
+          gcloud container images add-tag "$SOURCE_IMAGE:latest" "$SOURCE_IMAGE:maxtext_${maxtext_hash}_${clean_date}" --quiet
 
           # Add post-training dependencies tags
           if [ "${{ inputs.is_post_training }}" == "true" ]; then
             for dir in tunix vllm tpu-inference; do
               if [ -d "./$dir" ]; then
                 dir_hash=$(git -C "$dir" rev-parse --short HEAD)
-                gcloud container images add-tag "$SOURCE_IMAGE:latest" "$SOURCE_IMAGE:${dir}_$dir_hash" --quiet
+                gcloud container images add-tag "$SOURCE_IMAGE:latest" "$SOURCE_IMAGE:${dir}_${dir_hash}_${clean_date}" --quiet
               fi
             done
           fi

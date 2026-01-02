@@ -58,5 +58,14 @@ RUN --mount=type=cache,target=/root/.cache/pip bash /deps/tools/setup/setup.sh M
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
 
+# Download test assets from GCS if building image with test assets
+ARG INCLUDE_TEST_ASSETS=false
+RUN if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
+        echo "Downloading test assets from GCS..."; \
+        if ! gcloud storage cp -r gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT}"; then \
+        echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
+        fi; \
+    fi
+
 # Install (editable) MaxText
 RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .

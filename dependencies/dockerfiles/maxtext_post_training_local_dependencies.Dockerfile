@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG BASEIMAGE
+ARG BASEIMAGE=maxtext_base_image
 FROM ${BASEIMAGE}
+
 ARG MODE
 ENV MODE=$MODE
 
@@ -31,10 +32,8 @@ COPY tunix /tunix
 RUN pip uninstall -y google-tunix
 RUN pip install -e /tunix --no-cache-dir
 
-
 COPY vllm /vllm
 RUN VLLM_TARGET_DEVICE="tpu" pip install -e /vllm --no-cache-dir
-
 
 COPY tpu-inference /tpu-inference
 RUN pip install -e /tpu-inference --no-cache-dir

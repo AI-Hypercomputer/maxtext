@@ -35,6 +35,7 @@ from MaxText import maxtext_utils
 from MaxText import profiler
 from MaxText import pyconfig
 from MaxText import train_utils
+from MaxText import sharding
 from MaxText.data_loader import DataLoader
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
@@ -71,8 +72,10 @@ def train_loop(config, recorder, state=None):
       state,
   ) = setup_train_loop(config, recorder)
 
+  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
   )
 
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):

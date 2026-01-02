@@ -24,7 +24,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import jax
-import jax.tree_util
 from jax.experimental import multihost_utils
 
 from jaxtyping import Array
@@ -40,8 +39,10 @@ from safetensors.flax import save as save_flax_to_bytes
 from huggingface_hub import HfApi, repo_exists
 
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from transformers import AutoModelForCausalLM
 
 from MaxText import max_logging
+import psutil
 
 
 SAFE_TENSORS_CONFIG_FILE = "config.json"
@@ -731,3 +732,21 @@ def upload_folder_to_gcs(local_folder: str, gs_bucket_path: str, num_workers: in
       max_logging.log(f"✅ Uploaded {name} to {bucket.name}/{destination_dir}{name}")
 
   max_logging.log(f"Upload completed in {time.time() - start_time}s")
+
+
+def print_ram_usage(stage=""):
+  memory = psutil.virtual_memory()
+  max_logging.log(
+      f"[{stage}] RAM Usage: {memory.used / (1024**3):.2f}/{memory.total / (1024**3):.2f} GB ({memory.percent:.1f}%)"
+  )
+
+
+def get_hf_model(model_id: str, token: str):
+  """Loads the HuggingFace model based on model_id (Eager mode only)."""
+  if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
+    from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
+
+    hf_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(model_id, token=token)
+  else:
+    hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=token)
+  return hf_model

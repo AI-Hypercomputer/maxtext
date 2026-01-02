@@ -76,11 +76,11 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
   return sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
 
-def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules):
+def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, shard_mode):
   max_logging.log(
       "WARNING: Function maxtext_utils.all_gather_over_fsdp is deprecated. Please use sharding.all_gather_over_fsdp."
   )
-  return sharding.all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules)
+  return sharding.all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, shard_mode)
 
 
 def get_functional_train_with_signature(
@@ -712,6 +712,32 @@ def get_nested_value(dictionary, nested_key, default=None):
       return default
     current_level = current_level[key]
   return current_level
+
+
+def update_state_param(state, target_path, value):
+  """
+  Updates a specific parameter in state.params at the given path.
+
+  Args:
+      state: The current TrainState.
+      target_path: A tuple of keys matching the structure inside state.params.
+      value: The value to apply.
+  """
+
+  def create_jax_path(target_path):
+    path = []
+    for k in target_path:
+      path.append(jax.tree_util.DictKey(key=k))
+    return tuple(path)
+
+  def _apply_update(path, param):
+    if path == updated_target_path:
+      return param + value
+    return param
+
+  updated_target_path = create_jax_path(target_path)
+  new_params = jax.tree_util.tree_map_with_path(_apply_update, state.params)
+  return state.replace(params=new_params)
 
 
 def init_decode_state(apply_fn, params) -> train_state.TrainState:

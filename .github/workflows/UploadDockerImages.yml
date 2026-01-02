@@ -65,11 +65,11 @@ jobs:
           - device: tpu
             build_mode: stable
             image_name: maxtext_jax_stable
-            dockerfile: ./dependencies/dockerfiles/maxtext_dependencies.Dockerfile
+            dockerfile: ./dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
           - device: tpu
             build_mode: nightly
             image_name: maxtext_jax_nightly
-            dockerfile: ./dependencies/dockerfiles/maxtext_dependencies.Dockerfile
+            dockerfile: ./dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
@@ -102,6 +102,7 @@ jobs:
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
       image_date: ${{ needs.setup.outputs.image_date }}
+      base_image: gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:${{ needs.setup.outputs.image_date }}
       is_post_training: true
 
   gpu-pre-training:

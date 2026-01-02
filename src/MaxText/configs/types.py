@@ -552,7 +552,7 @@ class MoEGeneral(BaseModel):
   num_experts: PositiveInt = Field(1, description="The total number of experts in each MoE layer.")
   num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
-  load_balance_loss_weight: NonNegativeFloat = Field(0.01, description="Weight for the load balancing auxiliary loss.")
+  load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
   use_custom_sort_vjp: bool = Field(True, description="Whether to use a custom sort VJP for sparse matmul ops.")
   use_ring_of_experts: bool = Field(
       False,
@@ -639,6 +639,7 @@ class DeepSeekMoE(BaseModel):
   routed_scaling_factor: float = Field(1.0, description="Scaling factor for routing scores.")
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
+  routed_bias_update_rate: float = Field(0.0, description="Update rate applied to the router bias term.")
   mlp_bias: bool = Field(False, description="Whether to add a learnable bias for MLP matmul.")
   n_routing_groups: int = Field(-1, description="Number of groups for routing, disabled by default.")
   topk_routing_group: int = Field(-1, description="Number of top groups to route inputs to.")
@@ -879,8 +880,8 @@ class DatasetGeneral(BaseModel):
       description="Packing type when using Grain pipeline. 'first_fit' or 'concat_then_split'.",
   )
   max_segments_per_seq: int = Field(
-      32,
-      description="Maximum number of segments that can be packed into a single sequence.",
+      -1,
+      description="Maximum number of segments that can be packed into a single sequence. -1 or None for no limit.",
   )
   num_epoch: int = Field(1, description="Number of epochs to train for.")
   expansion_factor_real_data: float = Field(-1.0, description="Factor for partial data loading on hosts.")
@@ -1493,10 +1494,6 @@ class DerivedValues(BaseModel):
       None,
       description="Boolean flag indicating if pipeline parallelism is active across ICI or DCN.",
   )
-  model_fsdp_ag_once: bool = Field(
-      False,
-      description="An alias for `pipeline_fsdp_ag_once` for backward compatibility.",
-  )
 
   context_parallel_size: None | int = Field(
       None,
@@ -1989,8 +1986,6 @@ class MaxTextConfig(
       ):
         self.logical_axis_rules.append(["aqt_amax_history", ("stage",)])
 
-    self.model_fsdp_ag_once = self.pipeline_fsdp_ag_once  # Backward compatibility alias
-
     # H. RUN ALL CROSS-FIELD VALIDATIONS
     if self.load_parameters_path and self.load_full_state_path:
       raise ValueError("At most one of `load_parameters_path` or `load_full_state_path` should be set.")
@@ -2043,6 +2038,8 @@ class MaxTextConfig(
           )
       if self.decoder_block == DecoderBlockType.GPT_OSS and not self.sparse_matmul and self.capacity_factor != -1:
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
+      if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
+        raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
     if self.use_multimodal:
       valid_mm_models = (
           "gemma3-4b",
@@ -2079,6 +2076,8 @@ class MaxTextConfig(
         raise ValueError(
             "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs."
         )
+    if self.hardware == "gpu" and self.packing and self.attention == "cudnn_flash_te" and self.max_segments_per_seq <= 0:
+      raise ValueError("max_segments_per_seq must be set when using TransformerEngine attention and packing")
     dcn_product = (
         self.dcn_data_parallelism
         * self.dcn_pipeline_parallelism

@@ -12,3 +12,4 @@ per_device_batch_size: 2
 max_target_length: 1024
 dataset_type: "synthetic"
 steps: 10
+max_segments_per_seq: 32

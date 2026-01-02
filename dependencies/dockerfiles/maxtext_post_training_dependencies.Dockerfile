@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG BASEIMAGE
+ARG BASEIMAGE=maxtext_base_image
 FROM ${BASEIMAGE}
-ARG MODE
 
+ARG MODE
 ENV MODE=$MODE
 
 RUN echo "Installing Post-Training dependencies (vLLM, tpu-inference, tunix) with MODE=${MODE}"
