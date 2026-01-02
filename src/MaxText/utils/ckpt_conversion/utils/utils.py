@@ -223,8 +223,8 @@ def process_maxtext_param(
   # Stacked MaxText weight
   # This now handles three cases:
   # 2. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
-  # 3. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
-  # 4. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
+  # 3. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
+  # 4. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
   is_scanned_moe_layer = isinstance(hf_target_paths[0], list)
 
   if is_scanned_moe_layer:
@@ -250,24 +250,18 @@ def process_maxtext_param(
     return output_weights
 
   # Case 3 or 4: The source tensor is stacked on a single axis.
-  # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
-  # `w` is needed for weights, and except for gate.
-  # Gate values are stack in layers only, but weights are stack in both expert and layer.
-  moe_block_list = ["moe_block", "MoeBlock_0-w"]
-  is_unscanned_moe = any(block in maxtext_param_key for block in moe_block_list) and any(
-      f"_{i}-" in maxtext_param_key for i in range(maxtext_config.base_num_decoder_layers)
-  )
-
-  if is_unscanned_moe:
-    max_logging.log("\tunscan moe")
-    # Case 3: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
-    # The tensor is stacked ONLY on the expert axis. Assuming expert is axis 0.
-    axis_to_slice = 0
-  else:
+  # i.e., hf_target_paths is an (un-nested) list
+  # We determine if it's standard scanned (stack on layer axis) or unscanned MoE (stack on expert axis).
+  if maxtext_config.scan_layers:
     max_logging.log("\tscan")
-    # Case 4: Standard scanned layer.
+    # Case 3: Standard scanned layer.
     # The tensor is stacked ONLY on the layer axis.
     axis_to_slice = maxtext_config.param_scan_axis
+  else:
+    max_logging.log("\tunscan moe")
+    # Case 4: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
+    # The tensor is stacked ONLY on the expert axis. Assuming expert is axis 0.
+    axis_to_slice = 0
 
   # Iterate through the slices of the MaxText weight along the determined stacking axis.
   for i, hf_path in enumerate(hf_target_paths):
