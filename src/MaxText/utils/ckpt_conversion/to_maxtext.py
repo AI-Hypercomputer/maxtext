@@ -71,7 +71,7 @@ from transformers import AutoConfig
 from tqdm import tqdm
 from huggingface_hub import hf_hub_download, list_repo_files
 from safetensors import safe_open
-from absl import logging
+import absl
 
 from orbax.checkpoint import type_handlers
 from MaxText import checkpointing
@@ -87,7 +87,7 @@ from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MA
 from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, validate_and_filter_param_map_keys, print_ram_usage, get_hf_model
 jax.config.update("jax_platform_name", "cpu")
 
-logging.set_verbosity(logging.INFO)
+absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
 class MemoryMonitorTqdm(tqdm):
@@ -441,6 +441,130 @@ def get_maxtext_model_info(config):
   return maxtext_abstract_dict, abstract_params_treedef
 
 
+def _get_maxtext_indices_and_shapes(mt_param_key, maxtext_abstract_dict):
+  """Resolves MaxText key(s) to target indices and shapes, where index is order in maxtext_abstract_dict.keys.
+  Condition: maxtext_key form
+    Case 1: str, single mt key
+    Case 2: tuple, multiple mt key
+  """
+  is_many_mt_key = is_many_mt_key = isinstance(mt_param_key, tuple)
+  if not is_many_mt_key:
+    idx, mt_target_shape = maxtext_abstract_dict[mt_param_key]
+  else:
+    idx, mt_target_shape = [], []
+    for subkey in mt_param_key:
+      sub_idx, sub_mt_target_shape = maxtext_abstract_dict[subkey]
+      idx.append(sub_idx)
+      mt_target_shape.append(sub_mt_target_shape)
+  return idx, mt_target_shape
+
+
+def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape, config):
+  """Determine the loading function for hf key.
+  Condition: hf_key form
+    Case 1: str, unscanned
+    Case 2: nested list, scanned expert
+    Case 3: (un-nested) list, scanned
+    Case 4: (un-nested) list, unscanned expert
+  """
+  load_fn = None
+  if not isinstance(hf_source_keys_or_key, list):
+    # Case 1: Single hf key
+    def _loader(getter, key, shape, hook):
+      return apply_hook_fns(getter(key), shape, hook)
+
+    load_fn = partial(_loader, tensor_getter, hf_source_keys_or_key, mt_target_shape, hook_fn)
+  # Stacked mapping
+  elif isinstance(hf_source_keys_or_key[0], list):
+    # Case 2: Multi-Axis Stacked hf keys
+    load_fn = partial(
+        _build_multi_axis_stacked_tensor,
+        hf_source_keys_or_key,
+        tensor_getter,
+        hook_fn,
+        mt_target_shape,
+        config,
+    )
+  else:
+    # Case 3 or 4: Single-Axis Stacked hf keys
+    load_fn = partial(
+        _build_single_axis_stacked_tensor,
+        hf_source_keys_or_key,
+        tensor_getter,
+        hook_fn,
+        mt_target_shape,
+        config,
+    )
+  return load_fn
+
+
+def _get_maxtext_weight(
+    load_fn, idx, mt_target_shape, is_many_mt_key, mt_param_key, final_mt_weights, config, use_lazy_load
+):
+  """Load hf keys and convert to maxtext keys.
+  Condition: tensor load mode
+    Case 1: Eager mode
+    Case 2: Lazy mode
+  Condition: maxtext_key form
+    Case *.1: str, single mt key
+    Case *.2: tuple, multiple mt key
+  """
+
+  if not use_lazy_load:
+    # Case 1: Eager mode
+    # In eager mode, we execute the function immediately to get the
+    # NumPy array and append it to our list of weights.
+    final_mt_tensor_numpy = load_fn()
+    if not is_many_mt_key:
+      # Case 1.1: Eager mode, one mt key
+      final_mt_weights[idx] = final_mt_tensor_numpy
+      if final_mt_tensor_numpy.shape != mt_target_shape:
+        raise ValueError(
+            f"Shape mismatch for {mt_param_key}: Expected {mt_target_shape}, got {final_mt_tensor_numpy.shape}"
+        )
+    else:
+      # Case 1.2: Eager mode, many mt key
+      # This block handles 1-to-N mappings (one HF tensor to multiple MaxText tensors)
+      # The hook function is expected to return a list/tuple of tensors.
+      # In eager mode, we can just split the materialized tensor.
+      for i, sub_idx in enumerate(idx):
+        final_mt_weights[sub_idx] = final_mt_tensor_numpy[..., i]
+        if final_mt_weights[sub_idx].shape != mt_target_shape[i]:
+          raise ValueError(f"Expect {mt_target_shape[i]}, got {final_mt_weights[sub_idx].shape}")
+  else:
+    # Case 2: Lazy mode
+    # In lazy mode, we don't execute the loading/transformation function
+    # immediately. Instead, we wrap it in a `LazyTensor` object. This
+    # object acts as a placeholder that holds all the information needed
+    # to load the tensor later (the `load_fn`, shape, dtype).
+    # The actual data will only be loaded when Orbax calls `__array__`
+    # on this object during the saving process.
+    final_mt_tensor_numpy = LazyTensor(load_fn, mt_target_shape, config.weight_dtype, name=mt_param_key)
+    if not is_many_mt_key:
+      # Case 2.1: Lazy mode, one mt key
+      final_mt_weights[idx] = final_mt_tensor_numpy
+    else:
+      # Case 2.2: Lazy mode, many mt key
+      # This block handles 1-to-N mappings (one HF tensor to multiple MaxText tensors)
+      # The hook function is expected to return a list/tuple of tensors.
+      # For lazy loading, we can't split the tensor until it's loaded.
+      # We create multiple LazyTensors, each responsible for loading the
+      # full source tensor but then slicing its piece. Parent HF tensor is loaded repeatedly.
+      for i, sub_idx in enumerate(idx):
+
+        def _slicing_loader(base_loader, slice_idx):
+          return np.array(base_loader)[..., slice_idx]
+
+        # Each LazyTensor gets a new load_fn that wraps the original and applies the slice.
+        slicing_load_fn = partial(_slicing_loader, final_mt_tensor_numpy, i)
+        final_mt_weights[sub_idx] = LazyTensor(
+            slicing_load_fn,
+            mt_target_shape[i],
+            config.weight_dtype,
+            name=mt_param_key[i],
+        )
+
+
 def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   overall_start = time.time()
   # Check if the user is using an Instruct version. If so, use the base model architecture
@@ -548,111 +672,16 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
       raise ValueError(f"MaxText parameter {mt_param_key} not found in mapping.")
     hook_fn = hook_fn_map_mt.get(mt_param_key)
 
-    # Condition A: maxtext_key form
-    # Case 1: str, single mt key
-    # Case 2: tuple, multiple mt key
-    # idx: order in maxtext_abstract_dict.keys()
-    if not is_many_mt_key:
-      idx, mt_target_shape = maxtext_abstract_dict[mt_param_key]
-    else:
-      idx, mt_target_shape = [], []
-      for subkey in mt_param_key:
-        sub_idx, sub_mt_target_shape = maxtext_abstract_dict[subkey]
-        idx.append(sub_idx)
-        mt_target_shape.append(sub_mt_target_shape)
+    # Step 1: Resolves MaxText key(s) to target indices and shapes, based on maxtext_key form (single, multiple)
+    mt_target_idx, mt_target_shape = _get_maxtext_indices_and_shapes(mt_param_key, maxtext_abstract_dict)
 
-    # Condition B: hf_key form
-    # Case 1: str, unscanned
-    # Case 2: nested list, scanned expert
-    # Case 3: (un-nested) list, scanned
-    # Case 4: (un-nested) list, unscanned expert
-    # Determine the loading function for this specific parameter
-    load_fn = None
-    if not isinstance(hf_source_keys_or_key, list):
-      # Case 1: Single hf key
-      def _loader(getter, key, shape, hook):
-        return apply_hook_fns(getter(key), shape, hook)
+    # Step 2: Determine the loading function for hf key, based on hf_key form
+    load_fn = _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape, config)
 
-      load_fn = partial(_loader, tensor_getter, hf_source_keys_or_key, mt_target_shape, hook_fn)
-    # Stacked mapping
-    elif isinstance(hf_source_keys_or_key[0], list):
-      # Case 2: Multi-Axis Stacked hf keys
-      load_fn = partial(
-          _build_multi_axis_stacked_tensor,
-          hf_source_keys_or_key,
-          tensor_getter,
-          hook_fn,
-          mt_target_shape,
-          config,
-      )
-    else:
-      # Case 3 or 4: Single-Axis Stacked hf keys
-      load_fn = partial(
-          _build_single_axis_stacked_tensor,
-          hf_source_keys_or_key,
-          tensor_getter,
-          hook_fn,
-          mt_target_shape,
-          config,
-      )
-
-    # Condition C: tensor load mode
-    # Case 1: Eager mode
-    # Case 2: Lazy mode
-    if not use_lazy_load:
-      # Case 1: Eager mode
-      # In eager mode, we execute the function immediately to get the
-      # NumPy array and append it to our list of weights.
-      final_mt_tensor_numpy = load_fn()
-      if not is_many_mt_key:
-        # Case 1.1: Eager mode, one mt key
-        final_mt_weights[idx] = final_mt_tensor_numpy
-        if final_mt_tensor_numpy.shape != mt_target_shape:
-          raise ValueError(
-              f"Shape mismatch for {mt_param_key}: Expected {mt_target_shape}, got {final_mt_tensor_numpy.shape}"
-          )
-      else:
-        # Case 1.2: Eager mode, many mt key
-        # This block handles 1-to-N mappings (one HF tensor to multiple MaxText tensors)
-        # The hook function is expected to return a list/tuple of tensors.
-        # In eager mode, we can just split the materialized tensor.
-        for i, sub_idx in enumerate(idx):
-          final_mt_weights[sub_idx] = final_mt_tensor_numpy[..., i]
-          if final_mt_weights[sub_idx].shape != mt_target_shape[i]:
-            raise ValueError(f"Expect {mt_target_shape[i]}, got {final_mt_weights[sub_idx].shape}")
-    else:
-      # Case 2: Lazy mode
-      # In lazy mode, we don't execute the loading/transformation function
-      # immediately. Instead, we wrap it in a `LazyTensor` object. This
-      # object acts as a placeholder that holds all the information needed
-      # to load the tensor later (the `load_fn`, shape, dtype).
-      # The actual data will only be loaded when Orbax calls `__array__`
-      # on this object during the saving process.
-      final_mt_tensor_numpy = LazyTensor(load_fn, mt_target_shape, config.weight_dtype, name=mt_param_key)
-      if not is_many_mt_key:
-        # Case 2.1: Lazy mode, one mt key
-        final_mt_weights[idx] = final_mt_tensor_numpy
-      else:
-        # Case 2.2: Lazy mode, many mt key
-        # This block handles 1-to-N mappings (one HF tensor to multiple MaxText tensors)
-        # The hook function is expected to return a list/tuple of tensors.
-        # For lazy loading, we can't split the tensor until it's loaded.
-        # We create multiple LazyTensors, each responsible for loading the
-        # full source tensor but then slicing its piece. Parent HF tensor is loaded repeatedly.
-        for i, sub_idx in enumerate(idx):
-
-          def _slicing_loader(base_loader, slice_idx):
-            return np.array(base_loader)[..., slice_idx]
-
-          # Each LazyTensor gets a new load_fn that wraps the original
-          # and applies the slice.
-          slicing_load_fn = partial(_slicing_loader, final_mt_tensor_numpy, i)
-          final_mt_weights[sub_idx] = LazyTensor(
-              slicing_load_fn,
-              mt_target_shape[i],
-              config.weight_dtype,
-              name=mt_param_key[i],
-          )
+    # Step 3: Load hf keys and convert to maxtext keys, based on tensor load mode (lazy, eager) and maxtext_key form (single, multiple)
+    _get_maxtext_weight(
+        load_fn, mt_target_idx, mt_target_shape, is_many_mt_key, mt_param_key, final_mt_weights, config, use_lazy_load
+    )
 
   del hf_state_dict_numpy
   max_logging.log("Weight transformation preparation complete.")
