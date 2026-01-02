@@ -31,6 +31,7 @@ import pathlib
 import os
 import gc
 import logging
+import absl
 
 import numpy as np
 import torch
@@ -42,6 +43,8 @@ from safetensors import safe_open
 from MaxText import max_logging
 from MaxText.inference_utils import str2bool
 from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
+
+absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
 MODEL_PARAMS_DICT = {

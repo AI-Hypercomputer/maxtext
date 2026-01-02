@@ -26,6 +26,7 @@ import gc
 import logging
 import os
 import pathlib
+import absl
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
@@ -40,6 +41,7 @@ from MaxText.inference_utils import str2bool
 from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from MaxText.utils.ckpt_scripts.convert_gpt_oss_unscanned_ckpt import MODEL_PARAMS_DICT, _hf_to_maxtext_mapping, _pt_to_np
 
+absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 # NOTE: numpy doesn't have native support for bfloat16, so
 # we'll use ml_dtypes instead (which is quasi native)

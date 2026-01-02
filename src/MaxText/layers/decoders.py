@@ -902,6 +902,11 @@ class Decoder(nn.Module):
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     hidden_state = y
 
+    # When initializing with vLLM RPA attention, we need to run the output head to
+    # initialize any parameters associated with it.
+    if self.is_initializing() and cfg.attention == "vllm_rpa":
+      _ = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+
     # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
     if cfg.attention == "vllm_rpa":
       logits = None
