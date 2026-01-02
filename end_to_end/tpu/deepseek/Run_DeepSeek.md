@@ -151,7 +151,7 @@ python3 -m MaxText.decode src/MaxText/configs/base.yml \
     max_target_length=1024 \
     tokenizer_type=huggingface \
     tokenizer_path=deepseek-ai/DeepSeek-V3 \
-    attention=flash \
+    attention=dot_product \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     megablox=False \
@@ -197,7 +197,6 @@ python3 -m tests.forward_pass_logit_checker \
     model_name=deepseek2-16b \
     max_prefill_predict_length=4 \
     max_target_length=4 \
-    dataset_type=synthetic \
     scan_layers=false \
     sparse_matmul=False \
     dtype=float32 \

@@ -29,6 +29,7 @@ import pathlib
 import os
 import gc
 import logging
+import absl
 
 import numpy as np
 import torch
@@ -40,6 +41,8 @@ from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
 from MaxText import max_logging
 from MaxText.inference_utils import str2bool
 from safetensors import safe_open
+
+absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
 def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info) -> dict:
