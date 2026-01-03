@@ -382,7 +382,12 @@ def main(config, test_args):  # pylint: disable=W0621
     if test_args.hf_model_path == "":
       raise ValueError("run_hf_model requires hf_model_path")
     hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch.bfloat16)
-    tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path)
+
+    if os.path.isdir(test_args.hf_model_path):
+      tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path)
+    else:
+      tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path)
+
     pad_token_models = ["Llama-3.1", "Mixtral-8x"]
     if any(model in test_args.hf_model_path for model in pad_token_models):
       tokenizer.pad_token = tokenizer.eos_token

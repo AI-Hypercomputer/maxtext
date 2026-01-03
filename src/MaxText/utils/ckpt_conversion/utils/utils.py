@@ -93,6 +93,59 @@ def _get_local_directory(output_dir: str) -> str:
   return local_dir
 
 
+def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
+  """Validates param_mapping coverage and filters unused keys.
+
+  Preprocess maxtext keys for transformation in to_maxtext.py and to_huggingface.py.
+  - Ensures every MaxText checkpoint key (`maxtext_state_keys`) is covered by
+    the flattened param_mapping.
+  - Keys in the param_mapping that are not present in the checkpoint (common for
+    multi-variant maps like gemma3, qwen3, deepseek) are skipped.
+
+  Args:
+    param_map_keys: MaxText keys from the param_mapping. Keys can be strings
+      (1-to-1 mapping) or tuples (N-to-1 mapping).
+    maxtext_state_keys: Set of MaxText keys loaded from the Orbax checkpoint.
+
+  Returns:
+    A list of 'filtered' mapping keys (strings or tuples) that are fully present
+    and valid based on `maxtext_state_keys`.
+
+  Raises:
+    ValueError: If `maxtext_state_keys` is NOT a subset of the flattened
+      `param_map_keys`.
+  """
+  flattened_map_keys = set()
+  for key in param_map_keys:
+    if isinstance(key, tuple):
+      flattened_map_keys.update(key)
+    else:
+      flattened_map_keys.add(key)
+
+  # 1 Validate: every maxtext state key must be covered by param map
+  missing_keys = maxtext_state_keys - flattened_map_keys
+  if missing_keys:
+    raise ValueError(
+        "maxtext_state_dict must be a subset of flattened param_map"
+        + f"\nparam map\n{param_map_keys}"
+        + f"\nmaxtext:\n{maxtext_state_keys}"
+    )
+
+  # 2 Filter: param map may have extra keys
+  extra_keys = flattened_map_keys - maxtext_state_keys
+  if extra_keys:
+    max_logging.log(f"Warning: extra keys in param_map are skipped: {extra_keys}")
+
+  # skip extra keys in param map
+  filtered_map_keys = []
+  for key in param_map_keys:
+    if (isinstance(key, str) and key in maxtext_state_keys) or (
+        isinstance(key, tuple) and all(k in maxtext_state_keys for k in key)
+    ):
+      filtered_map_keys.append(key)
+  return filtered_map_keys
+
+
 def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map):
   """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list."""
   if hf_path not in hf_shape_map:
@@ -170,8 +223,8 @@ def process_maxtext_param(
   # Stacked MaxText weight
   # This now handles three cases:
   # 2. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
-  # 3. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
-  # 4. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
+  # 3. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
+  # 4. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
   is_scanned_moe_layer = isinstance(hf_target_paths[0], list)
 
   if is_scanned_moe_layer:
@@ -197,24 +250,18 @@ def process_maxtext_param(
     return output_weights
 
   # Case 3 or 4: The source tensor is stacked on a single axis.
-  # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
-  # `w` is needed for weights, and except for gate.
-  # Gate values are stack in layers only, but weights are stack in both expert and layer.
-  moe_block_list = ["moe_block", "MoeBlock_0-w"]
-  is_unscanned_moe = any(block in maxtext_param_key for block in moe_block_list) and any(
-      f"_{i}-" in maxtext_param_key for i in range(maxtext_config.base_num_decoder_layers)
-  )
-
-  if is_unscanned_moe:
-    max_logging.log("\tunscan moe")
-    # Case 3: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
-    # The tensor is stacked ONLY on the expert axis. Assuming expert is axis 0.
-    axis_to_slice = 0
-  else:
+  # i.e., hf_target_paths is an (un-nested) list
+  # We determine if it's standard scanned (stack on layer axis) or unscanned MoE (stack on expert axis).
+  if maxtext_config.scan_layers:
     max_logging.log("\tscan")
-    # Case 4: Standard scanned layer.
+    # Case 3: Standard scanned layer.
     # The tensor is stacked ONLY on the layer axis.
     axis_to_slice = maxtext_config.param_scan_axis
+  else:
+    max_logging.log("\tunscan moe")
+    # Case 4: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
+    # The tensor is stacked ONLY on the expert axis. Assuming expert is axis 0.
+    axis_to_slice = 0
 
   # Iterate through the slices of the MaxText weight along the determined stacking axis.
   for i, hf_path in enumerate(hf_target_paths):

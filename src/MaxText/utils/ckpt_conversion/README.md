@@ -6,10 +6,14 @@ This guide provides instructions for using the scripts that convert model checkp
 
 The following models are supported:
 
-- Gemma2 (2B, 9B, 27B).
-- Gemma3 multimodal (4B, 12B, 27B).
-- Qwen3 (0.6B, 4B, 8B, 14B, 32B).
-- Mixtral (8x7B, 8x22B).
+| Model Family | Sizes | HF $\to$ Orbax (scan) | HF $\to$ Orbax (unscan) | Orbax (scan) $\to$ HF | Orbax (unscan) $\to$ HF |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Gemma2** | 2B, 9B, 27B | √  | √ | √ | √ |
+| **Gemma3** (Multimodal) | 4B, 12B, 27B | - | √ | - | √ |
+| **Qwen3** | 0.6B, 4B, 8B, 14B, 32B | √ | √ | √ | √ |
+| **Mixtral** | 8x7B, 8x22B | √ | √ | √ | √ |
+| **GPT-OSS** | 20B, 120B | √ | √ | √ | √ |
+| **DeepSeek3** | 671B | - | - | √ | - |
 
 ## Prerequisites
 - Hugging Face requires Pytorch.
@@ -42,6 +46,8 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml
   * `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
   * `hf_access_token`: Your Hugging Face token.
   * `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Googld Cloud Storage (GCS) or local. If not set, the default output directory is `Maxtext/tmp`.
+  * `--lazy_load_tensors` (optional): If true, loads Hugging Face weights on-demand to minimize RAM usage.
+  * `--hf_model_path` (optional): Specify a local HF path, rather than the default repo `HF_IDS[model_name]`. Useful for locally dequantized HF model like gpt-oss or deepseek.
 
 \*\**It only converts the official version of Hugging Face model. You can refer the supported official version in HF_IDS in `src/MaxText/utils/ckpt_conversion/utils/utils.py`*
 
@@ -87,11 +93,11 @@ python3 -m tests.forward_pass_logit_checker src/MaxText/configs/base.yml \
     model_name=<MODEL_NAME> \
     scan_layers=false \
     max_prefill_predict_length=4 \
-     max_target_length=8 \
+    max_target_length=8 \
     use_multimodal=false \
     --run_hf_model=True \
     --hf_model_path=<path-to-HF-checkpoint> \
-    --max_kl_div=0.015 \
+    --max_kl_div=0.015
 ```
 
 **Key arguments:**
