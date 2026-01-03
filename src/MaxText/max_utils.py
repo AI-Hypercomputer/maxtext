@@ -791,13 +791,50 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
   return reordered.reshape(ori_tensor_shape)
 
 
-@partial(jax.jit, static_argnums=1)
-def reorder_causal_load_balanced(batch, cp_size):
-  """Reorders the example batch sequences"""
+@partial(jax.jit, static_argnums=(1, 2))
+def reorder_causal_load_balanced(batch, cp_size, reorder_strategy):
+  """Reorders the example batch sequences
+
+  Args:
+    batch: The batch to reorder.
+    cp_size: The size of the compute parallelism.
+    reorder_strategy: The ReorderStrategy enum value (DUAL_CHUNK_SWAP or STRIPED).
+
+  Returns:
+    The reordered batch.
+
+  Reorder Strategy:
+  - DUAL_CHUNK_SWAP: This strategy splits each query into two chunks and do the mirror swap between
+    GPUs. This is currently used for non-THD load balance. It requires the max_seqlens be the
+    multiple of 2 * cp_size.
+    Examples:
+    - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; GPU2: [8, 9, 10, 11]; GPU3: [12, 13, 14, 15];
+    - After reorder: GPU0: [0, 1, 14, 15]; GPU1: [4, 5, 10, 11]; GPU2: [8, 9, 6, 7]; GPU3: [12, 13, 2, 3]
+
+  - STRIPED: This strategy distributes the tokens in a striped (interleaved) manner across
+    the sequence. This is currently used for THD load balance.
+    Example: Consider 4 GPUs with seqlens=16.
+    - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; ...; GPU3: [12, 13, 14, 15]
+    - After reorder: GPU0: [0, 4, 8, 12]; GPU1: [1, 5, 9, 13]; ...; GPU3: [3, 7, 11, 15]
+
+  See: https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py
+  """
+  # pylint: disable=import-outside-toplevel
+  from transformer_engine.jax.attention import ReorderStrategy as TE_ReorderStrategy
+  from transformer_engine.jax.attention import reorder_causal_load_balancing
+  from MaxText.common_types import ReorderStrategy
+
+  reorder_strategy_map = {
+      ReorderStrategy.DUAL_CHUNK_SWAP: TE_ReorderStrategy.DualChunkSwap,
+      ReorderStrategy.STRIPED: TE_ReorderStrategy.Striped,
+  }
+
   return {
-      key: reorder_sequence(
+      key: reorder_causal_load_balancing(
           value,  # Pass each key's value inside batch separately
+          reorder_strategy_map[reorder_strategy],
           cp_size=cp_size,
+          seq_dim=1,
       )
       if key
       in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
