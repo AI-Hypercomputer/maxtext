@@ -25,7 +25,7 @@ Key Parameters (to be set in the config file or as command-line overrides):
                          Defaults to "./mt_output/".
   scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
                This must match the training configuration of the checkpoint.
-  lazy_load: (bool) If True, uses an on-demand loading strategy to minimize RAM
+  --lazy_load_tensors: (bool) If True, uses an on-demand loading strategy to minimize RAM
              usage during conversion. Recommended if, 2 * model_size (GB) >= system RAM
              Defaults to False.
 
@@ -84,7 +84,8 @@ from MaxText.inference_utils import str2bool
 from MaxText.layers import models, quantizations
 from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, validate_and_filter_param_map_keys, print_ram_usage, get_hf_model
+from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model, validate_and_filter_param_map_keys
+
 jax.config.update("jax_platform_name", "cpu")
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
@@ -147,6 +148,7 @@ class LazyHFLoader:
   def __init__(self, model_id, token):
     self.model_id = model_id
     self.token = token
+    # Whether loads from local directory
     self.is_local = os.path.isdir(self.model_id)
     self.shard_map = {}
     self.current_shard_name = None
@@ -181,8 +183,6 @@ class LazyHFLoader:
       self.shard_map = {None: "model.safetensors"}
       return
     else:
-      if self.is_local:
-        raise ValueError("Could not find recognized model weights (safetensors) in local directory.")
       raise ValueError("Could not find recognized model weights (safetensors) in HF repo.")
 
     # Download and parse the index
@@ -397,7 +397,7 @@ def _build_single_axis_stacked_tensor(
   return np.stack(tensors_to_stack, axis=axis_to_stack)
 
 
-def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape, config):
+def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape_or_shapes, config):
   """Determine the loading function for hf key.
   Condition: hf_key form
     Case 1: str, unscanned
@@ -411,7 +411,7 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
     def _loader(getter, key, shape, hook):
       return apply_hook_fns(getter(key), shape, hook)
 
-    load_fn = partial(_loader, tensor_getter, hf_source_keys_or_key, mt_target_shape, hook_fn)
+    load_fn = partial(_loader, tensor_getter, hf_source_keys_or_key, mt_target_shape_or_shapes, hook_fn)
   # Stacked mapping
   elif isinstance(hf_source_keys_or_key[0], list):
     # Case 2: Multi-Axis Stacked hf keys
@@ -420,7 +420,7 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         hf_source_keys_or_key,
         tensor_getter,
         hook_fn,
-        mt_target_shape,
+        mt_target_shape_or_shapes,
         config,
     )
   else:
@@ -430,7 +430,7 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         hf_source_keys_or_key,
         tensor_getter,
         hook_fn,
-        mt_target_shape,
+        mt_target_shape_or_shapes,
         config,
     )
   return load_fn
@@ -472,34 +472,43 @@ def get_maxtext_model_info(config):
 
   # preprocess state
   maxtext_abstract_dict = {}
-  for idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
+  for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
     key_parts = [k.key for k in path_tuple if hasattr(k, "key")]
     mt_param_key = "params-" + "-".join(key_parts)
     mt_target_shape = abstract_leaf_value.shape
-    maxtext_abstract_dict[mt_param_key] = (idx, mt_target_shape)
+    maxtext_abstract_dict[mt_param_key] = (mt_target_idx, mt_target_shape)
 
   return maxtext_abstract_dict, abstract_params_treedef
 
 
-def _get_maxtext_indices_and_shapes(mt_param_key, maxtext_abstract_dict):
+def _get_maxtext_indices_and_shapes(mt_param_key_or_keys, maxtext_abstract_dict):
   """Resolves MaxText key(s) to target indices and shapes, where index is order in maxtext_abstract_dict.keys.
   Condition: maxtext_key form
     Case 1: str, single mt key
     Case 2: tuple, multiple mt key
   """
-  is_many_mt_key = isinstance(mt_param_key, tuple)
+  is_many_mt_key = isinstance(mt_param_key_or_keys, tuple)
   if not is_many_mt_key:
-    idx, mt_target_shape = maxtext_abstract_dict[mt_param_key]
-  else:
-    idx, mt_target_shape = [], []
-    for subkey in mt_param_key:
-      sub_idx, sub_mt_target_shape = maxtext_abstract_dict[subkey]
-      idx.append(sub_idx)
-      mt_target_shape.append(sub_mt_target_shape)
-  return idx, mt_target_shape
+    mt_target_idx, mt_target_shape = maxtext_abstract_dict[mt_param_key_or_keys]
+    return mt_target_idx, mt_target_shape
+
+  mt_target_indices, mt_target_shapes = [], []
+  for mt_param_key in mt_param_key_or_keys:
+    mt_target_idx, mt_target_shape = maxtext_abstract_dict[mt_param_key]
+    mt_target_indices.append(mt_target_idx)
+    mt_target_shapes.append(mt_target_shape)
+  return mt_target_indices, mt_target_shapes
 
 
-def _get_maxtext_weight(load_fn, mt_target_idx, mt_target_shape, mt_param_key, final_mt_weights, config, use_lazy_load):
+def _get_maxtext_weight(
+    load_fn,
+    mt_target_idx_or_indices,
+    mt_target_shape_or_shapes,
+    mt_param_key_or_keys,
+    final_mt_weights,
+    config,
+    use_lazy_load,
+):
   """Load hf keys and convert to maxtext keys.
   Condition: tensor load mode
     Case 1: Eager mode
@@ -508,7 +517,7 @@ def _get_maxtext_weight(load_fn, mt_target_idx, mt_target_shape, mt_param_key, f
     Case *.1: str, single mt key
     Case *.2: tuple, multiple mt key
   """
-  is_many_mt_key = isinstance(mt_param_key, tuple)
+  is_many_mt_key = isinstance(mt_param_key_or_keys, tuple)
   if not use_lazy_load:
     # Case 1: Eager mode
     # In eager mode, we execute the function immediately to get the
@@ -516,21 +525,21 @@ def _get_maxtext_weight(load_fn, mt_target_idx, mt_target_shape, mt_param_key, f
     final_mt_tensor_numpy = load_fn()
     if not is_many_mt_key:
       # Case 1.1: Eager mode, one mt key
-      final_mt_weights[mt_target_idx] = final_mt_tensor_numpy
-      if final_mt_tensor_numpy.shape != mt_target_shape:
+      final_mt_weights[mt_target_idx_or_indices] = final_mt_tensor_numpy
+      if final_mt_tensor_numpy.shape != mt_target_shape_or_shapes:
         raise ValueError(
-            f"Shape mismatch for {mt_param_key}: Expected {mt_target_shape}, got {final_mt_tensor_numpy.shape}"
+            f"Shape mismatch for {mt_param_key_or_keys}: Expected {mt_target_shape_or_shapes}, got {final_mt_tensor_numpy.shape}"
         )
     else:
       # Case 1.2: Eager mode, many mt key
       # This block handles 1-to-N mappings (one HF tensor to multiple MaxText tensors)
       # The hook function is expected to return a list/tuple of tensors.
       # In eager mode, we can just split the materialized tensor.
-      for i, sub_idx in enumerate(mt_target_idx):
-        final_mt_weights[sub_idx] = final_mt_tensor_numpy[..., i]
-        if final_mt_weights[sub_idx].shape != mt_target_shape[i]:
+      for i, mt_target_idx in enumerate(mt_target_idx_or_indices):
+        final_mt_weights[mt_target_idx] = final_mt_tensor_numpy[..., i]
+        if final_mt_weights[mt_target_idx].shape != mt_target_shape_or_shapes[i]:
           raise ValueError(
-              f"Shape mismatch for {mt_param_key[i]}: Expect {mt_target_shape[i]}, got {final_mt_weights[sub_idx].shape}"
+              f"Shape mismatch for {mt_param_key_or_keys[i]}: Expect {mt_target_shape_or_shapes[i]}, got {final_mt_weights[mt_target_idx].shape}"
           )
   else:
     # Case 2: Lazy mode
@@ -540,10 +549,10 @@ def _get_maxtext_weight(load_fn, mt_target_idx, mt_target_shape, mt_param_key, f
     # to load the tensor later (the `load_fn`, shape, dtype).
     # The actual data will only be loaded when Orbax calls `__array__`
     # on this object during the saving process.
-    final_mt_tensor_numpy = LazyTensor(load_fn, mt_target_shape, config.weight_dtype, name=mt_param_key)
+    final_mt_tensor_numpy = LazyTensor(load_fn, mt_target_shape_or_shapes, config.weight_dtype, name=mt_param_key_or_keys)
     if not is_many_mt_key:
       # Case 2.1: Lazy mode, one mt key
-      final_mt_weights[mt_target_idx] = final_mt_tensor_numpy
+      final_mt_weights[mt_target_idx_or_indices] = final_mt_tensor_numpy
     else:
       # Case 2.2: Lazy mode, many mt key
       # This block handles 1-to-N mappings (one HF tensor to multiple MaxText tensors)
@@ -551,18 +560,18 @@ def _get_maxtext_weight(load_fn, mt_target_idx, mt_target_shape, mt_param_key, f
       # For lazy loading, we can't split the tensor until it's loaded.
       # We create multiple LazyTensors, each responsible for loading the
       # full source tensor but then slicing its piece. Parent HF tensor is loaded repeatedly.
-      for i, sub_idx in enumerate(mt_target_idx):
+      for i, mt_target_idx in enumerate(mt_target_idx_or_indices):
 
         def _slicing_loader(base_loader, slice_idx):
           return np.array(base_loader)[..., slice_idx]
 
         # Each LazyTensor gets a new load_fn that wraps the original and applies the slice.
         slicing_load_fn = partial(_slicing_loader, final_mt_tensor_numpy, i)
-        final_mt_weights[sub_idx] = LazyTensor(
+        final_mt_weights[mt_target_idx] = LazyTensor(
             slicing_load_fn,
-            mt_target_shape[i],
+            mt_target_shape_or_shapes[i],
             config.weight_dtype,
-            name=mt_param_key[i],
+            name=mt_param_key_or_keys[i],
         )
 
 
@@ -654,33 +663,44 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
 
   maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(config)
 
+  # Weight transformation
   max_logging.log("Starting weight transformation...")
   start = time.time()
   final_mt_weights = [None] * len(maxtext_abstract_dict)
 
-  # preprocess key
+  # Preprocess key
   filtered_map_keys = validate_and_filter_param_map_keys(param_map_mt_to_hf.keys(), maxtext_abstract_dict.keys())
 
-  for mt_param_key in MemoryMonitorTqdm(
+  for mt_param_key_or_keys in MemoryMonitorTqdm(
       filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
   ):
     if not use_lazy_load and config.scan_layers:
-      max_logging.log(f"maxtext param: {mt_param_key}")
+      max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
 
-    hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key)
+    hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
     if hf_source_keys_or_key is None:
-      raise ValueError(f"MaxText parameter {mt_param_key} not found in mapping.")
-    hook_fn = hook_fn_map_mt.get(mt_param_key)
+      raise ValueError(f"MaxText parameter {mt_param_key_or_keys} not found in mapping.")
+    hook_fn = hook_fn_map_mt.get(mt_param_key_or_keys)
 
     # Step 1: Resolves MaxText key(s) to target indices and shapes, based on maxtext_key form (single, multiple)
-    mt_target_idx, mt_target_shape = _get_maxtext_indices_and_shapes(mt_param_key, maxtext_abstract_dict)
+    mt_target_idx_or_indices, mt_target_shape_or_shapes = _get_maxtext_indices_and_shapes(
+        mt_param_key_or_keys, maxtext_abstract_dict
+    )
 
     # Step 2: Determine the loading function for hf key, based on hf_key form
-    load_fn = _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape, config)
+    load_fn = _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape_or_shapes, config)
 
     # Step 3: Load hf keys and convert to maxtext keys
     # based on tensor load mode (lazy, eager) and maxtext_key form (single, multiple)
-    _get_maxtext_weight(load_fn, mt_target_idx, mt_target_shape, mt_param_key, final_mt_weights, config, use_lazy_load)
+    _get_maxtext_weight(
+        load_fn,
+        mt_target_idx_or_indices,
+        mt_target_shape_or_shapes,
+        mt_param_key_or_keys,
+        final_mt_weights,
+        config,
+        use_lazy_load,
+    )
 
   del hf_state_dict_numpy
   max_logging.log("Weight transformation preparation complete.")
