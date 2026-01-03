@@ -78,6 +78,7 @@ class QuantizationType(str, Enum):
   FP8_NANO_V2 = "fp8_nanoo"
   FP8_GPU = "fp8_gpu"
   FP8_FULL = "fp8_full"
+  TE = "te_noscaling"
   TE_FP8_DS = "te_fp8_delayedscaling"
   TE_FP8_CS = "te_fp8_currentscaling"
   TE_MXFP8 = "te_mxfp8"
@@ -1830,7 +1831,10 @@ class MaxTextConfig(
         self.global_batch_size_to_eval_on,
         self.micro_batch_size_to_eval_on,
     ) = calculate_global_batch_sizes(
-        self.eval_per_device_batch_size, self.expansion_factor_real_data, self.num_target_devices, 1
+        self.eval_per_device_batch_size,
+        self.expansion_factor_real_data,
+        self.num_target_devices,
+        1,
     )
 
     # Calculate ramp-up batch size parameters if enabled.
