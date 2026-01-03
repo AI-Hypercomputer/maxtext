@@ -69,9 +69,9 @@ Setup following environment variables before running GRPO/GSPO:
 
 ```bash
 # -- Model configuration --
-export HF_MODEL='llama3.1-8b-Instruct'
-export MODEL='llama3.1-8b'
-export TOKENIZER='meta-llama/Llama-3.1-8B-Instruct'
+export HF_MODEL=<Hugging Face Model> # e.g. 'llama3.1-8b-Instruct'
+export MODEL=<MaxText Model> # e.g. 'llama3.1-8b'
+export TOKENIZER=<Tokenizer> # e.g. 'meta-llama/Llama-3.1-8B-Instruct'
 export HF_TOKEN=<Hugging Face access token>
 
 # -- MaxText configuration --

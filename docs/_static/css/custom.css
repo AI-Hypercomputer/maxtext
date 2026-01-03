@@ -209,3 +209,35 @@ html[data-theme="dark"] .button-primary:visited:hover {
     padding-inline: 50px;
     padding-bottom: 24px;
 }
+
+/* Inline inputs for editable commands */
+.inline-input {
+    background-color: rgba(255, 255, 255, 0.1);
+    color: inherit;
+    border: 1px solid #555;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-family: inherit;
+    font-size: inherit;
+    display: inline-block;
+    vertical-align: middle;
+    margin: 0 2px;
+    box-sizing: content-box;
+}
+
+.inline-input:focus {
+    outline: none;
+    border-color: #1A73E8;
+    background-color: rgba(255, 255, 255, 0.2);
+}
+
+html[data-theme="light"] .inline-input {
+    background-color: rgba(0, 0, 0, 0.05);
+    border-color: #ccc;
+    color: #333;
+}
+
+html[data-theme="light"] .inline-input:focus {
+    background-color: rgba(0, 0, 0, 0.1);
+    border-color: #1A73E8;
+}
