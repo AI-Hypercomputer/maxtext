@@ -10,7 +10,7 @@ The following models are supported:
 | :--- | :--- | :---: | :---: | :---: | :---: |
 | **Gemma2** | 2B, 9B, 27B | √ | √ | √ | √ |
 | **Gemma3** (Multimodal) | 4B, 12B, 27B | - | √ | - | √ |
-| **Llama3.1** | 8B, 70B*, 450B* | √ | √ | √ | √ |
+| **Llama3.1** | 8B, 70B, 450B* | √ | √ | √ | √ |
 | **Qwen3** | 0.6B, 4B, 8B, 14B, 32B | √ | √ | √ | √ |
 | **Qwen3 MoE** | 30B, 235B*, 480B* | √ | √ | √ | √ |
 | **Mixtral** | 8x7B, 8x22B* | √ | √ | √ | √ |
@@ -50,8 +50,8 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml
   * `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
   * `hf_access_token`: Your Hugging Face token.
   * `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Googld Cloud Storage (GCS) or local. If not set, the default output directory is `Maxtext/tmp`.
-  * `--lazy_load_tensors` (optional): If true, loads Hugging Face weights on-demand to minimize RAM usage.
-  * `--hf_model_path` (optional): Specify a local HF path, rather than the default repo `HF_IDS[model_name]`. Useful for locally dequantized HF model like gpt-oss or deepseek.
+  * `--lazy_load_tensors` (optional): If `true`, loads Hugging Face weights on-demand to minimize RAM usage.
+  * `--hf_model_path` (optional): Specify a local HF path, rather than the default repo `HF_IDS[model_name]`. Useful for locally dequantized HF model like GPT-OSS or DeepSeek.
 
 \*\**It only converts the official version of Hugging Face model. You can refer the supported official version in HF_IDS in `src/MaxText/utils/ckpt_conversion/utils/utils.py`*
 
@@ -82,6 +82,7 @@ python3 -m MaxText.utils.ckpt_conversion.to_huggingface src/MaxText/configs/base
   * `hf_access_token`: Your Hugging Face token.
   * `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
   * `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Googld Cloud Storage (GCS), Hugging Face Hub or local. If not set, the default output directory is `Maxtext/tmp`.
+  * `weight_dtype`: dtype for MaxText weights, default to `float32`. We recommend using `bfloat16` to save memory and speed up conversion.
 
 
 ## Verifying conversion correctness
