@@ -443,12 +443,12 @@ def _build_single_axis_stacked_tensor(
 
 
 def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape_or_shapes, config):
-  """Determine the loading function for hf key.
-  Condition: hf_key form
-    Case 1: str, unscanned
-    Case 2: nested list, scanned expert
-    Case 3: (un-nested) list, scanned
-    Case 4: (un-nested) list, unscanned expert
+  """Determine the loading function for HF keys.
+  HF keys can take four forms:
+    Case 1: Unscanned (single string)
+    Case 2: Scanned (list of strings)
+    Case 3: Unscanned with expert stacking (list of strings)
+    Case 4: Scanned with expert stacking (nested list of strings)
   """
   load_fn = None
   if not isinstance(hf_source_keys_or_key, list):
@@ -458,10 +458,10 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
 
     load_fn = partial(_loader, tensor_getter, hf_source_keys_or_key, mt_target_shape_or_shapes, hook_fn)
   # Stacked mapping
-  elif isinstance(hf_source_keys_or_key[0], list):
-    # Case 2: Multi-Axis Stacked hf keys
+  elif not isinstance(hf_source_keys_or_key[0], list):
+    # Case 2 or 3: Single-Axis Stacked hf keys
     load_fn = partial(
-        _build_multi_axis_stacked_tensor,
+        _build_single_axis_stacked_tensor,
         hf_source_keys_or_key,
         tensor_getter,
         hook_fn,
@@ -469,9 +469,10 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         config,
     )
   else:
-    # Case 3 or 4: Single-Axis Stacked hf keys
+    # isinstance(hf_source_keys_or_key[0], list)
+    # Case 4: Multi-Axis Stacked hf keys
     load_fn = partial(
-        _build_single_axis_stacked_tensor,
+        _build_multi_axis_stacked_tensor,
         hf_source_keys_or_key,
         tensor_getter,
         hook_fn,
@@ -482,16 +483,19 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
 
 
 def _get_maxtext_indices_and_shapes(mt_param_key_or_keys, maxtext_abstract_dict):
-  """Resolves MaxText key(s) to target indices and shapes, where index is order in maxtext_abstract_dict.keys.
-  Condition: maxtext_key form
-    Case 1: str, single mt key
-    Case 2: tuple, multiple mt key
+  """Resolves MaxText key(s) to target indices and shapes.
+
+  The index is the parameter's order in `maxtext_abstract_dict.keys()`. 
+  This function handles two forms of MaxText keys:
+  - `atomic_mt_key`: A single string representing one MaxText parameter that map to HF parameter(s).
+  - `composite_mt_key`: A tuple of strings for multiple MaxText parameters that map to HF parameter(s).
   """
-  is_many_mt_key = isinstance(mt_param_key_or_keys, tuple)
-  if not is_many_mt_key:
+  is_composite_mt_key = isinstance(mt_param_key_or_keys, tuple)
+  # atomic_mt_key
+  if not is_composite_mt_key:
     mt_target_idx, mt_target_shape = maxtext_abstract_dict[mt_param_key_or_keys]
     return mt_target_idx, mt_target_shape
-
+  # composite_mt_key
   mt_target_indices, mt_target_shapes = [], []
   for mt_param_key in mt_param_key_or_keys:
     mt_target_idx, mt_target_shape = maxtext_abstract_dict[mt_param_key]
@@ -509,31 +513,27 @@ def _get_maxtext_weight(
     config,
     use_lazy_load,
 ):
-  """Load hf keys and convert to maxtext keys.
-  Condition: tensor load mode
-    Case 1: Eager mode
-    Case 2: Lazy mode
-  Condition: maxtext_key form
-    Case *.1: str, single mt key
-    Case *.2: tuple, multiple mt key
+  """Loads Hugging Face parameters and converts them to MaxText parameters.
+
+  This function handles loading based on tensor mode (eager or lazy) and
+  processes MaxText keys, which can be `atomic_mt_key` or `composite_mt_key`.
   """
-  is_many_mt_key = isinstance(mt_param_key_or_keys, tuple)
+  is_composite_mt_key = isinstance(mt_param_key_or_keys, tuple)
   if not use_lazy_load:
     # Case 1: Eager mode
     # In eager mode, we execute the function immediately to get the
     # NumPy array and append it to our list of weights.
     final_mt_tensor_numpy = load_fn()
-    if not is_many_mt_key:
-      # Case 1.1: Eager mode, one mt key
+    if not is_composite_mt_key:
+      # Case 1.1: Eager mode, `atomic_mt_key`
       final_mt_weights[mt_target_idx_or_indices] = final_mt_tensor_numpy
       if final_mt_tensor_numpy.shape != mt_target_shape_or_shapes:
         raise ValueError(
             f"Shape mismatch for {mt_param_key_or_keys}: Expected {mt_target_shape_or_shapes}, got {final_mt_tensor_numpy.shape}"
         )
     else:
-      # Case 1.2: Eager mode, many mt key
-      # This block handles 1-to-N mappings (one HF tensor to multiple MaxText tensors)
-      # The hook function is expected to return a list/tuple of tensors.
+      # Case 1.2: Eager mode, `composite_mt_key`
+      # The hook returns a tensor that can be split in last dim.
       # In eager mode, we can just split the materialized tensor.
       for i, mt_target_idx in enumerate(mt_target_idx_or_indices):
         final_mt_weights[mt_target_idx] = final_mt_tensor_numpy[..., i]
@@ -550,13 +550,12 @@ def _get_maxtext_weight(
     # The actual data will only be loaded when Orbax calls `__array__`
     # on this object during the saving process.
     final_mt_tensor_numpy = LazyTensor(load_fn, mt_target_shape_or_shapes, config.weight_dtype, name=mt_param_key_or_keys)
-    if not is_many_mt_key:
-      # Case 2.1: Lazy mode, one mt key
+    if not is_composite_mt_key:
+      # Case 2.1: Lazy mode, `atomic_mt_key`
       final_mt_weights[mt_target_idx_or_indices] = final_mt_tensor_numpy
     else:
-      # Case 2.2: Lazy mode, many mt key
-      # This block handles 1-to-N mappings (one HF tensor to multiple MaxText tensors)
-      # The hook function is expected to return a list/tuple of tensors.
+      # Case 2.2: Lazy mode, `composite_mt_key`
+      # For a composite key, the hook returns a tensor that can be split in last dim.
       # For lazy loading, we can't split the tensor until it's loaded.
       # We create multiple LazyTensors, each responsible for loading the
       # full source tensor but then slicing its piece. Parent HF tensor is loaded repeatedly.

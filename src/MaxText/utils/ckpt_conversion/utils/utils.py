@@ -103,8 +103,9 @@ def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
     multi-variant maps like gemma3, qwen3, deepseek) are skipped.
 
   Args:
-    param_map_keys: MaxText keys from the param_mapping. Keys can be strings
-      (1-to-1 mapping) or tuples (N-to-1 mapping).
+    param_map_keys: MaxText keys from the `PARAM_MAPPING`. These can be:
+      - `atomic_mt_key`: A single string representing one MaxText parameter that map to HF parameter(s).
+      - `composite_mt_key`: A tuple of strings representing multiple MaxText parameters that map to HF parameter(s).
     maxtext_state_keys: Set of MaxText keys loaded from the Orbax checkpoint.
 
   Returns:
@@ -205,20 +206,21 @@ def process_maxtext_param(
 ) -> list[tuple[str, np.ndarray]]:
   """Processes a single MaxText parameter (or a group of parameters) for conversion, to_huggingface only.
 
-  This function is responsible for taking a MaxText parameter (which might be
-  a single tensor or a list of tensors for N-to-1 mappings) and transforming
+  This function is responsible for taking a MaxText parameter and transforming
   it into one or more Hugging Face compatible parameters. It handles various
-  scenarios including:
-  - 1-to-1 mappings (single MaxText param to single HF param).
-  - N-to-1 mappings (multiple MaxText params combined into a single HF param).
-  - Stacked MaxText parameters (e.g., scanned layers or MoE experts) that need
-    to be unstacked into individual Hugging Face parameters.
+  scenarios based on 
+  - the MaxText key form (`atomic_mt_key` or `composite_mt_key`)
+  - and the Hugging Face value form (unscanned string, scanned list of strings,
+  unscanned with expert stacking, or scanned with expert stacking).
+  Note: We assume composite_mt_key can only occur for unscanned/scanned HF keys, but not those with expert stacking.
 
   Args:
-    maxtext_param_key: The key (or tuple of keys for N-to-1 mappings) identifying
-      the MaxText parameter(s) being processed.
+    maxtext_param_key: The key identifying the MaxText parameter(s). Can be
+      an `atomic_mt_key` (str) or a `composite_mt_key` (tuple of str) mapping
+      to HF parameter(s).
     maxtext_param_weight: The actual weight(s) of the MaxText parameter(s).
-      This can be a single `jax.Array` or a list of `jax.Array` for N-to-1 mappings.
+      This can be a single `jax.Array` for an `atomic_mt_key` or a list of
+      `jax.Array` for a `composite_mt_key`.
     param_map: A dictionary mapping MaxText parameter keys to their corresponding
       Hugging Face target path(s).
     hook_fn_map: A dictionary mapping MaxText parameter keys to transformation
@@ -247,68 +249,69 @@ def process_maxtext_param(
   # This list will store tuples of (hf_path, hf_weight)
   output_weights = []
 
-  # Case 1: Unscan
+  # Case 1: Unscanned
   if not isinstance(hf_target_paths, list):
     max_logging.log("\tunscan")
     hf_path = hf_target_paths
     _process(hf_path, maxtext_param_weight, output_weights, current_hook_fns, hf_shape_map)
     return output_weights
-
+  
   # Stacked MaxText weight
   # This now handles three cases:
-  # 2. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
-  # 3. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
-  # 4. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
-  is_scanned_moe_layer = isinstance(hf_target_paths[0], list)
+  # 2. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
+  # 3. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
+  # 4. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
 
-  if is_scanned_moe_layer:
-    max_logging.log("\tscan moe")
-    # Case 2: Scanned MoE layer, e.g., from 'layers-moe_block-wi_0'.
-    # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
-    # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
-    expert_axis_to_slice = 0
+  if not isinstance(hf_target_paths[0], list):
+    # Case 2 or 3: The source tensor is stacked on a single axis.
+    # i.e., hf_target_paths is an (un-nested) list
+    # We determine if it's standard scanned (stack on layer axis) or unscanned MoE (stack on expert axis).
+    if maxtext_config.scan_layers:
+      max_logging.log("\tscan")
+      # Case 2: Standard scanned layer.
+      # The tensor is stacked ONLY on the layer axis.
+      axis_to_slice = maxtext_config.param_scan_axis
+    else:
+      max_logging.log("\tunscan moe")
+      # Case 3: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
+      # The tensor is stacked ONLY on the expert axis. Assuming expert is axis 0.
+      axis_to_slice = 0
 
-    # Outer loop for experts
-    for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
-      # Slice along the expert axis to get the tensor for the current expert across all layers.
-      expert_tensor_slice = jax.lax.index_in_dim(
-          maxtext_param_weight, expert_idx, axis=expert_axis_to_slice, keepdims=False
-      )
-      # Inner loop for layers
-      for layer_idx, hf_path in enumerate(expert_paths_for_layer):
-        # Slice the expert tensor along the layer axis to get the final individual weight.
-        # axis is 0 on the new sliced tensor
-        layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
-        _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, hf_shape_map)
+    # Iterate through the slices of the MaxText weight along the determined stacking axis.
+    for i, hf_path in enumerate(hf_target_paths):
+      if isinstance(maxtext_param_weight, list):
+        # This handles `composite_mt_key` mappings where `maxtext_param_weight` is a list of tensors.
+        # Each tensor in the list is sliced independently along the `axis_to_slice`.
+        weight_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
+      else:
+        # For `atomic_mt_key` mappings, slice the single MaxText tensor.
+        weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
+      _process(hf_path, weight_slice, output_weights, current_hook_fns, hf_shape_map)
 
     return output_weights
 
-  # Case 3 or 4: The source tensor is stacked on a single axis.
-  # i.e., hf_target_paths is an (un-nested) list
-  # We determine if it's standard scanned (stack on layer axis) or unscanned MoE (stack on expert axis).
-  if maxtext_config.scan_layers:
-    max_logging.log("\tscan")
-    # Case 3: Standard scanned layer.
-    # The tensor is stacked ONLY on the layer axis.
-    axis_to_slice = maxtext_config.param_scan_axis
-  else:
-    max_logging.log("\tunscan moe")
-    # Case 4: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
-    # The tensor is stacked ONLY on the expert axis. Assuming expert is axis 0.
-    axis_to_slice = 0
+  # Multi axis stacked: isinstance(hf_target_paths[0], list)
+  max_logging.log("\tscan moe")
+  # Case 4: Scanned MoE layer, e.g., from 'layers-moe_block-wi_0'.
+  # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
+  # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
+  expert_axis_to_slice = 0
 
-  # Iterate through the slices of the MaxText weight along the determined stacking axis.
-  for i, hf_path in enumerate(hf_target_paths):
-    if isinstance(maxtext_param_weight, list):
-      # This handles N-to-1 mappings where `maxtext_param_weight` is a list of tensors.
-      # Each tensor in the list is sliced independently along the `axis_to_slice`.
-      weight_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
-    else:
-      # For 1-to-1 mappings, slice the single MaxText tensor.
-      weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
-    _process(hf_path, weight_slice, output_weights, current_hook_fns, hf_shape_map)
+  # Outer loop for experts
+  for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
+    # Slice along the expert axis to get the tensor for the current expert across all layers.
+    expert_tensor_slice = jax.lax.index_in_dim(
+        maxtext_param_weight, expert_idx, axis=expert_axis_to_slice, keepdims=False
+    )
+    # Inner loop for layers
+    for layer_idx, hf_path in enumerate(expert_paths_for_layer):
+      # Slice the expert tensor along the layer axis to get the final individual weight.
+      # axis is 0 on the new sliced tensor
+      layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
+      _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, hf_shape_map)
 
   return output_weights
+
 
 
 def create_huggingface_hub_repo_if_not_exist(repo_id, repo_type):
