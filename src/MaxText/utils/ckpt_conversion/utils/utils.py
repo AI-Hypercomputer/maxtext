@@ -94,9 +94,9 @@ def _get_local_directory(output_dir: str) -> str:
 
 
 def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
-  """Validates param_mapping coverage and filters unused keys.
+  """Validates param_mapping coverage and filters unused keys, for to_maxtext and to_huggingface.
 
-  Preprocess maxtext keys for transformation in to_maxtext.py and to_huggingface.py.
+  Preprocess maxtext keys for transformation.
   - Ensures every MaxText checkpoint key (`maxtext_state_keys`) is covered by
     the flattened param_mapping.
   - Keys in the param_mapping that are not present in the checkpoint (common for
@@ -146,13 +146,47 @@ def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
   return filtered_map_keys
 
 
+def apply_hook_fns(weight, target_shape, hook_fns):
+  """Apply hook functions, essential for to_maxtext and to_huggingface"""
+  # If hook is unsepecified, use identity
+  if hook_fns is None:
+    return weight
+  if not isinstance(hook_fns, list):
+    hook_fns = [hook_fns]
+  # Apply a list of hooks, be careful of order
+  for hook_fn in hook_fns[::-1]:
+    weight = hook_fn(weight, target_shape)
+  return weight
+
+
+def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = None) -> np.ndarray:
+  """Converts a JAX array to a NumPy array with the specified dtype, to_huggingface only"""
+  final_dtype_str = str(weight.dtype) if dtype_str is None else dtype_str
+  # JAX dtypes like 'bfloat16', 'float32' are understood by np.dtype()
+  target_np_dtype = np.dtype(final_dtype_str)
+  expected_shape = weight.shape
+
+  # Gather the array across devices if it's sharded.
+  # process_allgather typically returns the array on the host.
+  weight = multihost_utils.process_allgather(weight)
+
+  # Convert JAX array to NumPy array.
+  np_array = np.array(weight)
+
+  # Cast to the target NumPy dtype if it's different.
+  if np_array.dtype != target_np_dtype:
+    np_array = np_array.astype(target_np_dtype)
+
+  return np_array.reshape(expected_shape)  # Reshape for safety, though usually preserved.
+
+
 def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map):
-  """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list."""
+  """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list, to_huggingface only"""
   if hf_path not in hf_shape_map:
     raise ValueError(f"HF path '{hf_path}' not found in hf_shape_map.")
   target_hf_shape = hf_shape_map[hf_path]
+  # If hook is unsepecified, use identity
   if current_hook_fns:
-    # otherwise identity
     processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
   numpy_slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
   assert len(target_hf_shape) == len(
@@ -169,7 +203,7 @@ def process_maxtext_param(
     hf_shape_map: dict[str, Any],
     maxtext_config: Any,
 ) -> list[tuple[str, np.ndarray]]:
-  """Processes a single MaxText parameter (or a group of parameters) for conversion to Hugging Face format.
+  """Processes a single MaxText parameter (or a group of parameters) for conversion, to_huggingface only.
 
   This function is responsible for taking a MaxText parameter (which might be
   a single tensor or a list of tensors for N-to-1 mappings) and transforming
@@ -275,37 +309,6 @@ def process_maxtext_param(
     _process(hf_path, weight_slice, output_weights, current_hook_fns, hf_shape_map)
 
   return output_weights
-
-
-def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = None) -> np.ndarray:
-  """Converts a JAX array to a NumPy array with the specified dtype."""
-  final_dtype_str = str(weight.dtype) if dtype_str is None else dtype_str
-  # JAX dtypes like 'bfloat16', 'float32' are understood by np.dtype()
-  target_np_dtype = np.dtype(final_dtype_str)
-  expected_shape = weight.shape
-
-  # Gather the array across devices if it's sharded.
-  # process_allgather typically returns the array on the host.
-  weight = multihost_utils.process_allgather(weight)
-
-  # Convert JAX array to NumPy array.
-  np_array = np.array(weight)
-
-  # Cast to the target NumPy dtype if it's different.
-  if np_array.dtype != target_np_dtype:
-    np_array = np_array.astype(target_np_dtype)
-
-  return np_array.reshape(expected_shape)  # Reshape for safety, though usually preserved.
-
-
-def apply_hook_fns(weight, target_shape, hook_fns):
-  if hook_fns is None:
-    return weight
-  if not isinstance(hook_fns, list):
-    hook_fns = [hook_fns]
-  for hook_fn in hook_fns[::-1]:
-    weight = hook_fn(weight, target_shape)
-  return weight
 
 
 def create_huggingface_hub_repo_if_not_exist(repo_id, repo_type):
@@ -736,7 +739,7 @@ def print_ram_usage(stage=""):
 
 
 def get_hf_model(model_id: str, token: str):
-  """Loads the HuggingFace model based on model_id (Eager mode only)."""
+  """Loads the HuggingFace model based on model_id (Eager mode only), to_maxtext"""
   if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
     from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
 

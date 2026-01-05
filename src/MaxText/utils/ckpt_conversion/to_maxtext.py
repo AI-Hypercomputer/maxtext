@@ -311,6 +311,51 @@ class LazyTensorHandler(type_handlers.NumpyHandler):
 type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=True)
 
 
+def get_maxtext_model_info(config):
+  """Initializes the abstract MaxText model and returns parameter mapping information.
+
+  Args:
+    config: The MaxText configuration object.
+
+  Returns:
+    maxtext_abstract_dict: A dictionary mapping MaxText parameter keys to a tuple
+      (index, target_shape), where 'index' is the position of the parameter in the
+      flattened parameter list.
+    abstract_params_treedef: The tree structure definition of the abstract model parameters.
+  """
+  # Setup JAX distributed system and mesh
+  devices_array = maxtext_utils.create_device_mesh(config)
+  mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
+
+  max_logging.log("Initializing MaxText abstract model...")
+  quant = quantizations.configure_quantization(config)
+  maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+
+  # Get abstract model structure (name, shape) without materializing the weights to save memory
+  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+
+  abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
+  # Standardize abstract tree for later unflattening
+  abstract_params_tree = jax.tree.map(
+      lambda _: 0,
+      abstract_params_tree,
+      is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
+  )
+  abstract_params_treedef = jax.tree_util.tree_structure(abstract_params_tree)
+
+  max_logging.log("MaxText abstract model and state initialized.")
+
+  # preprocess state
+  maxtext_abstract_dict = {}
+  for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
+    key_parts = [k.key for k in path_tuple if hasattr(k, "key")]
+    mt_param_key = "params-" + "-".join(key_parts)
+    mt_target_shape = abstract_leaf_value.shape
+    maxtext_abstract_dict[mt_param_key] = (mt_target_idx, mt_target_shape)
+
+  return maxtext_abstract_dict, abstract_params_treedef
+
+
 def _build_multi_axis_stacked_tensor(
     hf_source_keys: List[List[str]],
     tensor_getter_fn: Callable[[str], np.ndarray],
@@ -436,51 +481,6 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
   return load_fn
 
 
-def get_maxtext_model_info(config):
-  """Initializes the abstract MaxText model and returns parameter mapping information.
-
-  Args:
-    config: The MaxText configuration object.
-
-  Returns:
-    maxtext_abstract_dict: A dictionary mapping MaxText parameter keys to a tuple
-      (index, target_shape), where 'index' is the position of the parameter in the
-      flattened parameter list.
-    abstract_params_treedef: The tree structure definition of the abstract model parameters.
-  """
-  # Setup JAX distributed system and mesh
-  devices_array = maxtext_utils.create_device_mesh(config)
-  mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
-
-  max_logging.log("Initializing MaxText abstract model...")
-  quant = quantizations.configure_quantization(config)
-  maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-
-  # Get abstract model structure (name, shape) without materializing the weights to save memory
-  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
-
-  abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
-  # Standardize abstract tree for later unflattening
-  abstract_params_tree = jax.tree.map(
-      lambda _: 0,
-      abstract_params_tree,
-      is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
-  )
-  abstract_params_treedef = jax.tree_util.tree_structure(abstract_params_tree)
-
-  max_logging.log("MaxText abstract model and state initialized.")
-
-  # preprocess state
-  maxtext_abstract_dict = {}
-  for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
-    key_parts = [k.key for k in path_tuple if hasattr(k, "key")]
-    mt_param_key = "params-" + "-".join(key_parts)
-    mt_target_shape = abstract_leaf_value.shape
-    maxtext_abstract_dict[mt_param_key] = (mt_target_idx, mt_target_shape)
-
-  return maxtext_abstract_dict, abstract_params_treedef
-
-
 def _get_maxtext_indices_and_shapes(mt_param_key_or_keys, maxtext_abstract_dict):
   """Resolves MaxText key(s) to target indices and shapes, where index is order in maxtext_abstract_dict.keys.
   Condition: maxtext_key form
@@ -588,7 +588,6 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
         args[i] = f"model_name={model_name_arg}"
       break
 
-  config = pyconfig.initialize(args)
   # check the supported model ids
   if model_name_original not in HF_IDS:
     raise ValueError(f"Unsupported model name: {model_name_original}. Supported models are: {list(HF_IDS.keys())}")
@@ -598,7 +597,10 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   else:
     model_id = test_args.hf_model_path
 
+  # Initialize maxtext config
+  config = pyconfig.initialize(args)
   max_utils.print_system_information()
+
   if not config.base_output_directory:
     output_directory = f"tmp/{config.run_name}"
   else:

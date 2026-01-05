@@ -1053,10 +1053,7 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
   """
 
   def transpose(input_tensor, target_shape=None):
-    if saving_to_hf:
-      return input_tensor.T
-    else:
-      return input_tensor.T
+    return input_tensor.T
 
   def reshape_kernel(input_tensor, target_shape):
     """Reshapes and transposes kernel weights between MaxText and HF."""
