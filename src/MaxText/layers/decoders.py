@@ -404,9 +404,9 @@ class Decoder(nn.Module):
         return [mixtral.MixtralDecoderLayerToLinen]
       case DecoderBlockType.DEEPSEEK:
         if self.config.use_batch_split_schedule:
-          return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
+          return [deepseek_batchsplit.DeepSeekDenseLayerToLinen, deepseek_batchsplit.DeepSeekMoELayerToLinen]
         else:
-          return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
+          return [deepseek.DeepSeekDenseLayerToLinen, deepseek.DeepSeekMoELayerToLinen]
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
