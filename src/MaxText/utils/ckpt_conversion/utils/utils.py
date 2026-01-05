@@ -154,7 +154,7 @@ def apply_hook_fns(weight, target_shape, hook_fns):
   if not isinstance(hook_fns, list):
     hook_fns = [hook_fns]
   # Apply a list of hooks, be careful of order
-  for hook_fn in hook_fns[::-1]:
+  for hook_fn in hook_fns:
     weight = hook_fn(weight, target_shape)
   return weight
 

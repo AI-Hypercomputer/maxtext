@@ -381,15 +381,18 @@ def main(config, test_args):  # pylint: disable=W0621
     """Comparing maxtext model with HF model on-the-fly"""
     if test_args.hf_model_path == "":
       raise ValueError("run_hf_model requires hf_model_path")
-    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch.bfloat16)
+
+    hf_token = config.hf_access_token
+    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch.bfloat16, token=hf_token)
 
     if os.path.isdir(test_args.hf_model_path):
-      tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path)
+      tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, token=hf_token)
     else:
-      tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path)
+      tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path, token=hf_token)
 
-    pad_token_models = ["Llama-3.1", "Mixtral-8x"]
-    if any(model in test_args.hf_model_path for model in pad_token_models):
+    # maxtext model prefix, use eos token as pad token
+    pad_token_prefixes = ["llama3.1", "mixtral"]
+    if any(config.model_name.startswith(prefix) for prefix in pad_token_prefixes):
       tokenizer.pad_token = tokenizer.eos_token
 
     init_rng = jax.random.PRNGKey(config.init_weights_seed)

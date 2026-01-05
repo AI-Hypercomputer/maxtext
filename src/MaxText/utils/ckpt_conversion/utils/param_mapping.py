@@ -467,62 +467,41 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
     # TODO(wenxindongwork), Perhaps, this dtype should be the activation dtype
     normalizer = np.dtype("float32").type(config["hidden_size"] ** 0.5)
 
-    def to_hf():
+    if saving_to_hf:
       target_tensor = input_tensor[: target_shape[0], : target_shape[1]]
       target_tensor = target_tensor / normalizer
       target_tensor = target_tensor.astype(input_tensor.dtype)
       return target_tensor
-
-    def from_hf():
+    else:
       target_tensor = np.zeros(target_shape, dtype=input_tensor.dtype)
       target_tensor[: input_tensor.shape[0], : input_tensor.shape[1]] = input_tensor
       target_tensor = target_tensor * normalizer
       target_tensor = target_tensor.astype(input_tensor.dtype)
       return target_tensor
 
-    if saving_to_hf:
-      return to_hf()
-    else:
-      return from_hf()
-
   def reshape_kernel(input_tensor, target_shape):
-    def to_hf():
+    if saving_to_hf:
       flipped_target_shape = np.flip(np.array(target_shape))
       return input_tensor.reshape(flipped_target_shape).T
-
-    def from_hf():
+    else:
       return input_tensor.T.reshape(target_shape)
 
-    if saving_to_hf:
-      return to_hf()
-    else:
-      return from_hf()
-
   def scale_rmsnorm_layer(input_tensor, target_shape):
-    def to_hf():
+    if saving_to_hf:
       return (input_tensor - 1.0).reshape(target_shape)
-
-    def from_hf():
+    else:
       return (input_tensor + 1.0).reshape(target_shape)
 
-    if saving_to_hf:
-      return to_hf()
-    else:
-      return from_hf()
-
   def scale_query_layer(input_tensor, target_shape):
-    def to_hf():
+    if saving_to_hf:
       depth_scale = np.dtype("float32").type(np.sqrt(config["head_dim"]))
       return (input_tensor * depth_scale).astype(input_tensor.dtype)
-
-    def from_hf():
+    else:
       depth_scale = np.dtype("float32").type(1 / np.sqrt(config["head_dim"]))
       return (input_tensor * depth_scale).astype(input_tensor.dtype)
 
-    if saving_to_hf:
-      return to_hf()
-    else:
-      return from_hf()
+  # hook order does not affect result
+  query_hook_chain = [reshape_kernel, scale_query_layer]
 
   mapping = {
       "params-token_embedder-embedding": pad_hf_embedding_layer,
@@ -531,14 +510,8 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
   if scan_layers:
     mapping = {
         **mapping,
-        "params-decoder-layers-self_attention_global-query-kernel": [
-            reshape_kernel,
-            scale_query_layer,
-        ],
-        "params-decoder-layers-self_attention_local-query-kernel": [
-            reshape_kernel,
-            scale_query_layer,
-        ],
+        "params-decoder-layers-self_attention_global-query-kernel": query_hook_chain,
+        "params-decoder-layers-self_attention_local-query-kernel": query_hook_chain,
         "params-decoder-layers-self_attention_global-key-kernel": reshape_kernel,
         "params-decoder-layers-self_attention_local-key-kernel": reshape_kernel,
         "params-decoder-layers-self_attention_global-value-kernel": reshape_kernel,
@@ -564,14 +537,8 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
     for maxtext_layer_idx in range(nlayers // 2):
       mapping = {
           **mapping,
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-query-kernel": [
-              reshape_kernel,
-              scale_query_layer,
-          ],
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-query-kernel": [
-              reshape_kernel,
-              scale_query_layer,
-          ],
+          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-query-kernel": query_hook_chain,
+          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-query-kernel": query_hook_chain,
           f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": reshape_kernel,
           f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-key-kernel": reshape_kernel,
           f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-value-kernel": reshape_kernel,
@@ -1293,63 +1260,46 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   nlayers = config["num_hidden_layers"]
 
   def scale_query_layer(input_tensor, target_shape):
-    def to_hf():
-      depth_scale = np.dtype("float32").type(np.sqrt(config["head_dim"]))
-
-      original_dtype = input_tensor.dtype
-      output_tensor = input_tensor.astype(np.float32) * depth_scale
-      return output_tensor.astype(original_dtype)
-
-    def from_hf():
-      depth_scale = np.dtype("float32").type(1 / np.sqrt(config["head_dim"]))
-
-      original_dtype = input_tensor.dtype
-      output_tensor = input_tensor.astype(np.float32) * depth_scale
-      return output_tensor.astype(original_dtype)
-
     if saving_to_hf:
-      return to_hf()
+      depth_scale = np.dtype("float32").type(np.sqrt(config["head_dim"]))
+      original_dtype = input_tensor.dtype
+      output_tensor = input_tensor.astype(np.float32) * depth_scale
+      return output_tensor.astype(original_dtype)
     else:
-      return from_hf()
+      depth_scale = np.dtype("float32").type(1 / np.sqrt(config["head_dim"]))
+      original_dtype = input_tensor.dtype
+      output_tensor = input_tensor.astype(np.float32) * depth_scale
+      return output_tensor.astype(original_dtype)
 
   def adjust_rope(input_tensor, target_shape):
-    def from_hf(arr):
-      """Convert from HF's concatenated layout to MaxText's interleaved layout"""
+    arr = input_tensor
+    if saving_to_hf:
+      # Convert from MaxText's interleaved layout to HF's concatenated layout
+      evens = arr[..., ::2]
+      odds = arr[..., 1::2]
+      return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+    else:
+      # Convert from HF's concatenated layout to MaxText's interleaved layout
       half_dim = arr.shape[-1] // 2
       first_half = arr[..., :half_dim]
       second_half = arr[..., half_dim:]
       return jax.numpy.stack([first_half, second_half], axis=-1).reshape(arr.shape)
 
-    def to_hf(arr):
-      """Convert from MaxText's interleaved layout to HF's concatenated layout"""
-      evens = arr[..., ::2]
-      odds = arr[..., 1::2]
-      return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
-
-    if saving_to_hf:
-      return to_hf(input_tensor)
-    else:
-      return from_hf(input_tensor)
-
   def reshape_kernel(input_tensor, target_shape):
-    def to_hf():
+    if saving_to_hf:
       flipped_target_shape = np.flip(np.array(target_shape))
       return input_tensor.reshape(flipped_target_shape).transpose()
-
-    def from_hf():
+    else:
       return input_tensor.transpose().reshape(target_shape)
 
-    if saving_to_hf:
-      return to_hf()
-    else:
-      return from_hf()
-
-  query_hooks = [reshape_kernel, adjust_rope, scale_query_layer]
-  key_hooks = [reshape_kernel, adjust_rope]
-
+  # caveat: hook order does affect result
+  # to_huggingface
+  query_hook_chain = [scale_query_layer, adjust_rope, reshape_kernel]
+  key_hook_chain = [adjust_rope, reshape_kernel]
+  # to_maxtext
   if not saving_to_hf:
-    query_hooks.reverse()
-    key_hooks.reverse()
+    query_hook_chain.reverse()
+    key_hook_chain.reverse()
 
   hook_fns = {}
 
@@ -1358,8 +1308,8 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   if scan_layers:
     hook_fns = {
         **hook_fns,
-        "params-decoder-layers-self_attention-query-kernel": query_hooks,
-        "params-decoder-layers-self_attention-key-kernel": key_hooks,
+        "params-decoder-layers-self_attention-query-kernel": query_hook_chain,
+        "params-decoder-layers-self_attention-key-kernel": key_hook_chain,
         "params-decoder-layers-self_attention-value-kernel": reshape_kernel,
         "params-decoder-layers-self_attention-out-kernel": reshape_kernel,
         "params-decoder-layers-mlp-wi_0-kernel": reshape_kernel,
@@ -1368,8 +1318,8 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     }
   else:
     for layer_idx in range(nlayers):
-      hook_fns[f"params-decoder-layers_{layer_idx}-self_attention-query-kernel"] = query_hooks
-      hook_fns[f"params-decoder-layers_{layer_idx}-self_attention-key-kernel"] = key_hooks
+      hook_fns[f"params-decoder-layers_{layer_idx}-self_attention-query-kernel"] = query_hook_chain
+      hook_fns[f"params-decoder-layers_{layer_idx}-self_attention-key-kernel"] = key_hook_chain
       hook_fns[f"params-decoder-layers_{layer_idx}-self_attention-value-kernel"] = reshape_kernel
       hook_fns[f"params-decoder-layers_{layer_idx}-self_attention-out-kernel"] = reshape_kernel
       hook_fns[f"params-decoder-layers_{layer_idx}-mlp-wi_0-kernel"] = reshape_kernel
@@ -1541,6 +1491,9 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       # (N*D, H) -> (H, N*D) -> (H, N, D)
       return x.transpose().reshape(target_shape)
 
+  # hook order does not affect result
+  query_hook_chain = [reshape_and_transpose_attention, scale_query_layer]
+
   def reshape_kernel(x, target_shape):
     return x.transpose()
 
@@ -1554,7 +1507,7 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
 
   if scan_layers:
     plan = [
-        ("params-decoder-layers-self_attention-query-kernel", [reshape_and_transpose_attention, scale_query_layer]),
+        ("params-decoder-layers-self_attention-query-kernel", query_hook_chain),
         ("params-decoder-layers-self_attention-key-kernel", reshape_and_transpose_attention),
         ("params-decoder-layers-self_attention-value-kernel", reshape_and_transpose_attention),
         ("params-decoder-layers-self_attention-out-kernel", reshape_and_transpose_attention),
@@ -1565,7 +1518,7 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     ]
   else:
     plan = [
-        ("params-decoder-layers_{i}-self_attention-query-kernel", [reshape_and_transpose_attention, scale_query_layer]),
+        ("params-decoder-layers_{i}-self_attention-query-kernel", query_hook_chain),
         ("params-decoder-layers_{i}-self_attention-key-kernel", reshape_and_transpose_attention),
         ("params-decoder-layers_{i}-self_attention-value-kernel", reshape_and_transpose_attention),
         ("params-decoder-layers_{i}-self_attention-out-kernel", reshape_and_transpose_attention),
