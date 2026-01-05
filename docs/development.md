@@ -1,7 +1,7 @@
 ```{include} ../CONTRIBUTING.md
 ```
 
-## Contributing documentation
+## Contribute to documentation
 
 The MaxText documentation website is built using [Sphinx](https://www.sphinx-doc.org) and [MyST](https://myst-parser.readthedocs.io/en/latest/). Documents are written in [MyST Markdown syntax](https://myst-parser.readthedocs.io/en/latest/syntax/typography.html#syntax-core).
 
@@ -24,7 +24,7 @@ sphinx-build -b html . _build/html
 This will generate the documentation in the `docs/_build/html` directory. These files can be opened in a web browser directly, or you can use a simple HTTP server to serve the files. For example, you can run:
 
 ```bash
-python -m http.server -d docs/_build/html
+python -m http.server -d _build/html
 ```
 
 Then, open your web browser and navigate to `http://localhost:8000` to view the documentation.

@@ -172,14 +172,14 @@ class MixtralDecoderLayer(nnx.Module):
     # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
     # The `name` represents the weight name in JAX/checkpoints and so the class name
     # is just for readability.
-    mlp_lnx, load_balance_loss = self.MoeBlock_0(hidden_states)
+    mlp_lnx, load_balance_loss, _ = self.MoeBlock_0(hidden_states)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout(layer_output, deterministic=deterministic)
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
-    if load_balance_loss is not None:
+    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.sow("intermediates", "moe_lb_loss", load_balance_loss)
 
     if self.config.record_internal_nn_metrics:

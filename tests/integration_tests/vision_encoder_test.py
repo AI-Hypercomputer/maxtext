@@ -84,7 +84,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     input_images = images[jnp.newaxis, jnp.newaxis, ...]  # pytype: disable=unsupported-operands
 
     # Initialize only the vision encoder part and extract the corresponding params
-    vision_encoder_model = models.VisionEncoder(config)
+    vision_encoder_model = models.VisionEncoder(config, engine.mesh, rngs=engine.rng)
     vision_encoder_params = params["params"]["vision_encoder"]
 
     # Apply the vision encoder to get the image embeddings

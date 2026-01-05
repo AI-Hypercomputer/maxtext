@@ -16,9 +16,38 @@
 
 # Tutorials
 
+Explore our tutorials to learn how to use MaxText, from your first run to advanced post-training techniques.
+
+::::{grid} 1 2 2 2
+:gutter: 2
+
+:::{grid-item-card} 🚀 Getting Started
+:link: tutorials/first_run
+:link-type: doc
+
+Installation, prerequisites, verification, and your first training run.
+:::
+
+:::{grid-item-card} 📚 Pre-training
+:link: tutorials/pretraining
+:link-type: doc
+
+Step-by-step guides for pre-training with real datasets like C4 using HuggingFace, Grain, or TFDS.
+:::
+
+:::{grid-item-card} 🧩 Post-training
+:link: tutorials/post_training_index
+:link-type: doc
+
+Techniques for SFT, RL, and other post-training workflows on TPU.
+:::
+::::
+
 ```{toctree}
+:hidden:
 :maxdepth: 1
 
-tutorials/pre_training_index.md
+tutorials/first_run.md
+tutorials/pretraining.md
 tutorials/post_training_index.md
 ```

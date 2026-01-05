@@ -66,8 +66,7 @@ import jax
 import psutil
 from flax.training import train_state
 import flax.linen as nn
-from flax.linen import partitioning as nn_partitioning
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig
 from tqdm import tqdm
 from huggingface_hub import hf_hub_download, list_repo_files
 from safetensors import safe_open
@@ -83,16 +82,9 @@ from MaxText.inference_utils import str2bool
 from MaxText.layers import models, quantizations
 from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
+from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model
 
 jax.config.update("jax_platform_name", "cpu")
-
-
-def print_ram_usage(stage=""):
-  memory = psutil.virtual_memory()
-  max_logging.log(
-      f"[{stage}] RAM Usage: {memory.used / (1024**3):.2f}/{memory.total / (1024**3):.2f} GB ({memory.percent:.1f}%)"
-  )
 
 
 class MemoryMonitorTqdm(tqdm):
@@ -385,18 +377,6 @@ def _build_single_axis_stacked_tensor(
   return np.stack(tensors_to_stack, axis=axis_to_stack)
 
 
-def _get_hf_model(model_id: str, token: str):
-  """Loads the HuggingFace model based on model_id (Eager mode only)."""
-  # Some models require special classes to import
-  if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
-    from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
-
-    hf_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(model_id, token=token)
-  else:
-    hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=token)
-  return hf_model
-
-
 def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   # Check if the user is using an Instruct version. If so, use the base model architecture
   for i, arg in enumerate(args):
@@ -443,7 +423,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   else:
     max_logging.log(f"Lazy loading DISABLED. Loading full HuggingFace model: {model_id}...")
     hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
-    hf_model = _get_hf_model(model_id, token=hf_token)
+    hf_model = get_hf_model(model_id, token=hf_token)
     hf_state_dict_numpy = hf_model.state_dict()
     # Convert all to numpy immediately in eager mode
     for k, v in hf_state_dict_numpy.items():
@@ -466,8 +446,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   # Get abstract model structure (name, shape) without materializing the weights to save memory
-  with maxtext_model_flax.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
 
   abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
   # Standardize abstract tree for later unflattening

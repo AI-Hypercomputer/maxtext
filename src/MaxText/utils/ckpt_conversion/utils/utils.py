@@ -24,7 +24,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import jax
-import jax.tree_util
 from jax.experimental import multihost_utils
 
 from jaxtyping import Array
@@ -40,8 +39,10 @@ from safetensors.flax import save as save_flax_to_bytes
 from huggingface_hub import HfApi, repo_exists
 
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from transformers import AutoModelForCausalLM
 
 from MaxText import max_logging
+import psutil
 
 
 SAFE_TENSORS_CONFIG_FILE = "config.json"
@@ -76,6 +77,8 @@ HF_IDS = {
     "gpt-oss-20b": "openai/gpt-oss-20b",
     "gpt-oss-120b": "openai/gpt-oss-120b",
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+    "mixtral-8x7b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "mixtral-8x22b": "mistralai/Mixtral-8x22B-Instruct-v0.1",
 }
 
 
@@ -195,7 +198,10 @@ def process_maxtext_param(
 
   # Case 3 or 4: The source tensor is stacked on a single axis.
   # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
-  is_unscanned_moe = "moe_block" in maxtext_param_key and any(
+  # `w` is needed for weights, and except for gate.
+  # Gate values are stack in layers only, but weights are stack in both expert and layer.
+  moe_block_list = ["moe_block", "MoeBlock_0-w"]
+  is_unscanned_moe = any(block in maxtext_param_key for block in moe_block_list) and any(
       f"_{i}-" in maxtext_param_key for i in range(maxtext_config.base_num_decoder_layers)
   )
 
@@ -673,3 +679,21 @@ def upload_folder_to_gcs(local_folder: str, gs_bucket_path: str, num_workers: in
       max_logging.log(f"✅ Uploaded {name} to {bucket.name}/{destination_dir}{name}")
 
   max_logging.log(f"Upload completed in {time.time() - start_time}s")
+
+
+def print_ram_usage(stage=""):
+  memory = psutil.virtual_memory()
+  max_logging.log(
+      f"[{stage}] RAM Usage: {memory.used / (1024**3):.2f}/{memory.total / (1024**3):.2f} GB ({memory.percent:.1f}%)"
+  )
+
+
+def get_hf_model(model_id: str, token: str):
+  """Loads the HuggingFace model based on model_id (Eager mode only)."""
+  if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
+    from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
+
+    hf_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(model_id, token=token)
+  else:
+    hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=token)
+  return hf_model

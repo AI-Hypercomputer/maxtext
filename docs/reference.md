@@ -16,14 +16,46 @@
 
 # Reference documentation
 
+Deep dive into MaxText architecture, models, and core concepts.
+
+::::{grid} 1 2 2 2
+:gutter: 2
+
+:::{grid-item-card} 📊 Performance Metrics
+:link: reference/performance_metrics
+:link-type: doc
+
+Understanding Model Flops Utilization (MFU), calculation methods, and why it matters for performance optimization.
+:::
+
+:::{grid-item-card} 🤖 Models
+:link: reference/models
+:link-type: doc
+
+Supported models and architectures, including Llama, Qwen, and Mixtral. Details on tiering and new additions.
+:::
+
+:::{grid-item-card} 🏗️ Architecture
+:link: reference/architecture
+:link-type: doc
+
+High-level overview of MaxText design, JAX/XLA choices, and how components interact.
+:::
+
+:::{grid-item-card} 💡 Core Concepts
+:link: reference/core_concepts
+:link-type: doc
+
+Key concepts including checkpointing strategies, quantization, tiling, and Mixture of Experts (MoE) configuration.
+:::
+::::
+
 ```{toctree}
+:hidden:
 :maxdepth: 1
 
-reference/config_base.md
-reference/benchmark_and_performance.md
-reference/jax_xla_and_pallas.md
-reference/architecture_overview.md
-reference/tiering.md
-reference/supported_models_and_architectures.md
-reference/terminology.md
+reference/performance_metrics.md
+reference/models.md
+reference/architecture.md
+reference/core_concepts.md
 ```

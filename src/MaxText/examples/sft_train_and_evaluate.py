@@ -21,8 +21,11 @@ The primary goal is to demonstrate the end-to-end process of:
 
 ## Example command to run on single-host TPU:
 ```
-# Install dependencies in virtual environment
-bash setup.sh && bash src/MaxText/examples/install_tunix_vllm_requirement.sh
+# Install dependencies in virtual environment:
+# https://maxtext.readthedocs.io/en/latest/install_maxtext.html#from-pypi-recommended
+
+# Install post-training dependencies in virtual environment:
+bash tools/setup/setup_post_training_requirements.sh
 
 # Environment configurations
 export RUN_NAME=$(date +%Y-%m-%d-%H-%M-%S)

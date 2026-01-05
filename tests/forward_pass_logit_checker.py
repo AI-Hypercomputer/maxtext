@@ -39,6 +39,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import absl
 
 import numpy as np
 import jax
@@ -61,6 +62,8 @@ from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_
 from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
 from MaxText.layers import models
 from MaxText.layers import quantizations
+
+absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
 def upload_blob(bucket_name, source_file_name, destination_blob_name):
@@ -380,7 +383,8 @@ def main(config, test_args):  # pylint: disable=W0621
       raise ValueError("run_hf_model requires hf_model_path")
     hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch.bfloat16)
     tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path)
-    if "Llama-3.1" in test_args.hf_model_path:
+    pad_token_models = ["Llama-3.1", "Mixtral-8x"]
+    if any(model in test_args.hf_model_path for model in pad_token_models):
       tokenizer.pad_token = tokenizer.eos_token
 
     init_rng = jax.random.PRNGKey(config.init_weights_seed)

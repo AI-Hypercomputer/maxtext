@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG BASEIMAGE
+ARG BASEIMAGE=maxtext_base_image
 FROM ${BASEIMAGE}
-ARG MODE
 
+ARG MODE
 ENV MODE=$MODE
 
-RUN echo "Installing Post-Training dependencies (vLLM, tpu-common, tunix) with MODE=${MODE}"
+RUN echo "Installing Post-Training dependencies (vLLM, tpu-inference, tunix) with MODE=${MODE}"
 
 # Uninstall existing jax to avoid conflicts
 RUN pip uninstall -y jax jaxlib libtpu
@@ -26,6 +26,9 @@ RUN pip uninstall -y jax jaxlib libtpu
 RUN pip install aiohttp==3.12.15
 
 RUN pip install numba==0.61.2
+
+# Install Tunix
+RUN pip install google-tunix==0.1.5
 
 # Install vLLM for Jax and TPUs
 RUN pip install vllm-tpu

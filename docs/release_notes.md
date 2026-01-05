@@ -14,11 +14,11 @@
  limitations under the License.
  -->
 
-# MaxText Release Notes
+# MaxText release notes
 
 ## PyPI Package
 
-MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be installed through pip. Please see our [MaxText Installation Guide](https://maxtext.readthedocs.io/en/latest/guides/install_maxtext.html) for setup instructions.
+MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be installed through pip. Please see our [MaxText Installation Guide](https://maxtext.readthedocs.io/en/latest/install_maxtext.html) for setup instructions.
 
 ## Releases
 
@@ -26,6 +26,6 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 Our first MaxText PyPI package is here! MaxText is a high performance, highly scalable, open-source LLM library and reference implementation written in pure Python/JAX and targeting Google Cloud TPUs and GPUs for training. We are excited to make it easier than ever to get started.
 
-Users can now install MaxText through pip, both for local development and through stable PyPI builds. Please see our [MaxText Installation Guide](https://maxtext.readthedocs.io/en/latest/guides/install_maxtext.html) for more setup details.
+Users can now install MaxText through pip, both for local development and through stable PyPI builds. Please see our [MaxText Installation Guide](https://maxtext.readthedocs.io/en/latest/install_maxtext.html) for more setup details.
 
 Going forward, this page will document notable changes as we release new versions of MaxText.

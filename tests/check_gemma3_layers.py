@@ -27,6 +27,7 @@ from torch import nn
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 
 import numpy as np
 
@@ -77,6 +78,8 @@ class Gemma3RotaryEmbedding(nn.Module):
 
     self.config = config
     self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+
+    self.mesh = Mesh(jax.devices(), "data")
 
     inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
     self.register_buffer("inv_freq", inv_freq, persistent=False)
@@ -186,6 +189,7 @@ class Gemma3RotaryEmbeddingTest(unittest.TestCase):
     jax_rope = embeddings.RotaryEmbedding(
         min_timescale=min_timescale,
         max_timescale=max_timescale,
+        mesh=self.mesh,
         embedding_dims=head_dim,
         cast_as_fprop_dtype=False,
         fprop_dtype=jnp.float32,

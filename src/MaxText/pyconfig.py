@@ -29,6 +29,7 @@ from MaxText import max_utils
 from MaxText import pyconfig_deprecated
 from MaxText.common_types import DecoderBlockType, ShardMode
 from MaxText.configs import types
+from MaxText.configs.types import MaxTextConfig
 from MaxText.inference_utils import str2bool
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,12 @@ def _merge_logical_axis_rules(base_rules, new_rules):
   # Add all the new rules.
   updated_rules.extend(new_rules)
   return updated_rules
+
+
+def _apply_rules(base_rules, new_rules, config):
+  if config.get("override_logical_axis_rules"):
+    return new_rules
+  return _merge_logical_axis_rules(base_rules, new_rules)
 
 
 def _load_config(config_name: str) -> omegaconf.DictConfig:
@@ -104,7 +111,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   for key, value in raw_keys.items():
     if key not in valid_fields:
       logger.warning("Ignoring invalid/unsupported field from YAML/CLI: %s", repr(key))
-      continue
+      raise ValueError(f"{key!r} not in {", ".join(map(repr, valid_fields))}.")
 
     new_value = value
     if isinstance(new_value, str) and new_value.lower() == "none":
@@ -124,6 +131,16 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
 
     if key == "run_name" and new_value is None:
       new_value = ""
+
+    # Preprocess muon_consistent_rms to be None or float
+    if key == "muon_consistent_rms":
+      if value in ["None", "none"]:
+        new_value = None
+      else:
+        try:
+          new_value = float(value)
+        except ValueError as e:
+          raise ValueError("muon_consistent_rms should be None or float") from e
 
     pydantic_kwargs[key] = new_value
 
@@ -164,8 +181,11 @@ class HyperParameters:
 
   def __getattr__(self, attr: str) -> Any:
     """Provides attribute-style access to the final configuration dictionary."""
-    if attr in self._flat_config:
-      return self._flat_config[attr]
+    # Use object.__getattribute__ to avoid recursion when accessing _flat_config
+    # This is necessary for proper pickling/unpickling support
+    flat_config = object.__getattribute__(self, "_flat_config")
+    if attr in flat_config:
+      return flat_config[attr]
     raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'")
 
   def __setattr__(self, attr: str, value: Any) -> None:
@@ -179,6 +199,21 @@ class HyperParameters:
 
 def initialize(argv: list[str], **kwargs) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
+  pydantic_config = initialize_pydantic(argv, **kwargs)
+  config = HyperParameters(pydantic_config)
+
+  if config.log_config:
+    for k, v in sorted(config.get_keys().items()):
+      if k != "hf_access_token":
+        logger.info("Config param %s: %s", k, v)
+
+  return config
+
+
+def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
+  """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
+  Returns pydantic MaxTextConfig class whereas `initialize` returns the og `HyperParameters`
+  """
   # 1. Load base and inherited configs from file(s)
   config_path = resolve_config_path(argv[1])
   base_yml_config = _load_config(config_path)
@@ -222,8 +257,8 @@ def initialize(argv: list[str], **kwargs) -> HyperParameters:
   model_rules = omegaconf.OmegaConf.to_container(model_rules_oc, resolve=True) if model_rules_oc else []
   overrides_rules = omegaconf.OmegaConf.to_container(overrides_rules_oc, resolve=True) if overrides_rules_oc else []
 
-  merged_rules = _merge_logical_axis_rules(base_rules, model_rules)
-  merged_rules = _merge_logical_axis_rules(merged_rules, overrides_rules)
+  merged_rules = _apply_rules(base_rules, model_rules, model_cfg_oc)
+  merged_rules = _apply_rules(merged_rules, overrides_rules, overrides_cfg)
 
   # Remove the rules from the original configs before the main merge
   if "logical_axis_rules" in base_yml_config:
@@ -268,6 +303,9 @@ def initialize(argv: list[str], **kwargs) -> HyperParameters:
 
   pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict)
 
+  if pydantic_kwargs.get("use_tokamax_splash") and pydantic_kwargs.get("use_jax_splash"):
+    raise ValueError("At most one of `use_tokamax_splash` and `use_jax_splash` can be set to True.")
+
   # Initialize JAX distributed system before device backend is initialized.
   if pydantic_kwargs.get("jax_debug_log_modules"):
     jax.config.update("jax_debug_log_modules", pydantic_kwargs["jax_debug_log_modules"])
@@ -287,9 +325,9 @@ def initialize(argv: list[str], **kwargs) -> HyperParameters:
       if k not in KEYS_NO_LOGGING:
         logger.info("Config param %s: %s", k, v)
 
-  return config
+  return pydantic_config
 
 
 # Shim for backward compatibility with pyconfig_deprecated_test.py
 validate_and_update_keys = pyconfig_deprecated.validate_and_update_keys
-__all__ = ["initialize"]
+__all__ = ["initialize", "initialize_pydantic"]
