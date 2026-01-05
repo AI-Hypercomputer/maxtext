@@ -273,7 +273,7 @@ class MetricLogger:
     self.metadata[MetadataKey.PER_DEVICE_TOKENS] = maxtext_utils.calculate_tokens_training_per_device(self.config)
     max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
     max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self.writer)
-    max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], self.writer)
+    max_utils.add_text_to_summary_writer("libtpu_init_args", os.getenv("LIBTPU_INIT_ARGS", ""), self.writer)
     maxtext_utils.add_config_to_summary_writer(self.config, self.writer)
 
   def get_performance_metric_queue(self, config):

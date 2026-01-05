@@ -305,7 +305,7 @@ def validate_keys(keys):
     validate_mlp_dim(keys)
     validate_sparse_matmul_parallelism(keys)
     validate_ring_of_experts_parallelism(keys)
-    validate_shard_fsdp_on_expert_parallelism(keys)
+    validate_shard_expert_on_fsdp(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
     validate_gpt_oss_moe(keys)
@@ -1212,12 +1212,12 @@ def validate_ring_of_experts_parallelism(raw_keys):
     raise ValueError("Ring-of-experts requires expert-parallelism to be enabled.")
 
 
-def validate_shard_fsdp_on_expert_parallelism(raw_keys):
-  if raw_keys["fsdp_shard_on_exp"] and raw_keys["num_experts"] % raw_keys["ici_fsdp_parallelism"] != 0:
-    raise ValueError("fsdp_shard_on_exp requires num_experts is divisiable by ici_fsdp_parallelism.")
-  if raw_keys["fsdp_shard_on_exp"] and (using_tensor_parallelism(raw_keys) or using_expert_parallelism(raw_keys)):
+def validate_shard_expert_on_fsdp(raw_keys):
+  if raw_keys["shard_exp_on_fsdp"] and raw_keys["num_experts"] % raw_keys["ici_fsdp_parallelism"] != 0:
+    raise ValueError("shard_exp_on_fsdp requires num_experts is divisiable by ici_fsdp_parallelism.")
+  if raw_keys["shard_exp_on_fsdp"] and (using_tensor_parallelism(raw_keys) or using_expert_parallelism(raw_keys)):
     raise ValueError(
-        "fsdp_shard_on_exp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1."
+        "shard_exp_on_fsdp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1."
     )
 
 

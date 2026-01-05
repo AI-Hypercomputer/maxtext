@@ -342,7 +342,7 @@ class RoutedMoE(nnx.Module):
     self.quant = quant
     self.rngs = rngs
 
-    if self.config.fsdp_shard_on_exp:
+    if self.config.shard_exp_on_fsdp:
       # special sharding for dsv3
       self.wi_kernel_axes = ("embed_no_exp", None, "mlp")
       self.wo_kernel_axes = ("embed_no_exp", "mlp", None)
@@ -1012,10 +1012,10 @@ class RoutedMoE(nnx.Module):
     # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
     # mlp_no_fsdp axis
     weight_gather = False
-    if self.config.fsdp_shard_on_exp:
+    if self.config.shard_exp_on_fsdp:
       quantization_rule = qpl.get_current_rule("gmm")
       if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
-        # special sharding when using static scaling for weights in quantization with fsdp_shard_on_exp
+        # special sharding when using static scaling for weights in quantization with shard_exp_on_fsdp
         w0_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
         w1_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
         wo_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes)

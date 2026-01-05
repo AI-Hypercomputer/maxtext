@@ -172,6 +172,7 @@ def get_slices():
       "gcloud",
       "compute",
       "tpus",
+      "tpu-vm",
       "describe",
       slice_names[0],
       "--flatten=networkEndpoints[]",

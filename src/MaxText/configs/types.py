@@ -553,7 +553,9 @@ class MoEGeneral(BaseModel):
   num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
-  use_custom_sort_vjp: bool = Field(True, description="Whether to use a custom sort VJP for sparse matmul ops.")
+  use_custom_sort_vjp: bool = Field(
+      True, description="Whether to use a custom VJP sort for efficient backward pass processing in sparse matmul."
+  )
   use_ring_of_experts: bool = Field(
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
@@ -568,10 +570,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Use two separate All-Gather calls for MoE weights sharded on both FSDP and FSDP-transpose.",
   )
-  fsdp_shard_on_exp: bool = Field(
+  shard_exp_on_fsdp: bool = Field(
       False,
-      description="Shard the MoE weights on the num_expert dimension. Can be performant when "
-      "num_experts % fsdp_parallelism != 0.",
+      description="Shard the expert dimension of the MLP weights on the FSDP axis, "
+      "and recommended only when num_experts is a multiple of fsdp_parallelism",
   )
   use_2d_fsdp_sharding: bool = Field(
       False,
@@ -583,7 +585,7 @@ class MoEGeneral(BaseModel):
   )
   float32_weight_sum: bool = Field(
       True,
-      description="Whether to use full fp32 precision for weight_sum during final unpermute in MoE.",
+      description="Whether to use full fp32 precision to sum expert weights for numerical stability.",
   )
 
 
@@ -640,13 +642,16 @@ class DeepSeekMoE(BaseModel):
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
   routed_bias_update_rate: float = Field(0.0, description="Update rate applied to the router bias term.")
-  mlp_bias: bool = Field(False, description="Whether to add a learnable bias for MLP matmul.")
+  mlp_bias: bool = Field(
+      False,
+      description="Whether to add a learnable bias for MLP matmul, "
+      "and originally implemented to support the GPT-OSS model architecture",
+  )
   n_routing_groups: int = Field(-1, description="Number of groups for routing, disabled by default.")
   topk_routing_group: int = Field(-1, description="Number of top groups to route inputs to.")
   use_batch_split_schedule: bool = Field(
       False,
-      description="Splits the batch to allow for better scheduling when using expert parallelism by overlapping all-to-all "
-      "with compute.",
+      description="Whether to split batch into micro-batches to hide communications that yields performance benefits.",
   )
 
 
