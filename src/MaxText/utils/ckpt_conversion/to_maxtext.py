@@ -485,7 +485,7 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
 def _get_maxtext_indices_and_shapes(mt_param_key_or_keys, maxtext_abstract_dict):
   """Resolves MaxText key(s) to target indices and shapes.
 
-  The index is the parameter's order in `maxtext_abstract_dict.keys()`. 
+  The index is the parameter's order in `maxtext_abstract_dict.keys()`.
   This function handles two forms of MaxText keys:
   - `atomic_mt_key`: A single string representing one MaxText parameter that map to HF parameter(s).
   - `composite_mt_key`: A tuple of strings for multiple MaxText parameters that map to HF parameter(s).

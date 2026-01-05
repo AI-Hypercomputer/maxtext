@@ -208,7 +208,7 @@ def process_maxtext_param(
 
   This function is responsible for taking a MaxText parameter and transforming
   it into one or more Hugging Face compatible parameters. It handles various
-  scenarios based on 
+  scenarios based on
   - the MaxText key form (`atomic_mt_key` or `composite_mt_key`)
   - and the Hugging Face value form (unscanned string, scanned list of strings,
   unscanned with expert stacking, or scanned with expert stacking).
@@ -255,7 +255,7 @@ def process_maxtext_param(
     hf_path = hf_target_paths
     _process(hf_path, maxtext_param_weight, output_weights, current_hook_fns, hf_shape_map)
     return output_weights
-  
+
   # Stacked MaxText weight
   # This now handles three cases:
   # 2. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
@@ -311,7 +311,6 @@ def process_maxtext_param(
       _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, hf_shape_map)
 
   return output_weights
-
 
 
 def create_huggingface_hub_repo_if_not_exist(repo_id, repo_type):

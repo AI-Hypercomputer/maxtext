@@ -12,11 +12,12 @@ The following models are supported:
 | **Gemma3** (Multimodal) | 4B, 12B, 27B | - | √ | - | √ |
 | **Llama3.1** | 8B, 70B*, 450B* | √ | √ | √ | √ |
 | **Qwen3** | 0.6B, 4B, 8B, 14B, 32B | √ | √ | √ | √ |
+| **Qwen3 MoE** | 30B, 235B*, 480B* | √ | √ | √ | √ |
 | **Mixtral** | 8x7B, 8x22B* | √ | √ | √ | √ |
 | **GPT-OSS** | 20B, 120B* | √ | √ | √ | √ |
 | **DeepSeek3** | 671B | - | - | √ | - |
 
-\*: need to be tested
+\*: Need further testing
 
 ## Prerequisites
 - Hugging Face requires Pytorch.

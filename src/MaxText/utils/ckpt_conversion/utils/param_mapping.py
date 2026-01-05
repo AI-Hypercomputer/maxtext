@@ -587,7 +587,7 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
       layers. Defaults to False.
 
   Returns:
-    dict: A mapping where keys are `atomic_mt_key` (single MaxText parameter names). 
+    dict: A mapping where keys are `atomic_mt_key` (single MaxText parameter names).
       Values are Hugging Face parameter names in one of four forms: unscanned (string),
       scanned (list of strings), unscanned with expert stacking (list of strings),
       or scanned with expert stacking (nested list of strings).
@@ -796,7 +796,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
   """Generates a parameter mapping from MaxText to HuggingFace Deepseek weight paths.
 
   Returns:
-    dict: A mapping where keys are `atomic_mt_key` (single MaxText parameter names). 
+    dict: A mapping where keys are `atomic_mt_key` (single MaxText parameter names).
       Values are Hugging Face parameter names in one of four forms: unscanned (string),
       scanned (list of strings), unscanned with expert stacking (list of strings),
       or scanned with expert stacking (nested list of strings).
