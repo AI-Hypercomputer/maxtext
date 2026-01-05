@@ -16,37 +16,100 @@
 
 """Alternative DeepSeek model definition with batch-split schedule."""
 
-from flax import linen as nn
+from flax import nnx
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 from MaxText import common_types
+from MaxText import max_utils
+from MaxText.common_types import Config
 from MaxText.inference import page_manager
 from MaxText.layers import attention_mla
 from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers import normalizations
+from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
+from MaxText.sharding import maybe_shard_with_logical, create_sharding
 
-
-class DeepSeekGenericLayer(nn.Module):
+class DeepSeekBatchSplitGenericLayer(nnx.Module):
   """Generic DeepSeek layer with Multi-Head Latent Attention.
 
   This is to be used as a base class for DeepSeek layers with dense/sparse MLPs.
-
   This class follows a pattern of separating module creation from execution.
-  `*_layer()` methods (e.g., `attention_layer`) are factories for `nn.Module`s,
-  called in `setup()` to initialize sub-layers. The module instances are stored
-  in `*_op` attributes (e.g., `self.attention_op`). The corresponding methods
-  (e.g., `attention`) are called during execution in `__call__` and wrap the
-  `*_op` modules with logic like logical constraints. This keeps `__call__`
-  clean and readable.
   """
+  def __init__(
+      self,
+      config: Config,
+      model_mode: str,
+      mesh: Mesh,
+      rngs: nnx.Rngs,
+      quant: quantizations.AqtQuantization|None = None,
+  ) -> None:
 
-  config: common_types.Config
-  mesh: jax.sharding.Mesh
-  model_mode: str
-  quant: None | quantizations.AqtQuantization = None
+    self.config = config
+    self.model_mode = model_mode
+    self.mesh = mesh
+    self.quant = quant
+    self.rngs = rngs
+
+    batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, model_mode)
+    self.dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
+
+    self.out_sharding = create_sharding(self.mesh, self.logical_axis_names)
+    self.mlp_intermediate_sharding = create_sharding(self.mesh, self.mlp_logical_axis_names)
+
+    self.pre_attention_layer_norm = normalizations.RMSNorm(
+        num_features=self.dummy_inputs_shape[-1],
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+        rngs=self.rngs,
+    )
+
+    self.post_attention_layer_norm = normalizations.RMSNorm(
+        num_features=self.dummy_inputs_shape[-1],
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+        rngs=self.rngs,
+    )
+
+    self.self_attention = attention_mla.MLA(
+        config=self.config,
+        num_query_heads=self.config.num_query_heads,
+        num_kv_heads=self.config.num_kv_heads,
+        head_dim=self.config.head_dim,
+        max_target_length=self.config.max_target_length,
+        max_prefill_predict_length=self.config.max_prefill_predict_length,
+        attention_kernel=self.config.attention,
+        attention_type=self.config.attention_type,
+        inputs_q_shape=self.dummy_inputs_shape,
+        inputs_kv_shape=self.dummy_inputs_shape,
+        mesh=self.mesh,
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
+        dropout_rate=self.config.dropout_rate,
+        quant=self.quant,
+        kv_quant=quantizations.configure_kv_quant(self.config),
+        q_lora_rank=self.config.q_lora_rank,
+        kv_lora_rank=self.config.kv_lora_rank,
+        qk_nope_head_dim=self.config.qk_nope_head_dim,
+        qk_rope_head_dim=self.config.qk_rope_head_dim,
+        v_head_dim=self.config.v_head_dim,
+        max_position_embeddings=self.config.max_position_embeddings,
+        original_max_position_embeddings=self.config.original_max_position_embeddings,
+        mscale=self.config.mscale,
+        rope_factor=self.config.rope_factor,
+        model_mode=self.model_mode,
+        attn_logits_soft_cap=self.config.attn_logits_soft_cap,
+        rngs=self.rngs,
+    )
+
+    self.dropout = linears.Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
 
   def __call__(
       self,
@@ -67,8 +130,8 @@ class DeepSeekGenericLayer(nn.Module):
     x = self.with_logical_constraint(inputs)
     x = jax.ad_checkpoint.checkpoint_name(x, "decoder_layer_input")
 
-    x += self.attention(
-        self.pre_attention_norm(x),
+    x += self.attention_op(
+        self.pre_attention_norm_op(x),
         decoder_segment_ids,
         decoder_positions,
         deterministic,
@@ -76,22 +139,14 @@ class DeepSeekGenericLayer(nn.Module):
         page_state,
         slot,
     )
-    mlp_output = self.mlp(self.post_attention_norm(x), deterministic)
+
+    mlp_output = self.mlp_op(self.post_attention_norm_op(x), deterministic)
     if isinstance(mlp_output, tuple):
       x += mlp_output[0]
     else:
       x += mlp_output
-    x = self.dropout(x, deterministic)
-    return self.post_process(x, kv_cache)
-
-  def setup(self):
-    self.pre_attention_norm_op = self.rms_norm_layer("pre_attention_layer_norm")
-    self.post_attention_norm_op = self.rms_norm_layer(
-        "post_attention_layer_norm"
-    )
-    self.attention_op = self.attention_layer()
-    self.mlp_op = self.mlp_layer()
-    self.dropout_op = self.dropout_layer()
+    x = self.dropout_op(x, deterministic)
+    return self.post_process(x, kv_cache=kv_cache)
 
   @property
   def logical_axis_names(self):
@@ -101,69 +156,39 @@ class DeepSeekGenericLayer(nn.Module):
           "prefill_activation_norm_length",
           "activation_embed",
       )
-    else:
+    return (
+        "activation_batch",
+        "activation_norm_length",
+        "activation_embed",
+    )
+
+  @property
+  def mlp_logical_axis_names(self):
+    if self.model_mode == common_types.MODEL_MODE_PREFILL:
       return (
           "activation_batch",
-          "activation_norm_length",
-          "activation_embed",
+          "prefill_activation_norm_length",
+          "activation_mlp",
       )
+    return (
+        "activation_batch",
+        "activation_norm_length",
+        "activation_mlp",
+    )
 
   def with_logical_constraint(self, x):
-    return nn.with_logical_constraint(x, self.logical_axis_names)
-
-  def rms_norm_layer(self, name):
-    return normalizations.rms_norm(
-        num_features=self.config.base_emb_dim,
-        dtype=self.config.dtype,
-        weight_dtype=self.config.weight_dtype,
-        name=name,
-        kernel_axes=("norm",),
-        epsilon=self.config.normalization_layer_epsilon,
+    return maybe_shard_with_logical(
+      x, logical_axes=self.logical_axis_names,
+      mesh=self.mesh, shard_mode=self.config.shard_mode
     )
 
-  def pre_attention_norm(self, x):
-    return self.with_logical_constraint(self.pre_attention_norm_op(x))
+  def pre_attention_norm_op(self, x):
+    return self.with_logical_constraint(self.pre_attention_layer_norm(x))
 
-  def post_attention_norm(self, x):
-    return self.with_logical_constraint(self.post_attention_norm_op(x))
+  def post_attention_norm_op(self, x):
+    return self.with_logical_constraint(self.post_attention_layer_norm(x))
 
-  def attention_layer(self):
-    inputs_shape = (
-        self.config.per_device_batch_size,
-        self.config.max_target_length,
-        self.config.base_emb_dim,
-    )
-    return attention_mla.mla_as_linen(
-        config=self.config,
-        num_query_heads=self.config.num_query_heads,
-        num_kv_heads=self.config.num_kv_heads,
-        head_dim=self.config.head_dim,
-        max_target_length=self.config.max_target_length,
-        max_prefill_predict_length=self.config.max_prefill_predict_length,
-        attention_kernel=self.config.attention,
-        attention_type=self.config.attention_type,
-        inputs_q_shape=inputs_shape,
-        inputs_kv_shape=inputs_shape,
-        mesh=self.mesh,
-        dtype=self.config.dtype,
-        weight_dtype=self.config.weight_dtype,
-        dropout_rate=self.config.dropout_rate,
-        name="self_attention",
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(self.config),
-        q_lora_rank=self.config.q_lora_rank,
-        kv_lora_rank=self.config.kv_lora_rank,
-        qk_nope_head_dim=self.config.qk_nope_head_dim,
-        qk_rope_head_dim=self.config.qk_rope_head_dim,
-        v_head_dim=self.config.v_head_dim,
-        max_position_embeddings=self.config.max_position_embeddings,
-        original_max_position_embeddings=self.config.original_max_position_embeddings,
-        mscale=self.config.mscale,
-        rope_factor=self.config.rope_factor,
-        model_mode=self.model_mode,
-    )
-
-  def attention(
+  def attention_op(
       self,
       x,
       decoder_segment_ids,
@@ -174,74 +199,107 @@ class DeepSeekGenericLayer(nn.Module):
       slot: None | int = None,
   ):
     """Executes the attention layer."""
-    return self.with_logical_constraint(
-        self.attention_op(
-            x,
-            x,
-            decoder_positions,
-            decoder_segment_ids=decoder_segment_ids,
-            deterministic=deterministic,
-            model_mode=self.model_mode,
-            previous_chunk=previous_chunk,
-            page_state=page_state,
-            slot=slot,
-        )[0]
+    attention_result, _ = self.self_attention(
+      x,
+      x,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=self.model_mode,
+      previous_chunk=previous_chunk,
+      page_state=page_state,
+      slot=slot,
     )
+    return self.with_logical_constraint(attention_result)
 
-  def mlp_layer(self):
+  def mlp_op(self, x, deterministic, *args, **kwargs):
+    """Executes the MLP operation. To be implemented by subclasses."""
     raise NotImplementedError()
 
-  def mlp(self, x, deterministic):
-    raise NotImplementedError()
-
-  def dropout_layer(self):
-    return nn.Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,))
-
-  def dropout(self, x, deterministic):
+  def dropout_op(self, x, deterministic):
     return self.with_logical_constraint(
-        self.dropout_op(x, deterministic=deterministic)
+        self.dropout(x, deterministic=deterministic)
     )
 
   def post_process(self, x, kv_cache=None):
     """Collect statistics about the output of the layer."""
     if self.config.record_internal_nn_metrics:
-      self.sow("intermediates", "activation_mean", jnp.mean(x))
-      self.sow("intermediates", "activation_stdev", jnp.std(x))
+      self.sow(nnx.Intermediate, "activation_mean", jnp.mean(x))
+      self.sow(nnx.Intermediate, "activation_stdev", jnp.std(x))
       self.sow(
-          "intermediates",
+          nnx.Intermediate,
           "activation_fraction_zero",
           jnp.sum(x == 0) / jnp.size(x),
       )
 
     if self.config.scan_layers:
       return x, None
-    else:
-      return x, kv_cache
+    return x, kv_cache
 
 
-class DeepSeekDenseLayer(DeepSeekGenericLayer):
+class DeepSeekDenseLayer(DeepSeekBatchSplitGenericLayer):
   """DeepSeek layer with dense MLP."""
 
-  def mlp_layer(self):
-    return linears.mlp_block(
-        in_features=self.config.base_emb_dim,
+  def __init__(self,
+      config: Config,
+      model_mode: str,
+      mesh: Mesh,
+      rngs: nnx.Rngs,
+      quant: quantizations.AqtQuantization|None = None,):
+
+    super().__init__(config, model_mode, mesh, rngs, quant)
+
+    self.mlp = linears.MlpBlock(
+        config=self.config,
+        mesh=self.mesh,
+        in_features=self.dummy_inputs_shape[-1],
         intermediate_dim=self.config.mlp_dim,
         activations=self.config.mlp_activations,
         intermediate_dropout_rate=self.config.dropout_rate,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
-        name="mlp",
-        config=self.config,
         quant=self.quant,
-        mesh=self.mesh,
+        model_mode=model_mode,
+        rngs=self.rngs,
     )
 
-  def mlp(self, x, deterministic):
-    return self.with_logical_constraint(self.mlp_op(x, deterministic))
+  def mlp_op(self, x, deterministic, *args, **kwargs):
+    return self.with_logical_constraint(
+      self.mlp(
+        x,
+        deterministic,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding
+      )
+    )
 
 
-class DeepSeekMoELayer(DeepSeekGenericLayer):
+DeepSeekDenseLayerToLinen = nnx_wrappers.to_linen_class(
+    DeepSeekDenseLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
+
+class DeepSeekMoELayer(DeepSeekBatchSplitGenericLayer):
   """DeepSeek MoE layer that uses a batch-split schedule."""
+  def __init__(self,
+      config: Config,
+      model_mode: str,
+      mesh: Mesh,
+      rngs: nnx.Rngs,
+      quant: quantizations.AqtQuantization|None = None,):
+
+    super().__init__(config, model_mode, mesh, rngs, quant)
+
+    self.DeepSeekMoeBlock_0 = moe.RoutedAndSharedMoE(
+        config=self.config,
+        mesh=mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", None),
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
+        quant=quant,
+        rngs=self.rngs,
+    )
 
   def __call__(
       self,
@@ -257,6 +315,9 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       attention_metadata=None,
       split_factor: int = 2,
   ):
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
     x = self.with_logical_constraint(inputs)
     x = jax.ad_checkpoint.checkpoint_name(x, "decoder_layer_input")
 
@@ -271,8 +332,8 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       return jnp.concatenate(x, axis=0)
 
     def _attn(x, decoder_segment_ids, decoder_positions):
-      return self.attention(
-          self.pre_attention_norm(x),
+      return self.attention_op(
+          self.pre_attention_norm_op(x),
           decoder_segment_ids,
           decoder_positions,
           deterministic,
@@ -282,7 +343,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       )
 
     def _moe(x):
-      output, _, _ = self.mlp(self.post_attention_norm(x), deterministic)
+      output, _, _ = self.mlp_op(self.post_attention_norm_op(x), deterministic)
       return output
 
     # Split the inputs into micro-batches.
@@ -299,29 +360,18 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # Merge the micro-batches back into a single batch.
     x = _merge(x)
 
-    x = self.dropout(x, deterministic)
-    return self.post_process(x, kv_cache)
+    x = self.dropout_op(x, deterministic)
+    return self.post_process(x, kv_cache=kv_cache)
 
-  def init(self, *args, **kwargs):
-    # Calls the parent init method for testing parity.
-    return super().init(*args, **kwargs, method=super().__call__)
-
-  def mlp_layer(self):
-    # NOTE: the naming mismatch here is to ensure reverse compatibility with
-    # existing checkpoints. The `name` represents the weight name in
-    # JAX/checkpoints and so the class name is just for readability.
-    return moe.get_routed_and_shared_moe(
-        name="DeepSeekMoeBlock_0",
-        config=self.config,
-        mesh=self.mesh,
-        kernel_init=initializers.nd_dense_init(
-            1.0, "fan_in", "truncated_normal"
-        ),
-        kernel_axes=("embed", None),
-        dtype=self.config.dtype,
-        weight_dtype=self.config.weight_dtype,
-        quant=self.quant,
+  def mlp_op(self, x, deterministic, *args, **kwargs):
+    return self.with_logical_constraint(
+      self.DeepSeekMoeBlock_0(
+        x,intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding
+      )
     )
 
-  def mlp(self, x, _):
-    return self.with_logical_constraint(self.mlp_op(x))
+DeepSeekMoELayerToLinen = nnx_wrappers.to_linen_class(
+    DeepSeekMoELayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
