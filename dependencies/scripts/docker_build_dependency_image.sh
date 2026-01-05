@@ -96,18 +96,18 @@ if [[ -z ${JAX_VERSION+x} ]] ; then
 fi
 if [[ -z ${MODE} ]]; then
   export MODE=stable
-# TODO: Remove 'custom_wheels' mode support when tpu-recipes migration is complete.
-elif [[ ${MODE} == "custom_wheels" ]]; then
-  export WORKFLOW=custom-wheels
-  export MODE=nightly
 fi
 if [[ -z ${DEVICE} ]]; then
   export DEVICE=tpu
+fi
+if [[ -z ${WORKFLOW} ]]; then
+  export WORKFLOW=pre-training
 fi
 
 # Create docker build arguments array
 docker_build_args=(
   "DEVICE=${DEVICE}"
+  "WORKFLOW=${WORKFLOW}"
   "MODE=${MODE}"
   "JAX_VERSION=${JAX_VERSION}"
 )
@@ -171,12 +171,6 @@ build_tpu_image() {
   # Handle post-training workflow if specified
   if [[ ${WORKFLOW} == "post-training" || ${WORKFLOW} == "post-training-experimental" ]]; then
     build_post_training_image
-  fi
-
-  # TODO: Remove 'custom_wheels' mode support when tpu-recipes migration is complete.
-  if [[ ${WORKFLOW} == "custom-wheels" ]]; then
-    echo "Building custom wheels dependencies."
-    run_docker_build "$MAXTEXT_REPO_ROOT/dependencies/dockerfiles/maxtext_custom_wheels.Dockerfile" "BASEIMAGE=${LOCAL_IMAGE_NAME}"
   fi
 }
 
