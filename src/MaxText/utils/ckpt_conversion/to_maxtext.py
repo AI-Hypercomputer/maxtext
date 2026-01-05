@@ -529,7 +529,8 @@ def _get_maxtext_weight(
       final_mt_weights[mt_target_idx_or_indices] = final_mt_tensor_numpy
       if final_mt_tensor_numpy.shape != mt_target_shape_or_shapes:
         raise ValueError(
-            f"Shape mismatch for {mt_param_key_or_keys}: Expected {mt_target_shape_or_shapes}, got {final_mt_tensor_numpy.shape}"
+            f"Shape mismatch for {mt_param_key_or_keys}: Expected {mt_target_shape_or_shapes}, "
+            f"got {final_mt_tensor_numpy.shape}"
         )
     else:
       # Case 1.2: Eager mode, `composite_mt_key`
@@ -539,7 +540,8 @@ def _get_maxtext_weight(
         final_mt_weights[mt_target_idx] = final_mt_tensor_numpy[..., i]
         if final_mt_weights[mt_target_idx].shape != mt_target_shape_or_shapes[i]:
           raise ValueError(
-              f"Shape mismatch for {mt_param_key_or_keys[i]}: Expect {mt_target_shape_or_shapes[i]}, got {final_mt_weights[mt_target_idx].shape}"
+              f"Shape mismatch for {mt_param_key_or_keys[i]}: Expect {mt_target_shape_or_shapes[i]}, "
+              f"got {final_mt_weights[mt_target_idx].shape}"
           )
   else:
     # Case 2: Lazy mode

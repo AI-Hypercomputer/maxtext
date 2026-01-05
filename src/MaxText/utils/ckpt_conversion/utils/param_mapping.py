@@ -1522,9 +1522,6 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       # (N*D, H) -> (H, N*D) -> (H, N, D)
       return x.transpose().reshape(target_shape)
 
-  # hook order does not affect result
-  query_hook_chain = [reshape_and_transpose_attention, scale_query_layer]
-
   def reshape_kernel(x, target_shape):
     return x.transpose()
 
@@ -1535,6 +1532,9 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     else:
       depth_scale = np.dtype("float32").type(1 / np.sqrt(maxtext_config.head_dim))
       return (input_tensor * depth_scale).astype(input_tensor.dtype)
+
+  # hook order does not affect result
+  query_hook_chain = [reshape_and_transpose_attention, scale_query_layer]
 
   if scan_layers:
     plan = [
