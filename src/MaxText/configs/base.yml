@@ -214,7 +214,7 @@ expert_shard_attention_option: "fsdp"
 moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis. 
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
-fsdp_shard_on_exp: False
+shard_exp_on_fsdp: False
 # use fsdp and fsdp_transpose axes for sharding the moe weights
 use_2d_fsdp_sharding: False
 
