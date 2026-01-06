@@ -348,7 +348,7 @@ def ragged_paged_attention_kernel(
       def masked_store(ref, val, start, end, group=1):
         iota = lax.broadcasted_iota(jnp.int32, ref.shape, 0) // group
         mask = jnp.logical_and(iota >= start, iota < end)
-        pl.store(ref, tuple(slice(None) for _ in ref.shape), val, mask=mask)
+        pltpu.store(ref, val, mask=mask)
 
       qk = jnp.einsum("nd,md->nm", q, k, preferred_element_type=jnp.float32) * sm_scale
       store_start = jnp.maximum(q_start - q_len_start, 0)
