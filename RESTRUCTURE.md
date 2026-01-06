@@ -27,7 +27,6 @@ comments, or questions by creating a new
 ├── README.md
 ├── dependencies/
 │   ├── dockerfiles/
-│   │   ├── maxtext_custom_wheels.Dockerfile
 │   │   ├── maxtext_tpu_dependencies.Dockerfile
 │   │   ├── maxtext_gpu_dependencies.Dockerfile
 │   │   └── maxtext_runner.Dockerfile
