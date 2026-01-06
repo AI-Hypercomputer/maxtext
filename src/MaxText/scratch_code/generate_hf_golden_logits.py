@@ -47,6 +47,7 @@ import pickle
 import numpy as np
 from google.cloud import storage
 from PIL import Image
+from MaxText.inference_utils import str2bool
 
 # Load the tokenizer and model from Hugging Face
 
@@ -184,11 +185,11 @@ def main(raw_args=None) -> None:
       default="float32",
       help="model_class.from_pretrained: dtype",
   )
-  # variable `args.trust_remote_code` is True by default, False only if with flag `--not-trust-remote-code`
   parser.add_argument(
-      "--not-trust-remote-code",
-      dest="trust_remote_code",
-      action="store_false",
+      "--trust-remote-code",
+      type=str2bool,
+      required=False,
+      default=True,
       help="model_class.from_pretrained: trust_remote_code",
   )
   parser.add_argument(

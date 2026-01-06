@@ -6,10 +6,17 @@ This guide provides instructions for using the scripts that convert model checkp
 
 The following models are supported:
 
-- Gemma2 (2B, 9B, 27B).
-- Gemma3 multimodal (4B, 12B, 27B).
-- Qwen3 (0.6B, 4B, 8B, 14B, 32B).
-- Mixtral (8x7B, 8x22B).
+| Model Family | Sizes | HF $\to$ Orbax (scan) | HF $\to$ Orbax (unscan) | Orbax (scan) $\to$ HF | Orbax (unscan) $\to$ HF |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Gemma2** | 2B, 9B, 27B | √ | √ | √ | √ |
+| **Gemma3** (Multimodal) | 4B, 12B, 27B | - | √ | - | √ |
+| **Llama3.1** | 8B, 70B, 450B | √ | √ | √ | √ |
+| **Qwen3** | 0.6B, 4B, 8B, 14B, 32B | √ | √ | √ | √ |
+| **Qwen3 MoE** | 30B, 235B, 480B | √ | √ | √ | √ |
+| **Mixtral** | 8x7B, 8x22B | √ | √ | √ | √ |
+| **GPT-OSS** | 20B, 120B | √ | √ | √ | √ |
+| **DeepSeek3** | 671B | - | - | √ | - |
+
 
 ## Prerequisites
 - Hugging Face requires Pytorch.
@@ -42,8 +49,9 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml
   * `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
   * `hf_access_token`: Your Hugging Face token.
   * `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Googld Cloud Storage (GCS) or local. If not set, the default output directory is `Maxtext/tmp`.
+  * `--lazy_load_tensors` (optional): If `true`, loads Hugging Face weights on-demand to minimize RAM usage.
+  * `--hf_model_path` (optional): Specifies a local directory containing the model weights. If unspecified, we use the [default Hugging Face repository ID](https://github.com/AI-Hypercomputer/maxtext/blob/2f77e7b5fcc4b580bc2d109525c362f3d9056ec9/src/MaxText/utils/ckpt_conversion/utils/utils.py#L54-L82) (e.g., openai/gpt-oss-20b). This is necessary for locally dequantized models like GPT-OSS or DeepSeek. 
 
-\*\**It only converts the official version of Hugging Face model. You can refer the supported official version in HF_IDS in `src/MaxText/utils/ckpt_conversion/utils/utils.py`*
 
 ## MaxText to Hugging Face
 
@@ -62,6 +70,7 @@ python3 -m MaxText.utils.ckpt_conversion.to_huggingface src/MaxText/configs/base
     scan_layers=false \
     use_multimodal=false \
     hf_access_token=<your-hf-token> \
+    weight_dtype=bfloat16
 ```
 
 **Key arguments:**
@@ -72,6 +81,7 @@ python3 -m MaxText.utils.ckpt_conversion.to_huggingface src/MaxText/configs/base
   * `hf_access_token`: Your Hugging Face token.
   * `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
   * `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Googld Cloud Storage (GCS), Hugging Face Hub or local. If not set, the default output directory is `Maxtext/tmp`.
+  * `weight_dtype`: dtype for MaxText weights. It affects the resulting HF weight dtype. Default value is `float32`. We recommend using `bfloat16` to save memory and speed up conversion.
 
 
 ## Verifying conversion correctness
@@ -87,11 +97,11 @@ python3 -m tests.forward_pass_logit_checker src/MaxText/configs/base.yml \
     model_name=<MODEL_NAME> \
     scan_layers=false \
     max_prefill_predict_length=4 \
-     max_target_length=8 \
+    max_target_length=8 \
     use_multimodal=false \
     --run_hf_model=True \
     --hf_model_path=<path-to-HF-checkpoint> \
-    --max_kl_div=0.015 \
+    --max_kl_div=0.015
 ```
 
 **Key arguments:**
