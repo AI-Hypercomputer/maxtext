@@ -278,6 +278,7 @@ pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights
 # It may be useful to do the reverse when the layers_per_stage is very large.
 # The below settings only have effect when using pipeline parallelism.
 scan_pipeline_iterations: True
+scan_pipeline_repeats: True
 scan_layers_per_stage: False
 set_remat_policy_on_pipeline_iterations: True
 set_remat_policy_on_layers_per_stage: False

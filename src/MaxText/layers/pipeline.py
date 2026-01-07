@@ -23,6 +23,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import jax
 import jax.ad_checkpoint
+from jax._src.lax.parallel import all_gather_invariant
 
 from flax.core import meta
 from flax import linen as nn
@@ -154,7 +155,9 @@ class Pipeline(nn.Module):
       state_io: reshaped inputs [num_stages, microbatches/stages, micro_size, sequence, embed]
       circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed] when needed, else None
       circ_storage_mover: zeros[num_stages, micro_size, sequence, embed] when needed, else None
-      loop_iteration: scalar set initially to 0.
+      loop_iteration: scalar set initially to 0
+      bsw: pytree of identical structure as weights with leaf arrays leading dimension of num_repeats replaced by 2, e.g.
+        a leaf of shape [num_repeats, stages, mlp, embed] is mapped to [2, num_stages, mlp, embed].
     """
 
     # Shift is used to rotate the output of each pipeline into the input of the next
@@ -199,6 +202,15 @@ class Pipeline(nn.Module):
     else:
       circ_storage_mover = None
 
+    def _init_bsw_from_weights(variables):
+      """Buffer space for two copies of weights."""
+      return jax.tree.map(lambda x: jnp.zeros_like(x[:2]), variables)
+
+    if self.is_initializing():
+      bsw = None
+    else:
+      bsw = _init_bsw_from_weights(self.layers.variables)
+
     init_loop_state = {
         "state_io": state_io,
         "shift": shift,
@@ -206,6 +218,7 @@ class Pipeline(nn.Module):
         "circ_storage_mover": circ_storage_mover,
         "loop_iteration": 0,
         "prev_outputs": prev_outputs,
+        "bsw": bsw,
     }
     return init_loop_state
 
@@ -256,30 +269,6 @@ class Pipeline(nn.Module):
     stages_in = self._maybe_shard_with_logical(stages_in, self.stages_in_logical)
     return stages_in
 
-  def shard_dim_by_stages(self, x, dim: int, physical_partition_spec: P | None, is_stage_weight: bool = False):
-    """Shards x using the provided partition_spec, but adds the "stage" mesh axis to the existing sharding at
-    the specified dimension."""
-    placeholder = None if self.config.shard_mode == ShardMode.EXPLICIT else P.UNCONSTRAINED
-    if physical_partition_spec is None:
-      dims_mapping = [placeholder] * x.ndim
-    else:
-      physical_partition_spec = self._remove_fsdp_from_physical_partition_spec(physical_partition_spec)
-      dims_mapping = list(physical_partition_spec)
-      # If not a stage weight, we handle the repeat dimension offset
-      if not is_stage_weight:
-        dims_mapping = [placeholder] * (dim + 1) + dims_mapping[dim:]  # inflat one dimension for num_repeats
-    dims_mapping[dim] = "stage"
-    dims_mapping = tuple(dims_mapping)
-    # We add reduced rule only when pspec is given for a stage weight
-    if physical_partition_spec and is_stage_weight and self.config.shard_mode == ShardMode.EXPLICIT:
-      batch_mesh_axis = ["data", "fsdp"]
-      reduced_mark = [mesh_axis for mesh_axis in batch_mesh_axis if self.mesh.shape[mesh_axis] > 1]
-      pspec = P(*dims_mapping, reduced=set(reduced_mark))
-    else:
-      pspec = P(*dims_mapping)
-    sharding = jax.sharding.NamedSharding(self.mesh, pspec)
-    return self._maybe_shard_with_name(x, sharding)
-
   def get_microbatch_and_repeat_ids(self, loop_iteration):
     """Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and
     non-circular"""
@@ -311,17 +300,8 @@ class Pipeline(nn.Module):
       return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, repeat_id, 1, repeat_dim_in_weights), repeat_dim_in_weights)
 
     gathered_weights_stage_dim = 0
-    repeat_ids = self.shard_dim_by_stages(repeat_ids, 0, physical_partition_spec=None)
-    # num_repeats x num_stages x *param_dim
-    weights = self.shard_dim_by_stages(
-        weights, stages_dim_in_weights, physical_partition_spec=physical_partition_spec, is_stage_weight=False
-    )
     stage_weights = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=gathered_weights_stage_dim)(
         weights, repeat_ids
-    )
-    # num_stages x *param_dim
-    stage_weights = self.shard_dim_by_stages(
-        stage_weights, gathered_weights_stage_dim, physical_partition_spec=physical_partition_spec, is_stage_weight=True
     )
     return stage_weights
 
@@ -346,9 +326,8 @@ class Pipeline(nn.Module):
       replicated_sharding = NamedSharding(self.mesh, P())
       return x.at[idx].get(out_sharding=replicated_sharding)
 
-    ids = self.shard_dim_by_stages(ids, 0, physical_partition_spec=None)
     outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
-    return self.shard_dim_by_stages(outs, 0, physical_partition_spec=None)
+    return outs
 
   def get_new_loop_state(self, output, loop_state):
     """
@@ -452,6 +431,7 @@ class Pipeline(nn.Module):
         mesh=self.mesh,
         in_specs=(self.state_io_spec, self.stages_in_spec, self.stages_in_spec, P()),
         out_specs=self.state_io_spec,
+        check_vma=True,
     )
     def _update_state_io(state_in, stream_slice, output, stream_buf_idx):
       # Shift the current slice to the left, then fill the last stage with the final output.
@@ -469,6 +449,7 @@ class Pipeline(nn.Module):
         "circ_storage_mover": new_circ_storage_mover,
         "loop_iteration": loop_iteration + 1,
         "prev_outputs": new_prev_outputs,
+        "bsw": loop_state["bsw"],  # bsw is updated outside of this inner loop, only once per outer loop iteration
     }
     return new_loop_state
 
@@ -483,7 +464,7 @@ class Pipeline(nn.Module):
     output = output[:, permutation]
     return output
 
-  def get_current_stage_weights(self, pipeline_weights, loop_iteration, physical_partition_spec=None):
+  def get_current_stage_weights(self, pipeline_weights, bsw, loop_iteration, physical_partition_spec=None):
     """
     Gets the current weights used for one iteration. Outputs a pytree whose arrays have leading dimension of stages, e.g.
     {'mlp': 'wo': [stages, mlp, embed]}. Stage 0 will use the 0th index of this pytree, Stage 1 the 1st index, etc.
@@ -491,15 +472,19 @@ class Pipeline(nn.Module):
     for circular pipelines each stage grabs only the weights corresponding to the current repeat.
     """
     if self.config.num_pipeline_repeats > 1:
-      return self.get_current_repeat_from_stages(
-          pipeline_weights, loop_iteration, physical_partition_spec=physical_partition_spec
-      )
+      return self.get_current_weights_from_bsw(bsw, loop_iteration, physical_partition_spec=physical_partition_spec)
     else:
       return pipeline_weights
 
-  def get_current_repeat_from_stages(self, weights, loop_iteration, physical_partition_spec=None):
-    """get current repeat from stages"""
-    _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
+  def get_current_weights_from_bsw(self, bsw, loop_iteration, physical_partition_spec=None):
+    """Collect and gather weights from given bsw (buffer sliding window)"""
+
+    def _get_bsw_idx(loop_iteration):
+      _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
+      bsw_ids = (repeat_ids == repeat_ids[0]).astype(
+          jnp.int32
+      )  # For early repeats this might return true when it should be false
+      return bsw_ids
 
     circular_metadata_params = {
         nn.PARTITION_NAME: "circular_repeats",
@@ -509,7 +494,7 @@ class Pipeline(nn.Module):
         "optimizer_dims_mapping": None,
     }
     weights = meta.remove_axis(
-        weights, 0, circular_metadata_params
+        bsw, 0, circular_metadata_params
     )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular
     # entry per stage.
     weights = self._remove_logically_partition(weights)
@@ -517,7 +502,7 @@ class Pipeline(nn.Module):
     def gather_weights_for_stages_in(w, spec=None):
       return self.vmap_parallel_gather(
           w,
-          repeat_ids=repeat_ids,
+          repeat_ids=_get_bsw_idx(loop_iteration),
           repeat_dim_in_weights=0,
           stages_dim_in_weights=1,
           physical_partition_spec=spec,
@@ -528,6 +513,71 @@ class Pipeline(nn.Module):
     else:
       weights = jax.tree.map(gather_weights_for_stages_in, weights, physical_partition_spec)
     return weights
+
+  @staticmethod
+  def get_fsdp_index_pytree(physical_partition_spec):
+    """
+    Finds the index of 'fsdp' within each PartitionSpec in a Pytree.
+
+    Args:
+      physical_partition_spec: A Pytree where leaves are PartitionSpecs.
+
+    Returns:
+      A Pytree of the same structure where leaves are the integer index
+      of 'fsdp' or -1 if not found.
+    """
+
+    def find_fsdp(pspec):
+      # Ensure we are handling a PartitionSpec or a tuple/list of strings
+      if pspec is None:
+        return -1
+
+      # PartitionSpecs are essentially tuples (e.g., PartitionSpec('data', 'fsdp'))
+      for i, axis in enumerate(pspec):
+        # Handle cases where an axis might be a tuple itself (e.g., ('fsdp', 'tensor'))
+        if isinstance(axis, (list, tuple)):
+          if "fsdp" in axis:
+            return i
+        elif axis == "fsdp":
+          return i
+      return -1
+
+    return jax.tree.map(find_fsdp, physical_partition_spec)
+
+  def bsw_all_gather_over_fsdp(self, bsw, physical_partition_spec, loop_iteration):
+    """All gather bsw over fsdp mesh axis using shardmap."""
+    pps_no_fsdp = jax.tree.map(self._remove_fsdp_from_physical_partition_spec, physical_partition_spec)
+    fsdp_idx = self.get_fsdp_index_pytree(physical_partition_spec)
+
+    _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration + 1)
+
+    @jax.shard_map(
+        mesh=self.mesh,
+        in_specs=(physical_partition_spec, pps_no_fsdp, None, None),
+        out_specs=pps_no_fsdp,
+        check_vma=True,
+    )
+    def _all_gather_inner(variables, cur_bsw, repeat_idx, fsdp_idx):
+      new_variables = jax.tree.map(
+          lambda x: jax.lax.dynamic_slice_in_dim(x, repeat_idx, 1),
+          variables,
+      )
+
+      def _all_gather_invariant(x, i):
+        if i >= 0:
+          return all_gather_invariant(x, axis_name="fsdp", axis=i, tiled=True)
+        return x
+
+      new_variables = jax.tree.map(_all_gather_invariant, new_variables, fsdp_idx)
+
+      def shift_and_insert(bsw_leaf, new_leaf):
+        updated_bsw = bsw_leaf.at[0].set(bsw_leaf[1])
+        updated_bsw = updated_bsw.at[1].set(jnp.squeeze(new_leaf, axis=0))
+        return updated_bsw
+
+      return jax.tree.map(shift_and_insert, cur_bsw, new_variables)
+
+    return _all_gather_inner(self.layers.variables, bsw, repeat_ids[0], fsdp_idx)
 
   def get_vmap_func_for_init(self):
     """This vmap func is used to initialize the weights only on init."""
@@ -661,7 +711,7 @@ class Pipeline(nn.Module):
       )
 
     stage_weights = self.get_current_stage_weights(
-        pipeline_weights, loop_iteration, physical_partition_spec=physical_partition_spec
+        pipeline_weights, loop_state["bsw"], loop_iteration, physical_partition_spec=physical_partition_spec
     )
 
     stages_output = vmap_func(
@@ -761,19 +811,6 @@ class Pipeline(nn.Module):
       return P(*new_spec)
     return pps
 
-  def all_gather_over_fsdp(self, variables, logical_partition_spec):
-    physical_partition_spec = logical_to_mesh(
-        logical_partition_spec, mesh=self.mesh, rules=self.config.logical_axis_rules
-    )
-    physical_partition_spec_no_fsdp = jax.tree.map(
-        self._remove_fsdp_from_physical_partition_spec, physical_partition_spec
-    )
-    return jax.tree.map(
-        lambda w, p: self._maybe_shard_with_name(w, NamedSharding(self.mesh, p)),
-        variables,
-        physical_partition_spec_no_fsdp,
-    )
-
   @nn.compact
   def __call__(
       self,
@@ -825,6 +862,9 @@ class Pipeline(nn.Module):
       segment_idx = None
 
     loop_state = self.init_states(inputs)
+    physical_partition_spec = logical_to_mesh(
+        logical_partition_spec, mesh=self.mesh, rules=self.config.logical_axis_rules
+    )
 
     # Each microbatch should go through each stage (with repeats) - so there is num_micro * (num_stages * repeats)
     # compute to perform
@@ -836,8 +876,8 @@ class Pipeline(nn.Module):
     # Thus the total iterations is num_micro * repeat + num_stages - 1, & we may consider the num_stages - 1 as bubble.
     # The bubble doubles when we use forwarding delay.
     bubble_iterations = self.forwarding_delay * (self.num_stages - 1)
-    real_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats
-    total_iterations = real_iterations + bubble_iterations
+    # real_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats
+    # total_iterations = real_iterations + bubble_iterations
 
     if self.is_initializing():
       vmap_func = self.get_vmap_func_for_init()
@@ -899,21 +939,15 @@ class Pipeline(nn.Module):
           out_sharding=self.output_sharding,
       )
 
-    if self.config.pipeline_fsdp_ag_once:
-      variables = self._remove_logically_partition(self.layers.variables)
-      all_pipeline_weights = self.all_gather_over_fsdp(variables, logical_partition_spec)
-    else:
-      all_pipeline_weights = self.layers.variables
-
     logical_partition_spec = self.get_logical_spec_repeats_removed(logical_partition_spec)
 
-    def run_iteration_scannable(model, loop_state, xs):
+    def run_iteration_scannable(model, loop_state):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we
       # explicitly wrap the run_one_iteration in this method - the 1st argument model (`self`) is a nn.module instance.
       return (
           model.run_one_iteration(
               loop_state,
-              all_pipeline_weights,
+              model.layers.variables,
               positions,
               segment_ids,
               deterministic,
@@ -927,39 +961,152 @@ class Pipeline(nn.Module):
     if self.config.set_remat_policy_on_pipeline_iterations:
       run_iteration_scannable = nn.remat(
           run_iteration_scannable,
-          prevent_cse=not self.config.scan_pipeline_iterations,  # prevent_cse not used with scan
+          prevent_cse=not self.config.scan_pipeline_iterations,
           policy=self.get_pipeline_remat_policy(),
       )
 
-    # The scan cannot be used on init since it broadcasts the weights, which aren't yet initialized.
-    if self.config.scan_pipeline_iterations:
-      variable_carry = []
-      variable_broadcast = [
-          "params",
-          "_overwrite_with_gradient",
-      ]  # All loop iterations need the weights for the full pipeline.
-      if self.is_mutable_collection("non_trainable"):
-        variable_carry.append("non_trainable")
-      else:
-        variable_broadcast.append("non_trainable")
-      run_all_iterations_scanned = nn.scan(
-          run_iteration_scannable,
-          variable_axes={
-              "summaries": 0,
-              "aux_loss": 0,
-              "intermediates": 0,
-              "hyper_params": 0,
-          },
-          variable_broadcast=variable_broadcast,
-          variable_carry=variable_carry,
-          # Dropout/aqt keys will be split for each iteration.
-          split_rngs={"random": True},
-          length=total_iterations,
+    def run_one_repeat_scannable(model, loop_state):
+      loop_state["bsw"] = model.bsw_all_gather_over_fsdp(
+          loop_state["bsw"], physical_partition_spec, loop_state["loop_iteration"]
       )
-      loop_state, _ = run_all_iterations_scanned(self, loop_state, None)
+
+      if model.config.scan_pipeline_iterations:
+        run_one_repeat_scanned = nn.scan(
+            run_iteration_scannable,
+            variable_axes={
+                "summaries": 0,
+                "aux_loss": 0,
+                "intermediates": 0,
+                "hyper_params": 0,
+            },
+            variable_broadcast=variable_broadcast,
+            variable_carry=variable_carry,
+            # Dropout/aqt keys will be split for each iteration.
+            split_rngs={"random": True},
+            length=model.config.num_pipeline_microbatches,
+        )
+        loop_state, _ = run_one_repeat_scanned(model, loop_state)
+      else:
+        for _ in range(model.config.num_pipeline_microbatches):
+          loop_state, _ = run_iteration_scannable(model, loop_state)
+      return loop_state, None
+
+    run_one_repeat_scannable = nn.remat(
+        run_one_repeat_scannable,
+        prevent_cse=not self.config.scan_pipeline_iterations,
+        policy=self.get_pipeline_remat_policy(),
+    )
+
+    def run_real_repeats(model, loop_state):
+      if self.config.scan_pipeline_repeats:
+        run_repeats_scanned = nn.scan(
+            run_one_repeat_scannable,
+            variable_axes={
+                "summaries": 0,
+                "aux_loss": 0,
+                "intermediates": 0,
+                "hyper_params": 0,
+            },
+            variable_broadcast=variable_broadcast,
+            variable_carry=variable_carry,
+            split_rngs={"random": True},
+            length=model.config.num_pipeline_repeats,
+        )
+        loop_state, _ = run_repeats_scanned(model, loop_state)
+      else:
+        for _ in range(model.config.num_pipeline_repeats):  # remat and scan outer loop
+          loop_state, _ = run_one_repeat_scannable(model, loop_state)
+      return loop_state
+
+    run_real_repeats = nn.remat(
+        run_real_repeats,
+        prevent_cse=not self.config.scan_pipeline_iterations,
+        policy=self.get_pipeline_remat_policy(),
+    )
+
+    def run_bubble_iterations_scannable(model, loop_state):
+      loop_state["bsw"] = model.bsw_all_gather_over_fsdp(
+          loop_state["bsw"], physical_partition_spec, loop_state["loop_iteration"]
+      )
+
+      if model.config.scan_pipeline_iterations:
+        run_one_repeat_scanned = nn.scan(
+            run_iteration_scannable,
+            variable_axes={
+                "summaries": 0,
+                "aux_loss": 0,
+                "intermediates": 0,
+                "hyper_params": 0,
+            },
+            variable_broadcast=variable_broadcast,
+            variable_carry=variable_carry,
+            # Dropout/aqt keys will be split for each iteration.
+            split_rngs={"random": True},
+            length=bubble_iterations,
+        )
+        loop_state, _ = run_one_repeat_scanned(model, loop_state)
+      else:
+        for _ in range(model.config.num_pipeline_microbatches):
+          loop_state, _ = run_iteration_scannable(model, loop_state)
+      return loop_state, None
+
+    run_bubble_iterations_scannable = nn.remat(
+        run_bubble_iterations_scannable,
+        prevent_cse=not self.config.scan_pipeline_iterations,
+        policy=self.get_pipeline_remat_policy(),
+    )
+
+    def run_all_iterations(model, loop_state):
+      if self.config.scan_pipeline_repeats:
+        run_repeats_scanned = nn.scan(
+            run_one_repeat_scannable,
+            variable_axes={
+                "summaries": 0,
+                "aux_loss": 0,
+                "intermediates": 0,
+                "hyper_params": 0,
+            },
+            variable_broadcast=variable_broadcast,
+            variable_carry=variable_carry,
+            split_rngs={"random": True},
+            length=model.config.num_pipeline_repeats,
+        )
+
+        run_bubbles_scanned = nn.scan(
+            run_bubble_iterations_scannable,
+            variable_axes={
+                "summaries": 0,
+                "aux_loss": 0,
+                "intermediates": 0,
+                "hyper_params": 0,
+            },
+            variable_broadcast=variable_broadcast,
+            variable_carry=variable_carry,
+            split_rngs={"random": True},
+            length=model.config.num_pipeline_repeats,
+        )
+        loop_state, _ = run_repeats_scanned(model, loop_state)
+        loop_state, _ = run_bubbles_scanned(model, loop_state)
+      else:
+        for _ in range(model.config.num_pipeline_repeats):  # remat and scan outer loop
+          loop_state, _ = run_one_repeat_scannable(model, loop_state)
+        for _ in range(bubble_iterations):
+          loop_state, _ = run_iteration_scannable(model, loop_state)
+      return loop_state
+
+    # The scan cannot be used on init since it broadcasts the weights, which aren't yet initialized.
+    # if self.config.scan_pipeline_iterations:
+    variable_carry = []
+    variable_broadcast = [
+        "params",
+        "_overwrite_with_gradient",
+    ]  # All loop iterations need the weights for the full pipeline.
+    if self.is_mutable_collection("non_trainable"):
+      variable_carry.append("non_trainable")
     else:
-      for _ in range(total_iterations):
-        loop_state, _ = run_iteration_scannable(self, loop_state, None)
+      variable_broadcast.append("non_trainable")
+
+    loop_state = run_all_iterations(self, loop_state)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to
     # the input
