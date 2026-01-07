@@ -784,6 +784,7 @@ class PipelineParallelism(BaseModel):
   )
   pipeline_fsdp_ag_once: bool = Field(False, description="If True, all-gather FSDP weights once per pipeline repeat.")
   scan_pipeline_iterations: bool = Field(True, description="Use jax.lax.scan over pipeline iterations.")
+  scan_pipeline_repeats: bool = Field(True, description="Use jax.lax.scan over pipeline repeats.")
   scan_layers_per_stage: bool = Field(False, description="Use jax.lax.scan over layers within a stage.")
   set_remat_policy_on_pipeline_iterations: bool = Field(True, description="Set remat policy on the pipeline scan.")
   set_remat_policy_on_layers_per_stage: bool = Field(False, description="Set remat policy on the inner layer scan.")
