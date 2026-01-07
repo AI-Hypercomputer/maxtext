@@ -588,6 +588,7 @@ train_split: 'train'
 eval_split: 'validation'
 # for HuggingFace input pipeline (dataset_type=hf)
 hf_path: ''
+hf_name: ''
 hf_data_dir: ''
 hf_train_files: ''
 hf_eval_split: ''

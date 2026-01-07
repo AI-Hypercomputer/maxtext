@@ -352,6 +352,7 @@ def make_hf_train_iterator(
   """Load, preprocess dataset and return iterators"""
   train_ds = datasets.load_dataset(
       config.hf_path,
+      name=config.hf_name,
       data_dir=config.hf_data_dir,
       data_files=config.hf_train_files,
       split=config.train_split,
@@ -404,6 +405,7 @@ def make_hf_eval_iterator(
   """Make Hugging Face evaluation iterator. Load and preprocess eval dataset: and return iterator."""
   eval_ds = datasets.load_dataset(
       config.hf_path,
+      name=config.hf_name,
       data_dir=config.hf_data_dir,
       data_files=config.hf_eval_files,
       split=config.hf_eval_split,
