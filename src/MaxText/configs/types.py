@@ -919,7 +919,8 @@ class TfdsDataset(BaseModel):
 class HfDataset(BaseModel):
   """Configuration specific to HuggingFace datasets."""
 
-  hf_path: str = Field("", description="Path or name of the Hugging Face dataset.")
+  hf_path: str = Field("", description="Path of the Hugging Face dataset.")
+  hf_name: str = Field("", description="Name of the Hugging Face dataset.")
   hf_data_dir: PathStr = Field("", description="Data directory for the HF dataset.")
   hf_train_files: Optional[str] = Field(None, description="Files for the HF training split.")
   hf_eval_split: str = Field("", description="Name of the HF evaluation split.")

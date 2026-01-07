@@ -587,7 +587,9 @@ eval_dataset_name: 'c4/en:3.0.1'
 train_split: 'train'
 eval_split: 'validation'
 # for HuggingFace input pipeline (dataset_type=hf)
+# Check definition at https://github.com/huggingface/datasets/blob/0feb65dd8733191dd2d1e74215b422fc5939a56a/src/datasets/load.py#L1338-L1408
 hf_path: ''
+hf_name: ''
 hf_data_dir: ''
 hf_train_files: ''
 hf_eval_split: ''
