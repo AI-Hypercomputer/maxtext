@@ -48,7 +48,9 @@ install_maxtext_github_deps
 
 ## Install Post-Training dependencies
 
-### From PyPI releases
+### Option 1: From PyPI releases
+
+> **Caution:** RL in MaxText is currently broken with PyPI releases of post-training dependencies. We are working on fixing this and recommend following [Option 2: From Github](#option-2-from-github) in the meantime.
 
 Next, run the following bash script to get all the necessary installations inside the virtual environment (for e.g., `maxtext_venv`).
 This will take few minutes. Follow along the installation logs and look out for any issues!
@@ -57,9 +59,9 @@ This will take few minutes. Follow along the installation logs and look out for 
 bash tools/setup/setup_post_training_requirements.sh
 ```
 
-Primarily, it installs `vllm-tpu` which is [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby providing TPU inference for vLLM, with unified JAX and PyTorch support.
+Primarily, it installs `Tunix`, and `vllm-tpu` which is [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby providing TPU inference for vLLM, with unified JAX and PyTorch support.
 
-### From Github
+### Option 2: From Github
 
 You can also locally git clone [tunix](https://github.com/google/tunix) and install using the instructions [here](https://github.com/google/tunix?tab=readme-ov-file#installation). Similarly install [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) from source following the instructions [here](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/#install-from-source).
 

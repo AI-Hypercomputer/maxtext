@@ -86,7 +86,7 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
     skip_jax_distributed_system=true --lazy_load_tensors=true
 ```
 
-## Build and Upload MaxText Docker Image with Tunix, vLLM, tpu-inference dependencies
+## Build and upload MaxText Docker image with post-training dependencies
 Before building the Docker image, authenticate to [Google Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/docker/authentication#gcloud-helper) for permission to push your images and other access.
 ```bash
 # Authenticate your user account for gcloud CLI access
@@ -100,10 +100,10 @@ docker run hello-world
 
 You can install the required dependencies using either of the following two options:
 
-### Option 1: Installing stable releases of tunix and vllm-tpu
-Run the following bash script to create a docker image with all the dependencies of MaxText, Tunix, vLLM and tpu-inference installed.
+### Option 1: Install stable releases of post-training dependencies
+> **Caution:** RL in MaxText is currently broken with stable releases of post-training dependencies. We are working on fixing this and recommend following [Option 2: Install from Git repositories of post-training dependencies](#option-2-install-from-git-repositories-of-post-training-dependencies) in the meantime.
 
-In addition to MaxText dependencies, primarily, it installs `vllm-tpu` which is [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby providing TPU inference for vLLM, with unified JAX and PyTorch support. This build process takes approximately 10 to 15 minutes.
+Run the following bash script to create a docker image with MaxText dependencies, plus all the post-training dependencies installed. For the post-training dependencies, primarily, it installs `Tunix`, and `vllm-tpu` which is [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby providing TPU inference for vLLM, with unified JAX and PyTorch support. This build process takes approximately 10 to 15 minutes.
  
 ```
 bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
@@ -111,9 +111,8 @@ bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-trainin
 
 You can also use `bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training-experimental` to try out new features via experimental dependencies such as improved pathwaysutils resharding API.
 
-### Option 2: Install from locally git cloned repositories
-
-You can also locally git clone [tunix](https://github.com/google/tunix), [tpu-inference](https://github.com/vllm-project/tpu-inference), [vllm](https://github.com/vllm-project/vllm.git) and then use the following command to build a docker image using them: 
+### Option 2: Install from Git repositories of post-training dependencies
+You can also locally git clone [tunix](https://github.com/google/tunix), [tpu-inference](https://github.com/vllm-project/tpu-inference), [vllm](https://github.com/vllm-project/vllm) and then use the following command to build a docker image using them: 
 ```
 bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training POST_TRAINING_SOURCE=local
 ```
