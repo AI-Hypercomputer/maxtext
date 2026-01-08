@@ -67,6 +67,7 @@ jobs:
             echo "No files changed"
             echo "run_tests=true" >> $GITHUB_OUTPUT
             echo "run_notebooks=true" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
           # Check for source code changes (anything not .md and not .ipynb)
@@ -86,6 +87,8 @@ jobs:
             echo "No notebook changes, skipping notebook run."
             echo "run_notebooks=false" >> $GITHUB_OUTPUT
           fi
+
+          exit 0
 
   build_and_upload_maxtext_package:
     needs: doc_only_check
