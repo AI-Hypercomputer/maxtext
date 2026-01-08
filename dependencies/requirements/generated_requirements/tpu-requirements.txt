@@ -40,6 +40,7 @@ dill>=0.4.0
 distlib>=0.4.0
 dm-tree>=0.1.9
 docstring-parser>=0.17.0
+drjax>=0.1.4
 editdistance>=0.8.1
 einops>=0.8.1
 einshape>=1.0
