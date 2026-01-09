@@ -15,7 +15,7 @@
 # This workflow builds and pushes MaxText images for both TPU and GPU devices.
 # It runs automatically daily at 12am UTC, on Pull Requests, or manually via Workflow Dispatch.
 
-name: Build Images
+name: Build and Test Images
 
 on:
   schedule:
@@ -128,3 +128,75 @@ jobs:
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
       image_date: ${{ needs.setup.outputs.image_date }}
+
+  # TEST JOBS
+  pre-training-tpu-tests:
+    needs: [setup, tpu-pre-training]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [maxtext_jax_stable, maxtext_jax_nightly]
+        flavor: [tpu-unit, tpu-integration]
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    with:
+      flavor: ${{ matrix.flavor }}
+      base_image: ${{ matrix.image }}:${{ needs.setup.outputs.image_date }}
+      is_scheduled_run: true
+      maxtext_installed: true
+
+  post-training-tpu-tests:
+    needs: [setup, tpu-post-training]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [maxtext_post_training_stable, maxtext_post_training_nightly]
+        flavor: [tpu-unit, tpu-integration]
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    with:
+      flavor: ${{ matrix.flavor }}
+      base_image: ${{ matrix.image }}:${{ needs.setup.outputs.image_date }}
+      is_scheduled_run: true
+      maxtext_installed: true
+
+  post-training-tpu-notebook-tests:
+    needs: [setup, tpu-post-training]
+    uses: ./.github/workflows/run_jupyter_notebooks.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [maxtext_post_training_stable, maxtext_post_training_nightly]
+    with:
+      device_type: tpu
+      device_name: v6e-4
+      base_image: ${{  matrix.image }}:${{ needs.setup.outputs.image_date }}
+      cloud_runner: linux-x86-ct6e-180-4tpu
+      maxtext_installed: true
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  pre-training-gpu-tests:
+    needs: [setup, gpu-pre-training]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [maxtext_gpu_jax_stable, maxtext_gpu_jax_nightly]
+        flavor: [gpu-unit, gpu-integration]
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    with:
+      flavor: ${{ matrix.flavor }}
+      base_image: ${{ matrix.image }}:${{ needs.setup.outputs.image_date }}
+      is_scheduled_run: true
+      maxtext_installed: true
+
+  pre-training-cpu-tests:
+    needs: [setup, tpu-pre-training]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [maxtext_jax_stable, maxtext_jax_nightly]
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    with:
+      flavor: cpu-unit
+      base_image: ${{  matrix.image }}:${{ needs.setup.outputs.image_date }}
+      is_scheduled_run: true
+      maxtext_installed: true
