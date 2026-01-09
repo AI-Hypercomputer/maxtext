@@ -77,7 +77,6 @@ class RMSNorm(nnx.Module):
 
     scale = jnp.asarray(scale, self.dtype)
     effective_scale = scale + self.scale_offset  # Apply offset
-    # broadcast 2nd input then element-wise mul
     return jnp.einsum("i...k,...k->i...k", y, effective_scale, out_sharding=out_sharding)
 
 
@@ -197,3 +196,11 @@ def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
 
   inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) + jnp.array(eps, dtype=x.dtype))
   return x * inv_norm
+
+
+Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
+    RMSNorm,
+    base_metadata_fn=variable_to_logically_partitioned,
+    scale_init=linen_initializers.zeros,
+    scale_offset=1.0,
+)

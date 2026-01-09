@@ -153,16 +153,19 @@ class AotHloIdenticalTest(unittest.TestCase):
     print("AOT Compiled and train HLO files are identical for test {test_name}!")
 
   @pytest.mark.tpu_only
+  @pytest.mark.skip(reason="FileNotFoundError: /tmp/aot_test_dump. Skipped until fixing b/463839714.")
   def test_default_hlo_match(self):
     self.assert_compile_and_real_match_hlo("default_run")
 
   @pytest.mark.tpu_only
   @pytest.mark.scheduled_only
+  @pytest.mark.skip(reason="FileNotFoundError: /tmp/aot_test_dump. Skipped until fixing b/463839714.")
   def test_int8_hlo_match(self):
     self.assert_compile_and_real_match_hlo("int8", "quantization=int8")
 
   @pytest.mark.tpu_only
   @pytest.mark.scheduled_only
+  @pytest.mark.skip(reason="FileNotFoundError: /tmp/aot_test_dump. Skipped until fixing b/463839714.")
   def test_llama2_7b_hlo_match(self):
     self.assert_compile_and_real_match_hlo(
         "llama2-7b",

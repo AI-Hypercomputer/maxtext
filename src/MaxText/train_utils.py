@@ -19,6 +19,7 @@ import os
 import jax
 from MaxText import checkpointing
 from MaxText import max_logging
+from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import sharding
 from MaxText import optimizers
@@ -35,7 +36,8 @@ def create_training_tools(config, model, mesh):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-  tx = optimizers.get_optimizer(config, learning_rate_schedule)
+  # pass in model for muon
+  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_multi_tier_checkpointing:
     checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
@@ -73,6 +75,8 @@ def create_training_tools(config, model, mesh):
         logger,
         use_ocdbt,
         use_zarr3,
+        config.enable_continuous_checkpointing,
+        config.max_num_checkpoints_to_keep,
     )
 
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
@@ -193,7 +197,7 @@ def setup_train_loop(config, recorder, devices=None):
       )
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
-    with mesh:
+    with jax.set_mesh(mesh):
       if context_parallel_size > 1 and config.context_parallel_load_balance:
         data_iterator = map(maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode), data_iterator)
         if eval_data_iterator:
@@ -210,6 +214,11 @@ def setup_train_loop(config, recorder, devices=None):
     if not config.using_pipeline_parallelism and not config.use_multimodal:
       # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
       sharding.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+
+    # print weights sharding info under debug sharding mode
+    if config.debug_sharding:
+      max_utils.print_non_trivial_mesh_axis(model.mesh)
+      maxtext_utils.print_state_mesh_shardings_params(state, state_mesh_shardings, model.mesh)
 
     if config.use_dpo:
       abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)

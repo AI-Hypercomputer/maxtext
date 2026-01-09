@@ -27,8 +27,8 @@ import numpy as np
 
 from flax import linen as nn
 from flax.core.scope import FrozenVariableDict
-from flax.linen import Dense
 from flax.training import train_state
+from flax import nnx
 
 import optax
 
@@ -108,6 +108,45 @@ class TestNestedValueRetrieval(unittest.TestCase):
     self.assertEqual(result, expected_value)
 
 
+class UpdateStateParamTest(unittest.TestCase):
+
+  def setUp(self):
+    self.model = nn.Dense(features=5)
+    self.initial_params = {
+        "layers": {"layer_0": {"bias": jnp.array([1.0, 1.0])}, "layer_1": {"bias": jnp.array([2.0, 2.0])}},
+        "decoder": {"gate": {"bias": jnp.array([0.5, 0.5])}},
+    }
+    self.state = train_state.TrainState(
+        step=0, apply_fn=self.model.apply, params=self.initial_params, tx=None, opt_state={}
+    )
+
+  def test_update_mode_add(self):
+    target_path = ("decoder", "gate", "bias")
+    update_value = jnp.array([0.1, 0.2])
+    new_state = maxtext_utils.update_state_param(self.state, target_path, update_value)
+
+    expected = jnp.array([0.6, 0.7])
+    actual = new_state.params["decoder"]["gate"]["bias"]
+    self.assertTrue(jnp.allclose(actual, expected))
+
+    # Other values are untouched
+    original_layer_0 = self.state.params["layers"]["layer_0"]["bias"]
+    new_layer_0 = new_state.params["layers"]["layer_0"]["bias"]
+    self.assertTrue(jnp.array_equal(original_layer_0, new_layer_0))
+    original_layer_1 = self.state.params["layers"]["layer_1"]["bias"]
+    new_layer_1 = new_state.params["layers"]["layer_1"]["bias"]
+    self.assertTrue(jnp.array_equal(original_layer_1, new_layer_1))
+
+  def test_invalid_path_does_nothing(self):
+    """If path doesn't exist (or is wrong), nothing should happen."""
+    # Note: tree_map only iterates over EXISTING leaves. If path is wrong,
+    # the if condition inside never triggers.
+    target_path = ("decoder", "non_existent", "bias")
+    new_state = maxtext_utils.update_state_param(self.state, target_path, jnp.array([1.0]))
+
+    self.assertTrue(jax.tree_util.tree_all(jax.tree_util.tree_map(jnp.array_equal, new_state.params, self.state.params)))
+
+
 class MaxUtilsInitState(unittest.TestCase):
   """Tests initialization of training and decode states in maxtext_utils.py"""
 
@@ -156,20 +195,28 @@ class MaxUtilsInitState(unittest.TestCase):
     )
 
 
-class ModelWithMultipleCollections(nn.Module):
+@nnx.register_variable_name("special_variables")
+class SpecialVariables(nnx.Variable):
+  pass
+
+
+class ModelWithMultipleCollections(nnx.Module):
   """
   A simple model that has variables in multiple collections - "params" and "special_variables"
   """
 
-  dense: Dense = nn.Dense(4)
-
-  def setup(self):
-    self.kernel = self.variable("special_variables", "my_first_kernel", lambda: jnp.ones((4, 5)))
+  def __init__(self, input_dim: int, rngs: nnx.Rngs | None = None):
+    self.dense = nnx.Linear(input_dim, 4, rngs=rngs)
+    self.my_first_kernel = SpecialVariables(jnp.ones((4, 5)))
 
   def __call__(self, x, y, encoder_images=None, nnx_method=None, model_mode=None):
     x = self.dense(x)
-    x = x @ self.kernel.value
+    x = x @ self.my_first_kernel
     return x
+
+
+class TrainState(train_state.TrainState):
+  other_variables: nnx.State
 
 
 class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
@@ -179,16 +226,30 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
     self.config = pyconfig.initialize(
         [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
     )
-    self.model = ModelWithMultipleCollections()
-    self.key1, self.key2, self.key3 = random.split(random.key(0), num=3)
-    self.input = random.normal(self.key1, (self.config.global_batch_size_to_load, self.config.max_target_length))
-    self.params = self.model.init(self.key2, self.input, self.input)
+    self.model = ModelWithMultipleCollections(self.config.max_target_length, nnx.Rngs(0))
+    self.key = random.key(0)
     self.tx = optax.adam(learning_rate=0.001)
 
   def _test_init_initial_state_driver(self, is_training):
     """test initiating of the initial state driver"""
-    state_under_test = maxtext_utils.init_initial_state(self.model, self.tx, self.config, is_training, self.key3)
-    self.assertEqual(state_under_test.apply_fn, self.model.apply)
+    if is_training:
+      self.model.train()
+    else:
+      self.model.eval()
+
+    graphdef, params, other_variables = nnx.split(self.model, nnx.Param, ...)
+
+    state_under_test = None
+    if is_training:
+      state_under_test = TrainState.create(
+          apply_fn=graphdef.apply, params=params, other_variables=other_variables, tx=self.tx
+      )
+    else:
+      state_under_test = TrainState(
+          step=0, apply_fn=graphdef.apply, params=params, other_variables=other_variables, tx=None, opt_state={}
+      )
+
+    self.assertEqual(state_under_test.apply_fn, graphdef.apply)
     if is_training:
       self.assertEqual(state_under_test.tx, self.tx)
       self.assertNotEqual(state_under_test.opt_state, {})
@@ -197,11 +258,11 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
       self.assertEqual(state_under_test.opt_state, {})
     self.assertEqual(
         max_utils.calculate_num_params_from_pytree(state_under_test.params),
-        max_utils.calculate_num_params_from_pytree(self.params),
+        max_utils.calculate_num_params_from_pytree(params),
     )
-    self.assertEqual(len(self.params), len(state_under_test.params))
-    self.assertIn("special_variables", state_under_test.params)
-    self.assertIn("params", state_under_test.params)
+    self.assertEqual(len(params), len(state_under_test.params))
+    self.assertIsInstance(state_under_test.other_variables["my_first_kernel"], SpecialVariables)
+    self.assertTrue(hasattr(state_under_test, "params"))
 
   def test_initial_train_state(self):
     self._test_init_initial_state_driver(True)
@@ -296,52 +357,47 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     """
     Tests that a 2D tensor fully sharded across both mesh axes passes the assertion.
     """
-    # Activate the mesh context.
-    with self.mesh:
-      # Define a sharding spec that shards the first tensor dimension by the 'fsdp' mesh axis
-      # and the second dimension by the 'tensor' mesh axis.
-      pspec = PartitionSpec("fsdp", "tensor")
-      # Create a parameter and apply the sharding, ensuring it's distributed across all devices.
-      params = {"layer1": jax.device_put(jnp.ones((8, 8)), NamedSharding(self.mesh, pspec))}
+    # Define a sharding spec that shards the first tensor dimension by the 'fsdp' mesh axis
+    # and the second dimension by the 'tensor' mesh axis.
+    pspec = PartitionSpec("fsdp", "tensor")
+    # Create a parameter and apply the sharding, ensuring it's distributed across all devices.
+    params = {"layer1": jax.device_put(jnp.ones((8, 8)), NamedSharding(self.mesh, pspec))}
 
-      # Assert that the parameters are sufficiently sharded; this should pass with no error.
-      assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
+    # Assert that the parameters are sufficiently sharded; this should pass with no error.
+    assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
 
   def test_unsharded_fails(self):
     """
     Tests that a completely unsharded (fully replicated) parameter fails the assertion.
     """
-    with self.mesh:
-      # Create a parameter without any sharding specification. It will be replicated on all devices.
-      params = {"layer1": jnp.ones((8, 8))}
+    # Create a parameter without any sharding specification. It will be replicated on all devices.
+    params = {"layer1": jnp.ones((8, 8))}
 
-      # Expect an AssertionError because 100% of params are unsharded, exceeding the 10% tolerance.
-      with self.assertRaises(AssertionError):
-        assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
+    # Expect an AssertionError because 100% of params are unsharded, exceeding the 10% tolerance.
+    with self.assertRaises(AssertionError):
+      assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
 
   def test_mixed_sharding_fails(self):
     """
     Tests that a mix of sharded and unsharded parameters fails when the unsharded
     portion exceeds the tolerance.
     """
-    with self.mesh:
-      sharded_param = jax.device_put(jnp.ones((8, 8)), NamedSharding(self.mesh, PartitionSpec("fsdp", "tensor")))
-      unsharded_param = jnp.ones((8, 8))
-      params = {"layer1": sharded_param, "layer2": unsharded_param}
+    sharded_param = jax.device_put(jnp.ones((8, 8)), NamedSharding(self.mesh, PartitionSpec("fsdp", "tensor")))
+    unsharded_param = jnp.ones((8, 8))
+    params = {"layer1": sharded_param, "layer2": unsharded_param}
 
-      with self.assertRaises(AssertionError):
-        assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.5)
+    with self.assertRaises(AssertionError):
+      assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.5)
 
   def test_3d_tensor_sharded_on_fsdp_axis(self):
     """
     Tests that a 3D tensor sharded only on a valid target axis ('fsdp') should fail.
     """
-    with self.mesh:
-      pspec = PartitionSpec("fsdp", None, None)
-      params = {"conv3d_layer": jax.device_put(jnp.ones((8, 4, 4)), NamedSharding(self.mesh, pspec))}
+    pspec = PartitionSpec("fsdp", None, None)
+    params = {"conv3d_layer": jax.device_put(jnp.ones((8, 4, 4)), NamedSharding(self.mesh, pspec))}
 
-      with self.assertRaises(AssertionError):
-        assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.2)
+    with self.assertRaises(AssertionError):
+      assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.2)
 
   def test_multi_axis_sharding_pass(self):
     """
@@ -352,13 +408,12 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
     mesh = Mesh(devices, self.mesh_axes)
 
-    with mesh:
-      # Shard across multiple axes, including the valid 'fsdp' axis.
-      pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
-      params = {"complex_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, pspec))}
+    # Shard across multiple axes, including the valid 'fsdp' axis.
+    pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+    params = {"complex_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, pspec))}
 
-      # This should pass because 'fsdp' is a valid sharding axis being used.
-      assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
+    # This should pass because 'fsdp' is a valid sharding axis being used.
+    assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
 
   def test_multi_axis_not_sharded_fails(self):
     """
@@ -367,12 +422,11 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     """
     devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
     mesh = Mesh(devices, self.mesh_axes)
-    with mesh:
-      pspec = PartitionSpec(("sequence", "context"), "stage", "tensor", None)
-      params = {"complex_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, pspec))}
+    pspec = PartitionSpec(("sequence", "context"), "stage", "tensor", None)
+    params = {"complex_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, pspec))}
 
-      with self.assertRaises(AssertionError):
-        assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
+    with self.assertRaises(AssertionError):
+      assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
 
   def test_multi_axis_mixed_sharding_fails(self):
     """
@@ -380,17 +434,16 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     """
     devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
     mesh = Mesh(devices, self.mesh_axes)
-    with mesh:
-      sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
-      sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, sharded_pspec))
-      unsharded_param = jnp.ones((8, 8, 2, 2))
-      params = {
-          "sharded_layer": sharded_param,
-          "unsharded_layer": unsharded_param,
-      }
+    sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+    sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, sharded_pspec))
+    unsharded_param = jnp.ones((8, 8, 2, 2))
+    params = {
+        "sharded_layer": sharded_param,
+        "unsharded_layer": unsharded_param,
+    }
 
-      with self.assertRaises(AssertionError):
-        assert_params_sufficiently_sharded(params, mesh, tolerance=0.5)
+    with self.assertRaises(AssertionError):
+      assert_params_sufficiently_sharded(params, mesh, tolerance=0.5)
 
 
 class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
@@ -413,15 +466,14 @@ class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
     """
     Tests a mix of sharded and unsharded tensors on a complex mesh fails.
     """
-    with self.mesh:
-      sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
-      sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(self.mesh, sharded_pspec))
-      unsharded_param = jnp.ones((8, 8, 2, 2))
-      params = {
-          "sharded_layer": sharded_param,
-          "unsharded_layer": unsharded_param,
-      }
-      self.assertIsNotNone(get_formatted_sharding_annotations(params, self.mesh))
+    sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+    sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(self.mesh, sharded_pspec))
+    unsharded_param = jnp.ones((8, 8, 2, 2))
+    params = {
+        "sharded_layer": sharded_param,
+        "unsharded_layer": unsharded_param,
+    }
+    self.assertIsNotNone(get_formatted_sharding_annotations(params, self.mesh))
 
 
 class TestPromptLogprobsFromPrefill(unittest.TestCase):

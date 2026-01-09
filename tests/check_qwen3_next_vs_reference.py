@@ -648,7 +648,7 @@ class TestQwen3Next(unittest.TestCase):
             "num_experts_per_tok=2",
             "base_moe_mlp_dim=256",  # moe_mlp_dim will be calculated from this
             "norm_topk_prob=True",
-            "fsdp_shard_on_exp=False",
+            "shard_exp_on_fsdp=False",
             "mlp_activations=['silu', 'linear']",
             "dropout_rate=0.0",
             # Force the test to use the 'dense_matmul' path in the MoE layer,
@@ -1103,7 +1103,7 @@ class TestQwen3Next(unittest.TestCase):
             "num_experts_per_tok=2",
             "base_moe_mlp_dim=256",  # moe_mlp_dim will be calculated from this
             "norm_topk_prob=True",
-            "fsdp_shard_on_exp=False",
+            "shard_exp_on_fsdp=False",
             "mlp_activations=['silu', 'linear']",
             "dropout_rate=0.0",
             "sparse_matmul=False",

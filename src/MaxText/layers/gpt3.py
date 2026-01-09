@@ -246,7 +246,7 @@ class Gpt3MultiHeadAttention(nnx.Module):
       self.key = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv"))
       self.value = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv"))
     self.out = self.create_projection_layer(
-        (self.num_heads, self.head_dim), self.num_heads * self.head_dim, ("heads", "kv", "embed"), axis=(-2, -1)
+        (self.num_heads, self.head_dim), feature_dim[-1], ("heads", "kv", "embed"), axis=(-2, -1)
     )
     self.attention_op = AttentionOp(
         config=config,
@@ -430,6 +430,10 @@ class Gpt3DecoderLayer(nnx.Module):
       kv_cache=None,
       attention_metadata=None,
   ):
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
+
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx = self.pre_self_attention_norm(inputs)

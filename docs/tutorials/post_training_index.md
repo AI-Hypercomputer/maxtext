@@ -1,6 +1,6 @@
-# Post training
+# Post-training
 
-## What is MaxText post training?
+## What is MaxText post-training?
 
 MaxText provides performance and scalable LLM and VLM post-training, across a variety of techniques like SFT and GRPO.
 
@@ -18,14 +18,14 @@ MaxText was co-designed with key Google led innovations to provide a unified pos
 
 ## Supported techniques & models
 
-- **SFT (Supervised Fine-Tuning)** [(link)](https://maxtext.readthedocs.io/en/latest/tutorials/sft.html)
-    - Supports all MaxText models
-- **Multimodal SFT** [(link)](https://maxtext.readthedocs.io/en/latest/guides/multimodal.html)
-- **GRPO (Group Relative Policy Optimization)** [(link)](https://maxtext.readthedocs.io/en/latest/tutorials/grpo.html)
-    - Llama 3.1 8B
-    - Llama 3.1 70B
-- **GSPO-token**
-    - Coming soon
+- **SFT (Supervised Fine-Tuning)**
+  * [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft.html)
+  * [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html)
+- **Multimodal SFT**
+  * [Multimodal Support](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/multimodal.html)
+- **Reinforcement Learning (RL)**
+  * [RL on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl.html)
+  * [RL on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html)
 
 ## Step by step RL
 
@@ -49,17 +49,18 @@ Pathways supercharges RL with:
 
 ## Getting started
 
-Start your Post-Training journey through quick experimentation with our [Google Colabs](https://maxtext.readthedocs.io/en/latest/tutorials/how_to_run_colabs.html) or our Production level tutorials for [SFT](https://maxtext.readthedocs.io/en/latest/tutorials/sft_on_multi_host.html) and [GRPO](https://maxtext.readthedocs.io/en/latest/tutorials/grpo_with_pathways.html).
+Start your Post-Training journey through quick experimentation with [Python Notebooks](https://maxtext.readthedocs.io/en/latest/guides/run_python_notebook.html) or our Production level tutorials for [SFT](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html) and [RL](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html).
 
 ## More tutorials
 
 ```{toctree}
 :maxdepth: 1
 
-full_finetuning.md
-how_to_run_colabs.md
-grpo.md
-sft.md
-sft_on_multi_host.md
-grpo_with_pathways.md
+posttraining/sft.md
+posttraining/sft_on_multi_host.md
+posttraining/rl.md
+posttraining/rl_on_multi_host.md
+posttraining/knowledge_distillation.md
+posttraining/multimodal.md
+posttraining/full_finetuning.md
 ```

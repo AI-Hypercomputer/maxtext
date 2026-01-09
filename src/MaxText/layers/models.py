@@ -32,10 +32,9 @@ from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.decoders import Decoder
 from MaxText.layers.embeddings import Embed, embed_as_linen
-from MaxText.layers.encoders import VisionEncoder
+from MaxText.layers.encoders import VisionEncoder, vision_encoder_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.multi_token_prediction import MultiTokenPredictionBlock
-from MaxText.sharding import all_gather_over_fsdp
+from MaxText.layers.multi_token_prediction import multi_token_prediction_block_as_linen
 
 # ------------------------------------------------------------------------------
 # The network: Transformer Definitions
@@ -85,7 +84,7 @@ class TransformerLinenPure(nn.Module):
         config=cfg,
         mesh=self.mesh,
     )
-    self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
+    self.vision_encoder = vision_encoder_as_linen(config=cfg, mesh=mesh) if cfg.use_multimodal else None
     self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
@@ -94,8 +93,12 @@ class TransformerLinenPure(nn.Module):
       # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
-      self.mtp_block = MultiTokenPredictionBlock(
-          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
+      self.mtp_block = multi_token_prediction_block_as_linen(
+          config=self.config,
+          mesh=self.mesh,
+          transformer_layer_module=mtp_layer,
+          decoder=self.decoder,
+          rngs=self.make_rng("mtp_block"),
       )
 
   def logits_from_hidden_states(self, hidden_states, deterministic, model_mode):
@@ -207,7 +210,7 @@ class TransformerLinenPure(nn.Module):
 
     if self.config.attention == "vllm_rpa":
       # In vLLM, logits are computed separately after updating the KV cache.
-      return logits, hidden_state, kv_caches
+      return hidden_state, kv_caches
 
     return logits
 
@@ -285,7 +288,15 @@ class Transformer(nnx.Module):
   # Make new attributes required, so that all Transformer dependencies (train, decode,
   # compile, etc) will error instead of silently use defaults.
   # pylint: disable=attribute-defined-outside-init
-  def __init__(self, config: Config, mesh: Mesh, quant: Quant, *, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      quant: Quant,
+      *,
+      model_mode: str = MODEL_MODE_TRAIN,
+      rngs: nnx.Rngs,
+  ):
     """Initialize shared_embedding & decoder layers."""
     self.config = config
     self.mesh = mesh
@@ -304,7 +315,7 @@ class Transformer(nnx.Module):
         config=cfg,
         rngs=rngs,
     )
-    self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
+    self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh, rngs=rngs) if cfg.use_multimodal else None
 
     decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
@@ -347,8 +358,13 @@ class Transformer(nnx.Module):
       # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
-      mtp_block_linen = MultiTokenPredictionBlock(
-          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
+      mtp_block_linen = multi_token_prediction_block_as_linen(
+          config=self.config,
+          mesh=self.mesh,
+          transformer_layer_module=mtp_layer,
+          decoder=self.decoder,
+          rngs=rngs,
+          name="mtp_block",
       )
       self.mtp_block = nnx_wrappers.ToNNX(mtp_block_linen, rngs=rngs)
 
@@ -497,120 +513,6 @@ class Transformer(nnx.Module):
 
     if self.config.attention == "vllm_rpa":
       # In vLLM, logits are computed separately after updating the KV cache.
-      return logits, hidden_state, kv_caches
+      return hidden_state, kv_caches
 
     return logits
-
-
-class ZeroOneTransformer(nn.Module):
-  """
-  A wrapper for the base Transformer model designed to implement the Zero-1
-  FSDP optimization.
-
-  The goal of this optimization is to reduce communication overhead. In the standard
-  FSDP implementation, an all-gather operation on the model weights is performed twice
-  for each gradient accumulation microbatch (once for the forward pass, once for the backward pass).
-  This class changes that behavior. When enabled, it performs the all-gather operation
-  only *once* per full gradient accumulation step. It gathers the full weights into
-  memory, runs all the microbatch forward and backward passes, and then releases the
-  full weights. This trades higher peak memory usage for significantly reduced
-  network communication, which can improve training speed if sufficient memory is
-  available.
-  """
-
-  config: Config
-  mesh: Mesh
-  quant: Quant
-  # Possible model_mode values can be found in MaxText.common_types.
-  # We generally use MaxText.common_types.MODEL_MODE_TRAIN or
-  # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
-  # TODO: Make model_mode required after confirming no users are affected.
-  model_mode: str = MODEL_MODE_TRAIN  # May be different than the model_mode passed to __call__
-
-  def setup(self):
-    """Sets up the underlying Transformer model.
-
-    This method initializes the `self.model` attribute by calling the
-    `transformer_as_linen` factory function.
-    """
-    self.model = transformer_as_linen(self.config, self.mesh, self.quant, self.model_mode)
-
-  def __call__(
-      self,
-      decoder_input_tokens: jnp.ndarray,
-      decoder_positions: jnp.ndarray,
-      decoder_segment_ids=None,
-      encoder_images: None | jnp.ndarray = None,
-      encoder_image_masks: None | jnp.ndarray = None,
-      enable_dropout=True,
-      model_mode=MODEL_MODE_TRAIN,
-      previous_chunk=None,
-      true_length: None | int = None,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
-      partition_spec=None,
-      decoder_target_tokens: None | jnp.ndarray = None,
-      decoder_target_mask: None | jnp.ndarray = None,
-      nnx_method: str | None = None,
-  ):
-    """Applies the Zero-1 FSDP wrapped Transformer model.
-
-    This method handles the all-gather operation for model weights before
-    applying the underlying Transformer model, and then releases them.
-
-    Args:
-      decoder_input_tokens: Input tokens for the decoder.
-      decoder_positions: Positional encodings for the decoder inputs.
-      decoder_segment_ids: Segment IDs for the decoder inputs (optional).
-      encoder_images: Encoder images for multimodal models (optional).
-      enable_dropout: Whether to enable dropout. Defaults to True.
-      previous_chunk: Previous chunk for incremental decoding (optional).
-      true_length: True length of the prompt before padding (optional).
-      slot: An integer representing the decode batch index selected for this
-        request (optional).
-      page_state: Page state for paged attention (optional).
-      partition_spec: Partition specification for FSDP all-gather.
-      decoder_target_tokens: Target tokens for the decoder (optional, used in
-        MTP).
-      decoder_target_mask: Target mask for the decoder (optional, used in MTP).
-      nnx_method: Method to call on the NNX module (optional).
-
-    Returns:
-      Logits from the Transformer model.
-    """
-    if self.is_initializing():
-      return self.model(
-          decoder_input_tokens=decoder_input_tokens,
-          decoder_positions=decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          encoder_images=encoder_images,
-          encoder_image_masks=encoder_image_masks,
-          enable_dropout=enable_dropout,
-          model_mode=model_mode,
-          previous_chunk=previous_chunk,
-          true_length=true_length,
-          slot=slot,
-          page_state=page_state,
-      )
-    all_model_weights = all_gather_over_fsdp(
-        self.model.variables, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
-    )
-
-    return self.model.apply(
-        all_model_weights,
-        decoder_input_tokens=decoder_input_tokens,
-        decoder_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        encoder_images=encoder_images,
-        encoder_image_masks=encoder_image_masks,
-        enable_dropout=enable_dropout,
-        model_mode=model_mode,
-        previous_chunk=previous_chunk,
-        true_length=true_length,
-        slot=slot,
-        page_state=page_state,
-        mutable=False,
-        decoder_target_tokens=decoder_target_tokens,
-        decoder_target_mask=decoder_target_mask,
-        nnx_method=nnx_method,
-    )

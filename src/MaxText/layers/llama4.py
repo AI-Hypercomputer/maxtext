@@ -454,6 +454,9 @@ class Llama4DecoderLayer(nnx.Module):
     cfg = self.config
     assert cfg.num_experts >= 1, "Expected the Llama4 config to have `num_experts > 1`."
 
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
@@ -481,8 +484,9 @@ class Llama4DecoderLayer(nnx.Module):
     hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
+    load_balance_loss = None
     if self.is_moe_layer:
-      mlp_lnx = self.moe_block(hidden_states)
+      mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states)
     else:
       mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
@@ -490,6 +494,9 @@ class Llama4DecoderLayer(nnx.Module):
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout(layer_output, deterministic=deterministic)
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+
+    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+      self.sow("intermediates", "moe_lb_loss", load_balance_loss)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))

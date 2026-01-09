@@ -16,12 +16,18 @@
 
 # DeepSeek
 
-DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. DeepSeek-V3 features advanced techniques, including Multi-Head Latent Attention (MLA), finer-grained and shared experts, Multi-Token Prediction (MTP), and FP8 mixed precision designed for enhanced efficiency and performance. The currently supported models are DeepSeek V3 (671B) and DeepSeek V2-Lite (16B).
+DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The currently supported models are DeepSeek V3.1 (671B), DeepSeek V3 (671B), DeepSeek R1 (671B), and DeepSeek V2-Lite (16B).
 
-Please note:
-* FP8 mixed precision is not supported yet.
+* DeepSeek-V3 features advanced techniques, including Multi-Head Latent Attention (MLA), finer-grained and shared experts, Multi-Token Prediction (MTP), and FP8 mixed precision designed for enhanced efficiency and performance. 
+
+* DeepSeek V3.1 shares the same architecture as V3, but features an improved checkpoint that supports hybrid thinking modes, improved performance in agentic tasks, and higher thinking efficiency. 
+
+* DeepSeek R1 also uses V3 architecture. It utilizes cold-start data and large-scale reinforcement learning to incentivize chain-of-thought reasoning without relying solely on supervised fine-tuning.
+
+**Please note:**
 * To leverage MLA with Flash Attention, ensure you have the latest JAX version.
 * The provided TPU configurations are examples and not mandatory.
+* For V3.1 & R1, use existing V3 671B model configurations, as it shares the same architecture.
 
 
 ## Pre-training
@@ -50,7 +56,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
 
 
 ## Checkpoint conversion
-To get started, follow the instructions at HuggingFace ([V3](https://huggingface.co/deepseek-ai/DeepSeek-V3), [V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)) to download the model. Currently, for V3, please convert it from FP8 to BF16 using script [here](https://github.com/deepseek-ai/DeepSeek-V3/blob/a878eada08ea6913f5a2ae80a43afeffdef082ef/inference/fp8_cast_bf16.py). Once downloaded and converted to BF16:
+To get started, follow the instructions at HuggingFace ([V3](https://huggingface.co/deepseek-ai/DeepSeek-V3), [V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)) to download the model. Currently for V3, V3.1, and R1, it uses mixed precision fp8 & bf16 weights. To convert all FP8 weights to BF16, use the script [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_scripts/deepseek_fp8_to_bf16.py). Once downloaded and converted to BF16:
 * run [convert_deepseek_family_ckpt.py](../../../src/MaxText/utils/ckpt_scripts/convert_deepseek_family_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) for training and fine-tuning. When converting a checkpoint with MTP layers (like DeepSeek-V3), be sure to add the `--enable_mtp` flag to process them correctly.
 * run [convert_deepseek_family_unscanned_ckpt.py](../../../src/MaxText/utils/ckpt_scripts/convert_deepseek_family_unscanned_ckpt.py) to convert the checkpoint to unscanned version in Orbax for decoding.
 
@@ -145,7 +151,7 @@ python3 -m MaxText.decode src/MaxText/configs/base.yml \
     max_target_length=1024 \
     tokenizer_type=huggingface \
     tokenizer_path=deepseek-ai/DeepSeek-V3 \
-    attention=flash \
+    attention=dot_product \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     megablox=False \
@@ -191,7 +197,6 @@ python3 -m tests.forward_pass_logit_checker \
     model_name=deepseek2-16b \
     max_prefill_predict_length=4 \
     max_target_length=4 \
-    dataset_type=synthetic \
     scan_layers=false \
     sparse_matmul=False \
     dtype=float32 \
@@ -201,7 +206,7 @@ python3 -m tests.forward_pass_logit_checker \
     --golden_logits_path=${PWD}/golden_DeepSeek-V2-Lite.jsonl
 ```
 
-To run MMLU benchmarks and validate the model's performance, follow the instructions provided [here](../../../benchmarks/mmlu/mmlu_eval.py).
+To run MMLU benchmarks and validate the model's performance, follow the instructions provided [here](../../../benchmarks/api_server/README.md).
 
 ## Supported MoE strategy
 * Dropless

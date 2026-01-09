@@ -1,0 +1,66 @@
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# MaxText Codecov Configuration
+# 
+# We use a two-flag scheme ('regular' and 'scheduled') to handle our tiered test suite.
+# 'carryforward' is enabled because Pull Requests only run a subset of tests (excluding 'scheduled_only').
+# Without it, PRs would show a significant coverage drop as they would 'overwrite' the full-suite results.
+#
+# Scheme:
+# - 'regular': Updated by every PR/Schedule. Used to evaluate 'patch' (new code) coverage.
+# - 'scheduled': Updated ONLY by scheduled full runs. Used to anchor 'project' (total health) coverage.
+# During PRs, the 'scheduled' flag is carried forward from the last full run on 'main' to keep the score stable.
+
+# Exclude non-source code, deprecated and experimental folders from coverage tracking
+codecov: 
+ token: 35742a22-fb1f-4839-97ff-b54da5588689
+ignore:
+  - "src/MaxText/assets"
+  - "src/MaxText/configs"
+  - "src/MaxText/examples"
+  - "src/MaxText/experimental"
+  - "src/MaxText/inference"
+  - "src/MaxText/inference_mlperf"
+  - "src/MaxText/scratch_code"
+  - "src/MaxText/test_assets"
+
+
+flags:
+  # Updated on every PR and during every scheduled run (contains a subset of tests).
+  regular:
+    carryforward: true
+  # Updated ONLY during scheduled runs (contains all tests).
+  scheduled:
+    carryforward: true
+
+coverage:
+  status:
+    # Project score remains stable at the 'Full Suite' level.
+    # It carries forward the last 'scheduled' results during PRs.
+    project:
+      default:
+        target: auto
+        threshold: 5% # fail on 5+ percent degradation
+        flags:
+          - scheduled
+
+    # Patch score provides feedback on the code changed in a PR.
+    patch:
+      default:
+        target: auto
+        threshold: 5% # fail on 5+ percent degradation
+        flags:
+          - regular
+

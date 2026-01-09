@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""""Module for decoder layers."""
+"""Module for decoder layers"""
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -22,7 +22,7 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 
 from flax import linen as nn
 from flax import nnx
@@ -32,8 +32,10 @@ from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONT
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText import max_logging
 from MaxText import max_utils
+from MaxText.sharding import create_sharding
 from MaxText.inference import page_manager
 from MaxText.layers import linears
+from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
 from MaxText import maxtext_utils
@@ -402,9 +404,9 @@ class Decoder(nn.Module):
         return [mixtral.MixtralDecoderLayerToLinen]
       case DecoderBlockType.DEEPSEEK:
         if self.config.use_batch_split_schedule:
-          return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
+          return [deepseek_batchsplit.DeepSeekDenseLayerToLinen, deepseek_batchsplit.DeepSeekMoELayerToLinen]
         else:
-          return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
+          return [deepseek.DeepSeekDenseLayerToLinen, deepseek.DeepSeekMoELayerToLinen]
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
@@ -472,7 +474,6 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
-        DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
@@ -481,6 +482,10 @@ class Decoder(nn.Module):
       return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
+    elif self.config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+      return functools.partial(
+          normalizations.Qwen3NextRMSNormLinen, num_features=num_features, shard_mode=self.config.shard_mode
+      )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -607,16 +612,7 @@ class Decoder(nn.Module):
 
     cfg = self.config
     if cfg.shard_mode == ShardMode.EXPLICIT:
-      norm_out_sharding = NamedSharding(
-          self.mesh,
-          nn.logical_to_mesh_axes(
-              (
-                  "activation_batch",
-                  "activation_length_no_exp",
-                  "activation_embed",
-              )
-          ),
-      )
+      norm_out_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length_no_exp", "activation_embed"))
     else:
       norm_out_sharding = None
 
@@ -631,17 +627,10 @@ class Decoder(nn.Module):
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
-      out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes((None, None, "activation_vocab")))
+      out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"))
     else:
-      out_sharding = NamedSharding(
-          self.mesh,
-          nn.logical_to_mesh_axes(
-              (
-                  "activation_embed_and_logits_batch",
-                  "activation_length_no_exp",
-                  "activation_vocab",
-              )
-          ),
+      out_sharding = create_sharding(
+          self.mesh, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
       )
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
@@ -728,11 +717,11 @@ class Decoder(nn.Module):
     )
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
-        partition_spec = self.pipeline_module.get_weight_sharding(
+        logical_partition_spec = self.pipeline_module.get_weight_sharding(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
         )
       else:
-        partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
+        logical_partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
         assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
         dense_layer = RemattedBlockLayers[0]
@@ -761,9 +750,9 @@ class Decoder(nn.Module):
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
                 model_mode=model_mode,
             )(y, *broadcast_args)
-        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+        y = self.pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
       else:  # Not DeepSeek
-        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+        y = self.pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
@@ -913,11 +902,21 @@ class Decoder(nn.Module):
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     hidden_state = y
 
+    # When initializing with vLLM RPA attention, we need to run the output head to
+    # initialize any parameters associated with it.
+    if self.is_initializing() and cfg.attention == "vllm_rpa":
+      _ = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+
+    # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
+    if cfg.attention == "vllm_rpa":
+      logits = None
+
     # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
     # Instead, we keep track on the hidden states, which has smaller size compared to full logits
-    if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+    elif cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow("intermediates", "hidden_states", hidden_state)
+
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 

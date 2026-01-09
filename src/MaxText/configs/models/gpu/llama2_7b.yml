@@ -13,3 +13,4 @@ use_iota_embed: True
 scan_layers: False
 dataset_type: "synthetic"
 async_checkpointing: False
+max_segments_per_seq: 32

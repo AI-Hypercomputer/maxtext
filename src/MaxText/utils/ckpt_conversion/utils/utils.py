@@ -24,7 +24,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import jax
-import jax.tree_util
 from jax.experimental import multihost_utils
 
 from jaxtyping import Array
@@ -40,8 +39,10 @@ from safetensors.flax import save as save_flax_to_bytes
 from huggingface_hub import HfApi, repo_exists
 
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from transformers import AutoModelForCausalLM
 
 from MaxText import max_logging
+import psutil
 
 
 SAFE_TENSORS_CONFIG_FILE = "config.json"
@@ -76,6 +77,8 @@ HF_IDS = {
     "gpt-oss-20b": "openai/gpt-oss-20b",
     "gpt-oss-120b": "openai/gpt-oss-120b",
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+    "mixtral-8x7b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "mixtral-8x22b": "mistralai/Mixtral-8x22B-Instruct-v0.1",
 }
 
 
@@ -90,18 +93,114 @@ def _get_local_directory(output_dir: str) -> str:
   return local_dir
 
 
+def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
+  """Validates param_mapping coverage and filters unused keys, for to_maxtext and to_huggingface.
+
+  Preprocess maxtext keys for transformation.
+  - Ensures every MaxText checkpoint key (`maxtext_state_keys`) is covered by
+    the flattened param_mapping.
+  - Keys in the param_mapping that are not present in the checkpoint (common for
+    multi-variant maps like gemma3, qwen3, deepseek) are skipped.
+
+  Args:
+    param_map_keys: MaxText keys from the `PARAM_MAPPING`. These can be:
+      - `atomic_mt_key`: A single string representing one MaxText parameter that map to HF parameter(s).
+      - `composite_mt_key`: A tuple of strings representing multiple MaxText parameters that map to HF parameter(s).
+    maxtext_state_keys: Set of MaxText keys loaded from the Orbax checkpoint.
+
+  Returns:
+    A list of 'filtered' mapping keys (strings or tuples) that are fully present
+    and valid based on `maxtext_state_keys`.
+
+  Raises:
+    ValueError: If `maxtext_state_keys` is NOT a subset of the flattened
+      `param_map_keys`.
+  """
+  flattened_map_keys = set()
+  for key in param_map_keys:
+    if isinstance(key, tuple):
+      flattened_map_keys.update(key)
+    else:
+      flattened_map_keys.add(key)
+
+  # 1 Validate: every maxtext state key must be covered by param map
+  missing_keys = maxtext_state_keys - flattened_map_keys
+  if missing_keys:
+    raise ValueError(
+        "maxtext_state_dict must be a subset of flattened param_map"
+        + f"\nparam map\n{param_map_keys}"
+        + f"\nmaxtext:\n{maxtext_state_keys}"
+    )
+
+  # 2 Filter: param map may have extra keys
+  extra_keys = flattened_map_keys - maxtext_state_keys
+  if extra_keys:
+    max_logging.log(f"Warning: extra keys in param_map are skipped: {extra_keys}")
+
+  # skip extra keys in param map
+  filtered_map_keys = []
+  for key in param_map_keys:
+    if (isinstance(key, str) and key in maxtext_state_keys) or (
+        isinstance(key, tuple) and all(k in maxtext_state_keys for k in key)
+    ):
+      filtered_map_keys.append(key)
+  return filtered_map_keys
+
+
+def apply_hook_fns(weight, target_shape, hook_fns):
+  """Apply hook functions, essential for to_maxtext and to_huggingface"""
+  # If hook is unsepecified, use identity
+  if hook_fns is None:
+    return weight
+  if not isinstance(hook_fns, list):
+    hook_fns = [hook_fns]
+  # Apply a list of hooks, be careful of order
+  for hook_fn in hook_fns:
+    weight = hook_fn(weight, target_shape)
+  return weight
+
+
+def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = None) -> np.ndarray:
+  """Converts a JAX array to a NumPy array with the specified dtype, used in to_huggingface.
+
+  Args:
+    weight: The input JAX array, potentially sharded across devices.
+    dtype_str: The target NumPy dtype as a string (e.g., 'float32', 'bfloat16').
+      If None, the dtype of the input JAX array is preserved. Defaults to None.
+
+  Returns:
+    A NumPy array containing the data from `weight`, cast to `dtype_str` if provided.
+  """
+  final_dtype_str = str(weight.dtype) if dtype_str is None else dtype_str
+  # JAX dtypes like 'bfloat16', 'float32' are understood by np.dtype()
+  target_np_dtype = np.dtype(final_dtype_str)
+  expected_shape = weight.shape
+
+  # Gather the array across devices if it's sharded.
+  # process_allgather typically returns the array on the host.
+  weight = multihost_utils.process_allgather(weight)
+
+  # Convert JAX array to NumPy array.
+  np_array = np.array(weight)
+
+  # Cast to the target NumPy dtype if it's different.
+  if np_array.dtype != target_np_dtype:
+    np_array = np_array.astype(target_np_dtype)
+
+  return np_array.reshape(expected_shape)  # Reshape for safety, though usually preserved.
+
+
 def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map):
-  """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list."""
+  """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list, used in to_huggingface"""
   if hf_path not in hf_shape_map:
     raise ValueError(f"HF path '{hf_path}' not found in hf_shape_map.")
   target_hf_shape = hf_shape_map[hf_path]
+  # If hook is unsepecified, use identity
   if current_hook_fns:
-    # otherwise identity
     processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
   numpy_slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
-  assert len(target_hf_shape) == len(
-      numpy_slice.shape
-  ), f"shape mismatch {len(target_hf_shape)} and {len(numpy_slice.shape)}"
+  if numpy_slice.shape != target_hf_shape:
+    raise ValueError(f"Shape mismatch for {hf_path}: Expect {target_hf_shape}, got {numpy_slice.shape}")
   output_weights.append((hf_path, numpy_slice))
 
 
@@ -113,22 +212,23 @@ def process_maxtext_param(
     hf_shape_map: dict[str, Any],
     maxtext_config: Any,
 ) -> list[tuple[str, np.ndarray]]:
-  """Processes a single MaxText parameter (or a group of parameters) for conversion to Hugging Face format.
+  """Processes a single MaxText parameter (or a group of parameters) for conversion, used in to_huggingface.
 
-  This function is responsible for taking a MaxText parameter (which might be
-  a single tensor or a list of tensors for N-to-1 mappings) and transforming
+  This function is responsible for taking a MaxText parameter and transforming
   it into one or more Hugging Face compatible parameters. It handles various
-  scenarios including:
-  - 1-to-1 mappings (single MaxText param to single HF param).
-  - N-to-1 mappings (multiple MaxText params combined into a single HF param).
-  - Stacked MaxText parameters (e.g., scanned layers or MoE experts) that need
-    to be unstacked into individual Hugging Face parameters.
+  scenarios based on
+  - the MaxText key form (`atomic_mt_key` or `composite_mt_key`)
+  - and the Hugging Face value form (unscanned string, scanned list of strings,
+    unscanned with expert stacking, or scanned with expert stacking).
+  Note: We assume composite_mt_key can only occur for unscanned/scanned HF keys, but not those with expert stacking.
 
   Args:
-    maxtext_param_key: The key (or tuple of keys for N-to-1 mappings) identifying
-      the MaxText parameter(s) being processed.
+    maxtext_param_key: The key identifying the MaxText parameter(s). Can be
+      an `atomic_mt_key` (str) or a `composite_mt_key` (tuple of str) mapping
+      to HF parameter(s).
     maxtext_param_weight: The actual weight(s) of the MaxText parameter(s).
-      This can be a single `jax.Array` or a list of `jax.Array` for N-to-1 mappings.
+      This can be a single `jax.Array` for an `atomic_mt_key` or a list of
+      `jax.Array` for a `composite_mt_key`.
     param_map: A dictionary mapping MaxText parameter keys to their corresponding
       Hugging Face target path(s).
     hook_fn_map: A dictionary mapping MaxText parameter keys to transformation
@@ -157,7 +257,7 @@ def process_maxtext_param(
   # This list will store tuples of (hf_path, hf_weight)
   output_weights = []
 
-  # Case 1: Unscan
+  # Case 1: Unscanned
   if not isinstance(hf_target_paths, list):
     max_logging.log("\tunscan")
     hf_path = hf_target_paths
@@ -166,93 +266,60 @@ def process_maxtext_param(
 
   # Stacked MaxText weight
   # This now handles three cases:
-  # 2. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
+  # 2. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
   # 3. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
-  # 4. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
-  is_scanned_moe_layer = isinstance(hf_target_paths[0], list)
+  # 4. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
 
-  if is_scanned_moe_layer:
-    max_logging.log("\tscan moe")
-    # Case 2: Scanned MoE layer, e.g., from 'layers-moe_block-wi_0'.
-    # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
-    # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
-    expert_axis_to_slice = 0
+  if not isinstance(hf_target_paths[0], list):
+    # Case 2 or 3: The source tensor is stacked on a single axis.
+    # i.e., hf_target_paths is an (un-nested) list
+    # We determine if it's standard scanned (stack on layer axis) or unscanned MoE (stack on expert axis).
+    if maxtext_config.scan_layers:
+      max_logging.log("\tscan")
+      # Case 2: Standard scanned layer.
+      # The tensor is stacked ONLY on the layer axis.
+      axis_to_slice = maxtext_config.param_scan_axis
+    else:
+      max_logging.log("\tunscan moe")
+      # Case 3: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
+      # The tensor is stacked ONLY on the expert axis. Assuming expert is axis 0.
+      axis_to_slice = 0
 
-    # Outer loop for experts
-    for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
-      # Slice along the expert axis to get the tensor for the current expert across all layers.
-      expert_tensor_slice = jax.lax.index_in_dim(
-          maxtext_param_weight, expert_idx, axis=expert_axis_to_slice, keepdims=False
-      )
-      # Inner loop for layers
-      for layer_idx, hf_path in enumerate(expert_paths_for_layer):
-        # Slice the expert tensor along the layer axis to get the final individual weight.
-        # axis is 0 on the new sliced tensor
-        layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
-        _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, hf_shape_map)
+    # Iterate through the slices of the MaxText weight along the determined stacking axis.
+    # Handles MaxText key forms (`atomic_mt_key` and `composite_mt_key`)
+    for i, hf_path in enumerate(hf_target_paths):
+      if isinstance(maxtext_param_weight, list):
+        # This handles `composite_mt_key` mappings where `maxtext_param_weight` is a list of tensors.
+        # Each tensor in the list is sliced independently along the `axis_to_slice`.
+        weight_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
+      else:
+        # For `atomic_mt_key` mappings, slice the single MaxText tensor.
+        weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
+      _process(hf_path, weight_slice, output_weights, current_hook_fns, hf_shape_map)
 
     return output_weights
 
-  # Case 3 or 4: The source tensor is stacked on a single axis.
-  # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
-  is_unscanned_moe = "moe_block" in maxtext_param_key and any(
-      f"_{i}-" in maxtext_param_key for i in range(maxtext_config.base_num_decoder_layers)
-  )
+  # Multi axis stacked: isinstance(hf_target_paths[0], list)
+  max_logging.log("\tscan moe")
+  # Case 4: Scanned MoE layer, e.g., from 'layers-moe_block-wi_0'.
+  # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
+  # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
+  expert_axis_to_slice = 0
 
-  if is_unscanned_moe:
-    max_logging.log("\tunscan moe")
-    # Case 3: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
-    # The tensor is stacked ONLY on the expert axis. Assuming expert is axis 0.
-    axis_to_slice = 0
-  else:
-    max_logging.log("\tscan")
-    # Case 4: Standard scanned layer.
-    # The tensor is stacked ONLY on the layer axis.
-    axis_to_slice = maxtext_config.param_scan_axis
-
-  # Iterate through the slices of the MaxText weight along the determined stacking axis.
-  for i, hf_path in enumerate(hf_target_paths):
-    if isinstance(maxtext_param_weight, list):
-      # This handles N-to-1 mappings where `maxtext_param_weight` is a list of tensors.
-      # Each tensor in the list is sliced independently along the `axis_to_slice`.
-      weight_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
-    else:
-      # For 1-to-1 mappings, slice the single MaxText tensor.
-      weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
-    _process(hf_path, weight_slice, output_weights, current_hook_fns, hf_shape_map)
+  # Outer loop for experts
+  for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
+    # Slice along the expert axis to get the tensor for the current expert across all layers.
+    expert_tensor_slice = jax.lax.index_in_dim(
+        maxtext_param_weight, expert_idx, axis=expert_axis_to_slice, keepdims=False
+    )
+    # Inner loop for layers
+    for layer_idx, hf_path in enumerate(expert_paths_for_layer):
+      # Slice the expert tensor along the layer axis to get the final individual weight.
+      # axis is 0 on the new sliced tensor
+      layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
+      _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, hf_shape_map)
 
   return output_weights
-
-
-def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = None) -> np.ndarray:
-  """Converts a JAX array to a NumPy array with the specified dtype."""
-  final_dtype_str = str(weight.dtype) if dtype_str is None else dtype_str
-  # JAX dtypes like 'bfloat16', 'float32' are understood by np.dtype()
-  target_np_dtype = np.dtype(final_dtype_str)
-  expected_shape = weight.shape
-
-  # Gather the array across devices if it's sharded.
-  # process_allgather typically returns the array on the host.
-  weight = multihost_utils.process_allgather(weight)
-
-  # Convert JAX array to NumPy array.
-  np_array = np.array(weight)
-
-  # Cast to the target NumPy dtype if it's different.
-  if np_array.dtype != target_np_dtype:
-    np_array = np_array.astype(target_np_dtype)
-
-  return np_array.reshape(expected_shape)  # Reshape for safety, though usually preserved.
-
-
-def apply_hook_fns(weight, target_shape, hook_fns):
-  if hook_fns is None:
-    return weight
-  if not isinstance(hook_fns, list):
-    hook_fns = [hook_fns]
-  for hook_fn in hook_fns[::-1]:
-    weight = hook_fn(weight, target_shape)
-  return weight
 
 
 def create_huggingface_hub_repo_if_not_exist(repo_id, repo_type):
@@ -673,3 +740,21 @@ def upload_folder_to_gcs(local_folder: str, gs_bucket_path: str, num_workers: in
       max_logging.log(f"✅ Uploaded {name} to {bucket.name}/{destination_dir}{name}")
 
   max_logging.log(f"Upload completed in {time.time() - start_time}s")
+
+
+def print_ram_usage(stage=""):
+  memory = psutil.virtual_memory()
+  max_logging.log(
+      f"[{stage}] RAM Usage: {memory.used / (1024**3):.2f}/{memory.total / (1024**3):.2f} GB ({memory.percent:.1f}%)"
+  )
+
+
+def get_hf_model(model_id: str, token: str):
+  """Loads the HuggingFace model based on model_id (Eager mode only), used in to_maxtext"""
+  if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
+    from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
+
+    hf_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(model_id, token=token)
+  else:
+    hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=token)
+  return hf_model

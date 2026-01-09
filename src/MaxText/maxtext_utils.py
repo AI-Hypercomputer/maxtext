@@ -76,11 +76,11 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
   return sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
 
-def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules):
+def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, shard_mode):
   max_logging.log(
       "WARNING: Function maxtext_utils.all_gather_over_fsdp is deprecated. Please use sharding.all_gather_over_fsdp."
   )
-  return sharding.all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules)
+  return sharding.all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, shard_mode)
 
 
 def get_functional_train_with_signature(
@@ -714,6 +714,32 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
+def update_state_param(state, target_path, value):
+  """
+  Updates a specific parameter in state.params at the given path.
+
+  Args:
+      state: The current TrainState.
+      target_path: A tuple of keys matching the structure inside state.params.
+      value: The value to apply.
+  """
+
+  def create_jax_path(target_path):
+    path = []
+    for k in target_path:
+      path.append(jax.tree_util.DictKey(key=k))
+    return tuple(path)
+
+  def _apply_update(path, param):
+    if path == updated_target_path:
+      return param + value
+    return param
+
+  updated_target_path = create_jax_path(target_path)
+  new_params = jax.tree_util.tree_map_with_path(_apply_update, state.params)
+  return state.replace(params=new_params)
+
+
 def init_decode_state(apply_fn, params) -> train_state.TrainState:
   """Init train state with null opt state for decode."""
   state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
@@ -752,18 +778,19 @@ def init_initial_state(model, tx, config, is_training, key):
 
 def get_abstract_param(model, config):
   """Get abstract model structure (name, shape) without materializing the weights to save memory"""
-  key = jax.random.PRNGKey(0)
-  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-      config.model_name, batch_size=config.micro_batch_size_to_train_on
-  )
-  abstract_vars = jax.eval_shape(
-      model.init,
-      {"params": key, "dropout": key, "aqt": key},
-      jnp.ones(input_shape, dtype=jnp.int32),
-      jnp.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
-  )
+  with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    key = jax.random.PRNGKey(0)
+    input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+        config.model_name, batch_size=config.micro_batch_size_to_train_on
+    )
+    abstract_vars = jax.eval_shape(
+        model.init,
+        {"params": key, "dropout": key, "aqt": key},
+        jnp.ones(input_shape, dtype=jnp.int32),
+        jnp.ones(input_shape, dtype=jnp.int32),
+        encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+    )
   return abstract_vars
 
 
@@ -933,7 +960,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 
   unboxed_abstract_sharded_state = max_utils.unbox_logicallypartioned(abstract_sharded_state)
   # Initialization
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return (
       unboxed_abstract_sharded_state,
@@ -969,7 +996,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
     init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
     abstract_state = jax.eval_shape(init_kv_cache_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return state_mesh_annotations
 
@@ -998,7 +1025,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
     init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
     abstract_state = jax.eval_shape(init_kv_cache_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return state_mesh_annotations
 
@@ -1142,3 +1169,14 @@ def create_learning_rate_schedule(config):
     boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
 
   return optax.join_schedules(pieces, boundaries)
+
+
+def print_state_mesh_shardings_params(state, state_sharding, mesh):
+  """Print state shardings."""
+  leaves_params, _ = jax.tree_util.tree_flatten_with_path(state.params)
+  leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(state_sharding.params)
+  for (path, leaf_val), (_, leaf_sharding) in zip(leaves_params, leaves_sharding):
+    path_str = "/".join(str(p.key) for p in path)
+    shape = jax.typeof(leaf_val)
+    pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
+    print(f"{path_str:.<80} {shape} {pspec}", flush=True)

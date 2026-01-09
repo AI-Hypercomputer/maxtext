@@ -25,14 +25,30 @@ import numpy as np
 
 import jax
 
+import google_cloud_mldiagnostics as mldiag
+
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText.managed_mldiagnostics import ManagedMLDiagnostics
 from MaxText.utils import gcs_utils
 from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.globals import EPS
 
 from collections import defaultdict
+
+# Mapping MaxText metrics to managed profiler metrics
+_METRICS_TO_MANAGED = {
+    "learning/current_learning_rate": "learning_rate",
+    "learning/loss": "loss",
+    "learning/grad_norm": "gradient_norm",
+    "learning/total_weights": "total_weights",
+    "perf/step_time_seconds": "step_time",
+    "perf/per_device_tokens_per_sec": "throughput",
+    "perf/per_device_tflops_per_sec": "tflops",
+    # There are no mappings to the following metrics yet:
+    # "latency", "mfu"
+}
 
 
 def _prepare_metrics_for_json(metrics, step, run_name):
@@ -82,6 +98,8 @@ class MetricLogger:
     self.learning_rate_schedule = learning_rate_schedule
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     self.buffered_train_metrics = None
+    if self.config.managed_mldiagnostics:
+      ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
 
   def reset_eval_metrics(self):
     """Resets the cumulative metrics dictionary for a new evaluation run."""
@@ -100,6 +118,9 @@ class MetricLogger:
 
       if self.config.gcs_metrics and jax.process_index() == 0:
         self.write_metrics_for_gcs(metrics, step, is_training)
+
+      if self.config.managed_mldiagnostics:
+        self.write_metrics_to_managed_mldiagnostics(metrics, step)
 
   def log_metrics(self, metrics, step, is_training):
     """Logs metrics via max_logging."""
@@ -233,6 +254,18 @@ class MetricLogger:
         max_logging.log(f"To see full metrics 'tensorboard --logdir={self.config.tensorboard_dir}'")
         self.writer.flush()
 
+  def write_metrics_to_managed_mldiagnostics(self, metrics, step):
+    """Write metrics to managed profiler."""
+    if (step + 1) % self.config.log_period == 0 or step == self.config.steps - 1:
+      for metric_name in metrics.get("scalar", []):
+        value = metrics["scalar"][metric_name]
+        # For NumPy/JAX array objects (including single-element arrays), use .item()
+        # to extract the native Python scalar.
+        if hasattr(value, "item"):
+          value = value.item()
+        mapped_metric_name = _METRICS_TO_MANAGED.get(metric_name, metric_name)
+        mldiag.metrics.record(mapped_metric_name, value, step=int(step))
+
   def write_setup_info_to_tensorboard(self, params):
     """Writes setup information like train config params, num model params, and XLA flags to TensorBoard."""
     num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
@@ -240,7 +273,7 @@ class MetricLogger:
     self.metadata[MetadataKey.PER_DEVICE_TOKENS] = maxtext_utils.calculate_tokens_training_per_device(self.config)
     max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
     max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self.writer)
-    max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], self.writer)
+    max_utils.add_text_to_summary_writer("libtpu_init_args", os.getenv("LIBTPU_INIT_ARGS", ""), self.writer)
     maxtext_utils.add_config_to_summary_writer(self.config, self.writer)
 
   def get_performance_metric_queue(self, config):

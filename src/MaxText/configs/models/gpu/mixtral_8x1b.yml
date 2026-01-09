@@ -33,3 +33,4 @@ reuse_example_batch: 1
 enable_checkpointing: False
 megablox: False
 sparse_matmul: False
+max_segments_per_seq: 32

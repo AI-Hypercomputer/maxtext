@@ -305,7 +305,7 @@ def validate_keys(keys):
     validate_mlp_dim(keys)
     validate_sparse_matmul_parallelism(keys)
     validate_ring_of_experts_parallelism(keys)
-    validate_shard_fsdp_on_expert_parallelism(keys)
+    validate_shard_expert_on_fsdp(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
     validate_gpt_oss_moe(keys)
@@ -322,12 +322,6 @@ def validate_keys(keys):
 
   if keys["decoder_block"] == "llama4":
     validate_llama4_config(keys)
-
-  if keys["decoder_block"] == "qwen3_next":
-    validate_qwen3_next_config(keys)
-  else:
-    if keys["partial_rotary_factor"] is not None and keys["partial_rotary_factor"] != 1.0:
-      raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
 
   if keys["shard_optimizer_over_data"]:
     validate_optimizer_sharding_over_data(keys)
@@ -432,23 +426,6 @@ def validate_llama4_config(keys: dict):
     raise ValueError(
         f"The number of decoder layers ({keys['base_num_decoder_layers']}) must be divisible by interleave moe layer step ({keys['interleave_moe_layer_step']})"
     )
-
-
-def validate_qwen3_next_config(keys: dict):
-  """
-  Validates the following checks for Qwen3 Next:
-
-  Args:
-    keys: the raw config in dict form
-
-  """
-  if keys["sparse_matmul"]:
-    raise ValueError(
-        "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference."
-    )
-  rotary_dim = int(keys["head_dim"] * keys["partial_rotary_factor"])
-  if rotary_dim % 2 != 0:
-    raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
 
 
 def validate_model_name(s: str) -> bool:
@@ -1235,12 +1212,12 @@ def validate_ring_of_experts_parallelism(raw_keys):
     raise ValueError("Ring-of-experts requires expert-parallelism to be enabled.")
 
 
-def validate_shard_fsdp_on_expert_parallelism(raw_keys):
-  if raw_keys["fsdp_shard_on_exp"] and raw_keys["num_experts"] % raw_keys["ici_fsdp_parallelism"] != 0:
-    raise ValueError("fsdp_shard_on_exp requires num_experts is divisiable by ici_fsdp_parallelism.")
-  if raw_keys["fsdp_shard_on_exp"] and (using_tensor_parallelism(raw_keys) or using_expert_parallelism(raw_keys)):
+def validate_shard_expert_on_fsdp(raw_keys):
+  if raw_keys["shard_exp_on_fsdp"] and raw_keys["num_experts"] % raw_keys["ici_fsdp_parallelism"] != 0:
+    raise ValueError("shard_exp_on_fsdp requires num_experts is divisiable by ici_fsdp_parallelism.")
+  if raw_keys["shard_exp_on_fsdp"] and (using_tensor_parallelism(raw_keys) or using_expert_parallelism(raw_keys)):
     raise ValueError(
-        "fsdp_shard_on_exp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1."
+        "shard_exp_on_fsdp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1."
     )
 
 
@@ -1257,7 +1234,7 @@ def validate_optimizer_sharding_over_data(raw_keys):
   zero1_supported_opt_types = ("adamw", "adam_pax")
   if raw_keys["opt_type"] not in zero1_supported_opt_types:
     raise ValueError(
-        f"Optimizer type {raw_keys["opt_type"]} is not supported for optimizer sharding.\n"
+        f"Optimizer type {raw_keys['opt_type']} is not supported for optimizer sharding.\n"
         f"Please use an optimizer from this list: {zero1_supported_opt_types}."
     )
 

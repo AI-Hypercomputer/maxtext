@@ -39,6 +39,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import absl
 
 import numpy as np
 import jax
@@ -61,6 +62,8 @@ from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_
 from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
 from MaxText.layers import models
 from MaxText.layers import quantizations
+
+absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
 def upload_blob(bucket_name, source_file_name, destination_blob_name):
@@ -378,9 +381,21 @@ def main(config, test_args):  # pylint: disable=W0621
     """Comparing maxtext model with HF model on-the-fly"""
     if test_args.hf_model_path == "":
       raise ValueError("run_hf_model requires hf_model_path")
-    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch.bfloat16)
-    tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path)
-    if "Llama-3.1" in test_args.hf_model_path:
+
+    hf_token = config.hf_access_token
+    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch.bfloat16, token=hf_token)
+
+    if os.path.isdir(test_args.hf_model_path):
+      # local hf directory may not contain tokenizer, read from remote tokenizer
+      tokenizer_path = config.tokenizer_path
+    else:
+      tokenizer_path = test_args.hf_model_path
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, token=hf_token)
+
+    # maxtext model prefix, use eos token as pad token
+    pad_token_prefixes = ["llama3.1", "mixtral"]
+    if any(config.model_name.startswith(prefix) for prefix in pad_token_prefixes):
       tokenizer.pad_token = tokenizer.eos_token
 
     init_rng = jax.random.PRNGKey(config.init_weights_seed)

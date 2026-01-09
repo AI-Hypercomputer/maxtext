@@ -48,6 +48,7 @@ source_suffix = [".rst", ".ipynb", ".md"]
 html_theme = "sphinx_book_theme"
 html_static_path = ["_static"]
 html_css_files = ["css/custom.css"]
+html_js_files = ["js/editable_commands.js"]
 html_logo = "_static/maxtext.png"
 
 # -- Options for myst ----------------------------------------------
@@ -62,6 +63,9 @@ myst_linkify_fuzzy_links = False
 # Theme-specific options
 # https://sphinx-book-theme.readthedocs.io/en/stable/reference.html
 html_theme_options = {
+    "analytics": {
+        "google_analytics_id": "G-RC6NRK4GNN",
+    },
     "show_navbar_depth": 1,
     "show_toc_level": 1,
     "repository_url": "https://github.com/AI-Hypercomputer/maxtext",
@@ -73,7 +77,7 @@ html_theme_options = {
 
 # Remove specific documents from ToC
 exclude_patterns = [
-    "guides/run_maxtext/run_maxtext_via_multihost_job.md",
-    "guides/run_maxtext/run_maxtext_via_multihost_runner.md",
-    "explanations/llm_calculator.ipynb",
+    "run_maxtext/run_maxtext_via_multihost_job.md",
+    "run_maxtext/run_maxtext_via_multihost_runner.md",
+    "reference/core_concepts/llm_calculator.ipynb",
 ]

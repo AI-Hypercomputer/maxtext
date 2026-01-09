@@ -34,10 +34,11 @@
 :maxdepth: 2
 :hidden:
 
-explanations.md
+install_maxtext.md
+tutorials.md
+run_maxtext.md
 guides.md
 reference.md
-tutorials.md
 development.md
 release_notes.md
 ```
