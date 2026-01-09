@@ -137,6 +137,7 @@ jobs:
             uv pip install pytest-cov
             PYTEST_COV_ARGS="--cov=MaxText --cov=maxtext --cov-report=xml --cov-report=term"
           fi
+          export PYTHONPATH="${pwd}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
@@ -168,7 +169,6 @@ jobs:
             ${INPUTS_PYTEST_EXTRA_ARGS}
 
         env:
-          PYTHONPATH: "${{ github.workspace }}/src"
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
