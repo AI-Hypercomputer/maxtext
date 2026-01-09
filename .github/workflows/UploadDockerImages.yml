@@ -32,6 +32,11 @@ on:
           - all
           - tpu
           - gpu
+      image_suffix:
+        description: 'An image suffix can be provided to add to the image name'
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -72,7 +77,7 @@ jobs:
             dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
-      image_name: ${{ matrix.image_name }}
+      image_name: ${{ matrix.image_name }}${{ inputs.image_suffix  }}
       device: ${{ matrix.device }}
       build_mode: ${{ matrix.build_mode }}
       dockerfile: ${{ matrix.dockerfile }}
@@ -84,7 +89,7 @@ jobs:
     needs: [setup]
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
-      image_name: maxtext_post_training_nightly
+      image_name: maxtext_post_training_nightly${{ inputs.image_suffix  }}
       device: tpu
       build_mode: nightly
       workflow: post-training
@@ -109,7 +114,7 @@ jobs:
             dockerfile: ./src/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
-      image_name: ${{ matrix.image_name }}
+      image_name: ${{ matrix.image_name }}${{ inputs.image_suffix  }}
       device: ${{ matrix.device }}
       build_mode: ${{ matrix.build_mode }}
       dockerfile: ${{ matrix.dockerfile }}

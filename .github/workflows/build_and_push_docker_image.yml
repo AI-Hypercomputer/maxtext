@@ -62,6 +62,8 @@ jobs:
         github.event.inputs.target_device == 'tpu' ||
         github.event.inputs.target_device == 'gpu'
       )
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }} # Map the step output to the job level
     steps:
       - name: Check if build should run
         id: check
@@ -121,28 +123,80 @@ jobs:
             LIBTPU_VERSION=NONE
             INCLUDE_TEST_ASSETS=true
 
+  test:
+    needs: build_and_push
+    if: |
+      needs.build_and_push.result == 'success' &&
+      needs.build_and_push.outputs.should_run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: >-
+            ${{ fromJSON('{
+              "gpu-pre-training": ["gpu-unit", "gpu-integration"],
+              "tpu-post-training": ["post-training-tpu-unit", "post-training-tpu-integration", "post-training-cpu-unit"],
+              "tpu-pre-training": ["tpu-unit", "tpu-integration", "cpu-unit"]
+            }')[format('{0}-{1}', inputs.device, inputs.workflow)] }}
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    with:
+      flavor: ${{ matrix.flavor }}
+      base_image: ${{ inputs.image_name }}:${{ github.run_id }}
+      is_scheduled_run: true
+      maxtext_installed: true
+
+  notebook-test:
+    needs: build_and_push
+    if: |
+      inputs.device == 'tpu' &&
+      inputs.workflow == 'post-training' &&
+      needs.build_and_push.result == 'success' &&
+      needs.build_and_push.outputs.should_run == 'true'
+    uses: ./.github/workflows/run_jupyter_notebooks.yml
+    with:
+      device_type: tpu
+      device_name: v6e-4
+      base_image: ${{ inputs.image_name }}:${{ github.run_id }}
+      cloud_runner: linux-x86-ct6e-180-4tpu
+      maxtext_installed: true
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  tagging:
+    needs: [test, notebook-test]
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.notebook-test.result == 'success' || needs.notebook-test.result == 'skipped')
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+
       - name: Add tags to Docker image
-        if: steps.check.outputs.should_run == 'true'
         shell: bash
         run: |
           SOURCE_IMAGE="gcr.io/tpu-prod-env-multipod/${INPUTS_IMAGE_NAME}"
+          TEMP_IMG="${SOURCE_IMAGE}:${{ github.run_id }}"
 
           if [[ $INPUTS_VERSION_NAME ]]; then
             echo "Tagging docker images corresponding to PyPI release..."
-            gcloud container images add-tag "$SOURCE_IMAGE:${{ github.run_id }}" "$SOURCE_IMAGE:${INPUTS_VERSION_NAME}" --quiet
+            gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:${INPUTS_VERSION_NAME}" --quiet
           else
             echo "Tagging docker images corresponding to nightly release..."
 
             # Add date tag
-            gcloud container images add-tag "$SOURCE_IMAGE:${{ github.run_id }}" "$SOURCE_IMAGE:${INPUTS_IMAGE_DATE}" --quiet
+            gcloud container images add-tag "${TEMP_IMG}" "$SOURCE_IMAGE:${INPUTS_IMAGE_DATE}" --quiet
 
             # Convert date to YYYYMMDD format
             clean_date=$(echo "${INPUTS_IMAGE_DATE}" | sed 's/[-:]//g' | cut -c1-8)
 
             # Add MaxText tag
             maxtext_hash=$(git rev-parse --short HEAD)
-            gcloud container images add-tag "$SOURCE_IMAGE:${{ github.run_id }}" "$SOURCE_IMAGE:maxtext_${maxtext_hash}_${clean_date}" --quiet
+            gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${maxtext_hash}_${clean_date}" --quiet
           fi
+          # Latest Tag
+          gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:latest" --quiet
         env:
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
           INPUTS_IMAGE_DATE: ${{ inputs.image_date }}
