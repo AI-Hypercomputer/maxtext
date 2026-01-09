@@ -57,6 +57,7 @@ class TunixMaxTextAdapter(nnx.Module):
       positions: Array,  # [B, L]
       cache: Optional[Any],  # Tunix currently passes None from Trainers
       attention_mask: Optional[Array],  # [B, L, L] or None
+      decoder_segment_ids: Optional[Array] = None,
       output_hidden_states: bool = False,  # ignored
   ) -> Tuple[Array, None]:
     """Forward compatible with Tunix Trainers default loss.
@@ -65,8 +66,7 @@ class TunixMaxTextAdapter(nnx.Module):
     logits = self.base(
         decoder_input_tokens=input_tokens,
         decoder_positions=positions,
-        # TODO: @mazumdera - add support for packing
-        decoder_segment_ids=None,
+        decoder_segment_ids=decoder_segment_ids,
     )
     return logits, None
 
