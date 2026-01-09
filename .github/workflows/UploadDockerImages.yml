@@ -15,7 +15,7 @@
 # This workflow builds and pushes MaxText images for both TPU and GPU devices.
 # It runs automatically daily at 12am UTC, on Pull Requests, or manually via Workflow Dispatch.
 
-name: Build Images
+name: Build and Test Images
 
 on:
   schedule:
@@ -32,6 +32,11 @@ on:
           - all
           - tpu
           - gpu
+      for_dev_test:
+        description: 'For development test purpose. All images will be added a -test suffix'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -42,6 +47,7 @@ jobs:
     outputs:
       maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
       image_date: ${{ steps.vars.outputs.image_date }}
+      image_suffix: ${{ steps.vars.outputs.image_suffix }}
     steps:
      - name: Checkout MaxText
        uses: actions/checkout@v5
@@ -54,6 +60,13 @@ jobs:
 
         # Image date
         echo "image_date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+        # If for_dev_test is true, set suffix to -test, otherwise empty
+        if [[ "${{ github.event.inputs.for_dev_test }}" == "true" ]]; then
+          echo "image_suffix=-test" >> $GITHUB_OUTPUT
+        else
+          echo "image_suffix=" >> $GITHUB_OUTPUT
+        fi
 
   tpu-pre-training:
     name: ${{ matrix.image_name }}
@@ -72,7 +85,7 @@ jobs:
             dockerfile: ./dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
-      image_name: ${{ matrix.image_name }}
+      image_name: ${{ matrix.image_name }}${{ needs.setup.outputs.image_suffix  }}
       device: ${{ matrix.device }}
       build_mode: ${{ matrix.build_mode }}
       dockerfile: ${{ matrix.dockerfile }}
@@ -96,14 +109,13 @@ jobs:
             dockerfile: ./dependencies/dockerfiles/maxtext_post_training_local_dependencies.Dockerfile
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
-      image_name: ${{ matrix.image_name }}
+      image_name: ${{ matrix.image_name }}${{ needs.setup.outputs.image_suffix  }}
       device: ${{ matrix.device }}
       build_mode: ${{ matrix.build_mode }}
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
       image_date: ${{ needs.setup.outputs.image_date }}
       base_image: gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:${{ needs.setup.outputs.image_date }}
-      is_post_training: true
 
   gpu-pre-training:
     name: ${{ matrix.image_name }}
@@ -122,9 +134,48 @@ jobs:
             dockerfile: ./dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
-      image_name: ${{ matrix.image_name }}
+      image_name: ${{ matrix.image_name }}${{ needs.setup.outputs.image_suffix  }}
       device: ${{ matrix.device }}
       build_mode: ${{ matrix.build_mode }}
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
       image_date: ${{ needs.setup.outputs.image_date }}
+
+  # TEST JOBS
+  pre-training-tpu-tests:
+    needs: [setup, tpu-pre-training]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [maxtext_jax_stable, maxtext_jax_nightly]
+    uses: ./.github/workflows/test_and_tag_docker_image.yml
+    with:
+      image_name: ${{ matrix.image }}${{ needs.setup.outputs.image_suffix  }}
+      image_date: ${{ needs.setup.outputs.image_date }}
+      test_mode: tpu-pre-training
+
+  post-training-tpu-tests:
+    needs: [setup, tpu-post-training]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [maxtext_post_training_stable, maxtext_post_training_nightly]
+    uses: ./.github/workflows/test_and_tag_docker_image.yml
+    with:
+      image_name: ${{ matrix.image }}${{ needs.setup.outputs.image_suffix  }}
+      image_date: ${{ needs.setup.outputs.image_date }}
+      test_mode: tpu-post-training
+
+
+  pre-training-gpu-tests:
+    needs: [setup, gpu-pre-training]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [maxtext_gpu_jax_stable, maxtext_gpu_jax_nightly]
+    uses: ./.github/workflows/test_and_tag_docker_image.yml
+    with:
+      image_name: ${{ matrix.image }}${{ needs.setup.outputs.image_suffix  }}
+      image_date: ${{ needs.setup.outputs.image_date }}
+      test_mode: gpu-pre-training
+
