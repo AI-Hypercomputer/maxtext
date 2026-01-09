@@ -41,7 +41,7 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.inference import page_manager
 from MaxText.layers.attentions import Attention
 from MaxText.layers.linears import DenseGeneral, MlpBlock
-from MaxText.layers.moe import RoutedMoE
+from MaxText.layers.moe import RoutedMoE, RoutedAndSharedMoE
 
 
 # -----------------------------------------
@@ -1098,19 +1098,31 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       rngs: nnx.Rngs,
   ):
     super().__init__(config, mesh, model_mode, quant, rngs)
-    self.moe_block = RoutedMoE(
-        config=config,
-        num_experts=config.num_experts,
-        num_experts_per_tok=config.num_experts_per_tok,
-        mesh=mesh,
-        kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
-        intermediate_dim=config.moe_mlp_dim,  # same as config.mlp_dim
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        quant=quant,
-        rngs=rngs,
-    )
+    if config.shared_experts > 0:
+      self.moe_block = RoutedAndSharedMoE(
+          config=config,
+          mesh=mesh,
+          kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", None),
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          quant=quant,
+          rngs=rngs,
+      )
+    else:
+      self.moe_block = RoutedMoE(
+          config=config,
+          num_experts=config.num_experts,
+          num_experts_per_tok=config.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", None),
+          intermediate_dim=config.moe_mlp_dim,  # same as config.mlp_dim
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          quant=quant,
+          rngs=rngs,
+      )
 
   def __call__(
       self,

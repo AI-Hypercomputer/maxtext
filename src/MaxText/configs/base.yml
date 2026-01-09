@@ -221,7 +221,7 @@ use_2d_fsdp_sharding: False
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 first_num_dense_layers: 0 # number of initial dense layers in the model
-shared_experts: 1
+shared_experts: 0
 routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
 routed_bias: False # a flag if a learnable bias is added for routing
