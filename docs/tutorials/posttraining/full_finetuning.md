@@ -41,8 +41,8 @@ MaxText checkpoints are in their own format. You can see the format in the scrip
 
 The conversion scripts for LLama work with Meta’s original checkpoints and not with HuggingFace Checkpoint.
 
-#### Pre-requist
-- Download the Meta format checkpoints 
+#### Pre-requisite
+- Download the Meta format checkpoints. 
 
   Option 1: Download the checkpoint from Meta (https://llama.meta.com/llama-downloads/) in your local directory.
   
@@ -52,7 +52,7 @@ The conversion scripts for LLama work with Meta’s original checkpoints and not
 
   ```python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu```
 
-- Setup Environment Variables
+- Setup Environment Variables.
 
   ```bash
   export CONVERTED_CHECKPOINT_PATH=<GCS path for saving converted checkpoint> # e.g., gs://my-bucket/my-model-checkpoint
@@ -60,7 +60,7 @@ The conversion scripts for LLama work with Meta’s original checkpoints and not
   ```
 #### Running the weight conversion script
 
-Using 11ama-7b as an example:
+Using llama-7b as an example:
 
 ```bash
 python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt \
@@ -92,7 +92,7 @@ Post finetuning or pre-training, MaxText also provides scripts to convert MaxTex
   ```
 - Running the conversion script
 
-  The following example is executing a v6e-8 TPU VM with llama2-7b.
+Below is a sample for LLama2-7b on v6e-8 TPU VM.
 
   ```bash
   python3 -m MaxText.utils.ckpt_scripts.llama_mistral_mixtral_orbax_to_hf \
