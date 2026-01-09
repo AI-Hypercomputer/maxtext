@@ -37,7 +37,44 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  doc_only_check:
+    name: Check for Documentation-Only Changes
+    runs-on: ubuntu-latest
+    outputs:
+      skip_tests: ${{ steps.check.outputs.skip_tests }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check if only documentation changed
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Not a pull request, running all tests"
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          git fetch origin ${{ github.base_ref }}
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No files changed"
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+          elif echo "$CHANGED_FILES" | grep -v -E '\.(md|ipynb)$' > /dev/null; then
+            echo "Non-documentation files changed, running tests"
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+          else
+            echo "Only documentation (.md|ipynb) files changed, skipping tests"
+            echo "skip_tests=true" >> $GITHUB_OUTPUT
+          fi
+
   build_and_upload_maxtext_package:
+    needs: doc_only_check
+    if: needs.doc_only_check.outputs.skip_tests != 'true'
     uses: ./.github/workflows/build_package.yml
     with:
       device_type: tpu
@@ -176,6 +213,38 @@ jobs:
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+
+  all_tests_passed:
+    name: All Required Tests Passed
+    needs: [doc_only_check, build_and_upload_maxtext_package, maxtext_cpu_unit_tests, maxtext_tpu_unit_tests, maxtext_tpu_integration_tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, maxtext_gpu_unit_tests, maxtext_gpu_integration_tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check test results
+        run: |
+          # If doc-only, all tests should be skipped
+          if [ "${{ needs.doc_only_check.outputs.skip_tests }}" == "true" ]; then
+            echo "Documentation-only changes detected, tests were skipped"
+            exit 0
+          fi
+
+          # Otherwise, check that build and all tests passed or were skipped
+          echo "Build result: ${{ needs.build_and_upload_maxtext_package.result }}"
+          echo "CPU tests: ${{ needs.maxtext_cpu_unit_tests.result }}"
+          echo "TPU tests: ${{ needs.maxtext_tpu_unit_tests.result }}"
+          echo "TPU integration: ${{ needs.maxtext_tpu_integration_tests.result }}"
+          echo "TPU pathways: ${{ needs.maxtext_tpu_pathways_unit_tests.result }}"
+          echo "TPU pathways integration: ${{ needs.maxtext_tpu_pathways_integration_tests.result }}"
+          echo "GPU tests: ${{ needs.maxtext_gpu_unit_tests.result }}"
+          echo "GPU integration: ${{ needs.maxtext_gpu_integration_tests.result }}"
+
+          # Fail only if any job failed or was cancelled (skipped is OK)
+          if [ "${{ contains(needs.*.result, 'failure') }}" == "true" ] || [ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]; then
+            echo "One or more jobs failed or were cancelled"
+            exit 1
+          fi
+
+          echo "All required tests passed successfully"
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
