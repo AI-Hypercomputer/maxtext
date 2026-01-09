@@ -223,6 +223,7 @@ qwen25_14b_config = transformers.Qwen2Config(
     rope_theta=1000000.0,
     tie_word_embeddings=False,
     torch_dtype="bfloat16",
+    attention_bias=True,
 )
 
 

@@ -488,8 +488,8 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
         layer_mapping.update(
             {
                 f"{layer_prefix}.self_attn.q_proj.bias": [num_attention_heads * head_dim],
-                f"{layer_prefix}.self_attn.k_proj.bias": [num_attention_heads * head_dim],
-                f"{layer_prefix}.self_attn.v_proj.bias": [num_attention_heads * head_dim],
+                f"{layer_prefix}.self_attn.k_proj.bias": [num_key_value_heads * head_dim],
+                f"{layer_prefix}.self_attn.v_proj.bias": [num_key_value_heads * head_dim],
             }
         )
 
@@ -688,3 +688,4 @@ HF_SHAPE = {
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x22b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
 }
+
