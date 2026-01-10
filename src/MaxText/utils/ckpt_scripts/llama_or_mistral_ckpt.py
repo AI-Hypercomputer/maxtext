@@ -48,6 +48,7 @@ import ml_dtypes
 import psutil
 
 from tqdm import tqdm
+import time
 
 import numpy as np
 
@@ -1634,12 +1635,12 @@ def convert_to_jax_weights(base_model_path: str, model_size: str, huggingface_ck
 def save_weights_to_checkpoint(
     maxtext_model_path: str, jax_weights: dict, device_count: int, use_ocdbt: bool, use_zarr3: bool
 ):
-  """
-  Function to save jax_weights ready for MaxText to a parameters checkpoint.
+  """Converts model weights (np array or jax array) to sharded jax array across simulated devices
+  and save to a parameter checkpoint for MaxText.
 
   Args:
       maxtext_model_path: Path to save the MaxText checkpoint.
-      jax_weights: The JAX model weights to be saved.
+      jax_weights: The model weights (np array or jax array)
       device_count: The number of simulated devices.
       use_ocdbt: Whether to use Optimized Checkpoint Database with Transactions.
       use_zarr3: Whether to use Zarr3 or not.
@@ -1647,36 +1648,60 @@ def save_weights_to_checkpoint(
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   gc.collect()
+
+  # 1. Setup mesh & sharding specs
+  assert len(jax.devices()) == device_count
+  max_logging.log(f"shard weights across {device_count} devices")
+  # Pre-define sharding specs
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
-  s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
-  s2 = jax.sharding.NamedSharding(
-      mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis")
-  )  # shards second axis
-  s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
+  # shards axis 0
+  s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))
+  # shards axis 1
+  s2 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis"))
+  # no sharding
+  s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
 
   def checkpoint_device_put(arr):
+    """Determines correct sharding spec based on shape and shards the input array.
+
+    Args:
+      arr: A numpy array (or jax array).
+
+    Returns:
+      A sharded jax array.
+    """
     if arr.shape[0] % device_count == 0:
-      max_logging.log("sharding first axis")
+      max_logging.log("sharding axis 0")
       return jax.device_put(arr, device=s1)
     elif len(arr.shape) > 1 and arr.shape[1] % device_count == 0:
-      max_logging.log("sharding second axis")
+      max_logging.log("sharding axis 1")
       return jax.device_put(arr, device=s2)
     else:
       max_logging.log("no sharding was possible, replicating")
       return jax.device_put(arr, device=s3)
 
+  # 2. Weight sharding
+  start = time.time()
   # convert all weights to jax.numpy with sharding if applicable
   jax_weights_flat, jax_weights_struct = tree.flatten(jax_weights)
+  del jax_weights
+  gc.collect()
+
   jax_weights_new = []
-  while len(jax_weights_flat) > 0:
-    jax_weight = jax_weights_flat.pop(0)
+  jax_weights_flat.reverse()
+  num_weights = len(jax_weights_flat)
+  for _ in tqdm(range(num_weights)):
+    jax_weight = jax_weights_flat.pop()
     jax_weights_new.append(checkpoint_device_put(jax_weight))
     del jax_weight
     gc.collect()
     logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   jax_weights = tree.unflatten(jax_weights_struct, jax_weights_new)
+  max_logging.log(f"Elapse for checkpoint sharding: {(time.time() - start) / 60:.2f} min")
 
+  # 3. Save checkpoint
+  start = time.time()
   # dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
   enable_checkpointing = True
@@ -1702,6 +1727,8 @@ def save_weights_to_checkpoint(
       max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
     checkpoint_manager.wait_until_finished()
+
+  max_logging.log(f"Elapse for checkpoint save: {(time.time() - start) / 60:.2f} min")
 
 
 def list_folders_pathlib(directory: str):

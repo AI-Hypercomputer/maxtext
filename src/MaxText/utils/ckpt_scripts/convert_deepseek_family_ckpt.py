@@ -231,7 +231,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
 
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
   chkpt_vars = {}
-  for i, ckpt_path in enumerate(ckpt_paths):
+  for i, ckpt_path in tqdm(enumerate(ckpt_paths), total=len(ckpt_paths)):
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
       for key in f.keys():

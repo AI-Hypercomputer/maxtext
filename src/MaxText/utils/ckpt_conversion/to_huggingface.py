@@ -55,8 +55,8 @@ import jax
 import os
 from typing import Sequence
 import time
-from tqdm import tqdm
 import numpy as np
+import resource
 
 from transformers import AutoTokenizer, AutoProcessor
 
@@ -77,7 +77,10 @@ from MaxText.utils.ckpt_conversion.utils.utils import (
     process_maxtext_param,
     save_model_files,
     HF_IDS,
+    MemoryMonitorTqdm,
+    print_peak_memory,
 )
+
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
@@ -200,7 +203,7 @@ def main(argv: Sequence[str]) -> None:
   start = time.time()
   processed_params_list = []
 
-  for key in tqdm(filtered_map_keys, total=len(filtered_map_keys)):
+  for key in MemoryMonitorTqdm(filtered_map_keys, total=len(filtered_map_keys), leave=True):
     if isinstance(key, tuple):
       # if key is tuple of param names, weight is list of param weights
       weight = [maxtext_state_dict[subkey] for subkey in key]
@@ -231,7 +234,7 @@ def main(argv: Sequence[str]) -> None:
   max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
   max_logging.log(f"Elapse for save: {(time.time() - start) / 60:.2f} min")
   max_logging.log(f"Overall Elapse: {(time.time() - overall_start) / 60:.2f} min")
-
+  print_peak_memory()
 
 if __name__ == "__main__":
   app.run(main)

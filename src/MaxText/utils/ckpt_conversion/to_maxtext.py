@@ -28,8 +28,10 @@ Key Parameters (to be set in the config file or as command-line overrides):
   --lazy_load_tensors: (bool) If True, uses an on-demand loading strategy to minimize RAM
              usage during conversion. Recommended if, 2 * model_size (GB) >= system RAM
              Defaults to False.
-  --hf_model_path: (Optional) Specify a local HF path, rather than the default repo `HF_IDS[model_name]`. 
-              Useful for locally dequantized HF model like GPT-OSS or DeepSeek.
+  --hf_model_path: (Optional) Specifies a local or remote directory containing the model weights. 
+      If unspecified, we use the default Hugging Face repository ID 
+      (e.g., openai/gpt-oss-20b; see `HF_IDS[model_name]` in `utils/ckpt_conversion/utils`).
+      This is necessary for locally dequantized models like GPT-OSS or DeepSeek. 
 
 Environment Variables:
   HF_AUTH_TOKEN: (Required) HuggingFace authentication token, needed to
@@ -65,16 +67,19 @@ import threading
 from functools import partial
 from typing import Sequence, List, Any, Callable
 import numpy as np
-import jax
 import psutil
-from flax.training import train_state
-import flax.linen as nn
+import absl
+import resource
+
 from transformers import AutoConfig
-from tqdm import tqdm
 from huggingface_hub import hf_hub_download, list_repo_files
 from safetensors import safe_open
-import absl
+import torch
+import ml_dtypes
 
+import jax
+from flax.training import train_state
+import flax.linen as nn
 from orbax.checkpoint import type_handlers
 from MaxText import checkpointing
 from MaxText import max_logging
@@ -85,45 +90,27 @@ from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.inference_utils import str2bool
 from MaxText.layers import models, quantizations
 from MaxText.checkpointing import save_checkpoint
+from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model, validate_and_filter_param_map_keys
+from MaxText.utils.ckpt_conversion.utils.utils import (
+    apply_hook_fns,
+    HF_IDS,
+    get_hf_model,
+    validate_and_filter_param_map_keys,
+    MemoryMonitorTqdm,
+    print_ram_usage,
+    print_peak_memory,
+)
 
-jax.config.update("jax_platform_name", "cpu")
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
+# jax.config.update("jax_platform_name", "cpu")
 
-class MemoryMonitorTqdm(tqdm):
-  """Custom tqdm class that displays memory usage in the progress bar."""
-
-  def format_meter(
-      self,
-      n,
-      total,
-      elapsed,
-      postfix=None,
-      **extra_kwargs,
-  ):
-    """Override to add memory usage info to the postfix."""
-    # Get memory info
-    memory = psutil.virtual_memory()
-    used_gb = memory.used / (1024**3)
-    total_gb = memory.total / (1024**3)
-    memory_percent = memory.percent
-
-    # Create memory postfix
-    memory_info = f"RAM: {used_gb:.1f}/{total_gb:.1f}GB ({memory_percent:.1f}%)"
-
-    # Add memory info to postfix
-    if postfix:
-      if isinstance(postfix, dict):
-        postfix["memory"] = memory_info
-      else:
-        postfix = f"{postfix}, {memory_info}"
-    else:
-      postfix = memory_info
-
-    return super().format_meter(n=n, total=total, elapsed=elapsed, postfix=postfix, **extra_kwargs)
+# Used to convert numpy weights to sharded jax arrays across simulated cpu devices
+SIMULATED_CPU_DEVICES_COUNT = 16
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
 
 
 class LazyHFLoader:
@@ -629,11 +616,30 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   else:
     max_logging.log(f"Lazy loading DISABLED. Loading full HuggingFace model: {model_id}...")
     hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
-    hf_model = get_hf_model(model_id, token=hf_token)
+
+    # BEFORE
+    # hf_model = get_hf_model(model_id, token=hf_token)
+    # hf_state_dict_numpy = hf_model.state_dict()
+    # # Convert all to numpy immediately in eager mode
+    # for k, v in hf_state_dict_numpy.items():
+    #   hf_state_dict_numpy[k] = v.numpy()
+    # del hf_model
+    # max_logging.log("HuggingFace model loaded and converted to NumPy.")
+    # print_ram_usage("After full HF model load")
+
+    # def _eager_getter(key):
+    #   if key not in hf_state_dict_numpy:
+    #     raise ValueError(f"HuggingFace key {key} not found in state_dict.")
+    #   return hf_state_dict_numpy[key]
+
+    #   tensor_getter = _eager_getter
+
+    # AFTER
+    hf_model = get_hf_model(model_id, token=hf_token, dtype=torch.bfloat16)
     hf_state_dict_numpy = hf_model.state_dict()
     # Convert all to numpy immediately in eager mode
-    for k, v in hf_state_dict_numpy.items():
-      hf_state_dict_numpy[k] = v.numpy()
+    # for k, v in hf_state_dict_numpy.items():
+    #   hf_state_dict_numpy[k] = v.numpy()
     del hf_model
     max_logging.log("HuggingFace model loaded and converted to NumPy.")
     print_ram_usage("After full HF model load")
@@ -641,7 +647,9 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     def _eager_getter(key):
       if key not in hf_state_dict_numpy:
         raise ValueError(f"HuggingFace key {key} not found in state_dict.")
-      return hf_state_dict_numpy[key]
+      # TODO: bfloat16, float16
+      return hf_state_dict_numpy[key].to(torch.float32).numpy().astype(jax.bfloat16)
+      # return hf_state_dict_numpy[key].to(torch.float16).numpy()
 
     tensor_getter = _eager_getter
 
@@ -657,20 +665,12 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   hook_fn_map_mt = HOOK_FNS[model_key](hf_config_obj.to_dict(), config, config.scan_layers, saving_to_hf=False)
   max_logging.log("Parameter mappings and hooks obtained.")
 
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      output_directory,
-      enable_checkpointing=True,
-      use_async=False,  # Synchronous saving for simplicity in conversion script
-      save_interval_steps=1,  # Save at step 0
-      use_ocdbt=config.checkpoint_storage_use_ocdbt,
-      use_zarr3=config.checkpoint_storage_use_zarr3,
-  )
-
   maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(config)
 
   # Weight transformation
   max_logging.log("Starting weight transformation...")
   start = time.time()
+  # Stores MaxText weights: numpy.ndarray
   final_mt_weights = [None] * len(maxtext_abstract_dict)
 
   # Preprocess key
@@ -679,7 +679,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   for mt_param_key_or_keys in MemoryMonitorTqdm(
       filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
   ):
-    if not use_lazy_load and config.scan_layers:
+    if not use_lazy_load:
       max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
 
     hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
@@ -714,35 +714,54 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
   print_ram_usage("Before creating full JAX tree")
 
+  print(type(final_mt_weights[0]))  # np.array
+
   # Create final MaxText parameters tree
   jax_weights = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
   del final_mt_weights, abstract_params_treedef
+  # print(jax_weights[list(jax_weights.keys())[0]])
 
-  # Create TrainState for saving.
-  final_params_for_state = {"params": jax_weights}
-  final_save_state = train_state.TrainState(step=0, apply_fn=None, params=final_params_for_state, tx=None, opt_state={})
-  del final_params_for_state
-
+  # checkpoint saving
   print_ram_usage("Before saving")
-  start = time.time()
-  if checkpoint_manager is not None:
-    if use_lazy_load:
-      max_logging.log("Starting checkpoint save (loading weights just-in-time)...")
-    else:
-      max_logging.log("Starting checkpoint save...")
+  if use_lazy_load:
+    max_logging.log("Starting checkpoint save (loading weights just-in-time)...")
+  else:
+    max_logging.log("Starting checkpoint save...")
 
-    if save_checkpoint(checkpoint_manager, 0, final_save_state):
-      max_logging.log("saved a checkpoint at step 0")
+  # BEFORE
+  # start = time.time()
+  # # Create TrainState for saving.
+  # final_save_state = train_state.TrainState(step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={})
+  # checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+  #     output_directory,
+  #     enable_checkpointing=True,
+  #     use_async=False,  # Synchronous saving for simplicity in conversion script
+  #     save_interval_steps=1,  # Save at step 0
+  #     use_ocdbt=config.checkpoint_storage_use_ocdbt,
+  #     use_zarr3=config.checkpoint_storage_use_zarr3,
+  # )
+  # if checkpoint_manager is not None:
+  #   if save_checkpoint(checkpoint_manager, 0, final_save_state):
+  #     max_logging.log("saved a checkpoint at step 0")
+  #   # Upon preemption, exit when and only when all ongoing saves are complete.
+  #   if checkpoint_manager.reached_preemption(0):
+  #     checkpoint_manager.wait_until_finished()
+  #     sys.exit()
+  # max_logging.log(f"Elapse for save: {(time.time() - start) / 60:.2f} min")
 
-    # Upon preemption, exit when and only when all ongoing saves are complete.
-    if checkpoint_manager.reached_preemption(0):
-      checkpoint_manager.wait_until_finished()
-      sys.exit()
+  # AFTER
+  save_weights_to_checkpoint(
+      output_directory,
+      jax_weights,
+      SIMULATED_CPU_DEVICES_COUNT,
+      config.checkpoint_storage_use_ocdbt,
+      config.checkpoint_storage_use_zarr3,
+  )
 
   print_ram_usage("Program Ends")
   max_logging.log(f"Conversion complete. Checkpoint saved to {output_directory}")
-  max_logging.log(f"Elapse for save: {(time.time() - start) / 60:.2f} min")
   max_logging.log(f"Overall Elapse: {(time.time() - overall_start) / 60:.2f} min")
+  print_peak_memory()
 
 
 if __name__ == "__main__":
@@ -757,7 +776,7 @@ if __name__ == "__main__":
       default=False,
       help="Whether to use lazy loading of HF tensors.",
   )
-  # if not specified, default to MaxText.utils.ckpt_conversion.utils.utils.HF_IDS[model_name]
+  # If not specified, default to MaxText.utils.ckpt_conversion.utils.utils.HF_IDS[model_name]
   parser.add_argument(
       "--hf_model_path", type=str, required=False, default="", help="local path to hf model, or custom remote hf repo"
   )

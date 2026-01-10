@@ -22,6 +22,8 @@ import time
 import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+from tqdm import tqdm
+import resource
 
 import jax
 from jax.experimental import multihost_utils
@@ -43,6 +45,8 @@ from transformers import AutoModelForCausalLM
 
 from MaxText import max_logging
 import psutil
+
+import torch
 
 
 SAFE_TENSORS_CONFIG_FILE = "config.json"
@@ -749,12 +753,53 @@ def print_ram_usage(stage=""):
   )
 
 
-def get_hf_model(model_id: str, token: str):
+def print_peak_memory():
+  # Returns peak usage in Kilobytes on Linux
+  peak_memory_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+  max_logging.log(f"Peak Memory: {peak_memory_kb / 1024**2:.2f} GB")
+
+
+class MemoryMonitorTqdm(tqdm):
+  """Custom tqdm class that displays memory usage in the progress bar."""
+
+  def format_meter(
+      self,
+      n,
+      total,
+      elapsed,
+      postfix=None,
+      **extra_kwargs,
+  ):
+    """Override to add memory usage info to the postfix."""
+    # Get memory info
+    memory = psutil.virtual_memory()
+    used_gb = memory.used / (1024**3)
+    total_gb = memory.total / (1024**3)
+    memory_percent = memory.percent
+
+    # Create memory postfix
+    memory_info = f"RAM: {used_gb:.1f}/{total_gb:.1f}GB ({memory_percent:.1f}%)"
+
+    # Add memory info to postfix
+    if postfix:
+      if isinstance(postfix, dict):
+        postfix["memory"] = memory_info
+      else:
+        postfix = f"{postfix}, {memory_info}"
+    else:
+      postfix = memory_info
+
+    return super().format_meter(n=n, total=total, elapsed=elapsed, postfix=postfix, **extra_kwargs)
+
+
+def get_hf_model(model_id: str, token: str, dtype=torch.bfloat16):
   """Loads the HuggingFace model based on model_id (Eager mode only), used in to_maxtext"""
   if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
     from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
 
-    hf_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(model_id, token=token)
+    model_class = Qwen3OmniMoeForConditionalGeneration.from_pretrained
   else:
-    hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=token)
+    model_class = AutoModelForCausalLM
+
+  hf_model = model_class.from_pretrained(model_id, token=token, dtype=dtype)
   return hf_model
