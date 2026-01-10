@@ -1179,4 +1179,4 @@ def print_state_mesh_shardings_params(state, state_sharding, mesh):
     path_str = "/".join(str(p.key) for p in path)
     shape = jax.typeof(leaf_val)
     pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
-    print(f"{path_str:.<80} {shape} {pspec}", flush=True)
+    max_logging.log(f"{path_str:.<80} {shape} {tuple(pspec)}")

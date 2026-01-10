@@ -146,6 +146,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
           ("activation_embed_and_logits_batch", "activation_length"),
           model.mesh,
           config.shard_mode,
+          debug_sharding=config.debug_sharding,
       )
       # Mask out paddings at the end of each example.
       xent = xent * (data["targets_segmentation"] != 0)
@@ -445,12 +446,6 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
-        # Reshard data from loaded sharding to performant activation sharding
-        example_batch = sharding.maybe_shard_with_name(
-            example_batch,
-            sharding.get_input_data_sharding(config, mesh),
-            shard_mode=config.shard_mode,
-        )
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):

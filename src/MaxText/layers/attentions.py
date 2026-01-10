@@ -525,6 +525,7 @@ class Attention(nnx.Module):
         maybe_shard_with_logical,
         mesh=mesh,
         shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
     )
 
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:

@@ -134,6 +134,7 @@ class LlamaDecoderLayer(nnx.Module):
         maybe_shard_with_logical,
         mesh=self.mesh,
         shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
     )
 
   def __call__(

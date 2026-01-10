@@ -98,6 +98,7 @@ class DecoderLayer(nn.Module):
         sharding.maybe_shard_with_logical,
         mesh=mesh,
         shard_mode=cfg.shard_mode,
+        debug_sharding=cfg.debug_sharding,
     )
 
     if self.model_mode == MODEL_MODE_PREFILL:

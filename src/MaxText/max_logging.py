@@ -27,9 +27,9 @@ def debug(user_str):
   logging.debug(user_str, stacklevel=2)
 
 
-def info(user_str):
+def info(user_str, stacklevel=2):
   """Logs a message at the INFO level."""
-  logging.info(user_str, stacklevel=2)
+  logging.info(user_str, stacklevel=stacklevel)
 
 
 def warning(user_str):

@@ -20,12 +20,17 @@ from flax import linen as nn
 from collections.abc import Iterable
 
 import jax
+from jax.core import Tracer
 from jax.sharding import PartitionSpec as P, NamedSharding, reshard
 
 import optax
 
 from MaxText import max_utils
+from MaxText import max_logging
 from MaxText.common_types import ShardMode
+
+
+_LOGGED_ACTIVATION_SHARDINGS = set()
 
 
 def get_input_data_sharding(config, mesh):
@@ -33,27 +38,39 @@ def get_input_data_sharding(config, mesh):
   return create_sharding(mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules)
 
 
-def maybe_shard_with_name(inputs, named_sharding, shard_mode):
+def maybe_shard_with_name(inputs, named_sharding, shard_mode, debug_sharding=False, extra_stack_level=0):
   """
   In auto shardmode, this function hints inputs follow given named_sharding.
   In explicit shardmode, this function enforces inputs following named_sharding.
   """
   if inputs is None:
     return None
+  if (
+      debug_sharding and isinstance(inputs, Tracer) and isinstance(named_sharding, NamedSharding)
+  ):  # only print pspec for JitTracer
+    pspec = remove_size_one_mesh_axis(getattr(named_sharding, "spec"), getattr(named_sharding, "mesh"))
+    log_key = (str(jax.typeof(inputs)), tuple(pspec), extra_stack_level)
+    if log_key not in _LOGGED_ACTIVATION_SHARDINGS:
+      max_logging.info(f"{log_key[0]:.<80} {log_key[1]}.", stacklevel=3 + extra_stack_level)
+      _LOGGED_ACTIVATION_SHARDINGS.add(log_key)
   if shard_mode == ShardMode.EXPLICIT:
     return reshard(inputs, named_sharding)
   else:
     return jax.lax.with_sharding_constraint(inputs, named_sharding)
 
 
-def maybe_shard_with_logical(inputs, logical_axes, mesh, shard_mode, rules=None):
+def maybe_shard_with_logical(
+    inputs, logical_axes, mesh, shard_mode, rules=None, debug_sharding=False, extra_stack_level=0
+):
   """
   A wrapper of maybe_shard_with_name when logical axes are inputs
   """
   if inputs is None:
     return None
   named_sharding = create_sharding(mesh, logical_axes, rules=rules)
-  return maybe_shard_with_name(inputs, named_sharding, shard_mode)
+  return maybe_shard_with_name(
+      inputs, named_sharding, shard_mode, debug_sharding=debug_sharding, extra_stack_level=extra_stack_level + 1
+  )
 
 
 def remove_size_one_mesh_axis(spec, mesh):
