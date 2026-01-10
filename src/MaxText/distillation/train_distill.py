@@ -33,7 +33,6 @@ Architecture Overview:
    a standard interface (call signature) that the Tunix `DistillationTrainer` expects.
 """
 
-import os
 from typing import Any, Iterator, Sequence, Dict, Tuple
 
 from absl import app
@@ -54,7 +53,6 @@ from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText import tokenizer
 from MaxText import train_utils
-from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 
 # Tunix Imports
 from tunix.distillation import distillation_trainer
@@ -121,6 +119,34 @@ def get_distillation_optimizer(config, max_train_steps):
   optimizer = optax.inject_hyperparams(optimizer_factory)(learning_rate=schedule)
 
   return optimizer
+
+
+def create_forward_fn(config: pyconfig.HyperParameters):
+  """Creates a forward function closure that binds the specific model configuration.
+
+  Args:
+    config: The HyperParameters object for the specific model being wrapped.
+
+  Returns:
+    A callable `model_forward_fn` that matches the signature expected by the
+    Tunix `LogitStrategy` and handles the MaxText-specific forward call.
+  """
+
+  def model_forward_fn(model, input_tokens, positions, attention_mask, decoder_segment_ids=None, cache=None, **kwargs):
+    """Forward pass wrapper adapted for raw MaxText models."""
+    del kwargs  # Unused
+    del attention_mask  # Unused
+    del cache  # Unused
+
+    logits = model(
+        decoder_input_tokens=input_tokens,
+        decoder_positions=positions,
+        decoder_segment_ids=decoder_segment_ids,
+        enable_dropout=config.enable_dropout,
+    )
+    return logits
+
+  return model_forward_fn
 
 
 # -----------------------------------------------------------------------------
@@ -337,21 +363,18 @@ class MaxTextToTunixIterator:
 # Model Loading
 # -----------------------------------------------------------------------------
 def get_maxtext_model(config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh) -> nnx.Module:
-  """Loads a MaxText model and wraps it in a Tunix adapter.
+  """Loads a MaxText model.
 
   Args:
     config: The configuration object for this specific model (Student or Teacher).
     mesh: The global device mesh for sharding weights.
 
   Returns:
-    A TunixMaxTextAdapter instance wrapping the loaded MaxText model.
+    The loaded MaxText model.
   """
   max_logging.log(f"Initializing model: {config.model_name}...")
   model, _ = model_creation_utils.create_nnx_model(config, mesh=mesh)
-
-  with mesh:
-    tunix_model = TunixMaxTextAdapter(base_model=model, use_no_op_mappings=True)
-  return tunix_model
+  return model
 
 
 # -----------------------------------------------------------------------------
@@ -408,22 +431,9 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
     mask = jnp.not_equal(targets, pad_id).astype(one_hot.dtype)[..., None]
     return one_hot * mask
 
-  def model_forward_fn(model, input_tokens, positions, attention_mask, decoder_segment_ids=None, cache=None, **kwargs):
-    """Forward pass wrapper for the MaxText models (Student and Teacher)."""
-    del kwargs  # Unused
-    # Tunix adapter ensures __call__ signature matches this
-    outputs = model(
-        input_tokens=input_tokens,
-        positions=positions,
-        cache=cache,
-        attention_mask=attention_mask,
-        decoder_segment_ids=decoder_segment_ids,  # Support sequence packing
-    )
-    return outputs[0]  # Return logits only
-
   # Both Student and Teacher use the same forward logic via the adapter
-  student_forward_fn = model_forward_fn
-  teacher_forward_fn = model_forward_fn
+  student_forward_fn = create_forward_fn(student_config)
+  teacher_forward_fn = create_forward_fn(teacher_config)
 
   # Use Monitored strategy to enable KL/Soft/Hard Loss logging
   strategy = MonitoredLogitStrategy(
@@ -438,7 +448,10 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   optimizer = get_distillation_optimizer(student_config, student_config.steps)
 
   checkpointing_options = checkpoint.CheckpointManagerOptions(
-      save_interval_steps=student_config.checkpoint_period, max_to_keep=student_config.max_num_checkpoints_to_keep
+      save_interval_steps=student_config.checkpoint_period,
+      max_to_keep=student_config.max_num_checkpoints_to_keep,
+      enable_async_checkpointing=student_config.async_checkpointing,
+      create=True,
   )
 
   profiler_options = None
@@ -477,7 +490,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   trainer._has_aux = True  # pylint: disable=protected-access
 
   # 6. Configure Input Mapping
-  # Maps the attributes of MaxTextTrainingInput to the kwargs expected by the models
+  # Maps the attributes of MaxTextTrainingInput to the kwargs expected by model_forward_fn
   trainer = trainer.with_gen_model_input_fn(
       lambda batch: {
           "input_tokens": batch.input_tokens,
@@ -560,13 +573,12 @@ def main(argv: Sequence[str]) -> None:
   # We isolate the Teacher from Student CLI arguments (like pruning params).
   teacher_overrides = global_config.teacher_overrides
 
-  # Ensure load_parameters_path is set (check overrides, then env var)
+  # Ensure load_parameters_path is set in overrides
   if not teacher_overrides.get("load_parameters_path"):
-    ckpt_path = os.environ.get("TEACHER_CHECKPOINT_PATH")
-    if ckpt_path:
-      teacher_overrides["load_parameters_path"] = ckpt_path
-    else:
-      max_logging.log("Warning: No load_parameters_path found for Teacher.")
+    raise ValueError(
+        "Teacher model path is missing! You must provide 'teacher_overrides.load_parameters_path' "
+        "in your config or arguments."
+    )
 
   # Construct sanitized argv: [script_name, config_file]
   # This ensures flags like `num_query_heads=16` passed in CLI don't affect the Teacher.
