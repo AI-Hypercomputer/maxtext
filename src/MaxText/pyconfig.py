@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -328,6 +328,48 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   return pydantic_config
 
 
+def initialize_pydantic_with_maxtext_config(config: types.MaxTextConfig) -> types.MaxTextConfig:
+  """
+  Initializes the JAX environment, distributed system, and cache using a pre-constructed
+  MaxTextConfig object.
+
+  This bypasses YAML loading and CLI parsing, assuming the 'config' object passed in
+  is already valid and fully populated.
+  """
+
+  # 1. Logic Validation
+  if config.use_tokamax_splash and config.use_jax_splash:
+    raise ValueError("At most one of `use_tokamax_splash` and `use_jax_splash` can be set to True.")
+
+  # 2. JAX Configuration
+  # Initialize JAX distributed system before device backend is initialized.
+  if config.jax_debug_log_modules:
+    jax.config.update("jax_debug_log_modules", config.jax_debug_log_modules)
+
+  # Do not initialize jax distributed system during pytest runs.
+  if "pytest" not in sys.modules:
+    # maybe_initialize_jax_distributed_system expects a dictionary to look up keys
+    config_dict = config.model_dump()
+    max_utils.maybe_initialize_jax_distributed_system(config_dict)
+
+  # 3. JAX Compilation Cache
+  if config.jax_cache_dir:
+    from jax.experimental.compilation_cache import compilation_cache  # pylint: disable=import-outside-toplevel
+
+    compilation_cache.set_cache_dir(os.path.expanduser(config.jax_cache_dir))
+
+  # 4. Logging
+  # We replicate the logging behavior found in initialize_pydantic/HyperParameters
+  if config.log_config:
+    config_dict = config.model_dump()
+    for k, v in sorted(config_dict.items()):
+      if k not in KEYS_NO_LOGGING:
+        logger.info("Config param %s: %s", k, v)
+
+  return config
+
+
 # Shim for backward compatibility with pyconfig_deprecated_test.py
 validate_and_update_keys = pyconfig_deprecated.validate_and_update_keys
-__all__ = ["initialize", "initialize_pydantic"]
+
+__all__ = ["initialize", "initialize_pydantic", "initialize_pydantic_with_maxtext_config"]
