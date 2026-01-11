@@ -635,21 +635,57 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     #   tensor_getter = _eager_getter
 
     # AFTER
-    hf_model = get_hf_model(model_id, token=hf_token, dtype=torch.bfloat16)
+    if args.mode == "before":
+      # get_hf_model uses model.from_pretrained
+      # by default, dtype is float32?
+      hf_model = get_hf_model(model_id, token=hf_token)
+    else:
+      hf_model = get_hf_model(model_id, token=hf_token, dtype=torch.bfloat16)
+    
     hf_state_dict_numpy = hf_model.state_dict()
+    
+    if args.mode == "before":
     # Convert all to numpy immediately in eager mode
-    # for k, v in hf_state_dict_numpy.items():
-    #   hf_state_dict_numpy[k] = v.numpy()
+      for k, v in hf_state_dict_numpy.items():
+        hf_state_dict_numpy[k] = v.numpy()
+    
     del hf_model
     max_logging.log("HuggingFace model loaded and converted to NumPy.")
     print_ram_usage("After full HF model load")
 
+   
     def _eager_getter(key):
       if key not in hf_state_dict_numpy:
         raise ValueError(f"HuggingFace key {key} not found in state_dict.")
-      # TODO: bfloat16, float16
-      return hf_state_dict_numpy[key].to(torch.float32).numpy().astype(jax.bfloat16)
-      # return hf_state_dict_numpy[key].to(torch.float16).numpy()
+      if args.mode  == "before":
+        return hf_state_dict_numpy[key]
+      elif args.mode == "bloat16":
+        # torch.bfloat16 -> torch.float32 -> np.float32 -> jax.bfloat16
+        return hf_state_dict_numpy[key].to(torch.float32).numpy().astype(jax.bfloat16)    
+      elif args.mode == "float16":
+        # torch.bfloat16 -> torch.float16 -> np.float16
+        return hf_state_dict_numpy[key].to(torch.float16).numpy()
+      elif args.mode == "bloat16-2":
+        # View as int16 (same bit-width) to trick NumPy, then view as bfloat16      
+        # This is zero-copy on CPU
+        assert tensor.dtype == torch.bfloat16
+        tensor = hf_state_dict_numpy[key]
+        return tensor.view(torch.int16).numpy().view(jax.bfloat16)
+
+    # def _eager_getter(key):
+    #   if key not in hf_state_dict_numpy:
+    #     raise ValueError(f"HuggingFace key {key} not found in state_dict.")
+    #   # torch.bfloat16 -> torch.float32 -> np.float32 -> jax.bfloat16
+    #   return hf_state_dict_numpy[key].to(torch.float32).numpy().astype(jax.bfloat16)
+    #   # torch.bfloat16 -> torch.float16 -> np.float16
+    #   # return hf_state_dict_numpy[key].to(torch.float16).numpy()
+    #   # torch.float32 -> np.float32
+    #   # return hf_state_dict_numpy[key].numpy()
+      
+    #   # View as int16 (same bit-width) to trick NumPy, then view as bfloat16
+    #   # This is zero-copy on CPU
+    #   # return tensor.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
+
 
     tensor_getter = _eager_getter
 
@@ -779,6 +815,9 @@ if __name__ == "__main__":
   # If not specified, default to MaxText.utils.ckpt_conversion.utils.utils.HF_IDS[model_name]
   parser.add_argument(
       "--hf_model_path", type=str, required=False, default="", help="local path to hf model, or custom remote hf repo"
+  )
+  parser.add_argument(
+      "--mode", type=str, required=True, default="", help=""
   )
   local_args, _ = parser.parse_known_args()
   model_args = sys.argv
