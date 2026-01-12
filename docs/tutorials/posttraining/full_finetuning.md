@@ -44,10 +44,12 @@ install_maxtext_github_deps
 ```sh
 # -- Model configuration --
 export MODEL_NAME=<model name> # e.g., 'llama2-7b'
+export MODEL_TOKENIZER=<tokenizer path> # e.g., 'meta-llama/Llama-3.1-8B-Instruct'
 export HF_TOKEN=<Hugging Face access token>
 
 # -- MaxText configuration --
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
+export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
 ```
 
 ## Hugging Face checkpoint to Maxtext checkpoint
@@ -80,20 +82,6 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml
     base_output_directory=${MODEL_CKPT_DIRECTORY} \
     scan_layers=True skip_jax_distributed_system=True
 ```
-## MaxText checkpoint to Hugging Face checkpoint
-
-Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugging Face format. This is useful for sharing your models or integrating them with the Hugging Face ecosystem.
-
-```sh
-python3 -m MaxText.utils.ckpt_conversion.to_huggingface src/MaxText/configs/base.yml \
-  model_name=${MODEL_NAME} \
-  load_parameters_path=${MODEL_CKPT_PATH}$ \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  scan_layers=false \
-  use_multimodal=false \
-  hf_access_token=${HF_TOKEN} \
-  weight_dtype=bfloat16
-```
 ## Dataset
 
 MaxText provides examples to work with [Common Crawl](https://commoncrawl.org/). The dataset is available in TFRecords format in a cloud bucket. MaxText provides scripts to copy the dataset to a Google Cloud Storage Bucket.
@@ -118,17 +106,35 @@ The above will download the c4 dataset to the GCS BUCKET.
 
 ## Sample Full Fine tuning script
 
-Below is a sample training script for LLama2-7b on v6e-8 TPU VM.
+Below is a sample training script with an existing MaxText checkpoint (Option 1: Using an existing MaxText checkpoint).
 
 ```sh
 python3 -m MaxText.train \
   src/MaxText/configs/base.yml \
-  run_name="llama2-finetune-maxtext" \
+  run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   load_parameters_path=${MODEL_CKPT_PATH} \
-  model_name='llama2-7b' \
+  model_name=${MODEL_NAME} \
   dataset_path=${DATASET_GCS_BUCKET} \
   async_checkpointing=False  \
+  tokenizer_path=${MODEL_TOKENIZER} \
+  hf_access_token=${HF_TOKEN} \
+  steps=10 per_device_batch_size=1
+```
+
+Below is a sample training script with a converted a Hugging Face checkpoint (Option 2: Converting a Hugging Face checkpoint).
+
+```sh
+python3 -m MaxText.train \
+  src/MaxText/configs/base.yml \
+  run_name=${RUN_NAME} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+  load_parameters_path=${MODEL_CKPT_DIRECTORY}/0/items \
+  model_name=${MODEL_NAME} \
+  dataset_path=${DATASET_GCS_BUCKET} \
+  async_checkpointing=False  \
+  tokenizer_path=${MODEL_TOKENIZER} \
+  hf_access_token=${HF_TOKEN} \
   steps=10 per_device_batch_size=1
 ```
 
