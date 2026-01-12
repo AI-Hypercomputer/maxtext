@@ -1,5 +1,5 @@
 <!--
- # Copyright 2023–2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,36 +12,34 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
- -->
+-->
+Documentation… documentation!
+=============================
 
-# MaxText
+## Dependencies
+First install the dependencies:
+```sh
+$ python3 -m pip install -r requirements_docs.txt
+```
+(or `uv pip install` …)
 
-```{raw} html
-:file: index.html
+## Build
+```sh
+$ sphinx-build -M html docs out
 ```
 
-:link: reference/api
-
-<div class="doc-body">
-<section class="latest-news">
-
-```{include} ../README.md
-:start-after: <!-- NEWS START -->
-:end-before: <!-- NEWS END -->
+## Serve
+You can use any static file HTTP server, e.g.:
+```sh
+$ python3 -m http.server -d 'out/html'
 ```
 
-</section>
-</div>
-
-```{toctree}
-:maxdepth: 2
-:hidden:
-
-install_maxtext
-tutorials
-run_maxtext
-guides
-reference
-development
-release_notes
+## Build & server (watch for changes)
+```sh
+$ python3 -m pip install sphinx-autobuild
+$ sphinx-autobuild docs out
 ```
+
+## Release to readthedocs
+
+See GitHub Action

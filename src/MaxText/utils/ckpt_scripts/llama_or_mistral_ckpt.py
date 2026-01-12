@@ -414,9 +414,9 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
   Converts the loRA checkpoints at `lora_model_path` into Orbax checkpoints
   for MaxText.
 
-  Attributes:
-    lora_config (dict): Configuration of the LoRA adapter along with lora_model_path
-    model_size (str): llama2-7b to 70b, mistral-7b, or mixtral-8-7b, mixtral-8x22b
+  Args:
+    lora_config: Configuration of the LoRA adapter along with lora_model_path
+    model_size: llama2-7b to 70b, mistral-7b, or mixtral-8-7b, mixtral-8x22b
   """
   model_params = MODEL_PARAMS_DICT[model_size]
   base_num_decoder_layers = model_params["num_layers"]

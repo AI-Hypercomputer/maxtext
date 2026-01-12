@@ -303,7 +303,7 @@ def convert_to_jax_weights(base_model_path: str, model_size: str):
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and output jax_weights ready for MaxText
 
-  Attributes:
+  Args:
     base_model_path: checkpoint path
     model_size: gpt-oss-20b, gpt-oss-120b
   """

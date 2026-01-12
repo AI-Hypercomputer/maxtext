@@ -149,11 +149,9 @@ class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disab
   This mask class inherits from splash_attention_mask._ComputableMask and is designed to be used with Splash Attention.
   It allows the mask logic to be computed on-the-fly or fused into the attention kernel, avoiding the memory cost of
   materializing the full (sequence_length, sequence_length) boolean mask array, which can be prohibitive for long sequences.
-
-  Attributes:
-    chunk_size: The size of each attention chunk.
   """
 
+  #: The size of each attention chunk.
   chunk_size: int
 
   def __init__(
@@ -1198,17 +1196,10 @@ class AttentionOp(nnx.Module):
         segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
       else:
         segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
-    elif (
-        self.config.use_jax_splash
-        and self.config.expert_shard_attention_option == EP_AS_FSDP
-    ):
+    elif self.config.use_jax_splash and self.config.expert_shard_attention_option == EP_AS_FSDP:
       if self.config.use_max_logit_estimate > 0:
-        sa_config = dataclasses.replace(
-            sa_config, max_logit_const=self.config.use_max_logit_estimate
-        )
-      segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((
-          Q_LENGTH_NO_EXP,
-      ))
+        sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
+      segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
     else:
       # Create multi-head mask
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])

@@ -65,13 +65,7 @@ MaxTextConfig = Any
 
 @dataclasses.dataclass
 class InputData:
-  """Container for input data and metadata.
-
-  Attributes:
-      id: Unique identifier for this input
-      tokens: JAX array containing the tokenized input
-      true_length: Actual length of the input before padding
-  """
+  """Container for input data and metadata."""
 
   id: str
   tokens: jax.Array | np.ndarray
@@ -80,14 +74,7 @@ class InputData:
 
 @dataclasses.dataclass
 class CompletionOutput:
-  """Container for model generation output.
-
-  Attributes:
-      index: The index of the output in the request.
-      token_ids: The token IDs of the prompt and generated output text.
-      logprobs: The log probabilities of the prompt and generated output tokens.
-      prompt_length: The number of prompt tokens.
-  """
+  """Container for model generation output."""
 
   index: str
   token_ids: np.ndarray
@@ -249,7 +236,7 @@ class PrefillHelper:
           [input_id],
           decode_state,
       )
-    # Use batch processor for inputs that can benefit from prefill packing
+      # Use batch processor for inputs that can benefit from prefill packing
     elif self._type == PrefillType.BATCH:
       self._batch_processor.process(
           model_params,
@@ -484,7 +471,7 @@ class InferenceWorker:
     if rng is not None:
       self.rng = rng
 
-    # Set up state for this inference run
+      # Set up state for this inference run
     self.true_lengths = {input.id: input.true_length for input in data}
     self.running = True
 
@@ -516,7 +503,7 @@ class InferenceWorker:
       # 1. Wait for an empty slot
       while not self.empty_decode_slots:
         self.decode()
-      # 2. Get an available slot
+        # 2. Get an available slot
       slot = self.empty_decode_slots.pop()
       # 3. Prefill and insert kv cache
       self.prefill_helper.process(
@@ -529,14 +516,14 @@ class InferenceWorker:
           prefill_done=self.prefill_done,
       )
 
-    # 4. Flush any pending inputs in batch prefill mode
+      # 4. Flush any pending inputs in batch prefill mode
     self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
 
     # 5. Continue decoding until all sequences are complete
     while not all(value is None for value in self.slot_to_id.values()):
       self.decode()
 
-    # Wait for detokenization to complete
+      # Wait for detokenization to complete
     self.running = False
     max_logging.log("Inference worker: joining detokenization thread")
     start_time = time.time()
@@ -605,7 +592,7 @@ class InferenceWorker:
       result_tokens_list.append(result.result_tokens)
       prompt_logp_list.append(result.prompt_logp)
 
-    # Queue detokenization task
+      # Queue detokenization task
     task = DetokenizationTask(
         task_type="prefill",
         result_tokens=result_tokens_list,
@@ -629,7 +616,7 @@ class InferenceWorker:
         # Block on the last token
         jax.block_until_ready(result_tokens)
 
-      # Queue detokenization task
+        # Queue detokenization task
       task = DetokenizationTask(
           task_type="decode",
           tokens_buffer=result_tokens,
@@ -691,11 +678,11 @@ class InferenceWorker:
           if id_ is not None and id_ not in self.completed_sequences:
             active_slots.append((slot, id_))
 
-        # Skip processing entirely if no active sequences
+            # Skip processing entirely if no active sequences
         if not active_slots:
           continue
 
-        # Process single decode step - convert to numpy and emit
+          # Process single decode step - convert to numpy and emit
         with jax.profiler.TraceAnnotation("convert_to_numpy_and_emit_decode_step"):
           result_tokens_step = np.array(task.tokens_buffer)  # Single step tokens
           log_prob_step = np.array(task.logprob_buffer)  # Single step logprobs
@@ -706,7 +693,7 @@ class InferenceWorker:
             should_terminate = self.emit_token(id_, int(result_tokens_at_slot), log_prob_at_slot)
             if should_terminate:
               newly_empty.append(slot)
-      # Update decode slots
+              # Update decode slots
       for slot in newly_empty:
         self.slot_to_id[slot] = None
         self.empty_decode_slots.add(slot)
@@ -818,7 +805,7 @@ class OfflineEngine:
     else:
       self.prefill_lengths = sorted(prefill_lengths)
 
-    # Create meshes
+      # Create meshes
     if not self.mesh:
       self.mesh = OfflineEngine.create_mesh(jax.devices(), self.config)
 
@@ -881,7 +868,7 @@ class OfflineEngine:
     if isinstance(data[0], jax.Array):
       data = [np.array(array) for array in data]
 
-    # Convert numpy arrays to InputData objects
+      # Convert numpy arrays to InputData objects
     if isinstance(data[0], np.ndarray):
       max_logging.log(
           "When you provide JAX/numpy arrays to Offline Engine, "
@@ -889,7 +876,7 @@ class OfflineEngine:
       )
       data = [InputData(id=i, tokens=array, true_length=len(array)) for i, array in enumerate(data)]
 
-    # Make sure all data id is unique
+      # Make sure all data id is unique
     if len(data) != len({item.id for item in data}):
       raise ValueError("All data ids must be unique")
 
@@ -920,11 +907,11 @@ class OfflineEngine:
           target_length = length
           break
 
-      # If no suitable length found, use the maximum prefill length
+          # If no suitable length found, use the maximum prefill length
       if target_length is None:
         target_length = self.max_prefill_length
 
-      # Pad or truncate as needed
+        # Pad or truncate as needed
       if len(item.tokens) < target_length:
         # Pad with zeros
         padded_tokens = np.zeros(target_length, dtype=item.tokens.dtype)
@@ -933,7 +920,7 @@ class OfflineEngine:
         # Input is too long, truncate to max_prefill_length
         padded_tokens = item.tokens[:target_length]
 
-      # Create new InputData with padded tokens
+        # Create new InputData with padded tokens
       padded_data.append(InputData(id=item.id, tokens=padded_tokens, true_length=item.true_length))
 
     return padded_data

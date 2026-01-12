@@ -46,18 +46,17 @@ class Pipeline(nn.Module):
 
   Supports circular pipelines, and multiple layers per stage are used when a module that executes multiple layers
   is passed as the layers input.
-
-  Attributes:
-    config: Importantly contains num_pipeline_microbatches, num_pipeline_repeats.
-    layers: A module instance that each stage can execute. It can either be a single layer such as a
-      LlamaDecoderLayer instance or scanned/looped set of decoder layers to execute multiple layers per stage.
-    mesh:  The device mesh of the system.
-    remat_policy: Remat policy to use for the loop iterations
   """
 
+  #: Importantly contains num_pipeline_microbatches, num_pipeline_repeats.
   config: Config
-  layers: nn.Module  # The name of this property (layers) is reflected in the state pytree and thus also checkpoints.
+  #: A module instance that each stage can execute. It can either be a single layer such as a LlamaDecoderLayer instance or
+  #: scanned/looped set of decoder layers to execute multiple layers per stage. The name of this property (layers) is
+  #: reflected in the state pytree and thus also checkpoints.
+  layers: nn.Module
+  #: The device mesh of the system.
   mesh: Mesh
+  #: Remat policy to use for the loop iterations
   remat_policy: Any = None
 
   def setup(self):  # pylint: disable=missing-function-docstring

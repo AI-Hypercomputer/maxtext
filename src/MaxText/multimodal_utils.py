@@ -72,23 +72,15 @@ QWEN3_OMNI_IMAGE_SIZE = 768
 
 @dataclass
 class PreprocessorOutput:
-  """Holds the output of an image preprocessor.
+  """Holds the output of an image preprocessor."""
 
-  Attributes:
-    pixel_values: A JAX array containing the processed image pixel data.
-                  The shape and format depend on the specific model and
-                  preprocessing steps (e.g., [H, W, C] for Gemma3 or
-                  [NUM_TILES, C, TILE_SIZE, TILE_SIZE] for Llama4).
-    pixel_mask: An optional JAX array of shape (NUM_TILES,) indicating valid
-                tiles in the image.
-    aspect_ratios: An optional JAX array of shape (batch_size, 2) representing
-                   the aspect ratio [ratio_h, ratio_w] of the processed image(s).
-                   This is particularly relevant for models like Llama4 that handle
-                   images by tiling.
-  """
-
+  #: A JAX array containing the processed image pixel data. The shape and format depend on the specific model
+  #: and preprocessing steps (e.g., [H, W, C] for Gemma3 or [NUM_TILES, C, TILE_SIZE, TILE_SIZE] for Llama4).
   pixel_values: None | np.ndarray = None
+  #: An optional JAX array of shape (NUM_TILES,) indicating valid tiles in the image.
   pixel_mask: None | np.ndarray = None
+  #: An optional JAX array of shape (batch_size, 2) representing the aspect ratio [ratio_h, ratio_w] of the processed
+  #: image(s). This is particularly relevant for models like Llama4 that handle images by tiling.
   aspect_ratios: None | np.ndarray = None
 
 

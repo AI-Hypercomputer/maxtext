@@ -36,7 +36,6 @@ from flax import struct
 from flax.linen import partitioning as nn_partitioning
 import flax
 
-from jetstream.core import config_lib
 from jetstream.engine import engine_api
 from jetstream.engine import token_utils
 from jetstream.engine import tokenizer_api
@@ -66,14 +65,11 @@ PRNGKeyType = Any
 # TODO(yuyanpeng): Should import ExistingPrefix from jetstream.engine.engine_api
 @struct.dataclass
 class ExistingPrefix:
-  """Represents a prefix that has already been processed.
+  """Represents a prefix that has already been processed."""
 
-  Attributes:
-    cache: The kv-cache for the prefix get from model params cache.
-    common_prefix_tokens: The tokens that have already been processed without padding.
-  """
-
+  #: The kv-cache for the prefix get from model params cache.
   cache: Any
+  #: The tokens that have already been processed without padding.
   common_prefix_tokens: jax.Array
 
 
@@ -105,7 +101,7 @@ class MaxEngine(engine_api.Engine):
   JetStream efficient serving infrastructure.
   """
 
-  def __init__(self, config: Any, devices: config_lib.Devices | None = None):
+  def __init__(self, config: Any, devices: "jetstream.core.config_lib.Devices | None" = None):
     self.config = config
 
     # Mesh definition
