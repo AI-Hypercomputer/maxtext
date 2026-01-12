@@ -13,14 +13,10 @@
 # limitations under the License.
 
 """Used to perf benchmarks between Pathways and McJax."""
-import os
-import sys
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
-from . import args_helper as helper
-from . import user_configs
-from .runner_utils import generate_and_run_workloads
+from benchmarks.recipes import args_helper as helper
+from benchmarks.recipes import user_configs
+from benchmarks.recipes.runner_utils import generate_and_run_workloads
 
 
 def main() -> int:
@@ -33,6 +29,12 @@ def main() -> int:
   if not should_continue:
     return 0
 
+  return_code = generate_and_run_workloads(
+      user_configs.USER_CONFIG,
+      user_configs.USER_CONFIG.num_slices_list,
+      user_configs.USER_CONFIG.benchmark_steps,
+      user_configs.USER_CONFIG.priority,
+  )
   return_code = generate_and_run_workloads(
       user_configs.USER_CONFIG,
       user_configs.USER_CONFIG.num_slices_list,

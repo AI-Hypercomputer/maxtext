@@ -34,6 +34,8 @@ import time
 
 import omegaconf
 
+from benchmarks.benchmark_utils import get_xpk_path
+
 import benchmarks.maxtext_trillium_model_configs as model_configs
 from benchmarks.globals import MAXTEXT_PKG_DIR
 from benchmarks.command_utils import run_command_with_updates
@@ -101,7 +103,7 @@ class WorkloadConfig:
   num_steps: int = 20
   max_restarts: int = 0
   priority: str = "medium"
-  xpk_path: str = os.path.join("~", "xpk")
+  xpk_path: str = get_xpk_path()
   pathways_config: PathwaysConfig = None
   run_name: str = None
   generate_metrics_and_upload_to_big_query: bool = True

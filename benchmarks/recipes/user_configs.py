@@ -25,6 +25,8 @@ import dataclasses
 import os
 import sys
 
+from ..benchmark_utils import get_xpk_path
+
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
 from .. import maxtext_trillium_model_configs as v6e_model_configs
@@ -71,7 +73,7 @@ class UserConfig:
   num_slices_list: list[int] = dataclasses.field(default_factory=lambda: [2])
 
   # other configuration
-  xpk_path: str = "~/xpk"
+  xpk_path: str = get_xpk_path()
   max_restarts: int = 0
 
   def __post_init__(self):
