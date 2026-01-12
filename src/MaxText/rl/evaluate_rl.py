@@ -76,7 +76,7 @@ def generate_responses(
     )
     responses = responses.text
 
-    if tmvp_config.debug["rl"]:
+    if tmvp_config.debug.rl:
       max_logging.log(f"Pass {p+1}/{num_passes}, responses: {responses}")
 
     for idx, response in enumerate(responses):
@@ -101,7 +101,7 @@ def score_responses(tmvp_config, question, responses, answer):
   match_format = utils_rl.get_match_format_regex(tmvp_config)
   match_numbers = utils_rl.get_match_numbers_regex(tmvp_config)
 
-  if tmvp_config.debug["rl"]:
+  if tmvp_config.debug.rl:
     max_logging.log("========================================")
     max_logging.log(f"Evaluation Question: {question}")
     max_logging.log(f"Evaluation Answer: {answer}")
@@ -116,7 +116,7 @@ def score_responses(tmvp_config, question, responses, answer):
     # Extract numerical response
     extracted_response = guess.group(1) if (guess := match_numbers.search(response)) is not None else "-1000000"
 
-    if tmvp_config.debug["rl"]:
+    if tmvp_config.debug.rl:
       max_logging.log(f"Evaluation extracted_response: {extracted_response}")
 
     # Check exact correctness
@@ -132,7 +132,7 @@ def score_responses(tmvp_config, question, responses, answer):
         is_partially_correct = True
 
     except Exception as e:
-      if tmvp_config.debug["rl"]:
+      if tmvp_config.debug.rl:
         max_logging.log(f"Evaluation Exception: {e}")
         max_logging.log("SKIPPED")
 

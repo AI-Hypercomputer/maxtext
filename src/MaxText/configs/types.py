@@ -1416,14 +1416,14 @@ class VLLM(BaseModel):
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
 
 
-class GRPO(BaseModel):
-  """Configuration for Group Relative Policy Optimization (GRPO)."""
+class RL(BaseModel):
+  """Configuration for RL algorithms like Group Relative Policy Optimization (GRPO) among others."""
 
   num_generations: int = Field(2, description="Number of responses to generate per prompt (G in GRPO paper).")
   num_iterations: int = Field(1, description="Number of iterations per batch (μ in GRPO paper).")
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
   grpo_epsilon: float = Field(0.2, description="Epsilon value for clipping in the GRPO loss.")
-  loss_algo: str = Field("grpo", description="Loss algorithm, e.g., 'grpo' or 'gspo-token'.")
+  loss_algo: Literal["grpo", "gspo-token"] = Field("grpo", description="Loss algorithm, i.e., 'grpo' or 'gspo-token'.")
 
 
 class RLDataset(BaseModel):
@@ -1658,7 +1658,6 @@ class MaxTextConfig(
     # Reinforcement Learning
     RLHardware,
     VLLM,
-    GRPO,
     RLDataset,
     RLEvaluation,
     Reward,
@@ -1708,6 +1707,9 @@ class MaxTextConfig(
   """
 
   debug: Debug = Field(default_factory=Debug, description="Configuration for debugging options.")
+  rl: RL = Field(
+      default_factory=RL, description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO)."
+  )
   model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
   @model_validator(mode="before")
@@ -2153,7 +2155,7 @@ class MaxTextConfig(
       raise ValueError("`eval_steps` must be > 0 when `generate_padding_batch_eval` is True.")
     if self.dataset_type == "hf" and self.num_epoch != 1:
       raise ValueError("HuggingFace pipeline only supports num_epoch=1.")
-    if self.loss_algo == "grpo":
+    if self.rl.loss_algo == "grpo":
       self.use_grpo = True
     else:
       self.use_grpo = False

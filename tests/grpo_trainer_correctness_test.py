@@ -121,7 +121,7 @@ class GrpoTrainerTest(unittest.TestCase):
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama3.1-tokenizer"),
         enable_checkpointing=False,
         ici_tensor_parallelism=4,
-        per_device_batch_size=self.config.per_device_batch_size * self.config.num_generations,
+        per_device_batch_size=self.config.per_device_batch_size * self.config.rl["num_generations"],
     )
     self.model = mt.from_config(self.config)
     self.inference_model = mt.from_config(self.config_inference)
