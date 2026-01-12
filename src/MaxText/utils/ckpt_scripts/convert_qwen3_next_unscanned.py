@@ -65,67 +65,67 @@ def create_unscanned_layer_pytree(layer_idx) -> Dict[str, Any]:
   """Creates the nested dictionary for one scanned layer."""
   if layer_idx % 4 == 3:
     return {
-        # Common
-        "input_layernorm": {"scale": None},
-        "post_attention_layernorm": {"scale": None},
-        # MoE
-        "mlp": {
-            "shared_expert": {
-                "wi_0": {"kernel": None},
-                "wi_1": {"kernel": None},
-                "wo": {"kernel": None},
-            },
-            "shared_expert_gate": {"kernel": None},
-            "routed_experts": {
-                "gate": {"kernel": None},
-                "wi_0": None,
-                "wi_1": None,
-                "wo": None,
-            },
+      # Common
+      "input_layernorm": {"scale": None},
+      "post_attention_layernorm": {"scale": None},
+      # MoE
+      "mlp": {
+        "shared_expert": {
+          "wi_0": {"kernel": None},
+          "wi_1": {"kernel": None},
+          "wo": {"kernel": None},
         },
-        # Attention (will hold both GA and GDN params)
+        "shared_expert_gate": {"kernel": None},
+        "routed_experts": {
+          "gate": {"kernel": None},
+          "wi_0": None,
+          "wi_1": None,
+          "wo": None,
+        },
+      },
+      # Attention (will hold both GA and GDN params)
+      "attention": {
         "attention": {
-            "attention": {
-                "query": {"kernel": None},
-                "key": {"kernel": None},
-                "value": {"kernel": None},
-                "out": {"kernel": None},
-                "query_norm": {"scale": None},
-                "key_norm": {"scale": None},
-            },
+          "query": {"kernel": None},
+          "key": {"kernel": None},
+          "value": {"kernel": None},
+          "out": {"kernel": None},
+          "query_norm": {"scale": None},
+          "key_norm": {"scale": None},
         },
+      },
     }
   else:
     return {
-        # Common
-        "input_layernorm": {"scale": None},
-        "post_attention_layernorm": {"scale": None},
-        # MoE
-        "mlp": {
-            "shared_expert": {
-                "wi_0": {"kernel": None},
-                "wi_1": {"kernel": None},
-                "wo": {"kernel": None},
-            },
-            "shared_expert_gate": {"kernel": None},
-            "routed_experts": {
-                "gate": {"kernel": None},
-                "wi_0": None,
-                "wi_1": None,
-                "wo": None,
-            },
+      # Common
+      "input_layernorm": {"scale": None},
+      "post_attention_layernorm": {"scale": None},
+      # MoE
+      "mlp": {
+        "shared_expert": {
+          "wi_0": {"kernel": None},
+          "wi_1": {"kernel": None},
+          "wo": {"kernel": None},
         },
-        # Attention (will hold both GA and GDN params)
-        "attention": {
-            # GDN Params
-            "A_log": None,
-            "conv1d": {"kernel": None},
-            "dt_bias": None,
-            "in_proj_ba": {"kernel": None},
-            "in_proj_qkvz": {"kernel": None},
-            "norm": {"rms_norm": {"scale": None}},
-            "out_proj": {"kernel": None},
+        "shared_expert_gate": {"kernel": None},
+        "routed_experts": {
+          "gate": {"kernel": None},
+          "wi_0": None,
+          "wi_1": None,
+          "wo": None,
         },
+      },
+      # Attention (will hold both GA and GDN params)
+      "attention": {
+        # GDN Params
+        "A_log": None,
+        "conv1d": {"kernel": None},
+        "dt_bias": None,
+        "in_proj_ba": {"kernel": None},
+        "in_proj_qkvz": {"kernel": None},
+        "norm": {"rms_norm": {"scale": None}},
+        "out_proj": {"kernel": None},
+      },
     }
 
 
@@ -155,7 +155,7 @@ def convert_hf_to_maxtext(base_model_path: str, model_size: str, model_params: d
   chkpt_vars = {}
 
   for i, ckpt_path in enumerate(ckpt_paths):
-    max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+    max_logging.log(f"Loading checkpoint {i + 1} of {len(ckpt_paths)} ...")
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
       for key in f.keys():
         # Follow up for @rbierneni: Skipping mtp weights until verified
@@ -166,11 +166,11 @@ def convert_hf_to_maxtext(base_model_path: str, model_size: str, model_params: d
 
   # Part 2: Initialize the nested MaxText weights dictionary
   jax_weights = {
-      "token_embedder": {"embedding": None},
-      "decoder": {
-          "decoder_norm": {"scale": None},
-          "logits_dense": {"kernel": None},
-      },
+    "token_embedder": {"embedding": None},
+    "decoder": {
+      "decoder_norm": {"scale": None},
+      "logits_dense": {"kernel": None},
+    },
   }
   for l in range(num_layers):
     jax_weights["decoder"][f"layers_{l}"] = create_unscanned_layer_pytree(l)
@@ -181,7 +181,7 @@ def convert_hf_to_maxtext(base_model_path: str, model_size: str, model_params: d
   jax_weights["decoder"]["decoder_norm"]["scale"] = _pt_to_np(chkpt_vars["model.norm.weight"], cast_dtype=CAST_DTYPE)
   jax_weights["token_embedder"]["embedding"] = _pt_to_np(chkpt_vars["model.embed_tokens.weight"], cast_dtype=CAST_DTYPE)
   jax_weights["decoder"]["logits_dense"]["kernel"] = _pt_to_np(
-      chkpt_vars["lm_head.weight"], cast_dtype=CAST_DTYPE
+    chkpt_vars["lm_head.weight"], cast_dtype=CAST_DTYPE
   ).transpose()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -192,22 +192,22 @@ def convert_hf_to_maxtext(base_model_path: str, model_size: str, model_params: d
       gated_attn = jax_weights["decoder"][f"layers_{l}"]["attention"]["attention"]
 
       k_kernel = (
-          _pt_to_np(chkpt_vars[f"model.layers.{l}.self_attn.k_proj.weight"], cast_dtype=CAST_DTYPE)
-          .transpose()
-          .reshape(hidden_size, ga_num_kv_heads, head_dim)
+        _pt_to_np(chkpt_vars[f"model.layers.{l}.self_attn.k_proj.weight"], cast_dtype=CAST_DTYPE)
+        .transpose()
+        .reshape(hidden_size, ga_num_kv_heads, head_dim)
       )
       k_norm = _pt_to_np(chkpt_vars[f"model.layers.{l}.self_attn.k_norm.weight"], cast_dtype=CAST_DTYPE)
       o_kernel = _pt_to_np(chkpt_vars[f"model.layers.{l}.self_attn.o_proj.weight"], cast_dtype=CAST_DTYPE).transpose()
       q_kernel = (
-          _pt_to_np(chkpt_vars[f"model.layers.{l}.self_attn.q_proj.weight"], cast_dtype=CAST_DTYPE)
-          .transpose()
-          .reshape(hidden_size, ga_num_q_heads, head_dim * 2)
+        _pt_to_np(chkpt_vars[f"model.layers.{l}.self_attn.q_proj.weight"], cast_dtype=CAST_DTYPE)
+        .transpose()
+        .reshape(hidden_size, ga_num_q_heads, head_dim * 2)
       )
       q_norm = _pt_to_np(chkpt_vars[f"model.layers.{l}.self_attn.q_norm.weight"], cast_dtype=CAST_DTYPE)
       v_kernel = (
-          _pt_to_np(chkpt_vars[f"model.layers.{l}.self_attn.v_proj.weight"], cast_dtype=CAST_DTYPE)
-          .transpose()
-          .reshape(hidden_size, ga_num_kv_heads, head_dim)
+        _pt_to_np(chkpt_vars[f"model.layers.{l}.self_attn.v_proj.weight"], cast_dtype=CAST_DTYPE)
+        .transpose()
+        .reshape(hidden_size, ga_num_kv_heads, head_dim)
       )
 
       gated_attn["key"]["kernel"] = k_kernel
@@ -221,14 +221,14 @@ def convert_hf_to_maxtext(base_model_path: str, model_size: str, model_params: d
 
       a_log = _pt_to_np(chkpt_vars[f"model.layers.{l}.linear_attn.A_log"], cast_dtype=CAST_DTYPE)
       conv1d_kernel = _pt_to_np(
-          chkpt_vars[f"model.layers.{l}.linear_attn.conv1d.weight"], cast_dtype=CAST_DTYPE
+        chkpt_vars[f"model.layers.{l}.linear_attn.conv1d.weight"], cast_dtype=CAST_DTYPE
       ).transpose(2, 1, 0)
       dt_bias = _pt_to_np(chkpt_vars[f"model.layers.{l}.linear_attn.dt_bias"], cast_dtype=CAST_DTYPE)
       ba_kernel = _pt_to_np(
-          chkpt_vars[f"model.layers.{l}.linear_attn.in_proj_ba.weight"], cast_dtype=CAST_DTYPE
+        chkpt_vars[f"model.layers.{l}.linear_attn.in_proj_ba.weight"], cast_dtype=CAST_DTYPE
       ).transpose()
       qkvz_kernel = _pt_to_np(
-          chkpt_vars[f"model.layers.{l}.linear_attn.in_proj_qkvz.weight"], cast_dtype=CAST_DTYPE
+        chkpt_vars[f"model.layers.{l}.linear_attn.in_proj_qkvz.weight"], cast_dtype=CAST_DTYPE
       ).transpose()
       gated_rms_norm = _pt_to_np(chkpt_vars[f"model.layers.{l}.linear_attn.norm.weight"], cast_dtype=CAST_DTYPE)
       o_kernel = _pt_to_np(chkpt_vars[f"model.layers.{l}.linear_attn.out_proj.weight"], cast_dtype=CAST_DTYPE).transpose()
@@ -249,7 +249,7 @@ def convert_hf_to_maxtext(base_model_path: str, model_size: str, model_params: d
 
     input_layernorm = _pt_to_np(chkpt_vars[f"model.layers.{l}.input_layernorm.weight"], cast_dtype=CAST_DTYPE)
     post_attention_layernorm = _pt_to_np(
-        chkpt_vars[f"model.layers.{l}.post_attention_layernorm.weight"], cast_dtype=CAST_DTYPE
+      chkpt_vars[f"model.layers.{l}.post_attention_layernorm.weight"], cast_dtype=CAST_DTYPE
     )
 
     layer_weight["input_layernorm"]["scale"] = input_layernorm
@@ -262,16 +262,16 @@ def convert_hf_to_maxtext(base_model_path: str, model_size: str, model_params: d
     mlp_weights = jax_weights["decoder"][f"layers_{l}"]["mlp"]
 
     shared_wi_0 = _pt_to_np(
-        chkpt_vars[f"model.layers.{l}.mlp.shared_expert.gate_proj.weight"], cast_dtype=CAST_DTYPE
+      chkpt_vars[f"model.layers.{l}.mlp.shared_expert.gate_proj.weight"], cast_dtype=CAST_DTYPE
     ).transpose()
     shared_wi_1 = _pt_to_np(
-        chkpt_vars[f"model.layers.{l}.mlp.shared_expert.up_proj.weight"], cast_dtype=CAST_DTYPE
+      chkpt_vars[f"model.layers.{l}.mlp.shared_expert.up_proj.weight"], cast_dtype=CAST_DTYPE
     ).transpose()
     shared_wo = _pt_to_np(
-        chkpt_vars[f"model.layers.{l}.mlp.shared_expert.down_proj.weight"], cast_dtype=CAST_DTYPE
+      chkpt_vars[f"model.layers.{l}.mlp.shared_expert.down_proj.weight"], cast_dtype=CAST_DTYPE
     ).transpose()
     shared_gate_kernel = _pt_to_np(
-        chkpt_vars[f"model.layers.{l}.mlp.shared_expert_gate.weight"], cast_dtype=CAST_DTYPE
+      chkpt_vars[f"model.layers.{l}.mlp.shared_expert_gate.weight"], cast_dtype=CAST_DTYPE
     ).transpose()
 
     mlp_weights["shared_expert_gate"]["kernel"] = shared_gate_kernel
@@ -285,13 +285,13 @@ def convert_hf_to_maxtext(base_model_path: str, model_size: str, model_params: d
     routed_gate_kernel = _pt_to_np(chkpt_vars[f"model.layers.{l}.mlp.gate.weight"], cast_dtype=CAST_DTYPE).transpose()
     for i in range(num_experts):
       wi_0_list.append(
-          _pt_to_np(chkpt_vars[f"model.layers.{l}.mlp.experts.{i}.gate_proj.weight"], cast_dtype=CAST_DTYPE).transpose()
+        _pt_to_np(chkpt_vars[f"model.layers.{l}.mlp.experts.{i}.gate_proj.weight"], cast_dtype=CAST_DTYPE).transpose()
       )
       wi_1_list.append(
-          _pt_to_np(chkpt_vars[f"model.layers.{l}.mlp.experts.{i}.up_proj.weight"], cast_dtype=CAST_DTYPE).transpose()
+        _pt_to_np(chkpt_vars[f"model.layers.{l}.mlp.experts.{i}.up_proj.weight"], cast_dtype=CAST_DTYPE).transpose()
       )
       wo_list.append(
-          _pt_to_np(chkpt_vars[f"model.layers.{l}.mlp.experts.{i}.down_proj.weight"], cast_dtype=CAST_DTYPE).transpose()
+        _pt_to_np(chkpt_vars[f"model.layers.{l}.mlp.experts.{i}.down_proj.weight"], cast_dtype=CAST_DTYPE).transpose()
       )
 
     mlp_weights["routed_experts"]["gate"]["kernel"] = routed_gate_kernel
@@ -340,10 +340,10 @@ if __name__ == "__main__":
   base_weights_path = args.maxtext_model_path
 
   save_weights_to_checkpoint(
-      args.maxtext_model_path,
-      convert_to_jax_weights(args.base_model_path, args.model_size),
-      args.simulated_cpu_devices_count,
-      args.use_ocdbt,
-      args.use_zarr3,
+    args.maxtext_model_path,
+    convert_to_jax_weights(args.base_model_path, args.model_size),
+    args.simulated_cpu_devices_count,
+    args.use_ocdbt,
+    args.use_zarr3,
   )
   max_logging.log(f"Successfully saved base_weights to {base_weights_path}.")

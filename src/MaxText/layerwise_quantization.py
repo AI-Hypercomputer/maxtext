@@ -76,11 +76,11 @@ def get_original_path_key(aqt_k_tuple: tuple[DictKey, ...]) -> tuple[DictKey, ..
   if aqt_module_index == -1:
     return None
   if (
-      len(aqt_k) > aqt_module_index + 2
-      and isinstance(aqt_k[aqt_module_index + 1], DictKey)
-      and aqt_k[aqt_module_index + 1].key == "qrhs"
-      and isinstance(aqt_k[aqt_module_index + 2], DictKey)
-      and aqt_k[aqt_module_index + 2].key == "frozen"
+    len(aqt_k) > aqt_module_index + 2
+    and isinstance(aqt_k[aqt_module_index + 1], DictKey)
+    and aqt_k[aqt_module_index + 1].key == "qrhs"
+    and isinstance(aqt_k[aqt_module_index + 2], DictKey)
+    and aqt_k[aqt_module_index + 2].key == "frozen"
   ):
     parent_path = tuple(aqt_k[:aqt_module_index])
     return parent_path + (DictKey("kernel"),)
@@ -110,8 +110,8 @@ def get_quantized_param_paths(aqt_params: Any, params: Any) -> set[tuple[DictKey
       continue
     params_keys_str = {jax.tree_util.keystr(k) for k in params_path_set}
     raise ValueError(
-        f"Mapped AQT path {jax.tree_util.keystr(aqt_k_tuple)} to {jax.tree_util.keystr(original_k_tuple)},"
-        f" but not found in params. Available: {params_keys_str}"
+      f"Mapped AQT path {jax.tree_util.keystr(aqt_k_tuple)} to {jax.tree_util.keystr(original_k_tuple)},"
+      f" but not found in params. Available: {params_keys_str}"
     )
   return original_param_paths_to_remove
 
@@ -166,10 +166,10 @@ class LayerwiseQuantization:
     self.rng = rng
 
     # TODO(ranlihao): Remove this assertion once the Layerwise quantization is supported for other decoder blocks.
-    assert (
-        config.decoder_block == common_types.DecoderBlockType.DEEPSEEK
-    ), f"Layerwise quantization is only supported for {common_types.DecoderBlockType.DEEPSEEK}\
+    assert config.decoder_block == common_types.DecoderBlockType.DEEPSEEK, (
+      f"Layerwise quantization is only supported for {common_types.DecoderBlockType.DEEPSEEK}\
       , but got {config.decoder_block}."
+    )
     # Mesh definition
     devices_array = maxtext_utils.create_device_mesh(config=config)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
@@ -177,10 +177,10 @@ class LayerwiseQuantization:
     # Model and quantization config
     self.quant = quantizations.configure_quantization(config)
     model = models.transformer_as_linen(
-        config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
+      config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
     )
     self.unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(
-        model, None, self.config, self.rng, self._mesh, False
+      model, None, self.config, self.rng, self._mesh, False
     )
 
   def load_and_quantize(self) -> None:
@@ -196,33 +196,33 @@ class LayerwiseQuantization:
     _, rng_quant_params = jax.random.split(self.rng)
 
     layers = [
-        deepseek.DeepSeekDenseLayerToLinen(
-            config=config, mesh=self._mesh, quant=self.quant, model_mode=model_mode, rngs=nnx.Rngs(self.rng)
-        ),
-        deepseek.DeepSeekMoELayerToLinen(
-            config=config, mesh=self._mesh, quant=self.quant, model_mode=model_mode, rngs=nnx.Rngs(self.rng)
-        ),
+      deepseek.DeepSeekDenseLayerToLinen(
+        config=config, mesh=self._mesh, quant=self.quant, model_mode=model_mode, rngs=nnx.Rngs(self.rng)
+      ),
+      deepseek.DeepSeekMoELayerToLinen(
+        config=config, mesh=self._mesh, quant=self.quant, model_mode=model_mode, rngs=nnx.Rngs(self.rng)
+      ),
     ]
     layer_prefixes = [
-        "dense_layers",
-        "moe_layers",
+      "dense_layers",
+      "moe_layers",
     ]
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     num_layers_list = [
-        config.first_num_dense_layers,
-        num_moe_layers,
+      config.first_num_dense_layers,
+      num_moe_layers,
     ]
 
     def model_apply(_p, _rng, layer):
       return layer.apply(
-          _p | {"aqt": {}},
-          jnp.ones((1, self.config.max_prefill_predict_length, self.config.base_emb_dim), dtype=jnp.int32),
-          None,
-          jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          True,
-          model_mode=model_mode,
-          rngs={"params": _rng},
-          mutable=True,
+        _p | {"aqt": {}},
+        jnp.ones((1, self.config.max_prefill_predict_length, self.config.base_emb_dim), dtype=jnp.int32),
+        None,
+        jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+        True,
+        model_mode=model_mode,
+        rngs={"params": _rng},
+        mutable=True,
       )
 
     for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
@@ -237,7 +237,7 @@ class LayerwiseQuantization:
 
         if "aqt" not in new_vars:
           max_logging.log(
-              f"Warning: 'aqt' not found in new_vars for {layer_name}. Skipping AQT processing for this layer."
+            f"Warning: 'aqt' not found in new_vars for {layer_name}. Skipping AQT processing for this layer."
           )
           quantized_params["params"]["decoder"][layer_name] = params["params"]  # Keep original params
           continue
@@ -251,7 +251,7 @@ class LayerwiseQuantization:
           max_logging.log(f"ERROR: Failed to remove quantized params for {layer_name}: {e}")
           max_logging.log(f"Dumping params['params'] keys for {layer_name}:")
           jax.tree_util.tree_map_with_path(
-              lambda path, _: max_logging.log(f"  {jax.tree_util.keystr(path)}"), params["params"]
+            lambda path, _: max_logging.log(f"  {jax.tree_util.keystr(path)}"), params["params"]
           )
           max_logging.log(f"Dumping new_vars['aqt'] keys for {layer_name}:")
           jax.tree_util.tree_map_with_path(lambda path, _: max_logging.log(f"  {jax.tree_util.keystr(path)}"), aqt_vars)
@@ -277,13 +277,12 @@ class LayerwiseQuantization:
 
     config = self.config
     with nn_partitioning.axis_rules(config.logical_axis_rules):
-
       params = checkpointing.load_params_from_path(
-          config.load_parameters_path,
-          self._create_partial_abstract_params(self.unboxed_abstract_state.params, layer_name),
-          config.checkpoint_storage_concurrent_gb,
-          config.checkpoint_storage_use_ocdbt,
-          config.checkpoint_storage_use_zarr3,
+        config.load_parameters_path,
+        self._create_partial_abstract_params(self.unboxed_abstract_state.params, layer_name),
+        config.checkpoint_storage_concurrent_gb,
+        config.checkpoint_storage_use_ocdbt,
+        config.checkpoint_storage_use_zarr3,
       )
     return params
 
@@ -323,9 +322,9 @@ def main(argv: Sequence[str]) -> None:
 
 
 def validate_config(config):
-  assert (
-      config.load_full_state_path == ""
-  ), "Operation on full states not supported! Convert to parameter checkpoint first."
+  assert config.load_full_state_path == "", (
+    "Operation on full states not supported! Convert to parameter checkpoint first."
+  )
 
 
 if __name__ == "__main__":

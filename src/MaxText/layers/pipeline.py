@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Pipeline layer wrapping a decoder layer(s). Supports circular pipelining """
+"""Pipeline layer wrapping a decoder layer(s). Supports circular pipelining"""
 
 import functools
 from typing import Any
@@ -30,11 +30,11 @@ from flax.linen.spmd import LogicallyPartitioned
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN, EP_AS_CONTEXT, ShardMode
 from MaxText.sharding import (
-    maybe_shard_with_logical,
-    maybe_shard_with_name,
-    create_sharding,
-    logical_to_mesh_axes,
-    logical_to_mesh,
+  maybe_shard_with_logical,
+  maybe_shard_with_name,
+  create_sharding,
+  logical_to_mesh_axes,
+  logical_to_mesh,
 )
 
 
@@ -81,37 +81,37 @@ class Pipeline(nn.Module):
     self.stages_in_logical = ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed")
     self.stages_in_spec = logical_to_mesh_axes(self.stages_in_logical, self.mesh, rules=self.config.logical_axis_rules)
     self.stages_in_sharding = (
-        NamedSharding(self.mesh, self.stages_in_spec) if self.config.shard_mode == ShardMode.EXPLICIT else None
+      NamedSharding(self.mesh, self.stages_in_spec) if self.config.shard_mode == ShardMode.EXPLICIT else None
     )
 
     self.state_io_logical = ("activation_stage", None, self.batch_axis_name, self.seq_len_axis_name, "activation_embed")
     self.state_io_spec = logical_to_mesh_axes(self.state_io_logical, self.mesh, rules=self.config.logical_axis_rules)
     self.state_io_sharding = (
-        NamedSharding(self.mesh, self.state_io_spec) if self.config.shard_mode == ShardMode.EXPLICIT else None
+      NamedSharding(self.mesh, self.state_io_spec) if self.config.shard_mode == ShardMode.EXPLICIT else None
     )
     self.input_sharding = (
-        create_sharding(
-            self.mesh,
-            (None, self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
-            rules=self.config.logical_axis_rules,
-        )
-        if self.config.shard_mode == ShardMode.EXPLICIT
-        else None
+      create_sharding(
+        self.mesh,
+        (None, self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
+        rules=self.config.logical_axis_rules,
+      )
+      if self.config.shard_mode == ShardMode.EXPLICIT
+      else None
     )
     self.output_sharding = (
-        create_sharding(
-            self.mesh,
-            (self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
-            rules=self.config.logical_axis_rules,
-        )
-        if self.config.shard_mode == ShardMode.EXPLICIT
-        else None
+      create_sharding(
+        self.mesh,
+        (self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
+        rules=self.config.logical_axis_rules,
+      )
+      if self.config.shard_mode == ShardMode.EXPLICIT
+      else None
     )
 
   def need_circ_storage(self):
     return (
-        self.config.num_pipeline_repeats > 1
-        and self.config.num_pipeline_microbatches > self.num_stages * self.forwarding_delay
+      self.config.num_pipeline_repeats > 1
+      and self.config.num_pipeline_microbatches > self.num_stages * self.forwarding_delay
     )
 
   def iterations_to_complete_first_microbatch_one_repeat(self):
@@ -121,18 +121,18 @@ class Pipeline(nn.Module):
   def iterations_to_complete_first_microbatch(self):
     # Return the number of iterations it takes for microbatch 0 to finish the last stage of the last repeat
     return (
-        self.config.num_pipeline_microbatches * (self.config.num_pipeline_repeats - 1)
-        + self.iterations_to_complete_first_microbatch_one_repeat()
+      self.config.num_pipeline_microbatches * (self.config.num_pipeline_repeats - 1)
+      + self.iterations_to_complete_first_microbatch_one_repeat()
     )
 
   def _maybe_shard_with_logical(self, inputs, logical_axes):
     """Wrapper of maybe_shard_with_logical"""
     return maybe_shard_with_logical(
-        inputs,
-        logical_axes,
-        shard_mode=self.config.shard_mode,
-        mesh=self.mesh,
-        rules=self.config.logical_axis_rules,
+      inputs,
+      logical_axes,
+      shard_mode=self.config.shard_mode,
+      mesh=self.mesh,
+      rules=self.config.logical_axis_rules,
     )
 
   def _maybe_shard_with_name(self, inputs, sharding_name):
@@ -168,7 +168,7 @@ class Pipeline(nn.Module):
     #   as the pipeline runs/finishes
     # state_io has shape [num_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(
-        inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:], out_sharding=self.state_io_sharding
+      inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:], out_sharding=self.state_io_sharding
     )
     # We shard the pipeline_microbatch_size axis by data/fsdp, not num_microbatches since those are looped over.
     state_io = self._maybe_shard_with_logical(state_io, self.state_io_logical)
@@ -195,12 +195,12 @@ class Pipeline(nn.Module):
       circ_storage_mover = None
 
     init_loop_state = {
-        "state_io": state_io,
-        "shift": shift,
-        "circ_storage": circ_storage,
-        "circ_storage_mover": circ_storage_mover,
-        "loop_iteration": 0,
-        "prev_outputs": prev_outputs,
+      "state_io": state_io,
+      "shift": shift,
+      "circ_storage": circ_storage,
+      "circ_storage_mover": circ_storage_mover,
+      "loop_iteration": 0,
+      "prev_outputs": prev_outputs,
     }
     return init_loop_state
 
@@ -241,9 +241,9 @@ class Pipeline(nn.Module):
     def select_state_or_input(first_stage_in, shift):
       # Selects input for stage 0, shift for other stages
       return jnp.where(
-          jax.lax.broadcasted_iota("int32", shift.shape, 0, out_sharding=self.stages_in_sharding) == 0,
-          first_stage_in,
-          shift,
+        jax.lax.broadcasted_iota("int32", shift.shape, 0, out_sharding=self.stages_in_sharding) == 0,
+        first_stage_in,
+        shift,
       )
 
     # Selects input (from stream_io) for stage 0, other stages get from shift (the rotated previous output)
@@ -285,7 +285,7 @@ class Pipeline(nn.Module):
     return microbatch_ids, repeat_ids
 
   def vmap_parallel_gather(
-      self, weights, physical_partition_spec, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights
+    self, weights, physical_partition_spec, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights
   ):
     """Use vmap to implement a sharded parallel gather.
     Parallel gather means each stage has its own weights, and gets one slice from it.
@@ -309,14 +309,14 @@ class Pipeline(nn.Module):
     repeat_ids = self.shard_dim_by_stages(repeat_ids, 0, physical_partition_spec=None)
     # num_repeats x num_stages x *param_dim
     weights = self.shard_dim_by_stages(
-        weights, stages_dim_in_weights, physical_partition_spec=physical_partition_spec, is_stage_weight=False
+      weights, stages_dim_in_weights, physical_partition_spec=physical_partition_spec, is_stage_weight=False
     )
     stage_weights = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=gathered_weights_stage_dim)(
-        weights, repeat_ids
+      weights, repeat_ids
     )
     # num_stages x *param_dim
     stage_weights = self.shard_dim_by_stages(
-        stage_weights, gathered_weights_stage_dim, physical_partition_spec=physical_partition_spec, is_stage_weight=True
+      stage_weights, gathered_weights_stage_dim, physical_partition_spec=physical_partition_spec, is_stage_weight=True
     )
     return stage_weights
 
@@ -365,10 +365,10 @@ class Pipeline(nn.Module):
     old_prev_outputs = loop_state["prev_outputs"]
 
     @jax.shard_map(
-        mesh=self.mesh,
-        in_specs=self.stages_in_spec,
-        out_specs=self.stages_in_spec,
-        check_vma=True,
+      mesh=self.mesh,
+      in_specs=self.stages_in_spec,
+      out_specs=self.stages_in_spec,
+      check_vma=True,
     )
     def _rotate_right(arr):
       # we use +1 for right shifting
@@ -378,10 +378,10 @@ class Pipeline(nn.Module):
       return arr
 
     @jax.shard_map(
-        mesh=self.mesh,
-        in_specs=self.stages_in_spec,
-        out_specs=self.stages_in_spec,
-        check_vma=True,
+      mesh=self.mesh,
+      in_specs=self.stages_in_spec,
+      out_specs=self.stages_in_spec,
+      check_vma=True,
     )
     def _shift_right(arr):
       stage_idx = jax.lax.axis_index("stage")
@@ -416,7 +416,7 @@ class Pipeline(nn.Module):
         rotated = jnp.expand_dims(rotated, 1)
         # We rotate the pushing index into circ storage, and ensure that microbatch 0 lands in index 0
         offset = (
-            loop_iteration - self.iterations_to_complete_first_microbatch_one_repeat() - 1
+          loop_iteration - self.iterations_to_complete_first_microbatch_one_repeat() - 1
         ) % self.config.num_pipeline_microbatches  # Note extra -1 b/c grabbing from the
         # previous output - using circ_storage_mover before it is updated
         return jax.lax.dynamic_update_slice_in_dim(circ_storage_in, rotated, offset, axis=1)
@@ -444,9 +444,9 @@ class Pipeline(nn.Module):
       return jnp.where(stage_idx == stage_size - 1, output, arr)
 
     @jax.shard_map(
-        mesh=self.mesh,
-        in_specs=(self.state_io_spec, self.stages_in_spec, self.stages_in_spec, P()),
-        out_specs=self.state_io_spec,
+      mesh=self.mesh,
+      in_specs=(self.state_io_spec, self.stages_in_spec, self.stages_in_spec, P()),
+      out_specs=self.state_io_spec,
     )
     def _update_state_io(state_in, stream_slice, output, stream_buf_idx):
       # Shift the current slice to the left, then fill the last stage with the final output.
@@ -458,12 +458,12 @@ class Pipeline(nn.Module):
     new_state = _update_state_io(old_state_io, stream_slice, output, stream_buf_idx)
 
     new_loop_state = {
-        "state_io": new_state,
-        "shift": new_shift,
-        "circ_storage": new_circ_storage,
-        "circ_storage_mover": new_circ_storage_mover,
-        "loop_iteration": loop_iteration + 1,
-        "prev_outputs": new_prev_outputs,
+      "state_io": new_state,
+      "shift": new_shift,
+      "circ_storage": new_circ_storage,
+      "circ_storage_mover": new_circ_storage_mover,
+      "loop_iteration": loop_iteration + 1,
+      "prev_outputs": new_prev_outputs,
     }
     return new_loop_state
 
@@ -472,7 +472,7 @@ class Pipeline(nn.Module):
     # state_io - it will land on a different index of state_io depending on the number of iterations.
     microbatch_0_idx = self.iterations_to_complete_first_microbatch() % self.microbatches_per_stage
     permutation = (
-        np.arange(self.microbatches_per_stage) + microbatch_0_idx
+      np.arange(self.microbatches_per_stage) + microbatch_0_idx
     ) % self.microbatches_per_stage  # permute so the value in land_idx is moved into idx 0, and (land_idx + 1) appear
     # in idx 1, etc
     output = output[:, permutation]
@@ -487,7 +487,7 @@ class Pipeline(nn.Module):
     """
     if self.config.num_pipeline_repeats > 1:
       return self.get_current_repeat_from_stages(
-          pipeline_weights, loop_iteration, physical_partition_spec=physical_partition_spec
+        pipeline_weights, loop_iteration, physical_partition_spec=physical_partition_spec
       )
     else:
       return pipeline_weights
@@ -497,25 +497,25 @@ class Pipeline(nn.Module):
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
 
     circular_metadata_params = {
-        nn.PARTITION_NAME: "circular_repeats",
-        "sub_weight_split_dims_mapping": (None,),
-        "is_initializing": self.is_initializing(),
-        "x_times": self.config.num_pipeline_repeats,
-        "optimizer_dims_mapping": None,
+      nn.PARTITION_NAME: "circular_repeats",
+      "sub_weight_split_dims_mapping": (None,),
+      "is_initializing": self.is_initializing(),
+      "x_times": self.config.num_pipeline_repeats,
+      "optimizer_dims_mapping": None,
     }
     weights = meta.remove_axis(
-        weights, 0, circular_metadata_params
+      weights, 0, circular_metadata_params
     )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular
     # entry per stage.
     weights = self._remove_logically_partition(weights)
 
     def gather_weights_for_stages_in(w, spec=None):
       return self.vmap_parallel_gather(
-          w,
-          repeat_ids=repeat_ids,
-          repeat_dim_in_weights=0,
-          stages_dim_in_weights=1,
-          physical_partition_spec=spec,
+        w,
+        repeat_ids=repeat_ids,
+        repeat_dim_in_weights=0,
+        stages_dim_in_weights=1,
+        physical_partition_spec=spec,
       )
 
     if physical_partition_spec is None:
@@ -532,17 +532,17 @@ class Pipeline(nn.Module):
       return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
     vmap_func = nn.vmap(
-        func_to_vmap,
-        in_axes=(0, 0, 0, None, None),
-        spmd_axis_name=self.spmd_axis_name,  # TODO(b/470167805): replace self.spmd_axis_name with "stage" when JAX >= 0.8.2.
-        variable_axes={"params": 0, "_overwrite_with_gradient": 0},
-        split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
-        metadata_params={
-            nn.PARTITION_NAME: "layers",
-            "sub_weight_split_dims_mapping": (None),
-            "is_initializing": self.is_initializing(),
-            "x_times": self.num_stages,
-        },
+      func_to_vmap,
+      in_axes=(0, 0, 0, None, None),
+      spmd_axis_name=self.spmd_axis_name,  # TODO(b/470167805): replace self.spmd_axis_name with "stage" when JAX >= 0.8.2.
+      variable_axes={"params": 0, "_overwrite_with_gradient": 0},
+      split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
+      metadata_params={
+        nn.PARTITION_NAME: "layers",
+        "sub_weight_split_dims_mapping": (None),
+        "is_initializing": self.is_initializing(),
+        "x_times": self.num_stages,
+      },
     )
     return vmap_func
 
@@ -554,46 +554,46 @@ class Pipeline(nn.Module):
     """
 
     def func_to_vmap(
-        body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
+      body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
     ):
       """nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance."""
       weights = meta.remove_axis(
-          weights,
-          0,
-          {
-              nn.PARTITION_NAME: "layers",
-              "sub_weight_split_dims_mapping": (None,),
-              "is_initializing": self.is_initializing(),
-              "x_times": self.num_stages,
-          },
+        weights,
+        0,
+        {
+          nn.PARTITION_NAME: "layers",
+          "sub_weight_split_dims_mapping": (None,),
+          "is_initializing": self.is_initializing(),
+          "x_times": self.num_stages,
+        },
       )
       return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
     vmap_func = nn.vmap(
-        func_to_vmap,
-        in_axes=(0, 0, 0, 0, None, None),
-        spmd_axis_name=self.spmd_axis_name,  # TODO(b/470167805): replace self.spmd_axis_name with "stage" when JAX >= 0.8.2.
-        variable_axes={"params": 0},
-        split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
-        metadata_params={
-            nn.PARTITION_NAME: "layers",
-            "sub_weight_split_dims_mapping": (None),
-            "is_initializing": self.is_initializing(),
-            "x_times": self.num_stages,
-        },
+      func_to_vmap,
+      in_axes=(0, 0, 0, 0, None, None),
+      spmd_axis_name=self.spmd_axis_name,  # TODO(b/470167805): replace self.spmd_axis_name with "stage" when JAX >= 0.8.2.
+      variable_axes={"params": 0},
+      split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
+      metadata_params={
+        nn.PARTITION_NAME: "layers",
+        "sub_weight_split_dims_mapping": (None),
+        "is_initializing": self.is_initializing(),
+        "x_times": self.num_stages,
+      },
     )
     return vmap_func
 
   def run_one_iteration(
-      self,
-      loop_state,
-      pipeline_weights,
-      positions,
-      segment_ids,
-      deterministic,
-      model_mode,
-      decoder_layer_instance,
-      logical_partition_spec=None,
+    self,
+    loop_state,
+    pipeline_weights,
+    positions,
+    segment_ids,
+    deterministic,
+    model_mode,
+    decoder_layer_instance,
+    logical_partition_spec=None,
   ):
     """Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel,
     and update the loop state."""
@@ -620,23 +620,22 @@ class Pipeline(nn.Module):
       _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
 
       def prepare_vars_for_main_vmap(weights, physical_partition_spec=None):
-
         circular_metadata_params = {
-            nn.PARTITION_NAME: "circular_repeats",
-            "sub_weight_split_dims_mapping": (None,),
-            "is_initializing": self.is_initializing(),
-            "x_times": self.config.num_pipeline_repeats,
-            "optimizer_dims_mapping": None,
+          nn.PARTITION_NAME: "circular_repeats",
+          "sub_weight_split_dims_mapping": (None,),
+          "is_initializing": self.is_initializing(),
+          "x_times": self.config.num_pipeline_repeats,
+          "optimizer_dims_mapping": None,
         }
         weights = meta.remove_axis(
-            weights, 0, circular_metadata_params
+          weights, 0, circular_metadata_params
         )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one
         # circular entry per stage.
         weights = self._remove_logically_partition(weights)
 
         def gather_weights_for_stages_in(w, spec=None):
           return self.vmap_parallel_gather(
-              w, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1, physical_partition_spec=spec
+            w, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1, physical_partition_spec=spec
           )
 
         if physical_partition_spec is None:
@@ -646,27 +645,27 @@ class Pipeline(nn.Module):
         return weights
 
       prepare_vars_for_main_vmap_partial = functools.partial(
-          prepare_vars_for_main_vmap, physical_partition_spec=physical_partition_spec
+        prepare_vars_for_main_vmap, physical_partition_spec=physical_partition_spec
       )
       vmap_func = nn.map_variables(
-          vmap_func,
-          mapped_collections=["params", "_overwrite_with_gradient", "non_trainable", "summaries", "intermediates"],
-          mutable=True,
-          trans_in_fn=prepare_vars_for_main_vmap_partial,
+        vmap_func,
+        mapped_collections=["params", "_overwrite_with_gradient", "non_trainable", "summaries", "intermediates"],
+        mutable=True,
+        trans_in_fn=prepare_vars_for_main_vmap_partial,
       )
 
     stage_weights = self.get_current_stage_weights(
-        pipeline_weights, loop_iteration, physical_partition_spec=physical_partition_spec
+      pipeline_weights, loop_iteration, physical_partition_spec=physical_partition_spec
     )
 
     stages_output = vmap_func(
-        decoder_layer_instance,
-        stage_weights,
-        stages_inputs,
-        stages_segment_ids,
-        stages_positions,
-        deterministic,
-        model_mode,
+      decoder_layer_instance,
+      stage_weights,
+      stages_inputs,
+      stages_segment_ids,
+      stages_positions,
+      deterministic,
+      model_mode,
     )
     if self.config.scan_layers:
       stages_output = stages_output[0]
@@ -726,9 +725,9 @@ class Pipeline(nn.Module):
       return getattr(v, "value") if isinstance(v, LogicallyPartitioned) else v
 
     return jax.tree.map(
-        _remove_logically_partition_leaf,
-        weights,
-        is_leaf=lambda v: isinstance(v, LogicallyPartitioned),
+      _remove_logically_partition_leaf,
+      weights,
+      is_leaf=lambda v: isinstance(v, LogicallyPartitioned),
     )
 
   @staticmethod
@@ -758,26 +757,26 @@ class Pipeline(nn.Module):
 
   def all_gather_over_fsdp(self, variables, logical_partition_spec):
     physical_partition_spec = logical_to_mesh(
-        logical_partition_spec, mesh=self.mesh, rules=self.config.logical_axis_rules
+      logical_partition_spec, mesh=self.mesh, rules=self.config.logical_axis_rules
     )
     physical_partition_spec_no_fsdp = jax.tree.map(
-        self._remove_fsdp_from_physical_partition_spec, physical_partition_spec
+      self._remove_fsdp_from_physical_partition_spec, physical_partition_spec
     )
     return jax.tree.map(
-        lambda w, p: self._maybe_shard_with_name(w, NamedSharding(self.mesh, p)),
-        variables,
-        physical_partition_spec_no_fsdp,
+      lambda w, p: self._maybe_shard_with_name(w, NamedSharding(self.mesh, p)),
+      variables,
+      physical_partition_spec_no_fsdp,
     )
 
   @nn.compact
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      segment_ids: jnp.ndarray,
-      positions: jnp.ndarray,
-      deterministic: bool,
-      model_mode=MODEL_MODE_TRAIN,
-      logical_partition_spec=None,  # Pytree of sharding specifications of the weights (aka self.layers.variables)
+    self,
+    inputs: jnp.ndarray,
+    segment_ids: jnp.ndarray,
+    positions: jnp.ndarray,
+    deterministic: bool,
+    model_mode=MODEL_MODE_TRAIN,
+    logical_partition_spec=None,  # Pytree of sharding specifications of the weights (aka self.layers.variables)
   ) -> jnp.ndarray:
     """The main method that maps the series of decoder layer inputs to final layer outputs.
     Has the same signature of a single decoder layer, and expects the same shapes, e.g. the inputs should have shape
@@ -785,13 +784,13 @@ class Pipeline(nn.Module):
     """
     # Reshape inputs of [global_batch, ...] to [microbatches, pipeline_microbatch_sizes, ...]
     inputs = inputs.reshape(
-        (
-            self.config.num_pipeline_microbatches,
-            self.pipeline_microbatch_size,
-            self.config.max_target_length,
-            self.config.emb_dim,
-        ),
-        out_sharding=self.input_sharding,
+      (
+        self.config.num_pipeline_microbatches,
+        self.pipeline_microbatch_size,
+        self.config.max_target_length,
+        self.config.emb_dim,
+      ),
+      out_sharding=self.input_sharding,
     )
 
     example_inputs = jax.lax.broadcast(inputs[0], [self.num_stages])  # dummy inputs fed to initialize the module
@@ -801,7 +800,7 @@ class Pipeline(nn.Module):
       positions = self._maybe_shard_with_name(positions, ag_sharding)
 
       positions = positions.reshape(
-          (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
+        (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
       )
       example_position = jax.lax.broadcast(positions[0], [self.num_stages])
       position_idx = 0
@@ -811,7 +810,7 @@ class Pipeline(nn.Module):
     if segment_ids is not None:
       segment_ids = self._maybe_shard_with_name(segment_ids, ag_sharding)
       segment_ids = segment_ids.reshape(
-          (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
+        (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
       )
       example_segmentation = jax.lax.broadcast(segment_ids[0], [self.num_stages])
       segment_idx = 0
@@ -842,40 +841,40 @@ class Pipeline(nn.Module):
         # shape [num_repeat, num_stages, ...] (e.g. [num_repeat, num_stages, embed, mlp]) and shard the num_stages axis.
         # We wrap the main stage vmap with a num_repeat vmap to generate this axis only for parameter initialization.
         vmap_func = nn.vmap(
-            vmap_func,
-            in_axes=(0, segment_idx, position_idx, None, None),
-            variable_axes={
-                "params": 0,
-                "_overwrite_with_gradient": 0,
-                "non_trainable": 0,
-                "hyper_params": 0,
-            },
-            split_rngs={"params": True, "dropout": self.config.enable_dropout},
-            metadata_params={
-                nn.PARTITION_NAME: "circular_repeats",
-                "sub_weight_split_dims_mapping": (None,),
-                "is_initializing": True,
-                "x_times": self.config.num_pipeline_repeats,
-                "optimizer_dims_mapping": None,
-            },
+          vmap_func,
+          in_axes=(0, segment_idx, position_idx, None, None),
+          variable_axes={
+            "params": 0,
+            "_overwrite_with_gradient": 0,
+            "non_trainable": 0,
+            "hyper_params": 0,
+          },
+          split_rngs={"params": True, "dropout": self.config.enable_dropout},
+          metadata_params={
+            nn.PARTITION_NAME: "circular_repeats",
+            "sub_weight_split_dims_mapping": (None,),
+            "is_initializing": True,
+            "x_times": self.config.num_pipeline_repeats,
+            "optimizer_dims_mapping": None,
+          },
         )
 
         example_inputs = jax.lax.broadcast(example_inputs, [self.config.num_pipeline_repeats])
         example_segmentation = (
-            jax.lax.broadcast(example_segmentation, [self.config.num_pipeline_repeats])
-            if example_segmentation is not None
-            else None
+          jax.lax.broadcast(example_segmentation, [self.config.num_pipeline_repeats])
+          if example_segmentation is not None
+          else None
         )
         example_position = (
-            jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats])
-            if example_position is not None
-            else None
+          jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats])
+          if example_position is not None
+          else None
         )
       # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches for
       # the full total_iterations.
       example_inputs = self._maybe_shard_with_logical(example_inputs, (None, None, None, None))
       stage_outputs = vmap_func(
-          self.layers, example_inputs, example_segmentation, example_position, deterministic, model_mode
+        self.layers, example_inputs, example_segmentation, example_position, deterministic, model_mode
       )
       if self.config.scan_layers:
         stage_outputs = stage_outputs[0]
@@ -885,13 +884,13 @@ class Pipeline(nn.Module):
       if self.config.num_pipeline_repeats > 1:
         stage_outputs = stage_outputs[0]  # Remove extra dimension created for the circular vmap
       broadcasted_stage_outpus = jax.lax.broadcast(
-          stage_outputs[0], [self.config.micro_batch_size_to_train_on // self.pipeline_microbatch_size]
+        stage_outputs[0], [self.config.micro_batch_size_to_train_on // self.pipeline_microbatch_size]
       )
 
       return jnp.reshape(
-          broadcasted_stage_outpus,
-          [self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim],
-          out_sharding=self.output_sharding,
+        broadcasted_stage_outpus,
+        [self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim],
+        out_sharding=self.output_sharding,
       )
 
     if self.config.pipeline_fsdp_ag_once:
@@ -906,50 +905,50 @@ class Pipeline(nn.Module):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we
       # explicitly wrap the run_one_iteration in this method - the 1st argument model (`self`) is a nn.module instance.
       return (
-          model.run_one_iteration(
-              loop_state,
-              all_pipeline_weights,
-              positions,
-              segment_ids,
-              deterministic,
-              model_mode,
-              model.layers,
-              logical_partition_spec=logical_partition_spec,
-          ),
-          None,
+        model.run_one_iteration(
+          loop_state,
+          all_pipeline_weights,
+          positions,
+          segment_ids,
+          deterministic,
+          model_mode,
+          model.layers,
+          logical_partition_spec=logical_partition_spec,
+        ),
+        None,
       )
 
     if self.config.set_remat_policy_on_pipeline_iterations:
       run_iteration_scannable = nn.remat(
-          run_iteration_scannable,
-          prevent_cse=not self.config.scan_pipeline_iterations,  # prevent_cse not used with scan
-          policy=self.get_pipeline_remat_policy(),
+        run_iteration_scannable,
+        prevent_cse=not self.config.scan_pipeline_iterations,  # prevent_cse not used with scan
+        policy=self.get_pipeline_remat_policy(),
       )
 
     # The scan cannot be used on init since it broadcasts the weights, which aren't yet initialized.
     if self.config.scan_pipeline_iterations:
       variable_carry = []
       variable_broadcast = [
-          "params",
-          "_overwrite_with_gradient",
+        "params",
+        "_overwrite_with_gradient",
       ]  # All loop iterations need the weights for the full pipeline.
       if self.is_mutable_collection("non_trainable"):
         variable_carry.append("non_trainable")
       else:
         variable_broadcast.append("non_trainable")
       run_all_iterations_scanned = nn.scan(
-          run_iteration_scannable,
-          variable_axes={
-              "summaries": 0,
-              "aux_loss": 0,
-              "intermediates": 0,
-              "hyper_params": 0,
-          },
-          variable_broadcast=variable_broadcast,
-          variable_carry=variable_carry,
-          # Dropout/aqt keys will be split for each iteration.
-          split_rngs={"random": True},
-          length=total_iterations,
+        run_iteration_scannable,
+        variable_axes={
+          "summaries": 0,
+          "aux_loss": 0,
+          "intermediates": 0,
+          "hyper_params": 0,
+        },
+        variable_broadcast=variable_broadcast,
+        variable_carry=variable_carry,
+        # Dropout/aqt keys will be split for each iteration.
+        split_rngs={"random": True},
+        length=total_iterations,
       )
       loop_state, _ = run_all_iterations_scanned(self, loop_state, None)
     else:
@@ -962,9 +961,9 @@ class Pipeline(nn.Module):
 
     # reshape outputs to match input shape of total batch instead of microbatches [batch, sequence, embed]
     final_output = jnp.reshape(
-        final_output,
-        (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim),
-        out_sharding=self.output_sharding,
+      final_output,
+      (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim),
+      out_sharding=self.output_sharding,
     )
 
     return final_output

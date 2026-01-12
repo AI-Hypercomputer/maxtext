@@ -51,10 +51,10 @@ def estimate_kolmogorov(filepath: str) -> dict:
   with open(filepath, "rb") as f:
     data = f.read()
   results = {
-      "original_size": len(data),
-      "gzip_size": compressed_size(data, "gzip"),
-      "bz2_size": compressed_size(data, "bz2"),
-      "lzma_size": compressed_size(data, "lzma"),
+    "original_size": len(data),
+    "gzip_size": compressed_size(data, "gzip"),
+    "bz2_size": compressed_size(data, "bz2"),
+    "lzma_size": compressed_size(data, "lzma"),
   }
   # You could average or take the minimum as a final estimate:
   results["approx_k_complexity"] = min(results["gzip_size"], results["bz2_size"], results["lzma_size"])
@@ -63,7 +63,7 @@ def estimate_kolmogorov(filepath: str) -> dict:
 
 def main():
   parser = argparse.ArgumentParser(
-      description="Gemini evaluate the agent code implementation against human-written ground truth code"
+    description="Gemini evaluate the agent code implementation against human-written ground truth code"
   )
   parser.add_argument("--files", nargs=2, help="Paths to code files to analyze.")
   parser.add_argument("--api_key", type=str, help="API key.")
@@ -75,8 +75,8 @@ def main():
   dir_path = args.dir_path
 
   prompt_templates = {
-      "eval": load_prompt_template(f"{dir_path}/prompts/rate_outputs.txt"),
-      "pitfalls": load_prompt_template(f"{dir_path}/prompts/04_pitfalls.txt"),
+    "eval": load_prompt_template(f"{dir_path}/prompts/rate_outputs.txt"),
+    "pitfalls": load_prompt_template(f"{dir_path}/prompts/04_pitfalls.txt"),
   }
 
   # # Evaluation 1: Estimate complexity for each file
@@ -102,8 +102,8 @@ def main():
     dsl_chain = f.read()
 
   prompt = prompt_templates["eval"].format(
-      ground_truth=ground_truth,
-      dsl_chain=dsl_chain,
+    ground_truth=ground_truth,
+    dsl_chain=dsl_chain,
   )
   analysis = baseAgent.generate_text(prompt)
   print(analysis)

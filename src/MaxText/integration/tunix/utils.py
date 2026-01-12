@@ -26,92 +26,92 @@ STANDALONE_VLLM_WEIGHT_MAPPING = weight_mapping.StandaloneVllmWeightMapping()
 # not present in the original HF mapping.
 # Keys are the "generalized" MaxText names (e.g., base.decoder.layers...).
 _SHARDING_KNOWLEDGE_MAP = {
-    # Non-layer parameters
-    "base.token_embedder.embedding": ("model", None),
-    "base.decoder.decoder_norm.scale": (None,),
-    "base.decoder.logits_dense.kernel": (None, "model"),
-    # --- Attention (generic for scanned/unscanned) ---
-    "base.decoder.layers.pre_self_attention_layer_norm.scale": (None, "layer"),
-    "base.decoder.layers.self_attention.query.kernel": (
-        None,
-        "layer",
-        "model",
-        None,
-    ),
-    "base.decoder.layers.self_attention.key.kernel": (
-        None,
-        "layer",
-        "model",
-        None,
-    ),
-    "base.decoder.layers.self_attention.value.kernel": (
-        None,
-        "layer",
-        "model",
-        None,
-    ),
-    "base.decoder.layers.self_attention.query_norm.scale": (None, "layer"),
-    "base.decoder.layers.self_attention.key_norm.scale": (None, "layer"),
-    "base.decoder.layers.self_attention.out.kernel": (
-        "model",
-        "layer",
-        None,
-        None,
-    ),
-    "base.decoder.layers.post_self_attention_layer_norm.scale": (None, "layer"),
-    # --- Dense MLP (generic for scanned/unscanned) ---
-    "base.decoder.layers.mlp.wi_0.kernel": (None, "layer", "model"),
-    "base.decoder.layers.mlp.wi_1.kernel": (None, "layer", "model"),
-    "base.decoder.layers.mlp.wo.kernel": ("model", "layer", None),
-    # --- MoE (generic for scanned/unscanned) ---
-    "base.decoder.layers.moe_block.gate.kernel": (None, "layer", "model"),
-    "base.decoder.layers.moe_block.wi_0": ("expert", "layer", None, "model"),
-    "base.decoder.layers.moe_block.wi_1": ("expert", "layer", None, "model"),
-    "base.decoder.layers.moe_block.wo": ("expert", "layer", "model", None),
-    # --- Deepseek Attention ---
-    "base.decoder.layers.self_attention.wq_a.kernel": (
-        None,
-        "layer",
-        "model",
-        None,
-    ),
-    "base.decoder.layers.self_attention.wq_b.kernel": (
-        None,
-        "layer",
-        "model",
-        None,
-    ),
-    "base.decoder.layers.self_attention.q_norm.scale": (None, "layer"),
-    "base.decoder.layers.self_attention.wkv_a.kernel": (
-        None,
-        "layer",
-        "model",
-        None,
-    ),
-    "base.decoder.layers.self_attention.wkv_b.kernel": (
-        None,
-        "layer",
-        "model",
-        None,
-    ),
-    "base.decoder.layers.self_attention.kv_norm.scale": (None, "layer"),
-    # --- Deepseek MoE ---
-    "base.decoder.layers.moe_block.shared_experts.wi_0.kernel": (
-        None,
-        "layer",
-        "model",
-    ),
-    "base.decoder.layers.moe_block.shared_experts.wi_1.kernel": (
-        None,
-        "layer",
-        "model",
-    ),
-    "base.decoder.layers.moe_block.shared_experts.wo.kernel": (
-        "model",
-        "layer",
-        None,
-    ),
-    "base.decoder.layers.moe_block.gate.bias": (None, "layer", "model"),
+  # Non-layer parameters
+  "base.token_embedder.embedding": ("model", None),
+  "base.decoder.decoder_norm.scale": (None,),
+  "base.decoder.logits_dense.kernel": (None, "model"),
+  # --- Attention (generic for scanned/unscanned) ---
+  "base.decoder.layers.pre_self_attention_layer_norm.scale": (None, "layer"),
+  "base.decoder.layers.self_attention.query.kernel": (
+    None,
+    "layer",
+    "model",
+    None,
+  ),
+  "base.decoder.layers.self_attention.key.kernel": (
+    None,
+    "layer",
+    "model",
+    None,
+  ),
+  "base.decoder.layers.self_attention.value.kernel": (
+    None,
+    "layer",
+    "model",
+    None,
+  ),
+  "base.decoder.layers.self_attention.query_norm.scale": (None, "layer"),
+  "base.decoder.layers.self_attention.key_norm.scale": (None, "layer"),
+  "base.decoder.layers.self_attention.out.kernel": (
+    "model",
+    "layer",
+    None,
+    None,
+  ),
+  "base.decoder.layers.post_self_attention_layer_norm.scale": (None, "layer"),
+  # --- Dense MLP (generic for scanned/unscanned) ---
+  "base.decoder.layers.mlp.wi_0.kernel": (None, "layer", "model"),
+  "base.decoder.layers.mlp.wi_1.kernel": (None, "layer", "model"),
+  "base.decoder.layers.mlp.wo.kernel": ("model", "layer", None),
+  # --- MoE (generic for scanned/unscanned) ---
+  "base.decoder.layers.moe_block.gate.kernel": (None, "layer", "model"),
+  "base.decoder.layers.moe_block.wi_0": ("expert", "layer", None, "model"),
+  "base.decoder.layers.moe_block.wi_1": ("expert", "layer", None, "model"),
+  "base.decoder.layers.moe_block.wo": ("expert", "layer", "model", None),
+  # --- Deepseek Attention ---
+  "base.decoder.layers.self_attention.wq_a.kernel": (
+    None,
+    "layer",
+    "model",
+    None,
+  ),
+  "base.decoder.layers.self_attention.wq_b.kernel": (
+    None,
+    "layer",
+    "model",
+    None,
+  ),
+  "base.decoder.layers.self_attention.q_norm.scale": (None, "layer"),
+  "base.decoder.layers.self_attention.wkv_a.kernel": (
+    None,
+    "layer",
+    "model",
+    None,
+  ),
+  "base.decoder.layers.self_attention.wkv_b.kernel": (
+    None,
+    "layer",
+    "model",
+    None,
+  ),
+  "base.decoder.layers.self_attention.kv_norm.scale": (None, "layer"),
+  # --- Deepseek MoE ---
+  "base.decoder.layers.moe_block.shared_experts.wi_0.kernel": (
+    None,
+    "layer",
+    "model",
+  ),
+  "base.decoder.layers.moe_block.shared_experts.wi_1.kernel": (
+    None,
+    "layer",
+    "model",
+  ),
+  "base.decoder.layers.moe_block.shared_experts.wo.kernel": (
+    "model",
+    "layer",
+    None,
+  ),
+  "base.decoder.layers.moe_block.gate.bias": (None, "layer", "model"),
 }
 
 
@@ -131,7 +131,7 @@ class VllmWeightMapping:
 
     config = self.config
     mapping = self.convert_hf_map_to_sharding_map(
-        PARAM_MAPPING[self.model_name](config, maxtext_config=None, scan_layers=True)
+      PARAM_MAPPING[self.model_name](config, maxtext_config=None, scan_layers=True)
     )
     return mapping
 
@@ -170,9 +170,9 @@ class VllmWeightMapping:
     generic_key = re.sub(r"DeepSeekMoeBlock_0\.MoeBlock_0\.", "moe_block.", generic_key)
     # Handle shared experts
     generic_key = re.sub(
-        r"DeepSeekMoeBlock_0\.shared_experts\.",
-        "moe_block.shared_experts.",
-        generic_key,
+      r"DeepSeekMoeBlock_0\.shared_experts\.",
+      "moe_block.shared_experts.",
+      generic_key,
     )
     # Keep original rule for other models
     generic_key = re.sub(r"layers_(\d+)\.", "layers.", generic_key)

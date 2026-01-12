@@ -34,9 +34,9 @@ author = "MaxText developers"
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
 extensions = [
-    "myst_nb",
-    "sphinx_design",
-    "sphinx_copybutton",
+  "myst_nb",
+  "sphinx_design",
+  "sphinx_copybutton",
 ]
 
 templates_path = ["_templates"]
@@ -54,30 +54,30 @@ html_logo = "_static/maxtext.png"
 # -- Options for myst ----------------------------------------------
 myst_heading_anchors = 3  # auto-generate 3 levels of heading anchors
 myst_enable_extensions = [
-    "dollarmath",
-    "linkify",
-    "colon_fence",
+  "dollarmath",
+  "linkify",
+  "colon_fence",
 ]
 myst_linkify_fuzzy_links = False
 
 # Theme-specific options
 # https://sphinx-book-theme.readthedocs.io/en/stable/reference.html
 html_theme_options = {
-    "analytics": {
-        "google_analytics_id": "G-RC6NRK4GNN",
-    },
-    "show_navbar_depth": 1,
-    "show_toc_level": 1,
-    "repository_url": "https://github.com/AI-Hypercomputer/maxtext",
-    "path_to_docs": "docs/",
-    "use_repository_button": True,
-    "navigation_with_keys": True,
-    "home_page_in_toc": True,
+  "analytics": {
+    "google_analytics_id": "G-RC6NRK4GNN",
+  },
+  "show_navbar_depth": 1,
+  "show_toc_level": 1,
+  "repository_url": "https://github.com/AI-Hypercomputer/maxtext",
+  "path_to_docs": "docs/",
+  "use_repository_button": True,
+  "navigation_with_keys": True,
+  "home_page_in_toc": True,
 }
 
 # Remove specific documents from ToC
 exclude_patterns = [
-    "run_maxtext/run_maxtext_via_multihost_job.md",
-    "run_maxtext/run_maxtext_via_multihost_runner.md",
-    "reference/core_concepts/llm_calculator.ipynb",
+  "run_maxtext/run_maxtext_via_multihost_job.md",
+  "run_maxtext/run_maxtext_via_multihost_runner.md",
+  "reference/core_concepts/llm_calculator.ipynb",
 ]

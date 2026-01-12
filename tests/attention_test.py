@@ -29,11 +29,11 @@ from jax.sharding import AxisType, Mesh
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import (
-    AttentionType,
-    DECODING_ACTIVE_SEQUENCE_INDICATOR,
-    MODEL_MODE_AUTOREGRESSIVE,
-    MODEL_MODE_PREFILL,
-    MODEL_MODE_TRAIN,
+  AttentionType,
+  DECODING_ACTIVE_SEQUENCE_INDICATOR,
+  MODEL_MODE_AUTOREGRESSIVE,
+  MODEL_MODE_PREFILL,
+  MODEL_MODE_TRAIN,
 )
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers.attention_mla import MLA
@@ -53,16 +53,16 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
+      [
         [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, False, False],
-            ]
+          [False, False, False, False, False, False],
+          [False, True, True, True, False, False],
+          [False, True, True, True, False, False],
+          [False, True, True, True, False, False],
+          [False, False, False, False, False, False],
+          [False, False, False, False, False, False],
         ]
+      ]
     )
     np.testing.assert_array_equal(block_mask, expected_mask)
 
@@ -71,16 +71,16 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
+      [
         [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, False, False, False],
-                [False, True, True, False, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, True, True],
-                [False, False, False, False, True, True],
-            ]
+          [False, False, False, False, False, False],
+          [False, True, True, False, False, False],
+          [False, True, True, False, False, False],
+          [False, False, False, False, False, False],
+          [False, False, False, False, True, True],
+          [False, False, False, False, True, True],
         ]
+      ]
     )
     np.testing.assert_array_equal(block_mask, expected_mask)
 
@@ -89,24 +89,24 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
+      [
         [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, False, False],
-            ],
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, False, False, False],
-                [False, True, True, False, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, True, True],
-                [False, False, False, False, True, True],
-            ],
-        ]
+          [False, False, False, False, False, False],
+          [False, True, True, True, False, False],
+          [False, True, True, True, False, False],
+          [False, True, True, True, False, False],
+          [False, False, False, False, False, False],
+          [False, False, False, False, False, False],
+        ],
+        [
+          [False, False, False, False, False, False],
+          [False, True, True, False, False, False],
+          [False, True, True, False, False, False],
+          [False, False, False, False, False, False],
+          [False, False, False, False, True, True],
+          [False, False, False, False, True, True],
+        ],
+      ]
     )
     np.testing.assert_array_equal(block_mask, expected_mask)
 
@@ -115,7 +115,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.zeros(
-        (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
+      (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
     )
     np.testing.assert_array_equal(block_mask, expected_mask)
 
@@ -124,7 +124,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.ones(
-        (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
+      (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
     )
     np.testing.assert_array_equal(block_mask, expected_mask)
 
@@ -138,32 +138,32 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     image_mask = _make_bidirectional_block_mask(bidirectional_mask)
     combined_mask = causal_mask | image_mask[:, None, None, ...]
     expected_mask = np.asarray(
+      [
         [
+          [
             [
-                [
-                    [
-                        [True, False, False, False, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, True, False],
-                        [True, True, True, True, True, True],
-                    ]
-                ]
-            ],
+              [True, False, False, False, False, False],
+              [True, True, True, True, False, False],
+              [True, True, True, True, False, False],
+              [True, True, True, True, False, False],
+              [True, True, True, True, True, False],
+              [True, True, True, True, True, True],
+            ]
+          ]
+        ],
+        [
+          [
             [
-                [
-                    [
-                        [True, False, False, False, False, False],
-                        [True, True, True, False, False, False],
-                        [True, True, True, False, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, True, True],
-                        [True, True, True, True, True, True],
-                    ]
-                ]
-            ],
-        ]
+              [True, False, False, False, False, False],
+              [True, True, True, False, False, False],
+              [True, True, True, False, False, False],
+              [True, True, True, True, False, False],
+              [True, True, True, True, True, True],
+              [True, True, True, True, True, True],
+            ]
+          ]
+        ],
+      ]
     )
     np.testing.assert_array_equal(combined_mask, expected_mask)
 
@@ -269,19 +269,19 @@ class AttentionTest(parameterized.TestCase):
   # context_parallelism.py as well, since we are using the same configs for both
   # tests to get the same mesh and other config
   config_arguments = {
-      "per_device_batch_size": 1.0,
-      "run_name": "test",
-      "enable_checkpointing": False,
-      "max_prefill_predict_length": 16,
-      "max_target_length": 512,
-      "sa_block_q": 128,
-      "sa_block_kv": 128,
-      "sa_block_kv_compute": 128,
-      "sa_block_q_dkv": 128,
-      "sa_block_kv_dkv": 128,
-      "sa_block_kv_dkv_compute": 128,
-      "sa_block_q_dq": 128,
-      "sa_block_kv_dq": 128,
+    "per_device_batch_size": 1.0,
+    "run_name": "test",
+    "enable_checkpointing": False,
+    "max_prefill_predict_length": 16,
+    "max_target_length": 512,
+    "sa_block_q": 128,
+    "sa_block_kv": 128,
+    "sa_block_kv_compute": 128,
+    "sa_block_q_dkv": 128,
+    "sa_block_kv_dkv": 128,
+    "sa_block_kv_dkv_compute": 128,
+    "sa_block_q_dq": 128,
+    "sa_block_kv_dq": 128,
   }
 
   def setUp(self):
@@ -289,8 +289,8 @@ class AttentionTest(parameterized.TestCase):
     super().setUp()
     jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **self.config_arguments,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **self.config_arguments,
     )
     self.cfg = config
 
@@ -312,34 +312,34 @@ class AttentionTest(parameterized.TestCase):
     dummy_inputs_q = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
     dummy_inputs_kv = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
     self._attention_as_mha_generic = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        attention_type=self.attention_type,
-        model_mode=MODEL_MODE_PREFILL,
-        rngs=self.nnx_rng,
+      config=self.cfg,
+      num_query_heads=self.num_query_heads,
+      num_kv_heads=self.num_kv_heads,
+      head_dim=self.head_dim,
+      max_target_length=self.max_target_length,
+      max_prefill_predict_length=self.max_prefill_predict_length,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      mesh=self.mesh,
+      attention_kernel="dot_product",
+      dtype=self.dtype,
+      dropout_rate=self.cfg.dropout_rate,
+      attention_type=self.attention_type,
+      model_mode=MODEL_MODE_PREFILL,
+      rngs=self.nnx_rng,
     )
 
   def get_data(self, dtype):
     """get data"""
     lnx = jax.random.normal(
-        self.rng,
-        shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
-        dtype=dtype,
+      self.rng,
+      shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
+      dtype=dtype,
     )
 
     decoder_segment_ids = jax.random.randint(self.rng, (self.global_batch_size, self.max_target_length), 0, 4)
     decoder_positions = jax.random.randint(
-        self.rng, (self.global_batch_size, self.max_target_length), 0, self.max_target_length
+      self.rng, (self.global_batch_size, self.max_target_length), 0, self.max_target_length
     )
 
     return lnx, decoder_segment_ids, decoder_positions
@@ -347,17 +347,17 @@ class AttentionTest(parameterized.TestCase):
   def get_structured_data(self, dtype):
     """get structured data"""
     lnx = jax.random.normal(
-        self.rng,
-        shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
-        dtype=dtype,
+      self.rng,
+      shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
+      dtype=dtype,
     )
 
     decoder_positions = jnp.stack(
-        [jnp.arange(self.max_target_length, dtype=jnp.int32) for _ in range(self.global_batch_size)]
+      [jnp.arange(self.max_target_length, dtype=jnp.int32) for _ in range(self.global_batch_size)]
     )
 
     decoder_segment_ids = (
-        jax.numpy.zeros((self.global_batch_size, self.max_target_length)) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+      jax.numpy.zeros((self.global_batch_size, self.max_target_length)) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     )
 
     return lnx, decoder_segment_ids, decoder_positions
@@ -369,12 +369,12 @@ class AttentionTest(parameterized.TestCase):
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
 
     mha_full, _ = self._attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     lnx_prefill = lnx[:, 0:prefill_length, :]
@@ -382,27 +382,27 @@ class AttentionTest(parameterized.TestCase):
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
     mha_prefill, _ = self._attention_as_mha_generic(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
+      lnx_prefill,
+      lnx_prefill,
+      decoder_segment_ids=decoder_segment_ids_prefill,
+      inputs_positions=decoder_positions_prefill,
+      deterministic=True,
+      model_mode=MODEL_MODE_PREFILL,
     )
 
     self.assertTrue(
-        jax.numpy.allclose(mha_prefill, mha_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
+      jax.numpy.allclose(mha_prefill, mha_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
     )
 
     for idx in range(prefill_length, decode_total_length):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
       mha_idx, _ = self._attention_as_mha_generic(
-          lnx_idx,
-          lnx_idx,
-          inputs_positions=decoder_positions_idx,
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        lnx_idx,
+        lnx_idx,
+        inputs_positions=decoder_positions_idx,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
 
       mha_full_this_idx = mha_full[:, idx : idx + 1, :]
@@ -429,29 +429,29 @@ class AttentionTest(parameterized.TestCase):
     dummy_inputs_q = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
     dummy_inputs_kv = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
     attention_as_mha_generic = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        model_mode=MODEL_MODE_PREFILL,
-        rngs=self.nnx_rng,
+      config=self.cfg,
+      num_query_heads=self.num_query_heads,
+      num_kv_heads=self.num_kv_heads,
+      head_dim=self.head_dim,
+      max_target_length=self.max_target_length,
+      max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      mesh=self.mesh,
+      attention_kernel="dot_product",
+      dtype=dtype,
+      dropout_rate=self.cfg.dropout_rate,
+      model_mode=MODEL_MODE_PREFILL,
+      rngs=self.nnx_rng,
     )
 
     mha_prefill, _ = attention_as_mha_generic(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
+      lnx_prefill,
+      lnx_prefill,
+      decoder_segment_ids=decoder_segment_ids_prefill,
+      inputs_positions=decoder_positions_prefill,
+      deterministic=True,
+      model_mode=MODEL_MODE_PREFILL,
     )
 
     self.assertEqual(dtype, mha_prefill.dtype)
@@ -476,225 +476,225 @@ class AttentionTest(parameterized.TestCase):
     dummy_inputs_q = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
     dummy_inputs_kv = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
     attention_as_mha_generic = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        rngs=self.nnx_rng,
+      config=self.cfg,
+      num_query_heads=self.num_query_heads,
+      num_kv_heads=num_kv_heads,
+      head_dim=self.head_dim,
+      max_target_length=self.max_target_length,
+      max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      mesh=self.mesh,
+      attention_kernel="dot_product",
+      dtype=self.dtype,
+      dropout_rate=self.cfg.dropout_rate,
+      rngs=self.nnx_rng,
     )
 
     generic_state = nnx.state(attention_as_mha_generic)
 
     mha_generic_output, _ = attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     dummy_inputs_q = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
     dummy_inputs_kv = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
     attention_as_mha_flash = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        mesh=self.mesh,
-        attention_kernel="flash",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        rngs=self.nnx_rng,
+      config=self.cfg,
+      num_query_heads=self.num_query_heads,
+      num_kv_heads=num_kv_heads,
+      head_dim=self.head_dim,
+      max_target_length=self.max_target_length,
+      max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      mesh=self.mesh,
+      attention_kernel="flash",
+      dtype=self.dtype,
+      dropout_rate=self.cfg.dropout_rate,
+      rngs=self.nnx_rng,
     )
     nnx.update(attention_as_mha_flash, generic_state)
 
     mha_generic_flash_output, _ = attention_as_mha_flash(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     self.assertTrue(
-        jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
+      jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
     )
 
   @parameterized.named_parameters(
-      {
-          "testcase_name": "cp_no_load_balance",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 1,
-          "expert_shard_attention_option": "fsdp",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_with_load_balance",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "expert_shard_attention_option": "fsdp",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_with_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 2,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "ep_no_load_balance",
-          "ici_context_parallelism": 1,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 4,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "ep_with_load_balance",
-          "ici_context_parallelism": 1,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 4,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_no_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 1,
-          "expert_shard_attention_option": "fsdp",
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_with_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "expert_shard_attention_option": "fsdp",
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance_explicit",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_ep_with_load_balance_explicit",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 2,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "ep_no_load_balance_explicit",
-          "ici_context_parallelism": 1,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 4,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "ep_with_load_balance_explicit",
-          "ici_context_parallelism": 1,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 4,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "explicit",
-      },
+    {
+      "testcase_name": "cp_no_load_balance",
+      "ici_context_parallelism": 4,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 1,
+      "expert_shard_attention_option": "fsdp",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "cp_with_load_balance",
+      "ici_context_parallelism": 4,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 1,
+      "expert_shard_attention_option": "fsdp",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "cp_ep_no_load_balance",
+      "ici_context_parallelism": 2,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 2,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "cp_ep_with_load_balance",
+      "ici_context_parallelism": 2,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 2,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "ep_no_load_balance",
+      "ici_context_parallelism": 1,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 4,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "ep_with_load_balance",
+      "ici_context_parallelism": 1,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 4,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "cp_no_load_balance_explicit",
+      "ici_context_parallelism": 4,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 1,
+      "expert_shard_attention_option": "fsdp",
+      "shard_mode": "explicit",
+    },
+    {
+      "testcase_name": "cp_with_load_balance_explicit",
+      "ici_context_parallelism": 4,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 1,
+      "expert_shard_attention_option": "fsdp",
+      "shard_mode": "explicit",
+    },
+    {
+      "testcase_name": "cp_ep_no_load_balance_explicit",
+      "ici_context_parallelism": 2,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 2,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "explicit",
+    },
+    {
+      "testcase_name": "cp_ep_with_load_balance_explicit",
+      "ici_context_parallelism": 2,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 2,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "explicit",
+    },
+    {
+      "testcase_name": "ep_no_load_balance_explicit",
+      "ici_context_parallelism": 1,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 4,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "explicit",
+    },
+    {
+      "testcase_name": "ep_with_load_balance_explicit",
+      "ici_context_parallelism": 1,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 4,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "explicit",
+    },
   )
   # TODO (b/454764135.) : This tests fails with new tokamax kernel
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel(
-      self,
-      ici_context_parallelism,
-      context_parallel_load_balance,
-      ici_expert_parallelism,
-      expert_shard_attention_option,
-      shard_mode,
+    self,
+    ici_context_parallelism,
+    context_parallel_load_balance,
+    ici_expert_parallelism,
+    expert_shard_attention_option,
+    shard_mode,
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
     num_kv_heads = self.num_kv_heads
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
     # Dot product
     mha_generic_output, _ = self._attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
     generic_state = nnx.state(self._attention_as_mha_generic)
 
     # Test with Context Parallelism
     cfg_cp = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **self.config_arguments,
-        ici_context_parallelism=ici_context_parallelism,
-        context_parallel_load_balance=context_parallel_load_balance,
-        ici_expert_parallelism=ici_expert_parallelism,
-        expert_shard_attention_option=expert_shard_attention_option,
-        shard_mode=shard_mode,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **self.config_arguments,
+      ici_context_parallelism=ici_context_parallelism,
+      context_parallel_load_balance=context_parallel_load_balance,
+      ici_expert_parallelism=ici_expert_parallelism,
+      expert_shard_attention_option=expert_shard_attention_option,
+      shard_mode=shard_mode,
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     axis_type = AxisType.Explicit if shard_mode == "explicit" else AxisType.Auto
     axis_names = [axis_type for _ in cfg_cp.mesh_axes]
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes, axis_types=tuple(axis_names))
     attention_as_mha_flash_cp = Attention(
-        config=cfg_cp,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=mesh_cp,
-        attention_kernel="flash",
-        dtype=self.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        model_mode=MODEL_MODE_PREFILL,
-        rngs=self.nnx_rng,
+      config=cfg_cp,
+      num_query_heads=cfg_cp.num_query_heads,
+      num_kv_heads=num_kv_heads,
+      head_dim=cfg_cp.head_dim,
+      max_target_length=cfg_cp.max_target_length,
+      max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+      inputs_q_shape=lnx.shape,
+      inputs_kv_shape=lnx.shape,
+      mesh=mesh_cp,
+      attention_kernel="flash",
+      dtype=self.dtype,
+      dropout_rate=cfg_cp.dropout_rate,
+      model_mode=MODEL_MODE_PREFILL,
+      rngs=self.nnx_rng,
     )
     nnx.update(attention_as_mha_flash_cp, generic_state)
 
     mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
-        cfg_cp,
-        mesh_cp,
-        attention_as_mha_flash_cp,
-        lnx,
-        decoder_segment_ids,
-        decoder_positions,
+      cfg_cp,
+      mesh_cp,
+      attention_as_mha_flash_cp,
+      lnx,
+      decoder_segment_ids,
+      decoder_positions,
     )
 
     # This removes all sharding information and makes them standard NumPy arrays.
@@ -702,10 +702,10 @@ class AttentionTest(parameterized.TestCase):
     mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
 
     self.assertTrue(
-        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-        msg="Logits from generic dot product and flash attention + context/expert parallelism are not close.\n"
-        f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
-        f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
+      jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+      msg="Logits from generic dot product and flash attention + context/expert parallelism are not close.\n"
+      f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
+      f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
     )
 
   @pytest.mark.tpu_only
@@ -718,30 +718,30 @@ class AttentionTest(parameterized.TestCase):
   def dot_product_attention_helper(self, prefill_cache_axis_order, ar_cache_axis_order):
     for compute_axis_order in [(0, 1, 2, 3), (0, 2, 1, 3)]:
       self._dot_product_attention(
-          prefill_cache_axis_order,
-          ar_cache_axis_order,
-          compute_axis_order=compute_axis_order,
+        prefill_cache_axis_order,
+        ar_cache_axis_order,
+        compute_axis_order=compute_axis_order,
       )
       print(f"passed subtest for {compute_axis_order=}")
 
   def _dot_product_attention(
-      self,
-      prefill_cache_axis_order,
-      ar_cache_axis_order,
-      compute_axis_order,
+    self,
+    prefill_cache_axis_order,
+    ar_cache_axis_order,
+    compute_axis_order,
   ):
     """Test equalvant between different layout control in dot_product"""
 
     rtol, atol = 1e-02, 1e-02
 
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        max_target_length=128,
-        max_prefill_predict_length=16,
-        attention="dot_product",
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      per_device_batch_size=1.0,
+      run_name="test",
+      enable_checkpointing=False,
+      max_target_length=128,
+      max_prefill_predict_length=16,
+      attention="dot_product",
     )
 
     prefill_length = config.max_prefill_predict_length
@@ -754,42 +754,42 @@ class AttentionTest(parameterized.TestCase):
     dummy_inputs_q = jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim))
     dummy_inputs_kv = jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim))
     attention_w_layout = Attention(
-        mesh=self.mesh,
-        config=config,
-        num_query_heads=config.num_query_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        attention_kernel=config.attention,
-        dtype=config.dtype,
-        prefill_cache_axis_order=prefill_cache_axis_order,
-        ar_cache_axis_order=ar_cache_axis_order,
-        compute_axis_order=compute_axis_order,
-        model_mode=MODEL_MODE_PREFILL,
-        rngs=self.nnx_rng,
+      mesh=self.mesh,
+      config=config,
+      num_query_heads=config.num_query_heads,
+      num_kv_heads=config.num_kv_heads,
+      head_dim=config.head_dim,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      attention_kernel=config.attention,
+      dtype=config.dtype,
+      prefill_cache_axis_order=prefill_cache_axis_order,
+      ar_cache_axis_order=ar_cache_axis_order,
+      compute_axis_order=compute_axis_order,
+      model_mode=MODEL_MODE_PREFILL,
+      rngs=self.nnx_rng,
     )
     attention_w_layout_full, _ = attention_w_layout(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     attention_w_layout_prefill, _ = attention_w_layout(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
+      lnx_prefill,
+      lnx_prefill,
+      decoder_segment_ids=decoder_segment_ids_prefill,
+      inputs_positions=decoder_positions_prefill,
+      deterministic=True,
+      model_mode=MODEL_MODE_PREFILL,
     )
     self.assertTrue(
-        jax.numpy.allclose(attention_w_layout_full[:, :prefill_length, :], attention_w_layout_prefill, equal_nan=False)
+      jax.numpy.allclose(attention_w_layout_full[:, :prefill_length, :], attention_w_layout_prefill, equal_nan=False)
     )
 
     for idx in range(prefill_length, decode_total_length):
@@ -797,26 +797,26 @@ class AttentionTest(parameterized.TestCase):
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
       attention_w_layout_idx, _ = attention_w_layout(
-          lnx_idx,
-          lnx_idx,
-          inputs_positions=decoder_positions_idx,
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        lnx_idx,
+        lnx_idx,
+        inputs_positions=decoder_positions_idx,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
 
       attention_w_layout_full_this_idx = attention_w_layout_full[:, idx : idx + 1, :]
       self.assertTrue(attention_w_layout_full_this_idx.shape == attention_w_layout_idx.shape)
       self.assertTrue(
-          jax.numpy.allclose(
-              attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False
-          )
+        jax.numpy.allclose(
+          attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False
+        )
       )
 
   @pytest.mark.tpu_only
   def test_dot_product_reshape_q(self):
     for compute_axis_order in [(0, 1, 2, 3), (0, 2, 1, 3)]:
       self._dot_product_attention_reshape_q(
-          compute_axis_order=compute_axis_order,
+        compute_axis_order=compute_axis_order,
       )
       print(f"test passed for compute_axis_order: {compute_axis_order}")
 
@@ -826,13 +826,13 @@ class AttentionTest(parameterized.TestCase):
     rtol, atol = 1e-02, 1e-02
 
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        max_target_length=128,
-        max_prefill_predict_length=16,
-        attention="dot_product",
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      per_device_batch_size=1.0,
+      run_name="test",
+      enable_checkpointing=False,
+      max_target_length=128,
+      max_prefill_predict_length=16,
+      attention="dot_product",
     )
 
     prefill_length = config.max_prefill_predict_length
@@ -847,97 +847,97 @@ class AttentionTest(parameterized.TestCase):
     dummy_inputs_kv = jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim))
 
     attention_wo_reshape_q = Attention(
-        mesh=self.mesh,
-        config=config,
-        num_query_heads=config.num_query_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        attention_kernel=config.attention,
-        dtype=config.dtype,
-        compute_axis_order=compute_axis_order,
-        reshape_q=False,
-        model_mode=MODEL_MODE_PREFILL,
-        rngs=self.nnx_rng,
+      mesh=self.mesh,
+      config=config,
+      num_query_heads=config.num_query_heads,
+      num_kv_heads=config.num_kv_heads,
+      head_dim=config.head_dim,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      attention_kernel=config.attention,
+      dtype=config.dtype,
+      compute_axis_order=compute_axis_order,
+      reshape_q=False,
+      model_mode=MODEL_MODE_PREFILL,
+      rngs=self.nnx_rng,
     )
 
     attention_w_reshape_q = Attention(
-        mesh=self.mesh,
-        config=config,
-        num_query_heads=config.num_query_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        attention_kernel=config.attention,
-        dtype=config.dtype,
-        compute_axis_order=compute_axis_order,
-        reshape_q=True,
-        model_mode=MODEL_MODE_PREFILL,
-        rngs=self.nnx_rng,
+      mesh=self.mesh,
+      config=config,
+      num_query_heads=config.num_query_heads,
+      num_kv_heads=config.num_kv_heads,
+      head_dim=config.head_dim,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      attention_kernel=config.attention,
+      dtype=config.dtype,
+      compute_axis_order=compute_axis_order,
+      reshape_q=True,
+      model_mode=MODEL_MODE_PREFILL,
+      rngs=self.nnx_rng,
     )
 
     attention_wo_reshape_q_state = nnx.state(attention_wo_reshape_q)
     nnx.update(attention_w_reshape_q, attention_wo_reshape_q_state)
 
     attention_wo_reshape_q_full, _ = attention_wo_reshape_q(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     attention_w_reshape_q_full, _ = attention_w_reshape_q(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     attention_wo_reshape_q_prefill, _ = attention_wo_reshape_q(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
+      lnx_prefill,
+      lnx_prefill,
+      decoder_segment_ids=decoder_segment_ids_prefill,
+      inputs_positions=decoder_positions_prefill,
+      deterministic=True,
+      model_mode=MODEL_MODE_PREFILL,
     )
     self.assertTrue(
-        jax.numpy.allclose(
-            attention_wo_reshape_q_full[:, :prefill_length, :], attention_wo_reshape_q_prefill, equal_nan=False
-        )
+      jax.numpy.allclose(
+        attention_wo_reshape_q_full[:, :prefill_length, :], attention_wo_reshape_q_prefill, equal_nan=False
+      )
     )
 
     attention_w_reshape_q_prefill, _ = attention_w_reshape_q(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
+      lnx_prefill,
+      lnx_prefill,
+      decoder_segment_ids=decoder_segment_ids_prefill,
+      inputs_positions=decoder_positions_prefill,
+      deterministic=True,
+      model_mode=MODEL_MODE_PREFILL,
     )
     self.assertTrue(
-        jax.numpy.allclose(
-            attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False
-        )
+      jax.numpy.allclose(
+        attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False
+      )
     )
 
     self.assertTrue(jax.numpy.allclose(attention_wo_reshape_q_prefill, attention_w_reshape_q_prefill, equal_nan=False))
     self.assertTrue(
-        jax.numpy.allclose(
-            attention_wo_reshape_q_full[:, :prefill_length, :],
-            attention_w_reshape_q_full[:, :prefill_length, :],
-            equal_nan=False,
-        )
+      jax.numpy.allclose(
+        attention_wo_reshape_q_full[:, :prefill_length, :],
+        attention_w_reshape_q_full[:, :prefill_length, :],
+        equal_nan=False,
+      )
     )
 
     for idx in range(prefill_length, decode_total_length):
@@ -945,39 +945,39 @@ class AttentionTest(parameterized.TestCase):
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
       attention_wo_reshape_q_idx, _ = attention_wo_reshape_q(
-          lnx_idx,
-          lnx_idx,
-          inputs_positions=decoder_positions_idx,
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        lnx_idx,
+        lnx_idx,
+        inputs_positions=decoder_positions_idx,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
 
       attention_wo_reshape_q_full_this_idx = attention_wo_reshape_q_full[:, idx : idx + 1, :]
       self.assertTrue(attention_wo_reshape_q_full_this_idx.shape == attention_wo_reshape_q_idx.shape)
       self.assertTrue(
-          jax.numpy.allclose(
-              attention_wo_reshape_q_full_this_idx, attention_wo_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False
-          )
+        jax.numpy.allclose(
+          attention_wo_reshape_q_full_this_idx, attention_wo_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False
+        )
       )
 
       attention_w_reshape_q_idx, _ = attention_w_reshape_q(
-          lnx_idx,
-          lnx_idx,
-          inputs_positions=decoder_positions_idx,
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        lnx_idx,
+        lnx_idx,
+        inputs_positions=decoder_positions_idx,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
 
       attention_w_reshape_q_full_this_idx = attention_w_reshape_q_full[:, idx : idx + 1, :]
       self.assertTrue(attention_w_reshape_q_full_this_idx.shape == attention_w_reshape_q_idx.shape)
       self.assertTrue(
-          jax.numpy.allclose(
-              attention_w_reshape_q_full_this_idx, attention_w_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False
-          )
+        jax.numpy.allclose(
+          attention_w_reshape_q_full_this_idx, attention_w_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False
+        )
       )
 
       self.assertTrue(
-          jax.numpy.allclose(attention_w_reshape_q_idx, attention_wo_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False)
+        jax.numpy.allclose(attention_w_reshape_q_idx, attention_wo_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False)
       )
 
   def test_sliding_window_attention(self):
@@ -990,41 +990,41 @@ class AttentionTest(parameterized.TestCase):
 
     # Global Attention
     global_attn = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
-        mesh=self.mesh,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        attention_type=AttentionType.GLOBAL,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs=self.nnx_rng,
+      config=self.cfg,
+      num_query_heads=self.num_query_heads,
+      num_kv_heads=self.num_kv_heads,
+      head_dim=self.head_dim,
+      max_target_length=self.max_target_length,
+      max_prefill_predict_length=self.max_prefill_predict_length,
+      mesh=self.mesh,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      attention_kernel="dot_product",
+      dtype=self.dtype,
+      dropout_rate=self.cfg.dropout_rate,
+      attention_type=AttentionType.GLOBAL,
+      model_mode=MODEL_MODE_TRAIN,
+      rngs=self.nnx_rng,
     )
 
     # Attention with sliding window of size 8
     sliding_attn = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
-        mesh=self.mesh,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        attention_type=AttentionType.LOCAL_SLIDING,
-        sliding_window_size=8,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs=self.nnx_rng,
+      config=self.cfg,
+      num_query_heads=self.num_query_heads,
+      num_kv_heads=self.num_kv_heads,
+      head_dim=self.head_dim,
+      max_target_length=self.max_target_length,
+      max_prefill_predict_length=self.max_prefill_predict_length,
+      mesh=self.mesh,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      attention_kernel="dot_product",
+      dtype=self.dtype,
+      dropout_rate=self.cfg.dropout_rate,
+      attention_type=AttentionType.LOCAL_SLIDING,
+      sliding_window_size=8,
+      model_mode=MODEL_MODE_TRAIN,
+      rngs=self.nnx_rng,
     )
 
     # To share parameters, we copy the state from sliding_attn to global_attn.
@@ -1032,60 +1032,60 @@ class AttentionTest(parameterized.TestCase):
     nnx.update(global_attn, sliding_attn_state)
 
     global_attn_output, _ = global_attn(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     sliding_window_output, _ = sliding_attn(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     # Test if sliding window attention is different from global attention
     self.assertFalse(
-        jax.numpy.allclose(
-            sliding_window_output.astype(jnp.bfloat16), global_attn_output.astype(jnp.bfloat16), rtol=1e-04, atol=1e-04
-        )
+      jax.numpy.allclose(
+        sliding_window_output.astype(jnp.bfloat16), global_attn_output.astype(jnp.bfloat16), rtol=1e-04, atol=1e-04
+      )
     )
 
     # Attention with sliding window of size max_target_length
     # This should be equivalent to global attention.
     sliding_attn_full_window = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
-        mesh=self.mesh,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        attention_type=AttentionType.LOCAL_SLIDING,
-        sliding_window_size=self.max_target_length,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs=self.nnx_rng,
+      config=self.cfg,
+      num_query_heads=self.num_query_heads,
+      num_kv_heads=self.num_kv_heads,
+      head_dim=self.head_dim,
+      max_target_length=self.max_target_length,
+      max_prefill_predict_length=self.max_prefill_predict_length,
+      mesh=self.mesh,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      attention_kernel="dot_product",
+      dtype=self.dtype,
+      dropout_rate=self.cfg.dropout_rate,
+      attention_type=AttentionType.LOCAL_SLIDING,
+      sliding_window_size=self.max_target_length,
+      model_mode=MODEL_MODE_TRAIN,
+      rngs=self.nnx_rng,
     )
 
     nnx.update(sliding_attn_full_window, sliding_attn_state)
 
     sliding_window_output_full, _ = sliding_attn_full_window(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     print(f"{sliding_window_output_full.astype(jnp.bfloat16)=}")
@@ -1093,12 +1093,12 @@ class AttentionTest(parameterized.TestCase):
 
     # Test if sliding window attention with max_target_length size is the same as global attention
     self.assertTrue(
-        jax.numpy.allclose(
-            sliding_window_output_full.astype(jnp.bfloat16),
-            global_attn_output.astype(jnp.bfloat16),
-            rtol=1e-04,
-            atol=1e-04,
-        )
+      jax.numpy.allclose(
+        sliding_window_output_full.astype(jnp.bfloat16),
+        global_attn_output.astype(jnp.bfloat16),
+        rtol=1e-04,
+        atol=1e-04,
+      )
     )
 
   @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
@@ -1111,8 +1111,8 @@ class AttentionTest(parameterized.TestCase):
     vllm_config_arguments["attention"] = "vllm_rpa"
     vllm_config_arguments["chunk_attn_window_size"] = 128
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **vllm_config_arguments,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **vllm_config_arguments,
     )
 
     seq_len = self.max_target_length
@@ -1121,19 +1121,19 @@ class AttentionTest(parameterized.TestCase):
     dummy_inputs_q = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
     dummy_inputs_kv = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
     attention_vllm = Attention(
-        config=config,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        rngs=self.nnx_rng,
+      config=config,
+      num_query_heads=self.num_query_heads,
+      num_kv_heads=self.num_kv_heads,
+      head_dim=self.head_dim,
+      max_target_length=self.max_target_length,
+      max_prefill_predict_length=self.max_prefill_predict_length,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      mesh=self.mesh,
+      attention_kernel="dot_product",
+      dtype=self.dtype,
+      model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      rngs=self.nnx_rng,
     )
 
     # Prepare inputs
@@ -1157,14 +1157,14 @@ class AttentionTest(parameterized.TestCase):
 
     # Call the attention layer
     output, updated_kv_cache = attention_vllm(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        kv_cache=mock_kv_cache,
-        attention_metadata=mock_attention_metadata,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      kv_cache=mock_kv_cache,
+      attention_metadata=mock_attention_metadata,
     )
 
     # Assertions
@@ -1183,8 +1183,8 @@ class MLATest(attention_test_util.MLATestBase):
   """Test for the Multi-Headed Latent Attention"""
 
   @parameterized.named_parameters(
-      {"testcase_name": "RoPE_Yarn_Autoregression", "rope_type": "yarn"},
-      {"testcase_name": "Default_Autoregression", "rope_type": "default"},
+    {"testcase_name": "RoPE_Yarn_Autoregression", "rope_type": "yarn"},
+    {"testcase_name": "Default_Autoregression", "rope_type": "default"},
   )
   @pytest.mark.tpu_only
   def test_autoregression(self, rope_type):
@@ -1194,12 +1194,12 @@ class MLATest(attention_test_util.MLATestBase):
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
 
     mla_full, _ = mla(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     lnx_prefill = lnx[:, 0:prefill_length, :]
@@ -1207,27 +1207,27 @@ class MLATest(attention_test_util.MLATestBase):
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
     mla_prefill, _ = mla(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
+      lnx_prefill,
+      lnx_prefill,
+      decoder_segment_ids=decoder_segment_ids_prefill,
+      inputs_positions=decoder_positions_prefill,
+      deterministic=True,
+      model_mode=MODEL_MODE_PREFILL,
     )
 
     self.assertTrue(
-        jax.numpy.allclose(mla_prefill, mla_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
+      jax.numpy.allclose(mla_prefill, mla_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
     )
 
     for idx in range(prefill_length, decode_total_length):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
       mla_idx, _ = mla(
-          lnx_idx,
-          lnx_idx,
-          inputs_positions=decoder_positions_idx,
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        lnx_idx,
+        lnx_idx,
+        inputs_positions=decoder_positions_idx,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
 
       mla_full_this_idx = mla_full[:, idx : idx + 1, :]
@@ -1242,29 +1242,29 @@ class MLATest(attention_test_util.MLATestBase):
     attention_config_args = self.config_arguments.copy()
     attention_config_args["attention_type"] = AttentionType.GLOBAL.value
     attention_cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **attention_config_args,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **attention_config_args,
     )
     dummy_inputs_q = jnp.ones(
-        (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
+      (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
     )
     dummy_inputs_kv = jnp.ones(
-        (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
+      (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
     )
 
     base_attention = Attention(
-        config=attention_cfg,
-        num_query_heads=attention_cfg.num_query_heads,
-        num_kv_heads=attention_cfg.num_kv_heads,
-        head_dim=attention_cfg.head_dim,
-        max_target_length=attention_cfg.max_target_length,
-        max_prefill_predict_length=attention_cfg.max_prefill_predict_length,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=attention_cfg.dtype,
-        rngs=self.nnx_rng,
+      config=attention_cfg,
+      num_query_heads=attention_cfg.num_query_heads,
+      num_kv_heads=attention_cfg.num_kv_heads,
+      head_dim=attention_cfg.head_dim,
+      max_target_length=attention_cfg.max_target_length,
+      max_prefill_predict_length=attention_cfg.max_prefill_predict_length,
+      inputs_q_shape=dummy_inputs_q.shape,
+      inputs_kv_shape=dummy_inputs_kv.shape,
+      mesh=self.mesh,
+      attention_kernel="dot_product",
+      dtype=attention_cfg.dtype,
+      rngs=self.nnx_rng,
     )
 
     # 2. Assert that the base Attention layer HAS all its standard projections
@@ -1291,194 +1291,194 @@ class MLATest(attention_test_util.MLATestBase):
     self.assertTrue(hasattr(mla_layer, "out"), "MLA should have 'out' projection.")
 
   @parameterized.named_parameters(
-      {
-          "testcase_name": "cp_no_load_balance",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 1,
-          "expert_shard_attention_option": "fsdp",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_with_load_balance",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "expert_shard_attention_option": "fsdp",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_with_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 2,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "ep_no_load_balance",
-          "ici_context_parallelism": 1,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 4,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "ep_with_load_balance",
-          "ici_context_parallelism": 1,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 4,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_no_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 1,
-          "expert_shard_attention_option": "fsdp",
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_with_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "expert_shard_attention_option": "fsdp",
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance_explicit",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_ep_with_load_balance_explicit",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 2,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "ep_no_load_balance_explicit",
-          "ici_context_parallelism": 1,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 4,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "ep_with_load_balance_explicit",
-          "ici_context_parallelism": 1,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 4,
-          "expert_shard_attention_option": "context",
-          "shard_mode": "explicit",
-      },
+    {
+      "testcase_name": "cp_no_load_balance",
+      "ici_context_parallelism": 4,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 1,
+      "expert_shard_attention_option": "fsdp",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "cp_with_load_balance",
+      "ici_context_parallelism": 4,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 1,
+      "expert_shard_attention_option": "fsdp",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "cp_ep_no_load_balance",
+      "ici_context_parallelism": 2,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 2,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "cp_ep_with_load_balance",
+      "ici_context_parallelism": 2,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 2,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "ep_no_load_balance",
+      "ici_context_parallelism": 1,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 4,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "ep_with_load_balance",
+      "ici_context_parallelism": 1,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 4,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "auto",
+    },
+    {
+      "testcase_name": "cp_no_load_balance_explicit",
+      "ici_context_parallelism": 4,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 1,
+      "expert_shard_attention_option": "fsdp",
+      "shard_mode": "explicit",
+    },
+    {
+      "testcase_name": "cp_with_load_balance_explicit",
+      "ici_context_parallelism": 4,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 1,
+      "expert_shard_attention_option": "fsdp",
+      "shard_mode": "explicit",
+    },
+    {
+      "testcase_name": "cp_ep_no_load_balance_explicit",
+      "ici_context_parallelism": 2,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 2,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "explicit",
+    },
+    {
+      "testcase_name": "cp_ep_with_load_balance_explicit",
+      "ici_context_parallelism": 2,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 2,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "explicit",
+    },
+    {
+      "testcase_name": "ep_no_load_balance_explicit",
+      "ici_context_parallelism": 1,
+      "context_parallel_load_balance": False,
+      "ici_expert_parallelism": 4,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "explicit",
+    },
+    {
+      "testcase_name": "ep_with_load_balance_explicit",
+      "ici_context_parallelism": 1,
+      "context_parallel_load_balance": True,
+      "ici_expert_parallelism": 4,
+      "expert_shard_attention_option": "context",
+      "shard_mode": "explicit",
+    },
   )
   # TODO (b/454764135.) : This tests fails with new tokamax kernel
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel(
-      self,
-      ici_context_parallelism,
-      context_parallel_load_balance,
-      ici_expert_parallelism,
-      expert_shard_attention_option,
-      shard_mode,
+    self,
+    ici_context_parallelism,
+    context_parallel_load_balance,
+    ici_expert_parallelism,
+    expert_shard_attention_option,
+    shard_mode,
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
 
     config_arguments = {
-        "per_device_batch_size": 1.0,
-        "run_name": "test",
-        "enable_checkpointing": False,
-        "max_target_length": 512,
-        "sa_block_q": 128,
-        "sa_block_kv": 128,
-        "sa_block_kv_compute": 128,
-        "sa_block_q_dkv": 128,
-        "sa_block_kv_dkv": 128,
-        "sa_block_kv_dkv_compute": 128,
-        "sa_block_q_dq": 128,
-        "sa_block_kv_dq": 128,
-        "attention_type": AttentionType.MLA.value,
-        "q_lora_rank": 4,
-        "kv_lora_rank": 4,
-        "qk_nope_head_dim": 128,
-        "qk_rope_head_dim": 64,
-        "v_head_dim": 128,
-        "shard_mode": shard_mode,
+      "per_device_batch_size": 1.0,
+      "run_name": "test",
+      "enable_checkpointing": False,
+      "max_target_length": 512,
+      "sa_block_q": 128,
+      "sa_block_kv": 128,
+      "sa_block_kv_compute": 128,
+      "sa_block_q_dkv": 128,
+      "sa_block_kv_dkv": 128,
+      "sa_block_kv_dkv_compute": 128,
+      "sa_block_q_dq": 128,
+      "sa_block_kv_dq": 128,
+      "attention_type": AttentionType.MLA.value,
+      "q_lora_rank": 4,
+      "kv_lora_rank": 4,
+      "qk_nope_head_dim": 128,
+      "qk_rope_head_dim": 64,
+      "v_head_dim": 128,
+      "shard_mode": shard_mode,
     }
 
     cfg, mla = self.init_mla(config_arguments, rope_type="default")
     lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
     # Dot product
     mla_generic_output, _ = mla(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
     )
     generic_state = nnx.state(mla)
 
     # Test with Context Parallelism
     cfg_cp = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **config_arguments,
-        rope_type=cfg.rope_type,
-        ici_context_parallelism=ici_context_parallelism,
-        context_parallel_load_balance=context_parallel_load_balance,
-        ici_expert_parallelism=ici_expert_parallelism,
-        expert_shard_attention_option=expert_shard_attention_option,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **config_arguments,
+      rope_type=cfg.rope_type,
+      ici_context_parallelism=ici_context_parallelism,
+      context_parallel_load_balance=context_parallel_load_balance,
+      ici_expert_parallelism=ici_expert_parallelism,
+      expert_shard_attention_option=expert_shard_attention_option,
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     axis_type = AxisType.Explicit if shard_mode == "explicit" else AxisType.Auto
     axis_names = [axis_type for _ in cfg_cp.mesh_axes]
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes, axis_types=tuple(axis_names))
     attention_as_mla_flash_cp = MLA(
-        config=cfg_cp,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        mesh=mesh_cp,
-        attention_kernel="flash",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        attention_type=cfg_cp.attention_type,
-        q_lora_rank=cfg_cp.q_lora_rank,
-        kv_lora_rank=cfg_cp.kv_lora_rank,
-        qk_nope_head_dim=cfg_cp.qk_nope_head_dim,
-        qk_rope_head_dim=cfg_cp.qk_rope_head_dim,
-        v_head_dim=cfg_cp.v_head_dim,
-        model_mode=MODEL_MODE_PREFILL,
-        rngs=self.nnx_rng,
+      config=cfg_cp,
+      num_query_heads=cfg_cp.num_query_heads,
+      num_kv_heads=cfg_cp.num_kv_heads,
+      head_dim=cfg_cp.head_dim,
+      inputs_q_shape=lnx.shape,
+      inputs_kv_shape=lnx.shape,
+      max_target_length=cfg_cp.max_target_length,
+      max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+      mesh=mesh_cp,
+      attention_kernel="flash",
+      dtype=cfg_cp.dtype,
+      dropout_rate=cfg_cp.dropout_rate,
+      attention_type=cfg_cp.attention_type,
+      q_lora_rank=cfg_cp.q_lora_rank,
+      kv_lora_rank=cfg_cp.kv_lora_rank,
+      qk_nope_head_dim=cfg_cp.qk_nope_head_dim,
+      qk_rope_head_dim=cfg_cp.qk_rope_head_dim,
+      v_head_dim=cfg_cp.v_head_dim,
+      model_mode=MODEL_MODE_PREFILL,
+      rngs=self.nnx_rng,
     )
     nnx.update(attention_as_mla_flash_cp, generic_state)
     mla_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
-        cfg_cp,
-        mesh_cp,
-        attention_as_mla_flash_cp,
-        lnx,
-        decoder_segment_ids,
-        decoder_positions,
+      cfg_cp,
+      mesh_cp,
+      attention_as_mla_flash_cp,
+      lnx,
+      decoder_segment_ids,
+      decoder_positions,
     )
 
     # This removes all sharding information and makes them standard NumPy arrays.
@@ -1486,10 +1486,10 @@ class MLATest(attention_test_util.MLATestBase):
     mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
 
     self.assertTrue(
-        jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-        msg="MLA Logits from generic dot product and flash attention + context/expert parallelism are not close.\n"
-        f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
-        f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
+      jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+      msg="MLA Logits from generic dot product and flash attention + context/expert parallelism are not close.\n"
+      f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
+      f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
     )
 
 

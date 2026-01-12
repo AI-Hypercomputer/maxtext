@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for kernels """
+"""Tests for kernels"""
 
 import numpy as np
 from MaxText.max_utils import permute_to_match_maxtext_rope, unpermute_from_match_maxtext_rope
@@ -20,12 +20,11 @@ import unittest
 
 
 class HFCheckpointConversionTest(unittest.TestCase):
-
   def test_huggingface_to_maxtext_back_to_huggingface_flow(self):
     base_num_query_heads = 16
     head_dim = 32
     wq = np.arange(base_num_query_heads * head_dim * base_num_query_heads * head_dim, dtype=np.float16).reshape(
-        base_num_query_heads * head_dim, base_num_query_heads * head_dim
+      base_num_query_heads * head_dim, base_num_query_heads * head_dim
     )
     wq1 = wq.transpose()
     wq2 = np.reshape(wq1, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])

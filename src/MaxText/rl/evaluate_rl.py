@@ -16,6 +16,7 @@
 """
 RL Evaluation Module.
 """
+
 from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
@@ -44,10 +45,10 @@ from MaxText import max_logging
 
 
 def generate_responses(
-    tmvp_config,
-    prompts,
-    rl_cluster,
-    num_passes=1,
+  tmvp_config,
+  prompts,
+  rl_cluster,
+  num_passes=1,
 ):
   """
   Generate responses for a batch of prompts across potentially multiple passes.
@@ -66,18 +67,18 @@ def generate_responses(
 
   for p in range(num_passes):
     responses = rl_cluster.rollout.generate(
-        prompts,
-        rollout_config=RolloutConfig(
-            max_tokens_to_generate=tmvp_config.max_target_length - tmvp_config.max_prefill_predict_length,
-            temperature=eval_strategy["eval_temperature"],
-            top_k=eval_strategy["eval_top_k"],
-            top_p=eval_strategy["eval_top_p"],
-        ),
+      prompts,
+      rollout_config=RolloutConfig(
+        max_tokens_to_generate=tmvp_config.max_target_length - tmvp_config.max_prefill_predict_length,
+        temperature=eval_strategy["eval_temperature"],
+        top_k=eval_strategy["eval_top_k"],
+        top_p=eval_strategy["eval_top_p"],
+      ),
     )
     responses = responses.text
 
     if tmvp_config.debug["rl"]:
-      max_logging.log(f"Pass {p+1}/{num_passes}, responses: {responses}")
+      max_logging.log(f"Pass {p + 1}/{num_passes}, responses: {responses}")
 
     for idx, response in enumerate(responses):
       multiple_call_responses[idx].append(response)
@@ -148,12 +149,12 @@ def score_responses(tmvp_config, question, responses, answer):
 
 
 def evaluate(
-    tmvp_config,
-    dataset,
-    rl_cluster,
-    num_passes=1,
-    corr_lst=False,
-    make_lst=False,
+  tmvp_config,
+  dataset,
+  rl_cluster,
+  num_passes=1,
+  corr_lst=False,
+  make_lst=False,
 ):
   """
   Computes accuracy and percentage of outputs matching the format.
@@ -182,19 +183,19 @@ def evaluate(
 
     # Generate responses for all prompts in the batch
     multiple_call_responses = generate_responses(
-        tmvp_config=tmvp_config,
-        prompts=prompts,
-        rl_cluster=rl_cluster,
-        num_passes=num_passes,
+      tmvp_config=tmvp_config,
+      prompts=prompts,
+      rl_cluster=rl_cluster,
+      num_passes=num_passes,
     )
 
     # Score each question-answer pair
     for question, responses, answer in zip(questions, multiple_call_responses, answers):
       is_correct, is_partially_correct, has_correct_format = score_responses(
-          tmvp_config=tmvp_config,
-          question=question,
-          responses=responses,
-          answer=answer,
+        tmvp_config=tmvp_config,
+        question=question,
+        responses=responses,
+        answer=answer,
       )
 
       # Update counters
@@ -217,17 +218,16 @@ def evaluate(
       # Print progress every 10 items
       if total % 10 == 0:
         max_logging.log(
-            f"===> {corr=}, {total=}, {corr / total * 100=}, "
-            f"{partially_corr / total * 100=}, {corr_format / total * 100=}"
+          f"===> {corr=}, {total=}, {corr / total * 100=}, {partially_corr / total * 100=}, {corr_format / total * 100=}"
         )
 
   # Prepare return values
   to_return = (
-      corr,
-      total,
-      corr / total * 100,
-      partially_corr / total * 100,
-      corr_format / total * 100,
+    corr,
+    total,
+    corr / total * 100,
+    partially_corr / total * 100,
+    corr_format / total * 100,
   )
 
   return to_return, response_lst

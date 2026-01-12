@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=bare-except, consider-using-generator, too-many-positional-arguments
-""" Utils that are only interesting to MaxText. """
+"""Utils that are only interesting to MaxText."""
 
 import jax
 import jax.numpy as jnp
@@ -28,22 +28,22 @@ def get_optimizer(config, learning_rate_schedule, model=None):
   if config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
     return optax.adamw(
-        learning_rate_schedule,
-        b1=config.adam_b1,
-        b2=config.adam_b2,
-        eps=config.adam_eps,
-        eps_root=config.adam_eps_root,
-        weight_decay=config.adam_weight_decay,
-        mu_dtype=config.mu_dtype,
+      learning_rate_schedule,
+      b1=config.adam_b1,
+      b2=config.adam_b2,
+      eps=config.adam_eps,
+      eps_root=config.adam_eps_root,
+      weight_decay=config.adam_weight_decay,
+      mu_dtype=config.mu_dtype,
     )
   elif config.opt_type == "adam_pax":
     return adam_pax(
-        learning_rate_schedule,
-        beta1=config.adam_b1,
-        beta2=config.adam_b2,
-        epsilon=config.adam_eps,
-        epsilon_root=config.adam_eps_root,
-        weight_decay=config.adam_weight_decay,
+      learning_rate_schedule,
+      beta1=config.adam_b1,
+      beta2=config.adam_b2,
+      epsilon=config.adam_eps,
+      epsilon_root=config.adam_eps_root,
+      weight_decay=config.adam_weight_decay,
     )
   elif config.opt_type == "sgd":
     return optax.sgd(learning_rate_schedule)
@@ -54,20 +54,20 @@ def get_optimizer(config, learning_rate_schedule, model=None):
     else:
       raise ValueError("Please specify model to extract muon dimension number.")
     muon_kwargs = {
-        # Shared parameters: "nesterov" uses default
-        "learning_rate": learning_rate_schedule,
-        "eps": config.adam_eps,
-        "mu_dtype": config.mu_dtype,
-        # Muon-specific parameters: "ns_coeffs", "ns_steps", "weight_decay_mask", "adaptive" uses default
-        "beta": config.muon_beta,
-        "weight_decay": config.muon_weight_decay,
-        "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
-        "consistent_rms": config.muon_consistent_rms,
-        # AdamW-specific parameters
-        "adam_b1": config.adam_b1,
-        "adam_b2": config.adam_b2,
-        "adam_eps_root": config.adam_eps_root,
-        "adam_weight_decay": config.adam_weight_decay,
+      # Shared parameters: "nesterov" uses default
+      "learning_rate": learning_rate_schedule,
+      "eps": config.adam_eps,
+      "mu_dtype": config.mu_dtype,
+      # Muon-specific parameters: "ns_coeffs", "ns_steps", "weight_decay_mask", "adaptive" uses default
+      "beta": config.muon_beta,
+      "weight_decay": config.muon_weight_decay,
+      "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
+      "consistent_rms": config.muon_consistent_rms,
+      # AdamW-specific parameters
+      "adam_b1": config.adam_b1,
+      "adam_b2": config.adam_b2,
+      "adam_eps_root": config.adam_eps_root,
+      "adam_weight_decay": config.adam_weight_decay,
     }
     return muon(**muon_kwargs)
   else:
@@ -75,12 +75,12 @@ def get_optimizer(config, learning_rate_schedule, model=None):
 
 
 def adam_pax(
-    learning_rate_fn: optax.Schedule,
-    beta1: float,
-    beta2: float,
-    epsilon: float,
-    epsilon_root: float,
-    weight_decay: float,
+  learning_rate_fn: optax.Schedule,
+  beta1: float,
+  beta2: float,
+  epsilon: float,
+  epsilon_root: float,
+  weight_decay: float,
 ) -> optax.GradientTransformation:
   """Standard Adam optimizer that supports weight decay.
 
@@ -137,7 +137,6 @@ def adam_pax(
     count = state.count
 
     class _slot_opt_state:
-
       def __init__(self, mu, nu):
         self.mu = mu
         self.nu = nu

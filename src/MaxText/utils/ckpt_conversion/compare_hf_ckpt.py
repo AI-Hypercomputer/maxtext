@@ -97,7 +97,6 @@ def load_safetensors_generic(path: str, max_workers: int) -> Dict[str, np.ndarra
   print_ram_usage(f"Start {'GCS' if is_gcs else 'Local'} Load")
 
   with ThreadPoolExecutor(max_workers=max_workers) as executor:
-
     if is_gcs:
       fs = gcsfs.GCSFileSystem()
       search_pattern = f"{path.rstrip('/')}/*.safetensors"
@@ -142,7 +141,7 @@ def get_hf_model_state_dict(model_id: str, token: str) -> Dict[str, np.ndarray]:
 
 
 def verify_dictionaries(
-    ref_dict: Dict[str, np.ndarray], cand_dict: Dict[str, np.ndarray], rtol: float, atol: float
+  ref_dict: Dict[str, np.ndarray], cand_dict: Dict[str, np.ndarray], rtol: float, atol: float
 ) -> bool:
   """Compares two dictionaries of numpy arrays."""
 
@@ -193,7 +192,7 @@ def main(args: Sequence[str], test_args: argparse.Namespace) -> None:
     config = pyconfig.initialize(args)
     model_name = config.model_name
     if model_name not in HF_IDS:
-      raise ValueError(f"Unsupported model name: {model_name}. " f"Supported: {list(HF_IDS.keys())}")
+      raise ValueError(f"Unsupported model name: {model_name}. Supported: {list(HF_IDS.keys())}")
 
     model_id = HF_IDS[model_name]
     hf_token = config.hf_access_token
@@ -221,43 +220,43 @@ if __name__ == "__main__":
   # Parse script-specific arguments
   parser = argparse.ArgumentParser()
   parser.add_argument(
-      "--candidate_path",
-      type=str,
-      default="",
-      required=True,
-      help="The path to the converted safetensors checkpoint (e.g. gs://bucket/path or /local/path)",
+    "--candidate_path",
+    type=str,
+    default="",
+    required=True,
+    help="The path to the converted safetensors checkpoint (e.g. gs://bucket/path or /local/path)",
   )
 
   parser.add_argument(
-      "--reference_path",
-      type=str,
-      default="",
-      required=False,
-      help="The path to the reference safetensors checkpoint (e.g. gs://bucket/path or /local/path)",
+    "--reference_path",
+    type=str,
+    default="",
+    required=False,
+    help="The path to the reference safetensors checkpoint (e.g. gs://bucket/path or /local/path)",
   )
 
   parser.add_argument(
-      "--max_workers",
-      type=int,
-      default=12,
-      required=False,
-      help="The max workers for loading safetensors",
+    "--max_workers",
+    type=int,
+    default=12,
+    required=False,
+    help="The max workers for loading safetensors",
   )
 
   parser.add_argument(
-      "--rtol",
-      type=float,
-      default=1e-2,
-      required=False,
-      help="Relative tolerance for numpy.allclose",
+    "--rtol",
+    type=float,
+    default=1e-2,
+    required=False,
+    help="Relative tolerance for numpy.allclose",
   )
 
   parser.add_argument(
-      "--atol",
-      type=float,
-      default=1e-2,
-      required=False,
-      help="Absolute tolerance for numpy.allclose",
+    "--atol",
+    type=float,
+    default=1e-2,
+    required=False,
+    help="Absolute tolerance for numpy.allclose",
   )
 
   local_args, _ = parser.parse_known_args()

@@ -40,29 +40,29 @@ from MaxText import max_logging
 from MaxText.inference_utils import str2bool
 
 MODEL_PARAMS_DICT = {
-    "qwen3-next-80b-a3b": {
-        "num_hidden_layers": 48,
-        "hidden_size": 2048,
-        # MoE Params
-        "num_experts": 512,
-        "moe_intermediate_size": 512,
-        # Gated Attention (GA) params (layer_3)
-        "head_dim": 256,
-        "ga_num_q_heads": 16,
-        "ga_num_kv_heads": 2,
-        "ga_o_proj_input_dim": 4096,
-        # Gated DeltaNet (GDN) params (layers_0, _1, _2)
-        "gdn_num_value_heads": 32,
-        "gdn_num_key_heads": 16,
-        "inhomogeneous_layer_cycle_interval": 4,
-        "gdn_conv_kernel_dim": 4,
-        "gdn_key_head_dim": 128,
-        "gdn_value_head_dim": 128,
-        "gdn_a_log_dim": 32,
-        "gdn_conv_features": 8192,
-        "gdn_norm_dim": 128,
-        "gdn_out_proj_input_dim": 4096,
-    },
+  "qwen3-next-80b-a3b": {
+    "num_hidden_layers": 48,
+    "hidden_size": 2048,
+    # MoE Params
+    "num_experts": 512,
+    "moe_intermediate_size": 512,
+    # Gated Attention (GA) params (layer_3)
+    "head_dim": 256,
+    "ga_num_q_heads": 16,
+    "ga_num_kv_heads": 2,
+    "ga_o_proj_input_dim": 4096,
+    # Gated DeltaNet (GDN) params (layers_0, _1, _2)
+    "gdn_num_value_heads": 32,
+    "gdn_num_key_heads": 16,
+    "inhomogeneous_layer_cycle_interval": 4,
+    "gdn_conv_kernel_dim": 4,
+    "gdn_key_head_dim": 128,
+    "gdn_value_head_dim": 128,
+    "gdn_a_log_dim": 32,
+    "gdn_conv_features": 8192,
+    "gdn_norm_dim": 128,
+    "gdn_out_proj_input_dim": 4096,
+  },
 }
 
 # NOTE: numpy doesn't have native support for bfloat16, so
@@ -90,11 +90,11 @@ def hf_to_maxtext_mapping(layer_idx: int, num_experts: int, inhomogeneous_layer_
 
   # 2. Initialize mapping with global weights and standard layer norms
   mapping = {
-      "model.embed_tokens.weight": "token_embedder.embedding",
-      "model.norm.weight": "decoder.decoder_norm.scale",
-      "lm_head.weight": "decoder.logits_dense.kernel",
-      f"{hf_prefix}.input_layernorm.weight": f"{mt_prefix}.input_layernorm.scale",
-      f"{hf_prefix}.post_attention_layernorm.weight": f"{mt_prefix}.post_attention_layernorm.scale",
+    "model.embed_tokens.weight": "token_embedder.embedding",
+    "model.norm.weight": "decoder.decoder_norm.scale",
+    "lm_head.weight": "decoder.logits_dense.kernel",
+    f"{hf_prefix}.input_layernorm.weight": f"{mt_prefix}.input_layernorm.scale",
+    f"{hf_prefix}.post_attention_layernorm.weight": f"{mt_prefix}.post_attention_layernorm.scale",
   }
 
   # 3. Handle Attention Logic (Full vs Linear)
@@ -102,37 +102,37 @@ def hf_to_maxtext_mapping(layer_idx: int, num_experts: int, inhomogeneous_layer_
 
   if is_full_attention_layer:
     mapping.update(
-        {
-            f"{hf_prefix}.self_attn.q_proj.weight": f"{mt_attn_prefix}.attention.query.kernel",
-            f"{hf_prefix}.self_attn.k_proj.weight": f"{mt_attn_prefix}.attention.key.kernel",
-            f"{hf_prefix}.self_attn.v_proj.weight": f"{mt_attn_prefix}.attention.value.kernel",
-            f"{hf_prefix}.self_attn.o_proj.weight": f"{mt_attn_prefix}.attention.out.kernel",
-            f"{hf_prefix}.self_attn.q_norm.weight": f"{mt_attn_prefix}.attention.query_norm.scale",
-            f"{hf_prefix}.self_attn.k_norm.weight": f"{mt_attn_prefix}.attention.key_norm.scale",
-        }
+      {
+        f"{hf_prefix}.self_attn.q_proj.weight": f"{mt_attn_prefix}.attention.query.kernel",
+        f"{hf_prefix}.self_attn.k_proj.weight": f"{mt_attn_prefix}.attention.key.kernel",
+        f"{hf_prefix}.self_attn.v_proj.weight": f"{mt_attn_prefix}.attention.value.kernel",
+        f"{hf_prefix}.self_attn.o_proj.weight": f"{mt_attn_prefix}.attention.out.kernel",
+        f"{hf_prefix}.self_attn.q_norm.weight": f"{mt_attn_prefix}.attention.query_norm.scale",
+        f"{hf_prefix}.self_attn.k_norm.weight": f"{mt_attn_prefix}.attention.key_norm.scale",
+      }
     )
   else:
     mapping.update(
-        {
-            f"{hf_prefix}.linear_attn.in_proj_qkvz.weight": f"{mt_attn_prefix}.in_proj_qkvz.kernel",
-            f"{hf_prefix}.linear_attn.in_proj_ba.weight": f"{mt_attn_prefix}.in_proj_ba.kernel",
-            f"{hf_prefix}.linear_attn.conv1d.weight": f"{mt_attn_prefix}.conv1d.kernel",
-            f"{hf_prefix}.linear_attn.A_log": f"{mt_attn_prefix}.A_log",
-            f"{hf_prefix}.linear_attn.dt_bias": f"{mt_attn_prefix}.dt_bias",
-            f"{hf_prefix}.linear_attn.norm.weight": f"{mt_attn_prefix}.norm.rms_norm.scale",
-            f"{hf_prefix}.linear_attn.out_proj.weight": f"{mt_attn_prefix}.out_proj.kernel",
-        }
+      {
+        f"{hf_prefix}.linear_attn.in_proj_qkvz.weight": f"{mt_attn_prefix}.in_proj_qkvz.kernel",
+        f"{hf_prefix}.linear_attn.in_proj_ba.weight": f"{mt_attn_prefix}.in_proj_ba.kernel",
+        f"{hf_prefix}.linear_attn.conv1d.weight": f"{mt_attn_prefix}.conv1d.kernel",
+        f"{hf_prefix}.linear_attn.A_log": f"{mt_attn_prefix}.A_log",
+        f"{hf_prefix}.linear_attn.dt_bias": f"{mt_attn_prefix}.dt_bias",
+        f"{hf_prefix}.linear_attn.norm.weight": f"{mt_attn_prefix}.norm.rms_norm.scale",
+        f"{hf_prefix}.linear_attn.out_proj.weight": f"{mt_attn_prefix}.out_proj.kernel",
+      }
     )
 
   # 4. Handle MLP (Gates and Shared Experts)
   mapping.update(
-      {
-          f"{hf_prefix}.mlp.gate.weight": f"{mt_mlp_prefix}.routed_experts.gate.kernel",
-          f"{hf_prefix}.mlp.shared_expert.gate_proj.weight": f"{mt_mlp_prefix}.shared_expert.wi_0.kernel",
-          f"{hf_prefix}.mlp.shared_expert.up_proj.weight": f"{mt_mlp_prefix}.shared_expert.wi_1.kernel",
-          f"{hf_prefix}.mlp.shared_expert.down_proj.weight": f"{mt_mlp_prefix}.shared_expert.wo.kernel",
-          f"{hf_prefix}.mlp.shared_expert_gate.weight": f"{mt_mlp_prefix}.shared_expert_gate.kernel",
-      }
+    {
+      f"{hf_prefix}.mlp.gate.weight": f"{mt_mlp_prefix}.routed_experts.gate.kernel",
+      f"{hf_prefix}.mlp.shared_expert.gate_proj.weight": f"{mt_mlp_prefix}.shared_expert.wi_0.kernel",
+      f"{hf_prefix}.mlp.shared_expert.up_proj.weight": f"{mt_mlp_prefix}.shared_expert.wi_1.kernel",
+      f"{hf_prefix}.mlp.shared_expert.down_proj.weight": f"{mt_mlp_prefix}.shared_expert.wo.kernel",
+      f"{hf_prefix}.mlp.shared_expert_gate.weight": f"{mt_mlp_prefix}.shared_expert_gate.kernel",
+    }
   )
 
   # 5. Handle Routed Experts Loop
@@ -163,69 +163,67 @@ def init_maxtext_weights(model_params, num_layers_to_convert, num_experts_to_con
   gdn_conv_kernel_dim = model_params["gdn_conv_kernel_dim"]
 
   weights = {
-      "decoder": {
-          "layers": {},
-          "decoder_norm": {"scale": None},
-          "logits_dense": {"kernel": None},
-      },
-      "token_embedder": {"embedding": None},
+    "decoder": {
+      "layers": {},
+      "decoder_norm": {"scale": None},
+      "logits_dense": {"kernel": None},
+    },
+    "token_embedder": {"embedding": None},
   }
 
   for i in range(cycle):
     layer_key = f"layer_{i}"
     layer_struct = {
-        "input_layernorm": {"scale": np.zeros((emb_dim, num_stacked_layers), dtype=jnp.bfloat16)},
-        "post_attention_layernorm": {"scale": np.zeros((emb_dim, num_stacked_layers), dtype=jnp.bfloat16)},
-        "attention": {},
-        "mlp": {
-            "routed_experts": {
-                "gate": {"kernel": np.zeros((emb_dim, num_stacked_layers, num_experts_to_convert), dtype=jnp.bfloat16)},
-                "wi_0": np.zeros(
-                    (num_experts_to_convert, num_stacked_layers, emb_dim, moe_intermediate_size), dtype=jnp.bfloat16
-                ),
-                "wi_1": np.zeros(
-                    (num_experts_to_convert, num_stacked_layers, emb_dim, moe_intermediate_size), dtype=jnp.bfloat16
-                ),
-                "wo": np.zeros(
-                    (num_experts_to_convert, num_stacked_layers, moe_intermediate_size, emb_dim), dtype=jnp.bfloat16
-                ),
-            },
-            "shared_expert": {
-                "wi_0": {"kernel": np.zeros((emb_dim, num_stacked_layers, moe_intermediate_size), dtype=jnp.bfloat16)},
-                "wi_1": {"kernel": np.zeros((emb_dim, num_stacked_layers, moe_intermediate_size), dtype=jnp.bfloat16)},
-                "wo": {"kernel": np.zeros((moe_intermediate_size, num_stacked_layers, emb_dim), dtype=jnp.bfloat16)},
-            },
-            "shared_expert_gate": {"kernel": np.zeros((emb_dim, num_stacked_layers, 1), dtype=jnp.bfloat16)},
+      "input_layernorm": {"scale": np.zeros((emb_dim, num_stacked_layers), dtype=jnp.bfloat16)},
+      "post_attention_layernorm": {"scale": np.zeros((emb_dim, num_stacked_layers), dtype=jnp.bfloat16)},
+      "attention": {},
+      "mlp": {
+        "routed_experts": {
+          "gate": {"kernel": np.zeros((emb_dim, num_stacked_layers, num_experts_to_convert), dtype=jnp.bfloat16)},
+          "wi_0": np.zeros(
+            (num_experts_to_convert, num_stacked_layers, emb_dim, moe_intermediate_size), dtype=jnp.bfloat16
+          ),
+          "wi_1": np.zeros(
+            (num_experts_to_convert, num_stacked_layers, emb_dim, moe_intermediate_size), dtype=jnp.bfloat16
+          ),
+          "wo": np.zeros(
+            (num_experts_to_convert, num_stacked_layers, moe_intermediate_size, emb_dim), dtype=jnp.bfloat16
+          ),
         },
+        "shared_expert": {
+          "wi_0": {"kernel": np.zeros((emb_dim, num_stacked_layers, moe_intermediate_size), dtype=jnp.bfloat16)},
+          "wi_1": {"kernel": np.zeros((emb_dim, num_stacked_layers, moe_intermediate_size), dtype=jnp.bfloat16)},
+          "wo": {"kernel": np.zeros((moe_intermediate_size, num_stacked_layers, emb_dim), dtype=jnp.bfloat16)},
+        },
+        "shared_expert_gate": {"kernel": np.zeros((emb_dim, num_stacked_layers, 1), dtype=jnp.bfloat16)},
+      },
     }
 
     is_full_attention_layer = (i + 1) % cycle == 0
     if is_full_attention_layer:
       layer_struct["attention"] = {
-          "attention": {
-              "query": {"kernel": np.zeros((emb_dim, num_stacked_layers, num_q_heads, head_dim * 2), dtype=jnp.bfloat16)},
-              "key": {"kernel": np.zeros((emb_dim, num_stacked_layers, num_kv_heads, head_dim), dtype=jnp.bfloat16)},
-              "value": {"kernel": np.zeros((emb_dim, num_stacked_layers, num_kv_heads, head_dim), dtype=jnp.bfloat16)},
-              "out": {"kernel": np.zeros((num_q_heads * head_dim, num_stacked_layers, emb_dim), dtype=jnp.bfloat16)},
-              "query_norm": {"scale": np.zeros((head_dim, num_stacked_layers), dtype=jnp.bfloat16)},
-              "key_norm": {"scale": np.zeros((head_dim, num_stacked_layers), dtype=jnp.bfloat16)},
-          }
+        "attention": {
+          "query": {"kernel": np.zeros((emb_dim, num_stacked_layers, num_q_heads, head_dim * 2), dtype=jnp.bfloat16)},
+          "key": {"kernel": np.zeros((emb_dim, num_stacked_layers, num_kv_heads, head_dim), dtype=jnp.bfloat16)},
+          "value": {"kernel": np.zeros((emb_dim, num_stacked_layers, num_kv_heads, head_dim), dtype=jnp.bfloat16)},
+          "out": {"kernel": np.zeros((num_q_heads * head_dim, num_stacked_layers, emb_dim), dtype=jnp.bfloat16)},
+          "query_norm": {"scale": np.zeros((head_dim, num_stacked_layers), dtype=jnp.bfloat16)},
+          "key_norm": {"scale": np.zeros((head_dim, num_stacked_layers), dtype=jnp.bfloat16)},
+        }
       }
     else:
       layer_struct["attention"] = {
-          "in_proj_qkvz": {
-              "kernel": np.zeros((emb_dim, num_stacked_layers, gdn_key_dim * 2 + gdn_value_dim * 2), dtype=jnp.bfloat16)
-          },
-          "in_proj_ba": {"kernel": np.zeros((emb_dim, num_stacked_layers, gdn_num_v_heads * 2), dtype=jnp.bfloat16)},
-          "conv1d": {"kernel": np.zeros((gdn_conv_kernel_dim, num_stacked_layers, 1, gdn_conv_dim), dtype=jnp.bfloat16)},
-          "A_log": np.zeros((gdn_num_v_heads, num_stacked_layers), dtype=jnp.bfloat16),
-          "dt_bias": np.zeros((gdn_num_v_heads, num_stacked_layers), dtype=jnp.bfloat16),
-          "norm": {
-              "rms_norm": {
-                  "scale": np.zeros((model_params["gdn_value_head_dim"], num_stacked_layers), dtype=jnp.bfloat16)
-              }
-          },
-          "out_proj": {"kernel": np.zeros((gdn_value_dim, num_stacked_layers, emb_dim), dtype=jnp.bfloat16)},
+        "in_proj_qkvz": {
+          "kernel": np.zeros((emb_dim, num_stacked_layers, gdn_key_dim * 2 + gdn_value_dim * 2), dtype=jnp.bfloat16)
+        },
+        "in_proj_ba": {"kernel": np.zeros((emb_dim, num_stacked_layers, gdn_num_v_heads * 2), dtype=jnp.bfloat16)},
+        "conv1d": {"kernel": np.zeros((gdn_conv_kernel_dim, num_stacked_layers, 1, gdn_conv_dim), dtype=jnp.bfloat16)},
+        "A_log": np.zeros((gdn_num_v_heads, num_stacked_layers), dtype=jnp.bfloat16),
+        "dt_bias": np.zeros((gdn_num_v_heads, num_stacked_layers), dtype=jnp.bfloat16),
+        "norm": {
+          "rms_norm": {"scale": np.zeros((model_params["gdn_value_head_dim"], num_stacked_layers), dtype=jnp.bfloat16)}
+        },
+        "out_proj": {"kernel": np.zeros((gdn_value_dim, num_stacked_layers, emb_dim), dtype=jnp.bfloat16)},
       }
     weights["decoder"]["layers"][layer_key] = layer_struct
   return weights
@@ -298,7 +296,7 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict, args) -> dic
     ln["input_layernorm"]["scale"][:, stack_idx] = to_np_bfloat16(get_hf_tensor(".input_layernorm.scale"))
     # HF: [emb_dim] -> slice of MaxText: [emb_dim, num_stacked_layers]
     ln["post_attention_layernorm"]["scale"][:, stack_idx] = to_np_bfloat16(
-        get_hf_tensor(".post_attention_layernorm.scale")
+      get_hf_tensor(".post_attention_layernorm.scale")
     )
 
     attn_block = ln["attention"]
@@ -319,24 +317,24 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict, args) -> dic
       attn_params["value"]["kernel"][:, stack_idx, :, :] = v_kernel.reshape(emb_dim, num_kv_heads, head_dim)
       # HF: [2048, 4096] -> Transpose -> slice of MaxText: [num_q_heads * head_dim, num_stacked_layers, emb_dim]
       attn_params["out"]["kernel"][:, stack_idx, :] = to_np_bfloat16(
-          get_hf_tensor(".attention.attention.out.kernel")
+        get_hf_tensor(".attention.attention.out.kernel")
       ).transpose()
       # HF: [256] -> slice of MaxText: [head_dim, num_stacked_layers]
       attn_params["query_norm"]["scale"][:, stack_idx] = to_np_bfloat16(
-          get_hf_tensor(".attention.attention.query_norm.scale")
+        get_hf_tensor(".attention.attention.query_norm.scale")
       )
       # HF: [256] -> slice of MaxText: [head_dim, num_stacked_layers]
       attn_params["key_norm"]["scale"][:, stack_idx] = to_np_bfloat16(
-          get_hf_tensor(".attention.attention.key_norm.scale")
+        get_hf_tensor(".attention.attention.key_norm.scale")
       )
     else:  # Gated Delta Net
       # HF: [12288, 2048] -> Transpose -> slice of MaxText: [emb_dim, num_stacked_layers, 12288]
       attn_block["in_proj_qkvz"]["kernel"][:, stack_idx, :] = to_np_bfloat16(
-          get_hf_tensor(".attention.in_proj_qkvz.kernel")
+        get_hf_tensor(".attention.in_proj_qkvz.kernel")
       ).transpose()
       # HF: [64, 2048] -> Transpose -> slice of MaxText: [emb_dim, num_stacked_layers, 64]
       attn_block["in_proj_ba"]["kernel"][:, stack_idx, :] = to_np_bfloat16(
-          get_hf_tensor(".attention.in_proj_ba.kernel")
+        get_hf_tensor(".attention.in_proj_ba.kernel")
       ).transpose()
       # HF: [8192, 1, 4] -> Transpose(2,1,0) -> slice of MaxText: [gdn_conv_kernel_dim, num_stacked_layers, 1, gdn_conv_dim]
       conv1d_kernel = to_np_bfloat16(get_hf_tensor(".attention.conv1d.kernel"))
@@ -347,48 +345,48 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict, args) -> dic
       attn_block["dt_bias"][:, stack_idx] = to_np_bfloat16(get_hf_tensor(".attention.dt_bias"))
       # HF: [128] -> slice of MaxText: [128, num_stacked_layers]
       attn_block["norm"]["rms_norm"]["scale"][:, stack_idx] = to_np_bfloat16(
-          get_hf_tensor(".attention.norm.rms_norm.scale")
+        get_hf_tensor(".attention.norm.rms_norm.scale")
       )
       # HF: [2048, 4096] -> Transpose -> slice of MaxText: [4096, num_stacked_layers, 2048]
       attn_block["out_proj"]["kernel"][:, stack_idx, :] = to_np_bfloat16(
-          get_hf_tensor(".attention.out_proj.kernel")
+        get_hf_tensor(".attention.out_proj.kernel")
       ).transpose()
 
     # MoE
     mlp_block = ln["mlp"]
     # HF: [512, 2048] -> Transpose -> slice of MaxText: [emb_dim, num_stacked_layers, 512]
     mlp_block["routed_experts"]["gate"]["kernel"][:, stack_idx, :] = to_np_bfloat16(
-        get_hf_tensor(".mlp.routed_experts.gate.kernel")
+      get_hf_tensor(".mlp.routed_experts.gate.kernel")
     ).transpose()
     # HF: [512, 2048] -> Transpose -> slice of MaxText: [emb_dim, num_stacked_layers, 512]
     mlp_block["shared_expert"]["wi_0"]["kernel"][:, stack_idx, :] = to_np_bfloat16(
-        get_hf_tensor(".mlp.shared_expert.wi_0.kernel")
+      get_hf_tensor(".mlp.shared_expert.wi_0.kernel")
     ).transpose()
     # HF: [512, 2048] -> Transpose -> slice of MaxText: [emb_dim, num_stacked_layers, 512]
     mlp_block["shared_expert"]["wi_1"]["kernel"][:, stack_idx, :] = to_np_bfloat16(
-        get_hf_tensor(".mlp.shared_expert.wi_1.kernel")
+      get_hf_tensor(".mlp.shared_expert.wi_1.kernel")
     ).transpose()
     # HF: [2048, 512] -> Transpose -> slice of MaxText: [512, num_stacked_layers, 2048]
     mlp_block["shared_expert"]["wo"]["kernel"][:, stack_idx, :] = to_np_bfloat16(
-        get_hf_tensor(".mlp.shared_expert.wo.kernel")
+      get_hf_tensor(".mlp.shared_expert.wo.kernel")
     ).transpose()
     # HF: [1, 2048] -> Transpose -> slice of MaxText: [emb_dim, num_stacked_layers, 1]
     mlp_block["shared_expert_gate"]["kernel"][:, stack_idx, :] = to_np_bfloat16(
-        get_hf_tensor(".mlp.shared_expert_gate.kernel")
+      get_hf_tensor(".mlp.shared_expert_gate.kernel")
     ).transpose()
 
     for i in range(num_experts_to_convert):
       # HF: [512, 2048] -> Transpose -> slice of MaxText: [num_experts, num_stacked_layers, emb_dim, moe_intermediate_size]
       mlp_block["routed_experts"]["wi_0"][i, stack_idx, :, :] = to_np_bfloat16(
-          get_hf_tensor(f".mlp.routed_experts.{i}.wi_0")
+        get_hf_tensor(f".mlp.routed_experts.{i}.wi_0")
       ).transpose()
       # HF: [512, 2048] -> Transpose -> slice of MaxText: [num_experts, num_stacked_layers, emb_dim, moe_intermediate_size]
       mlp_block["routed_experts"]["wi_1"][i, stack_idx, :, :] = to_np_bfloat16(
-          get_hf_tensor(f".mlp.routed_experts.{i}.wi_1")
+        get_hf_tensor(f".mlp.routed_experts.{i}.wi_1")
       ).transpose()
       # HF: [2048, 512] -> Transpose -> slice of MaxText: [num_experts, num_stacked_layers, moe_intermediate_size, emb_dim]
       mlp_block["routed_experts"]["wo"][i, stack_idx, :, :] = to_np_bfloat16(
-          get_hf_tensor(f".mlp.routed_experts.{i}.wo")
+        get_hf_tensor(f".mlp.routed_experts.{i}.wo")
       ).transpose()
   gc.collect()
   return maxtext_weights
@@ -408,7 +406,7 @@ def main(args):
   max_logging.log(f"Conversion complete. Saving MaxText checkpoint to {args.maxtext_model_path}")
 
   llama_or_mistral_ckpt.save_weights_to_checkpoint(
-      args.maxtext_model_path, jax_weights, args.simulated_cpu_devices_count, args.use_ocdbt, args.use_zarr3
+    args.maxtext_model_path, jax_weights, args.simulated_cpu_devices_count, args.use_ocdbt, args.use_zarr3
   )
   max_logging.log("Checkpoint saved successfully.")
 
@@ -417,15 +415,15 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Convert Qwen3-Next HF weights to MaxText.")
   parser.add_argument("--base_model_path", type=str, required=True, help="Path to the HF Qwen3-Next checkpoint files.")
   parser.add_argument(
-      "--maxtext_model_path", type=str, required=True, help="Path to save the MaxText checkpoint (local or GCS)."
+    "--maxtext_model_path", type=str, required=True, help="Path to save the MaxText checkpoint (local or GCS)."
   )
   parser.add_argument(
-      "--model_size", type=str, required=True, choices=MODEL_PARAMS_DICT.keys(), help="The model size to convert."
+    "--model_size", type=str, required=True, choices=MODEL_PARAMS_DICT.keys(), help="The model size to convert."
   )
 
   # Saving options
   parser.add_argument(
-      "--simulated_cpu_devices_count", type=int, default=16, help="Number of simulated CPU devices for saving."
+    "--simulated_cpu_devices_count", type=int, default=16, help="Number of simulated CPU devices for saving."
   )
   parser.add_argument("--use_ocdbt", type=str2bool, default=True, help="Use OCDBT format for saving.")
   parser.add_argument("--use_zarr3", type=str2bool, default=True, help="Use Zarr3 format for saving.")

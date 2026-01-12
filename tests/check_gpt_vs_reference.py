@@ -171,14 +171,14 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 # Reference implementation
 def eager_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    scaling: float,
-    dropout: float = 0.0,
-    **kwargs,
+  module: nn.Module,
+  query: torch.Tensor,
+  key: torch.Tensor,
+  value: torch.Tensor,
+  attention_mask: Optional[torch.Tensor],
+  scaling: float,
+  dropout: float = 0.0,
+  **kwargs,
 ):
   """PyTorch reference implementation for eager attention.
 
@@ -274,12 +274,12 @@ class GptOssMLPTest(unittest.TestCase):
     torch.set_printoptions(profile="full")
     np.set_printoptions(threshold=np.inf)
     predefined_weights = {
-        "router.weight": torch.randn(config.num_local_experts, config.hidden_size),
-        "router.bias": torch.randn(config.num_local_experts),
-        "experts.gate_up_proj": torch.randn(config.num_local_experts, config.hidden_size, 2 * config.intermediate_size),
-        "experts.gate_up_proj_bias": torch.randn(config.num_local_experts, 2 * config.intermediate_size),
-        "experts.down_proj": torch.randn(config.num_local_experts, config.intermediate_size, config.hidden_size),
-        "experts.down_proj_bias": torch.randn(config.num_local_experts, config.hidden_size),
+      "router.weight": torch.randn(config.num_local_experts, config.hidden_size),
+      "router.bias": torch.randn(config.num_local_experts),
+      "experts.gate_up_proj": torch.randn(config.num_local_experts, config.hidden_size, 2 * config.intermediate_size),
+      "experts.gate_up_proj_bias": torch.randn(config.num_local_experts, 2 * config.intermediate_size),
+      "experts.down_proj": torch.randn(config.num_local_experts, config.intermediate_size, config.hidden_size),
+      "experts.down_proj_bias": torch.randn(config.num_local_experts, config.hidden_size),
     }
 
     batch_size = 4
@@ -295,57 +295,57 @@ class GptOssMLPTest(unittest.TestCase):
 
     # MaxText model
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        run_name="gpt_oss_mlp_test",
-        enable_checkpointing=False,
-        model_name="default",
-        dtype="float32",
-        weight_dtype="float32",
-        megablox=False,
-        sparse_matmul=True,
-        per_device_batch_size=1,
-        max_target_length=seq_len,
-        max_prefill_predict_length=seq_len,
-        base_emb_dim=config.hidden_size,
-        base_mlp_dim=config.intermediate_size,
-        base_moe_mlp_dim=config.intermediate_size,
-        mlp_activations=["sigmoid", "linear"],
-        mlp_activations_limit=config.limit,
-        routed_bias=True,
-        mlp_bias=True,
-        num_experts=config.num_local_experts,
-        num_experts_per_tok=config.num_experts_per_tok,
-        decoder_block="gpt_oss",
-        attention="dot_product",
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      run_name="gpt_oss_mlp_test",
+      enable_checkpointing=False,
+      model_name="default",
+      dtype="float32",
+      weight_dtype="float32",
+      megablox=False,
+      sparse_matmul=True,
+      per_device_batch_size=1,
+      max_target_length=seq_len,
+      max_prefill_predict_length=seq_len,
+      base_emb_dim=config.hidden_size,
+      base_mlp_dim=config.intermediate_size,
+      base_moe_mlp_dim=config.intermediate_size,
+      mlp_activations=["sigmoid", "linear"],
+      mlp_activations_limit=config.limit,
+      routed_bias=True,
+      mlp_bias=True,
+      num_experts=config.num_local_experts,
+      num_experts_per_tok=config.num_experts_per_tok,
+      decoder_block="gpt_oss",
+      attention="dot_product",
     )
     jax_hidden_states = to_jax(hidden_states)
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     jax_model = moe.get_routed_moe(
-        name="MoeBlock",
-        config=cfg,
-        num_experts=cfg.num_experts,
-        num_experts_per_tok=cfg.num_experts_per_tok,
-        mesh=mesh,
-        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", "mlp"),
-        intermediate_dim=cfg.base_mlp_dim,
-        dtype=cfg.dtype,
+      name="MoeBlock",
+      config=cfg,
+      num_experts=cfg.num_experts,
+      num_experts_per_tok=cfg.num_experts_per_tok,
+      mesh=mesh,
+      kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes=("embed", "mlp"),
+      intermediate_dim=cfg.base_mlp_dim,
+      dtype=cfg.dtype,
     )
 
     moe_variables = {
-        "moe_variables": {
-            "gate": {
-                "kernel": to_jax(predefined_weights["router.weight"].transpose(0, 1)),
-                "bias": to_jax(predefined_weights["router.bias"]),
-            },
-            "wi_0": to_jax(predefined_weights["experts.gate_up_proj"][..., ::2]),
-            "wi_0_bias": to_jax(predefined_weights["experts.gate_up_proj_bias"][..., ::2]),
-            "wi_1": to_jax(predefined_weights["experts.gate_up_proj"][..., 1::2]),
-            "wi_1_bias": to_jax(predefined_weights["experts.gate_up_proj_bias"][..., 1::2]),
-            "wo": to_jax(predefined_weights["experts.down_proj"]),
-            "wo_bias": to_jax(predefined_weights["experts.down_proj_bias"]),
+      "moe_variables": {
+        "gate": {
+          "kernel": to_jax(predefined_weights["router.weight"].transpose(0, 1)),
+          "bias": to_jax(predefined_weights["router.bias"]),
         },
+        "wi_0": to_jax(predefined_weights["experts.gate_up_proj"][..., ::2]),
+        "wi_0_bias": to_jax(predefined_weights["experts.gate_up_proj_bias"][..., ::2]),
+        "wi_1": to_jax(predefined_weights["experts.gate_up_proj"][..., 1::2]),
+        "wi_1_bias": to_jax(predefined_weights["experts.gate_up_proj_bias"][..., 1::2]),
+        "wo": to_jax(predefined_weights["experts.down_proj"]),
+        "wo_bias": to_jax(predefined_weights["experts.down_proj_bias"]),
+      },
     }
     actual_output, _ = jax.jit(jax_model.apply)(moe_variables, jax_hidden_states)
     # Add normalization to let logits at same scale
@@ -369,9 +369,9 @@ class GptOssAttentionTest(unittest.TestCase):
     self.seq_len = 128
 
     self.mock_module_with_sinks = SimpleNamespace(
-        num_key_value_groups=self.config.num_attention_heads // self.config.num_key_value_heads,
-        sinks=torch.randn(self.config.num_attention_heads),
-        training=False,
+      num_key_value_groups=self.config.num_attention_heads // self.config.num_key_value_heads,
+      sinks=torch.randn(self.config.num_attention_heads),
+      training=False,
     )
 
     self.query = torch.randn(self.batch_size, self.config.num_attention_heads, self.seq_len, self.config.head_dim)
@@ -392,56 +392,56 @@ class GptOssAttentionTest(unittest.TestCase):
   def test_dot_product_attention_with_sinks(self):
     """Validates dot-product attention with sinks against the reference."""
     expected_attn_output, _ = eager_attention_forward(
-        module=self.mock_module_with_sinks,
-        query=self.query,
-        key=self.key,
-        value=self.value,
-        attention_mask=self.attention_mask,
-        scaling=self.scaling,
-        dropout=0.0,
+      module=self.mock_module_with_sinks,
+      query=self.query,
+      key=self.key,
+      value=self.value,
+      attention_mask=self.attention_mask,
+      scaling=self.scaling,
+      dropout=0.0,
     )
 
     cfg_dot = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        run_name="gpt_oss_attention_test_dot",
-        enable_checkpointing=False,
-        model_name="default",
-        dtype="float32",
-        per_device_batch_size=self.batch_size,
-        max_target_length=self.seq_len,
-        max_prefill_predict_length=self.seq_len,
-        base_num_query_heads=self.config.num_attention_heads,
-        base_num_kv_heads=self.config.num_key_value_heads,
-        head_dim=self.config.head_dim,
-        attention="dot_product",
-        attention_bias=False,
-        attention_sink=True,
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      run_name="gpt_oss_attention_test_dot",
+      enable_checkpointing=False,
+      model_name="default",
+      dtype="float32",
+      per_device_batch_size=self.batch_size,
+      max_target_length=self.seq_len,
+      max_prefill_predict_length=self.seq_len,
+      base_num_query_heads=self.config.num_attention_heads,
+      base_num_kv_heads=self.config.num_key_value_heads,
+      head_dim=self.config.head_dim,
+      attention="dot_product",
+      attention_bias=False,
+      attention_sink=True,
     )
     devices_array = maxtext_utils.create_device_mesh(cfg_dot)
     mesh = Mesh(devices_array, cfg_dot.mesh_axes)
 
     attention_op_dot = attentions.AttentionOp(
-        config=cfg_dot,
-        mesh=mesh,
-        attention_kernel="dot_product",
-        max_target_length=self.seq_len,
-        num_query_heads=self.config.num_attention_heads,
-        num_kv_heads=self.config.num_key_value_heads,
-        dtype=jnp.float32,
-        attention_type=attentions.AttentionType.FULL,
+      config=cfg_dot,
+      mesh=mesh,
+      attention_kernel="dot_product",
+      max_target_length=self.seq_len,
+      num_query_heads=self.config.num_attention_heads,
+      num_kv_heads=self.config.num_key_value_heads,
+      dtype=jnp.float32,
+      attention_type=attentions.AttentionType.FULL,
     )
 
     @jax.jit
     def run_dot_product_attention(q, k, v):
       unnormalized_output, _, sum_val = attention_op_dot.apply_attention_dot(
-          query=q,
-          key=k,
-          value=v,
-          decoder_segment_ids=jnp.ones((self.batch_size, self.seq_len)),
-          model_mode="train",
-          sinks=self.jax_sinks,
-          qk_product_einsum=jnp.einsum,
-          wv_product_einsum=jnp.einsum,
+        query=q,
+        key=k,
+        value=v,
+        decoder_segment_ids=jnp.ones((self.batch_size, self.seq_len)),
+        model_mode="train",
+        sinks=self.jax_sinks,
+        qk_product_einsum=jnp.einsum,
+        wv_product_einsum=jnp.einsum,
       )
       return unnormalized_output / sum_val
 
@@ -455,59 +455,59 @@ class GptOssAttentionTest(unittest.TestCase):
   def test_flash_attention_with_sinks(self):
     """Validates flash attention with sinks against the reference."""
     expected_attn_output, _ = eager_attention_forward(
-        module=self.mock_module_with_sinks,
-        query=self.query,
-        key=self.key,
-        value=self.value,
-        attention_mask=self.attention_mask,
-        scaling=self.scaling,
-        dropout=0.0,
+      module=self.mock_module_with_sinks,
+      query=self.query,
+      key=self.key,
+      value=self.value,
+      attention_mask=self.attention_mask,
+      scaling=self.scaling,
+      dropout=0.0,
     )
 
     cfg_flash = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        run_name="gpt_oss_attention_test_flash",
-        enable_checkpointing=False,
-        model_name="default",
-        dtype="float32",
-        per_device_batch_size=self.batch_size,
-        max_target_length=self.seq_len,
-        max_prefill_predict_length=self.seq_len,
-        base_num_query_heads=self.config.num_attention_heads,
-        base_num_kv_heads=self.config.num_key_value_heads,
-        head_dim=self.config.head_dim,
-        attention="flash",
-        attention_bias=False,
-        attention_sink=True,
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      run_name="gpt_oss_attention_test_flash",
+      enable_checkpointing=False,
+      model_name="default",
+      dtype="float32",
+      per_device_batch_size=self.batch_size,
+      max_target_length=self.seq_len,
+      max_prefill_predict_length=self.seq_len,
+      base_num_query_heads=self.config.num_attention_heads,
+      base_num_kv_heads=self.config.num_key_value_heads,
+      head_dim=self.config.head_dim,
+      attention="flash",
+      attention_bias=False,
+      attention_sink=True,
     )
     devices_array = maxtext_utils.create_device_mesh(cfg_flash)
     mesh = Mesh(devices_array, cfg_flash.mesh_axes)
 
     attention_op_flash = attentions.AttentionOp(
-        config=cfg_flash,
-        mesh=mesh,
-        attention_kernel="flash",
-        max_target_length=self.seq_len,
-        num_query_heads=self.config.num_attention_heads,
-        num_kv_heads=self.config.num_key_value_heads,
-        dtype=jnp.float32,
-        attention_type=attentions.AttentionType.FULL,
+      config=cfg_flash,
+      mesh=mesh,
+      attention_kernel="flash",
+      max_target_length=self.seq_len,
+      num_query_heads=self.config.num_attention_heads,
+      num_kv_heads=self.config.num_key_value_heads,
+      dtype=jnp.float32,
+      attention_type=attentions.AttentionType.FULL,
     )
 
     @jax.jit
     def run_flash_attention(q, k, v, sinks_logits):
       output = attention_op_flash.tpu_flash_attention(
-          query=q,
-          key=k,
-          value=v,
-          decoder_segment_ids=None,
-          sinks=sinks_logits,
+        query=q,
+        key=k,
+        value=v,
+        decoder_segment_ids=None,
+        sinks=sinks_logits,
       )
       return output
 
     scaled_jax_query_flash_t = self.jax_query_t * self.scaling
     actual_attn_output_flash = run_flash_attention(
-        scaled_jax_query_flash_t, self.jax_key_t, self.jax_value_t, self.jax_sinks
+      scaled_jax_query_flash_t, self.jax_key_t, self.jax_value_t, self.jax_sinks
     )
     mse_flash = jnp.mean((to_jax(expected_attn_output) - actual_attn_output_flash) ** 2)
     self.assertLess(mse_flash, 1e-3, f"flash attention mismatch, MSE: {mse_flash}")
@@ -570,7 +570,7 @@ class GptOssRotaryEmbedding(nn.Module):
 
 
 def _compute_yarn_parameters(
-    config, device: "torch.device", seq_len: Optional[int] = None
+  config, device: "torch.device", seq_len: Optional[int] = None
 ) -> tuple["torch.Tensor", float]:
   """
   https://github.com/huggingface/transformers/blob/b9282355bea846b54ed850a066901496b19da654/src/transformers/modeling_rope_utils.py#L197C1-L281C38
@@ -585,7 +585,7 @@ def _compute_yarn_parameters(
   mscale = config.rope_scaling.get("mscale")
   mscale_all_dim = config.rope_scaling.get("mscale_all_dim")
   original_max_position_embeddings = (
-      config.rope_scaling.get("original_max_position_embeddings") or config.max_position_embeddings
+    config.rope_scaling.get("original_max_position_embeddings") or config.max_position_embeddings
   )
 
   def get_mscale(scale, mscale=1):
@@ -639,8 +639,7 @@ def _compute_yarn_parameters(
   # Get n-dimensional rotational scaling corrected for extrapolation
   inv_freq_extrapolation_factor = 1 - linear_ramp_factor(low, high, dim // 2).to(device=device, dtype=torch.float)
   inv_freq = (
-      inv_freq_interpolation * (1 - inv_freq_extrapolation_factor)
-      + inv_freq_extrapolation * inv_freq_extrapolation_factor
+    inv_freq_interpolation * (1 - inv_freq_extrapolation_factor) + inv_freq_extrapolation * inv_freq_extrapolation_factor
   )
   return inv_freq, attention_factor
 
@@ -650,9 +649,9 @@ ROPE_INIT_FUNCTIONS = {"yarn": _compute_yarn_parameters}
 
 # https://github.com/huggingface/transformers/blob/b9282355bea846b54ed850a066901496b19da654/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L217C1-L233C28
 def _apply_rotary_emb(
-    x: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
+  x: torch.Tensor,
+  cos: torch.Tensor,
+  sin: torch.Tensor,
 ) -> torch.Tensor:
   """Applies rotary embedding to a tensor.
 
@@ -711,20 +710,20 @@ class GptOssYarnTest(unittest.TestCase):
     self.positions = torch.arange(self.seq_len).unsqueeze(0)
     # torch config
     pt_config = {
-        "head_dim": self.config.head_dim,
-        "max_position_embeddings": self.config.max_position_embeddings,
-        "rope_scaling": {
-            "beta_fast": self.config.beta_fast,
-            "beta_slow": self.config.beta_slow,
-            "factor": self.config.rope_factor,
-            "original_max_position_embeddings": self.config.original_max_position_embeddings,
-            "rope_type": self.config.rope_type,
-            "truncate": self.config.rope_truncate,
-        },
-        "rope_theta": self.config.rope_max_timescale,
-        # placeholder, to get past `getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)`
-        "hidden_size": float("inf"),
-        "num_attention_heads": float("inf"),
+      "head_dim": self.config.head_dim,
+      "max_position_embeddings": self.config.max_position_embeddings,
+      "rope_scaling": {
+        "beta_fast": self.config.beta_fast,
+        "beta_slow": self.config.beta_slow,
+        "factor": self.config.rope_factor,
+        "original_max_position_embeddings": self.config.original_max_position_embeddings,
+        "rope_type": self.config.rope_type,
+        "truncate": self.config.rope_truncate,
+      },
+      "rope_theta": self.config.rope_max_timescale,
+      # placeholder, to get past `getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)`
+      "hidden_size": float("inf"),
+      "num_attention_heads": float("inf"),
     }
     self.pt_config = SimpleNamespace(**pt_config)
     devices_array = maxtext_utils.create_device_mesh(self.config)
@@ -738,18 +737,18 @@ class GptOssYarnTest(unittest.TestCase):
     q_rope_pt, k_rope_pt = apply_rotary_pos_emb(self.query, self.key, cos, sin)
     # JAX Yarn RoPE
     model_jax = embeddings.YarnRotaryEmbedding(
-        max_position_embeddings=self.config.max_position_embeddings,
-        original_max_position_embeddings=self.config.original_max_position_embeddings,
-        mesh=self.mesh,
-        beta_fast=self.config.beta_fast,
-        beta_slow=self.config.beta_slow,
-        rope_theta=self.config.rope_max_timescale,
-        rope_factor=self.config.rope_factor,
-        embedding_dims=self.config.head_dim,
-        fprop_dtype=self.dtype,
-        interleave=self.config.rope_interleave,
-        truncate=self.config.rope_truncate,
-        attention_scaling=self.config.rope_attention_scaling,
+      max_position_embeddings=self.config.max_position_embeddings,
+      original_max_position_embeddings=self.config.original_max_position_embeddings,
+      mesh=self.mesh,
+      beta_fast=self.config.beta_fast,
+      beta_slow=self.config.beta_slow,
+      rope_theta=self.config.rope_max_timescale,
+      rope_factor=self.config.rope_factor,
+      embedding_dims=self.config.head_dim,
+      fprop_dtype=self.dtype,
+      interleave=self.config.rope_interleave,
+      truncate=self.config.rope_truncate,
+      attention_scaling=self.config.rope_attention_scaling,
     )
     jax_positions = to_jax(self.positions)
     q_rope_jax = model_jax(to_jax(self.query).transpose(0, 2, 1, 3), jax_positions)

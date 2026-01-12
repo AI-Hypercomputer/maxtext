@@ -23,14 +23,14 @@ from MaxText.sharding import maybe_shard_with_name
 
 
 def gradient_accumulation_loss_and_grad(
-    _loss_fn,
-    config,
-    model,
-    params,
-    params_shardings,
-    data,
-    dropout_rng,
-    extra_dpo_args,
+  _loss_fn,
+  config,
+  model,
+  params,
+  params_shardings,
+  data,
+  dropout_rng,
+  extra_dpo_args,
 ):
   """
   Calculates gradients using gradient accumulation.
@@ -110,21 +110,21 @@ def gradient_accumulation_loss_and_grad(
   init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
   init_grad = jax.tree.map(_maybe_shard_with_name, init_grad, grad_shardings)
   init_grad_and_loss = {
-      "loss": 0.0,
-      "grad": init_grad,
-      "total_weights": 0,
-      "moe_lb_loss": 0.0,
-      "mtp_loss": 0.0,
-      "ga_params": ga_params,
+    "loss": 0.0,
+    "grad": init_grad,
+    "total_weights": 0,
+    "moe_lb_loss": 0.0,
+    "mtp_loss": 0.0,
+    "ga_params": ga_params,
   }
 
   grad_and_loss, aux = jax.lax.scan(
-      accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
+    accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
   )
   loss = (
-      grad_and_loss["loss"] / grad_and_loss["total_weights"]
-      + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
-      + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
+    grad_and_loss["loss"] / grad_and_loss["total_weights"]
+    + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
+    + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
   )
   raw_grads = grad_and_loss["grad"]
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)

@@ -43,11 +43,11 @@ class ConfigTest(unittest.TestCase):
   def test_type_conversion(self):
     """Tests that CLI arguments are converted to the correct types."""
     argv = [
-        "",
-        _BASE_CONFIG_PATH,
-        "per_device_batch_size=3.5",
-        "enable_checkpointing=false",
-        "steps=50",
+      "",
+      _BASE_CONFIG_PATH,
+      "per_device_batch_size=3.5",
+      "enable_checkpointing=false",
+      "steps=50",
     ]
     config = pyconfig.initialize(argv)
     self.assertEqual(config.per_device_batch_size, 3.5)
@@ -69,12 +69,12 @@ class ConfigTest(unittest.TestCase):
   def test_derived_values(self):
     """Tests that derived values are calculated correctly."""
     argv = [
-        "",
-        _BASE_CONFIG_PATH,
-        "run_name=test",
-        "global_parameter_scale=4",
-        "per_device_batch_size=8",
-        "gradient_accumulation_steps=2",
+      "",
+      _BASE_CONFIG_PATH,
+      "run_name=test",
+      "global_parameter_scale=4",
+      "per_device_batch_size=8",
+      "gradient_accumulation_steps=2",
     ]
     # Mock jax.devices() to be deterministic
     mock_devices = [MagicMock(slice_index=0) for _ in range(8)]
@@ -117,11 +117,11 @@ class ConfigTest(unittest.TestCase):
   def test_llama3_tokenizer_correction(self):
     """Tests that tokenizer_type is forced to 'tiktoken' for llama3."""
     argv = [
-        "",
-        _BASE_CONFIG_PATH,
-        "model_name=llama3-8b",
-        "tokenizer_path=assets/tokenizer_llama3.tiktoken",
-        "run_name=test",
+      "",
+      _BASE_CONFIG_PATH,
+      "model_name=llama3-8b",
+      "tokenizer_path=assets/tokenizer_llama3.tiktoken",
+      "run_name=test",
     ]
     config = pyconfig.initialize(argv)
     self.assertEqual(config.tokenizer_type, "tiktoken")
@@ -130,12 +130,12 @@ class ConfigTest(unittest.TestCase):
     """Test that `pydantic.ValidationError` is raised on keys not in MaxTextConfig"""
     with self.assertRaises(ValueError):
       initialize_pydantic(
-          [
-              "",
-              _BASE_CONFIG_PATH,
-              "tokenizer_path=assets/tokenizer_llama3.tiktoken",
-              "NOT_A_VALID_KEY=test",
-          ]
+        [
+          "",
+          _BASE_CONFIG_PATH,
+          "tokenizer_path=assets/tokenizer_llama3.tiktoken",
+          "NOT_A_VALID_KEY=test",
+        ]
       )
 
 

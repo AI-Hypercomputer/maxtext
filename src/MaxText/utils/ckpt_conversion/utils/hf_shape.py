@@ -59,15 +59,15 @@ def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
 
   # Vision Tower embeddings
   shapes["model.vision_tower.vision_model.embeddings.patch_embedding.weight"] = [
-      vision_hidden_size,
-      vision_num_channels,
-      vision_patch_size,
-      vision_patch_size,
+    vision_hidden_size,
+    vision_num_channels,
+    vision_patch_size,
+    vision_patch_size,
   ]
   shapes["model.vision_tower.vision_model.embeddings.patch_embedding.bias"] = [vision_hidden_size]
   shapes["model.vision_tower.vision_model.embeddings.position_embedding.weight"] = [
-      vision_num_positions,
-      vision_hidden_size,
+    vision_num_positions,
+    vision_hidden_size,
   ]
 
   # Vision Encoder layers
@@ -77,36 +77,36 @@ def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.layer_norm1.bias"] = [vision_hidden_size]
     # Attention
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.q_proj.weight"] = [
-        vision_hidden_size,
-        vision_hidden_size,
+      vision_hidden_size,
+      vision_hidden_size,
     ]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.q_proj.bias"] = [vision_hidden_size]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.k_proj.weight"] = [
-        vision_hidden_size,
-        vision_hidden_size,
+      vision_hidden_size,
+      vision_hidden_size,
     ]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.k_proj.bias"] = [vision_hidden_size]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.v_proj.weight"] = [
-        vision_hidden_size,
-        vision_hidden_size,
+      vision_hidden_size,
+      vision_hidden_size,
     ]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.v_proj.bias"] = [vision_hidden_size]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.out_proj.weight"] = [
-        vision_hidden_size,
-        vision_hidden_size,
+      vision_hidden_size,
+      vision_hidden_size,
     ]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.out_proj.bias"] = [vision_hidden_size]
     # MLP
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.layer_norm2.weight"] = [vision_hidden_size]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.layer_norm2.bias"] = [vision_hidden_size]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.mlp.fc1.weight"] = [
-        vision_intermediate_size,
-        vision_hidden_size,
+      vision_intermediate_size,
+      vision_hidden_size,
     ]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.mlp.fc1.bias"] = [vision_intermediate_size]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.mlp.fc2.weight"] = [
-        vision_hidden_size,
-        vision_intermediate_size,
+      vision_hidden_size,
+      vision_intermediate_size,
     ]
     shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.mlp.fc2.bias"] = [vision_hidden_size]
 
@@ -166,43 +166,43 @@ def GEMMA2_HF_WEIGHTS_TO_SHAPE(config):
   """
 
   mapping = {
-      "model.embed_tokens.weight": [config["vocab_size"], config["hidden_size"]],
-      "model.norm.weight": [config["hidden_size"]],
+    "model.embed_tokens.weight": [config["vocab_size"], config["hidden_size"]],
+    "model.norm.weight": [config["hidden_size"]],
   }
   for layer_idx in range(config["num_hidden_layers"]):
     layer_mapping = {
-        f"model.layers.{layer_idx}.input_layernorm.weight": [config["hidden_size"]],
-        f"model.layers.{layer_idx}.mlp.down_proj.weight": [
-            config["hidden_size"],
-            config["intermediate_size"],
-        ],
-        f"model.layers.{layer_idx}.mlp.up_proj.weight": [
-            config["intermediate_size"],
-            config["hidden_size"],
-        ],
-        f"model.layers.{layer_idx}.mlp.gate_proj.weight": [
-            config["intermediate_size"],
-            config["hidden_size"],
-        ],
-        f"model.layers.{layer_idx}.post_attention_layernorm.weight": [config["hidden_size"]],
-        f"model.layers.{layer_idx}.post_feedforward_layernorm.weight": [config["hidden_size"]],
-        f"model.layers.{layer_idx}.pre_feedforward_layernorm.weight": [config["hidden_size"]],
-        f"model.layers.{layer_idx}.self_attn.k_proj.weight": [
-            config["num_key_value_heads"] * config["head_dim"],
-            config["hidden_size"],
-        ],
-        f"model.layers.{layer_idx}.self_attn.o_proj.weight": [
-            config["hidden_size"],
-            config["num_attention_heads"] * config["head_dim"],
-        ],
-        f"model.layers.{layer_idx}.self_attn.q_proj.weight": [
-            config["num_attention_heads"] * config["head_dim"],
-            config["hidden_size"],
-        ],
-        f"model.layers.{layer_idx}.self_attn.v_proj.weight": [
-            config["num_key_value_heads"] * config["head_dim"],
-            config["hidden_size"],
-        ],
+      f"model.layers.{layer_idx}.input_layernorm.weight": [config["hidden_size"]],
+      f"model.layers.{layer_idx}.mlp.down_proj.weight": [
+        config["hidden_size"],
+        config["intermediate_size"],
+      ],
+      f"model.layers.{layer_idx}.mlp.up_proj.weight": [
+        config["intermediate_size"],
+        config["hidden_size"],
+      ],
+      f"model.layers.{layer_idx}.mlp.gate_proj.weight": [
+        config["intermediate_size"],
+        config["hidden_size"],
+      ],
+      f"model.layers.{layer_idx}.post_attention_layernorm.weight": [config["hidden_size"]],
+      f"model.layers.{layer_idx}.post_feedforward_layernorm.weight": [config["hidden_size"]],
+      f"model.layers.{layer_idx}.pre_feedforward_layernorm.weight": [config["hidden_size"]],
+      f"model.layers.{layer_idx}.self_attn.k_proj.weight": [
+        config["num_key_value_heads"] * config["head_dim"],
+        config["hidden_size"],
+      ],
+      f"model.layers.{layer_idx}.self_attn.o_proj.weight": [
+        config["hidden_size"],
+        config["num_attention_heads"] * config["head_dim"],
+      ],
+      f"model.layers.{layer_idx}.self_attn.q_proj.weight": [
+        config["num_attention_heads"] * config["head_dim"],
+        config["hidden_size"],
+      ],
+      f"model.layers.{layer_idx}.self_attn.v_proj.weight": [
+        config["num_key_value_heads"] * config["head_dim"],
+        config["hidden_size"],
+      ],
     }
     mapping = {**mapping, **layer_mapping}
   return mapping
@@ -259,9 +259,9 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
 
   # --- Initialize Mapping ---
   mapping = {
-      "model.embed_tokens.weight": [vocab_size, hidden_size],
-      "model.norm.weight": [hidden_size],
-      "lm_head.weight": [vocab_size, hidden_size],
+    "model.embed_tokens.weight": [vocab_size, hidden_size],
+    "model.norm.weight": [hidden_size],
+    "lm_head.weight": [vocab_size, hidden_size],
   }
 
   # --- Loop Over Layers ---
@@ -270,13 +270,13 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
 
     # Common layer components
     layer_mapping = {
-        f"{layer_prefix}.input_layernorm.weight": [hidden_size],
-        f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
-        # --- Attention projections ---
-        f"{layer_prefix}.self_attn.kv_a_proj_with_mqa.weight": [kv_a_proj_out_dim, hidden_size],
-        f"{layer_prefix}.self_attn.kv_a_layernorm.weight": [kv_lora_rank],
-        f"{layer_prefix}.self_attn.kv_b_proj.weight": [kv_b_dim, kv_lora_rank],
-        f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, o_proj_in_dim],
+      f"{layer_prefix}.input_layernorm.weight": [hidden_size],
+      f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
+      # --- Attention projections ---
+      f"{layer_prefix}.self_attn.kv_a_proj_with_mqa.weight": [kv_a_proj_out_dim, hidden_size],
+      f"{layer_prefix}.self_attn.kv_a_layernorm.weight": [kv_lora_rank],
+      f"{layer_prefix}.self_attn.kv_b_proj.weight": [kv_b_dim, kv_lora_rank],
+      f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, o_proj_in_dim],
     }
 
     # --- Q-Projection (Conditional on LoRA) ---
@@ -284,11 +284,11 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
       layer_mapping[f"{layer_prefix}.self_attn.q_proj.weight"] = [q_dim, hidden_size]
     else:
       layer_mapping.update(
-          {
-              f"{layer_prefix}.self_attn.q_a_proj.weight": [q_lora_rank, hidden_size],
-              f"{layer_prefix}.self_attn.q_a_layernorm.weight": [q_lora_rank],
-              f"{layer_prefix}.self_attn.q_b_proj.weight": [q_dim, q_lora_rank],
-          }
+        {
+          f"{layer_prefix}.self_attn.q_a_proj.weight": [q_lora_rank, hidden_size],
+          f"{layer_prefix}.self_attn.q_a_layernorm.weight": [q_lora_rank],
+          f"{layer_prefix}.self_attn.q_b_proj.weight": [q_dim, q_lora_rank],
+        }
       )
 
     # --- Add conditional biases ---
@@ -296,52 +296,52 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
       if q_lora_rank is not None:
         layer_mapping[f"{layer_prefix}.self_attn.q_a_proj.bias"] = [q_lora_rank]
       layer_mapping.update(
-          {
-              f"{layer_prefix}.self_attn.kv_a_proj_with_mqa.bias": [kv_a_proj_out_dim],
-              f"{layer_prefix}.self_attn.o_proj.bias": [hidden_size],
-          }
+        {
+          f"{layer_prefix}.self_attn.kv_a_proj_with_mqa.bias": [kv_a_proj_out_dim],
+          f"{layer_prefix}.self_attn.o_proj.bias": [hidden_size],
+        }
       )
 
     # --- Add MLP weights (Dense vs. MoE) ---
     if layer_idx < first_k_dense:
       # This is a DENSE MLP layer (DeepseekV3MLP)
       layer_mapping.update(
-          {
-              f"{layer_prefix}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
-              f"{layer_prefix}.mlp.up_proj.weight": [intermediate_size, hidden_size],
-              f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, intermediate_size],
-          }
+        {
+          f"{layer_prefix}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
+          f"{layer_prefix}.mlp.up_proj.weight": [intermediate_size, hidden_size],
+          f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, intermediate_size],
+        }
       )
     else:
       # This is a MoE MLP layer (DeepseekV3MoE)
       # Add the router gate (DeepseekV3TopkRouter)
       layer_mapping.update(
-          {
-              f"{layer_prefix}.mlp.gate.weight": [n_routed_experts, hidden_size],
-              f"{layer_prefix}.mlp.gate.e_score_correction_bias": [n_routed_experts],
-          }
+        {
+          f"{layer_prefix}.mlp.gate.weight": [n_routed_experts, hidden_size],
+          f"{layer_prefix}.mlp.gate.e_score_correction_bias": [n_routed_experts],
+        }
       )
 
       # Add routed experts (DeepseekV3NaiveMoe)
       for expert_j in range(n_routed_experts):
         expert_prefix = f"{layer_prefix}.mlp.experts.{expert_j}"
         layer_mapping.update(
-            {
-                f"{expert_prefix}.gate_proj.weight": [moe_intermediate_size, hidden_size],
-                f"{expert_prefix}.up_proj.weight": [moe_intermediate_size, hidden_size],
-                f"{expert_prefix}.down_proj.weight": [hidden_size, moe_intermediate_size],
-            }
+          {
+            f"{expert_prefix}.gate_proj.weight": [moe_intermediate_size, hidden_size],
+            f"{expert_prefix}.up_proj.weight": [moe_intermediate_size, hidden_size],
+            f"{expert_prefix}.down_proj.weight": [hidden_size, moe_intermediate_size],
+          }
         )
 
       # Add shared experts (if any)
       if n_shared_experts > 0:
         shared_intermediate_size = moe_intermediate_size * n_shared_experts
         layer_mapping.update(
-            {
-                f"{layer_prefix}.mlp.shared_experts.gate_proj.weight": [shared_intermediate_size, hidden_size],
-                f"{layer_prefix}.mlp.shared_experts.up_proj.weight": [shared_intermediate_size, hidden_size],
-                f"{layer_prefix}.mlp.shared_experts.down_proj.weight": [hidden_size, shared_intermediate_size],
-            }
+          {
+            f"{layer_prefix}.mlp.shared_experts.gate_proj.weight": [shared_intermediate_size, hidden_size],
+            f"{layer_prefix}.mlp.shared_experts.up_proj.weight": [shared_intermediate_size, hidden_size],
+            f"{layer_prefix}.mlp.shared_experts.down_proj.weight": [hidden_size, shared_intermediate_size],
+          }
         )
 
     mapping.update(layer_mapping)
@@ -369,9 +369,9 @@ def GPT_OSS_HF_WEIGHTS_TO_SHAPE(config):
 
   # --- Initialize Mapping ---
   mapping = {
-      "model.embed_tokens.weight": [vocab_size, hidden_size],
-      "model.norm.weight": [hidden_size],
-      "lm_head.weight": [vocab_size, hidden_size],
+    "model.embed_tokens.weight": [vocab_size, hidden_size],
+    "model.norm.weight": [hidden_size],
+    "lm_head.weight": [vocab_size, hidden_size],
   }
 
   # --- Loop Over Layers ---
@@ -380,52 +380,52 @@ def GPT_OSS_HF_WEIGHTS_TO_SHAPE(config):
 
     # --- Standard Layer Components ---
     layer_mapping = {
-        f"{layer_prefix}.input_layernorm.weight": [hidden_size],
-        f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
+      f"{layer_prefix}.input_layernorm.weight": [hidden_size],
+      f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
     }
 
     # --- Attention Weights (GptOssAttention) ---
     layer_mapping.update(
-        {
-            # Standard QKV projections (Linear: [out_features, in_features])
-            f"{layer_prefix}.self_attn.q_proj.weight": [q_dim, hidden_size],
-            f"{layer_prefix}.self_attn.k_proj.weight": [kv_dim, hidden_size],
-            f"{layer_prefix}.self_attn.v_proj.weight": [kv_dim, hidden_size],
-            f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, q_dim],
-            # Attention sinks unique to this model
-            f"{layer_prefix}.self_attn.sinks": [num_attention_heads],
-        }
+      {
+        # Standard QKV projections (Linear: [out_features, in_features])
+        f"{layer_prefix}.self_attn.q_proj.weight": [q_dim, hidden_size],
+        f"{layer_prefix}.self_attn.k_proj.weight": [kv_dim, hidden_size],
+        f"{layer_prefix}.self_attn.v_proj.weight": [kv_dim, hidden_size],
+        f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, q_dim],
+        # Attention sinks unique to this model
+        f"{layer_prefix}.self_attn.sinks": [num_attention_heads],
+      }
     )
 
     if attention_bias:
       layer_mapping.update(
-          {
-              f"{layer_prefix}.self_attn.q_proj.bias": [q_dim],
-              f"{layer_prefix}.self_attn.k_proj.bias": [kv_dim],
-              f"{layer_prefix}.self_attn.v_proj.bias": [kv_dim],
-              f"{layer_prefix}.self_attn.o_proj.bias": [hidden_size],
-          }
+        {
+          f"{layer_prefix}.self_attn.q_proj.bias": [q_dim],
+          f"{layer_prefix}.self_attn.k_proj.bias": [kv_dim],
+          f"{layer_prefix}.self_attn.v_proj.bias": [kv_dim],
+          f"{layer_prefix}.self_attn.o_proj.bias": [hidden_size],
+        }
       )
 
     # --- MoE MLP Weights (GptOssMLP) ---
     # Router (GptOssTopKRouter)
     layer_mapping.update(
-        {
-            f"{layer_prefix}.mlp.router.weight": [num_local_experts, hidden_size],
-            f"{layer_prefix}.mlp.router.bias": [num_local_experts],
-        }
+      {
+        f"{layer_prefix}.mlp.router.weight": [num_local_experts, hidden_size],
+        f"{layer_prefix}.mlp.router.bias": [num_local_experts],
+      }
     )
 
     # Experts (GptOssExperts)
     layer_mapping.update(
-        {
-            # Fused gate and up projection: [num_experts, hidden, 2 * intermediate]
-            f"{layer_prefix}.mlp.experts.gate_up_proj": [num_local_experts, hidden_size, 2 * intermediate_size],
-            f"{layer_prefix}.mlp.experts.gate_up_proj_bias": [num_local_experts, 2 * intermediate_size],
-            # Down projection: [num_experts, intermediate, hidden]
-            f"{layer_prefix}.mlp.experts.down_proj": [num_local_experts, intermediate_size, hidden_size],
-            f"{layer_prefix}.mlp.experts.down_proj_bias": [num_local_experts, hidden_size],
-        }
+      {
+        # Fused gate and up projection: [num_experts, hidden, 2 * intermediate]
+        f"{layer_prefix}.mlp.experts.gate_up_proj": [num_local_experts, hidden_size, 2 * intermediate_size],
+        f"{layer_prefix}.mlp.experts.gate_up_proj_bias": [num_local_experts, 2 * intermediate_size],
+        # Down projection: [num_experts, intermediate, hidden]
+        f"{layer_prefix}.mlp.experts.down_proj": [num_local_experts, intermediate_size, hidden_size],
+        f"{layer_prefix}.mlp.experts.down_proj_bias": [num_local_experts, hidden_size],
+      }
     )
 
     mapping.update(layer_mapping)
@@ -457,13 +457,13 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
   num_attention_heads = config["num_attention_heads"]
   num_key_value_heads = config["num_key_value_heads"]
   head_dim = config.get(
-      "head_dim", config["hidden_size"] // config["num_attention_heads"]
+    "head_dim", config["hidden_size"] // config["num_attention_heads"]
   )  # head_dim might not always be present
 
   mapping = {
-      "model.embed_tokens.weight": [config["vocab_size"], hidden_size],
-      "model.norm.weight": [hidden_size],
-      "lm_head.weight": [config["vocab_size"], hidden_size],
+    "model.embed_tokens.weight": [config["vocab_size"], hidden_size],
+    "model.norm.weight": [hidden_size],
+    "lm_head.weight": [config["vocab_size"], hidden_size],
   }
 
   # Determine if the model is MoE based on config keys
@@ -472,16 +472,16 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
   for layer_idx in range(num_hidden_layers):
     layer_prefix = f"model.layers.{layer_idx}"
     layer_mapping = {
-        f"{layer_prefix}.input_layernorm.weight": [hidden_size],
-        f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
-        # Attention projections
-        f"{layer_prefix}.self_attn.q_proj.weight": [num_attention_heads * head_dim, hidden_size],
-        f"{layer_prefix}.self_attn.k_proj.weight": [num_key_value_heads * head_dim, hidden_size],
-        f"{layer_prefix}.self_attn.v_proj.weight": [num_key_value_heads * head_dim, hidden_size],
-        f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, num_attention_heads * head_dim],
-        # QK Norm weights (applied per head to the head_dim dimension)
-        f"{layer_prefix}.self_attn.q_norm.weight": [head_dim],
-        f"{layer_prefix}.self_attn.k_norm.weight": [head_dim],
+      f"{layer_prefix}.input_layernorm.weight": [hidden_size],
+      f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
+      # Attention projections
+      f"{layer_prefix}.self_attn.q_proj.weight": [num_attention_heads * head_dim, hidden_size],
+      f"{layer_prefix}.self_attn.k_proj.weight": [num_key_value_heads * head_dim, hidden_size],
+      f"{layer_prefix}.self_attn.v_proj.weight": [num_key_value_heads * head_dim, hidden_size],
+      f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, num_attention_heads * head_dim],
+      # QK Norm weights (applied per head to the head_dim dimension)
+      f"{layer_prefix}.self_attn.q_norm.weight": [head_dim],
+      f"{layer_prefix}.self_attn.k_norm.weight": [head_dim],
     }
 
     if num_experts > 1:
@@ -494,22 +494,22 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
         moe_ffn_intermediate_size = config.get("intermediate_size")
         if moe_ffn_intermediate_size is None:
           raise ValueError(
-              "MoE model detected (num_experts > 1) but 'moe_intermediate_size' or 'intermediate_size' not found in config."
+            "MoE model detected (num_experts > 1) but 'moe_intermediate_size' or 'intermediate_size' not found in config."
           )
 
       layer_mapping.update(
-          {
-              f"{layer_prefix}.mlp.gate.weight": [num_experts, hidden_size],
-          }
+        {
+          f"{layer_prefix}.mlp.gate.weight": [num_experts, hidden_size],
+        }
       )
       for expert_j in range(num_experts):
         expert_prefix = f"{layer_prefix}.mlp.experts.{expert_j}"
         layer_mapping.update(
-            {
-                f"{expert_prefix}.gate_proj.weight": [moe_ffn_intermediate_size, hidden_size],
-                f"{expert_prefix}.up_proj.weight": [moe_ffn_intermediate_size, hidden_size],
-                f"{expert_prefix}.down_proj.weight": [hidden_size, moe_ffn_intermediate_size],
-            }
+          {
+            f"{expert_prefix}.gate_proj.weight": [moe_ffn_intermediate_size, hidden_size],
+            f"{expert_prefix}.up_proj.weight": [moe_ffn_intermediate_size, hidden_size],
+            f"{expert_prefix}.down_proj.weight": [hidden_size, moe_ffn_intermediate_size],
+          }
         )
     else:
       # Dense MLP layers
@@ -517,11 +517,11 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
       if dense_ffn_intermediate_size is None:
         raise ValueError("'intermediate_size' not found in config for a dense MLP.")
       layer_mapping.update(
-          {
-              f"{layer_prefix}.mlp.gate_proj.weight": [dense_ffn_intermediate_size, hidden_size],
-              f"{layer_prefix}.mlp.up_proj.weight": [dense_ffn_intermediate_size, hidden_size],
-              f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, dense_ffn_intermediate_size],
-          }
+        {
+          f"{layer_prefix}.mlp.gate_proj.weight": [dense_ffn_intermediate_size, hidden_size],
+          f"{layer_prefix}.mlp.up_proj.weight": [dense_ffn_intermediate_size, hidden_size],
+          f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, dense_ffn_intermediate_size],
+        }
       )
     mapping.update(layer_mapping)
   return mapping
@@ -540,42 +540,42 @@ def LLAMA31_HF_WEIGHTS_TO_SHAPE(config):
   """
 
   mapping = {
-      "model.embed_tokens.weight": [config["vocab_size"], config["hidden_size"]],
-      "model.norm.weight": [config["hidden_size"]],
-      "lm_head.weight": [config["vocab_size"], config["hidden_size"]],
+    "model.embed_tokens.weight": [config["vocab_size"], config["hidden_size"]],
+    "model.norm.weight": [config["hidden_size"]],
+    "lm_head.weight": [config["vocab_size"], config["hidden_size"]],
   }
   for layer_idx in range(config["num_hidden_layers"]):
     layer_mapping = {
-        f"model.layers.{layer_idx}.input_layernorm.weight": [config["hidden_size"]],
-        f"model.layers.{layer_idx}.mlp.down_proj.weight": [
-            config["hidden_size"],
-            config["intermediate_size"],
-        ],
-        f"model.layers.{layer_idx}.mlp.up_proj.weight": [
-            config["intermediate_size"],
-            config["hidden_size"],
-        ],
-        f"model.layers.{layer_idx}.mlp.gate_proj.weight": [
-            config["intermediate_size"],
-            config["hidden_size"],
-        ],
-        f"model.layers.{layer_idx}.post_attention_layernorm.weight": [config["hidden_size"]],
-        f"model.layers.{layer_idx}.self_attn.k_proj.weight": [
-            config["num_key_value_heads"] * config["head_dim"],
-            config["hidden_size"],
-        ],
-        f"model.layers.{layer_idx}.self_attn.o_proj.weight": [
-            config["hidden_size"],
-            config["num_attention_heads"] * config["head_dim"],
-        ],
-        f"model.layers.{layer_idx}.self_attn.q_proj.weight": [
-            config["num_attention_heads"] * config["head_dim"],
-            config["hidden_size"],
-        ],
-        f"model.layers.{layer_idx}.self_attn.v_proj.weight": [
-            config["num_key_value_heads"] * config["head_dim"],
-            config["hidden_size"],
-        ],
+      f"model.layers.{layer_idx}.input_layernorm.weight": [config["hidden_size"]],
+      f"model.layers.{layer_idx}.mlp.down_proj.weight": [
+        config["hidden_size"],
+        config["intermediate_size"],
+      ],
+      f"model.layers.{layer_idx}.mlp.up_proj.weight": [
+        config["intermediate_size"],
+        config["hidden_size"],
+      ],
+      f"model.layers.{layer_idx}.mlp.gate_proj.weight": [
+        config["intermediate_size"],
+        config["hidden_size"],
+      ],
+      f"model.layers.{layer_idx}.post_attention_layernorm.weight": [config["hidden_size"]],
+      f"model.layers.{layer_idx}.self_attn.k_proj.weight": [
+        config["num_key_value_heads"] * config["head_dim"],
+        config["hidden_size"],
+      ],
+      f"model.layers.{layer_idx}.self_attn.o_proj.weight": [
+        config["hidden_size"],
+        config["num_attention_heads"] * config["head_dim"],
+      ],
+      f"model.layers.{layer_idx}.self_attn.q_proj.weight": [
+        config["num_attention_heads"] * config["head_dim"],
+        config["hidden_size"],
+      ],
+      f"model.layers.{layer_idx}.self_attn.v_proj.weight": [
+        config["num_key_value_heads"] * config["head_dim"],
+        config["hidden_size"],
+      ],
     }
     mapping = {**mapping, **layer_mapping}
   return mapping
@@ -608,20 +608,20 @@ def MIXTRAL_HF_WEIGHTS_TO_SHAPE(config):
   for i in range(config["num_hidden_layers"]):
     # Attention Projections
     shapes[f"model.layers.{i}.self_attn.q_proj.weight"] = [
-        config["hidden_size"],
-        config["hidden_size"],
+      config["hidden_size"],
+      config["hidden_size"],
     ]
     shapes[f"model.layers.{i}.self_attn.k_proj.weight"] = [
-        kv_dim,
-        config["hidden_size"],
+      kv_dim,
+      config["hidden_size"],
     ]
     shapes[f"model.layers.{i}.self_attn.v_proj.weight"] = [
-        kv_dim,
-        config["hidden_size"],
+      kv_dim,
+      config["hidden_size"],
     ]
     shapes[f"model.layers.{i}.self_attn.o_proj.weight"] = [
-        config["hidden_size"],
-        config["hidden_size"],
+      config["hidden_size"],
+      config["hidden_size"],
     ]
 
     # LayerNorms
@@ -630,23 +630,23 @@ def MIXTRAL_HF_WEIGHTS_TO_SHAPE(config):
 
     # MOE Gate
     shapes[f"model.layers.{i}.block_sparse_moe.gate.weight"] = [
-        config["num_local_experts"],
-        config["hidden_size"],
+      config["num_local_experts"],
+      config["hidden_size"],
     ]
 
     # MOE Experts
     for j in range(config["num_local_experts"]):
       shapes[f"model.layers.{i}.block_sparse_moe.experts.{j}.w1.weight"] = [
-          config["intermediate_size"],
-          config["hidden_size"],
+        config["intermediate_size"],
+        config["hidden_size"],
       ]
       shapes[f"model.layers.{i}.block_sparse_moe.experts.{j}.w2.weight"] = [
-          config["hidden_size"],
-          config["intermediate_size"],
+        config["hidden_size"],
+        config["intermediate_size"],
       ]
       shapes[f"model.layers.{i}.block_sparse_moe.experts.{j}.w3.weight"] = [
-          config["intermediate_size"],
-          config["hidden_size"],
+        config["intermediate_size"],
+        config["hidden_size"],
       ]
 
   return shapes
@@ -654,27 +654,27 @@ def MIXTRAL_HF_WEIGHTS_TO_SHAPE(config):
 
 # {maxtext model name: {hf weight name: hf shape}}
 HF_SHAPE = {
-    "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
-    "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
-    "gemma2-27b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
-    "gemma3-4b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
-    "gemma3-12b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
-    "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-0.6b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-4b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-4b-thinking-2507": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-8b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-14b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-32b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "llama3.1-8b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
-    "llama3.1-70b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
-    "llama3.1-405b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-30b-a3b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-235b-a22b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "qwen3-480b-a35b": QWEN3_HF_WEIGHTS_TO_SHAPE,
-    "deepseek3-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
-    "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
-    "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
-    "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
-    "mixtral-8x22b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
+  "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
+  "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
+  "gemma2-27b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
+  "gemma3-4b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
+  "gemma3-12b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
+  "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
+  "qwen3-0.6b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+  "qwen3-4b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+  "qwen3-4b-thinking-2507": QWEN3_HF_WEIGHTS_TO_SHAPE,
+  "qwen3-8b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+  "qwen3-14b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+  "qwen3-32b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+  "llama3.1-8b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
+  "llama3.1-70b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
+  "llama3.1-405b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
+  "qwen3-30b-a3b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+  "qwen3-235b-a22b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+  "qwen3-480b-a35b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+  "deepseek3-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
+  "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
+  "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
+  "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
+  "mixtral-8x22b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
 }

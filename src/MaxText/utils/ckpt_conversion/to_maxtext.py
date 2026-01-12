@@ -86,7 +86,13 @@ from MaxText.inference_utils import str2bool
 from MaxText.layers import models, quantizations
 from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model, validate_and_filter_param_map_keys
+from MaxText.utils.ckpt_conversion.utils.utils import (
+  apply_hook_fns,
+  HF_IDS,
+  print_ram_usage,
+  get_hf_model,
+  validate_and_filter_param_map_keys,
+)
 
 jax.config.update("jax_platform_name", "cpu")
 
@@ -97,12 +103,12 @@ class MemoryMonitorTqdm(tqdm):
   """Custom tqdm class that displays memory usage in the progress bar."""
 
   def format_meter(
-      self,
-      n,
-      total,
-      elapsed,
-      postfix=None,
-      **extra_kwargs,
+    self,
+    n,
+    total,
+    elapsed,
+    postfix=None,
+    **extra_kwargs,
   ):
     """Override to add memory usage info to the postfix."""
     # Get memory info
@@ -339,9 +345,9 @@ def get_maxtext_model_info(config):
   abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
   # Standardize abstract tree for later unflattening
   abstract_params_tree = jax.tree.map(
-      lambda _: 0,
-      abstract_params_tree,
-      is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
+    lambda _: 0,
+    abstract_params_tree,
+    is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
   )
   abstract_params_treedef = jax.tree_util.tree_structure(abstract_params_tree)
 
@@ -359,11 +365,11 @@ def get_maxtext_model_info(config):
 
 
 def _build_multi_axis_stacked_tensor(
-    hf_source_keys: List[List[str]],
-    tensor_getter_fn: Callable[[str], np.ndarray],
-    hook_fns: Any,
-    target_shape: tuple,
-    config,
+  hf_source_keys: List[List[str]],
+  tensor_getter_fn: Callable[[str], np.ndarray],
+  hook_fns: Any,
+  target_shape: tuple,
+  config,
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along two axes (experts and layers).
 
@@ -399,11 +405,11 @@ def _build_multi_axis_stacked_tensor(
 
 
 def _build_single_axis_stacked_tensor(
-    hf_source_keys: List[str],
-    tensor_getter_fn: Callable[[str], np.ndarray],
-    hook_fns: Any,
-    target_shape: tuple,
-    config,
+  hf_source_keys: List[str],
+  tensor_getter_fn: Callable[[str], np.ndarray],
+  hook_fns: Any,
+  target_shape: tuple,
+  config,
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along a single axis.
 
@@ -463,23 +469,23 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
   elif not isinstance(hf_source_keys_or_key[0], list):
     # Case 2 or 3: Single-Axis Stacked hf keys (un-nested list)
     load_fn = partial(
-        _build_single_axis_stacked_tensor,
-        hf_source_keys_or_key,
-        tensor_getter,
-        hook_fn,
-        mt_target_shape_or_shapes,
-        config,
+      _build_single_axis_stacked_tensor,
+      hf_source_keys_or_key,
+      tensor_getter,
+      hook_fn,
+      mt_target_shape_or_shapes,
+      config,
     )
   else:
     # isinstance(hf_source_keys_or_key[0], list)
     # Case 4: Multi-Axis Stacked hf keys (nested list)
     load_fn = partial(
-        _build_multi_axis_stacked_tensor,
-        hf_source_keys_or_key,
-        tensor_getter,
-        hook_fn,
-        mt_target_shape_or_shapes,
-        config,
+      _build_multi_axis_stacked_tensor,
+      hf_source_keys_or_key,
+      tensor_getter,
+      hook_fn,
+      mt_target_shape_or_shapes,
+      config,
     )
   return load_fn
 
@@ -507,13 +513,13 @@ def _get_maxtext_indices_and_shapes(mt_param_key_or_keys, maxtext_abstract_dict)
 
 
 def _get_maxtext_weight(
-    load_fn,
-    mt_target_idx_or_indices,
-    mt_target_shape_or_shapes,
-    mt_param_key_or_keys,
-    final_mt_weights,
-    config,
-    use_lazy_load,
+  load_fn,
+  mt_target_idx_or_indices,
+  mt_target_shape_or_shapes,
+  mt_param_key_or_keys,
+  final_mt_weights,
+  config,
+  use_lazy_load,
 ):
   """Loads Hugging Face parameters and converts them to MaxText parameters.
 
@@ -531,8 +537,8 @@ def _get_maxtext_weight(
       final_mt_weights[mt_target_idx_or_indices] = final_mt_tensor_numpy
       if final_mt_tensor_numpy.shape != mt_target_shape_or_shapes:
         raise ValueError(
-            f"Shape mismatch for {mt_param_key_or_keys}: Expected {mt_target_shape_or_shapes}, "
-            f"got {final_mt_tensor_numpy.shape}"
+          f"Shape mismatch for {mt_param_key_or_keys}: Expected {mt_target_shape_or_shapes}, "
+          f"got {final_mt_tensor_numpy.shape}"
         )
     else:
       # Case 1.2: Eager mode, `composite_mt_key`
@@ -542,8 +548,8 @@ def _get_maxtext_weight(
         final_mt_weights[mt_target_idx] = final_mt_tensor_numpy[..., i]
         if final_mt_weights[mt_target_idx].shape != mt_target_shape_or_shapes[i]:
           raise ValueError(
-              f"Shape mismatch for {mt_param_key_or_keys[i]}: Expect {mt_target_shape_or_shapes[i]}, "
-              f"got {final_mt_weights[mt_target_idx].shape}"
+            f"Shape mismatch for {mt_param_key_or_keys[i]}: Expect {mt_target_shape_or_shapes[i]}, "
+            f"got {final_mt_weights[mt_target_idx].shape}"
           )
   else:
     # Case 2: Lazy mode
@@ -571,10 +577,10 @@ def _get_maxtext_weight(
         # Each LazyTensor gets a new load_fn that wraps the original and applies the slice.
         slicing_load_fn = partial(_slicing_loader, final_mt_tensor_numpy, i)
         final_mt_weights[mt_target_idx] = LazyTensor(
-            slicing_load_fn,
-            mt_target_shape_or_shapes[i],
-            config.weight_dtype,
-            name=mt_param_key_or_keys[i],
+          slicing_load_fn,
+          mt_target_shape_or_shapes[i],
+          config.weight_dtype,
+          name=mt_param_key_or_keys[i],
         )
 
 
@@ -658,12 +664,12 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   max_logging.log("Parameter mappings and hooks obtained.")
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      output_directory,
-      enable_checkpointing=True,
-      use_async=False,  # Synchronous saving for simplicity in conversion script
-      save_interval_steps=1,  # Save at step 0
-      use_ocdbt=config.checkpoint_storage_use_ocdbt,
-      use_zarr3=config.checkpoint_storage_use_zarr3,
+    output_directory,
+    enable_checkpointing=True,
+    use_async=False,  # Synchronous saving for simplicity in conversion script
+    save_interval_steps=1,  # Save at step 0
+    use_ocdbt=config.checkpoint_storage_use_ocdbt,
+    use_zarr3=config.checkpoint_storage_use_zarr3,
   )
 
   maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(config)
@@ -677,7 +683,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   filtered_map_keys = validate_and_filter_param_map_keys(param_map_mt_to_hf.keys(), maxtext_abstract_dict.keys())
 
   for mt_param_key_or_keys in MemoryMonitorTqdm(
-      filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
+    filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
   ):
     if not use_lazy_load and config.scan_layers:
       max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
@@ -690,7 +696,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     # Step 1: Resolves MaxText key(s) to target indices and shapes
     # based on MaxText key form (`atomic_mt_key` or `composite_mt_key`)
     mt_target_idx_or_indices, mt_target_shape_or_shapes = _get_maxtext_indices_and_shapes(
-        mt_param_key_or_keys, maxtext_abstract_dict
+      mt_param_key_or_keys, maxtext_abstract_dict
     )
 
     # Step 2: Determine the loading function for hf key
@@ -700,13 +706,13 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     # Step 3: Load hf keys and convert to maxtext keys
     # based on tensor load mode (lazy, eager) and MaxText key form (`atomic_mt_key` or `composite_mt_key`)
     _get_maxtext_weight(
-        load_fn,
-        mt_target_idx_or_indices,
-        mt_target_shape_or_shapes,
-        mt_param_key_or_keys,
-        final_mt_weights,
-        config,
-        use_lazy_load,
+      load_fn,
+      mt_target_idx_or_indices,
+      mt_target_shape_or_shapes,
+      mt_param_key_or_keys,
+      final_mt_weights,
+      config,
+      use_lazy_load,
     )
 
   del hf_state_dict_numpy
@@ -751,15 +757,15 @@ if __name__ == "__main__":
 
   parser = argparse.ArgumentParser()
   parser.add_argument(
-      "--lazy_load_tensors",
-      type=str2bool,
-      required=False,
-      default=False,
-      help="Whether to use lazy loading of HF tensors.",
+    "--lazy_load_tensors",
+    type=str2bool,
+    required=False,
+    default=False,
+    help="Whether to use lazy loading of HF tensors.",
   )
   # if not specified, default to MaxText.utils.ckpt_conversion.utils.utils.HF_IDS[model_name]
   parser.add_argument(
-      "--hf_model_path", type=str, required=False, default="", help="local path to hf model, or custom remote hf repo"
+    "--hf_model_path", type=str, required=False, default="", help="local path to hf model, or custom remote hf repo"
   )
   local_args, _ = parser.parse_known_args()
   model_args = sys.argv

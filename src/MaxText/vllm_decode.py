@@ -88,21 +88,21 @@ flags.mark_flag_as_required("hf_config_path")
 
 
 def decode_with_vllm(
-    model_name: str,
-    hf_model_name: str,
-    hf_config_path: str,
-    load_parameters_path: str,
-    ici_data_parallelism: int,
-    ici_tensor_parallelism: int,
-    ici_expert_parallelism: int,
-    max_prefill_length: int,
-    max_target_length: int,
-    gpu_memory_utilization: float,
-    enable_expert_parallel: bool,
-    prompt: str,
-    decode_sampling_temperature: float,
-    decode_sampling_nucleus_p: float,
-    decode_sampling_top_k: float,
+  model_name: str,
+  hf_model_name: str,
+  hf_config_path: str,
+  load_parameters_path: str,
+  ici_data_parallelism: int,
+  ici_tensor_parallelism: int,
+  ici_expert_parallelism: int,
+  max_prefill_length: int,
+  max_target_length: int,
+  gpu_memory_utilization: float,
+  enable_expert_parallel: bool,
+  prompt: str,
+  decode_sampling_temperature: float,
+  decode_sampling_nucleus_p: float,
+  decode_sampling_top_k: float,
 ) -> None:
   """Decode using vLLM with a MaxText model implementation.
 
@@ -142,19 +142,19 @@ def decode_with_vllm(
 
   # Prepare MaxText and sharding configs (Parallelism is dynamic)
   vllm_args["additional_config"]["maxtext_config"] = {
-      "model_name": model_name,
-      "max_target_length": max_target_length,
-      "weight_dtype": "bfloat16",
-      "allow_split_physical_axes": True,
-      "load_parameters_path": load_parameters_path,
+    "model_name": model_name,
+    "max_target_length": max_target_length,
+    "weight_dtype": "bfloat16",
+    "allow_split_physical_axes": True,
+    "load_parameters_path": load_parameters_path,
   }
 
   vllm_args["additional_config"]["sharding"] = {
-      "sharding_strategy": {
-          "tensor_parallelism": ici_tensor_parallelism,
-          "expert_parallelism": ici_expert_parallelism,
-          "data_parallelism": ici_data_parallelism,
-      },
+    "sharding_strategy": {
+      "tensor_parallelism": ici_tensor_parallelism,
+      "expert_parallelism": ici_expert_parallelism,
+      "data_parallelism": ici_data_parallelism,
+    },
   }
 
   if enable_expert_parallel:
@@ -163,15 +163,15 @@ def decode_with_vllm(
   # Initialize and Run LLM
   max_tokens = max_target_length - max_prefill_length
   sampling_params = SamplingParams(
-      temperature=decode_sampling_temperature,
-      max_tokens=max_tokens,
-      top_k=decode_sampling_top_k,
-      top_p=decode_sampling_nucleus_p,
+    temperature=decode_sampling_temperature,
+    max_tokens=max_tokens,
+    top_k=decode_sampling_top_k,
+    top_p=decode_sampling_nucleus_p,
   )
 
   print(
-      f"Initializing LLM with DP={vllm_args['data_parallel_size']}, TP={vllm_args['tensor_parallel_size']} "
-      f"and EP={ici_expert_parallelism if enable_expert_parallel else 0}..."
+    f"Initializing LLM with DP={vllm_args['data_parallel_size']}, TP={vllm_args['tensor_parallel_size']} "
+    f"and EP={ici_expert_parallelism if enable_expert_parallel else 0}..."
   )
   llm = LLM(**vllm_args)
 
@@ -186,9 +186,9 @@ def decode_with_vllm(
 
 
 def decode_with_tunix(
-    config: Config,
-    model: Any,
-    mesh: jax.sharding.Mesh,
+  config: Config,
+  model: Any,
+  mesh: jax.sharding.Mesh,
 ) -> None:
   """Decode using vLLM with a MaxText model."""
   # Wrap the model for Tunix
@@ -196,9 +196,9 @@ def decode_with_tunix(
 
   # Load the tokenizer
   tokenizer = transformers.AutoTokenizer.from_pretrained(
-      config.tokenizer_path,
-      token=config.hf_access_token,
-      model_max_length=config.max_target_length,
+    config.tokenizer_path,
+    token=config.hf_access_token,
+    model_max_length=config.max_target_length,
   )
   tokenizer.bos_token = None
 
@@ -206,13 +206,13 @@ def decode_with_tunix(
   if config.use_chat_template:
     # Format the prompt using chat template if specified
     messages = [
-        {"role": "user", "content": config.prompt},
+      {"role": "user", "content": config.prompt},
     ]
     input_with_chat_template = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,  # Set to False to get the string
-        add_generation_prompt=True,
-        add_special_tokens=False,  # Prevent adding special tokens
+      messages,
+      tokenize=False,  # Set to False to get the string
+      add_generation_prompt=True,
+      add_special_tokens=False,  # Prevent adding special tokens
     )
     prompts = [input_with_chat_template]
 
@@ -221,26 +221,26 @@ def decode_with_tunix(
 
   # Create vLLM rollout for inference
   rollout_config = base_rollout.RolloutConfig(
-      max_tokens_to_generate=max_tokens_to_generate,
-      max_prompt_length=max_prompt_length,
-      temperature=config.decode_sampling_temperature,
-      top_p=config.decode_sampling_nucleus_p,
-      top_k=config.decode_sampling_top_k,
+    max_tokens_to_generate=max_tokens_to_generate,
+    max_prompt_length=max_prompt_length,
+    temperature=config.decode_sampling_temperature,
+    top_p=config.decode_sampling_nucleus_p,
+    top_k=config.decode_sampling_top_k,
   )
   vllm_rollout = VllmRollout(
-      model=tunix_model,
-      tokenizer=tokenizer,
-      # The cache_config_or_size sets the absolute maximum sequence length.
-      # We add 256 as a safety buffer to account for tokens added by
-      # other special formatting, which is not part of max_prompt_length.
-      cache_config_or_size=max_prompt_length + max_tokens_to_generate + 256,
-      mesh=mesh,
-      model_version=config.tokenizer_path,
-      hbm_utilization=0.8,
-      # Initialize vllm model with random weights to speed up bootstrap time.
-      # Actual model weights will be loaded later.
-      init_with_random_weights=True,
-      tpu_backend_type="jax",
+    model=tunix_model,
+    tokenizer=tokenizer,
+    # The cache_config_or_size sets the absolute maximum sequence length.
+    # We add 256 as a safety buffer to account for tokens added by
+    # other special formatting, which is not part of max_prompt_length.
+    cache_config_or_size=max_prompt_length + max_tokens_to_generate + 256,
+    mesh=mesh,
+    model_version=config.tokenizer_path,
+    hbm_utilization=0.8,
+    # Initialize vllm model with random weights to speed up bootstrap time.
+    # Actual model weights will be loaded later.
+    init_with_random_weights=True,
+    tpu_backend_type="jax",
   )
 
   # Generate text
@@ -254,7 +254,7 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
 
   if FLAGS.use_tunix:
@@ -263,21 +263,21 @@ def main(argv: Sequence[str]) -> None:
     decode_with_tunix(config, model=maxtext_model, mesh=mesh)
   else:
     decode_with_vllm(
-        model_name=FLAGS.model_name,
-        hf_model_name=FLAGS.hf_model_name,
-        hf_config_path=FLAGS.hf_config_path,
-        load_parameters_path=FLAGS.load_parameters_path,
-        ici_data_parallelism=FLAGS.ici_data_parallelism,
-        ici_tensor_parallelism=FLAGS.ici_tensor_parallelism,
-        ici_expert_parallelism=FLAGS.ici_expert_parallelism,
-        max_target_length=FLAGS.max_target_length,
-        max_prefill_length=FLAGS.max_prefill_length,
-        gpu_memory_utilization=FLAGS.gpu_memory_utilization,
-        enable_expert_parallel=FLAGS.enable_expert_parallel,
-        prompt=FLAGS.prompt,
-        decode_sampling_temperature=FLAGS.decode_sampling_temperature,
-        decode_sampling_nucleus_p=FLAGS.decode_sampling_nucleus_p,
-        decode_sampling_top_k=FLAGS.decode_sampling_top_k,
+      model_name=FLAGS.model_name,
+      hf_model_name=FLAGS.hf_model_name,
+      hf_config_path=FLAGS.hf_config_path,
+      load_parameters_path=FLAGS.load_parameters_path,
+      ici_data_parallelism=FLAGS.ici_data_parallelism,
+      ici_tensor_parallelism=FLAGS.ici_tensor_parallelism,
+      ici_expert_parallelism=FLAGS.ici_expert_parallelism,
+      max_target_length=FLAGS.max_target_length,
+      max_prefill_length=FLAGS.max_prefill_length,
+      gpu_memory_utilization=FLAGS.gpu_memory_utilization,
+      enable_expert_parallel=FLAGS.enable_expert_parallel,
+      prompt=FLAGS.prompt,
+      decode_sampling_temperature=FLAGS.decode_sampling_temperature,
+      decode_sampling_nucleus_p=FLAGS.decode_sampling_nucleus_p,
+      decode_sampling_top_k=FLAGS.decode_sampling_top_k,
     )
 
 

@@ -66,9 +66,9 @@ def validate_compute_axis_order(s: str) -> None:
 
 
 def validate_shard_mode(
-    shard_mode: str,
-    decoder_block: str,
-    quantization: str,
+  shard_mode: str,
+  decoder_block: str,
+  quantization: str,
 ) -> None:
   """Validates sharding settings, raising ValueError for incompatible combinations."""
   if shard_mode not in {"auto", "explicit"}:
@@ -81,8 +81,8 @@ def validate_shard_mode(
     supported_decoders = {"simple", "simple_mlp", "llama2"}
     if decoder_block not in supported_decoders:
       raise ValueError(
-          f"Decoder '{decoder_block}' is not supported with 'explicit' sharding. "
-          f"Supported options are: {list(supported_decoders)}."
+        f"Decoder '{decoder_block}' is not supported with 'explicit' sharding. "
+        f"Supported options are: {list(supported_decoders)}."
       )
 
     # Check for unsupported quantization
@@ -100,13 +100,13 @@ def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
 
 def validate_attention_kernel(s: str) -> None:
   valid_attention_kernels = (
-      "autoselected",
-      "dot_product",
-      "flash",
-      "cudnn_flash_te",
-      "cudnn_flash_jax",
-      "paged",
-      "vllm_rpa",
+    "autoselected",
+    "dot_product",
+    "flash",
+    "cudnn_flash_te",
+    "cudnn_flash_jax",
+    "paged",
+    "vllm_rpa",
   )
   if s not in valid_attention_kernels:  # currently supported attention
     raise ValueError("Invalid attention kernel was passed. Valid options ", valid_attention_kernels)
@@ -124,9 +124,9 @@ def validate_moba_attention(moba, attention) -> None:
 
 
 def validate_attention_window_params(
-    attention_type: str,
-    chunk_attn_window_size: int,
-    sliding_window_size: int,
+  attention_type: str,
+  chunk_attn_window_size: int,
+  sliding_window_size: int,
 ) -> None:
   """
   Validates window size parameters for attention types 'chunk' and 'local'.
@@ -135,14 +135,14 @@ def validate_attention_window_params(
     # Validate chunk_attn_window_size for 'chunk' attention
     if not isinstance(chunk_attn_window_size, int) or chunk_attn_window_size <= 0:
       raise ValueError(
-          f"When attention_type is 'chunk', chunk_attn_window_size must be an integer greater than 0. "
-          f"Got: {chunk_attn_window_size}"
+        f"When attention_type is 'chunk', chunk_attn_window_size must be an integer greater than 0. "
+        f"Got: {chunk_attn_window_size}"
       )
   elif attention_type == AttentionType.LOCAL_SLIDING.value:
     if not isinstance(sliding_window_size, int) or sliding_window_size <= 0:
       raise ValueError(
-          f"When attention_type is 'local', sliding_window_size must be an integer greater than 0. "
-          f"Got: {sliding_window_size}"
+        f"When attention_type is 'local', sliding_window_size must be an integer greater than 0. "
+        f"Got: {sliding_window_size}"
       )
 
 
@@ -159,7 +159,7 @@ def validate_periodic_profiler(profiler, profile_periodically_period, profiler_s
     raise ValueError("Periodic profiler requested but no profiler was set, set it via profiler=xplane or profiler=nsys")
   if profile_periodically_period < profiler_steps:
     raise ValueError(
-        f"You must set the profile_periodically_period {profile_periodically_period} at least as long as profiler_steps {profiler_steps}."
+      f"You must set the profile_periodically_period {profile_periodically_period} at least as long as profiler_steps {profiler_steps}."
     )
 
 
@@ -175,8 +175,8 @@ def validate_prefill_and_target_lengths(max_prefill_length: int, max_target_leng
   if max_target_length < max_prefill_length:
     # valid max_target_length = max_prefill_length for existing logit checks
     raise ValueError(
-        f"Invalid max_target_length {max_target_length}, this should be the sum of "
-        f"max_prefill_predict_length ({max_prefill_length}) and the expected max output length."
+      f"Invalid max_target_length {max_target_length}, this should be the sum of "
+      f"max_prefill_predict_length ({max_prefill_length}) and the expected max output length."
     )
 
 
@@ -190,7 +190,7 @@ def validate_expert_shard_attention_option(expert_shard_attention_option: str) -
   valid_expert_shard_attention_option = ("fsdp", "context")
   if expert_shard_attention_option not in valid_expert_shard_attention_option:
     raise ValueError(
-        f"Invalid expert_shard_attention_option was passed. Got: {expert_shard_attention_option}. Valid options: {valid_expert_shard_attention_option}"
+      f"Invalid expert_shard_attention_option was passed. Got: {expert_shard_attention_option}. Valid options: {valid_expert_shard_attention_option}"
     )
 
 
@@ -207,17 +207,17 @@ def validate_rampup_batch_size(batch_size_start, batch_size_end, batch_size_incr
   assert global_rampup_samples > 0, f"global_rampup_samples should be positive, got {global_rampup_samples}."
   diff_batch_size = batch_size_end - batch_size_start
   assert diff_batch_size > 0, (
-      "per_device_batch_size must be greater than per_device_batch_size_start. "
-      f"get batch size is {batch_size_end} and batch size start is {batch_size_start}."
+    "per_device_batch_size must be greater than per_device_batch_size_start. "
+    f"get batch size is {batch_size_end} and batch size start is {batch_size_start}."
   )
   assert diff_batch_size % batch_size_increment == 0, (
-      "Expect rampup batch size change divisible by batch size increment."
-      f"Got per_device_batch_size={batch_size_end} and per_device_batch_size_start={batch_size_start}."
+    "Expect rampup batch size change divisible by batch size increment."
+    f"Got per_device_batch_size={batch_size_end} and per_device_batch_size_start={batch_size_start}."
   )
 
 
 def validate_context_parallel_strategy_ring(
-    context_parallel_size: int, context_parallel_strategy: str, hardware: str
+  context_parallel_size: int, context_parallel_strategy: str, hardware: str
 ) -> None:
   """Validates that ring context parallelism strategy is only used on GPU hardware."""
   if context_parallel_size > 1 and context_parallel_strategy.lower() == "ring":
@@ -230,7 +230,7 @@ def validate_keys(keys):
   validate_attention_type(keys["attention_type"])
   validate_moba_attention(keys["moba"], keys["attention"])
   validate_attention_window_params(
-      keys["attention_type"], keys.get("chunk_attn_window_size"), keys.get("sliding_window_size")
+    keys["attention_type"], keys.get("chunk_attn_window_size"), keys.get("sliding_window_size")
   )
   validate_profiler_type(keys["profiler"])
   validate_periodic_profiler(keys["profiler"], keys["profile_periodically_period"], keys["profiler_steps"])
@@ -241,14 +241,14 @@ def validate_keys(keys):
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
   validate_vocab_tiling(
-      keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"], keys["enable_nnx"]
+    keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"], keys["enable_nnx"]
   )
   if keys["enable_rampup_batch_size"]:
     validate_rampup_batch_size(
-        keys["per_device_batch_size_start"],
-        keys["per_device_batch_size"],
-        keys["per_device_batch_size_increment"],
-        keys["global_rampup_samples"],
+      keys["per_device_batch_size_start"],
+      keys["per_device_batch_size"],
+      keys["per_device_batch_size_increment"],
+      keys["global_rampup_samples"],
     )
 
   # TODO remove after b/435512699 resolved
@@ -256,7 +256,7 @@ def validate_keys(keys):
     raise ValueError("Currently load-balanced context parallelism is not supported for chunk attention.")
 
   validate_context_parallel_strategy_ring(
-      keys["context_parallel_size"], keys["context_parallel_strategy"], keys["hardware"]
+    keys["context_parallel_size"], keys["context_parallel_strategy"], keys["hardware"]
   )
 
   if keys["mtp_eval_target_module"] < 0:
@@ -264,40 +264,40 @@ def validate_keys(keys):
 
   if keys["mtp_num_layers"] > 0 and keys["model_call_mode"] == "inference":
     raise ValueError(
-        "Multi-Token Prediction (MTP) is enabled (mtp_num_layers > 0), but it is not supported in inference mode. "
-        "Please disable MTP by setting mtp_num_layers=0 for inference."
+      "Multi-Token Prediction (MTP) is enabled (mtp_num_layers > 0), but it is not supported in inference mode. "
+      "Please disable MTP by setting mtp_num_layers=0 for inference."
     )
 
-  assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
-      "enable_checkpointing"
-  ], "You must set enable_checkpointing to load a checkpoint"
-  assert (
-      keys["load_parameters_path"] == "" or keys["load_full_state_path"] == ""
-  ), "At most one of `load_parameters_path` or `load_full_state_path` should be set"
+  assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys["enable_checkpointing"], (
+    "You must set enable_checkpointing to load a checkpoint"
+  )
+  assert keys["load_parameters_path"] == "" or keys["load_full_state_path"] == "", (
+    "At most one of `load_parameters_path` or `load_full_state_path` should be set"
+  )
 
   if keys["enable_multi_tier_checkpointing"]:
-    assert keys[
-        "local_checkpoint_directory"
-    ], "A local checkpoint directory must be specified when using multi-tier checkpointing"
-    assert (
-        keys["local_checkpoint_period"] > 0
-    ), "A positive local checkpoint period must be specified when using multi-tier checkpointing"
-    assert (
-        keys["multi_tier_checkpointing_backup_interval_minutes"] > 0
-    ), "A positive multi-tier checkpointing backup interval minutes must be specified when using multi-tier checkpointing"
+    assert keys["local_checkpoint_directory"], (
+      "A local checkpoint directory must be specified when using multi-tier checkpointing"
+    )
+    assert keys["local_checkpoint_period"] > 0, (
+      "A positive local checkpoint period must be specified when using multi-tier checkpointing"
+    )
+    assert keys["multi_tier_checkpointing_backup_interval_minutes"] > 0, (
+      "A positive multi-tier checkpointing backup interval minutes must be specified when using multi-tier checkpointing"
+    )
 
   if keys["enable_emergency_checkpoint"]:
-    assert (
-        keys["local_checkpoint_directory"] != ""
-    ), "A local checkpoint directory must be specified when using emergency checkpoint"
-    assert (
-        keys["local_checkpoint_period"] > 0
-    ), "A positive local checkpoint period must be specified when using emergency checkpoint"
+    assert keys["local_checkpoint_directory"] != "", (
+      "A local checkpoint directory must be specified when using emergency checkpoint"
+    )
+    assert keys["local_checkpoint_period"] > 0, (
+      "A positive local checkpoint period must be specified when using emergency checkpoint"
+    )
 
   else:
     max_logging.log(
-        "Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
-        " use_replicator_service and replicator_backup_interval_minutes"
+      "Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
+      " use_replicator_service and replicator_backup_interval_minutes"
     )
 
   validate_multiple_slices(keys)
@@ -314,9 +314,9 @@ def validate_keys(keys):
   if keys["use_multimodal"]:
     validate_multimodal_model_name(keys["model_name"])
     if keys["use_sft"]:
-      assert keys[
-          "sft_train_on_completion_only"
-      ], "In multimodal SFT (use_multimodal=True, use_sft=True), sft_train_on_completion_only must be set to True"
+      assert keys["sft_train_on_completion_only"], (
+        "In multimodal SFT (use_multimodal=True, use_sft=True), sft_train_on_completion_only must be set to True"
+      )
       # TODO(aireenmei, hengtaoguo): support packing
       assert not keys["packing"], "In multimodal SFT (use_multimodal=True, use_sft=True), packing is not supported yet"
 
@@ -328,9 +328,9 @@ def validate_keys(keys):
 
 
 def validate_tokenizer(keys):
-  assert keys[
-      "tokenizer_path"
-  ], "Please provide tokenizer_path. Even if using pre-tokenized data, tokenizer is required to process special tokens."
+  assert keys["tokenizer_path"], (
+    "Please provide tokenizer_path. Even if using pre-tokenized data, tokenizer is required to process special tokens."
+  )
 
 
 def validate_constant_bound(keys):
@@ -339,9 +339,9 @@ def validate_constant_bound(keys):
   else:
     value_list = keys["constant_bound_config"].split(",")
     keys["constant_bound_config"] = list(map(float, value_list))
-  assert (
-      len(keys["constant_bound_config"]) == 0 or len(keys["constant_bound_config"]) == 6
-  ), "Please specify competete constant bound or none"
+  assert len(keys["constant_bound_config"]) == 0 or len(keys["constant_bound_config"]) == 6, (
+    "Please specify competete constant bound or none"
+  )
 
 
 def validate_quantization_methods(keys):
@@ -364,7 +364,7 @@ def validate_data_input(keys):
     keys["hf_access_token"] = None
   if keys["dataset_type"] == "hf":
     max_logging.log(
-        f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
+      f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
     )
     assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
     if not keys["hf_train_files"]:
@@ -379,14 +379,14 @@ def validate_data_input(keys):
 
   elif keys["dataset_type"] == "grain":
     max_logging.log(
-        f"dataset_type set to grain, will use {keys['grain_train_files']=} as data files, and {keys['grain_worker_count']} workers"
+      f"dataset_type set to grain, will use {keys['grain_train_files']=} as data files, and {keys['grain_worker_count']} workers"
     )
     assert keys["grain_train_files"] != "", "grain_train_files can't be empty when dataset_type=grain"
     if keys["eval_interval"] > 0:
       assert keys["grain_eval_files"], "Please specify grain_eval_files or set eval_interval to <=0."
     assert keys["tokenizer_type"] in (
-        "sentencepiece",
-        "huggingface",
+      "sentencepiece",
+      "huggingface",
     ), f"grain pipeline only supports tokenizer_type: sentencepiece, huggingface, but got {keys['tokenizer_type']}"
   elif keys["dataset_type"] == "tfds":
     max_logging.log(f"dataset_type set to tfds, will use {keys['dataset_path']=} and {keys['dataset_name']=}")
@@ -395,13 +395,13 @@ def validate_data_input(keys):
       assert keys["eval_split"], "Please specify eval_split or set eval_interval to <=0."
 
   if "tokenizer_llama3.tiktoken" in keys["tokenizer_path"]:
-    assert (
-        keys["tokenizer_type"] == "tiktoken"
-    ), "tokenizer_type must be tiktoken when using tokenizer=tokenizer_llama3.tiktoken"
+    assert keys["tokenizer_type"] == "tiktoken", (
+      "tokenizer_type must be tiktoken when using tokenizer=tokenizer_llama3.tiktoken"
+    )
 
   if keys["sharding_tolerance"] > 1.0 or keys["sharding_tolerance"] < 0.0:
     max_logging.log(
-        "WARNING: 'sharding_tolerance: allowed percentage of non-sharded parameters' should be between 0.0 and 1.0"
+      "WARNING: 'sharding_tolerance: allowed percentage of non-sharded parameters' should be between 0.0 and 1.0"
     )
 
   if keys["eval_interval"] > 0 and keys["generate_padding_batch_eval"]:
@@ -418,13 +418,13 @@ def validate_llama4_config(keys: dict):
   """
   if keys["capacity_factor"] >= 0:
     raise ValueError(
-        "Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!"
+      "Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!"
     )
   if keys["num_experts_per_tok"] > 1:
     raise ValueError("Only top-1 routing is supported for Llama4 for now!")
   if keys["base_num_decoder_layers"] % keys["interleave_moe_layer_step"] != 0:
     raise ValueError(
-        f"The number of decoder layers ({keys['base_num_decoder_layers']}) must be divisible by interleave moe layer step ({keys['interleave_moe_layer_step']})"
+      f"The number of decoder layers ({keys['base_num_decoder_layers']}) must be divisible by interleave moe layer step ({keys['interleave_moe_layer_step']})"
     )
 
 
@@ -432,52 +432,52 @@ def validate_model_name(s: str) -> bool:
   """Validate provided model name."""
   # currently supported models
   valid_model_names = (
-      "default",
-      "llama2-7b",
-      "llama2-13b",
-      "llama2-70b",
-      "llama3-8b",
-      "llama3-70b",
-      "llama3.1-8b",
-      "llama3.1-70b",
-      "llama3.1-405b",
-      "llama3.3-70b",
-      "mistral-7b",
-      "mixtral-8x7b",
-      "mixtral-8x22b",
-      "deepseek2-16b",
-      "deepseek2-236b",
-      "deepseek3-671b",
-      "deepseek3-test",
-      "deepseek3-tiny",
-      "kimi-k2-1t",
-      "gemma-7b",
-      "gemma-2b",
-      "gemma2-2b",
-      "gemma2-9b",
-      "gemma2-27b",
-      "gemma3-4b",
-      "gemma3-12b",
-      "gemma3-27b",
-      "qwen3-0.6b",
-      "qwen3-4b",
-      "qwen3-4b-thinking-2507",
-      "qwen3-8b",
-      "qwen3-14b",
-      "qwen3-32b",
-      "qwen3-235b-a22b",
-      "qwen3-30b-a3b",
-      "qwen3-480b-a35b",
-      "qwen3-next-80b-a3b",
-      "qwen3-omni-30b-a3b",
-      "gpt3-175b",
-      "gpt3-22b",
-      "gpt3-6b",
-      "gpt3-52k",
-      "gpt-oss-20b",
-      "gpt-oss-120b",
-      "llama4-17b-16e",
-      "llama4-17b-128e",
+    "default",
+    "llama2-7b",
+    "llama2-13b",
+    "llama2-70b",
+    "llama3-8b",
+    "llama3-70b",
+    "llama3.1-8b",
+    "llama3.1-70b",
+    "llama3.1-405b",
+    "llama3.3-70b",
+    "mistral-7b",
+    "mixtral-8x7b",
+    "mixtral-8x22b",
+    "deepseek2-16b",
+    "deepseek2-236b",
+    "deepseek3-671b",
+    "deepseek3-test",
+    "deepseek3-tiny",
+    "kimi-k2-1t",
+    "gemma-7b",
+    "gemma-2b",
+    "gemma2-2b",
+    "gemma2-9b",
+    "gemma2-27b",
+    "gemma3-4b",
+    "gemma3-12b",
+    "gemma3-27b",
+    "qwen3-0.6b",
+    "qwen3-4b",
+    "qwen3-4b-thinking-2507",
+    "qwen3-8b",
+    "qwen3-14b",
+    "qwen3-32b",
+    "qwen3-235b-a22b",
+    "qwen3-30b-a3b",
+    "qwen3-480b-a35b",
+    "qwen3-next-80b-a3b",
+    "qwen3-omni-30b-a3b",
+    "gpt3-175b",
+    "gpt3-22b",
+    "gpt3-6b",
+    "gpt3-52k",
+    "gpt-oss-20b",
+    "gpt-oss-120b",
+    "llama4-17b-16e",
+    "llama4-17b-128e",
   )
   if s not in valid_model_names:
     raise ValueError(f"Invalid model name was passed. Got {s}, Valid options {valid_model_names}")
@@ -485,15 +485,15 @@ def validate_model_name(s: str) -> bool:
 
 def validate_multimodal_model_name(s: str) -> bool:
   valid_model_names = (
-      "gemma3-4b",
-      "gemma3-12b",
-      "gemma3-27b",
-      "llama4-17b-16e",
-      "llama4-17b-128e",
+    "gemma3-4b",
+    "gemma3-12b",
+    "gemma3-27b",
+    "llama4-17b-16e",
+    "llama4-17b-128e",
   )
   if s not in valid_model_names:
     raise ValueError(
-        f"Invalid multimodal model name was passed. Got {s}. Valid options which support multimodal inputs are: {valid_model_names}"
+      f"Invalid multimodal model name was passed. Got {s}. Valid options which support multimodal inputs are: {valid_model_names}"
     )
 
 
@@ -501,24 +501,23 @@ def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
   overwritten_keys = [k for k in keys1 if k in keys2]
   if overwritten_keys:
     raise ValueError(
-        f"Keys {overwritten_keys} are overwritten from both the model"
-        " and the environment/command line. This isn't allowed."
+      f"Keys {overwritten_keys} are overwritten from both the model and the environment/command line. This isn't allowed."
     )
 
 
 def validate_and_assign_remat_tensors(keys):
   # list of allowed tensors for custom remat policy
   tensors = [
-      "decoder_layer_input",
-      "context",
-      "mlpwi",
-      "mlpwi_0",
-      "mlpwi_1",
-      "mlpwo",
-      "query_proj",
-      "key_proj",
-      "value_proj",
-      "out_proj",
+    "decoder_layer_input",
+    "context",
+    "mlpwi",
+    "mlpwi_0",
+    "mlpwi_1",
+    "mlpwo",
+    "query_proj",
+    "key_proj",
+    "value_proj",
+    "out_proj",
   ]
   assert keys["decoder_layer_input"] != "remat", "Cannot remeterialize this tensor with scan_layers=True"
   tensors_on_device = []
@@ -590,11 +589,11 @@ class _HyperParameters:
         new_proposal = os.environ.get(yaml_key_to_env_key(k))
 
       if (not isinstance(new_proposal, type(raw_data_from_yaml[k]))) and (
-          type(raw_data_from_yaml[k]) not in _yaml_types_to_parser
+        type(raw_data_from_yaml[k]) not in _yaml_types_to_parser
       ):
         raise ValueError(
-            f"For key '{k}', type {type(raw_data_from_yaml[k])} not in {_yaml_types_to_parser.keys()}, can't pass"
-            " at the CLI or ENV"
+          f"For key '{k}', type {type(raw_data_from_yaml[k])} not in {_yaml_types_to_parser.keys()}, can't pass"
+          " at the CLI or ENV"
         )
 
       if new_proposal is None:
@@ -604,7 +603,7 @@ class _HyperParameters:
       else:
         try:
           raw_keys[k] = _yaml_types_to_parser[type(raw_data_from_yaml[k])](
-              new_proposal
+            new_proposal
           )  # take the command line value, but type it like the config value.
         except ValueError as e:
           raise ValueError(f"Couldn't parse value from CLI or ENV '{new_proposal}' for key '{k}'") from e
@@ -670,17 +669,17 @@ class _HyperParameters:
     if not os.path.isfile(raw_keys["tokenizer_path"]):
       # Try and find the tokenizer path relative to the config file.
       for search_root in (
-          MAXTEXT_ASSETS_ROOT,
-          os.path.dirname(MAXTEXT_ASSETS_ROOT),
-          os.path.join(MAXTEXT_REPO_ROOT, "assets"),
-          MAXTEXT_REPO_ROOT,
-          os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText"),
-          MAXTEXT_PKG_DIR,
-          os.path.dirname(config_name),
+        MAXTEXT_ASSETS_ROOT,
+        os.path.dirname(MAXTEXT_ASSETS_ROOT),
+        os.path.join(MAXTEXT_REPO_ROOT, "assets"),
+        MAXTEXT_REPO_ROOT,
+        os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText"),
+        MAXTEXT_PKG_DIR,
+        os.path.dirname(config_name),
       ):
         tokenizer_path = os.path.join(
-            search_root,
-            raw_keys["tokenizer_path"],
+          search_root,
+          raw_keys["tokenizer_path"],
         )
 
         if os.path.isfile(tokenizer_path):
@@ -704,7 +703,7 @@ class _HyperParameters:
       if raw_keys["run_name"] == "":
         now = datetime.datetime.now()
         timestamp = now.strftime("%Y-%m-%d-%H-%M")
-        raw_keys["run_name"] = f'{raw_keys["model_name"]}_{timestamp}'
+        raw_keys["run_name"] = f"{raw_keys['model_name']}_{timestamp}"
     run_name = raw_keys["run_name"]
     base_output_directory = raw_keys["base_output_directory"]
     if run_name:
@@ -733,49 +732,49 @@ class _HyperParameters:
     # This is the first command that initializes the backend - it calls
     # jax.devices()
     (
-        raw_keys["global_batch_size_to_load"],
-        raw_keys["global_batch_size_to_train_on"],
-        raw_keys["micro_batch_size_to_train_on"],
+      raw_keys["global_batch_size_to_load"],
+      raw_keys["global_batch_size_to_train_on"],
+      raw_keys["micro_batch_size_to_train_on"],
     ) = calculate_global_batch_sizes(
-        raw_keys["per_device_batch_size"],
-        raw_keys["expansion_factor_real_data"],
-        get_num_target_devices(raw_keys),
-        raw_keys["gradient_accumulation_steps"],
+      raw_keys["per_device_batch_size"],
+      raw_keys["expansion_factor_real_data"],
+      get_num_target_devices(raw_keys),
+      raw_keys["gradient_accumulation_steps"],
     )
 
     # Initialize starting global batch size and global increments if rampup batch
     # size is enabled
     if raw_keys["enable_rampup_batch_size"]:
       (
-          raw_keys["global_batch_size_to_load_start"],
-          raw_keys["global_batch_size_to_train_on_start"],
-          raw_keys["micro_batch_size_to_train_on_start"],
+        raw_keys["global_batch_size_to_load_start"],
+        raw_keys["global_batch_size_to_train_on_start"],
+        raw_keys["micro_batch_size_to_train_on_start"],
       ) = calculate_global_batch_sizes(
-          raw_keys["per_device_batch_size_start"],
-          raw_keys["expansion_factor_real_data"],
-          get_num_target_devices(raw_keys),
-          raw_keys["gradient_accumulation_steps"],
+        raw_keys["per_device_batch_size_start"],
+        raw_keys["expansion_factor_real_data"],
+        get_num_target_devices(raw_keys),
+        raw_keys["gradient_accumulation_steps"],
       )
 
       (
-          raw_keys["global_batch_size_to_load_increment"],
-          raw_keys["global_batch_size_to_train_on_increment"],
-          raw_keys["micro_batch_size_to_train_on_increment"],
+        raw_keys["global_batch_size_to_load_increment"],
+        raw_keys["global_batch_size_to_train_on_increment"],
+        raw_keys["micro_batch_size_to_train_on_increment"],
       ) = calculate_global_batch_sizes(
-          raw_keys["per_device_batch_size_increment"],
-          raw_keys["expansion_factor_real_data"],
-          get_num_target_devices(raw_keys),
-          raw_keys["gradient_accumulation_steps"],
+        raw_keys["per_device_batch_size_increment"],
+        raw_keys["expansion_factor_real_data"],
+        get_num_target_devices(raw_keys),
+        raw_keys["gradient_accumulation_steps"],
       )
 
       (
-          raw_keys["rampup_samples_per_increment_to_load"],
-          raw_keys["rampup_end_step"],
+        raw_keys["rampup_samples_per_increment_to_load"],
+        raw_keys["rampup_end_step"],
       ) = calculate_rampup_samples_and_steps(
-          raw_keys["global_batch_size_to_load_start"],
-          raw_keys["global_batch_size_to_load"],
-          raw_keys["global_batch_size_to_load_increment"],
-          raw_keys["global_rampup_samples"],
+        raw_keys["global_batch_size_to_load_start"],
+        raw_keys["global_batch_size_to_load"],
+        raw_keys["global_batch_size_to_load_increment"],
+        raw_keys["global_rampup_samples"],
       )
     else:
       raw_keys["rampup_end_step"] = 0
@@ -784,34 +783,34 @@ class _HyperParameters:
       raw_keys["eval_per_device_batch_size"] = raw_keys["per_device_batch_size"]
 
     (
-        raw_keys["global_batch_size_to_load_eval"],
-        raw_keys["global_batch_size_to_eval_on"],
-        raw_keys["micro_batch_size_to_eval_on"],
+      raw_keys["global_batch_size_to_load_eval"],
+      raw_keys["global_batch_size_to_eval_on"],
+      raw_keys["micro_batch_size_to_eval_on"],
     ) = calculate_global_batch_sizes(
-        raw_keys["eval_per_device_batch_size"],
-        raw_keys["expansion_factor_real_data"],
-        get_num_target_devices(raw_keys),
-        1,
+      raw_keys["eval_per_device_batch_size"],
+      raw_keys["expansion_factor_real_data"],
+      get_num_target_devices(raw_keys),
+      1,
     )
 
     # Automatically disable shardy when gradient accumulation is enabled on GPU
     # This incompatibility is specific to GPU hardware
     if (
-        raw_keys["gradient_accumulation_steps"] > 1
-        and raw_keys["shardy"]
-        and raw_keys["hardware"] in ("gpu", "gpu_multiprocess")
+      raw_keys["gradient_accumulation_steps"] > 1
+      and raw_keys["shardy"]
+      and raw_keys["hardware"] in ("gpu", "gpu_multiprocess")
     ):
       max_logging.log(
-          "WARNING: Automatically setting shardy=False because"
-          f" gradient_accumulation_steps={raw_keys['gradient_accumulation_steps']} > 1"
-          f" on hardware={raw_keys['hardware']}."
-          " Shardy is not compatible with gradient accumulation on GPU."
+        "WARNING: Automatically setting shardy=False because"
+        f" gradient_accumulation_steps={raw_keys['gradient_accumulation_steps']} > 1"
+        f" on hardware={raw_keys['hardware']}."
+        " Shardy is not compatible with gradient accumulation on GPU."
       )
       raw_keys["shardy"] = False
 
     if raw_keys["pagedattn_max_pages_per_group"] <= 0:
       raw_keys["pagedattn_max_pages_per_group"] = (
-          raw_keys["max_target_length"] + raw_keys["pagedattn_tokens_per_page"] - 1
+        raw_keys["max_target_length"] + raw_keys["pagedattn_tokens_per_page"] - 1
       ) // raw_keys["pagedattn_tokens_per_page"]
 
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
@@ -910,32 +909,32 @@ class _HyperParameters:
 
 def create_parallelisms_list(raw_keys):
   ici_parallelism = [
-      raw_keys["ici_data_parallelism"],
-      raw_keys["ici_pipeline_parallelism"],
-      raw_keys["ici_fsdp_parallelism"],
-      raw_keys["ici_fsdp_transpose_parallelism"],
-      raw_keys["ici_sequence_parallelism"],
-      raw_keys["ici_context_parallelism"],
-      raw_keys["ici_context_autoregressive_parallelism"],
-      raw_keys["ici_tensor_parallelism"],
-      raw_keys["ici_tensor_transpose_parallelism"],
-      raw_keys["ici_tensor_sequence_parallelism"],
-      raw_keys["ici_expert_parallelism"],
-      raw_keys["ici_autoregressive_parallelism"],
+    raw_keys["ici_data_parallelism"],
+    raw_keys["ici_pipeline_parallelism"],
+    raw_keys["ici_fsdp_parallelism"],
+    raw_keys["ici_fsdp_transpose_parallelism"],
+    raw_keys["ici_sequence_parallelism"],
+    raw_keys["ici_context_parallelism"],
+    raw_keys["ici_context_autoregressive_parallelism"],
+    raw_keys["ici_tensor_parallelism"],
+    raw_keys["ici_tensor_transpose_parallelism"],
+    raw_keys["ici_tensor_sequence_parallelism"],
+    raw_keys["ici_expert_parallelism"],
+    raw_keys["ici_autoregressive_parallelism"],
   ]
   dcn_parallelism = [
-      raw_keys["dcn_data_parallelism"],
-      raw_keys["dcn_pipeline_parallelism"],
-      raw_keys["dcn_fsdp_parallelism"],
-      raw_keys["dcn_fsdp_transpose_parallelism"],
-      raw_keys["dcn_sequence_parallelism"],
-      raw_keys["dcn_context_parallelism"],
-      raw_keys["dcn_context_autoregressive_parallelism"],
-      raw_keys["dcn_tensor_parallelism"],
-      raw_keys["dcn_tensor_transpose_parallelism"],
-      raw_keys["dcn_tensor_sequence_parallelism"],
-      raw_keys["dcn_expert_parallelism"],
-      raw_keys["dcn_autoregressive_parallelism"],
+    raw_keys["dcn_data_parallelism"],
+    raw_keys["dcn_pipeline_parallelism"],
+    raw_keys["dcn_fsdp_parallelism"],
+    raw_keys["dcn_fsdp_transpose_parallelism"],
+    raw_keys["dcn_sequence_parallelism"],
+    raw_keys["dcn_context_parallelism"],
+    raw_keys["dcn_context_autoregressive_parallelism"],
+    raw_keys["dcn_tensor_parallelism"],
+    raw_keys["dcn_tensor_transpose_parallelism"],
+    raw_keys["dcn_tensor_sequence_parallelism"],
+    raw_keys["dcn_expert_parallelism"],
+    raw_keys["dcn_autoregressive_parallelism"],
   ]
   raw_keys["ici_parallelism"] = ici_parallelism
   raw_keys["dcn_parallelism"] = dcn_parallelism
@@ -962,7 +961,7 @@ def validate_and_set_hlo_dump_defaults(raw_keys):
     raw_keys["dump_hlo_xla_flags"] = f"--xla_dump_to={raw_keys['dump_hlo_local_dir']} --xla_dump_large_constants"
     if raw_keys["dump_hlo_local_module_name"]:
       raw_keys["dump_hlo_xla_flags"] = (
-          f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_local_module_name']}"
+        f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_local_module_name']}"
       )
   if not raw_keys["dump_hlo_gcs_dir"]:
     raw_keys["dump_hlo_gcs_dir"] = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], "xla_dump")
@@ -975,24 +974,24 @@ def validate_and_set_hlo_dump_defaults(raw_keys):
 
 def validate_multiple_slices(raw_keys):
   if (
-      math.fabs(
-          math.prod(
-              [
-                  raw_keys["dcn_data_parallelism"],
-                  raw_keys["dcn_pipeline_parallelism"],
-                  raw_keys["dcn_fsdp_parallelism"],
-                  raw_keys["dcn_fsdp_transpose_parallelism"],
-                  raw_keys["dcn_sequence_parallelism"],
-                  raw_keys["dcn_context_parallelism"],
-                  raw_keys["dcn_tensor_parallelism"],
-                  raw_keys["dcn_tensor_sequence_parallelism"],
-                  raw_keys["dcn_expert_parallelism"],
-                  raw_keys["dcn_context_autoregressive_parallelism"],
-                  raw_keys["dcn_autoregressive_parallelism"],
-              ]
-          )
+    math.fabs(
+      math.prod(
+        [
+          raw_keys["dcn_data_parallelism"],
+          raw_keys["dcn_pipeline_parallelism"],
+          raw_keys["dcn_fsdp_parallelism"],
+          raw_keys["dcn_fsdp_transpose_parallelism"],
+          raw_keys["dcn_sequence_parallelism"],
+          raw_keys["dcn_context_parallelism"],
+          raw_keys["dcn_tensor_parallelism"],
+          raw_keys["dcn_tensor_sequence_parallelism"],
+          raw_keys["dcn_expert_parallelism"],
+          raw_keys["dcn_context_autoregressive_parallelism"],
+          raw_keys["dcn_autoregressive_parallelism"],
+        ]
       )
-      > 1
+    )
+    > 1
   ):
     assert raw_keys["num_slices"] > 1, "DCN parallelism requested but only one slice available."
 
@@ -1002,7 +1001,7 @@ def set_and_validate_pipeline_config(raw_keys):
     # For pipeline parallelism, model_fsdp_ag_once should be False, and pipeline_fsdp_ag_once is typically True.
     if raw_keys["model_fsdp_ag_once"]:
       raise ValueError(
-          "You should only set pipeline_fsdp_once=True, leave model_fsdp_ag_once=False with pipeline parallelism."
+        "You should only set pipeline_fsdp_once=True, leave model_fsdp_ag_once=False with pipeline parallelism."
       )
 
     def modify_activation_embed_and_logits_batch(logical_axis_rules):
@@ -1012,8 +1011,8 @@ def set_and_validate_pipeline_config(raw_keys):
           # Microbatches are sharded by stage, so moving out of and into this sharding should be a local reshape.
           # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
           logical_axis_rules[idx] = [
-              "activation_embed_and_logits_batch",
-              ["stage", "data", "fsdp", "fsdp_transpose", "expert"],
+            "activation_embed_and_logits_batch",
+            ["stage", "data", "fsdp", "fsdp_transpose", "expert"],
           ]
           break  # Exit the loop after modifying the list
       return logical_axis_rules
@@ -1021,34 +1020,49 @@ def set_and_validate_pipeline_config(raw_keys):
     def pipeline_first_axis(raw_keys):
       # We have seen better performance when axes used for DCN are earlier in this list than ICI, see (b/339009148) for details
       ici_parallelism = [
-          raw_keys["ici_pipeline_parallelism"],
-          raw_keys["ici_data_parallelism"],
-          raw_keys["ici_fsdp_parallelism"],
-          raw_keys["ici_fsdp_transpose_parallelism"],
-          raw_keys["ici_sequence_parallelism"],
-          raw_keys["ici_context_parallelism"],
-          raw_keys["ici_context_autoregressive_parallelism"],
-          raw_keys["ici_tensor_parallelism"],
-          raw_keys["ici_tensor_transpose_parallelism"],
-          raw_keys["ici_tensor_sequence_parallelism"],
-          raw_keys["ici_expert_parallelism"],
-          raw_keys["ici_autoregressive_parallelism"],
+        raw_keys["ici_pipeline_parallelism"],
+        raw_keys["ici_data_parallelism"],
+        raw_keys["ici_fsdp_parallelism"],
+        raw_keys["ici_fsdp_transpose_parallelism"],
+        raw_keys["ici_sequence_parallelism"],
+        raw_keys["ici_context_parallelism"],
+        raw_keys["ici_context_autoregressive_parallelism"],
+        raw_keys["ici_tensor_parallelism"],
+        raw_keys["ici_tensor_transpose_parallelism"],
+        raw_keys["ici_tensor_sequence_parallelism"],
+        raw_keys["ici_expert_parallelism"],
+        raw_keys["ici_autoregressive_parallelism"],
       ]
       dcn_parallelism = [
-          raw_keys["dcn_pipeline_parallelism"],
-          raw_keys["dcn_data_parallelism"],
-          raw_keys["dcn_fsdp_parallelism"],
-          raw_keys["dcn_fsdp_transpose_parallelism"],
-          raw_keys["dcn_sequence_parallelism"],
-          raw_keys["dcn_context_parallelism"],
-          raw_keys["dcn_context_autoregressive_parallelism"],
-          raw_keys["dcn_tensor_parallelism"],
-          raw_keys["dcn_tensor_transpose_parallelism"],
-          raw_keys["dcn_tensor_sequence_parallelism"],
-          raw_keys["dcn_expert_parallelism"],
-          raw_keys["dcn_autoregressive_parallelism"],
+        raw_keys["dcn_pipeline_parallelism"],
+        raw_keys["dcn_data_parallelism"],
+        raw_keys["dcn_fsdp_parallelism"],
+        raw_keys["dcn_fsdp_transpose_parallelism"],
+        raw_keys["dcn_sequence_parallelism"],
+        raw_keys["dcn_context_parallelism"],
+        raw_keys["dcn_context_autoregressive_parallelism"],
+        raw_keys["dcn_tensor_parallelism"],
+        raw_keys["dcn_tensor_transpose_parallelism"],
+        raw_keys["dcn_tensor_sequence_parallelism"],
+        raw_keys["dcn_expert_parallelism"],
+        raw_keys["dcn_autoregressive_parallelism"],
       ]
       mesh_axes = [
+        "stage",
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive",
+      ]
+      data_sharding = [
+        [
           "stage",
           "data",
           "fsdp",
@@ -1061,22 +1075,7 @@ def set_and_validate_pipeline_config(raw_keys):
           "tensor_sequence",
           "expert",
           "autoregressive",
-      ]
-      data_sharding = [
-          [
-              "stage",
-              "data",
-              "fsdp",
-              "fsdp_transpose",
-              "sequence",
-              "context",
-              "context_autoregressive",
-              "tensor",
-              "tensor_transpose",
-              "tensor_sequence",
-              "expert",
-              "autoregressive",
-          ]
+        ]
       ]
 
       raw_keys["ici_parallelism"] = ici_parallelism
@@ -1098,47 +1097,49 @@ def set_and_validate_pipeline_config(raw_keys):
     else:
       if raw_keys["decoder_block"] == "deepseek":
         moe_layers = raw_keys["num_decoder_layers"] - raw_keys["first_num_dense_layers"]
-        assert (
-            raw_keys["pipeline_parallel_layers"] <= moe_layers
-        ), f"You can only pipeline a subset of the moe decoder layers for deepseek, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {moe_layers} decoder layers."
+        assert raw_keys["pipeline_parallel_layers"] <= moe_layers, (
+          f"You can only pipeline a subset of the moe decoder layers for deepseek, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {moe_layers} decoder layers."
+        )
       else:
-        assert (
-            raw_keys["pipeline_parallel_layers"] <= raw_keys["num_decoder_layers"]
-        ), f"You can only pipeline a subset of the decoder layers, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {raw_keys['num_decoder_layers']} decoder layers."
-    assert (
-        raw_keys["scan_layers"] or raw_keys["pipeline_parallel_layers"] == raw_keys["num_decoder_layers"]
-    ), "Currently we only support scan_layers=True when pipelining a subset of layers."
-    assert (
-        raw_keys["pipeline_parallel_layers"] > 0
-    ), "You must set pipeline_parallel_layers to a positive integer less than or equal to the number of layers"
+        assert raw_keys["pipeline_parallel_layers"] <= raw_keys["num_decoder_layers"], (
+          f"You can only pipeline a subset of the decoder layers, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {raw_keys['num_decoder_layers']} decoder layers."
+        )
+    assert raw_keys["scan_layers"] or raw_keys["pipeline_parallel_layers"] == raw_keys["num_decoder_layers"], (
+      "Currently we only support scan_layers=True when pipelining a subset of layers."
+    )
+    assert raw_keys["pipeline_parallel_layers"] > 0, (
+      "You must set pipeline_parallel_layers to a positive integer less than or equal to the number of layers"
+    )
 
     if raw_keys["num_pipeline_repeats"] == -1:
       num_pipeline_repeats, remainder = divmod(
-          raw_keys["pipeline_parallel_layers"], num_stages * raw_keys["num_layers_per_pipeline_stage"]
+        raw_keys["pipeline_parallel_layers"], num_stages * raw_keys["num_layers_per_pipeline_stage"]
       )
-      assert (
-          not remainder
-      ), f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of pipeline_parallel_layers which defaults to decoder layers  ({raw_keys['pipeline_parallel_layers']}) "
+      assert not remainder, (
+        f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of pipeline_parallel_layers which defaults to decoder layers  ({raw_keys['pipeline_parallel_layers']}) "
+      )
       raw_keys["num_pipeline_repeats"] = num_pipeline_repeats
     assert (
-        num_stages * raw_keys["num_pipeline_repeats"] * raw_keys["num_layers_per_pipeline_stage"]
-        == raw_keys["pipeline_parallel_layers"]
-    ), f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to pipeline_parallel_layers which defaults to decoder layers ({raw_keys['pipeline_parallel_layers']})"
+      num_stages * raw_keys["num_pipeline_repeats"] * raw_keys["num_layers_per_pipeline_stage"]
+      == raw_keys["pipeline_parallel_layers"]
+    ), (
+      f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to pipeline_parallel_layers which defaults to decoder layers ({raw_keys['pipeline_parallel_layers']})"
+    )
     if raw_keys["num_pipeline_microbatches"] == -1:
       if raw_keys["pipeline_delay_activation_forwarding"]:
         raw_keys["num_pipeline_microbatches"] = 2 * num_stages
       else:
         raw_keys["num_pipeline_microbatches"] = num_stages
-    assert (
-        raw_keys["num_pipeline_microbatches"] % num_stages == 0
-    ), f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
-    assert (
-        raw_keys["micro_batch_size_to_train_on"] % raw_keys["num_pipeline_microbatches"] == 0
-    ), f"The batch size ({raw_keys['micro_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
+    assert raw_keys["num_pipeline_microbatches"] % num_stages == 0, (
+      f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
+    )
+    assert raw_keys["micro_batch_size_to_train_on"] % raw_keys["num_pipeline_microbatches"] == 0, (
+      f"The batch size ({raw_keys['micro_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
+    )
     if raw_keys["pipeline_delay_activation_forwarding"]:
-      assert (
-          raw_keys["num_pipeline_microbatches"] >= 2 * num_stages
-      ), f"Delayed activation forwarding requires at least 2 * num_stages microbatches, but {num_stages} stages are used with {raw_keys['num_pipeline_microbatches']} microbatches"
+      assert raw_keys["num_pipeline_microbatches"] >= 2 * num_stages, (
+        f"Delayed activation forwarding requires at least 2 * num_stages microbatches, but {num_stages} stages are used with {raw_keys['num_pipeline_microbatches']} microbatches"
+      )
   else:
     raw_keys["using_pipeline_parallelism"] = False
   return raw_keys
@@ -1147,14 +1148,14 @@ def set_and_validate_pipeline_config(raw_keys):
 def validate_deepseek_moe(raw_keys):
   if raw_keys["n_routing_groups"] != -1:
     if raw_keys["topk_routing_group"] == -1:
-      raise ValueError(f'config topk_routing_group: {raw_keys["topk_routing_group"]} is not defined')
+      raise ValueError(f"config topk_routing_group: {raw_keys['topk_routing_group']} is not defined")
     if raw_keys["n_routing_groups"] <= raw_keys["topk_routing_group"]:
       raise ValueError(
-          f'config n_routing_groups: {raw_keys["n_routing_groups"]} must be greter than topk_routing_group: {raw_keys["topk_routing_group"]}'
+        f"config n_routing_groups: {raw_keys['n_routing_groups']} must be greter than topk_routing_group: {raw_keys['topk_routing_group']}"
       )
     if raw_keys["num_experts"] % raw_keys["n_routing_groups"] != 0:
       raise ValueError(
-          f'config num_experts: {raw_keys["num_experts"]} must be divisible by n_routing_groups: {raw_keys["n_routing_groups"]}'
+        f"config num_experts: {raw_keys['num_experts']} must be divisible by n_routing_groups: {raw_keys['n_routing_groups']}"
       )
 
 
@@ -1165,14 +1166,14 @@ def validate_mlp_dim(raw_keys):
   base_moe_mlp_dim = raw_keys["base_moe_mlp_dim"]
   if is_fully_moe_model and (base_mlp_dim != base_moe_mlp_dim):
     raise ValueError(
-        f"For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}."
+      f"For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}."
     )
 
 
 def validate_gpt_oss_moe(raw_keys):
   if raw_keys["decoder_block"] == "gpt_oss" and not raw_keys["sparse_matmul"] and raw_keys["capacity_factor"] != -1:
     raise ValueError(
-        "GPT OSS model only supports dropless MoE. Please use dense matmul with capacity_factor=-1 or sparse matmul."
+      "GPT OSS model only supports dropless MoE. Please use dense matmul with capacity_factor=-1 or sparse matmul."
     )
 
 
@@ -1183,27 +1184,27 @@ def validate_sparse_matmul_parallelism(raw_keys):
 
   # TODO: remove once b/435539039 resolved
   if raw_keys["sparse_matmul"] and (
-      using_fsdp_and_transpose_parallelism(raw_keys)
-      and using_expert_parallelism(raw_keys)
-      and using_tensor_parallelism(raw_keys)
+    using_fsdp_and_transpose_parallelism(raw_keys)
+    and using_expert_parallelism(raw_keys)
+    and using_tensor_parallelism(raw_keys)
   ):
     raise ValueError("Sparse matmul doesn't support using fsdp, expert, and tensor parallelism together.")
   tensor_parallelism = (
-      raw_keys["ici_tensor_parallelism"]
-      * raw_keys["dcn_tensor_parallelism"]
-      * raw_keys["ici_tensor_sequence_parallelism"]
-      * raw_keys["dcn_tensor_sequence_parallelism"]
-      * raw_keys["ici_tensor_transpose_parallelism"]
-      * raw_keys["dcn_tensor_transpose_parallelism"]
+    raw_keys["ici_tensor_parallelism"]
+    * raw_keys["dcn_tensor_parallelism"]
+    * raw_keys["ici_tensor_sequence_parallelism"]
+    * raw_keys["dcn_tensor_sequence_parallelism"]
+    * raw_keys["ici_tensor_transpose_parallelism"]
+    * raw_keys["dcn_tensor_transpose_parallelism"]
   )
   if raw_keys["sparse_matmul"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
     raise ValueError(
-        f"The embedding dimension {raw_keys['emb_dim']} is not divisible by tensor parallelism setting {tensor_parallelism}."
+      f"The embedding dimension {raw_keys['emb_dim']} is not divisible by tensor parallelism setting {tensor_parallelism}."
     )
   expert_parallelism = raw_keys["ici_expert_parallelism"] * raw_keys["dcn_expert_parallelism"]
   if raw_keys["sparse_matmul"] and using_expert_parallelism(raw_keys) and (raw_keys["num_experts"] % expert_parallelism):
     raise ValueError(
-        f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
+      f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
 
 
@@ -1217,7 +1218,7 @@ def validate_shard_expert_on_fsdp(raw_keys):
     raise ValueError("shard_exp_on_fsdp requires num_experts is divisiable by ici_fsdp_parallelism.")
   if raw_keys["shard_exp_on_fsdp"] and (using_tensor_parallelism(raw_keys) or using_expert_parallelism(raw_keys)):
     raise ValueError(
-        "shard_exp_on_fsdp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1."
+      "shard_exp_on_fsdp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1."
     )
 
 
@@ -1234,8 +1235,8 @@ def validate_optimizer_sharding_over_data(raw_keys):
   zero1_supported_opt_types = ("adamw", "adam_pax")
   if raw_keys["opt_type"] not in zero1_supported_opt_types:
     raise ValueError(
-        f"Optimizer type {raw_keys['opt_type']} is not supported for optimizer sharding.\n"
-        f"Please use an optimizer from this list: {zero1_supported_opt_types}."
+      f"Optimizer type {raw_keys['opt_type']} is not supported for optimizer sharding.\n"
+      f"Please use an optimizer from this list: {zero1_supported_opt_types}."
     )
 
 
@@ -1249,9 +1250,9 @@ def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules
     replacements.append((logical_axis, mesh_axes))
     new_logical_axis.add(logical_axis)
   old_logical_rules_filtered = [
-      (old_logical_axis, _lists_to_tuples(old_mesh_axes))
-      for old_logical_axis, old_mesh_axes in old_logical_axis_rules
-      if old_logical_axis not in new_logical_axis
+    (old_logical_axis, _lists_to_tuples(old_mesh_axes))
+    for old_logical_axis, old_mesh_axes in old_logical_axis_rules
+    if old_logical_axis not in new_logical_axis
   ]
   return old_logical_rules_filtered + replacements
 
@@ -1261,7 +1262,7 @@ def update_model_keys(raw_keys, model_keys, key):
   assert key in model_keys and key in raw_keys
   if key == "logical_axis_rules":
     raw_keys[key] = create_new_logical_axis_rules(
-        old_logical_axis_rules=raw_keys[key], new_logical_axis_rules=model_keys[key]
+      old_logical_axis_rules=raw_keys[key], new_logical_axis_rules=model_keys[key]
     )
     return
   raw_keys[key] = model_keys[key]
@@ -1294,8 +1295,8 @@ def get_individual_scales(scale):
   log_2_scale = math.floor((math.log2(scale)))
   if 2**log_2_scale != scale:
     raise ValueError(
-        "Global parameter scale should be a power of 2. If you want finer grained control of the model sizes "
-        "then you can explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim."
+      "Global parameter scale should be a power of 2. If you want finer grained control of the model sizes "
+      "then you can explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim."
     )
   base_scale, rem = divmod(log_2_scale, 3)
   num_head_scale = base_scale + int(rem > 0)
@@ -1306,7 +1307,7 @@ def get_individual_scales(scale):
 
 
 def calculate_global_batch_sizes(
-    per_device_batch_size, expansion_factor_real_data, num_devices, gradient_accumulation_steps
+  per_device_batch_size, expansion_factor_real_data, num_devices, gradient_accumulation_steps
 ):
   """Calculates target global batch size from target devices and per_device_batch"""
   if per_device_batch_size < 1.0:
@@ -1328,10 +1329,10 @@ def calculate_global_batch_sizes(
 
 
 def calculate_rampup_samples_and_steps(
-    batch_size_start,
-    batch_size_end,
-    batch_size_increment,
-    global_rampup_samples,
+  batch_size_start,
+  batch_size_end,
+  batch_size_increment,
+  global_rampup_samples,
 ):
   """Calculate num of samples for each increment and num of steps for batch rampup"""
   diff_batch_size = batch_size_end - batch_size_start
@@ -1383,10 +1384,10 @@ def using_pipeline_parallelism(raw_keys) -> bool:
 
 def using_tensor_parallelism(raw_keys) -> bool:
   return (
-      int(raw_keys["ici_tensor_parallelism"]) > 1
-      or int(raw_keys["dcn_tensor_parallelism"]) > 1
-      or int(raw_keys["ici_tensor_sequence_parallelism"]) > 1
-      or int(raw_keys["dcn_tensor_sequence_parallelism"]) > 1
+    int(raw_keys["ici_tensor_parallelism"]) > 1
+    or int(raw_keys["dcn_tensor_parallelism"]) > 1
+    or int(raw_keys["ici_tensor_sequence_parallelism"]) > 1
+    or int(raw_keys["dcn_tensor_sequence_parallelism"]) > 1
   )
 
 
@@ -1396,9 +1397,9 @@ def using_sequence_parallelism(raw_keys) -> bool:
 
 def using_expert_parallelism(raw_keys) -> bool:
   if (
-      int(raw_keys["ici_expert_parallelism"]) > 1
-      and int(raw_keys["dcn_expert_parallelism"]) > 1
-      and raw_keys["hardware"] == "tpu"
+    int(raw_keys["ici_expert_parallelism"]) > 1
+    and int(raw_keys["dcn_expert_parallelism"]) > 1
+    and raw_keys["hardware"] == "tpu"
   ):
     raise ValueError("Expert parallelism can only be enabled on ICI or DCN on TPU, not both.")
   return int(raw_keys["ici_expert_parallelism"]) > 1 or int(raw_keys["dcn_expert_parallelism"]) > 1
@@ -1406,10 +1407,10 @@ def using_expert_parallelism(raw_keys) -> bool:
 
 def using_fsdp_and_transpose_parallelism(raw_keys) -> bool:
   return (
-      int(raw_keys["ici_fsdp_parallelism"]) > 1
-      or int(raw_keys["dcn_fsdp_parallelism"]) > 1
-      or int(raw_keys["ici_fsdp_transpose_parallelism"]) > 1
-      or int(raw_keys["dcn_fsdp_transpose_parallelism"]) > 1
+    int(raw_keys["ici_fsdp_parallelism"]) > 1
+    or int(raw_keys["dcn_fsdp_parallelism"]) > 1
+    or int(raw_keys["ici_fsdp_transpose_parallelism"]) > 1
+    or int(raw_keys["dcn_fsdp_transpose_parallelism"]) > 1
   )
 
 

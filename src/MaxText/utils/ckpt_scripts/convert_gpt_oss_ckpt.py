@@ -52,7 +52,7 @@ CAST_DTYPE = ml_dtypes.bfloat16
 
 
 def _convert_huggingface_to_jax_weights(
-    base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process
+  base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process
 ):
   """Convert a Huggingface Checkpoint to a dictionary of Numpy arrays representing the weights.
 
@@ -78,7 +78,7 @@ def _convert_huggingface_to_jax_weights(
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
   chkpt_vars = {}
   for i, ckpt_path in enumerate(ckpt_paths):
-    max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+    max_logging.log(f"Loading checkpoint {i + 1} of {len(ckpt_paths)} ...")
 
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
       for key in f.keys():
@@ -91,34 +91,34 @@ def _convert_huggingface_to_jax_weights(
 
   # initialize the data structure for storing jax_weights
   jax_weights = {
-      "token_embedder": {"embedding": None},
-      "decoder": {
-          "decoder_norm": {"scale": None},
-          "logits_dense": {"kernel": None},
-          "layers": {},
-      },
+    "token_embedder": {"embedding": None},
+    "decoder": {
+      "decoder_norm": {"scale": None},
+      "logits_dense": {"kernel": None},
+      "layers": {},
+    },
   }
   # block 0, 1
   for block_idx in range(layer_cycle_interval):
     jax_weights["decoder"]["layers"][f"layers_{block_idx}"] = {
-        "pre_self_attention_layer_norm": {"scale": None},
-        "post_self_attention_layer_norm": {"scale": None},
-        "GptOssAttention": {
-            "query": {"kernel": None, "bias": None},
-            "key": {"kernel": None, "bias": None},
-            "value": {"kernel": None, "bias": None},
-            "out": {"kernel": None, "bias": None},
-            "sinks": None,
-        },
-        "GptOssMlp": {
-            "gate": {"kernel": None, "bias": None},
-            "wi_0": None,
-            "wi_0_bias": None,
-            "wi_1": None,
-            "wi_1_bias": None,
-            "wo": None,
-            "wo_bias": None,
-        },
+      "pre_self_attention_layer_norm": {"scale": None},
+      "post_self_attention_layer_norm": {"scale": None},
+      "GptOssAttention": {
+        "query": {"kernel": None, "bias": None},
+        "key": {"kernel": None, "bias": None},
+        "value": {"kernel": None, "bias": None},
+        "out": {"kernel": None, "bias": None},
+        "sinks": None,
+      },
+      "GptOssMlp": {
+        "gate": {"kernel": None, "bias": None},
+        "wi_0": None,
+        "wi_0_bias": None,
+        "wi_1": None,
+        "wi_1_bias": None,
+        "wo": None,
+        "wo_bias": None,
+      },
     }
 
   # decoder norm scale ###########################################
@@ -220,16 +220,16 @@ def _convert_huggingface_to_jax_weights(
     layer_weight = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]
 
     pre_self_attention_layernorm = _pt_to_np(
-        chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"], cast_dtype=CAST_DTYPE
+      chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"], cast_dtype=CAST_DTYPE
     )
     post_self_attention_layernorm = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.ffn_norm.weight"], cast_dtype=CAST_DTYPE)
 
     if layer_weight["pre_self_attention_layer_norm"]["scale"] is None:
       layer_weight["pre_self_attention_layer_norm"]["scale"] = np.zeros(
-          stack_shape + pre_self_attention_layernorm.shape, dtype=CAST_DTYPE
+        stack_shape + pre_self_attention_layernorm.shape, dtype=CAST_DTYPE
       )
       layer_weight["post_self_attention_layer_norm"]["scale"] = np.zeros(
-          stack_shape + post_self_attention_layernorm.shape, dtype=CAST_DTYPE
+        stack_shape + post_self_attention_layernorm.shape, dtype=CAST_DTYPE
       )
 
     layer_weight["pre_self_attention_layer_norm"]["scale"][block_layer_idx, ...] = pre_self_attention_layernorm  # pylint: disable=E1137
@@ -238,10 +238,10 @@ def _convert_huggingface_to_jax_weights(
   for block_idx in range(layer_cycle_interval):
     layer_weight = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]
     layer_weight["pre_self_attention_layer_norm"]["scale"] = layer_weight["pre_self_attention_layer_norm"][
-        "scale"
+      "scale"
     ].transpose(1, 0)
     layer_weight["post_self_attention_layer_norm"]["scale"] = layer_weight["post_self_attention_layer_norm"][
-        "scale"
+      "scale"
     ].transpose(1, 0)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -258,7 +258,7 @@ def _convert_huggingface_to_jax_weights(
     gate_bias = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.gate.bias"], cast_dtype=CAST_DTYPE)
     wi_0_1 = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"], cast_dtype=CAST_DTYPE)
     wi_0_1_bias = _pt_to_np(
-        chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias"], cast_dtype=CAST_DTYPE
+      chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias"], cast_dtype=CAST_DTYPE
     )
     wo = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"], cast_dtype=CAST_DTYPE)
     wo_bias = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj_bias"], cast_dtype=CAST_DTYPE)
@@ -344,10 +344,10 @@ if __name__ == "__main__":
   base_weights_path = args.maxtext_model_path
 
   save_weights_to_checkpoint(
-      args.maxtext_model_path,
-      convert_to_jax_weights(args.base_model_path, args.model_size),
-      args.simulated_cpu_devices_count,
-      args.use_ocdbt,
-      args.use_zarr3,
+    args.maxtext_model_path,
+    convert_to_jax_weights(args.base_model_path, args.model_size),
+    args.simulated_cpu_devices_count,
+    args.use_ocdbt,
+    args.use_zarr3,
   )
   max_logging.log(f"Successfully saved base_weights to {base_weights_path}.")
