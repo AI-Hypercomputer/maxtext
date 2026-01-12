@@ -16,12 +16,14 @@
 
 import math
 from typing import Any, Optional, Tuple
+import copy
 
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh, NamedSharding
 import jax.numpy as jnp
 
 from flax import nnx
+import jax
 
 from MaxText.common_types import (
     Array,
@@ -209,6 +211,196 @@ def mla_as_linen(
   )
 
 
+# # Mocking a configuration object type for type hinting
+# class ModelArgs:
+#     dim: int
+#     index_n_heads: int
+#     index_head_dim: int
+#     qk_rope_head_dim: int
+#     index_topk: int
+#     q_lora_rank: int
+#     max_batch_size: int
+#     max_seq_len: int
+#     scale_fmt: str = "fp8"  # Placeholder
+
+# def apply_rotary_emb(x: jax.Array, freqs_cis: jax.Array) -> jax.Array:
+#     """
+#     Minimal JAX implementation of RoPE corresponding to the PyTorch snippet.
+#     Assumes x is [B, L, H, D] or [B, L, D] and D corresponds to complex dimension.
+#     """
+#     # Reshape x into complex pairs: [..., D] -> [..., D/2, 2] -> complex
+#     # This logic depends heavily on how freqs_cis is passed (complex vs sin/cos).
+#     # Assuming freqs_cis is complex [L, D/2] broadcastable to x.
+
+#     x_complex = jax.lax.complex(x[..., ::2], x[..., 1::2])
+
+#     # Reshape freqs_cis to broadcast:
+#     # If x is [B, S, H, D/2], freqs needs to align with S and D/2.
+#     # We assume the caller handles broadcasting or freqs_cis is pre-shaped.
+#     out_complex = x_complex * freqs_cis
+
+#     # Convert back to real [..., D]
+#     out_real = jnp.stack([out_complex.real, out_complex.imag], axis=-1).reshape(x.shape)
+#     return out_real
+
+
+# def _apply_partial_rope(self, x, freqs_cis):
+#     """Helper to apply RoPE only to the first rope_head_dim features."""
+#     # x shape: [..., D]
+#     x_pe, x_nope = jnp.split(x, [self.rope_head_dim], axis=-1)
+#     # Apply RoPE (Assuming standard MaxText apply_rotary_emb is available in scope)
+#     x_pe = apply_rotary_emb(x_pe, freqs_cis)
+#     return jnp.concatenate([x_pe, x_nope], axis=-1)
+
+
+class Indexer(nnx.Module):
+  """
+  DeepSeek V3.2 Sparse Attention Indexer.
+  Selects Top-K relevant tokens using a lightweight MQA mechanism.
+  """
+
+  def __init__(self, config: Any, rngs: nnx.Rngs, rotary_embedding):
+    self.n_heads = config.index_n_heads
+    self.head_dim = config.index_head_dim
+    self.index_topk = config.index_topk
+    self.dim = config.emb_dim
+    self.rope_head_dim = config.qk_rope_head_dim
+    self.q_lora_rank = config.q_lora_rank
+    self.softmax_scale = self.head_dim**-0.5
+    self.rotary_embedding = rotary_embedding
+    assert config.index_topk < config.max_target_length
+
+    # Projection: Latent Query (qr) -> Indexer Heads
+    self.wq_b = nnx.Linear(
+        in_features=self.q_lora_rank,
+        out_features=self.n_heads * self.head_dim,
+        use_bias=False,
+        dtype=jnp.bfloat16,
+        rngs=rngs,
+    )
+
+    # Projection: Input (x) -> Shared Indexer Key (MQA)
+    self.wk = nnx.Linear(in_features=self.dim, out_features=self.head_dim, use_bias=False, dtype=jnp.bfloat16, rngs=rngs)
+
+    # Key Normalization
+    self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=False, dtype=jnp.bfloat16, rngs=rngs)
+
+    # Projection: Input (x) -> Importance Weights (fp32)
+    self.weights_proj = nnx.Linear(
+        in_features=self.dim,
+        out_features=self.n_heads,
+        use_bias=False,
+        dtype=jnp.float32,
+        param_dtype=jnp.float32,
+        rngs=rngs,
+    )
+
+    # Internal Indexer Cache (distinct from main MLA KV Cache)
+    # Shape: [Batch, MaxLen, HeadDim]
+    self.k_cache = nnx.Variable(jnp.zeros((config.max_target_length, self.head_dim), dtype=jnp.bfloat16))
+
+  def apply_rotary_embedding(
+      self, inputs: Array, inputs_positions: Optional[Array | None] = None, rope_kwargs: dict | None = None
+  ):
+    return self.rotary_embedding(inputs, inputs_positions)
+
+  def _apply_partial_rope(self, x, positions):
+    """Helper to apply Yarn RoPE only to the first rope_head_dim features."""
+    # x shape: [B, S, H, D]
+    x_pe, x_nope = jnp.split(x, [self.rope_head_dim], axis=-1)
+
+    # [CHANGE] Use the class-based rotary embedding
+    # YarnRotaryEmbedding expects: inputs=[B, S, H, D], position=[B, S]
+    x_pe = self.rotary_embedding(x_pe, position=positions)
+
+    return jnp.concatenate([x_pe, x_nope], axis=-1)
+
+  # TODO: remove freqs_cis
+  # TODO: k < seq len
+  def __call__(self, x, qr, start_pos, freqs_cis=None, mask=None):
+    """
+    Returns:
+        index_mask: A bias mask [Batch, 1, SeqLen, TotalLen] with 0.0 for TopK and -inf otherwise.
+    """
+    bsz, seqlen, _ = x.shape
+    end_pos = start_pos + seqlen
+
+    # [CHANGE] Generate position indices for Yarn RoPE
+    # Shape: [B, S]
+    positions = jnp.arange(start_pos, end_pos, dtype=jnp.int32)[None, :]
+    positions = jnp.broadcast_to(positions, (bsz, seqlen))
+
+    # 1. Query Processing: Project from Latent QR
+    q = self.wq_b(qr)
+    q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)
+    # q = self._apply_partial_rope(q, freqs_cis)
+
+    # [CHANGE] Pass positions instead of freqs_cis
+    q = self._apply_partial_rope(q, positions)
+
+    # 2. Key Processing: Project from Input X
+    k = self.wk(x)
+    k = self.k_norm(k)
+
+    # k = self._apply_partial_rope(k, freqs_cis)
+    # [CHANGE] Reshape K to have a "Heads" dimension for YarnRotaryEmbedding
+    # Input: [B, S, D] -> [B, S, 1, D]
+    k = k[:, :, None, :]
+    k = self._apply_partial_rope(k, positions)
+    k = k.squeeze(2)  # Back to [B, S, D]
+
+    # 3. Cache Update (Functional NNX update)
+    current_cache = self.k_cache.value
+    # Expand cache to batch if needed (simplified assumption)
+    if current_cache.ndim == 2:
+      current_cache = jnp.broadcast_to(current_cache, (bsz, current_cache.shape[0], current_cache.shape[1]))
+
+    updated_cache = jax.lax.dynamic_update_slice(current_cache, k.astype(current_cache.dtype), (0, start_pos, 0))
+    self.k_cache.value = updated_cache
+
+    # Active Keys: [B, TotalLen, D]
+    k_active = jax.lax.dynamic_slice(updated_cache, (0, 0, 0), (bsz, end_pos, self.head_dim))
+
+    # 4. Compute Scores
+    weights = self.weights_proj(x.astype(jnp.float32)) * (self.n_heads**-0.5) * self.softmax_scale
+
+    # Logits: Q [B,S,H,D] @ K.T [B,T,D] -> [B,S,T,H]
+    logits = jnp.einsum("bshd, btd -> bsth", q, k_active)
+    logits = jax.nn.relu(logits)
+
+    # Weighted Sum: [B,S,T,H] * [B,S,H] -> [B,S,T]
+    index_score = jnp.einsum("bsth, bsh -> bst", logits, weights)
+
+    # 5. Masking & TopK
+    if mask is not None:
+      # Ensure mask broadcasts [B, 1, S, T] -> [B, S, T]
+      index_score += mask.squeeze(1)
+
+    print("jax_index_score", index_score)
+
+    # Select TopK Indices (Values, Indices)
+    # We need to handle the case where total_len < topk (pad with -inf)
+    topk_vals, topk_indices = jax.lax.top_k(index_score, k=self.index_topk)
+
+    # 6. Create Sparse Mask
+    bias_mask = jnp.full(index_score.shape, -1e10, dtype=x.dtype)
+
+    # Scatter 0.0 at topk indices
+    batch_idx = jnp.arange(bsz)[:, None, None]
+    seq_idx = jnp.arange(seqlen)[None, :, None]
+
+    # JAX scatter update
+    bias_mask = bias_mask.at[batch_idx, seq_idx, topk_indices].set(0.0)
+
+    # Re-apply causal mask if present
+    if mask is not None:
+      bias_mask += mask.squeeze(1)
+
+    bias_mask = bias_mask[:, None, :, :]  # [B, 1, S, T]
+
+    return bias_mask, topk_indices, index_score
+
+
 class MLA(Attention):
   """Multi-Head Latent Attention (MLA) layer."""
 
@@ -363,6 +555,15 @@ class MLA(Attention):
         rngs=rngs,
     )
 
+    # [CHANGE 1] Initialize Indexer
+    # We check a config flag to see if we are in Sparse/DeepSeek3.2 mode
+    self.use_sparse_indexer = getattr(config, "use_sparse_indexer", False)
+    if self.use_sparse_indexer:
+      indexer_rope = copy.copy(self.rotary_embedding)
+      # indexer does not interleave
+      indexer_rope.interleave = False
+      self.indexer = Indexer(config, rngs=rngs, rotary_embedding=indexer_rope)
+
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
 
@@ -503,6 +704,7 @@ class MLA(Attention):
           rngs=self.rngs,
       )
 
+  # [CHANGE 2] Modify return signature to export Latent Query (qr)
   def mla_query_projection(self, inputs_q: Array, inputs_positions: Array, model_mode) -> Array:
     """Query projection for MLA, e.g. includes LoRA if q_lora_rank > 0."""
     # specify query logical name
@@ -524,17 +726,25 @@ class MLA(Attention):
       mscale = 0.1 * self.mscale * math.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
+    low_rank_q = None  # Placeholder for qr
+
     if self.q_lora_rank == 0:
       q = self.query(inputs_q, out_sharding=query_sharding)
     else:
       # LoRA path
       low_rank_q = self.wq_a(inputs_q, out_sharding=wqa_out_sharding)  # [B, L, q_lora_rank]
       low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
+      # [CRITICAL] This 'low_rank_q' IS the 'qr' needed by the Indexer
       low_rank_q = checkpoint_name(low_rank_q, "mla_q")
       q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads * qk_head_dim]
+      print("shape", q.shape)
+      # TODO: something wrong here?
+      # 2. Manual Reshape (Convert to Rank 4)
+      q = q.reshape((q.shape[0], q.shape[1], self.num_query_heads, self.qk_head_dim))  # Batch  # Seq  # 128  # 192
 
     # Split into non-positional and rotary parts.
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
+
     q_nope = self._maybe_shard_with_logical(q_nope, query_logical_name)
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions)
     q_pe = self._maybe_shard_with_logical(q_pe, query_logical_name)
@@ -542,7 +752,8 @@ class MLA(Attention):
     # DeepSeek v3 was doing it in attention score computation.
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
     query = self._maybe_shard_with_logical(query, query_logical_name)
-    return query
+    # Return Tuple
+    return query, low_rank_q
 
   def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
     """get (key,value) pair from mla"""
@@ -558,6 +769,8 @@ class MLA(Attention):
 
     wkva_out_sharding = create_sharding(self.mesh, key_logical_name)
     kv_out = self.wkv_b(low_rank_main, out_sharding=wkva_out_sharding)
+    # reshape?
+    kv_out = kv_out.reshape(kv_out.shape[0], kv_out.shape[1], self.num_kv_heads, self.qk_nope_head_dim + self.v_head_dim)
 
     # Split kv_out into key_nope and value parts.
     key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
@@ -737,23 +950,83 @@ class MLA(Attention):
       inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.input_axis_names)
       out_logical_name = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
 
-    query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
+    # [CHANGE 3] Unpack the tuple from projection
+    query, low_rank_q = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
     key, value, cached_values = self.mla_kv_projection(
         inputs_kv, inputs_positions, decoder_segment_ids, model_mode, previous_chunk
     )
-
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
+    # [CHANGE 4] Apply Indexer Logic
+    sparse_bias = None
+
+    # TODO(shuningjin): get mask from segment id
+    jax_mask_bias = None
+
+    # 1. Create Dummy 4D Tensors for Shape Inference
+    # The helper needs: [Batch, SeqLen, NumHeads, HeadDim]
+    # Values don't matter, only shape does.
+    # dummy_shape = (
+    #     self.batch_size,
+    #     self.seq_len,
+    #     self.config.num_query_heads,  # Ensure this config matches PyTorch n_heads
+    #     128,  # Head dim (arbitrary, just needs to exist)
+    # )
+    # dummy_q = jnp.zeros(dummy_shape, dtype=jnp.bfloat16)
+    # dummy_k = jnp.zeros(dummy_shape, dtype=jnp.bfloat16)
+
+    # # 2. Use the Production Helper to Generate Mask
+    # # This guarantees the logic (causal, padding, etc.) matches your real model
+    # jax_mask_bias = self.attention_op.generate_attention_mask(
+    #     query=dummy_q,
+    #     key=dummy_k,
+    #     decoder_segment_ids=decoder_segment_ids,  # Pass the zeros you created
+    #     model_mode=MODEL_MODE_TRAIN,  # Enforces Causal Masking
+    # )
+
+    # Shape: [1, 1, SeqLen, SeqLen] (Batch, Heads, Query, Key)
+    # We use (1, 1, ...) to broadcast across all heads.
+    # jax_mask = jnp.tril(jnp.ones((1, 1, self.seq_len, self.seq_len), dtype=jnp.bool_))
+
+    # # 2. Convert to Bias Values
+    # # PyTorch used: float("-inf")
+    # # JAX/MaxText usually prefers a large finite negative number (like -1e30) for stability,
+    # # but -inf works too. Let's use -1e30 to be safe on TPU.
+    # jax_mask_bias = jnp.where(jax_mask, 0.0, -1e30).astype(jnp.bfloat16)
+
+    if self.use_sparse_indexer and low_rank_q is not None:
+      # Determine start_pos for cache updates (simplified logic)
+      start_pos = 0
+      if inputs_positions is not None:
+        start_pos = inputs_positions[0, 0]  # Assuming [B, L] or similar
+      # Run Indexer
+      # inputs_q is 'x', low_rank_q is 'qr'
+      sparse_bias, _, _ = self.indexer(
+          x=inputs_q,
+          qr=low_rank_q,
+          start_pos=start_pos,
+          freqs_cis=None,  # In JAX/MaxText, RoPE is usually applied inside helper, or pass freqs if avail
+          mask=jax_mask_bias,  # Pass decoder_segment_ids converted to mask if needed
+      )
+
+    # [CHANGE 5] Pass the sparse_bias to the Attention Op
+    # Note: AttentionOp in MaxText often takes 'decoder_segment_ids' as the mask source.
+    # If AttentionOp doesn't support an explicit 'bias' argument, we might need to
+    # add it to the logits manually or wrap the attention op.
+
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
+      if sparse_bias:
+        raise NotImplementedError
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
       unnormalized_out = unnormalized_out[..., : self.v_head_dim]
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
-      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
+      # ds3.2, MHA mode for train / prefill, TODO: MQA model for decode (mathematically equivalent but speed faster)?
+      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, sparse_bias=sparse_bias)
 
     if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)

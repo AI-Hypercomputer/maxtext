@@ -328,6 +328,12 @@ moba: False
 moba_chunk_size: 1024
 moba_topk: 8
 
+# Deepseek Sparse Attention (DSA, deepseek3.2-style MLA)
+use_sparse_indexer: False
+index_head_dim: 128
+index_n_heads: 64
+index_topk: 2048
+
 # MLA parameters
 q_lora_rank: 0
 kv_lora_rank: 512
@@ -995,3 +1001,4 @@ use_jax_splash: false
 vllm_hf_config_path: ""
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
+

@@ -486,6 +486,15 @@ class MlaAttention(BaseModel):
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
 
 
+class AttentionIndexer(BaseModel):
+  """Configuration specific to Deepseek Sparse Attention (DSA) -- DeepSeek3.2-style of MLA."""
+
+  use_sparse_indexer: bool = Field(False, description="If True, enables sparse indexer.")
+  index_head_dim: NonNegativeInt = Field(128, description="head dim in indexer")
+  index_n_heads: NonNegativeInt = Field(64, description="number of head for indexer")
+  index_topk: NonNegativeInt = Field(2048, description="topk in indexer")
+
+
 class Llama4Attention(BaseModel):
   """Configuration specific to Llama4-style models."""
 
@@ -1633,6 +1642,7 @@ class MaxTextConfig(
     Attention,
     MlaAttention,
     MoBa,
+    AttentionIndexer,
     Llama4Attention,
     SplashAttention,
     PagedAttention,
