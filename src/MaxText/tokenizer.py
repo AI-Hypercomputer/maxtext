@@ -37,7 +37,9 @@ class TikTokenTokenizer:
 
   num_reserved_special_tokens = 256
 
-  pat_str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"  # pylint: disable=line-too-long
+  pat_str = (
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"  # pylint: disable=line-too-long
+  )
 
   def __init__(self, model_path: str, add_bos: bool, add_eos: bool):
     """
@@ -50,23 +52,23 @@ class TikTokenTokenizer:
     mergeable_ranks = load_tiktoken_bpe(model_path)
     num_base_tokens = len(mergeable_ranks)
     special_tokens = [
-        "<|begin_of_text|>",
-        "<|end_of_text|>",
-        "<|reserved_special_token_0|>",
-        "<|reserved_special_token_1|>",
-        "<|reserved_special_token_2|>",
-        "<|reserved_special_token_3|>",
-        "<|start_header_id|>",
-        "<|end_header_id|>",
-        "<|reserved_special_token_4|>",
-        "<|eot_id|>",  # end of turn
+      "<|begin_of_text|>",
+      "<|end_of_text|>",
+      "<|reserved_special_token_0|>",
+      "<|reserved_special_token_1|>",
+      "<|reserved_special_token_2|>",
+      "<|reserved_special_token_3|>",
+      "<|start_header_id|>",
+      "<|end_header_id|>",
+      "<|reserved_special_token_4|>",
+      "<|eot_id|>",  # end of turn
     ] + [f"<|reserved_special_token_{i}|>" for i in range(5, self.num_reserved_special_tokens - 5)]
     self.special_tokens = {token: num_base_tokens + i for i, token in enumerate(special_tokens)}
     self.model = tiktoken.Encoding(
-        name=Path(model_path).name,
-        pat_str=self.pat_str,
-        mergeable_ranks=mergeable_ranks,
-        special_tokens=self.special_tokens,
+      name=Path(model_path).name,
+      pat_str=self.pat_str,
+      mergeable_ranks=mergeable_ranks,
+      special_tokens=self.special_tokens,
     )
     self.eos = add_eos
     self.bos = add_bos
@@ -78,17 +80,17 @@ class TikTokenTokenizer:
     self.eos_id: int = self.special_tokens["<|end_of_text|>"]
     self.pad_id: int = -1
     self.stop_tokens = {
-        self.special_tokens["<|end_of_text|>"],
-        self.special_tokens["<|eot_id|>"],
+      self.special_tokens["<|end_of_text|>"],
+      self.special_tokens["<|eot_id|>"],
     }
     max_logging.log(f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}")
 
   def encode(
-      self,
-      s: str,
-      *,
-      allowed_special: Literal["all"] | Collection[str] = (),
-      disallowed_special: Literal["all"] | Collection[str] = (),
+    self,
+    s: str,
+    *,
+    allowed_special: Literal["all"] | Collection[str] = (),
+    disallowed_special: Literal["all"] | Collection[str] = (),
   ) -> list[int]:
     """
     Encodes a string into a list of token IDs.
@@ -123,20 +125,20 @@ class TikTokenTokenizer:
     MAX_NO_WHITESPACES_CHARS = 25_000
 
     substrs = (
-        substr
-        for i in range(0, len(s), TIKTOKEN_MAX_ENCODE_CHARS)
-        for substr in self._split_whitespaces_or_nonwhitespaces(
-            s[i : i + TIKTOKEN_MAX_ENCODE_CHARS], MAX_NO_WHITESPACES_CHARS
-        )
+      substr
+      for i in range(0, len(s), TIKTOKEN_MAX_ENCODE_CHARS)
+      for substr in self._split_whitespaces_or_nonwhitespaces(
+        s[i : i + TIKTOKEN_MAX_ENCODE_CHARS], MAX_NO_WHITESPACES_CHARS
+      )
     )
     t: list[int] = []
     for substr in substrs:
       t.extend(
-          self.model.encode(
-              substr,
-              allowed_special=set(allowed_special),
-              disallowed_special=disallowed_special,
-          )
+        self.model.encode(
+          substr,
+          allowed_special=set(allowed_special),
+          disallowed_special=disallowed_special,
+        )
       )
     if self.bos:
       t.insert(0, self.bos_id)
@@ -238,10 +240,10 @@ class HFTokenizer:
   def __init__(self, model_path: str, add_bos: bool, add_eos: bool, hf_access_token: str):
     max_logging.log(f"Loading HF tokenizer: {model_path}")
     self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-        model_path,
-        add_bos_token=add_bos,
-        add_eos_token=add_eos,
-        token=hf_access_token,
+      model_path,
+      add_bos_token=add_bos,
+      add_eos_token=add_eos,
+      token=hf_access_token,
     )
     self.pad_id = self.tokenizer.pad_token_id
     self.unk_id = self.tokenizer.unk_token_id

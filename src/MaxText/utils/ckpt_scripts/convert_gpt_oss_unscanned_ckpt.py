@@ -61,22 +61,22 @@ def _pt_to_np(pt_weight, cast_dtype=None, transpose=False):
 
 
 MODEL_PARAMS_DICT = {
-    "gpt-oss-20b": {
-        "base_emb_dim": 2880,
-        "base_num_query_heads": 64,
-        "base_num_kv_heads": 8,
-        "head_dim": 64,
-        "base_num_decoder_layers": 24,
-        "inhomogeneous_layer_cycle_interval": 2,
-    },
-    "gpt-oss-120b": {
-        "base_emb_dim": 2880,
-        "base_num_query_heads": 64,
-        "base_num_kv_heads": 8,
-        "head_dim": 64,
-        "base_num_decoder_layers": 36,
-        "inhomogeneous_layer_cycle_interval": 2,
-    },
+  "gpt-oss-20b": {
+    "base_emb_dim": 2880,
+    "base_num_query_heads": 64,
+    "base_num_kv_heads": 8,
+    "head_dim": 64,
+    "base_num_decoder_layers": 24,
+    "inhomogeneous_layer_cycle_interval": 2,
+  },
+  "gpt-oss-120b": {
+    "base_emb_dim": 2880,
+    "base_num_query_heads": 64,
+    "base_num_kv_heads": 8,
+    "head_dim": 64,
+    "base_num_decoder_layers": 36,
+    "inhomogeneous_layer_cycle_interval": 2,
+  },
 }
 
 
@@ -92,34 +92,34 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1) -> dict:
   """
   # pylint: disable=line-too-long
   return {
-      "model.embed_tokens.weight": "tok_embeddings.weight",
-      "model.norm.weight": "norm.weight",
-      "lm_head.weight": "output.weight",
-      # layernorm
-      f"model.layers.{layer_idx}.input_layernorm.weight": f"layers.{layer_idx}.attention_norm.weight",
-      f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"layers.{layer_idx}.ffn_norm.weight",
-      # attention
-      f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"layers.{layer_idx}.attention.wq.weight",
-      f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"layers.{layer_idx}.attention.wk.weight",
-      f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"layers.{layer_idx}.attention.wv.weight",
-      f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"layers.{layer_idx}.attention.wo.weight",
-      f"model.layers.{layer_idx}.self_attn.q_proj.bias": f"layers.{layer_idx}.attention.wq.bias",
-      f"model.layers.{layer_idx}.self_attn.k_proj.bias": f"layers.{layer_idx}.attention.wk.bias",
-      f"model.layers.{layer_idx}.self_attn.v_proj.bias": f"layers.{layer_idx}.attention.wv.bias",
-      f"model.layers.{layer_idx}.self_attn.o_proj.bias": f"layers.{layer_idx}.attention.wo.bias",
-      f"model.layers.{layer_idx}.self_attn.sinks": f"layers.{layer_idx}.attention.sinks",
-      # MoE
-      f"model.layers.{layer_idx}.mlp.router.weight": f"layers.{layer_idx}.feed_forward.gate.weight",
-      f"model.layers.{layer_idx}.mlp.router.bias": f"layers.{layer_idx}.feed_forward.gate.bias",
-      f"model.layers.{layer_idx}.mlp.experts.gate_up_proj": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj",
-      f"model.layers.{layer_idx}.mlp.experts.gate_up_proj_bias": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias",
-      f"model.layers.{layer_idx}.mlp.experts.down_proj": f"layers.{layer_idx}.feed_forward.experts.down_proj",
-      f"model.layers.{layer_idx}.mlp.experts.down_proj_bias": f"layers.{layer_idx}.feed_forward.experts.down_proj_bias",
+    "model.embed_tokens.weight": "tok_embeddings.weight",
+    "model.norm.weight": "norm.weight",
+    "lm_head.weight": "output.weight",
+    # layernorm
+    f"model.layers.{layer_idx}.input_layernorm.weight": f"layers.{layer_idx}.attention_norm.weight",
+    f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"layers.{layer_idx}.ffn_norm.weight",
+    # attention
+    f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"layers.{layer_idx}.attention.wq.weight",
+    f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"layers.{layer_idx}.attention.wk.weight",
+    f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"layers.{layer_idx}.attention.wv.weight",
+    f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"layers.{layer_idx}.attention.wo.weight",
+    f"model.layers.{layer_idx}.self_attn.q_proj.bias": f"layers.{layer_idx}.attention.wq.bias",
+    f"model.layers.{layer_idx}.self_attn.k_proj.bias": f"layers.{layer_idx}.attention.wk.bias",
+    f"model.layers.{layer_idx}.self_attn.v_proj.bias": f"layers.{layer_idx}.attention.wv.bias",
+    f"model.layers.{layer_idx}.self_attn.o_proj.bias": f"layers.{layer_idx}.attention.wo.bias",
+    f"model.layers.{layer_idx}.self_attn.sinks": f"layers.{layer_idx}.attention.sinks",
+    # MoE
+    f"model.layers.{layer_idx}.mlp.router.weight": f"layers.{layer_idx}.feed_forward.gate.weight",
+    f"model.layers.{layer_idx}.mlp.router.bias": f"layers.{layer_idx}.feed_forward.gate.bias",
+    f"model.layers.{layer_idx}.mlp.experts.gate_up_proj": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj",
+    f"model.layers.{layer_idx}.mlp.experts.gate_up_proj_bias": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias",
+    f"model.layers.{layer_idx}.mlp.experts.down_proj": f"layers.{layer_idx}.feed_forward.experts.down_proj",
+    f"model.layers.{layer_idx}.mlp.experts.down_proj_bias": f"layers.{layer_idx}.feed_forward.experts.down_proj_bias",
   }
 
 
 def _convert_huggingface_to_jax_weights(
-    base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process
+  base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process
 ):
   """Convert a Huggingface Checkpoint to a dictionary of Numpy arrays representing the weights.
 
@@ -144,7 +144,7 @@ def _convert_huggingface_to_jax_weights(
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
   chkpt_vars = {}
   for i, ckpt_path in enumerate(ckpt_paths):
-    max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+    max_logging.log(f"Loading checkpoint {i + 1} of {len(ckpt_paths)} ...")
 
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
       for key in f.keys():
@@ -157,32 +157,32 @@ def _convert_huggingface_to_jax_weights(
 
   # initialize the data structure for storing jax_weights
   jax_weights = {
-      "token_embedder": {"embedding": None},
-      "decoder": {
-          "decoder_norm": {"scale": None},
-          "logits_dense": {"kernel": None},
-      },
+    "token_embedder": {"embedding": None},
+    "decoder": {
+      "decoder_norm": {"scale": None},
+      "logits_dense": {"kernel": None},
+    },
   }
   for layer_idx in range(base_num_decoder_layers):
     jax_weights["decoder"][f"layers_{layer_idx}"] = {
-        "pre_self_attention_layer_norm": {"scale": None},
-        "post_self_attention_layer_norm": {"scale": None},
-        "GptOssAttention": {
-            "query": {"kernel": None, "bias": None},
-            "key": {"kernel": None, "bias": None},
-            "value": {"kernel": None, "bias": None},
-            "out": {"kernel": None, "bias": None},
-            "sinks": None,
-        },
-        "GptOssMlp": {
-            "gate": {"kernel": None, "bias": None},
-            "wi_0": None,
-            "wi_0_bias": None,
-            "wi_1": None,
-            "wi_1_bias": None,
-            "wo": None,
-            "wo_bias": None,
-        },
+      "pre_self_attention_layer_norm": {"scale": None},
+      "post_self_attention_layer_norm": {"scale": None},
+      "GptOssAttention": {
+        "query": {"kernel": None, "bias": None},
+        "key": {"kernel": None, "bias": None},
+        "value": {"kernel": None, "bias": None},
+        "out": {"kernel": None, "bias": None},
+        "sinks": None,
+      },
+      "GptOssMlp": {
+        "gate": {"kernel": None, "bias": None},
+        "wi_0": None,
+        "wi_0_bias": None,
+        "wi_1": None,
+        "wi_1_bias": None,
+        "wo": None,
+        "wo_bias": None,
+      },
     }
 
   # decoder norm scale ###########################################
@@ -248,7 +248,7 @@ def _convert_huggingface_to_jax_weights(
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     layer_weight = jax_weights["decoder"][f"layers_{layer_idx}"]
     pre_self_attention_layernorm = _pt_to_np(
-        chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"], cast_dtype=CAST_DTYPE
+      chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"], cast_dtype=CAST_DTYPE
     )
     post_self_attention_layernorm = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.ffn_norm.weight"], cast_dtype=CAST_DTYPE)
 
@@ -267,7 +267,7 @@ def _convert_huggingface_to_jax_weights(
     gate_bias = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.gate.bias"], cast_dtype=CAST_DTYPE)
     wi_0_1 = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"], cast_dtype=CAST_DTYPE)
     wi_0_1_bias = _pt_to_np(
-        chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias"], cast_dtype=CAST_DTYPE
+      chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias"], cast_dtype=CAST_DTYPE
     )
     wo = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"], cast_dtype=CAST_DTYPE)
     wo_bias = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj_bias"], cast_dtype=CAST_DTYPE)
@@ -331,10 +331,10 @@ if __name__ == "__main__":
   base_weights_path = args.maxtext_model_path
 
   save_weights_to_checkpoint(
-      args.maxtext_model_path,
-      convert_to_jax_weights(args.base_model_path, args.model_size),
-      args.simulated_cpu_devices_count,
-      args.use_ocdbt,
-      args.use_zarr3,
+    args.maxtext_model_path,
+    convert_to_jax_weights(args.base_model_path, args.model_size),
+    args.simulated_cpu_devices_count,
+    args.use_ocdbt,
+    args.use_zarr3,
   )
   max_logging.log(f"Successfully saved base_weights to {base_weights_path}.")

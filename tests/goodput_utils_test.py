@@ -28,13 +28,13 @@ class GoodputUtilsTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        base_output_directory="gs://runner-maxtext-logs",
-        run_name="runner_test",
-        enable_checkpointing=False,
-        monitor_goodput=True,
-        enable_goodput_recording=True,
-        monitor_step_time_deviation=True,
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      base_output_directory="gs://runner-maxtext-logs",
+      run_name="runner_test",
+      enable_checkpointing=False,
+      monitor_goodput=True,
+      enable_goodput_recording=True,
+      monitor_step_time_deviation=True,
     )
 
   @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_end_time")

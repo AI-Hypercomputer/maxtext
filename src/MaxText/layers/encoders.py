@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""""Module for encoder layers."""
+""" "Module for encoder layers."""
 
 import jax
 from flax import nnx
@@ -77,16 +77,16 @@ class VisionEncoder(nnx.Module):
 
 
 def vision_encoder_as_linen(
-    config: Config,
-    mesh: Mesh,
+  config: Config,
+  mesh: Mesh,
 ):
   """Creates a VisionEncoder module."""
   module = nnx_wrappers.to_linen(
-      VisionEncoder,
-      config=config,
-      mesh=mesh,
-      name="vision_encoder",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
+    VisionEncoder,
+    config=config,
+    mesh=mesh,
+    name="vision_encoder",
+    abstract_init=False,
+    metadata_fn=initializers.variable_to_logically_partitioned,
   )
   return module

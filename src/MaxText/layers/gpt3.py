@@ -48,18 +48,18 @@ class Gpt3LayerNorm(nnx.Module):
   """GPT3 Layer normalization operating on the last axis of the input data."""
 
   def __init__(
-      self,
-      num_features: int,
-      epsilon: float = 1e-6,
-      dtype: Any = jnp.float32,
-      weight_dtype: Any = jnp.float32,
-      kernel_axes: tuple[None | str, ...] = (),
-      scale_init: Initializer = nn.initializers.zeros,
-      use_bias: bool = True,
-      reductions_in_fp32: bool = False,
-      parameter_memory_host_offload: bool = False,
-      *,
-      rngs: nnx.Rngs,
+    self,
+    num_features: int,
+    epsilon: float = 1e-6,
+    dtype: Any = jnp.float32,
+    weight_dtype: Any = jnp.float32,
+    kernel_axes: tuple[None | str, ...] = (),
+    scale_init: Initializer = nn.initializers.zeros,
+    use_bias: bool = True,
+    reductions_in_fp32: bool = False,
+    parameter_memory_host_offload: bool = False,
+    *,
+    rngs: nnx.Rngs,
   ):
     self.epsilon = epsilon
     self.dtype = dtype
@@ -71,12 +71,12 @@ class Gpt3LayerNorm(nnx.Module):
     self.parameter_memory_host_offload = parameter_memory_host_offload
 
     self.scale = nnx.Param(
-        self.scale_init(rngs.params(), (num_features,), self.weight_dtype),
-        sharding=self.kernel_axes,
+      self.scale_init(rngs.params(), (num_features,), self.weight_dtype),
+      sharding=self.kernel_axes,
     )
     if self.use_bias:
       self.bias = nnx.Param(
-          initializers.default_bias_init(rngs.params(), (num_features,), self.weight_dtype), sharding=self.kernel_axes
+        initializers.default_bias_init(rngs.params(), (num_features,), self.weight_dtype), sharding=self.kernel_axes
       )
     else:
       self.bias = None
@@ -100,10 +100,10 @@ class Gpt3LayerNorm(nnx.Module):
     scale = jnp.asarray(scale, self.dtype)
     # broadcast second inputs and element-wise mul
     output = jnp.einsum(
-        "i...k,...k->i...k",
-        normed_inputs,
-        scale + 1,
-        out_sharding=out_sharding,
+      "i...k,...k->i...k",
+      normed_inputs,
+      scale + 1,
+      out_sharding=out_sharding,
     )
 
     if self.bias is not None:
@@ -114,17 +114,17 @@ class Gpt3LayerNorm(nnx.Module):
 
 
 def gpt3_layer_norm(
-    *,
-    num_features: int,
-    epsilon: float = 1e-6,
-    dtype: Any = jnp.float32,
-    weight_dtype: Any = jnp.float32,
-    kernel_axes: tuple[None | str, ...] = (),
-    scale_init: Initializer = nn.initializers.zeros,
-    use_bias: bool = True,
-    reductions_in_fp32: bool = False,
-    parameter_memory_host_offload: bool = False,
-    name: None | str = None,
+  *,
+  num_features: int,
+  epsilon: float = 1e-6,
+  dtype: Any = jnp.float32,
+  weight_dtype: Any = jnp.float32,
+  kernel_axes: tuple[None | str, ...] = (),
+  scale_init: Initializer = nn.initializers.zeros,
+  use_bias: bool = True,
+  reductions_in_fp32: bool = False,
+  parameter_memory_host_offload: bool = False,
+  name: None | str = None,
 ):
   """Initializes the gpt3_layer_norm module.
 
@@ -142,18 +142,18 @@ def gpt3_layer_norm(
   """
 
   module = nnx_wrappers.to_linen(
-      Gpt3LayerNorm,
-      num_features=num_features,
-      epsilon=epsilon,
-      dtype=dtype,
-      weight_dtype=weight_dtype,
-      kernel_axes=kernel_axes,
-      scale_init=scale_init,
-      use_bias=use_bias,
-      reductions_in_fp32=reductions_in_fp32,
-      parameter_memory_host_offload=parameter_memory_host_offload,
-      name=name,
-      metadata_fn=initializers.variable_to_logically_partitioned,
+    Gpt3LayerNorm,
+    num_features=num_features,
+    epsilon=epsilon,
+    dtype=dtype,
+    weight_dtype=weight_dtype,
+    kernel_axes=kernel_axes,
+    scale_init=scale_init,
+    use_bias=use_bias,
+    reductions_in_fp32=reductions_in_fp32,
+    parameter_memory_host_offload=parameter_memory_host_offload,
+    name=name,
+    metadata_fn=initializers.variable_to_logically_partitioned,
   )
   return module
 
@@ -186,33 +186,33 @@ class Gpt3MultiHeadAttention(nnx.Module):
   """
 
   def __init__(
-      self,
-      config: Config,
-      model_mode: str,
-      num_heads: int,
-      feature_dim: tuple[int, ...],
-      head_dim: int,
-      max_target_length: int,
-      max_prefill_predict_length: int,
-      mesh: Mesh,
-      rngs: nnx.Rngs,
-      attention_kernel: str,
-      dtype: DType = jnp.float32,
-      weight_dtype: DType = jnp.float32,
-      dropout_rate: float = 0.0,
-      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
-      float32_qk_product: bool = False,  # computes logits in float32 for stability.
-      float32_logits: bool = True,  # cast logits in float32 for stability.
-      fused_qkv: bool = True,
-      quant: Optional[Quant] = None,
-      kv_quant: Optional[KVQuant] = None,
-      use_bias: bool = True,
-      input_axis_names: AxisNames = (BATCH, LENGTH, EMBED),
-      query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
-      key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
-      value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
-      out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
-      **kwargs: Any,
+    self,
+    config: Config,
+    model_mode: str,
+    num_heads: int,
+    feature_dim: tuple[int, ...],
+    head_dim: int,
+    max_target_length: int,
+    max_prefill_predict_length: int,
+    mesh: Mesh,
+    rngs: nnx.Rngs,
+    attention_kernel: str,
+    dtype: DType = jnp.float32,
+    weight_dtype: DType = jnp.float32,
+    dropout_rate: float = 0.0,
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+    float32_qk_product: bool = False,  # computes logits in float32 for stability.
+    float32_logits: bool = True,  # cast logits in float32 for stability.
+    fused_qkv: bool = True,
+    quant: Optional[Quant] = None,
+    kv_quant: Optional[KVQuant] = None,
+    use_bias: bool = True,
+    input_axis_names: AxisNames = (BATCH, LENGTH, EMBED),
+    query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+    key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+    value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+    out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+    **kwargs: Any,
   ):
     self.config = config
     self.num_heads = num_heads
@@ -239,52 +239,52 @@ class Gpt3MultiHeadAttention(nnx.Module):
     self.rngs = rngs
     if self.fused_qkv:
       self.qkv_proj = self.create_projection_layer(
-          feature_dim, (3, self.num_heads, self.head_dim), ("embed", "qkv", "heads", "kv")
+        feature_dim, (3, self.num_heads, self.head_dim), ("embed", "qkv", "heads", "kv")
       )
     else:
       self.query = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv"))
       self.key = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv"))
       self.value = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv"))
     self.out = self.create_projection_layer(
-        (self.num_heads, self.head_dim), feature_dim[-1], ("heads", "kv", "embed"), axis=(-2, -1)
+      (self.num_heads, self.head_dim), feature_dim[-1], ("heads", "kv", "embed"), axis=(-2, -1)
     )
     self.attention_op = AttentionOp(
-        config=config,
-        mesh=self.mesh,
-        attention_kernel=self.attention_kernel,
-        max_target_length=self.max_target_length,
-        float32_qk_product=self.float32_qk_product,
-        float32_logits=self.float32_logits,
-        quant=self.quant,
-        kv_quant=self.kv_quant,
-        num_query_heads=self.num_heads,
-        num_kv_heads=self.num_heads,
-        dtype=self.dtype,
+      config=config,
+      mesh=self.mesh,
+      attention_kernel=self.attention_kernel,
+      max_target_length=self.max_target_length,
+      float32_qk_product=self.float32_qk_product,
+      float32_logits=self.float32_logits,
+      quant=self.quant,
+      kv_quant=self.kv_quant,
+      num_query_heads=self.num_heads,
+      num_kv_heads=self.num_heads,
+      dtype=self.dtype,
     )
 
   def create_projection_layer(
-      self,
-      input_shape: tuple[int, ...],
-      output_shape: tuple[int, ...] | int,
-      kernel_axes: tuple[str, ...],
-      axis: int | tuple[int, ...] = -1,
+    self,
+    input_shape: tuple[int, ...],
+    output_shape: tuple[int, ...] | int,
+    kernel_axes: tuple[str, ...],
+    axis: int | tuple[int, ...] = -1,
   ):
     """Create projection layer for Key, Value, Query and Output"""
     axis = canonicalize_tuple(axis)
     in_features_shape = tuple(input_shape[ax] for ax in normalize_axes(axis, len(input_shape)))
 
     return DenseGeneral(
-        in_features_shape=in_features_shape,
-        out_features_shape=output_shape,
-        axis=axis,
-        kernel_init=self.kernel_init,
-        kernel_axes=kernel_axes,
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        quant=self.quant,
-        use_bias=self.use_bias,
-        matmul_precision=self.config.matmul_precision,
-        rngs=self.rngs,
+      in_features_shape=in_features_shape,
+      out_features_shape=output_shape,
+      axis=axis,
+      kernel_init=self.kernel_init,
+      kernel_axes=kernel_axes,
+      dtype=self.dtype,
+      weight_dtype=self.weight_dtype,
+      quant=self.quant,
+      use_bias=self.use_bias,
+      matmul_precision=self.config.matmul_precision,
+      rngs=self.rngs,
     )
 
   def qkv_projection(self, projection_layer: Any, inputs: Array):
@@ -301,14 +301,14 @@ class Gpt3MultiHeadAttention(nnx.Module):
     return proj
 
   def __call__(
-      self,
-      inputs_q: Array,
-      decoder_segment_ids: Array | None = None,
-      *,
-      deterministic: bool = False,
-      model_mode: str = MODEL_MODE_TRAIN,
-      kv_cache: Array | None = None,
-      attention_metadata: dict[str, Any] | None = None,
+    self,
+    inputs_q: Array,
+    decoder_segment_ids: Array | None = None,
+    *,
+    deterministic: bool = False,
+    model_mode: str = MODEL_MODE_TRAIN,
+    kv_cache: Array | None = None,
+    attention_metadata: dict[str, Any] | None = None,
   ):
     inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
     if self.fused_qkv:
@@ -348,14 +348,13 @@ class Gpt3DecoderLayer(nnx.Module):
   """Transformer decoder layer that attends to the encoder."""
 
   def __init__(
-      self,
-      config: models.Config,
-      model_mode: str,
-      mesh: Mesh,
-      rngs: nnx.Rngs,
-      quant: Optional[Quant] = None,
+    self,
+    config: models.Config,
+    model_mode: str,
+    mesh: Mesh,
+    rngs: nnx.Rngs,
+    quant: Optional[Quant] = None,
   ):
-
     self.config = config
     self.mesh = mesh
     self.quant = quant
@@ -365,52 +364,52 @@ class Gpt3DecoderLayer(nnx.Module):
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.pre_self_attention_norm = Gpt3LayerNorm(
-        num_features=dummy_inputs_shape[-1],
-        dtype=config.dtype,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        reductions_in_fp32=False,
-        use_bias=True,
-        rngs=self.rngs,
+      num_features=dummy_inputs_shape[-1],
+      dtype=config.dtype,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      reductions_in_fp32=False,
+      use_bias=True,
+      rngs=self.rngs,
     )
 
     self.mlp = MlpBlock(
-        mesh=self.mesh,
-        in_features=dummy_inputs_shape[-1],
-        intermediate_dim=config.mlp_dim,
-        activations=config.mlp_activations,
-        intermediate_dropout_rate=config.dropout_rate,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        use_bias=True,
-        use_pre_norm=True,
-        config=config,
-        quant=self.quant,
-        model_mode=model_mode,
-        rngs=self.rngs,
+      mesh=self.mesh,
+      in_features=dummy_inputs_shape[-1],
+      intermediate_dim=config.mlp_dim,
+      activations=config.mlp_activations,
+      intermediate_dropout_rate=config.dropout_rate,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      use_bias=True,
+      use_pre_norm=True,
+      config=config,
+      quant=self.quant,
+      model_mode=model_mode,
+      rngs=self.rngs,
     )
 
     self.self_attention = Gpt3MultiHeadAttention(
-        config=config,
-        num_heads=config.num_query_heads,
-        dtype=config.dtype,
-        feature_dim=dummy_inputs_shape,
-        weight_dtype=config.weight_dtype,
-        head_dim=config.head_dim,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        attention_kernel=config.attention,
-        mesh=self.mesh,
-        dropout_rate=config.dropout_rate,
-        name="self_attention",
-        float32_qk_product=config.float32_qk_product,
-        float32_logits=config.float32_logits,
-        fused_qkv=config.fused_qkv,
-        use_bias=True,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(config),
-        model_mode=model_mode,
-        rngs=self.rngs,
+      config=config,
+      num_heads=config.num_query_heads,
+      dtype=config.dtype,
+      feature_dim=dummy_inputs_shape,
+      weight_dtype=config.weight_dtype,
+      head_dim=config.head_dim,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      attention_kernel=config.attention,
+      mesh=self.mesh,
+      dropout_rate=config.dropout_rate,
+      name="self_attention",
+      float32_qk_product=config.float32_qk_product,
+      float32_logits=config.float32_logits,
+      fused_qkv=config.fused_qkv,
+      use_bias=True,
+      quant=self.quant,
+      kv_quant=quantizations.configure_kv_quant(config),
+      model_mode=model_mode,
+      rngs=self.rngs,
     )
 
     self.dropout = linears.Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
@@ -418,17 +417,17 @@ class Gpt3DecoderLayer(nnx.Module):
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      previous_chunk=None,
-      page_state=None,
-      slot=None,
-      kv_cache=None,
-      attention_metadata=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    previous_chunk=None,
+    page_state=None,
+    slot=None,
+    kv_cache=None,
+    attention_metadata=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -441,17 +440,17 @@ class Gpt3DecoderLayer(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
     # Self-attention block
-    assert (
-        self.config.num_query_heads == self.config.num_kv_heads
-    ), f"{self.config.num_query_heads=} should be the same as {self.config.num_kv_heads=} in gpt3"
+    assert self.config.num_query_heads == self.config.num_kv_heads, (
+      f"{self.config.num_query_heads=} should be the same as {self.config.num_kv_heads=} in gpt3"
+    )
 
     attention_lnx, kv_cache = self.self_attention(
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        model_mode=model_mode,
-        deterministic=deterministic,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      model_mode=model_mode,
+      deterministic=deterministic,
+      kv_cache=kv_cache,
+      attention_metadata=attention_metadata,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
@@ -468,9 +467,9 @@ class Gpt3DecoderLayer(nnx.Module):
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
-          "activation_fraction_zero",
-          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+        "intermediates",
+        "activation_fraction_zero",
+        jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
     if self.config.scan_layers:
@@ -480,6 +479,6 @@ class Gpt3DecoderLayer(nnx.Module):
 
 
 Gpt3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Gpt3DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  Gpt3DecoderLayer,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )

@@ -15,6 +15,7 @@
 """
 Tests for GatedDeltaRule in Qwen3-Next against its PyTorch reference.
 """
+
 import unittest
 import os
 from types import SimpleNamespace
@@ -49,13 +50,13 @@ def create_causal_mask_PT(q_seq_len: int, kv_seq_len: int, dtype=torch.float32):
 
 
 def eager_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    scaling: float,
-    dropout: float = 0.0,
+  module: nn.Module,
+  query: torch.Tensor,
+  key: torch.Tensor,
+  value: torch.Tensor,
+  attention_mask: Optional[torch.Tensor],
+  scaling: float,
+  dropout: float = 0.0,
 ):
   """Pytorch implementation of default self-attention operation"""
   key_states = repeat_kv(key, module.num_key_value_groups)
@@ -110,16 +111,16 @@ def l2norm_torch(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
 
 
 def torch_chunk_gated_delta_rule(
-    query,
-    key,
-    value,
-    g,
-    beta,
-    chunk_size=64,
-    initial_state=None,
-    output_final_state=False,
-    # Keep original HF name in PT func signature for clarity
-    use_qk_l2norm_in_kernel=False,
+  query,
+  key,
+  value,
+  g,
+  beta,
+  chunk_size=64,
+  initial_state=None,
+  output_final_state=False,
+  # Keep original HF name in PT func signature for clarity
+  use_qk_l2norm_in_kernel=False,
 ):
   """
   PyTorch implementation of the chunked Gated Delta Rule attention mechanism.
@@ -167,12 +168,12 @@ def torch_chunk_gated_delta_rule(
   k_beta = key * beta.unsqueeze(-1)
   # reshape to chunks
   query, key, value, k_beta, v_beta = [
-      x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1]) for x in (query, key, value, k_beta, v_beta)
+    x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1]) for x in (query, key, value, k_beta, v_beta)
   ]
   g = g.reshape(g.shape[0], g.shape[1], -1, chunk_size)
   mask = torch.triu(
-      torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device),
-      diagonal=0,
+    torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device),
+    diagonal=0,
   )
 
   # chunk decay
@@ -187,14 +188,14 @@ def torch_chunk_gated_delta_rule(
   value = attn @ v_beta
   k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
   last_recurrent_state = (
-      torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim).to(value)
-      if initial_state is None
-      else initial_state.to(value)
+    torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim).to(value)
+    if initial_state is None
+    else initial_state.to(value)
   )
   core_attn_out = torch.zeros_like(value)
   mask = torch.triu(
-      torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device),
-      diagonal=1,
+    torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device),
+    diagonal=1,
   )
 
   # for each chunk
@@ -206,8 +207,8 @@ def torch_chunk_gated_delta_rule(
     attn_inter = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
     core_attn_out[:, :, i] = attn_inter + attn @ v_new
     last_recurrent_state = (
-        last_recurrent_state * g[:, :, i, -1, None, None].exp()
-        + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
+      last_recurrent_state * g[:, :, i, -1, None, None].exp()
+      + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
     )
 
   if not output_final_state:
@@ -269,9 +270,9 @@ class Qwen3NextRotaryEmbedding_PT(nn.Module):
 
   @staticmethod
   def compute_default_rope_parameters(
-      config,
-      device: Optional["torch.device"] = None,
-      seq_len: Optional[int] = None,
+    config,
+    device: Optional["torch.device"] = None,
+    seq_len: Optional[int] = None,
   ) -> tuple["torch.Tensor", float]:
     """
     Computes the inverse frequencies according to the original RoPE implementation
@@ -350,10 +351,10 @@ class Qwen3NextExperts_PT(nn.ModuleList):
       self.append(Qwen3NextMLP_PT(config, intermediate_size=config.moe_intermediate_size))
 
   def forward(
-      self,
-      hidden_states: torch.Tensor,
-      top_k_index: torch.Tensor,
-      top_k_weights: torch.Tensor,
+    self,
+    hidden_states: torch.Tensor,
+    top_k_index: torch.Tensor,
+    top_k_weights: torch.Tensor,
   ) -> torch.Tensor:
     """Forward pass for the expert layers."""
     final_hidden_states = torch.zeros_like(hidden_states)
@@ -465,12 +466,12 @@ class Qwen3NextGatedDeltaNet_PT(nn.Module):
 
     self.conv_dim = self.key_dim * 2 + self.value_dim
     self.conv1d = nn.Conv1d(
-        in_channels=self.conv_dim,
-        out_channels=self.conv_dim,
-        bias=False,
-        kernel_size=self.conv_kernel_size,
-        groups=self.conv_dim,
-        padding=self.conv_kernel_size - 1,
+      in_channels=self.conv_dim,
+      out_channels=self.conv_dim,
+      bias=False,
+      kernel_size=self.conv_kernel_size,
+      groups=self.conv_dim,
+      padding=self.conv_kernel_size - 1,
     )
 
     projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
@@ -492,9 +493,9 @@ class Qwen3NextGatedDeltaNet_PT(nn.Module):
 
     # Simplified split for test where num_v_heads == num_k_heads
     q, k, v, z = torch.split(
-        projected_states_qkvz,
-        [self.key_dim, self.key_dim, self.value_dim, self.value_dim],
-        dim=-1,
+      projected_states_qkvz,
+      [self.key_dim, self.key_dim, self.value_dim, self.value_dim],
+      dim=-1,
     )
     b, a = torch.split(projected_states_ba, [self.num_v_heads, self.num_v_heads], dim=-1)
 
@@ -511,13 +512,13 @@ class Qwen3NextGatedDeltaNet_PT(nn.Module):
 
     # Use the renamed config flag when calling the reference function internally
     core_attn_out, _ = torch_chunk_gated_delta_rule(
-        query,
-        key,
-        value,
-        g,
-        beta,
-        chunk_size=self.config.gdn_chunk_size,  # Use renamed config
-        use_qk_l2norm_in_kernel=self.config.use_qk_norm_in_gdn,  # Use renamed config
+      query,
+      key,
+      value,
+      g,
+      beta,
+      chunk_size=self.config.gdn_chunk_size,  # Use renamed config
+      use_qk_l2norm_in_kernel=self.config.use_qk_norm_in_gdn,  # Use renamed config
     )
 
     z_reshaped = z.reshape(batch_size, seq_len, self.num_v_heads, self.head_v_dim)
@@ -552,7 +553,7 @@ class Qwen3NextFullAttention_PT(nn.Module):
     self.attention_dropout = config.attention_dropout
 
     self.q_proj = nn.Linear(
-        config.hidden_size, config.num_attention_heads * self.head_dim * 2, bias=config.attention_bias
+      config.hidden_size, config.num_attention_heads * self.head_dim * 2, bias=config.attention_bias
     )
     self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias)
     self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias)
@@ -561,12 +562,12 @@ class Qwen3NextFullAttention_PT(nn.Module):
     self.k_norm = Qwen3NextRMSNorm_PT(self.head_dim, eps=config.rms_norm_eps)
 
   def forward(
-      self,
-      hidden_states: torch.Tensor,
-      position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-      attention_mask: Optional[torch.Tensor] = None,
-      past_key_values: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-      cache_position: Optional[torch.LongTensor] = None,
+    self,
+    hidden_states: torch.Tensor,
+    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+    attention_mask: Optional[torch.Tensor] = None,
+    past_key_values: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    cache_position: Optional[torch.LongTensor] = None,
   ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Pytorch impl forward pass for Full Attention"""
 
@@ -589,13 +590,13 @@ class Qwen3NextFullAttention_PT(nn.Module):
       key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
     attn_output = eager_attention_forward(
-        self,
-        query_states,
-        key_states,
-        value_states,
-        attention_mask,
-        dropout=0.0 if not self.training else self.attention_dropout,
-        scaling=self.scaling,
+      self,
+      query_states,
+      key_states,
+      value_states,
+      attention_mask,
+      dropout=0.0 if not self.training else self.attention_dropout,
+      scaling=self.scaling,
     )
     attn_output = attn_output.reshape(*input_shape, -1).contiguous()
     attn_output = attn_output * torch.sigmoid(gate)
@@ -617,69 +618,69 @@ class TestQwen3Next(unittest.TestCase):
     super().setUp()
     # This setup now includes all necessary parameters for both linear attention and MoE tests.
     self.cfg = pyconfig.initialize(
-        [
-            None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            # Base settings for the test
-            "run_name=qwen3_next_test",
-            "dtype=float32",
-            "weight_dtype=float32",
-            "matmul_precision=highest",
-            "float32_logits=True",
-            "decoder_block=qwen3_next",
-            "attention=dot_product",
-            # Model dimensions
-            "base_emb_dim=128",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "head_dim=32",
-            # Gated Delta Net Dims (Using renamed parameters)
-            "gdn_num_value_heads=4",
-            "gdn_num_key_heads=4",
-            "gdn_key_head_dim=32",
-            "gdn_value_head_dim=32",
-            "gdn_conv_kernel_dim=4",
-            "gdn_chunk_size=64",
-            "use_qk_norm_in_gdn=True",  # Use renamed parameter
-            "normalization_layer_epsilon=1e-6",
-            # MoE Test Configs (with a small number of experts)
-            "base_mlp_dim=256",
-            "num_experts=8",
-            "num_experts_per_tok=2",
-            "base_moe_mlp_dim=256",  # moe_mlp_dim will be calculated from this
-            "norm_topk_prob=True",
-            "shard_exp_on_fsdp=False",
-            "mlp_activations=['silu', 'linear']",
-            "dropout_rate=0.0",
-            # Force the test to use the 'dense_matmul' path in the MoE layer,
-            # as the 'sparse_matmul' path was found to be numerically incorrect compared to the reference.
-            "sparse_matmul=False",
-            # To be able to run on cpu machines
-            "skip_jax_distributed_system=True",
-            # For FullAttention Layer
-            "attention_bias=False",
-            "rope_max_timescale=10000.0",
-            "partial_rotary_factor=0.25",
-        ]
+      [
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        # Base settings for the test
+        "run_name=qwen3_next_test",
+        "dtype=float32",
+        "weight_dtype=float32",
+        "matmul_precision=highest",
+        "float32_logits=True",
+        "decoder_block=qwen3_next",
+        "attention=dot_product",
+        # Model dimensions
+        "base_emb_dim=128",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "head_dim=32",
+        # Gated Delta Net Dims (Using renamed parameters)
+        "gdn_num_value_heads=4",
+        "gdn_num_key_heads=4",
+        "gdn_key_head_dim=32",
+        "gdn_value_head_dim=32",
+        "gdn_conv_kernel_dim=4",
+        "gdn_chunk_size=64",
+        "use_qk_norm_in_gdn=True",  # Use renamed parameter
+        "normalization_layer_epsilon=1e-6",
+        # MoE Test Configs (with a small number of experts)
+        "base_mlp_dim=256",
+        "num_experts=8",
+        "num_experts_per_tok=2",
+        "base_moe_mlp_dim=256",  # moe_mlp_dim will be calculated from this
+        "norm_topk_prob=True",
+        "shard_exp_on_fsdp=False",
+        "mlp_activations=['silu', 'linear']",
+        "dropout_rate=0.0",
+        # Force the test to use the 'dense_matmul' path in the MoE layer,
+        # as the 'sparse_matmul' path was found to be numerically incorrect compared to the reference.
+        "sparse_matmul=False",
+        # To be able to run on cpu machines
+        "skip_jax_distributed_system=True",
+        # For FullAttention Layer
+        "attention_bias=False",
+        "rope_max_timescale=10000.0",
+        "partial_rotary_factor=0.25",
+      ]
     )
     # Update the SimpleNamespace config used by PT models too
     self.pt_internal_cfg = SimpleNamespace(
-        hidden_size=self.cfg.emb_dim,
-        gdn_num_value_heads=self.cfg.gdn_num_value_heads,
-        gdn_num_key_heads=self.cfg.gdn_num_key_heads,
-        gdn_key_head_dim=self.cfg.gdn_key_head_dim,
-        gdn_value_head_dim=self.cfg.gdn_value_head_dim,
-        gdn_conv_kernel_dim=self.cfg.gdn_conv_kernel_dim,
-        hidden_act="silu",
-        normalization_layer_epsilon=self.cfg.normalization_layer_epsilon,
-        gdn_chunk_size=self.cfg.gdn_chunk_size,
-        use_qk_norm_in_gdn=self.cfg.use_qk_norm_in_gdn,
-        # MoE related for PT models
-        moe_intermediate_size=self.cfg.moe_mlp_dim,
-        shared_expert_intermediate_size=self.cfg.moe_mlp_dim,
-        num_experts=self.cfg.num_experts,
-        num_experts_per_tok=self.cfg.num_experts_per_tok,
-        norm_topk_prob=self.cfg.norm_topk_prob,
+      hidden_size=self.cfg.emb_dim,
+      gdn_num_value_heads=self.cfg.gdn_num_value_heads,
+      gdn_num_key_heads=self.cfg.gdn_num_key_heads,
+      gdn_key_head_dim=self.cfg.gdn_key_head_dim,
+      gdn_value_head_dim=self.cfg.gdn_value_head_dim,
+      gdn_conv_kernel_dim=self.cfg.gdn_conv_kernel_dim,
+      hidden_act="silu",
+      normalization_layer_epsilon=self.cfg.normalization_layer_epsilon,
+      gdn_chunk_size=self.cfg.gdn_chunk_size,
+      use_qk_norm_in_gdn=self.cfg.use_qk_norm_in_gdn,
+      # MoE related for PT models
+      moe_intermediate_size=self.cfg.moe_mlp_dim,
+      shared_expert_intermediate_size=self.cfg.moe_mlp_dim,
+      num_experts=self.cfg.num_experts,
+      num_experts_per_tok=self.cfg.num_experts_per_tok,
+      norm_topk_prob=self.cfg.norm_topk_prob,
     )
 
     self.batch_size = 4
@@ -718,11 +719,11 @@ class TestQwen3Next(unittest.TestCase):
 
     # JAX implementation
     jax_model = Qwen3NextRMSNormGated(
-        num_features=self.hidden_size,
-        eps=self.cfg.normalization_layer_epsilon,
-        dtype=self.cfg.dtype,
-        weight_dtype=self.cfg.weight_dtype,
-        rngs=self.nnx_rngs,
+      num_features=self.hidden_size,
+      eps=self.cfg.normalization_layer_epsilon,
+      dtype=self.cfg.dtype,
+      weight_dtype=self.cfg.weight_dtype,
+      rngs=self.nnx_rngs,
     )
     params = {"rms_norm": {"scale": nnx.Param(jnp.array(weight_pt.numpy()))}}
     nnx.update(jax_model, params)
@@ -737,11 +738,11 @@ class TestQwen3Next(unittest.TestCase):
     actual_output = run_jax(hidden_states_jax, gate_jax)
 
     np.testing.assert_allclose(
-        expected_output.numpy(),
-        actual_output,
-        rtol=1e-5,
-        atol=1e-6,  # Tight tolerance for this layer
-        err_msg="Qwen3NextRMSNormGated does not match PyTorch reference!",
+      expected_output.numpy(),
+      actual_output,
+      rtol=1e-5,
+      atol=1e-6,  # Tight tolerance for this layer
+      err_msg="Qwen3NextRMSNormGated does not match PyTorch reference!",
     )
     print("test_rms_norm_gated passed!")
 
@@ -750,20 +751,20 @@ class TestQwen3Next(unittest.TestCase):
     print("Running test_l2norm...")
     # Use renamed config parameters
     x_pt = torch.randn(
-        self.batch_size,
-        self.seq_len,
-        self.cfg.gdn_num_value_heads,
-        self.cfg.gdn_key_head_dim,
+      self.batch_size,
+      self.seq_len,
+      self.cfg.gdn_num_value_heads,
+      self.cfg.gdn_key_head_dim,
     )
     expected_output = l2norm_torch(x_pt)
     # Call l2norm from normalizations module now
     actual_output = normalizations.l2norm(jnp.array(x_pt.numpy()))
     np.testing.assert_allclose(
-        expected_output.numpy(),
-        actual_output,
-        rtol=1e-5,
-        atol=1e-6,
-        err_msg="l2norm does not match PyTorch reference!",
+      expected_output.numpy(),
+      actual_output,
+      rtol=1e-5,
+      atol=1e-6,
+      err_msg="l2norm does not match PyTorch reference!",
     )
     print("test_l2norm passed!")
 
@@ -783,28 +784,28 @@ class TestQwen3Next(unittest.TestCase):
 
     # Shapes are (B, S, H, D)
     q_jax = (
-        jax.random.normal(
-            key_q,
-            (self.batch_size, self.seq_len, num_heads, k_head_dim),
-            dtype=jnp.float32,
-        )
-        * 0.1
+      jax.random.normal(
+        key_q,
+        (self.batch_size, self.seq_len, num_heads, k_head_dim),
+        dtype=jnp.float32,
+      )
+      * 0.1
     )
     k_jax = (
-        jax.random.normal(
-            key_k,
-            (self.batch_size, self.seq_len, num_heads, k_head_dim),
-            dtype=jnp.float32,
-        )
-        * 0.1
+      jax.random.normal(
+        key_k,
+        (self.batch_size, self.seq_len, num_heads, k_head_dim),
+        dtype=jnp.float32,
+      )
+      * 0.1
     )
     v_jax = (
-        jax.random.normal(
-            key_v,
-            (self.batch_size, self.seq_len, num_heads, v_head_dim),
-            dtype=jnp.float32,
-        )
-        * 0.1
+      jax.random.normal(
+        key_v,
+        (self.batch_size, self.seq_len, num_heads, v_head_dim),
+        dtype=jnp.float32,
+      )
+      * 0.1
     )
     g_jax = jax.random.normal(key_g, (self.batch_size, self.seq_len, num_heads), dtype=jnp.float32) * 0.1
     beta_jax = jax.random.uniform(key_beta, (self.batch_size, self.seq_len, num_heads), dtype=jnp.float32)
@@ -820,63 +821,63 @@ class TestQwen3Next(unittest.TestCase):
 
     # Test without L2Norm (pass False using the original PT arg name)
     torch_output, _ = torch_chunk_gated_delta_rule(
-        q_torch.clone(),
-        k_torch.clone(),
-        v_torch.clone(),
-        g_torch.clone(),
-        beta_torch.clone(),
-        chunk_size=chunk_size,
-        output_final_state=False,
-        use_qk_l2norm_in_kernel=False,
+      q_torch.clone(),
+      k_torch.clone(),
+      v_torch.clone(),
+      g_torch.clone(),
+      beta_torch.clone(),
+      chunk_size=chunk_size,
+      output_final_state=False,
+      use_qk_l2norm_in_kernel=False,
     )
     # Pass False using the new JAX arg name
     jax_output, _ = qwen3.jax_chunk_gated_delta_rule(
-        q_jax,
-        k_jax,
-        v_jax,
-        g_jax,
-        beta_jax,
-        chunk_size=chunk_size,
-        initial_state=None,
-        use_qk_norm_in_gdn=False,
+      q_jax,
+      k_jax,
+      v_jax,
+      g_jax,
+      beta_jax,
+      chunk_size=chunk_size,
+      initial_state=None,
+      use_qk_norm_in_gdn=False,
     )
     np.testing.assert_allclose(
-        torch_output.detach().numpy(),
-        np.asarray(jax_output),
-        atol=target_atol,
-        rtol=target_rtol,
-        err_msg=f"JAX and PyTorch outputs are NOT close without L2Norm within atol={target_atol}, rtol={target_rtol}!",
+      torch_output.detach().numpy(),
+      np.asarray(jax_output),
+      atol=target_atol,
+      rtol=target_rtol,
+      err_msg=f"JAX and PyTorch outputs are NOT close without L2Norm within atol={target_atol}, rtol={target_rtol}!",
     )
     print(f"JAX and PyTorch outputs are close without L2Norm within atol={target_atol}, rtol={target_rtol}!")
 
     # Test with L2Norm (pass True using the original PT arg name)
     torch_output_norm, _ = torch_chunk_gated_delta_rule(
-        q_torch.clone(),
-        k_torch.clone(),
-        v_torch.clone(),
-        g_torch.clone(),
-        beta_torch.clone(),
-        chunk_size=chunk_size,
-        output_final_state=False,
-        use_qk_l2norm_in_kernel=True,
+      q_torch.clone(),
+      k_torch.clone(),
+      v_torch.clone(),
+      g_torch.clone(),
+      beta_torch.clone(),
+      chunk_size=chunk_size,
+      output_final_state=False,
+      use_qk_l2norm_in_kernel=True,
     )
     # Pass True using the new JAX arg name
     jax_output_norm, _ = qwen3.jax_chunk_gated_delta_rule(
-        q_jax,
-        k_jax,
-        v_jax,
-        g_jax,
-        beta_jax,
-        chunk_size=chunk_size,
-        initial_state=None,
-        use_qk_norm_in_gdn=True,
+      q_jax,
+      k_jax,
+      v_jax,
+      g_jax,
+      beta_jax,
+      chunk_size=chunk_size,
+      initial_state=None,
+      use_qk_norm_in_gdn=True,
     )
     np.testing.assert_allclose(
-        torch_output_norm.detach().numpy(),
-        np.asarray(jax_output_norm),
-        atol=target_atol,
-        rtol=target_rtol,
-        err_msg=f"JAX and PyTorch outputs are NOT close with L2Norm within atol={target_atol}, rtol={target_rtol}!",
+      torch_output_norm.detach().numpy(),
+      np.asarray(jax_output_norm),
+      atol=target_atol,
+      rtol=target_rtol,
+      err_msg=f"JAX and PyTorch outputs are NOT close with L2Norm within atol={target_atol}, rtol={target_rtol}!",
     )
     print(f"JAX and PyTorch outputs are close with L2Norm within atol={target_atol}, rtol={target_rtol}!")
     print("test_chunk_gated_delta_rule_logic passed!")
@@ -915,11 +916,11 @@ class TestQwen3Next(unittest.TestCase):
 
     # 2. Set up the JAX implementation.
     jax_model = Qwen3NextRMSNorm(
-        num_features=self.hidden_size,
-        eps=self.cfg.normalization_layer_epsilon,
-        dtype=jnp.float32,
-        weight_dtype=jnp.float32,
-        rngs=self.nnx_rngs,
+      num_features=self.hidden_size,
+      eps=self.cfg.normalization_layer_epsilon,
+      dtype=jnp.float32,
+      weight_dtype=jnp.float32,
+      rngs=self.nnx_rngs,
     )
 
     params = {"scale": nnx.Param(jnp.array(weight_pt.numpy()))}
@@ -935,11 +936,11 @@ class TestQwen3Next(unittest.TestCase):
 
     # 3. Compare the outputs.
     np.testing.assert_allclose(
-        expected_output.numpy(),
-        actual_output,
-        rtol=1e-6,
-        atol=1e-6,
-        err_msg="Qwen3NextRMSNorm does not match PyTorch reference!",
+      expected_output.numpy(),
+      actual_output,
+      rtol=1e-6,
+      atol=1e-6,
+      err_msg="Qwen3NextRMSNorm does not match PyTorch reference!",
     )
     print("test_qwen3_next_rms_norm passed!")
 
@@ -969,27 +970,27 @@ class TestQwen3Next(unittest.TestCase):
 
     # Map PyTorch weights to JAX NNX module attributes
     jax_params = {
-        "routed_experts": {
-            "gate": {"kernel": nnx.Param(jnp.array(pt_model.gate.weight.T.detach().numpy()))},
-            "wi_0": nnx.Param(jnp.array(stacked_gate_proj.detach().numpy())),
-            "wi_1": nnx.Param(jnp.array(stacked_up_proj.detach().numpy())),
-            "wo": nnx.Param(jnp.array(stacked_down_proj.detach().numpy())),
+      "routed_experts": {
+        "gate": {"kernel": nnx.Param(jnp.array(pt_model.gate.weight.T.detach().numpy()))},
+        "wi_0": nnx.Param(jnp.array(stacked_gate_proj.detach().numpy())),
+        "wi_1": nnx.Param(jnp.array(stacked_up_proj.detach().numpy())),
+        "wo": nnx.Param(jnp.array(stacked_down_proj.detach().numpy())),
+      },
+      "shared_expert": {
+        "wi": {  # Assuming fused_mlp=True in config for shared_expert
+          "0": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.gate_proj.weight.T.detach().numpy()))},
+          "1": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.up_proj.weight.T.detach().numpy()))},
         },
-        "shared_expert": {
-            "wi": {  # Assuming fused_mlp=True in config for shared_expert
-                "0": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.gate_proj.weight.T.detach().numpy()))},
-                "1": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.up_proj.weight.T.detach().numpy()))},
-            },
-            "wo": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.down_proj.weight.T.detach().numpy()))},
-        },
-        "shared_expert_gate": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert_gate.weight.T.detach().numpy()))},
+        "wo": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.down_proj.weight.T.detach().numpy()))},
+      },
+      "shared_expert_gate": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert_gate.weight.T.detach().numpy()))},
     }
     # Adjust shared_expert structure if not fused
     if not self.cfg.fused_mlp:
       jax_params["shared_expert"] = {
-          "wi_0": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.gate_proj.weight.T.detach().numpy()))},
-          "wi_1": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.up_proj.weight.T.detach().numpy()))},
-          "wo": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.down_proj.weight.T.detach().numpy()))},
+        "wi_0": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.gate_proj.weight.T.detach().numpy()))},
+        "wi_1": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.up_proj.weight.T.detach().numpy()))},
+        "wo": {"kernel": nnx.Param(jnp.array(pt_model.shared_expert.down_proj.weight.T.detach().numpy()))},
       }
 
     # 4. Set up and run the full JAX Qwen3NextSparseMoeBlock
@@ -1007,11 +1008,11 @@ class TestQwen3Next(unittest.TestCase):
 
     # 5. Compare the outputs
     np.testing.assert_allclose(
-        expected_output.detach().numpy(),
-        actual_output,
-        rtol=1e-5,
-        atol=1e-5,
-        err_msg="Qwen3NextSparseMoeBlock does not match PyTorch reference!",
+      expected_output.detach().numpy(),
+      actual_output,
+      rtol=1e-5,
+      atol=1e-5,
+      err_msg="Qwen3NextSparseMoeBlock does not match PyTorch reference!",
     )
     print("test_qwen3_next_sparse_moe_block passed!")
 
@@ -1038,13 +1039,13 @@ class TestQwen3Next(unittest.TestCase):
     conv1d_weight_jax = np.transpose(conv1d_weight_pt, (2, 1, 0))
 
     params = {
-        "in_proj_qkvz": {"kernel": nnx.Param(jnp.array(pt_model.in_proj_qkvz.weight.T.detach().numpy()))},
-        "in_proj_ba": {"kernel": nnx.Param(jnp.array(pt_model.in_proj_ba.weight.T.detach().numpy()))},
-        "conv1d": {"kernel": nnx.Param(jnp.array(conv1d_weight_jax))},
-        "A_log": nnx.Param(jnp.array(pt_model.A_log.detach().numpy())),
-        "dt_bias": nnx.Param(jnp.array(pt_model.dt_bias.detach().numpy())),
-        "norm": {"weight": nnx.Param(jnp.array(pt_model.norm.weight.detach().numpy()))},
-        "out_proj": {"kernel": nnx.Param(jnp.array(pt_model.out_proj.weight.T.detach().numpy()))},
+      "in_proj_qkvz": {"kernel": nnx.Param(jnp.array(pt_model.in_proj_qkvz.weight.T.detach().numpy()))},
+      "in_proj_ba": {"kernel": nnx.Param(jnp.array(pt_model.in_proj_ba.weight.T.detach().numpy()))},
+      "conv1d": {"kernel": nnx.Param(jnp.array(conv1d_weight_jax))},
+      "A_log": nnx.Param(jnp.array(pt_model.A_log.detach().numpy())),
+      "dt_bias": nnx.Param(jnp.array(pt_model.dt_bias.detach().numpy())),
+      "norm": {"weight": nnx.Param(jnp.array(pt_model.norm.weight.detach().numpy()))},
+      "out_proj": {"kernel": nnx.Param(jnp.array(pt_model.out_proj.weight.T.detach().numpy()))},
     }
     nnx.update(jax_model, params)
     hidden_states_jax = jnp.array(hidden_states_pt.numpy())
@@ -1058,11 +1059,11 @@ class TestQwen3Next(unittest.TestCase):
 
     # 3. Compare outputs
     np.testing.assert_allclose(
-        expected_output.numpy(),
-        actual_output,
-        rtol=1e-4,
-        atol=1e-4,  # Relaxed tolerance slightly for end-to-end layer
-        err_msg="Qwen3NextGatedDeltaNet does not match PyTorch reference!",
+      expected_output.numpy(),
+      actual_output,
+      rtol=1e-4,
+      atol=1e-4,  # Relaxed tolerance slightly for end-to-end layer
+      err_msg="Qwen3NextGatedDeltaNet does not match PyTorch reference!",
     )
     print("test_gated_delta_net_full passed!")
 
@@ -1072,64 +1073,64 @@ class TestQwen3Next(unittest.TestCase):
 
     # Re-initialize config with the specified attention type
     cfg = pyconfig.initialize(
-        [
-            None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            # Base settings for the test
-            "run_name=qwen3_next_test",
-            "dtype=float32",
-            "weight_dtype=float32",
-            "matmul_precision=highest",
-            "float32_logits=True",
-            "decoder_block=qwen3_next",
-            f"attention={attention_type}",  # Override attention type
-            # Model dimensions
-            "base_emb_dim=128",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "head_dim=32",
-            # Gated Delta Net Dims (Using renamed parameters)
-            "gdn_num_value_heads=4",
-            "gdn_num_key_heads=4",
-            "gdn_key_head_dim=32",
-            "gdn_value_head_dim=32",
-            "gdn_conv_kernel_dim=4",
-            "gdn_chunk_size=64",
-            "use_qk_norm_in_gdn=True",  # Use renamed parameter
-            "normalization_layer_epsilon=1e-6",
-            # MoE Test Configs (with a small number of experts)
-            "base_mlp_dim=256",
-            "num_experts=8",
-            "num_experts_per_tok=2",
-            "base_moe_mlp_dim=256",  # moe_mlp_dim will be calculated from this
-            "norm_topk_prob=True",
-            "shard_exp_on_fsdp=False",
-            "mlp_activations=['silu', 'linear']",
-            "dropout_rate=0.0",
-            "sparse_matmul=False",
-            "skip_jax_distributed_system=True",
-            # For FullAttention Layer
-            "attention_bias=False",
-            "rope_max_timescale=10000.0",
-            "partial_rotary_factor=0.25",
-        ]
+      [
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        # Base settings for the test
+        "run_name=qwen3_next_test",
+        "dtype=float32",
+        "weight_dtype=float32",
+        "matmul_precision=highest",
+        "float32_logits=True",
+        "decoder_block=qwen3_next",
+        f"attention={attention_type}",  # Override attention type
+        # Model dimensions
+        "base_emb_dim=128",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "head_dim=32",
+        # Gated Delta Net Dims (Using renamed parameters)
+        "gdn_num_value_heads=4",
+        "gdn_num_key_heads=4",
+        "gdn_key_head_dim=32",
+        "gdn_value_head_dim=32",
+        "gdn_conv_kernel_dim=4",
+        "gdn_chunk_size=64",
+        "use_qk_norm_in_gdn=True",  # Use renamed parameter
+        "normalization_layer_epsilon=1e-6",
+        # MoE Test Configs (with a small number of experts)
+        "base_mlp_dim=256",
+        "num_experts=8",
+        "num_experts_per_tok=2",
+        "base_moe_mlp_dim=256",  # moe_mlp_dim will be calculated from this
+        "norm_topk_prob=True",
+        "shard_exp_on_fsdp=False",
+        "mlp_activations=['silu', 'linear']",
+        "dropout_rate=0.0",
+        "sparse_matmul=False",
+        "skip_jax_distributed_system=True",
+        # For FullAttention Layer
+        "attention_bias=False",
+        "rope_max_timescale=10000.0",
+        "partial_rotary_factor=0.25",
+      ]
     )
 
     # 1. Config for PyTorch
     pt_config = SimpleNamespace(
-        hidden_size=cfg.emb_dim,
-        num_attention_heads=cfg.num_query_heads,
-        head_dim=cfg.head_dim,
-        num_key_value_heads=cfg.num_kv_heads,
-        attention_bias=False,
-        rms_norm_eps=1e-6,
-        rope_parameters={
-            "rope_type": "default",
-            "rope_theta": 10000.0,
-        },
-        max_position_embeddings=cfg.max_target_length,
-        attention_dropout=cfg.dropout_rate,
-        partial_rotary_factor=0.25,
+      hidden_size=cfg.emb_dim,
+      num_attention_heads=cfg.num_query_heads,
+      head_dim=cfg.head_dim,
+      num_key_value_heads=cfg.num_kv_heads,
+      attention_bias=False,
+      rms_norm_eps=1e-6,
+      rope_parameters={
+        "rope_type": "default",
+        "rope_theta": 10000.0,
+      },
+      max_position_embeddings=cfg.max_target_length,
+      attention_dropout=cfg.dropout_rate,
+      partial_rotary_factor=0.25,
     )
 
     # 2. Instantiate PyTorch model
@@ -1138,7 +1139,7 @@ class TestQwen3Next(unittest.TestCase):
 
     # 3. Instantiate JAX model
     jax_model = qwen3.Qwen3NextFullAttention(
-        config=cfg, mesh=self.mesh, model_mode="train", layer_idx=0, quant=None, rngs=self.nnx_rngs
+      config=cfg, mesh=self.mesh, model_mode="train", layer_idx=0, quant=None, rngs=self.nnx_rngs
     )
 
     # 4. Weight Mapping
@@ -1210,7 +1211,7 @@ class TestQwen3Next(unittest.TestCase):
     @jax.jit
     def run_jax(inputs, segment_ids, positions):
       return jax_model(
-          inputs, decoder_segment_ids=segment_ids, decoder_positions=positions, deterministic=True, model_mode="train"
+        inputs, decoder_segment_ids=segment_ids, decoder_positions=positions, deterministic=True, model_mode="train"
       )
 
     jax_output = run_jax(hidden_states_jax, decoder_segment_ids_jax, decoder_positions_jax)
@@ -1227,11 +1228,11 @@ class TestQwen3Next(unittest.TestCase):
 
     self.assertEqual(pt_out_np.shape, jax_out_np.shape, "Shape mismatch for jax and pytorch impls")
     np.testing.assert_allclose(
-        pt_out_np,
-        jax_out_np,
-        rtol=rtol,
-        atol=atol,
-        err_msg="Weight mismatch for jax/pytorch impls",
+      pt_out_np,
+      jax_out_np,
+      rtol=rtol,
+      atol=atol,
+      err_msg="Weight mismatch for jax/pytorch impls",
     )
     print("test_full_attention_jax_vs_pytorch passed!")
 

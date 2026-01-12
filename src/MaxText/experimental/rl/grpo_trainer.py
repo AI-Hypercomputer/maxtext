@@ -32,7 +32,6 @@ handles model parameter resharding between the two, and manages the
 entire training loop, including checkpointing and metric logging.
 """
 
-
 import pathwaysutils
 
 import datetime
@@ -87,10 +86,10 @@ from MaxText.metric_logger import MetricLogger
 from MaxText.train import get_first_step
 from MaxText.train_utils import validate_train_config
 from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    create_goodput_recorder,
-    maybe_monitor_goodput,
-    maybe_record_goodput,
+  GoodputEvent,
+  create_goodput_recorder,
+  maybe_monitor_goodput,
+  maybe_record_goodput,
 )
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 
@@ -229,15 +228,15 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # We compute the log-probabilities for the entire generated sequence, then shift as usual.
   rng1, rng_fwd = random.split(dropout_rng)
   token_logps_policy, intermediate_outputs = grpo_utils.compute_log_probs(
-      model,
-      params,
-      prompt_with_completions,
-      prompt_completions_position,
-      prompt_completions_segmentation,
-      completions_segmentation,
-      config,
-      is_train=is_train,
-      rngs={"dropout": rng1, "params": rng_fwd},
+    model,
+    params,
+    prompt_with_completions,
+    prompt_completions_position,
+    prompt_completions_segmentation,
+    completions_segmentation,
+    config,
+    is_train=is_train,
+    rngs={"dropout": rng1, "params": rng_fwd},
   )  # [BxG,S-1,E]
 
   completion_target_segmentation = data["ar_completions_segmentation"][..., 1:]  # [BxG,S-1]
@@ -274,22 +273,22 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   coef_1 = jnp.exp(policy_diff)
   coef_2 = jnp.clip(coef_1, 1 - config.grpo_epsilon, 1 + config.grpo_epsilon)
   loss_tokens = -jnp.minimum(
-      coef_1 * advantages_exp,
-      coef_2 * advantages_exp,
+    coef_1 * advantages_exp,
+    coef_2 * advantages_exp,
   )
 
   # --- (5) Compute per-token KL divergence for each token in the generated completion, if beta != 0.
   if config.grpo_beta != 0.0:
     token_logps_ref, _ = grpo_utils.compute_log_probs(
-        model,
-        {"params": reference_params},
-        prompt_with_completions,
-        prompt_completions_position,
-        prompt_completions_segmentation,
-        completions_segmentation,
-        config,
-        is_train=False,
-        rngs={"dropout": rng1, "params": rng_fwd},
+      model,
+      {"params": reference_params},
+      prompt_with_completions,
+      prompt_completions_position,
+      prompt_completions_segmentation,
+      completions_segmentation,
+      config,
+      is_train=False,
+      rngs={"dropout": rng1, "params": rng_fwd},
     )  # [BxG,S-1,E]
 
     token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
@@ -323,14 +322,14 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   avg_advantage = jnp.mean(advantages)
   avg_completion_length = jnp.mean(jnp.sum(data["ar_completions_segmentation"] != 0, axis=1))
   aux = LossAux(
-      total_loss=loss,
-      avg_reward=avg_reward,
-      avg_reward_std=jnp.mean(repeated_group_std),
-      avg_advantage=avg_advantage,
-      avg_kl=avg_kl,
-      completion_length=avg_completion_length,
-      moe_lb_loss=moe_lb_loss,
-      total_weights=total_weights,
+    total_loss=loss,
+    avg_reward=avg_reward,
+    avg_reward_std=jnp.mean(repeated_group_std),
+    avg_advantage=avg_advantage,
+    avg_kl=avg_kl,
+    completion_length=avg_completion_length,
+    moe_lb_loss=moe_lb_loss,
+    total_weights=total_weights,
   )
 
   return loss, aux
@@ -374,12 +373,12 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     def accumulate_gradient(acc_grad_and_loss, data):
       grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
       (_, aux), cur_batch_gradient = grad_func(
-          model, config, data, dropout_rng, state.params, *extra_grpo_args, is_train=True
+        model, config, data, dropout_rng, state.params, *extra_grpo_args, is_train=True
       )
       acc_grad_and_loss["loss"] += aux["total_loss"]
       acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
       acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
+        lambda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
       )
       acc_grad_and_loss["total_weights"] += aux["total_weights"]
       return acc_grad_and_loss, aux
@@ -395,11 +394,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0}
 
     grad_and_loss, aux = jax.lax.scan(
-        accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
+      accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
     )
     loss = (
-        grad_and_loss["loss"] / grad_and_loss["total_weights"]
-        + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
+      grad_and_loss["loss"] / grad_and_loss["total_weights"]
+      + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
     )
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
     aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)
@@ -410,7 +409,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       state = state.replace(params=cast_params)
       if config.use_grpo:
         reference_params = jax.device_put(
-            reference_params, max_utils.with_memory_kind(reference_params_sharding, "device")
+          reference_params, max_utils.with_memory_kind(reference_params_sharding, "device")
         )
         reference_params = max_utils.cast_to_bf16(reference_params)
         extra_grpo_args = [reference_params]
@@ -426,22 +425,22 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     grads = raw_grads
   if config.optimizer_memory_host_offload:
     state = state.replace(
-        opt_state=jax.device_put(
-            state.opt_state,
-            jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
-        )
+      opt_state=jax.device_put(
+        state.opt_state,
+        jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
+      )
     )
   new_state = state.apply_gradients(grads=grads)
 
   scalar_metrics = {
-      "learning/loss": loss,
-      "learning/avg_reward": aux.avg_reward,
-      "learning/avg_reward_std": aux.avg_reward_std,
-      "learning/avg_advantage": aux.avg_advantage,
-      "learning/avg_kl": aux.avg_kl,
-      "learning/completion_length": aux.completion_length,
-      "learning/moe_lb_loss": moe_lb_loss,
-      "learning/total_weights": total_weights,
+    "learning/loss": loss,
+    "learning/avg_reward": aux.avg_reward,
+    "learning/avg_reward_std": aux.avg_reward_std,
+    "learning/avg_advantage": aux.avg_advantage,
+    "learning/avg_kl": aux.avg_kl,
+    "learning/completion_length": aux.completion_length,
+    "learning/moe_lb_loss": moe_lb_loss,
+    "learning/total_weights": total_weights,
   }
   if not config.optimizer_memory_host_offload:
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
@@ -449,8 +448,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
     scalar_metrics["learning/avg_reward"] = aux.avg_reward
   metrics = {
-      "scalar": scalar_metrics,
-      "scalars": {},
+    "scalar": scalar_metrics,
+    "scalars": {},
   }
 
   new_state = _merge_grpo_state(new_state, reference_params)
@@ -486,12 +485,12 @@ def eval_step(model, config, state, data, dropout_rng):
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
   metrics = {
-      "scalar": {
-          "evaluation/loss": loss,
-          "evaluation/total_loss": total_loss,
-          "evaluation/total_weights": total_weights,
-          "evaluation/moe_lb_loss": moe_lb_loss,
-      },
+    "scalar": {
+      "evaluation/loss": loss,
+      "evaluation/total_loss": total_loss,
+      "evaluation/total_weights": total_weights,
+      "evaluation/moe_lb_loss": moe_lb_loss,
+    },
   }
   if config.use_dpo:
     metrics["scalar"]["evaluation/grpo_reward_accuracy"] = aux["reward_accuracy"]
@@ -500,22 +499,22 @@ def eval_step(model, config, state, data, dropout_rng):
 
 
 def setup_train_loop(
-    config,
-    config_inference,
-    recorder: GoodputRecorder,
+  config,
+  config_inference,
+  recorder: GoodputRecorder,
 ) -> tuple[
-    jax.Array,
-    CheckpointManager,
-    TrainState,
-    TrainState,
-    mt.Transformer,
-    mt.Transformer,
-    mt.Mesh,
-    mt.Mesh,
-    Callable[[int], float],
-    Iterator,
-    Iterator,
-    TrainState,
+  jax.Array,
+  CheckpointManager,
+  TrainState,
+  TrainState,
+  mt.Transformer,
+  mt.Transformer,
+  mt.Mesh,
+  mt.Mesh,
+  Callable[[int], float],
+  Iterator,
+  Iterator,
+  TrainState,
 ]:
   """Initializes objects needed for the training loop.
 
@@ -558,41 +557,41 @@ def setup_train_loop(
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator = grpo_input_pipeline.create_data_iterator(config_inference, inference_mesh)
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+      model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
     )
 
   # create inference_state_mesh_shardings from inference_mesh
   inference_state_mesh_shardings = maxtext_utils.get_abstract_state(
-      inference_model, tx, config_inference, init_rng, inference_mesh, is_training=False
+    inference_model, tx, config_inference, init_rng, inference_mesh, is_training=False
   )[2]
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
     sharding.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
   return (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      inference_state_mesh_shardings,
-      model,
-      inference_model,
-      mesh,
-      inference_mesh,
-      learning_rate_schedule,
-      data_iterator,
-      iter(()),  # GRPO does not support eval_dataset
-      state,
+    init_rng,
+    checkpoint_manager,
+    state_mesh_shardings,
+    inference_state_mesh_shardings,
+    model,
+    inference_model,
+    mesh,
+    inference_mesh,
+    learning_rate_schedule,
+    data_iterator,
+    iter(()),  # GRPO does not support eval_dataset
+    state,
   )
 
 
 def generate_completions(
-    worker_data_loader,
-    worker_inference_engine,
-    worker_tokenizer_model,
-    worker_config_inference,
-    worker_config_train,
-    worker_input_data_shardings,
-    engine_lock,
+  worker_data_loader,
+  worker_inference_engine,
+  worker_tokenizer_model,
+  worker_config_inference,
+  worker_config_train,
+  worker_input_data_shardings,
+  engine_lock,
 ):
   """Loads a batch of prompts and generates completions using the inference engine.
 
@@ -614,17 +613,17 @@ def generate_completions(
     thread_example_batch = worker_data_loader.load_next_batch()
     # Trim data for inference processing
     thread_example_batch_trimmed = jax.tree_util.tree_map(
-        lambda arr: arr[
-            : int(
-                (worker_config_inference.per_device_batch_size // worker_config_inference.num_generations)
-                * worker_config_train.inference_replicas
-                * worker_config_train.inference_devices_per_replica
-            )
-        ],
-        thread_example_batch,
+      lambda arr: arr[
+        : int(
+          (worker_config_inference.per_device_batch_size // worker_config_inference.num_generations)
+          * worker_config_train.inference_replicas
+          * worker_config_train.inference_devices_per_replica
+        )
+      ],
+      thread_example_batch,
     )
     processed_batch = grpo_utils.generate_offline_completions(
-        worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed
+      worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed
     )
     processed_batch = jax.device_put(processed_batch, worker_input_data_shardings)
   return processed_batch
@@ -658,26 +657,26 @@ def train_loop(config, config_inference, recorder, state=None):
   """
 
   (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      inference_state_mesh_shardings,
-      model,
-      _,  # inference_model
-      mesh,
-      inference_mesh,
-      learning_rate_schedule,
-      data_iterator,
-      eval_data_iterator,
-      state,
+    init_rng,
+    checkpoint_manager,
+    state_mesh_shardings,
+    inference_state_mesh_shardings,
+    model,
+    _,  # inference_model
+    mesh,
+    inference_mesh,
+    learning_rate_schedule,
+    data_iterator,
+    eval_data_iterator,
+    state,
   ) = setup_train_loop(config, config_inference, recorder)
   tokenizer_model = transformers.AutoTokenizer.from_pretrained(
-      config.tokenizer_path,
-      add_bos_token=config.add_bos,
-      add_eos_token=config.add_eos,
-      model_max_length=config.max_target_length,
-      legacy=False,
-      token=config.hf_access_token,
+    config.tokenizer_path,
+    add_bos_token=config.add_bos,
+    add_eos_token=config.add_eos,
+    model_max_length=config.max_target_length,
+    legacy=False,
+    token=config.hf_access_token,
   )
 
   if "reference_params" not in state.params:
@@ -686,14 +685,14 @@ def train_loop(config, config_inference, recorder, state=None):
   state_mesh_shardings = _merge_grpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+    config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
   )
 
   data_sharding = sharding.get_input_data_sharding(config, mesh)
 
   inference_engine = offline_engine.OfflineEngine(
-      config=config_inference,
-      mesh=inference_mesh,
+    config=config_inference,
+    mesh=inference_mesh,
   )
   data_buffer = []
   data_buffer_lock = threading.Lock()
@@ -708,16 +707,16 @@ def train_loop(config, config_inference, recorder, state=None):
   metric_logger.write_setup_info_to_tensorboard(state.params["params"])
 
   def generation_worker_fn(
-      worker_inference_engine,
-      worker_tokenizer_model,
-      worker_config_inference,
-      worker_config_train,
-      worker_data_buffer,
-      worker_data_buffer_lock,
-      worker_input_data_shardings,
-      engine_lock,
-      stop_event,
-      profiler_object,
+    worker_inference_engine,
+    worker_tokenizer_model,
+    worker_config_inference,
+    worker_config_train,
+    worker_data_buffer,
+    worker_data_buffer_lock,
+    worker_input_data_shardings,
+    engine_lock,
+    stop_event,
+    profiler_object,
   ):
     """The target function for the data generation worker thread.
 
@@ -749,13 +748,13 @@ def train_loop(config, config_inference, recorder, state=None):
           is_profiling = False
         with jax.profiler.StepTraceAnnotation("inference", step_num=worker_step):
           processed_batch = generate_completions(
-              data_loader,
-              worker_inference_engine,
-              worker_tokenizer_model,
-              worker_config_inference,
-              worker_config_train,
-              worker_input_data_shardings,
-              engine_lock,
+            data_loader,
+            worker_inference_engine,
+            worker_tokenizer_model,
+            worker_config_inference,
+            worker_config_train,
+            worker_input_data_shardings,
+            engine_lock,
           )
           jax.block_until_ready(processed_batch)
 
@@ -764,9 +763,9 @@ def train_loop(config, config_inference, recorder, state=None):
             worker_data_buffer.append(processed_batch)
           else:
             worker_data_buffer[0] = jax.tree_util.tree_map(
-                lambda a, b: np.concatenate([a, b], axis=0),
-                worker_data_buffer[0],
-                processed_batch,
+              lambda a, b: np.concatenate([a, b], axis=0),
+              worker_data_buffer[0],
+              processed_batch,
             )
         worker_step += 1
       except StopIteration:
@@ -782,20 +781,20 @@ def train_loop(config, config_inference, recorder, state=None):
 
   required_batch_size = int(config.per_device_batch_size * config.num_generations * mesh.size)
   generation_thread = threading.Thread(
-      target=generation_worker_fn,
-      args=(
-          inference_engine,  # Shared inference engine
-          tokenizer_model,
-          config_inference,
-          config,  # Main config for load_next_batch
-          data_buffer,
-          data_buffer_lock,
-          data_sharding,  # Sharding for the data put into the buffer
-          inference_engine_lock,
-          stop_event,
-          inference_prof,  # profiler object
-      ),
-      daemon=True,  # So it exits when the main thread exits
+    target=generation_worker_fn,
+    args=(
+      inference_engine,  # Shared inference engine
+      tokenizer_model,
+      config_inference,
+      config,  # Main config for load_next_batch
+      data_buffer,
+      data_buffer_lock,
+      data_sharding,  # Sharding for the data put into the buffer
+      inference_engine_lock,
+      stop_event,
+      inference_prof,  # profiler object
+    ),
+    daemon=True,  # So it exits when the main thread exits
   )
   generation_thread.start()
 
@@ -829,12 +828,12 @@ def train_loop(config, config_inference, recorder, state=None):
       with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
         if step != 0 and step % config.inference_rollouts == 0:
           grpo_utils.pathways_reshard(
-              config_inference,
-              inference_engine,
-              {"params": state.params["params"]},
-              {"params": state_mesh_shardings.params["params"]},
-              mesh,
-              {"params": inference_state_mesh_shardings.params["params"]},
+            config_inference,
+            inference_engine,
+            {"params": state.params["params"]},
+            {"params": state_mesh_shardings.params["params"]},
+            mesh,
+            {"params": inference_state_mesh_shardings.params["params"]},
           )
           with data_buffer_lock:
             data_buffer.clear()
@@ -848,11 +847,11 @@ def train_loop(config, config_inference, recorder, state=None):
       if config.dump_hlo and step == start_step:
         jax.block_until_ready(state)  # Ensure compilation has finished.
         gcs_utils.upload_dump(
-            config.dump_hlo_local_dir,
-            config.dump_hlo_gcs_dir,
-            module_name=config.dump_hlo_module_name,
-            delete_local_after=config.dump_hlo_delete_local_after,
-            all_host_upload=config.dump_hlo_upload_all,
+          config.dump_hlo_local_dir,
+          config.dump_hlo_gcs_dir,
+          module_name=config.dump_hlo_module_name,
+          delete_local_after=config.dump_hlo_delete_local_after,
+          all_host_upload=config.dump_hlo_upload_all,
         )
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
@@ -914,7 +913,7 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
   configs_argv = max_utils.parse_custom_args(argv)
   config = pyconfig.initialize(configs_argv[0])
@@ -922,17 +921,17 @@ def main(argv: Sequence[str]) -> None:
     raise ValueError("Please set the value of use_grpo to True")
   if config.inference_rollouts < 1 or config.inference_rollouts > config.steps:
     raise ValueError(
-        f"Please set the value of inference_rollouts to be less than {config.steps} or greater than 1. "
-        f"Current value: {config.inference_rollouts}"
+      f"Please set the value of inference_rollouts to be less than {config.steps} or greater than 1. "
+      f"Current value: {config.inference_rollouts}"
     )
   if config.decode_sampling_strategy == "greedy" or config.decode_sampling_temperature == 0.0:
     raise ValueError(
-        "Please set decode_sampling_strategy as 'weighted' and decode_sampling_temperature as a positive number"
+      "Please set decode_sampling_strategy as 'weighted' and decode_sampling_temperature as a positive number"
     )
   if config.inference_devices_per_replica * config.inference_replicas >= jax.device_count():
     raise ValueError(
-        f"Invalid value chosen for {config.inference_devices_per_replica=} and {config.inference_replicas=} "
-        f"with {jax.device_count()} devices"
+      f"Invalid value chosen for {config.inference_devices_per_replica=} and {config.inference_replicas=} "
+      f"with {jax.device_count()} devices"
     )
   config_inference = pyconfig.initialize(configs_argv[1])
 
@@ -951,11 +950,11 @@ def main(argv: Sequence[str]) -> None:
 
   # Stack traces configurations
   debug_config = debug_configuration.DebugConfig(
-      stack_trace_config=stack_trace_configuration.StackTraceConfig(
-          collect_stack_trace=config.collect_stack_trace,
-          stack_trace_to_cloud=config.stack_trace_to_cloud,
-          stack_trace_interval_seconds=config.stack_trace_interval_seconds,
-      )
+    stack_trace_config=stack_trace_configuration.StackTraceConfig(
+      collect_stack_trace=config.collect_stack_trace,
+      stack_trace_to_cloud=config.stack_trace_to_cloud,
+      stack_trace_interval_seconds=config.stack_trace_interval_seconds,
+    )
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
 

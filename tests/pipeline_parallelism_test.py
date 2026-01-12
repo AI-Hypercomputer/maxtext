@@ -55,7 +55,6 @@ def assert_same_output_and_grad(f1, f2, *inputs):
 
 
 class PipelineParallelismTest(unittest.TestCase):
-
   def assert_pipeline_same_output_and_grad(self, config, single_pipeline_stage_class=None):
     """check that the output and gradient are the same"""
     devices_array = maxtext_utils.create_device_mesh(config)
@@ -64,7 +63,7 @@ class PipelineParallelismTest(unittest.TestCase):
     if single_pipeline_stage_class is None:
       rngs = nnx.Rngs(params=0)
       single_pipeline_stage = simple_layer.SimpleDecoderLayerToLinen(
-          config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
+        config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
       )
     else:
       if issubclass(single_pipeline_stage_class, nnx_wrappers.ToLinen):
@@ -92,47 +91,47 @@ class PipelineParallelismTest(unittest.TestCase):
       return inputs, dummy_targets, inputs_position, inputs_segmentation
 
     inputs, dummy_targets, inputs_position, inputs_segmentation = get_inputs(
-        config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim
+      config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim
     )
     deterministic = True
     # We use a simpler single matmul decoder layer for fast compilation in these tests.
     rngs = nnx.Rngs(params=0)
     single_pipeline_stage = simple_layer.SimpleDecoderLayerToLinen(
-        config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
+      config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
     )
     my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
     init_pipeline_params = my_pipeline.init(
-        jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
+      jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
     )
     logical_partition_spec = my_pipeline.get_weight_sharding(
-        inputs, inputs_position, inputs_segmentation, deterministic, model_mode
+      inputs, inputs_position, inputs_segmentation, deterministic, model_mode
     )
 
     # Create a dummy scalar loss function so we may take the gradient wrt weights
     def pipeline_parallelism_dummy_loss_extra(
+      params,
+      inputs,
+      inputs_position,
+      inputs_segmentation,
+      deterministic,
+      model_mode,
+      dummy_targets,
+      logical_partition_spec=None,
+    ):
+      outputs = my_pipeline.apply(
         params,
         inputs,
         inputs_position,
         inputs_segmentation,
         deterministic,
         model_mode,
-        dummy_targets,
-        logical_partition_spec=None,
-    ):
-      outputs = my_pipeline.apply(
-          params,
-          inputs,
-          inputs_position,
-          inputs_segmentation,
-          deterministic,
-          model_mode,
-          logical_partition_spec=logical_partition_spec,
+        logical_partition_spec=logical_partition_spec,
       )
       loss = jnp.linalg.norm(outputs - dummy_targets)
       return loss
 
     pipeline_parallelism_dummy_loss = functools.partial(
-        pipeline_parallelism_dummy_loss_extra, logical_partition_spec=logical_partition_spec
+      pipeline_parallelism_dummy_loss_extra, logical_partition_spec=logical_partition_spec
     )
 
     def regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
@@ -158,47 +157,47 @@ class PipelineParallelismTest(unittest.TestCase):
         cur_layer_params["params"] = cur_layer_params["params"]["layers"]
         if config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage > 1:
           cur_layer_params["params"] = meta.remove_axis(
-              cur_layer_params["params"], 0, {nn.PARTITION_NAME: "circular_repeats"}
+            cur_layer_params["params"], 0, {nn.PARTITION_NAME: "circular_repeats"}
           )
           cur_layer_params["params"] = meta.remove_axis(cur_layer_params["params"], 0, {nn.PARTITION_NAME: "layers"})
         reg_layer_activations, _ = single_pipeline_stage.apply(
-            cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode
+          cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode
         )
       return reg_layer_activations
 
     def regular_sequential_layers_dummy_loss(
-        params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets
+      params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets
     ):
       outputs = regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
       loss = jnp.linalg.norm(outputs - dummy_targets)
       return loss
 
     assert_same_output_and_grad(
-        regular_sequential_layers_dummy_loss,
-        pipeline_parallelism_dummy_loss,
-        init_pipeline_params,
-        inputs,
-        inputs_segmentation,
-        inputs_position,
-        deterministic,
-        model_mode,
-        dummy_targets,
+      regular_sequential_layers_dummy_loss,
+      pipeline_parallelism_dummy_loss,
+      init_pipeline_params,
+      inputs,
+      inputs_segmentation,
+      inputs_position,
+      deterministic,
+      model_mode,
+      dummy_targets,
     )
 
   @pytest.mark.tpu_only
   def test_circular_minimum_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        enable_checkpointing=False,
-        enable_goodput_recording=False,
-        run_name="circular_minimum_microbatches",
-        max_target_length=128,
-        base_emb_dim=28,
-        ici_pipeline_parallelism=4,
-        base_num_decoder_layers=8,
-        num_pipeline_microbatches=4,
-        per_device_batch_size=4,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      enable_goodput_recording=False,
+      run_name="circular_minimum_microbatches",
+      max_target_length=128,
+      base_emb_dim=28,
+      ici_pipeline_parallelism=4,
+      base_num_decoder_layers=8,
+      num_pipeline_microbatches=4,
+      per_device_batch_size=4,
     )
     self.assert_pipeline_same_output_and_grad(config)
 
@@ -206,16 +205,16 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_extra_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        enable_checkpointing=False,
-        enable_goodput_recording=False,
-        run_name="circular_extra_microbatches",
-        max_target_length=128,
-        base_emb_dim=28,
-        ici_pipeline_parallelism=4,
-        base_num_decoder_layers=8,
-        num_pipeline_microbatches=8,
-        per_device_batch_size=4,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      enable_goodput_recording=False,
+      run_name="circular_extra_microbatches",
+      max_target_length=128,
+      base_emb_dim=28,
+      ici_pipeline_parallelism=4,
+      base_num_decoder_layers=8,
+      num_pipeline_microbatches=8,
+      per_device_batch_size=4,
     )
     self.assert_pipeline_same_output_and_grad(config)
 
@@ -223,22 +222,22 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_deepseek_megablox_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        enable_checkpointing=False,
-        enable_goodput_recording=False,
-        run_name="circular_moe",
-        max_target_length=128,
-        base_emb_dim=28,
-        ici_pipeline_parallelism=4,
-        base_num_decoder_layers=8,
-        num_pipeline_microbatches=8,
-        per_device_batch_size=4,
-        num_experts=4,
-        num_experts_per_tok=2,
-        megablox=False,
-        sparse_matmul=False,
-        capacity_factor=1,
-        decoder_block="deepseek",
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      enable_goodput_recording=False,
+      run_name="circular_moe",
+      max_target_length=128,
+      base_emb_dim=28,
+      ici_pipeline_parallelism=4,
+      base_num_decoder_layers=8,
+      num_pipeline_microbatches=8,
+      per_device_batch_size=4,
+      num_experts=4,
+      num_experts_per_tok=2,
+      megablox=False,
+      sparse_matmul=False,
+      capacity_factor=1,
+      decoder_block="deepseek",
     )
     self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen)
 
@@ -246,17 +245,17 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_ag_once(self):
     # 2 stages, 8 microbatches, all gather once
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        enable_checkpointing=False,
-        enable_goodput_recording=False,
-        run_name="circular_ag_once",
-        max_target_length=128,
-        base_emb_dim=28,
-        ici_pipeline_parallelism=2,
-        base_num_decoder_layers=8,
-        num_pipeline_microbatches=8,
-        per_device_batch_size=4,
-        pipeline_fsdp_ag_once=True,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      enable_goodput_recording=False,
+      run_name="circular_ag_once",
+      max_target_length=128,
+      base_emb_dim=28,
+      ici_pipeline_parallelism=2,
+      base_num_decoder_layers=8,
+      num_pipeline_microbatches=8,
+      per_device_batch_size=4,
+      pipeline_fsdp_ag_once=True,
     )
     self.assert_pipeline_same_output_and_grad(config)
 
@@ -264,15 +263,15 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        enable_checkpointing=False,
-        run_name="non_circular",
-        max_target_length=128,
-        base_emb_dim=28,
-        ici_pipeline_parallelism=4,
-        base_num_decoder_layers=4,
-        num_pipeline_microbatches=4,
-        per_device_batch_size=4,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      run_name="non_circular",
+      max_target_length=128,
+      base_emb_dim=28,
+      ici_pipeline_parallelism=4,
+      base_num_decoder_layers=4,
+      num_pipeline_microbatches=4,
+      per_device_batch_size=4,
     )
     self.assert_pipeline_same_output_and_grad(config)
 
@@ -281,48 +280,48 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_full_train_circular(self):
     # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats), 8 microbatches
     train_main(
-        [
-            None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            "base_output_directory=gs://runner-maxtext-logs",
-            "run_name=runner_pipeline_parallelism_test",
-            "dataset_path=gs://maxtext-dataset",
-            "base_emb_dim=28",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "base_mlp_dim=32",
-            "base_num_decoder_layers=32",
-            "head_dim=128",
-            "per_device_batch_size=2",
-            "max_target_length=1024",
-            "vocab_size=32",
-            "dataset_type=synthetic",
-            "steps=3",
-            "enable_checkpointing=False",
-            "enable_goodput_recording=False",
-            "ici_pipeline_parallelism=4",
-            "num_layers_per_pipeline_stage=2",
-            "num_pipeline_microbatches=8",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-            "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
-        ]
+      [
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        "base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_pipeline_parallelism_test",
+        "dataset_path=gs://maxtext-dataset",
+        "base_emb_dim=28",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=32",
+        "base_num_decoder_layers=32",
+        "head_dim=128",
+        "per_device_batch_size=2",
+        "max_target_length=1024",
+        "vocab_size=32",
+        "dataset_type=synthetic",
+        "steps=3",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "ici_pipeline_parallelism=4",
+        "num_layers_per_pipeline_stage=2",
+        "num_pipeline_microbatches=8",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+        "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
+      ]
     )
 
   @pytest.mark.tpu_only
   def test_delay_activation_forwarding_same_output_and_grad(self):
     # 4 stages, delayed activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        enable_checkpointing=False,
-        enable_goodput_recording=False,
-        run_name="activation_forwarding",
-        max_target_length=128,
-        base_emb_dim=28,
-        ici_pipeline_parallelism=4,
-        base_num_decoder_layers=8,
-        num_pipeline_microbatches=8,
-        per_device_batch_size=4,
-        pipeline_delay_activation_forwarding=True,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      enable_goodput_recording=False,
+      run_name="activation_forwarding",
+      max_target_length=128,
+      base_emb_dim=28,
+      ici_pipeline_parallelism=4,
+      base_num_decoder_layers=8,
+      num_pipeline_microbatches=8,
+      per_device_batch_size=4,
+      pipeline_delay_activation_forwarding=True,
     )
     self.assert_pipeline_same_output_and_grad(config)
 
@@ -331,31 +330,31 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_full_train_non_circular(self):
     # Run a full train.py call with 4 stages, 32 layers (8 layers per stage), 8 microbatches
     train_main(
-        [
-            None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            "base_output_directory=gs://runner-maxtext-logs",
-            "run_name=runner_pipeline_parallelism_test",
-            "dataset_path=gs://maxtext-dataset",
-            "base_emb_dim=28",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "base_mlp_dim=32",
-            "base_num_decoder_layers=32",
-            "head_dim=128",
-            "per_device_batch_size=2",
-            "max_target_length=1024",
-            "vocab_size=32",
-            "dataset_type=synthetic",
-            "steps=3",
-            "enable_checkpointing=False",
-            "enable_goodput_recording=False",
-            "ici_pipeline_parallelism=4",
-            "num_layers_per_pipeline_stage=8",
-            "num_pipeline_microbatches=8",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-            "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
-        ]
+      [
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        "base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_pipeline_parallelism_test",
+        "dataset_path=gs://maxtext-dataset",
+        "base_emb_dim=28",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=32",
+        "base_num_decoder_layers=32",
+        "head_dim=128",
+        "per_device_batch_size=2",
+        "max_target_length=1024",
+        "vocab_size=32",
+        "dataset_type=synthetic",
+        "steps=3",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "ici_pipeline_parallelism=4",
+        "num_layers_per_pipeline_stage=8",
+        "num_pipeline_microbatches=8",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+        "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
+      ]
     )
 
   @pytest.mark.integration_test
@@ -363,33 +362,33 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_subset_layers(self):
     # Run a full train.py call with 4 stages, 16 layers - 8 in pipeline, 8 ran outside of pipeline
     train_main(
-        [
-            None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            "base_output_directory=gs://runner-maxtext-logs",
-            "run_name=runner_pipeline_parallelism_test",
-            "dataset_path=gs://maxtext-dataset",
-            "base_emb_dim=28",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "base_mlp_dim=32",
-            "base_num_decoder_layers=16",
-            "head_dim=128",
-            "per_device_batch_size=2",
-            "max_target_length=1024",
-            "vocab_size=32",
-            "dataset_type=synthetic",
-            "steps=3",
-            "enable_checkpointing=False",
-            "enable_goodput_recording=False",
-            "ici_pipeline_parallelism=4",
-            "num_layers_per_pipeline_stage=1",
-            "num_pipeline_repeats=2",
-            "pipeline_parallel_layers=8",
-            "num_pipeline_microbatches=8",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-            "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
-        ]
+      [
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        "base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_pipeline_parallelism_test",
+        "dataset_path=gs://maxtext-dataset",
+        "base_emb_dim=28",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=32",
+        "base_num_decoder_layers=16",
+        "head_dim=128",
+        "per_device_batch_size=2",
+        "max_target_length=1024",
+        "vocab_size=32",
+        "dataset_type=synthetic",
+        "steps=3",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "ici_pipeline_parallelism=4",
+        "num_layers_per_pipeline_stage=1",
+        "num_pipeline_repeats=2",
+        "pipeline_parallel_layers=8",
+        "num_pipeline_microbatches=8",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+        "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
+      ]
     )
 
   @pytest.mark.integration_test
@@ -397,31 +396,31 @@ class PipelineParallelismTest(unittest.TestCase):
     # Run a full train.py call with fp8 quantization, which adds extra
     # variable collections that need to be handled
     train_main(
-        [
-            None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            "base_output_directory=gs://runner-maxtext-logs",
-            "run_name=runner_pipeline_parallelism_fp8_test",
-            "dataset_path=gs://maxtext-dataset",
-            "base_emb_dim=28",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "base_mlp_dim=32",
-            "base_num_decoder_layers=4",
-            "head_dim=128",
-            "per_device_batch_size=2",
-            "max_target_length=1024",
-            "vocab_size=32",
-            "dataset_type=synthetic",
-            "steps=3",
-            "enable_checkpointing=False",
-            "enable_goodput_recording=False",
-            "ici_pipeline_parallelism=4",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-            "quantization=fp8",
-            "scan_layers_per_stage=False",
-            "attention=dot_product",
-        ]
+      [
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        "base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_pipeline_parallelism_fp8_test",
+        "dataset_path=gs://maxtext-dataset",
+        "base_emb_dim=28",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=32",
+        "base_num_decoder_layers=4",
+        "head_dim=128",
+        "per_device_batch_size=2",
+        "max_target_length=1024",
+        "vocab_size=32",
+        "dataset_type=synthetic",
+        "steps=3",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "ici_pipeline_parallelism=4",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+        "quantization=fp8",
+        "scan_layers_per_stage=False",
+        "attention=dot_product",
+      ]
     )
 
   @pytest.mark.integration_test
@@ -429,31 +428,31 @@ class PipelineParallelismTest(unittest.TestCase):
     # Run a full train.py call with NANOO fp8 quantization, which adds extra
     # variable collections that need to be handled
     train_main(
-        [
-            None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            "base_output_directory=gs://runner-maxtext-logs",
-            "run_name=runner_pipeline_parallelism_nanoo_fp8_test",
-            "dataset_path=gs://maxtext-dataset",
-            "base_emb_dim=28",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "base_mlp_dim=32",
-            "base_num_decoder_layers=4",
-            "head_dim=128",
-            "per_device_batch_size=2",
-            "max_target_length=1024",
-            "vocab_size=32",
-            "dataset_type=synthetic",
-            "steps=3",
-            "enable_checkpointing=False",
-            "enable_goodput_recording=False",
-            "ici_pipeline_parallelism=4",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-            "quantization=nanoo_fp8",
-            "scan_layers_per_stage=False",
-            "attention=dot_product",
-        ]
+      [
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        "base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_pipeline_parallelism_nanoo_fp8_test",
+        "dataset_path=gs://maxtext-dataset",
+        "base_emb_dim=28",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=32",
+        "base_num_decoder_layers=4",
+        "head_dim=128",
+        "per_device_batch_size=2",
+        "max_target_length=1024",
+        "vocab_size=32",
+        "dataset_type=synthetic",
+        "steps=3",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "ici_pipeline_parallelism=4",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+        "quantization=nanoo_fp8",
+        "scan_layers_per_stage=False",
+        "attention=dot_product",
+      ]
     )
 
 

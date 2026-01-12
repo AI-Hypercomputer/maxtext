@@ -43,13 +43,13 @@ class GemmaDecoderLayer(nnx.Module):
   quant: None | Quant = None
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      quant: Optional[Quant] = None,
-      *,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    quant: Optional[Quant] = None,
+    *,
+    rngs: nnx.Rngs,
   ):
     self.config = config
     self.mesh = mesh
@@ -61,57 +61,57 @@ class GemmaDecoderLayer(nnx.Module):
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.pre_self_attention_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        rngs=self.rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      rngs=self.rngs,
     )
 
     self.self_attention = Attention(
-        config=config,
-        num_query_heads=config.num_query_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        attention_kernel=config.attention,
-        inputs_q_shape=dummy_inputs_shape,
-        inputs_kv_shape=dummy_inputs_shape,
-        mesh=self.mesh,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        dropout_rate=config.dropout_rate,
-        float32_qk_product=config.float32_qk_product,
-        float32_logits=config.float32_logits,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(config),
-        use_ragged_attention=config.use_ragged_attention,
-        ragged_block_size=config.ragged_block_size,
-        model_mode=self.model_mode,
-        rngs=self.rngs,
+      config=config,
+      num_query_heads=config.num_query_heads,
+      num_kv_heads=config.num_kv_heads,
+      head_dim=config.head_dim,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      attention_kernel=config.attention,
+      inputs_q_shape=dummy_inputs_shape,
+      inputs_kv_shape=dummy_inputs_shape,
+      mesh=self.mesh,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      dropout_rate=config.dropout_rate,
+      float32_qk_product=config.float32_qk_product,
+      float32_logits=config.float32_logits,
+      quant=self.quant,
+      kv_quant=quantizations.configure_kv_quant(config),
+      use_ragged_attention=config.use_ragged_attention,
+      ragged_block_size=config.ragged_block_size,
+      model_mode=self.model_mode,
+      rngs=self.rngs,
     )
 
     self.pre_ffw_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        rngs=self.rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      rngs=self.rngs,
     )
 
     self.mlp = MlpBlock(
-        config=config,
-        mesh=self.mesh,
-        in_features=config.emb_dim,
-        intermediate_dim=config.mlp_dim,
-        activations=config.mlp_activations,
-        intermediate_dropout_rate=config.dropout_rate,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        quant=self.quant,
-        model_mode=self.model_mode,
-        rngs=self.rngs,
+      config=config,
+      mesh=self.mesh,
+      in_features=config.emb_dim,
+      intermediate_dim=config.mlp_dim,
+      activations=config.mlp_activations,
+      intermediate_dropout_rate=config.dropout_rate,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      quant=self.quant,
+      model_mode=self.model_mode,
+      rngs=self.rngs,
     )
 
     self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
@@ -119,18 +119,18 @@ class GemmaDecoderLayer(nnx.Module):
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      previous_chunk=None,
-      page_manager=None,
-      page_state=None,
-      slot=None,
-      kv_cache=None,
-      attention_metadata=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    previous_chunk=None,
+    page_manager=None,
+    page_state=None,
+    slot=None,
+    kv_cache=None,
+    attention_metadata=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -143,14 +143,14 @@ class GemmaDecoderLayer(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
     attention_lnx, kv_cache = self.self_attention(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
+      lnx,
+      lnx,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=model_mode,
+      kv_cache=kv_cache,
+      attention_metadata=attention_metadata,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
@@ -168,17 +168,17 @@ class GemmaDecoderLayer(nnx.Module):
 
     layer_output = next_layer_addition_dropped_out
     layer_output = nn.with_logical_constraint(
-        layer_output,
-        self.activation_axis_names,
+      layer_output,
+      self.activation_axis_names,
     )
 
     if self.config.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
-          "activation_fraction_zero",
-          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+        "intermediates",
+        "activation_fraction_zero",
+        jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
     if self.config.scan_layers:
@@ -188,6 +188,6 @@ class GemmaDecoderLayer(nnx.Module):
 
 
 GemmaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    GemmaDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  GemmaDecoderLayer,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )

@@ -16,7 +16,6 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -46,13 +45,13 @@ class MixtralDecoderLayer(nnx.Module):
 
   @nn.compact
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      quant: None | Quant = None,
-      *,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    quant: None | Quant = None,
+    *,
+    rngs: nnx.Rngs,
   ):
     self.config = config
     self.mesh = mesh
@@ -64,63 +63,63 @@ class MixtralDecoderLayer(nnx.Module):
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.pre_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=self.rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=self.rngs,
     )
 
     self.self_attention = Attention(
-        config=config,
-        num_query_heads=config.num_query_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        attention_kernel=config.attention,
-        inputs_q_shape=dummy_inputs_shape,
-        inputs_kv_shape=dummy_inputs_shape,
-        mesh=mesh,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        dropout_rate=config.dropout_rate,
-        float32_qk_product=config.float32_qk_product,
-        float32_logits=config.float32_logits,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(config),
-        prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
-        ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
-        compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))),
-        reshape_q=config.reshape_q,
-        use_ragged_attention=config.use_ragged_attention,
-        ragged_block_size=config.ragged_block_size,
-        model_mode=model_mode,
-        rngs=self.rngs,
+      config=config,
+      num_query_heads=config.num_query_heads,
+      num_kv_heads=config.num_kv_heads,
+      head_dim=config.head_dim,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      attention_kernel=config.attention,
+      inputs_q_shape=dummy_inputs_shape,
+      inputs_kv_shape=dummy_inputs_shape,
+      mesh=mesh,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      dropout_rate=config.dropout_rate,
+      float32_qk_product=config.float32_qk_product,
+      float32_logits=config.float32_logits,
+      quant=self.quant,
+      kv_quant=quantizations.configure_kv_quant(config),
+      prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
+      ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
+      compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))),
+      reshape_q=config.reshape_q,
+      use_ragged_attention=config.use_ragged_attention,
+      ragged_block_size=config.ragged_block_size,
+      model_mode=model_mode,
+      rngs=self.rngs,
     )
 
     self.post_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=self.rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=self.rngs,
     )
 
     self.MoeBlock_0 = moe.RoutedMoE(
-        config=config,
-        num_experts=config.num_experts,
-        num_experts_per_tok=config.num_experts_per_tok,
-        mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
-        intermediate_dim=config.mlp_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        quant=self.quant,
-        rngs=self.rngs,
+      config=config,
+      num_experts=config.num_experts,
+      num_experts_per_tok=config.num_experts_per_tok,
+      mesh=mesh,
+      kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes=("embed", None),
+      intermediate_dim=config.mlp_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      quant=self.quant,
+      rngs=self.rngs,
     )
 
     self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
@@ -128,17 +127,17 @@ class MixtralDecoderLayer(nnx.Module):
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      previous_chunk=None,
-      page_state=None,
-      slot=None,
-      kv_cache=None,
-      attention_metadata=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    previous_chunk=None,
+    page_state=None,
+    slot=None,
+    kv_cache=None,
+    attention_metadata=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -150,15 +149,15 @@ class MixtralDecoderLayer(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
     attention_lnx, kv_cache = self.self_attention(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        previous_chunk=previous_chunk,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
+      lnx,
+      lnx,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=model_mode,
+      previous_chunk=previous_chunk,
+      kv_cache=kv_cache,
+      attention_metadata=attention_metadata,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
@@ -186,9 +185,9 @@ class MixtralDecoderLayer(nnx.Module):
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
-          "activation_fraction_zero",
-          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+        "intermediates",
+        "activation_fraction_zero",
+        jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
     if self.config.scan_layers:
@@ -198,6 +197,6 @@ class MixtralDecoderLayer(nnx.Module):
 
 
 MixtralDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    MixtralDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  MixtralDecoderLayer,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )

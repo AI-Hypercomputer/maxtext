@@ -22,20 +22,20 @@ import jax
 import jax.numpy as jnp
 from MaxText import max_utils
 from MaxText.sharding import (
-    maybe_shard_with_name,
-    all_gather_over_fsdp,
-    create_sharding,
+  maybe_shard_with_name,
+  all_gather_over_fsdp,
+  create_sharding,
 )
 from MaxText.common_types import ShardMode
 
 
 def vocab_tiling_linen_loss(
-    hidden_states,
-    data,
-    config,
-    model,
-    params,
-    is_train,
+  hidden_states,
+  data,
+  config,
+  model,
+  params,
+  is_train,
 ):
   """Calculates cross-entropy loss using vocab tiling for Linen models.
 
@@ -60,32 +60,32 @@ def vocab_tiling_linen_loss(
 
   param_spec = nn.get_partition_spec(params)
   hidden_spec = create_sharding(
-      model.mesh,
-      ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed"),
+    model.mesh,
+    ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed"),
   )
   label_spec = create_sharding(
-      model.mesh,
-      ("activation_embed_and_logits_batch", "activation_length_no_exp"),
+    model.mesh,
+    ("activation_embed_and_logits_batch", "activation_length_no_exp"),
   )
   reshaped_hidden_spec = create_sharding(
-      model.mesh,
-      ("num_tile", "activation_embed_and_logits_batch_sequence", "activation_embed"),
+    model.mesh,
+    ("num_tile", "activation_embed_and_logits_batch_sequence", "activation_embed"),
   )
   reshaped_data_spec = create_sharding(
-      model.mesh,
-      ("num_tile", "activation_embed_and_logits_batch_sequence"),
+    model.mesh,
+    ("num_tile", "activation_embed_and_logits_batch_sequence"),
   )
   chunked_hidden_spec = create_sharding(
-      model.mesh,
-      ("activation_embed_and_logits_batch_sequence", "activation_embed"),
+    model.mesh,
+    ("activation_embed_and_logits_batch_sequence", "activation_embed"),
   )
   chunked_data_spec = create_sharding(
-      model.mesh,
-      ("activation_embed_and_logits_batch_sequence",),
+    model.mesh,
+    ("activation_embed_and_logits_batch_sequence",),
   )
   chunked_logits_spec = create_sharding(
-      model.mesh,
-      ("activation_embed_and_logits_batch_sequence", "activation_vocab"),
+    model.mesh,
+    ("activation_embed_and_logits_batch_sequence", "activation_vocab"),
   )
 
   _maybe_shard_with_name = functools.partial(maybe_shard_with_name, shard_mode=config.shard_mode)
@@ -115,7 +115,7 @@ def vocab_tiling_linen_loss(
     vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
 
     reshaped_hidden_states = _reshape(
-        hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
+      hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
     )
     reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
     reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
@@ -129,10 +129,10 @@ def vocab_tiling_linen_loss(
 
       # Calculate logits for the current chunk
       chunk_logits = model.apply(
-          {"params": gathered_params["params"]},
-          hidden_chunk,
-          deterministic=deterministic,
-          method="logits_from_hidden_states",
+        {"params": gathered_params["params"]},
+        hidden_chunk,
+        deterministic=deterministic,
+        method="logits_from_hidden_states",
       )
       chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
       one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
@@ -143,31 +143,31 @@ def vocab_tiling_linen_loss(
 
     initial_loss = 0.0
     total_loss, _ = jax.lax.scan(
-        _fwd_scan_body, initial_loss, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      _fwd_scan_body, initial_loss, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
     )
     residuals = (
-        gathered_params,
-        reshaped_hidden_states,
-        reshaped_labels,
-        reshaped_segmentation,
-        batch_size,
-        seq_len,
-        emb_dim,
+      gathered_params,
+      reshaped_hidden_states,
+      reshaped_labels,
+      reshaped_segmentation,
+      batch_size,
+      seq_len,
+      emb_dim,
     )
 
     return total_loss, residuals
 
   def _chunked_cross_entropy_loss_bwd(residuals, loss_cotangent):
     gathered_params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation, batch_size, seq_len, emb_dim = (
-        residuals
+      residuals
     )
 
     def _single_chunk_loss_fn(input_params, input_hidden_chunk, input_label_chunk, input_segmentation_chunk):
       chunk_logits = model.apply(
-          {"params": input_params["params"]},
-          input_hidden_chunk,
-          deterministic=deterministic,
-          method="logits_from_hidden_states",
+        {"params": input_params["params"]},
+        input_hidden_chunk,
+        deterministic=deterministic,
+        method="logits_from_hidden_states",
       )
       chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
       one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size)
@@ -195,9 +195,9 @@ def vocab_tiling_linen_loss(
       grad_hidden_chunk = _maybe_shard_with_name(grad_hidden_chunk, chunked_hidden_spec)
 
       grad_params_acc = jax.tree_util.tree_map(
-          lambda acc, update: acc + update,
-          grad_params_acc,
-          grad_params_update,
+        lambda acc, update: acc + update,
+        grad_params_acc,
+        grad_params_update,
       )
       return grad_params_acc, grad_hidden_chunk
 
@@ -205,7 +205,7 @@ def vocab_tiling_linen_loss(
 
     # The scan now returns the total gradients for the params in the final carry
     grad_params, grad_reshaped_hidden_states = jax.lax.scan(
-        _bwd_scan_body, initial_grad_params_acc, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      _bwd_scan_body, initial_grad_params_acc, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
     )
     grad_reshaped_hidden_states = _maybe_shard_with_name(grad_reshaped_hidden_states, reshaped_hidden_spec)
     # TODO (chengnuojin): we may want to convert grad_params to bf16 to save memory
@@ -215,19 +215,19 @@ def vocab_tiling_linen_loss(
     # Give back sharding constraint
     grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
     return (
-        grad_params,  # grad for params
-        grad_reshaped_hidden_states.astype(reshaped_hidden_states.dtype),
-        None,  # grad for reshaped_labels
-        None,  # grad for reshaped_segmentation
+      grad_params,  # grad for params
+      grad_reshaped_hidden_states.astype(reshaped_hidden_states.dtype),
+      None,  # grad for reshaped_labels
+      None,  # grad for reshaped_segmentation
     )
 
   chunked_cross_entropy_loss.defvjp(_chunked_cross_entropy_loss_fwd, _chunked_cross_entropy_loss_bwd)
 
   total_loss = chunked_cross_entropy_loss(
-      gathered_params,
-      hidden_states,
-      labels,
-      segmentation,
+    gathered_params,
+    hidden_states,
+    labels,
+    segmentation,
   )
 
   return total_loss

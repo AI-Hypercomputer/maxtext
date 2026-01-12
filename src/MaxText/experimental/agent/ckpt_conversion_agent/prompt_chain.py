@@ -15,6 +15,7 @@
 """
 This is a baseline agent, using prompt-chain + validator/executer architecture
 """
+
 import os
 import json
 import argparse
@@ -40,7 +41,7 @@ class prompt_chaining_agent(BaseAgent):
     """Run chain"""
     # Load context data
     with open(
-        os.path.join(self.dir_path, "context", self.target_model, "maxtext_params.json"), "rt", encoding="utf8"
+      os.path.join(self.dir_path, "context", self.target_model, "maxtext_params.json"), "rt", encoding="utf8"
     ) as f:
       maxtext_params = json.load(f)
     with open(os.path.join(self.dir_path, "context", self.target_model, "hf_params.json"), "rt", encoding="utf8") as f:
@@ -48,23 +49,23 @@ class prompt_chaining_agent(BaseAgent):
 
     # Load prompt templates
     prompt_templates = {
-        "analysis": load_prompt_template(f"{self.dir_path}/prompts/01_analysis.txt"),
-        "param_mapping": load_prompt_template(f"{self.dir_path}/prompts/03_param_mapping.txt"),
-        "param_mapping_check": load_prompt_template(f"{self.dir_path}/prompts/03_param_mapping_check.txt"),
-        "hook_fn": load_prompt_template(f"{self.dir_path}/prompts/04_hook_fn_prompt_chain.txt"),
-        "pitfalls": load_prompt_template(f"{self.dir_path}/prompts/04_pitfalls.txt"),
-        "shape_mapping": load_prompt_template(f"{self.dir_path}/prompts/05_shape_mapping.txt"),
-        "shape_mapping_check": load_prompt_template(f"{self.dir_path}/prompts/05_shape_mapping_check.txt"),
+      "analysis": load_prompt_template(f"{self.dir_path}/prompts/01_analysis.txt"),
+      "param_mapping": load_prompt_template(f"{self.dir_path}/prompts/03_param_mapping.txt"),
+      "param_mapping_check": load_prompt_template(f"{self.dir_path}/prompts/03_param_mapping_check.txt"),
+      "hook_fn": load_prompt_template(f"{self.dir_path}/prompts/04_hook_fn_prompt_chain.txt"),
+      "pitfalls": load_prompt_template(f"{self.dir_path}/prompts/04_pitfalls.txt"),
+      "shape_mapping": load_prompt_template(f"{self.dir_path}/prompts/05_shape_mapping.txt"),
+      "shape_mapping_check": load_prompt_template(f"{self.dir_path}/prompts/05_shape_mapping_check.txt"),
     }
 
     # ======== Analyze Model Structures ========
     print("Step 1: Analyzing model structures...")
     prompt1 = prompt_templates["analysis"].format(
-        target_model=self.target_model,
-        maxtext_params_json=json.dumps(maxtext_params, indent=2),
-        hf_params_json=json.dumps(hf_params, indent=2),
-        dsl=None,
-        pitfalls=load_prompt_template(f"{self.dir_path}/prompts/04_pitfalls.txt"),
+      target_model=self.target_model,
+      maxtext_params_json=json.dumps(maxtext_params, indent=2),
+      hf_params_json=json.dumps(hf_params, indent=2),
+      dsl=None,
+      pitfalls=load_prompt_template(f"{self.dir_path}/prompts/04_pitfalls.txt"),
     )
     analysis = self.generate_text(prompt1)
 
@@ -75,21 +76,21 @@ class prompt_chaining_agent(BaseAgent):
     for attempt in range(1, max_retries + 1):
       print(f"  Attempt {attempt}...")
       prompt3 = prompt_templates["param_mapping"].format(
-          target_model=self.target_model,
-          analysis=analysis,
-          pitfalls=None,
-          maxtext_params_json=json.dumps(maxtext_params, indent=2),
-          hf_params_json=json.dumps(hf_params, indent=2),
-          feedback=feedback,
-          request_options={"timeout": 300},
+        target_model=self.target_model,
+        analysis=analysis,
+        pitfalls=None,
+        maxtext_params_json=json.dumps(maxtext_params, indent=2),
+        hf_params_json=json.dumps(hf_params, indent=2),
+        feedback=feedback,
+        request_options={"timeout": 300},
       )
       candidate = self.generate_text(prompt3)
 
       prompt3_1 = prompt_templates["param_mapping_check"].format(
-          maxtext_params_json=json.dumps(maxtext_params, indent=2),
-          hf_params_json=json.dumps(hf_params, indent=2),
-          code=candidate,
-          analysis=analysis,
+        maxtext_params_json=json.dumps(maxtext_params, indent=2),
+        hf_params_json=json.dumps(hf_params, indent=2),
+        code=candidate,
+        analysis=analysis,
       )
       feedback = self.generate_text(prompt3_1)
 
@@ -122,17 +123,17 @@ class prompt_chaining_agent(BaseAgent):
     for attempt in range(1, max_retries + 1):
       print("Step 3: Generating HF weights shape mapping function...")
       prompt2 = prompt_templates["shape_mapping"].format(
-          target_model=self.target_model,
-          hf_params_json=json.dumps(hf_params, indent=2),
-          analysis=analysis,
-          feedback=feedback,
-          pitfalls=None,
+        target_model=self.target_model,
+        hf_params_json=json.dumps(hf_params, indent=2),
+        analysis=analysis,
+        feedback=feedback,
+        pitfalls=None,
       )
       candidate = self.generate_text(prompt2)
 
       prompt2_1 = prompt_templates["shape_mapping_check"].format(
-          hf_params_json=json.dumps(hf_params, indent=2),
-          code=candidate,
+        hf_params_json=json.dumps(hf_params, indent=2),
+        code=candidate,
       )
       feedback = self.generate_text(prompt2_1)
 
@@ -158,9 +159,9 @@ class prompt_chaining_agent(BaseAgent):
     # ======== Generate Hook Functions ========
     print("Step 4: Generating layerwise transformation hook functions...")
     prompt4 = prompt_templates["hook_fn"].format(
-        target_model=self.target_model,
-        analysis=analysis,
-        param_mapping=param_mapping_code,
+      target_model=self.target_model,
+      analysis=analysis,
+      param_mapping=param_mapping_code,
     )
     hook_fn_code = self.generate_text(prompt4)
 

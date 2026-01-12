@@ -30,16 +30,15 @@ from MaxText import pyconfig
 
 # pylint: disable=protected-access
 class TrainDistillTest(unittest.TestCase):
-
   def test_maxtext_to_tunix_iterator(self):
     """Verifies the adapter correctly converts dictionary batches to dataclasses."""
 
     # 1. Create a dummy iterator that simulates MaxText data loader
     dummy_batch = {
-        "inputs": np.array([[10, 11]]),
-        "inputs_position": np.array([[0, 1]]),
-        "inputs_segmentation": np.array([[1, 1]]),
-        "targets": np.array([[11, 12]]),
+      "inputs": np.array([[10, 11]]),
+      "inputs_position": np.array([[0, 1]]),
+      "inputs_segmentation": np.array([[1, 1]]),
+      "targets": np.array([[11, 12]]),
     }
 
     dummy_iter = iter([dummy_batch])
@@ -64,9 +63,9 @@ class TrainDistillTest(unittest.TestCase):
   def test_maxtext_to_tunix_iterator_packed_fallback(self):
     """Verifies fallback behavior when segmentation is missing."""
     dummy_batch = {
-        "inputs": np.array([[10, 11]]),
-        "inputs_position": np.array([[0, 1]]),
-        "targets": np.array([[11, 12]]),
+      "inputs": np.array([[10, 11]]),
+      "inputs_position": np.array([[0, 1]]),
+      "targets": np.array([[11, 12]]),
     }
     dummy_iter = iter([dummy_batch])
     adapter = train_distill.MaxTextToTunixIterator(dummy_iter)
@@ -91,10 +90,10 @@ class TrainDistillTest(unittest.TestCase):
     # 2. Setup Input
     # pylint: disable=unexpected-keyword-arg
     input_data = train_distill.MaxTextTrainingInput(
-        input_tokens=jnp.array([[1]]),
-        input_mask=jnp.array([[True]]),
-        positions=jnp.array([[0]]),
-        targets=jnp.array([[1]]),
+      input_tokens=jnp.array([[1]]),
+      input_mask=jnp.array([[True]]),
+      positions=jnp.array([[0]]),
+      targets=jnp.array([[1]]),
     )
 
     # 3. Mock Strategy Output
@@ -135,8 +134,8 @@ class TrainDistillTest(unittest.TestCase):
     # Verify InjectHyperparamsState is the top-level state (required for Tunix logging)
     # Note: When injecting a schedule (callable), optax returns InjectStatefulHyperparamsState
     self.assertTrue(
-        isinstance(state, (optax.InjectHyperparamsState, optax.InjectStatefulHyperparamsState)),
-        f"State is {type(state)}, expected InjectHyperparamsState or InjectStatefulHyperparamsState",
+      isinstance(state, (optax.InjectHyperparamsState, optax.InjectStatefulHyperparamsState)),
+      f"State is {type(state)}, expected InjectHyperparamsState or InjectStatefulHyperparamsState",
     )
     self.assertIn("learning_rate", state.hyperparams)
 
@@ -148,11 +147,11 @@ class TrainDistillTest(unittest.TestCase):
   def test_monitored_strategy(self):
     """Verifies the strategy calculates metrics and returns the correct tuple."""
     strategy = train_distill.MonitoredLogitStrategy(
-        student_forward_fn=lambda m, **k: None,
-        teacher_forward_fn=lambda m, **k: None,
-        labels_fn=lambda t: t,
-        temperature=1.0,
-        alpha=0.5,
+      student_forward_fn=lambda m, **k: None,
+      teacher_forward_fn=lambda m, **k: None,
+      labels_fn=lambda t: t,
+      temperature=1.0,
+      alpha=0.5,
     )
 
     # Dummy inputs (batch=1, seq=2, vocab=4)

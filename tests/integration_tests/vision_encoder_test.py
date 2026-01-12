@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for multimodal vision encoder. """
+"""Tests for multimodal vision encoder."""
 
 import unittest
 import os
@@ -38,32 +38,31 @@ from MaxText import maxengine
 
 # 4b with vit
 DEFAULT_LOAD_PARAMETERS_PATH = (
-    "gs://maxtext-model-checkpoints/gemma3-4b/multimodal/2025-04-25-18-06-04/checkpoints/0/items"
+  "gs://maxtext-model-checkpoints/gemma3-4b/multimodal/2025-04-25-18-06-04/checkpoints/0/items"
 )
 
 
 class VisionEncoderEmbeddingTest(unittest.TestCase):
-
   CONFIGS = {
-      "gemma3-4b": [  # tests decode with multimodal gemma-4b
-          None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-          "model_name=gemma3-4b",
-          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.gemma3')}",
-          "use_multimodal=True",
-          "run_name=runner_test",
-          f"load_parameters_path={DEFAULT_LOAD_PARAMETERS_PATH}",
-          "steps=1",
-          "enable_checkpointing=False",
-          "max_target_length=16",
-          "max_prefill_predict_length=8",
-          "per_device_batch_size=1",
-          "scan_layers=false",
-          "enable_checkpointing=true",
-          "prompt='Describe this image'",
-          rf"image_path={os.path.join(MAXTEXT_TEST_ASSETS_ROOT, 'test_image.jpg')}",
-          "skip_jax_distributed_system=True",
-      ],
+    "gemma3-4b": [  # tests decode with multimodal gemma-4b
+      None,
+      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      "model_name=gemma3-4b",
+      rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.gemma3')}",
+      "use_multimodal=True",
+      "run_name=runner_test",
+      f"load_parameters_path={DEFAULT_LOAD_PARAMETERS_PATH}",
+      "steps=1",
+      "enable_checkpointing=False",
+      "max_target_length=16",
+      "max_prefill_predict_length=8",
+      "per_device_batch_size=1",
+      "scan_layers=false",
+      "enable_checkpointing=true",
+      "prompt='Describe this image'",
+      rf"image_path={os.path.join(MAXTEXT_TEST_ASSETS_ROOT, 'test_image.jpg')}",
+      "skip_jax_distributed_system=True",
+    ],
   }
 
   @pytest.mark.skip(reason="until b/416335384 is fixed")
@@ -92,7 +91,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
       return vision_encoder_model.apply({"params": params}, images_input)
 
     jitted_apply_vision_encoder_fn: Callable[[VariableDict, tuple[dict, ...]], np.ndarray] = jax.jit(
-        apply_vision_encoder_fn
+      apply_vision_encoder_fn
     )
     image_embeddings = jitted_apply_vision_encoder_fn(vision_encoder_params, input_images)  # pylint: disable=not-callable
 

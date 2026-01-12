@@ -40,9 +40,9 @@ class Monitor(abc.ABC):
   """Abstract base class for workload monitors."""
 
   def __init__(
-      self,
-      workload_name: str,
-      disruption_config: DisruptionConfig,
+    self,
+    workload_name: str,
+    disruption_config: DisruptionConfig,
   ):
     """Initializes a Monitor."""
     self.workload_name = workload_name
@@ -62,10 +62,10 @@ class StepMonitor(Monitor):
   """Monitors workload progress based on steps in logs."""
 
   def __init__(
-      self,
-      workload_name: str,
-      disruption_config: DisruptionConfig,
-      step_pod_regex: str,
+    self,
+    workload_name: str,
+    disruption_config: DisruptionConfig,
+    step_pod_regex: str,
   ):
     """Initializes StepMonitor."""
     super().__init__(workload_name, disruption_config)
@@ -80,25 +80,25 @@ class StepMonitor(Monitor):
       return False
 
     kubectl_logs_command = [
-        "kubectl",
-        "logs",
-        "-f",  # Follow the logs for real-time updates
-        pod_name,
+      "kubectl",
+      "logs",
+      "-f",  # Follow the logs for real-time updates
+      pod_name,
     ]
     kubectl_logs_command_str = " ".join(kubectl_logs_command)
 
     process = None
     print(
-        f"Workload '{self.workload_name}', Pod '{pod_name}': Tailing logs for"
-        f" real-time step detection (reading in chunks)..."
+      f"Workload '{self.workload_name}', Pod '{pod_name}': Tailing logs for"
+      f" real-time step detection (reading in chunks)..."
     )
     try:
       with subprocess.Popen(
-          kubectl_logs_command_str,
-          shell=True,
-          stdout=subprocess.PIPE,
-          stderr=subprocess.PIPE,
-          text=True,
+        kubectl_logs_command_str,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
       ) as process:
         last_step = -1
         with process.stdout as pipe:
@@ -112,19 +112,19 @@ class StepMonitor(Monitor):
               last_step = max(last_step, step_number)  # Update last seen step
               if step_number >= self.disruption_config.trigger_value:
                 print(
-                    f"Workload '{self.workload_name}', Pod '{pod_name}': STEP"
-                    f" trigger reached! Detected step: {step_number}, Trigger"
-                    f" Value: {self.disruption_config.trigger_value}."
+                  f"Workload '{self.workload_name}', Pod '{pod_name}': STEP"
+                  f" trigger reached! Detected step: {step_number}, Trigger"
+                  f" Value: {self.disruption_config.trigger_value}."
                 )
                 return True
     except subprocess.CalledProcessError as e:
-      print(f"Error getting logs for pod '{pod_name}' of workload" f" '{self.workload_name}': {e.stderr}")
+      print(f"Error getting logs for pod '{pod_name}' of workload '{self.workload_name}': {e.stderr}")
       return False
     finally:
       if process:
         process.kill()
 
-    print(f"Workload '{self.workload_name}', Pod '{pod_name}': No step trigger" " detected.")
+    print(f"Workload '{self.workload_name}', Pod '{pod_name}': No step trigger detected.")
     return False
 
 
@@ -134,11 +134,11 @@ class TimeMonitor(Monitor):
   def monitor_and_detect_trigger(self):
     """Monitors time and detects time-based trigger by sleeping."""
     print(
-        f"😴 Using TimeMonitor for workload: {self.workload_name}, sleeping for"
-        f" {self.disruption_config.trigger_value} seconds 😴."
+      f"😴 Using TimeMonitor for workload: {self.workload_name}, sleeping for"
+      f" {self.disruption_config.trigger_value} seconds 😴."
     )
     time.sleep(self.disruption_config.trigger_value)
-    print("😳 Time trigger reached after" f" {self.disruption_config.trigger_value} seconds 😳")
+    print(f"😳 Time trigger reached after {self.disruption_config.trigger_value} seconds 😳")
     return True
 
 

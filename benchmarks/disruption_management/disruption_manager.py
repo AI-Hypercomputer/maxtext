@@ -49,10 +49,10 @@ class DisruptionManager:
     self.threads_to_monitor: defaultdict[str, list[threading.Thread]] = defaultdict(list)
 
   def add_workload(
-      self,
-      workload_name: str,
-      cluster_config: XpkClusterConfig,
-      disruption_configs: list[DisruptionConfig],
+    self,
+    workload_name: str,
+    cluster_config: XpkClusterConfig,
+    disruption_configs: list[DisruptionConfig],
   ) -> None:
     """Adds a workload and starts monitoring for disruptions & recovery.
 
@@ -69,12 +69,12 @@ class DisruptionManager:
     # Note that we do not start the threads here.
     for disruption_config in disruption_configs:
       thread = threading.Thread(
-          target=self._monitor_and_disrupt_workload,
-          args=(workload_name, cluster_config, disruption_config),
-          daemon=True,
+        target=self._monitor_and_disrupt_workload,
+        args=(workload_name, cluster_config, disruption_config),
+        daemon=True,
       )
       self.threads_to_monitor[workload_name].append(thread)
-    print(f"Added {len(disruption_configs)} disruption configs for workload:" f" {workload_name}")
+    print(f"Added {len(disruption_configs)} disruption configs for workload: {workload_name}")
 
   def remove_workload(self, workload_name: str) -> None:
     """Removes a workload from the disruption manager.
@@ -114,10 +114,10 @@ class DisruptionManager:
     print("All disruptions completed.")
 
   def _monitor_and_disrupt_workload(
-      self,
-      workload_name: str,
-      cluster_config: XpkClusterConfig,
-      disruption_config: DisruptionConfig,
+    self,
+    workload_name: str,
+    cluster_config: XpkClusterConfig,
+    disruption_config: DisruptionConfig,
   ) -> None:
     """Monitors workload progress, triggers disruptions, and recoveries."""
     target_pod_regex = f"{workload_name}{disruption_config.target_pod_regex}"
@@ -129,8 +129,7 @@ class DisruptionManager:
 
     if monitor.monitor_and_detect_trigger():
       print(
-          f"🔥🔥🔥 Trigger detected for workload: {workload_name}, triggering"
-          f" {disruption_config.disruption_method} 🔥🔥🔥"
+        f"🔥🔥🔥 Trigger detected for workload: {workload_name}, triggering {disruption_config.disruption_method} 🔥🔥🔥"
       )
       disruption_handler.trigger_disruption(workload_name, cluster_config, disruption_config, target_pod_regex)
     else:
@@ -143,9 +142,9 @@ class DisruptionManager:
 
 
 def construct_disruption_configs(
-    framework: str,
-    disruption_method: DisruptionMethod,
-    disruptions,
+  framework: str,
+  disruption_method: DisruptionMethod,
+  disruptions,
 ) -> list[DisruptionConfig]:
   """Constructs the disruption configs for the benchmark."""
 
@@ -162,14 +161,14 @@ def construct_disruption_configs(
   for trigger_type, trigger_values in disruptions.items():
     for trigger_value in trigger_values:
       disruption_config_list.append(
-          DisruptionConfig(
-              name="_".join([str(trigger_value), trigger_type]),
-              trigger_type=TriggerType.TIME_SECONDS if trigger_type == "time_seconds" else TriggerType.STEP,
-              trigger_value=trigger_value,
-              disruption_method=disruption_method,
-              target_pod_regex=target_pod_regex,
-              step_pod_regex=step_pod_regex,
-              worker_container_name=worker_container_name,
-          )
+        DisruptionConfig(
+          name="_".join([str(trigger_value), trigger_type]),
+          trigger_type=TriggerType.TIME_SECONDS if trigger_type == "time_seconds" else TriggerType.STEP,
+          trigger_value=trigger_value,
+          disruption_method=disruption_method,
+          target_pod_regex=target_pod_regex,
+          step_pod_regex=step_pod_regex,
+          worker_container_name=worker_container_name,
+        )
       )
   return disruption_config_list

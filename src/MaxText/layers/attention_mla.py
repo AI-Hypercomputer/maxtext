@@ -24,32 +24,32 @@ import jax.numpy as jnp
 from flax import nnx
 
 from MaxText.common_types import (
-    Array,
-    AxisIdxes,
-    AxisNames,
-    BATCH,
-    BATCH_NO_EXP,
-    Config,
-    DECODE_BATCH,
-    DECODE_LENGTH,
-    D_KV,
-    DType,
-    EMBED,
-    EP_AS_CONTEXT,
-    HEAD,
-    Q_LORA_UP_PROJ,
-    KV_BATCH,
-    KV_BATCH_NO_EXP,
-    KV_HEAD,
-    KV_HEAD_DIM,
-    KV_LORA_UP_PROJ,
-    LENGTH,
-    LENGTH_NO_EXP,
-    MODEL_MODE_PREFILL,
-    MODEL_MODE_TRAIN,
-    PREFILL_KV_BATCH,
-    PREFILL_LENGTH,
-    AttentionType,
+  Array,
+  AxisIdxes,
+  AxisNames,
+  BATCH,
+  BATCH_NO_EXP,
+  Config,
+  DECODE_BATCH,
+  DECODE_LENGTH,
+  D_KV,
+  DType,
+  EMBED,
+  EP_AS_CONTEXT,
+  HEAD,
+  Q_LORA_UP_PROJ,
+  KV_BATCH,
+  KV_BATCH_NO_EXP,
+  KV_HEAD,
+  KV_HEAD_DIM,
+  KV_LORA_UP_PROJ,
+  LENGTH,
+  LENGTH_NO_EXP,
+  MODEL_MODE_PREFILL,
+  MODEL_MODE_TRAIN,
+  PREFILL_KV_BATCH,
+  PREFILL_LENGTH,
+  AttentionType,
 )
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
@@ -65,7 +65,155 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 def mla_as_linen(
-    *,
+  *,
+  config: Config,
+  num_query_heads: int,
+  num_kv_heads: int,
+  head_dim: int,
+  max_target_length: int,
+  mesh: Mesh,
+  attention_kernel: str,
+  inputs_q_shape: Tuple,
+  inputs_kv_shape: Tuple,
+  dtype: DType = jnp.float32,
+  weight_dtype: DType = jnp.float32,
+  max_prefill_predict_length: int = -1,
+  dropout_rate: float = 0.0,
+  kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+  float32_qk_product: bool = False,  # computes logits in float32 for stability.
+  float32_logits: bool = False,  # cast logits in float32 for stability.
+  quant: Optional[Quant] = None,
+  kv_quant: Optional[KVQuant] = None,
+  attention_type: AttentionType = AttentionType.MLA,  # Default to MLA attention
+  attn_logits_soft_cap: float | None = None,
+  sliding_window_size: int | None = None,
+  use_ragged_attention: bool = False,
+  ragged_block_size: int = 256,
+  use_qk_norm: bool = False,
+  query_pre_attn_scalar: float | None = None,
+  use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
+  # Temperature tuning parameters used for Llama4
+  temperature_tuning: bool = False,
+  temperature_tuning_scale: float = 0.1,
+  temperature_tuning_floor_scale: float = 8192.0,
+  # Shard the query activation as the same as the key and value.
+  # TODO: Find a better sharding axis name.
+  # TODO: Further break down the Training and Inference axes for the q, k, v.
+  prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
+  prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
+  prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
+  query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+  key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+  value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+  ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+  ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+  ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+  input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
+  ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
+  out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
+  ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
+  prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
+  decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
+  prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
+  decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
+  prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
+  ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
+  compute_axis_order: AxisIdxes = (0, 1, 2, 3),
+  reshape_q: bool = False,
+  is_nope_layer: bool = False,
+  is_vision: bool = False,
+  model_mode: str = MODEL_MODE_TRAIN,
+  q_lora_rank: int = 0,
+  kv_lora_rank: int = 512,
+  qk_nope_head_dim: int = 128,
+  qk_rope_head_dim: int = 64,
+  v_head_dim: int = 128,
+  max_position_embeddings: int = 4096 * 4,
+  original_max_position_embeddings: int = 4096,
+  mscale: float = 1.0,  # scaling factor for softmax
+  rope_factor: float = 40.0,  # rotary embedding factor
+  name: str | None = None,
+):
+  """A factory function to create an MLA as a Linen module.
+
+  This function serves as a bridge to use the NNX-based `MLA` within a
+  Linen model.
+  """
+  return nnx_wrappers.to_linen(
+    MLA,
+    config=config,
+    num_query_heads=num_query_heads,
+    num_kv_heads=num_kv_heads,
+    head_dim=head_dim,
+    max_target_length=max_target_length,
+    mesh=mesh,
+    attention_kernel=attention_kernel,
+    inputs_q_shape=inputs_q_shape,
+    inputs_kv_shape=inputs_kv_shape,
+    dtype=dtype,
+    weight_dtype=weight_dtype,
+    max_prefill_predict_length=max_prefill_predict_length,
+    dropout_rate=dropout_rate,
+    kernel_init=kernel_init,
+    float32_qk_product=float32_qk_product,
+    float32_logits=float32_logits,
+    quant=quant,
+    kv_quant=kv_quant,
+    attention_type=attention_type,
+    attn_logits_soft_cap=attn_logits_soft_cap,
+    sliding_window_size=sliding_window_size,
+    use_ragged_attention=use_ragged_attention,
+    ragged_block_size=ragged_block_size,
+    use_qk_norm=use_qk_norm,
+    query_pre_attn_scalar=query_pre_attn_scalar,
+    use_bias_in_projections=use_bias_in_projections,
+    temperature_tuning=temperature_tuning,
+    temperature_tuning_scale=temperature_tuning_scale,
+    temperature_tuning_floor_scale=temperature_tuning_floor_scale,
+    prefill_query_axis_names=prefill_query_axis_names,
+    prefill_key_axis_names=prefill_key_axis_names,
+    prefill_value_axis_names=prefill_value_axis_names,
+    query_axis_names=query_axis_names,
+    key_axis_names=key_axis_names,
+    value_axis_names=value_axis_names,
+    ep_query_axis_names=ep_query_axis_names,
+    ep_key_axis_names=ep_key_axis_names,
+    ep_value_axis_names=ep_value_axis_names,
+    input_axis_names=input_axis_names,
+    ep_input_axis_names=ep_input_axis_names,
+    out_axis_names=out_axis_names,
+    ep_out_axis_names=ep_out_axis_names,
+    prefill_input_axis_names=prefill_input_axis_names,
+    decode_input_axis_names=decode_input_axis_names,
+    prefill_out_axis_names=prefill_out_axis_names,
+    decode_out_axis_names=decode_out_axis_names,
+    prefill_cache_axis_order=prefill_cache_axis_order,
+    ar_cache_axis_order=ar_cache_axis_order,
+    compute_axis_order=compute_axis_order,
+    reshape_q=reshape_q,
+    is_nope_layer=is_nope_layer,
+    is_vision=is_vision,
+    model_mode=model_mode,
+    q_lora_rank=q_lora_rank,
+    kv_lora_rank=kv_lora_rank,
+    qk_nope_head_dim=qk_nope_head_dim,
+    qk_rope_head_dim=qk_rope_head_dim,
+    v_head_dim=v_head_dim,
+    max_position_embeddings=max_position_embeddings,
+    original_max_position_embeddings=original_max_position_embeddings,
+    mscale=mscale,
+    rope_factor=rope_factor,
+    name=name,
+    metadata_fn=variable_to_logically_partitioned,
+    abstract_init=False,
+  )
+
+
+class MLA(Attention):
+  """Multi-Head Latent Attention (MLA) layer."""
+
+  def __init__(
+    self,
     config: Config,
     num_query_heads: int,
     num_kv_heads: int,
@@ -133,14 +281,31 @@ def mla_as_linen(
     mscale: float = 1.0,  # scaling factor for softmax
     rope_factor: float = 40.0,  # rotary embedding factor
     name: str | None = None,
-):
-  """A factory function to create an MLA as a Linen module.
+    rngs: Optional[nnx.Rngs] = None,
+  ):
+    """Initializes the MLA module.
 
-  This function serves as a bridge to use the NNX-based `MLA` within a
-  Linen model.
-  """
-  return nnx_wrappers.to_linen(
-      MLA,
+    Args:
+      config: The model configuration.
+      ... and other configuration parameters for MLA attention.
+      rngs: The random number generators for initialization, passed by the nnx.to_linen wrapper.
+    """
+    base_kv_cache = config.attention != "paged" and config.mla_naive_kvcache
+
+    # Setting these before call to super because a field is used in super
+    self.q_lora_rank = q_lora_rank
+    self.kv_lora_rank = kv_lora_rank
+    self.qk_nope_head_dim = qk_nope_head_dim
+    self.qk_rope_head_dim = qk_rope_head_dim
+    self.v_head_dim = v_head_dim
+    self.max_position_embeddings = max_position_embeddings
+    self.original_max_position_embeddings = original_max_position_embeddings
+    self.mscale = mscale
+    self.rope_factor = rope_factor
+
+    self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+
+    super().__init__(
       config=config,
       num_query_heads=num_query_heads,
       num_kv_heads=num_kv_heads,
@@ -194,173 +359,8 @@ def mla_as_linen(
       is_nope_layer=is_nope_layer,
       is_vision=is_vision,
       model_mode=model_mode,
-      q_lora_rank=q_lora_rank,
-      kv_lora_rank=kv_lora_rank,
-      qk_nope_head_dim=qk_nope_head_dim,
-      qk_rope_head_dim=qk_rope_head_dim,
-      v_head_dim=v_head_dim,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings,
-      mscale=mscale,
-      rope_factor=rope_factor,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )
-
-
-class MLA(Attention):
-  """Multi-Head Latent Attention (MLA) layer."""
-
-  def __init__(
-      self,
-      config: Config,
-      num_query_heads: int,
-      num_kv_heads: int,
-      head_dim: int,
-      max_target_length: int,
-      mesh: Mesh,
-      attention_kernel: str,
-      inputs_q_shape: Tuple,
-      inputs_kv_shape: Tuple,
-      dtype: DType = jnp.float32,
-      weight_dtype: DType = jnp.float32,
-      max_prefill_predict_length: int = -1,
-      dropout_rate: float = 0.0,
-      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
-      float32_qk_product: bool = False,  # computes logits in float32 for stability.
-      float32_logits: bool = False,  # cast logits in float32 for stability.
-      quant: Optional[Quant] = None,
-      kv_quant: Optional[KVQuant] = None,
-      attention_type: AttentionType = AttentionType.MLA,  # Default to MLA attention
-      attn_logits_soft_cap: float | None = None,
-      sliding_window_size: int | None = None,
-      use_ragged_attention: bool = False,
-      ragged_block_size: int = 256,
-      use_qk_norm: bool = False,
-      query_pre_attn_scalar: float | None = None,
-      use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
-      # Temperature tuning parameters used for Llama4
-      temperature_tuning: bool = False,
-      temperature_tuning_scale: float = 0.1,
-      temperature_tuning_floor_scale: float = 8192.0,
-      # Shard the query activation as the same as the key and value.
-      # TODO: Find a better sharding axis name.
-      # TODO: Further break down the Training and Inference axes for the q, k, v.
-      prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
-      ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
-      out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
-      ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
-      prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
-      decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-      prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-      decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
-      prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
-      ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
-      compute_axis_order: AxisIdxes = (0, 1, 2, 3),
-      reshape_q: bool = False,
-      is_nope_layer: bool = False,
-      is_vision: bool = False,
-      model_mode: str = MODEL_MODE_TRAIN,
-      q_lora_rank: int = 0,
-      kv_lora_rank: int = 512,
-      qk_nope_head_dim: int = 128,
-      qk_rope_head_dim: int = 64,
-      v_head_dim: int = 128,
-      max_position_embeddings: int = 4096 * 4,
-      original_max_position_embeddings: int = 4096,
-      mscale: float = 1.0,  # scaling factor for softmax
-      rope_factor: float = 40.0,  # rotary embedding factor
-      name: str | None = None,
-      rngs: Optional[nnx.Rngs] = None,
-  ):
-    """Initializes the MLA module.
-
-    Args:
-      config: The model configuration.
-      ... and other configuration parameters for MLA attention.
-      rngs: The random number generators for initialization, passed by the nnx.to_linen wrapper.
-    """
-    base_kv_cache = config.attention != "paged" and config.mla_naive_kvcache
-
-    # Setting these before call to super because a field is used in super
-    self.q_lora_rank = q_lora_rank
-    self.kv_lora_rank = kv_lora_rank
-    self.qk_nope_head_dim = qk_nope_head_dim
-    self.qk_rope_head_dim = qk_rope_head_dim
-    self.v_head_dim = v_head_dim
-    self.max_position_embeddings = max_position_embeddings
-    self.original_max_position_embeddings = original_max_position_embeddings
-    self.mscale = mscale
-    self.rope_factor = rope_factor
-
-    self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
-
-    super().__init__(
-        config=config,
-        num_query_heads=num_query_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=head_dim,
-        max_target_length=max_target_length,
-        mesh=mesh,
-        attention_kernel=attention_kernel,
-        inputs_q_shape=inputs_q_shape,
-        inputs_kv_shape=inputs_kv_shape,
-        dtype=dtype,
-        weight_dtype=weight_dtype,
-        max_prefill_predict_length=max_prefill_predict_length,
-        dropout_rate=dropout_rate,
-        kernel_init=kernel_init,
-        float32_qk_product=float32_qk_product,
-        float32_logits=float32_logits,
-        quant=quant,
-        kv_quant=kv_quant,
-        attention_type=attention_type,
-        attn_logits_soft_cap=attn_logits_soft_cap,
-        sliding_window_size=sliding_window_size,
-        use_ragged_attention=use_ragged_attention,
-        ragged_block_size=ragged_block_size,
-        use_qk_norm=use_qk_norm,
-        query_pre_attn_scalar=query_pre_attn_scalar,
-        use_bias_in_projections=use_bias_in_projections,
-        temperature_tuning=temperature_tuning,
-        temperature_tuning_scale=temperature_tuning_scale,
-        temperature_tuning_floor_scale=temperature_tuning_floor_scale,
-        prefill_query_axis_names=prefill_query_axis_names,
-        prefill_key_axis_names=prefill_key_axis_names,
-        prefill_value_axis_names=prefill_value_axis_names,
-        query_axis_names=query_axis_names,
-        key_axis_names=key_axis_names,
-        value_axis_names=value_axis_names,
-        ep_query_axis_names=ep_query_axis_names,
-        ep_key_axis_names=ep_key_axis_names,
-        ep_value_axis_names=ep_value_axis_names,
-        input_axis_names=input_axis_names,
-        ep_input_axis_names=ep_input_axis_names,
-        out_axis_names=out_axis_names,
-        ep_out_axis_names=ep_out_axis_names,
-        prefill_input_axis_names=prefill_input_axis_names,
-        decode_input_axis_names=decode_input_axis_names,
-        prefill_out_axis_names=prefill_out_axis_names,
-        decode_out_axis_names=decode_out_axis_names,
-        prefill_cache_axis_order=prefill_cache_axis_order,
-        ar_cache_axis_order=ar_cache_axis_order,
-        compute_axis_order=compute_axis_order,
-        reshape_q=reshape_q,
-        is_nope_layer=is_nope_layer,
-        is_vision=is_vision,
-        model_mode=model_mode,
-        base_kv_cache=base_kv_cache,
-        rngs=rngs,
+      base_kv_cache=base_kv_cache,
+      rngs=rngs,
     )
 
     # Module attribute names must match names previously passed to Linen for checkpointing
@@ -369,9 +369,9 @@ class MLA(Attention):
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
     """Initializes the MLA-specific projections."""
     # Assert required configuration parameters for MLA attention.
-    assert (
-        self.config.attention_type == AttentionType.MLA.value
-    ), f"MLA requires MLA attention type {AttentionType.MLA.value}"
+    assert self.config.attention_type == AttentionType.MLA.value, (
+      f"MLA requires MLA attention type {AttentionType.MLA.value}"
+    )
     assert self.kv_lora_rank > 0, "KV LoRA rank must be > 0"
     assert self.qk_nope_head_dim > 0, "QK NoPe head dim must be > 0"
     assert self.qk_rope_head_dim > 0, "QK RoPE head dim must be > 0"
@@ -382,92 +382,92 @@ class MLA(Attention):
     if self.q_lora_rank == 0:
       # Standard Q projection (without LoRA).
       self.query = DenseGeneral(
-          in_features_shape=self.config.emb_dim,
-          out_features_shape=(self.num_query_heads, self.qk_head_dim),
-          axis=-1,
-          kernel_init=self.kernel_init,
-          kernel_axes=("embed", "q_heads", "kv"),
-          dtype=self.dtype,
-          weight_dtype=self.weight_dtype,
-          quant=self.quant,
-          matmul_precision=self.config.matmul_precision,
-          shard_mode=self.config.shard_mode,
-          rngs=self.rngs,
-      )
-    else:
-      # LoRA path for Q.
-      self.wq_a = DenseGeneral(
-          in_features_shape=self.config.emb_dim,
-          out_features_shape=self.q_lora_rank,
-          axis=-1,
-          kernel_init=self.kernel_init,
-          kernel_axes=("embed", "q_lora_up_proj"),
-          dtype=self.dtype,
-          weight_dtype=self.weight_dtype,
-          quant=self.quant,
-          matmul_precision=self.config.matmul_precision,
-          shard_mode=self.config.shard_mode,
-          rngs=self.rngs,
-      )
-      self.q_norm = RMSNorm(
-          num_features=self.q_lora_rank,
-          dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
-          epsilon=self.config.normalization_layer_epsilon,
-          kernel_axes=("norm",),
-          rngs=self.rngs,
-      )
-      self.wq_b = DenseGeneral(
-          in_features_shape=self.q_lora_rank,
-          out_features_shape=(self.num_query_heads, self.qk_head_dim),
-          axis=-1,
-          kernel_init=self.kernel_init,
-          kernel_axes=("q_lora", "q_heads", "kv"),
-          dtype=self.dtype,
-          weight_dtype=self.weight_dtype,
-          quant=self.quant,
-          matmul_precision=self.config.matmul_precision,
-          shard_mode=self.config.shard_mode,
-          rngs=self.rngs,
-      )
-
-    # KV LoRA path.
-    self.wkv_a = DenseGeneral(
         in_features_shape=self.config.emb_dim,
-        out_features_shape=self.kv_lora_rank + self.qk_rope_head_dim,
+        out_features_shape=(self.num_query_heads, self.qk_head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "kv_lora_up_proj"),
+        kernel_axes=("embed", "q_heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
         rngs=self.rngs,
-    )
-    self.kv_norm = RMSNorm(
-        num_features=self.kv_lora_rank,
+      )
+    else:
+      # LoRA path for Q.
+      self.wq_a = DenseGeneral(
+        in_features_shape=self.config.emb_dim,
+        out_features_shape=self.q_lora_rank,
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=("embed", "q_lora_up_proj"),
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        quant=self.quant,
+        matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
+        rngs=self.rngs,
+      )
+      self.q_norm = RMSNorm(
+        num_features=self.q_lora_rank,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
         epsilon=self.config.normalization_layer_epsilon,
         kernel_axes=("norm",),
         rngs=self.rngs,
-    )
-    self.wkv_b = DenseGeneral(
-        in_features_shape=self.kv_lora_rank,
-        out_features_shape=(
-            self.num_query_heads,
-            (self.qk_nope_head_dim + self.v_head_dim),
-        ),
+      )
+      self.wq_b = DenseGeneral(
+        in_features_shape=self.q_lora_rank,
+        out_features_shape=(self.num_query_heads, self.qk_head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("kv_lora", "kv_heads", "kv_head_dim"),
+        kernel_axes=("q_lora", "q_heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
         rngs=self.rngs,
+      )
+
+    # KV LoRA path.
+    self.wkv_a = DenseGeneral(
+      in_features_shape=self.config.emb_dim,
+      out_features_shape=self.kv_lora_rank + self.qk_rope_head_dim,
+      axis=-1,
+      kernel_init=self.kernel_init,
+      kernel_axes=("embed", "kv_lora_up_proj"),
+      dtype=self.dtype,
+      weight_dtype=self.weight_dtype,
+      quant=self.quant,
+      matmul_precision=self.config.matmul_precision,
+      shard_mode=self.config.shard_mode,
+      rngs=self.rngs,
+    )
+    self.kv_norm = RMSNorm(
+      num_features=self.kv_lora_rank,
+      dtype=self.config.dtype,
+      weight_dtype=self.config.weight_dtype,
+      epsilon=self.config.normalization_layer_epsilon,
+      kernel_axes=("norm",),
+      rngs=self.rngs,
+    )
+    self.wkv_b = DenseGeneral(
+      in_features_shape=self.kv_lora_rank,
+      out_features_shape=(
+        self.num_query_heads,
+        (self.qk_nope_head_dim + self.v_head_dim),
+      ),
+      axis=-1,
+      kernel_init=self.kernel_init,
+      kernel_axes=("kv_lora", "kv_heads", "kv_head_dim"),
+      dtype=self.dtype,
+      weight_dtype=self.weight_dtype,
+      quant=self.quant,
+      matmul_precision=self.config.matmul_precision,
+      shard_mode=self.config.shard_mode,
+      rngs=self.rngs,
     )
 
     # Set softmax scaling.
@@ -488,19 +488,19 @@ class MLA(Attention):
         alignment = self.config.pagedattn_head_dim_alignment
         head_dim = (head_dim + alignment - 1) // alignment * alignment
       self.ds_paged_attention_op = paged_attention.PagedAttentionOp(
-          mesh=self.mesh,
-          num_pages=self.config.pagedattn_num_pages,
-          tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
-          num_kv_heads=self.num_kv_heads,
-          kv_head_dim_size=head_dim,
-          dtype=self.dtype,
-          attn_logits_soft_cap=self.attn_logits_soft_cap,
-          rngs=self.rngs,
+        mesh=self.mesh,
+        num_pages=self.config.pagedattn_num_pages,
+        tokens_per_page=self.config.pagedattn_tokens_per_page,
+        max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1)
+        // self.config.pagedattn_tokens_per_page,
+        max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1)
+        // self.config.pagedattn_tokens_per_page,
+        pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
+        num_kv_heads=self.num_kv_heads,
+        kv_head_dim_size=head_dim,
+        dtype=self.dtype,
+        attn_logits_soft_cap=self.attn_logits_soft_cap,
+        rngs=self.rngs,
       )
 
   def mla_query_projection(self, inputs_q: Array, inputs_positions: Array, model_mode) -> Array:
@@ -594,20 +594,20 @@ class MLA(Attention):
     placeholder_seq_len = 1
 
     return kvcache.MlaKVCache(
-        max_prefill_length=self.max_prefill_predict_length,
-        max_target_length=self.max_target_length,
-        batch=batch_size,
-        key_seq_len=placeholder_seq_len,
-        value_seq_len=placeholder_seq_len,
-        key_head_size=self.kv_lora_rank,
-        value_head_size=self.qk_rope_head_dim,
-        dtype=self.dtype,
-        kv_quant=self.kv_quant,
-        prefill_cache_axis_order=self.prefill_cache_axis_order,
-        ar_cache_axis_order=self.ar_cache_axis_order,
-        model_mode=self.model_mode,
-        use_chunked_prefill=self.config.use_chunked_prefill,
-        rngs=self.rngs,
+      max_prefill_length=self.max_prefill_predict_length,
+      max_target_length=self.max_target_length,
+      batch=batch_size,
+      key_seq_len=placeholder_seq_len,
+      value_seq_len=placeholder_seq_len,
+      key_head_size=self.kv_lora_rank,
+      value_head_size=self.qk_rope_head_dim,
+      dtype=self.dtype,
+      kv_quant=self.kv_quant,
+      prefill_cache_axis_order=self.prefill_cache_axis_order,
+      ar_cache_axis_order=self.ar_cache_axis_order,
+      model_mode=self.model_mode,
+      use_chunked_prefill=self.config.use_chunked_prefill,
+      rngs=self.rngs,
     )
 
   def update_mla_kv_caches(self, low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk=None):
@@ -634,12 +634,12 @@ class MLA(Attention):
     """
 
     prefill_mla_cache, ar_mla_cache = self.MlaKVCache_0(
-        key_latent=low_rank_main,
-        key_rope=key_rope,
-        decoder_segment_ids=decoder_segment_ids,
-        model_mode=model_mode,
-        use_ragged_attention=self.use_ragged_attention,
-        previous_chunk=previous_chunk,
+      key_latent=low_rank_main,
+      key_rope=key_rope,
+      decoder_segment_ids=decoder_segment_ids,
+      model_mode=model_mode,
+      use_ragged_attention=self.use_ragged_attention,
+      previous_chunk=previous_chunk,
     )
 
     if prefill_mla_cache:
@@ -681,28 +681,28 @@ class MLA(Attention):
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       else:
         cached_values = self.update_mla_kv_caches(
-            low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk
+          low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk
         )
 
     return key, value, cached_values
 
   def __call__(
-      self,
-      inputs_q: Array,
-      inputs_kv: Array,
-      inputs_positions: Array | None = None,
-      decoder_segment_ids: Array | None = None,
-      out_sharding: NamedSharding | None = None,
-      *,
-      model_mode: str = MODEL_MODE_TRAIN,
-      deterministic: bool = False,
-      previous_chunk: Any = None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
-      bidirectional_mask: Optional[Any] = None,
-      rope_kwargs: dict | None = None,
-      kv_cache: Optional[Array] = None,
-      attention_metadata: Optional[dict[str, Any]] = None,
+    self,
+    inputs_q: Array,
+    inputs_kv: Array,
+    inputs_positions: Array | None = None,
+    decoder_segment_ids: Array | None = None,
+    out_sharding: NamedSharding | None = None,
+    *,
+    model_mode: str = MODEL_MODE_TRAIN,
+    deterministic: bool = False,
+    previous_chunk: Any = None,
+    slot: Optional[int] = None,
+    page_state: Optional[page_manager.PageState] = None,
+    bidirectional_mask: Optional[Any] = None,
+    rope_kwargs: dict | None = None,
+    kv_cache: Optional[Array] = None,
+    attention_metadata: Optional[dict[str, Any]] = None,
   ) -> tuple[Array, Optional[Array]]:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 
@@ -739,7 +739,7 @@ class MLA(Attention):
 
     query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
     key, value, cached_values = self.mla_kv_projection(
-        inputs_kv, inputs_positions, decoder_segment_ids, model_mode, previous_chunk
+      inputs_kv, inputs_positions, decoder_segment_ids, model_mode, previous_chunk
     )
 
     query = checkpoint_name(query, "query_proj")
@@ -748,7 +748,7 @@ class MLA(Attention):
 
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
-          query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
+        query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
       unnormalized_out = unnormalized_out[..., : self.v_head_dim]
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out

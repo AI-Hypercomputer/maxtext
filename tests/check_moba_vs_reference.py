@@ -21,7 +21,6 @@ Bottlenecks) implementation by comparing both its final output and its
 intermediate tensors against a reference PyTorch implementation.
 """
 
-
 import math
 import os
 import sys
@@ -40,43 +39,43 @@ from MaxText.layers.attention_op import AttentionOp
 
 # Define test configurations
 TEST_CONFIGS = [
-    {
-        "name": "Standard",
-        "batch_size": 2,
-        "seq_len": 2048,
-        "moba_chunk_size": 256,
-        "moba_topk": 4,
-    },
-    {
-        "name": "Non-divisible_SeqLen",
-        "batch_size": 2,
-        "seq_len": 2000,
-        "moba_chunk_size": 256,
-        "moba_topk": 4,
-    },
-    {
-        "name": "TopK_greater_than_blocks",
-        "batch_size": 1,
-        "seq_len": 1024,
-        "moba_chunk_size": 256,
-        "moba_topk": 8,  # 8 > 1024/256=4
-    },
-    {
-        "name": "Small_and_quick",
-        "batch_size": 4,
-        "seq_len": 512,
-        "moba_chunk_size": 128,
-        "moba_topk": 2,
-    },
+  {
+    "name": "Standard",
+    "batch_size": 2,
+    "seq_len": 2048,
+    "moba_chunk_size": 256,
+    "moba_topk": 4,
+  },
+  {
+    "name": "Non-divisible_SeqLen",
+    "batch_size": 2,
+    "seq_len": 2000,
+    "moba_chunk_size": 256,
+    "moba_topk": 4,
+  },
+  {
+    "name": "TopK_greater_than_blocks",
+    "batch_size": 1,
+    "seq_len": 1024,
+    "moba_chunk_size": 256,
+    "moba_topk": 8,  # 8 > 1024/256=4
+  },
+  {
+    "name": "Small_and_quick",
+    "batch_size": 4,
+    "seq_len": 512,
+    "moba_chunk_size": 128,
+    "moba_topk": 2,
+  },
 ]
 
 
 def moba_attn_varlen_naive(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    moba_chunk_size: int,
-    moba_topk: int,
+  q: torch.Tensor,
+  k: torch.Tensor,
+  cu_seqlens: torch.Tensor,
+  moba_chunk_size: int,
+  moba_topk: int,
 ) -> torch.Tensor:
   """PyTorch Golden Reference for MoBA Mask (https://github.com/MoonshotAI/MoBA/blob/master/moba/moba_naive.py)
 
@@ -169,7 +168,7 @@ class MobaTest(unittest.TestCase):
 
     # Get JAX results
     jax_results = self._get_jax_results(
-        q_np, k_np, v_np, seq_len, moba_chunk_size, moba_topk, num_q_heads, num_kv_heads, head_dim, dtype_jax
+      q_np, k_np, v_np, seq_len, moba_chunk_size, moba_topk, num_q_heads, num_kv_heads, head_dim, dtype_jax
     )
 
     return torch_results, jax_results
@@ -219,37 +218,37 @@ class MobaTest(unittest.TestCase):
     output = torch.einsum("hxy,yhd->xhd", p, v_.type(torch.float32)).unsqueeze(0).type_as(q)
 
     return {
-        "output": output.to(torch.float32).numpy(),
-        "key_gate_weight": key_gate_weight.to(torch.float32).numpy(),
-        "gate_before_masking": gate_before_masking.to(torch.float32).numpy(),
-        "gate_after_masking": gate_after_masking.to(torch.float32).numpy(),
-        "gate_top_k_val": gate_top_k_val.to(torch.float32).numpy(),
-        "gate_top_k_idx": gate_top_k_idx.numpy(),
-        "gate_top_k_val_min": gate_top_k_val_min_thresh.unsqueeze(-1).to(torch.float32).numpy(),
-        "need_attend_threshold_mask": need_attend_threshold_mask.numpy(),
-        "gate_idx_mask": gate_idx_mask.numpy(),
-        "need_attend": need_attend.numpy(),
+      "output": output.to(torch.float32).numpy(),
+      "key_gate_weight": key_gate_weight.to(torch.float32).numpy(),
+      "gate_before_masking": gate_before_masking.to(torch.float32).numpy(),
+      "gate_after_masking": gate_after_masking.to(torch.float32).numpy(),
+      "gate_top_k_val": gate_top_k_val.to(torch.float32).numpy(),
+      "gate_top_k_idx": gate_top_k_idx.numpy(),
+      "gate_top_k_val_min": gate_top_k_val_min_thresh.unsqueeze(-1).to(torch.float32).numpy(),
+      "need_attend_threshold_mask": need_attend_threshold_mask.numpy(),
+      "gate_idx_mask": gate_idx_mask.numpy(),
+      "need_attend": need_attend.numpy(),
     }
 
   def _get_jax_results(
-      self, q_np, k_np, v_np, seq_len, moba_chunk_size, moba_topk, num_q_heads, num_kv_heads, head_dim, dtype_jax
+    self, q_np, k_np, v_np, seq_len, moba_chunk_size, moba_topk, num_q_heads, num_kv_heads, head_dim, dtype_jax
   ):
     """Computes results from the JAX implementation."""
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        run_name="moba_test",
-        enable_checkpointing=False,
-        model_name="default",
-        dtype="bfloat16",
-        moba=True,
-        moba_chunk_size=moba_chunk_size,
-        moba_topk=moba_topk,
-        matmul_precision="highest",
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      run_name="moba_test",
+      enable_checkpointing=False,
+      model_name="default",
+      dtype="bfloat16",
+      moba=True,
+      moba_chunk_size=moba_chunk_size,
+      moba_topk=moba_topk,
+      matmul_precision="highest",
     )
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
     attention_op = AttentionOp(
-        config, mesh, "dot_product", seq_len, num_q_heads, num_kv_heads, float32_qk_product=True, float32_logits=True
+      config, mesh, "dot_product", seq_len, num_q_heads, num_kv_heads, float32_qk_product=True, float32_logits=True
     )
 
     q_jax, k_jax, v_jax = map(lambda x: jnp.asarray(x, dtype=dtype_jax), (q_np, k_np, v_np))
@@ -259,19 +258,19 @@ class MobaTest(unittest.TestCase):
     # Note: JAX intermediates are calculated on the first batch item for simplicity.
     intermediates = attention_op.calculate_moba_gate_logic(q_scaled_jax[0], k_jax[0], q_positions)
     (
-        key_gate_weight,
-        gate_before,
-        gate_after,
-        gate_top_k_val,
-        gate_top_k_idx,
-        gate_top_k_val_min,
-        need_attend_threshold_mask,
-        gate_idx_mask,
-        need_attend,
+      key_gate_weight,
+      gate_before,
+      gate_after,
+      gate_top_k_val,
+      gate_top_k_idx,
+      gate_top_k_val_min,
+      need_attend_threshold_mask,
+      gate_idx_mask,
+      need_attend,
     ) = intermediates
 
     unnormalized_output, _, exponentials_sum = attention_op.apply_attention_dot(
-        q_scaled_jax, k_jax, v_jax, None, "train", qk_product_einsum=jnp.einsum, wv_product_einsum=jnp.einsum
+      q_scaled_jax, k_jax, v_jax, None, "train", qk_product_einsum=jnp.einsum, wv_product_einsum=jnp.einsum
     )
     output = unnormalized_output / exponentials_sum
 
@@ -280,16 +279,16 @@ class MobaTest(unittest.TestCase):
     _, _, _, n_k = gate_top_k_idx.shape
 
     return {
-        "output": np.array(output.astype(jnp.float32)),
-        "key_gate_weight": np.array(key_gate_weight),
-        "gate_before_masking": np.array(gate_before).reshape((h, s, n)),
-        "gate_after_masking": np.array(gate_after).reshape((h, s, n)),
-        "gate_top_k_val": np.array(gate_top_k_val).reshape((h, s, n_k)),
-        "gate_top_k_idx": np.array(gate_top_k_idx).reshape((h, s, n_k)),
-        "gate_top_k_val_min": np.array(gate_top_k_val_min).reshape((h, s, 1)),
-        "need_attend_threshold_mask": np.array(need_attend_threshold_mask).reshape((h, s, n)),
-        "gate_idx_mask": np.array(gate_idx_mask).reshape((h, s, n)),
-        "need_attend": np.array(need_attend).reshape((h, s, n)),
+      "output": np.array(output.astype(jnp.float32)),
+      "key_gate_weight": np.array(key_gate_weight),
+      "gate_before_masking": np.array(gate_before).reshape((h, s, n)),
+      "gate_after_masking": np.array(gate_after).reshape((h, s, n)),
+      "gate_top_k_val": np.array(gate_top_k_val).reshape((h, s, n_k)),
+      "gate_top_k_idx": np.array(gate_top_k_idx).reshape((h, s, n_k)),
+      "gate_top_k_val_min": np.array(gate_top_k_val_min).reshape((h, s, 1)),
+      "need_attend_threshold_mask": np.array(need_attend_threshold_mask).reshape((h, s, n)),
+      "gate_idx_mask": np.array(gate_idx_mask).reshape((h, s, n)),
+      "need_attend": np.array(need_attend).reshape((h, s, n)),
     }
 
   def test_all_configurations(self):
@@ -307,40 +306,40 @@ class MobaTest(unittest.TestCase):
         # checks have already confirmed), the final outputs are expected to diverge.
         if np.array_equal(torch_res["need_attend"], jax_res["need_attend"]):
           np.testing.assert_allclose(
-              torch_res["output"],
-              jax_res["output"],
-              atol=2e-2,
-              rtol=2e-2,
-              err_msg="Final outputs do not match despite identical attention masks.",
+            torch_res["output"],
+            jax_res["output"],
+            atol=2e-2,
+            rtol=2e-2,
+            err_msg="Final outputs do not match despite identical attention masks.",
           )
 
         # Test intermediate numerical tensors
         for key in ["key_gate_weight", "gate_before_masking", "gate_after_masking", "gate_top_k_val_min"]:
           np.testing.assert_allclose(
-              torch_res[key], jax_res[key], atol=1e-2, rtol=1e-2, err_msg=f"Intermediate tensor '{key}' does not match."
+            torch_res[key], jax_res[key], atol=1e-2, rtol=1e-2, err_msg=f"Intermediate tensor '{key}' does not match."
           )
 
         # Test top_k values (sorted, as order isn't guaranteed)
         np.testing.assert_allclose(
-            np.sort(torch_res["gate_top_k_val"], axis=-1),
-            np.sort(jax_res["gate_top_k_val"], axis=-1),
-            atol=1e-2,
-            rtol=1e-2,
-            err_msg="Intermediate tensor 'gate_top_k_val' does not match.",
+          np.sort(torch_res["gate_top_k_val"], axis=-1),
+          np.sort(jax_res["gate_top_k_val"], axis=-1),
+          atol=1e-2,
+          rtol=1e-2,
+          err_msg="Intermediate tensor 'gate_top_k_val' does not match.",
         )
 
         # Test boolean masks with tie-breaking logic
         for key in ["need_attend_threshold_mask", "gate_idx_mask", "need_attend"]:
           self._assert_masks_equivalent(
-              torch_res[key], jax_res[key], torch_res["gate_after_masking"], jax_res["gate_top_k_val_min"], key
+            torch_res[key], jax_res[key], torch_res["gate_after_masking"], jax_res["gate_top_k_val_min"], key
           )
 
         # Test top_k indices with tie-breaking logic
         self._assert_indices_equivalent(
-            torch_res["gate_top_k_idx"],
-            jax_res["gate_top_k_idx"],
-            torch_res["gate_after_masking"],
-            jax_res["gate_top_k_val_min"],
+          torch_res["gate_top_k_idx"],
+          jax_res["gate_top_k_idx"],
+          torch_res["gate_after_masking"],
+          jax_res["gate_top_k_val_min"],
         )
 
   def test_end_to_end_mask(self):
@@ -373,33 +372,33 @@ class MobaTest(unittest.TestCase):
         k_torch = torch.from_numpy(k_np).to(dtype_torch)
         cu_seqlens = torch.arange(0, (batch + 1) * seq_len, seq_len, dtype=torch.int32)
         torch_mask = moba_attn_varlen_naive(
-            q_torch.flatten(0, 1), k_torch.flatten(0, 1), cu_seqlens, moba_chunk_size, moba_topk
+          q_torch.flatten(0, 1), k_torch.flatten(0, 1), cu_seqlens, moba_chunk_size, moba_topk
         )
         torch_mask_np = torch_mask.to(torch.float32).numpy()
 
         # Get JAX mask
         jax_config = pyconfig.initialize(
-            [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-            run_name="moba_test_mask",
-            enable_checkpointing=False,
-            model_name="default",
-            dtype="bfloat16",
-            moba=True,
-            moba_chunk_size=moba_chunk_size,
-            moba_topk=moba_topk,
-            matmul_precision="highest",
+          [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+          run_name="moba_test_mask",
+          enable_checkpointing=False,
+          model_name="default",
+          dtype="bfloat16",
+          moba=True,
+          moba_chunk_size=moba_chunk_size,
+          moba_topk=moba_topk,
+          matmul_precision="highest",
         )
         devices_array = maxtext_utils.create_device_mesh(jax_config)
         mesh = Mesh(devices_array, jax_config.mesh_axes)
         attention_op = AttentionOp(
-            jax_config,
-            mesh,
-            "dot_product",
-            seq_len,
-            num_q_heads,
-            num_kv_heads,
-            float32_qk_product=True,
-            float32_logits=True,
+          jax_config,
+          mesh,
+          "dot_product",
+          seq_len,
+          num_q_heads,
+          num_kv_heads,
+          float32_qk_product=True,
+          float32_logits=True,
         )
         q_jax = jnp.asarray(q_np, dtype=dtype_jax)
         k_jax = jnp.asarray(k_np, dtype=dtype_jax)
@@ -432,8 +431,8 @@ class MobaTest(unittest.TestCase):
       bad_idx = np.where(~is_valid_mismatch)[0][0]
       bad_index = (h_coords[bad_idx], s_coords[bad_idx], n_coords[bad_idx])
       self.fail(
-          f"Mask '{mask_name}' mismatch at index {bad_index} is not due to a tie at the threshold. "
-          f"Gate value was {mismatched_gate_values[bad_idx]}, but threshold was {mismatched_thresholds[bad_idx]}."
+        f"Mask '{mask_name}' mismatch at index {bad_index} is not due to a tie at the threshold. "
+        f"Gate value was {mismatched_gate_values[bad_idx]}, but threshold was {mismatched_thresholds[bad_idx]}."
       )
 
   def _assert_indices_equivalent(self, torch_idx, jax_idx, torch_gate, jax_min_val):
@@ -456,11 +455,11 @@ class MobaTest(unittest.TestCase):
           is_inf = gate_val == -np.inf and threshold == -np.inf
           if not (is_close or is_inf):
             self.fail(
-                f"Intermediate tensor 'gate_top_k_idx' has a critical mismatch.\n"
-                f"Mismatch for query at (head={h_idx}, seq_pos={s_idx}).\n"
-                f"Index sets were {torch_indices_set} (torch) and {jax_indices_set} (jax).\n"
-                f"Differing block index {block_idx} has gate value {gate_val}, "
-                f"which is not equal to the threshold {threshold}."
+              f"Intermediate tensor 'gate_top_k_idx' has a critical mismatch.\n"
+              f"Mismatch for query at (head={h_idx}, seq_pos={s_idx}).\n"
+              f"Index sets were {torch_indices_set} (torch) and {jax_indices_set} (jax).\n"
+              f"Differing block index {block_idx} has gate value {gate_val}, "
+              f"which is not equal to the threshold {threshold}."
             )
 
 

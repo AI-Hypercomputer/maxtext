@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Common types."""
+
 import enum
 from typing import Any, Sequence
 

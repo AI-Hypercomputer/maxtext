@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the common Max Utils """
+"""Tests for the common Max Utils"""
+
 import os
 import sys
 import unittest
@@ -53,11 +54,11 @@ class MaxUtilsPytree(unittest.TestCase):
 
   def test_calculate_num_params_from_pytree(self):
     example_tree = [
-        [1, "a", object()],
-        (1, (2, 3), ()),
-        [1, {"k1": 2, "k2": (3, 4)}, 5],
-        {"a": 2, "b": (2, 3)},
-        jnp.array([1, 2, 3]),
+      [1, "a", object()],
+      (1, (2, 3), ()),
+      [1, {"k1": 2, "k2": (3, 4)}, 5],
+      {"a": 2, "b": (2, 3)},
+      jnp.array([1, 2, 3]),
     ]
     self.assertEqual(max_utils.calculate_num_params_from_pytree(example_tree), 17)
     # Model params
@@ -112,15 +113,15 @@ class UnscanTest(unittest.TestCase):
   def init_pyconfig(self, **kwargs):
     """init pyconfig"""
     init_kwargs = {
-        "per_device_batch_size": 1.0,
-        "run_name": "test",
-        "enable_checkpointing": False,
-        "dataset_type": "synthetic",
-        "model_name": "llama3.1-8b",
+      "per_device_batch_size": 1.0,
+      "run_name": "test",
+      "enable_checkpointing": False,
+      "dataset_type": "synthetic",
+      "model_name": "llama3.1-8b",
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **init_kwargs,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **init_kwargs,
     )
     return config
 
@@ -142,11 +143,11 @@ class UnscanTest(unittest.TestCase):
     # Time the unscan operation.
     start_time = time.time()
     max_utils.unscan_train_state_params(
-        params_to_unscan,
-        sharding_to_unscan,
-        mesh,
-        scan_axis,
-        [("layers", num_layers)],
+      params_to_unscan,
+      sharding_to_unscan,
+      mesh,
+      scan_axis,
+      [("layers", num_layers)],
     )
     jax.block_until_ready(params_to_unscan)
     end_time = time.time()
@@ -156,7 +157,7 @@ class UnscanTest(unittest.TestCase):
     decoder_params = params_to_unscan["params"]["decoder"]
     self.assertNotIn("layers", decoder_params)
     self.assertIn("layers_0", decoder_params)
-    self.assertIn(f"layers_{num_layers-1}", decoder_params)
+    self.assertIn(f"layers_{num_layers - 1}", decoder_params)
 
     # Check shape of one of the unstacked tensors.
     # The exact key might differ based on model implementation, adjust if needed.

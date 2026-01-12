@@ -44,3 +44,41 @@ path = "build_hooks.py"
 
 [project.scripts]
 install_maxtext_github_deps = "install_maxtext_extra_deps.install_github_deps:main"
+
+[tool.ruff]
+exclude = [
+    ".eggs",
+    ".git",
+    ".ipynb_checkpoints",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "_build",
+    "build",
+    "dist",
+    "site-packages",
+    "venv",
+]
+
+line-length = 122
+indent-width = 2
+
+target-version = "py312"
+
+[tool.ruff.lint]
+# TODO: Replace all pylint ignores in codebase with "noqa" equivalents, so all rules that pylint checks can be enabled:
+select = ["E9"]
+#ignore = ["R0401","R0917","W0201","W0613"]
+#ignore = ["R4","R9","W201","W613"]
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.format]
+
+indent-style = "space"
+docstring-code-format = false

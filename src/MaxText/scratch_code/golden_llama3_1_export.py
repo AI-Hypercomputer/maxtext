@@ -39,8 +39,8 @@ def save_golden_logits(model_id, output_path):
   """save golden logits"""
   tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B")
   model = AutoModelForCausalLM.from_pretrained(
-      model_id,
-      torch_dtype=torch.float32,
+    model_id,
+    torch_dtype=torch.float32,
   )
 
   # Your prompt text
@@ -61,9 +61,9 @@ def save_golden_logits(model_id, output_path):
 
       # Prepare data to be saved
       data_to_save = {
-          "prompt": prompt_text,
-          "tokens": input_ids.tolist()[0],
-          "logits": logits.tolist()[0],  # Convert numpy array to list for JSON serialization
+        "prompt": prompt_text,
+        "tokens": input_ids.tolist()[0],
+        "logits": logits.tolist()[0],  # Convert numpy array to list for JSON serialization
       }
       all_data_to_save.append(data_to_save)
 

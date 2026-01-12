@@ -13,8 +13,9 @@
 # limitations under the License.
 
 """
-A DSL agent class, to propose potential new DSL rules/ops based on the previous analysis call. 
+A DSL agent class, to propose potential new DSL rules/ops based on the previous analysis call.
 """
+
 import argparse
 import os
 from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_text_file
@@ -45,16 +46,16 @@ class DSLAgent(BaseAgent):
   def _load_prompt_templates(self):
     """Loads all necessary prompt templates."""
     templates = {
-        "dsl": load_prompt_template(f"{self.dir_path}/prompts/04_dsl.txt"),
+      "dsl": load_prompt_template(f"{self.dir_path}/prompts/04_dsl.txt"),
     }
     return templates
 
   def verify_dsl(self):
     """Verify DSL."""
     prompt = self.prompt_templates["dsl"].format(
-        analysis=self.analysis,
-        target_model=self.target_model,
-        dsl=self.dsl,
+      analysis=self.analysis,
+      target_model=self.target_model,
+      dsl=self.dsl,
     )
 
     verification_dsl = self.generate_text(prompt)
@@ -81,7 +82,7 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="A script to process model transformations.")
   parser.add_argument("--target_model", type=str, required=True, help='The name of the target model (e.g., "GEMMA3").')
   parser.add_argument(
-      "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
+    "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
   )
   parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
   args = parser.parse_args()

@@ -29,10 +29,10 @@ class XlaGpuFeatureTestCase:
   """Test case class for verifying GPU-specific features in HLO files."""
 
   def check_collective_matmul(
-      self,
-      hlo_content: str,
-      expected_unrolled_ag: int,
-      expected_unrolled_rs: int,
+    self,
+    hlo_content: str,
+    expected_unrolled_ag: int,
+    expected_unrolled_rs: int,
   ) -> None:
     """Verify correctness of collective matmul in the given HLO content.
 
@@ -58,21 +58,21 @@ class XlaGpuFeatureTestCase:
     actual_unrolled_rs = len(re.findall(pattern_rs, hlo_content, re.MULTILINE))
 
     np.testing.assert_equal(
-        (actual_unrolled_ag, actual_unrolled_rs),
-        (expected_unrolled_ag, expected_unrolled_rs),
-        err_msg=(
-            f"Collective matmul operation counts mismatch. "
-            f"Expected all-gather: {expected_unrolled_ag}, "
-            f"Actual all-gather: {actual_unrolled_ag}, "
-            f"Expected reduce-scatter: {expected_unrolled_rs}, "
-            f"Actual reduce-scatter: {actual_unrolled_rs}"
-        ),
+      (actual_unrolled_ag, actual_unrolled_rs),
+      (expected_unrolled_ag, expected_unrolled_rs),
+      err_msg=(
+        f"Collective matmul operation counts mismatch. "
+        f"Expected all-gather: {expected_unrolled_ag}, "
+        f"Actual all-gather: {actual_unrolled_ag}, "
+        f"Expected reduce-scatter: {expected_unrolled_rs}, "
+        f"Actual reduce-scatter: {actual_unrolled_rs}"
+      ),
     )
 
   def check_fp8_gemm(
-      self,
-      hlo_content: str,
-      expected_fp8_gemm: int,
+    self,
+    hlo_content: str,
+    expected_fp8_gemm: int,
   ) -> None:
     """Check the number of FP8 GEMM operations in the given HLO content.
 
@@ -94,17 +94,17 @@ class XlaGpuFeatureTestCase:
     actual_fp8_gemm = len(re.findall(pattern_fp8_gemm, hlo_content, re.MULTILINE))
 
     np.testing.assert_equal(
-        actual_fp8_gemm,
-        expected_fp8_gemm,
-        err_msg=(f"FP8 GEMM operation count mismatch. " f"Expected: {expected_fp8_gemm}, " f"Actual: {actual_fp8_gemm}"),
+      actual_fp8_gemm,
+      expected_fp8_gemm,
+      err_msg=(f"FP8 GEMM operation count mismatch. Expected: {expected_fp8_gemm}, Actual: {actual_fp8_gemm}"),
     )
 
 
 def test_collective_matmul(
-    test_case: XlaGpuFeatureTestCase,
-    hlo_file: str,
-    expected_unrolled_ag: int,
-    expected_unrolled_rs: int,
+  test_case: XlaGpuFeatureTestCase,
+  hlo_file: str,
+  expected_unrolled_ag: int,
+  expected_unrolled_rs: int,
 ) -> None:
   """Test collective matmul correctness in HLO file.
 
@@ -121,9 +121,9 @@ def test_collective_matmul(
 
 
 def test_fp8_gemm(
-    test_case: XlaGpuFeatureTestCase,
-    hlo_file: str,
-    expected_fp8_gemm: int,
+  test_case: XlaGpuFeatureTestCase,
+  hlo_file: str,
+  expected_fp8_gemm: int,
 ) -> None:
   """Test FP8 GEMM correctness in HLO file.
 

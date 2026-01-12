@@ -45,8 +45,8 @@ def _create_prefix_caching_config(config) -> config_lib.PrefixCachingConfig | No
     raise ValueError("Prefix caching requires chunked prefill.")
 
   return config_lib.PrefixCachingConfig(
-      max_hbm_byte=config.prefix_caching_hbm_byte,
-      max_dram_byte=config.prefix_caching_dram_byte,
+    max_hbm_byte=config.prefix_caching_hbm_byte,
+    max_dram_byte=config.prefix_caching_dram_byte,
   )
 
 
@@ -66,17 +66,17 @@ def main(config):
   # TODO: Add grpc credentials for OSS.
   # pylint: disable=unexpected-keyword-arg
   jetstream_server = server_lib.run(
-      threads=256,
-      port=9000,
-      config=server_config,
-      devices=devices,
-      metrics_server_config=metrics_server_config,
-      enable_jax_profiler=config.enable_jax_profiler if config.enable_jax_profiler else False,
-      jax_profiler_port=config.jax_profiler_port if config.jax_profiler_port else 9999,
-      enable_model_warmup=config.enable_model_warmup if config.enable_model_warmup else False,
-      lora_input_adapters_path=config.lora_input_adapters_path,
-      multi_sampling=config.multi_sampling if config.multi_sampling else False,
-      prefix_caching_config=_create_prefix_caching_config(config),
+    threads=256,
+    port=9000,
+    config=server_config,
+    devices=devices,
+    metrics_server_config=metrics_server_config,
+    enable_jax_profiler=config.enable_jax_profiler if config.enable_jax_profiler else False,
+    jax_profiler_port=config.jax_profiler_port if config.jax_profiler_port else 9999,
+    enable_model_warmup=config.enable_model_warmup if config.enable_model_warmup else False,
+    lora_input_adapters_path=config.lora_input_adapters_path,
+    multi_sampling=config.multi_sampling if config.multi_sampling else False,
+    prefix_caching_config=_create_prefix_caching_config(config),
   )
   jetstream_server.wait_for_termination()
 

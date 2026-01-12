@@ -20,16 +20,15 @@ from MaxText.input_pipeline import instruction_data_processing
 
 
 class InstructionDataProcessingTest(unittest.TestCase):
-
   def test_map_qa_data_to_conversation_with_prompt_completion_template(self):
     template_config = {
-        "PROMPT_TEMPLATE": "This is a question: {question}",
-        "COMPLETION_TEMPLATE": "<reasoning>\n{reasoning}\n</reasoning>\n<answer>\n{answer}\n</answer>",
-        "REASONING_ANSWER_SEPARATOR": "##",
+      "PROMPT_TEMPLATE": "This is a question: {question}",
+      "COMPLETION_TEMPLATE": "<reasoning>\n{reasoning}\n</reasoning>\n<answer>\n{answer}\n</answer>",
+      "REASONING_ANSWER_SEPARATOR": "##",
     }
     example = {
-        "question": "What is 2 + 2?",
-        "answer": "Because 2 and 2 make 4.\n ## 4",
+      "question": "What is 2 + 2?",
+      "answer": "Because 2 and 2 make 4.\n ## 4",
     }
     example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
     self.assertTrue("messages" in example)
@@ -41,12 +40,12 @@ class InstructionDataProcessingTest(unittest.TestCase):
 
   def test_map_qa_data_to_conversation_with_no_reasoning_template(self):
     template_config = {
-        "PROMPT_TEMPLATE": "This is a question: {question}",
-        "COMPLETION_TEMPLATE": "The answer is: {answer}",
+      "PROMPT_TEMPLATE": "This is a question: {question}",
+      "COMPLETION_TEMPLATE": "The answer is: {answer}",
     }
     example = {
-        "question": "What is the capital of France?",
-        "answer": "The capital of France is Paris.",
+      "question": "What is the capital of France?",
+      "answer": "The capital of France is Paris.",
     }
     example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
     self.assertTrue("messages" in example)
@@ -58,13 +57,13 @@ class InstructionDataProcessingTest(unittest.TestCase):
 
   def test_map_qa_data_to_conversation_with_missing_reasoning_placeholder(self):
     template_config = {
-        "PROMPT_TEMPLATE": "This is a question: {question}",
-        "COMPLETION_TEMPLATE": "The answer is: {answer}",
-        "REASONING_ANSWER_SEPARATOR": "##",
+      "PROMPT_TEMPLATE": "This is a question: {question}",
+      "COMPLETION_TEMPLATE": "The answer is: {answer}",
+      "REASONING_ANSWER_SEPARATOR": "##",
     }
     example = {
-        "question": "What is 2 + 2?",
-        "answer": "Because 2 and 2 make 4.\n ## The answer is: 4",
+      "question": "What is 2 + 2?",
+      "answer": "Because 2 and 2 make 4.\n ## The answer is: 4",
     }
     example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
     self.assertTrue("messages" in example)
@@ -76,13 +75,13 @@ class InstructionDataProcessingTest(unittest.TestCase):
 
   def test_map_qa_data_to_conversation_with_missing_answer_placeholder(self):
     template_config = {
-        "PROMPT_TEMPLATE": "This is a question: {question}",
-        "COMPLETION_TEMPLATE": "The answer is: {reply}",
-        "REASONING_ANSWER_SEPARATOR": "##",
+      "PROMPT_TEMPLATE": "This is a question: {question}",
+      "COMPLETION_TEMPLATE": "The answer is: {reply}",
+      "REASONING_ANSWER_SEPARATOR": "##",
     }
     example = {
-        "question": "What is 2 + 2?",
-        "answer": "Because 2 and 2 make 4.\n ## The answer is: 4",
+      "question": "What is 2 + 2?",
+      "answer": "Because 2 and 2 make 4.\n ## The answer is: 4",
     }
     example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
     self.assertTrue("messages" in example)
@@ -94,12 +93,12 @@ class InstructionDataProcessingTest(unittest.TestCase):
 
   def test_map_qa_data_to_conversation_with_missing_question_placeholder(self):
     template_config = {
-        "PROMPT_TEMPLATE": "This is a question: {user_question}",
-        "COMPLETION_TEMPLATE": "The answer is: {answer}",
+      "PROMPT_TEMPLATE": "This is a question: {user_question}",
+      "COMPLETION_TEMPLATE": "The answer is: {answer}",
     }
     example = {
-        "question": "What is 2 + 2?",
-        "answer": "Because 2 and 2 make 4.\n ## The answer is: 4",
+      "question": "What is 2 + 2?",
+      "answer": "Because 2 and 2 make 4.\n ## The answer is: 4",
     }
     example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
     self.assertTrue("messages" in example)
@@ -112,8 +111,8 @@ class InstructionDataProcessingTest(unittest.TestCase):
   def test_map_qa_data_to_conversation_with_no_templates(self):
     template_config = {}
     example = {
-        "question": "What is the capital of Germany?",
-        "answer": "The capital of Germany is Berlin.",
+      "question": "What is the capital of Germany?",
+      "answer": "The capital of Germany is Berlin.",
     }
     example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
     self.assertTrue("messages" in example)

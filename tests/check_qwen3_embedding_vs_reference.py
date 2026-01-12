@@ -25,67 +25,67 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeVisionEncoderConfig
 from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
-    Qwen3OmniMoeVisionEncoder as TorchQwen3OmniMoeVisionEncoder,
-    Qwen3OmniMoeVisionMLP as TorchQwen3OmniMoeVisionMLP,
-    Qwen3OmniMoeVisionPatchEmbed as TorchQwen3OmniMoeVisionPatchEmbed,
-    Qwen3OmniMoeVisionPatchMerger as TorchQwen3OmniMoeVisionPatchMerger,
-    apply_rotary_pos_emb_vision,
+  Qwen3OmniMoeVisionEncoder as TorchQwen3OmniMoeVisionEncoder,
+  Qwen3OmniMoeVisionMLP as TorchQwen3OmniMoeVisionMLP,
+  Qwen3OmniMoeVisionPatchEmbed as TorchQwen3OmniMoeVisionPatchEmbed,
+  Qwen3OmniMoeVisionPatchMerger as TorchQwen3OmniMoeVisionPatchMerger,
+  apply_rotary_pos_emb_vision,
 )
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_REPO_ROOT
 from MaxText.layers.embeddings import (
-    Qwen3OmniMoeVisionPosEmbedInterpolate as JaxQwen3OmniMoeVisionPosEmbedInterpolate,
-    Qwen3OmniMoeVisionRotaryEmbedding as JaxQwen3OmniMoeVisionRotaryEmbedding,
+  Qwen3OmniMoeVisionPosEmbedInterpolate as JaxQwen3OmniMoeVisionPosEmbedInterpolate,
+  Qwen3OmniMoeVisionRotaryEmbedding as JaxQwen3OmniMoeVisionRotaryEmbedding,
 )
 from MaxText.layers.qwen3 import (
-    Qwen3OmniMoeVisionAttention as JaxQwen3OmniMoeVisionAttention,
-    Qwen3OmniMoeVisionEncoder as JaxQwen3OmniMoeVisionEncoder,
-    Qwen3OmniMoeVisionMLP as JaxQwen3OmniMoeVisionMLP,
-    Qwen3OmniMoeVisionPatchEmbed as JaxQwen3OmniMoeVisionPatchEmbed,
-    Qwen3OmniMoeVisionPatchMerger as JaxQwen3OmniMoeVisionPatchMerger,
-    Qwen3OmniMoeVisionProjector as JaxQwen3OmniMoeVisionProjector,
+  Qwen3OmniMoeVisionAttention as JaxQwen3OmniMoeVisionAttention,
+  Qwen3OmniMoeVisionEncoder as JaxQwen3OmniMoeVisionEncoder,
+  Qwen3OmniMoeVisionMLP as JaxQwen3OmniMoeVisionMLP,
+  Qwen3OmniMoeVisionPatchEmbed as JaxQwen3OmniMoeVisionPatchEmbed,
+  Qwen3OmniMoeVisionPatchMerger as JaxQwen3OmniMoeVisionPatchMerger,
+  Qwen3OmniMoeVisionProjector as JaxQwen3OmniMoeVisionProjector,
 )
 from tests.multimodal_test_utils import (
-    assert_all_close_jax_torch,
-    copy_attention_weights_to_maxtext,
-    copy_mlp_weights,
-    copy_patch_embed_weights,
-    copy_patch_merger_weights,
-    copy_vision_encoder_weights,
-    create_random_jax_torch,
-    split_into_patches,
+  assert_all_close_jax_torch,
+  copy_attention_weights_to_maxtext,
+  copy_mlp_weights,
+  copy_patch_embed_weights,
+  copy_patch_merger_weights,
+  copy_vision_encoder_weights,
+  create_random_jax_torch,
+  split_into_patches,
 )
 
 
 base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "configs", "base.yml")
 jax_vision_config = pyconfig.initialize(
-    ["", base_config_path],
-    model_name="qwen3-omni-30b-a3b",
-    attention="dot_product",
-    attention_type="full",
-    matmul_precision="highest",
-    dtype="float32",
-    dtype_mm="float32",
-    weight_dtype="float32",
-    float32_logits=True,
-    float32_qk_product=True,
+  ["", base_config_path],
+  model_name="qwen3-omni-30b-a3b",
+  attention="dot_product",
+  attention_type="full",
+  matmul_precision="highest",
+  dtype="float32",
+  dtype_mm="float32",
+  weight_dtype="float32",
+  float32_logits=True,
+  float32_qk_product=True,
 )
 
 torch_vision_config = Qwen3OmniMoeVisionEncoderConfig(
-    hidden_size=jax_vision_config.hidden_size_for_vit,
-    num_heads=jax_vision_config.num_attention_heads_for_vit,
-    intermediate_size=jax_vision_config.intermediate_size_for_vit,
-    spatial_merge_size=jax_vision_config.spatial_merge_size_for_vit,
-    depth=jax_vision_config.num_hidden_layers_for_vit,
-    rope_theta=jax_vision_config.rope_theta_for_vit,
-    patch_size=jax_vision_config.patch_size_for_vit,
-    temporal_patch_size=jax_vision_config.temporal_patch_size_for_vit,
-    in_channels=jax_vision_config.num_channels_for_vit,
-    num_position_embeddings=jax_vision_config.num_position_embeddings_for_vit,
-    out_hidden_size=jax_vision_config.out_hidden_size_for_vit,
-    deepstack_visual_indexes=list(jax_vision_config.deepstack_visual_indexes_for_vit),
-    hidden_act="gelu_pytorch_tanh",
+  hidden_size=jax_vision_config.hidden_size_for_vit,
+  num_heads=jax_vision_config.num_attention_heads_for_vit,
+  intermediate_size=jax_vision_config.intermediate_size_for_vit,
+  spatial_merge_size=jax_vision_config.spatial_merge_size_for_vit,
+  depth=jax_vision_config.num_hidden_layers_for_vit,
+  rope_theta=jax_vision_config.rope_theta_for_vit,
+  patch_size=jax_vision_config.patch_size_for_vit,
+  temporal_patch_size=jax_vision_config.temporal_patch_size_for_vit,
+  in_channels=jax_vision_config.num_channels_for_vit,
+  num_position_embeddings=jax_vision_config.num_position_embeddings_for_vit,
+  out_hidden_size=jax_vision_config.out_hidden_size_for_vit,
+  deepstack_visual_indexes=list(jax_vision_config.deepstack_visual_indexes_for_vit),
+  hidden_act="gelu_pytorch_tanh",
 )
 torch_vision_config._attn_implementation = "eager"  # pylint: disable=protected-access
 
@@ -152,27 +152,27 @@ class TestQwen3OmniMoeVisionAttention(BaseVisionTestCaseWithMesh):
     position_embeddings = (emb.cos(), emb.sin())
 
     torch_output = torch_model(
-        torch_hidden_states,
-        cu_seqlens=cu_seqlens,
-        position_embeddings=position_embeddings,
+      torch_hidden_states,
+      cu_seqlens=cu_seqlens,
+      position_embeddings=position_embeddings,
     )
 
     jax_hidden_states_3d = jax_hidden_states_2d[jnp.newaxis, :, :]
     jax_output = jax_model(
-        jax_hidden_states_3d,  # Shape: (1, seq_len, hidden_size)
-        num_frames=1,
-        height=4,
-        width=4,
-        deterministic=True,
+      jax_hidden_states_3d,  # Shape: (1, seq_len, hidden_size)
+      num_frames=1,
+      height=4,
+      width=4,
+      deterministic=True,
     )
     jax_output = jax_output[0]
 
     assert_all_close_jax_torch(
-        jax_output,
-        torch_output,
-        rtol=1e-2,
-        atol=1e-2,
-        error_msg="Vision attention outputs differ",
+      jax_output,
+      torch_output,
+      rtol=1e-2,
+      atol=1e-2,
+      error_msg="Vision attention outputs differ",
     )
 
   def test_attention_is_jittable(self):
@@ -196,9 +196,9 @@ class TestQwen3OmniMoeVisionPatchMerger(BaseVisionTestCase):
     torch_model.eval()
 
     jax_model = JaxQwen3OmniMoeVisionPatchMerger(
-        config=self.config,
-        use_postshuffle_norm=use_postshuffle_norm,
-        rngs=nnx.Rngs(42),
+      config=self.config,
+      use_postshuffle_norm=use_postshuffle_norm,
+      rngs=nnx.Rngs(42),
     )
 
     copy_patch_merger_weights(torch_model, jax_model)
@@ -206,7 +206,7 @@ class TestQwen3OmniMoeVisionPatchMerger(BaseVisionTestCase):
     batch_size = 2
     seq_len = 64
     jax_hidden_states, torch_hidden_states = create_random_jax_torch(
-        batch_size * seq_len, self.config.hidden_size_for_vit
+      batch_size * seq_len, self.config.hidden_size_for_vit
     )
 
     jax_hidden_states = jax_hidden_states.reshape(batch_size, seq_len, self.config.hidden_size_for_vit)
@@ -288,21 +288,21 @@ class TestQwen3OmniMoeVisionPatchEmbed(BaseVisionTestCase):
     """Test that JAX patch embed output matches PyTorch implementation."""
     batch_size = 2
     total_elements = (
-        batch_size
-        * self.config.num_channels_for_vit
-        * self.config.temporal_patch_size_for_vit
-        * self.config.patch_size_for_vit
-        * self.config.patch_size_for_vit
+      batch_size
+      * self.config.num_channels_for_vit
+      * self.config.temporal_patch_size_for_vit
+      * self.config.patch_size_for_vit
+      * self.config.patch_size_for_vit
     )
     jax_hidden_states, torch_hidden_states = create_random_jax_torch(total_elements)
 
     # Reshape JAX input to proper 5D shape: (batch, in_channels, temporal, height, width)
     jax_hidden_states = jax_hidden_states.reshape(
-        batch_size,
-        self.config.num_channels_for_vit,
-        self.config.temporal_patch_size_for_vit,
-        self.config.patch_size_for_vit,
-        self.config.patch_size_for_vit,
+      batch_size,
+      self.config.num_channels_for_vit,
+      self.config.temporal_patch_size_for_vit,
+      self.config.patch_size_for_vit,
+      self.config.patch_size_for_vit,
     )
 
     torch_output = self.torch_model(torch_hidden_states)
@@ -324,13 +324,13 @@ class TestQwen3OmniMoeVisionPatchEmbed(BaseVisionTestCase):
 
     # Patch embed expects 5D input: (batch, in_channels, temporal, height, width)
     hidden_states = jnp.ones(
-        (
-            batch_size,
-            self.config.num_channels_for_vit,
-            self.config.temporal_patch_size_for_vit,
-            self.config.patch_size_for_vit,
-            self.config.patch_size_for_vit,
-        )
+      (
+        batch_size,
+        self.config.num_channels_for_vit,
+        self.config.temporal_patch_size_for_vit,
+        self.config.patch_size_for_vit,
+        self.config.patch_size_for_vit,
+      )
     )
     forward(self.jax_model, hidden_states)
 
@@ -341,26 +341,26 @@ class TestQwen3OmniMoeVisionRotaryEmbedding(BaseVisionTestCase):
   def setUp(self):
     super().setUp()
     self.jax_model = JaxQwen3OmniMoeVisionRotaryEmbedding(
-        hidden_size=self.config.hidden_size_for_vit,
-        num_attention_heads=self.config.num_attention_heads_for_vit,
-        spatial_merge_size=self.config.spatial_merge_size_for_vit,
-        rope_theta=self.config.rope_theta_for_vit,
-        cast_as_fprop_dtype=False,
-        fprop_dtype=jnp.float32,
-        rngs=nnx.Rngs(42),
+      hidden_size=self.config.hidden_size_for_vit,
+      num_attention_heads=self.config.num_attention_heads_for_vit,
+      spatial_merge_size=self.config.spatial_merge_size_for_vit,
+      rope_theta=self.config.rope_theta_for_vit,
+      cast_as_fprop_dtype=False,
+      fprop_dtype=jnp.float32,
+      rngs=nnx.Rngs(42),
     )
     self.torch_encoder = create_torch_encoder()
 
   def _create_jax_rotary_model(self):
     """Helper to create JAX rotary embedding model."""
     return JaxQwen3OmniMoeVisionRotaryEmbedding(
-        hidden_size=self.config.hidden_size_for_vit,
-        num_attention_heads=self.config.num_attention_heads_for_vit,
-        spatial_merge_size=self.config.spatial_merge_size_for_vit,
-        rope_theta=self.config.rope_theta_for_vit,
-        cast_as_fprop_dtype=False,
-        fprop_dtype=jnp.float32,
-        rngs=nnx.Rngs(42),
+      hidden_size=self.config.hidden_size_for_vit,
+      num_attention_heads=self.config.num_attention_heads_for_vit,
+      spatial_merge_size=self.config.spatial_merge_size_for_vit,
+      rope_theta=self.config.rope_theta_for_vit,
+      cast_as_fprop_dtype=False,
+      fprop_dtype=jnp.float32,
+      rngs=nnx.Rngs(42),
     )
 
   def test_grid_based_embedding_matches_torch(self):
@@ -402,18 +402,18 @@ class TestQwen3OmniMoeVisionRotaryEmbedding(BaseVisionTestCase):
     q_rotated_torch, k_rotated_torch = apply_rotary_pos_emb_vision(q_torch, k_torch, cos, sin)
 
     assert_all_close_jax_torch(
-        q_rotated_jax,
-        q_rotated_torch,
-        rtol=1e-3,
-        atol=1e-4,
-        error_msg="Q rotation mismatch",
+      q_rotated_jax,
+      q_rotated_torch,
+      rtol=1e-3,
+      atol=1e-4,
+      error_msg="Q rotation mismatch",
     )
     assert_all_close_jax_torch(
-        k_rotated_jax,
-        k_rotated_torch,
-        rtol=1e-3,
-        atol=1e-4,
-        error_msg="K rotation mismatch",
+      k_rotated_jax,
+      k_rotated_torch,
+      rtol=1e-3,
+      atol=1e-4,
+      error_msg="K rotation mismatch",
     )
 
 
@@ -423,11 +423,11 @@ class TestQwen3OmniMoeVisionPosEmbedInterpolate(BaseVisionTestCase):
   def setUp(self):
     super().setUp()
     self.jax_model = JaxQwen3OmniMoeVisionPosEmbedInterpolate(
-        num_position_embeddings=self.config.num_position_embeddings_for_vit,
-        hidden_size=self.config.hidden_size_for_vit,
-        spatial_merge_size=self.config.spatial_merge_size_for_vit,
-        dtype=jnp.float32,
-        rngs=nnx.Rngs(42),
+      num_position_embeddings=self.config.num_position_embeddings_for_vit,
+      hidden_size=self.config.hidden_size_for_vit,
+      spatial_merge_size=self.config.spatial_merge_size_for_vit,
+      dtype=jnp.float32,
+      rngs=nnx.Rngs(42),
     )
     self.torch_encoder = create_torch_encoder()
     torch_pos_embed_weight = self.torch_encoder.pos_embed.weight.detach().cpu().numpy()
@@ -436,11 +436,11 @@ class TestQwen3OmniMoeVisionPosEmbedInterpolate(BaseVisionTestCase):
   def _create_jax_pos_embed_model(self):
     """Helper to create JAX position embedding model."""
     return JaxQwen3OmniMoeVisionPosEmbedInterpolate(
-        num_position_embeddings=self.config.num_position_embeddings_for_vit,
-        hidden_size=self.config.hidden_size_for_vit,
-        spatial_merge_size=self.config.spatial_merge_size_for_vit,
-        dtype=jnp.float32,
-        rngs=nnx.Rngs(42),
+      num_position_embeddings=self.config.num_position_embeddings_for_vit,
+      hidden_size=self.config.hidden_size_for_vit,
+      spatial_merge_size=self.config.spatial_merge_size_for_vit,
+      dtype=jnp.float32,
+      rngs=nnx.Rngs(42),
     )
 
   def _copy_weights_and_test(self, num_frames, height, width):
@@ -486,9 +486,9 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
     jax_hidden_states = jax_hidden_states.reshape(1, in_channels, temporal_patch_size, h * patch_size, w * patch_size)
 
     torch_hidden_states = split_into_patches(
-        torch.from_numpy(np.array(jax_hidden_states)),
-        temporal_patch_size,
-        patch_size,
+      torch.from_numpy(np.array(jax_hidden_states)),
+      temporal_patch_size,
+      patch_size,
     )
 
     grid_thw = np.array([[1, h, w]], dtype=np.int64)
@@ -502,26 +502,26 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
     jax_deep_feats = [feat[0] for feat in jax_deep_feats]
 
     assert_all_close_jax_torch(
-        jax_output,
-        torch_output,
-        rtol=1e-2,
-        atol=1e-2,
-        error_msg="Vision encoder final output differs",
+      jax_output,
+      torch_output,
+      rtol=1e-2,
+      atol=1e-2,
+      error_msg="Vision encoder final output differs",
     )
 
     # Compare deep features
     self.assertEqual(
-        len(jax_deep_feats),
-        len(torch_deep_feats),
-        "Number of deep features should match",
+      len(jax_deep_feats),
+      len(torch_deep_feats),
+      "Number of deep features should match",
     )
     for i, (jax_feat, torch_feat) in enumerate(zip(jax_deep_feats, torch_deep_feats)):
       assert_all_close_jax_torch(
-          jax_feat,
-          torch_feat,
-          rtol=1e-2,
-          atol=1e-2,
-          error_msg=f"Deep feature {i} differs",
+        jax_feat,
+        torch_feat,
+        rtol=1e-2,
+        atol=1e-2,
+        error_msg=f"Deep feature {i} differs",
       )
 
 

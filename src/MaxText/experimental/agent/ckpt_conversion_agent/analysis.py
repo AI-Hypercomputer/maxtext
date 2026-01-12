@@ -15,6 +15,7 @@
 """
 A plan agent to analysis the HF & Maxtext models architecture and generate a conversion plan in json format.
 """
+
 import json
 import os
 from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_json, load_text_file
@@ -48,8 +49,8 @@ class AnalysisAgent(BaseAgent):
   def _load_prompt_templates(self):
     """Loads all necessary prompt templates."""
     templates = {
-        "analysis": load_prompt_template(f"{self.dir_path}/prompts/01_analysis.txt"),
-        "pitfalls": load_prompt_template(f"{self.dir_path}/prompts/04_pitfalls.txt"),
+      "analysis": load_prompt_template(f"{self.dir_path}/prompts/01_analysis.txt"),
+      "pitfalls": load_prompt_template(f"{self.dir_path}/prompts/04_pitfalls.txt"),
     }
     return templates
 
@@ -65,11 +66,11 @@ class AnalysisAgent(BaseAgent):
 
     # analysis
     prompt1 = self.prompt_templates["analysis"].format(
-        target_model=self.target_model,
-        maxtext_params_json=json.dumps(self.maxtext_params, indent=2),
-        hf_params_json=json.dumps(self.hf_params, indent=2),
-        dsl=self.dsl,
-        pitfalls=self.prompt_templates["pitfalls"],
+      target_model=self.target_model,
+      maxtext_params_json=json.dumps(self.maxtext_params, indent=2),
+      hf_params_json=json.dumps(self.hf_params, indent=2),
+      dsl=self.dsl,
+      pitfalls=self.prompt_templates["pitfalls"],
     )
 
     # Generate the analysis

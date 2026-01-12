@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for tokenizer
-"""
+"""Tests for tokenizer"""
 
 import unittest
 
@@ -52,16 +51,16 @@ class TokenizerTransformTest(unittest.TestCase):
   def test_tokenize_and_trim(self):
     """Tests the 1:1 MapTransform (truncation) logic."""
     trim_op = _grain_tokenizer.TokenizeAndTrim(
-        feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
+      feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
     )
     trim_ds = self.base_ds.map(trim_op)
     results = list(trim_ds)
     self.assertEqual(len(results), len(self.source_data))
     expected_inputs = [
-        np.array([1, 2, 3], dtype=np.int32),
-        np.array([4, 5, 6, 7, 8], dtype=np.int32),
-        np.array([], dtype=np.int32),
-        np.array([11, 12, 13, 14, 15], dtype=np.int32),
+      np.array([1, 2, 3], dtype=np.int32),
+      np.array([4, 5, 6, 7, 8], dtype=np.int32),
+      np.array([], dtype=np.int32),
+      np.array([11, 12, 13, 14, 15], dtype=np.int32),
     ]
     result_inputs = [r["text"] for r in results]
     self.assertEqual(len(result_inputs), len(expected_inputs))
@@ -71,17 +70,17 @@ class TokenizerTransformTest(unittest.TestCase):
   def test_tokenize_and_chunk(self):
     """Tests the 1:N FlatMapTransform (chunking) logic."""
     chunk_op = _grain_tokenizer.TokenizeAndChunk(
-        feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
+      feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
     )
     chunk_ds = self.base_ds.apply(chunk_op)
     results = list(chunk_ds)
     self.assertEqual(len(results), 5)
     expected_inputs = [
-        np.array([1, 2, 3], dtype=np.int32),
-        np.array([4, 5, 6, 7, 8], dtype=np.int32),
-        np.array([9, 10], dtype=np.int32),
-        np.array([11, 12, 13, 14, 15], dtype=np.int32),
-        np.array([16, 17, 18, 19, 20], dtype=np.int32),
+      np.array([1, 2, 3], dtype=np.int32),
+      np.array([4, 5, 6, 7, 8], dtype=np.int32),
+      np.array([9, 10], dtype=np.int32),
+      np.array([11, 12, 13, 14, 15], dtype=np.int32),
+      np.array([16, 17, 18, 19, 20], dtype=np.int32),
     ]
     result_inputs = [r["text"] for r in results]
     self.assertEqual(len(result_inputs), len(expected_inputs))
@@ -91,17 +90,17 @@ class TokenizerTransformTest(unittest.TestCase):
   def test_trim_and_pad_chaining(self):
     """Tests chaining TokenizeAndTrim.map() -> PadOrTrimToMaxLength.map()"""
     trim_op = _grain_tokenizer.TokenizeAndTrim(
-        feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
+      feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
     )
     pad_op = _input_pipeline_utils.PadOrTrimToMaxLength(max_length=self.pad_length, pad_id=self.pad_id)
     chained_ds = self.base_ds.map(trim_op).map(pad_op)
     results = list(chained_ds)
     self.assertEqual(len(results), len(self.source_data))
     expected_inputs = [
-        np.array([1, 2, 3, 0, 0, 0, 0], dtype=np.int32),
-        np.array([4, 5, 6, 7, 8, 0, 0], dtype=np.int32),
-        np.array([0, 0, 0, 0, 0, 0, 0], dtype=np.int32),
-        np.array([11, 12, 13, 14, 15, 0, 0], dtype=np.int32),
+      np.array([1, 2, 3, 0, 0, 0, 0], dtype=np.int32),
+      np.array([4, 5, 6, 7, 8, 0, 0], dtype=np.int32),
+      np.array([0, 0, 0, 0, 0, 0, 0], dtype=np.int32),
+      np.array([11, 12, 13, 14, 15, 0, 0], dtype=np.int32),
     ]
     result_inputs = [r["text"] for r in results]
     self.assertEqual(len(result_inputs), len(expected_inputs))
@@ -111,18 +110,18 @@ class TokenizerTransformTest(unittest.TestCase):
   def test_chunk_and_pad_chaining(self):
     """Tests chaining TokenizeAndChunk.apply() -> PadOrTrimToMaxLength.map()"""
     chunk_op = _grain_tokenizer.TokenizeAndChunk(
-        feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
+      feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
     )
     pad_op = _input_pipeline_utils.PadOrTrimToMaxLength(max_length=self.pad_length, pad_id=self.pad_id)
     chained_ds = self.base_ds.apply(chunk_op).map(pad_op)
     results = list(chained_ds)
     self.assertEqual(len(results), 5)
     expected_inputs = [
-        np.array([1, 2, 3, 0, 0, 0, 0], dtype=np.int32),
-        np.array([4, 5, 6, 7, 8, 0, 0], dtype=np.int32),
-        np.array([9, 10, 0, 0, 0, 0, 0], dtype=np.int32),
-        np.array([11, 12, 13, 14, 15, 0, 0], dtype=np.int32),
-        np.array([16, 17, 18, 19, 20, 0, 0], dtype=np.int32),
+      np.array([1, 2, 3, 0, 0, 0, 0], dtype=np.int32),
+      np.array([4, 5, 6, 7, 8, 0, 0], dtype=np.int32),
+      np.array([9, 10, 0, 0, 0, 0, 0], dtype=np.int32),
+      np.array([11, 12, 13, 14, 15, 0, 0], dtype=np.int32),
+      np.array([16, 17, 18, 19, 20, 0, 0], dtype=np.int32),
     ]
     result_inputs = [r["text"] for r in results]
     self.assertEqual(len(result_inputs), len(expected_inputs))

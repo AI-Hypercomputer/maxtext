@@ -42,21 +42,21 @@ import jax.numpy as jnp
 from jax.experimental import multihost_utils
 
 from openai_harmony import (
-    load_harmony_encoding,
-    HarmonyEncodingName,
-    Role,
+  load_harmony_encoding,
+  HarmonyEncodingName,
+  Role,
 )
 
 from benchmarks.api_server.maxtext_generator import MaxTextGenerator
 from benchmarks.api_server.server_models import (
-    CompletionRequest,
-    CompletionResponse,
-    CompletionChoice,
-    Usage,
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatCompletionChoice,
-    ChatMessage,
+  CompletionRequest,
+  CompletionResponse,
+  CompletionChoice,
+  Usage,
+  ChatCompletionRequest,
+  ChatCompletionResponse,
+  ChatCompletionChoice,
+  ChatMessage,
 )
 from benchmarks.api_server import server_utils
 
@@ -181,37 +181,37 @@ def _build_chat_completion_response(request, completion_result, llm):
         text_out = user_visible
       else:
         logger.warning(
-            "Harmony parsing for gpt-oss did not yield content in the 'final' channel. Falling back to raw text."
+          "Harmony parsing for gpt-oss did not yield content in the 'final' channel. Falling back to raw text."
         )
     except (ValueError, IndexError) as e:
       logger.error("Harmony parsing failed for gpt-oss: %s. Falling back to raw text.", e, exc_info=True)
 
   want_top_logprobs = (
-      (request.top_logprobs or 0) > 0 if isinstance(request, ChatCompletionRequest) else (request.logprobs or 0) > 0
+    (request.top_logprobs or 0) > 0 if isinstance(request, ChatCompletionRequest) else (request.logprobs or 0) > 0
   )
   lp_payload = server_utils.to_openai_logprobs(
-      getattr(completion_result, "logprobs", None), llm, want_top=want_top_logprobs
+    getattr(completion_result, "logprobs", None), llm, want_top=want_top_logprobs
   )
   text_out, lp_payload, finish_reason = server_utils.apply_stops_to_text_and_logprobs(text_out, lp_payload, request.stop)
   if finish_reason is None:
     finish_reason = completion_result.finish_reason
 
   usage = Usage(
-      prompt_tokens=completion_result.prompt_token_count,
-      completion_tokens=completion_result.completion_token_count,
-      total_tokens=completion_result.prompt_token_count + completion_result.completion_token_count,
+    prompt_tokens=completion_result.prompt_token_count,
+    completion_tokens=completion_result.completion_token_count,
+    total_tokens=completion_result.prompt_token_count + completion_result.completion_token_count,
   )
   return ChatCompletionResponse(
-      model=request.model,
-      choices=[
-          ChatCompletionChoice(
-              index=0,
-              message=ChatMessage(role="assistant", content=text_out),
-              finish_reason=finish_reason,
-              logprobs=lp_payload,
-          )
-      ],
-      usage=usage,
+    model=request.model,
+    choices=[
+      ChatCompletionChoice(
+        index=0,
+        message=ChatMessage(role="assistant", content=text_out),
+        finish_reason=finish_reason,
+        logprobs=lp_payload,
+      )
+    ],
+    usage=usage,
   )
 
 
@@ -225,7 +225,7 @@ def _build_completion_response(request, completions, prompts, llm):
     item = completions[idx]
     text_out = item.text
     lp_payload = server_utils.to_openai_logprobs(
-        getattr(item, "logprobs", None), llm, want_top=(request.logprobs or 0) > 0
+      getattr(item, "logprobs", None), llm, want_top=(request.logprobs or 0) > 0
     )
     finish_reason = getattr(item, "finish_reason", "stop")
     text_out, lp_payload, stop_reason = server_utils.apply_stops_to_text_and_logprobs(text_out, lp_payload, request.stop)
@@ -236,23 +236,23 @@ def _build_completion_response(request, completions, prompts, llm):
     completion_tokens_total += item.completion_token_count
 
     choices.append(
-        CompletionChoice(
-            text=text_out,
-            index=idx,
-            logprobs=lp_payload,
-            finish_reason=finish_reason,
-        )
+      CompletionChoice(
+        text=text_out,
+        index=idx,
+        logprobs=lp_payload,
+        finish_reason=finish_reason,
+      )
     )
 
   usage = Usage(
-      prompt_tokens=prompt_tokens_total,
-      completion_tokens=completion_tokens_total,
-      total_tokens=prompt_tokens_total + completion_tokens_total,
+    prompt_tokens=prompt_tokens_total,
+    completion_tokens=completion_tokens_total,
+    total_tokens=prompt_tokens_total + completion_tokens_total,
   )
   return CompletionResponse(
-      model=request.model,
-      choices=choices,
-      usage=usage,
+    model=request.model,
+    choices=choices,
+    usage=usage,
   )
 
 
@@ -291,14 +291,14 @@ def _prepare_batch_for_broadcast(batched_items):
     logprobs_param = first_request.logprobs
 
   params = {
-      "max_tokens": first_request.max_tokens,
-      "logprobs": logprobs_param,
-      "echo": getattr(first_request, "echo", False),
-      "stop": first_request.stop,
-      "temperature": first_request.temperature,
-      "seed": first_request.seed,
-      "top_k": first_request.top_k,
-      "top_p": first_request.top_p,
+    "max_tokens": first_request.max_tokens,
+    "logprobs": logprobs_param,
+    "echo": getattr(first_request, "echo", False),
+    "stop": first_request.stop,
+    "temperature": first_request.temperature,
+    "seed": first_request.seed,
+    "top_k": first_request.top_k,
+    "top_p": first_request.top_p,
   }
 
   all_prompts = []
@@ -348,8 +348,8 @@ def main_loop():
 
     # Broadcast the payload to all ranks
     data_to_broadcast = (
-        jnp.array([payload_len], dtype=jnp.int32),
-        jnp.pad(jnp.frombuffer(payload_bytes, dtype=jnp.uint8), (0, MAX_REQUEST_SIZE - payload_len)),
+      jnp.array([payload_len], dtype=jnp.int32),
+      jnp.pad(jnp.frombuffer(payload_bytes, dtype=jnp.uint8), (0, MAX_REQUEST_SIZE - payload_len)),
     )
     received_len_array, received_data_array = multihost_utils.broadcast_one_to_all(data_to_broadcast)
 
@@ -364,7 +364,7 @@ def main_loop():
     try:
       if jax.process_index() == 0:
         logger.info(
-            "Starting batched generation for %d prompts with params: %s", len(payload["prompts"]), payload["params"]
+          "Starting batched generation for %d prompts with params: %s", len(payload["prompts"]), payload["params"]
         )
 
       completions = LLM.generate_batch(prompts=payload["prompts"], **payload["params"])
@@ -388,36 +388,36 @@ def main():
   if jax.process_index() == 0:
     # Define a Uvicorn-compatible logging config.
     LOGGING_CONFIG = {
-        "version": 1,
-        "disable_existing_loggers": False,
-        "formatters": {
-            "default": {
-                "()": "uvicorn.logging.DefaultFormatter",
-                "fmt": f"%(levelprefix)s RANK {rank}: %(message)s",
-                "use_colors": None,
-            },
-            "access": {
-                "()": "uvicorn.logging.AccessFormatter",
-                "fmt": f'%(levelprefix)s RANK {rank}: %(client_addr)s - "%(request_line)s" %(status_code)s',
-            },
+      "version": 1,
+      "disable_existing_loggers": False,
+      "formatters": {
+        "default": {
+          "()": "uvicorn.logging.DefaultFormatter",
+          "fmt": f"%(levelprefix)s RANK {rank}: %(message)s",
+          "use_colors": None,
         },
-        "handlers": {
-            "default": {
-                "formatter": "default",
-                "class": "logging.StreamHandler",
-                "stream": "ext://sys.stderr",
-            },
-            "access": {
-                "formatter": "access",
-                "class": "logging.StreamHandler",
-                "stream": "ext://sys.stdout",
-            },
+        "access": {
+          "()": "uvicorn.logging.AccessFormatter",
+          "fmt": f'%(levelprefix)s RANK {rank}: %(client_addr)s - "%(request_line)s" %(status_code)s',
         },
-        "loggers": {
-            "": {"handlers": ["default"], "level": "INFO"},
-            "uvicorn.error": {"level": "INFO"},
-            "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+      },
+      "handlers": {
+        "default": {
+          "formatter": "default",
+          "class": "logging.StreamHandler",
+          "stream": "ext://sys.stderr",
         },
+        "access": {
+          "formatter": "access",
+          "class": "logging.StreamHandler",
+          "stream": "ext://sys.stdout",
+        },
+      },
+      "loggers": {
+        "": {"handlers": ["default"], "level": "INFO"},
+        "uvicorn.error": {"level": "INFO"},
+        "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+      },
     }
 
     config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_config=LOGGING_CONFIG)

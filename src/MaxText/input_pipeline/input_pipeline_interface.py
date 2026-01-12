@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Input pipeline"""
+
 import functools
 
 import jax
@@ -23,12 +24,15 @@ from MaxText import max_logging
 from MaxText.input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
 from MaxText.input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
 from MaxText.input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
-from MaxText.input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
+from MaxText.input_pipeline._tfds_data_processing_c4_mlperf import (
+  make_c4_mlperf_train_iterator,
+  make_c4_mlperf_eval_iterator,
+)
 from MaxText.input_pipeline.synthetic_data_processing import SyntheticDataIterator, PlaceHolderDataIterator
 
 
 def get_process_loading_real_data(
-    data_sharding, global_batch_size_to_load, global_batch_size_to_train_on, max_target_length, mesh
+  data_sharding, global_batch_size_to_load, global_batch_size_to_train_on, max_target_length, mesh
 ):
   """Get list of processes loading data from GCS when expansion_factor_real_data != -1"""
   sharding = jax.sharding.NamedSharding(mesh, P(*data_sharding))
@@ -61,10 +65,10 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
   dataset_type_to_train_eval_iterator = {
-      "tfds": (make_tfds_train_iterator, make_tfds_eval_iterator),
-      "grain": (make_grain_train_iterator, make_grain_eval_iterator),
-      "hf": (make_hf_train_iterator, make_hf_eval_iterator),
-      "c4_mlperf": (make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator),
+    "tfds": (make_tfds_train_iterator, make_tfds_eval_iterator),
+    "grain": (make_grain_train_iterator, make_grain_eval_iterator),
+    "hf": (make_hf_train_iterator, make_hf_eval_iterator),
+    "c4_mlperf": (make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator),
   }
 
   # Collect train and eval iterators
@@ -74,19 +78,19 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
     train_iterator, eval_iterator = dataset_type_to_train_eval_iterator[config.dataset_type]
   else:
     max_logging.log(
-        f"WARNING: '{config.dataset_type}' is not a supported dataset type."
-        "Using synthetic data. Please choose from 'tfds', 'grain', 'hf', or 'c4_mlperf'."
+      f"WARNING: '{config.dataset_type}' is not a supported dataset type."
+      "Using synthetic data. Please choose from 'tfds', 'grain', 'hf', or 'c4_mlperf'."
     )
     output_train_iterator, output_eval_iterator = SyntheticDataIterator(config, mesh), None
     return output_train_iterator, output_eval_iterator
 
   # Generate output train iterator
   process_indices_train = get_process_loading_real_data(
-      config.data_sharding,
-      config.global_batch_size_to_load,
-      config.global_batch_size_to_train_on,
-      config.max_target_length,
-      mesh,
+    config.data_sharding,
+    config.global_batch_size_to_load,
+    config.global_batch_size_to_train_on,
+    config.max_target_length,
+    mesh,
   )
   output_train_iterator = create_process_specific_iterator(config, mesh, process_indices_train, train_iterator)
   if config.expansion_factor_real_data > 1:  # assert number of hosts loading real data
@@ -96,11 +100,11 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
   output_eval_iterator = None
   if config.eval_interval > 0:
     process_indices_eval = get_process_loading_real_data(
-        config.data_sharding,
-        config.global_batch_size_to_load_eval,
-        config.global_batch_size_to_eval_on,
-        config.max_target_length,
-        mesh,
+      config.data_sharding,
+      config.global_batch_size_to_load_eval,
+      config.global_batch_size_to_eval_on,
+      config.max_target_length,
+      mesh,
     )
 
     if config.expansion_factor_real_data > 1:

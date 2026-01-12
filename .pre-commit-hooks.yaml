@@ -6,14 +6,14 @@
   exclude: '^\.[^/]*(cache|assets|uv|venv)/.*'
   types: [ text ]
 
-- id: pyink
-  name: pyink
-  description: Run pyink Python code formatter.
-  entry: pyink
-  language: python
-  types:
-    - python
-    - text
+#- id: pyink
+#  name: pyink
+#  description: Run pyink Python code formatter.
+#  entry: pyink
+#  language: python
+#  types:
+#    - python
+#    - text
 
 # - id: pytype
 #   name: Pytype
@@ -38,3 +38,11 @@
 #     - toml
 #   files: '^pyproject\.toml$'
 #   entry: validate-pyproject
+
+- id: ruff-format
+  name: ruff-format
+  description: uses `ruff` to prettify code
+  types:
+     - python
+  entry: ruff-format
+  language: system

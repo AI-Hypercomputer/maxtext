@@ -42,20 +42,20 @@ def get_mha_cost_estimate(shape_dtype):
   # fmt: on
 
   return pl.CostEstimate(
-      flops=flops,
-      transcendentals=batch_size * num_heads * seq_len,
-      bytes_accessed=int(sum(np.prod(s.shape) * s.dtype.itemsize for s in shape_dtype)),
+    flops=flops,
+    transcendentals=batch_size * num_heads * seq_len,
+    bytes_accessed=int(sum(np.prod(s.shape) * s.dtype.itemsize for s in shape_dtype)),
   )
 
 
 @functools.partial(jax.jit, static_argnames=["mask_value"])
 def reference_mqa(
-    q: jax.Array,
-    k: jax.Array,
-    v: jax.Array,
-    lengths: jax.Array,
-    *,
-    mask_value: float = DEFAULT_MASK_VALUE,
+  q: jax.Array,
+  k: jax.Array,
+  v: jax.Array,
+  lengths: jax.Array,
+  *,
+  mask_value: float = DEFAULT_MASK_VALUE,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Multi query attention reference.
 
@@ -86,12 +86,12 @@ def reference_mqa(
 
 @jax.jit
 def reference_mha(
-    q: jax.Array,
-    k: jax.Array,
-    v: jax.Array,
-    lengths: jax.Array,
-    *,
-    mask_value: float = DEFAULT_MASK_VALUE,
+  q: jax.Array,
+  k: jax.Array,
+  v: jax.Array,
+  lengths: jax.Array,
+  *,
+  mask_value: float = DEFAULT_MASK_VALUE,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Multi head attention reference.
 
@@ -112,17 +112,17 @@ def reference_mha(
   k = jnp.swapaxes(k, 1, 2)
   v = jnp.swapaxes(v, 1, 2)
   return jax.vmap(functools.partial(reference_mqa, mask_value=mask_value), in_axes=(1, 1, 1, None), out_axes=2)(
-      q, k, v, lengths
+    q, k, v, lengths
   )
 
 
 @functools.partial(jax.jit, static_argnames=["mask_value"])
 def reference_gqa(
-    q: jax.Array,
-    k: jax.Array,
-    v: jax.Array,
-    lengths: jax.Array,
-    mask_value: float = DEFAULT_MASK_VALUE,
+  q: jax.Array,
+  k: jax.Array,
+  v: jax.Array,
+  lengths: jax.Array,
+  mask_value: float = DEFAULT_MASK_VALUE,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Vanilla attention GQA implementation for reference.
 
@@ -160,16 +160,16 @@ def reference_gqa(
 
 
 def ragged_flash_attention_kernel(
-    lengths_ref,
-    q_ref,
-    k_ref,
-    v_ref,
-    o_ref,
-    m_ref,
-    l_ref,
-    *,
-    block_size: int,
-    mask_value: float,
+  lengths_ref,
+  q_ref,
+  k_ref,
+  v_ref,
+  o_ref,
+  m_ref,
+  l_ref,
+  *,
+  block_size: int,
+  mask_value: float,
 ):
   """Pallas kernel for flash attention."""
   b, i = pl.program_id(0), pl.program_id(1)
@@ -211,14 +211,14 @@ def ragged_flash_attention_kernel(
 
 
 def ragged_mqa(
-    q: jax.Array,
-    k: jax.Array,
-    v: jax.Array,
-    lengths: jax.Array,
-    *,
-    block_size: int = 256,
-    mask_value: float = DEFAULT_MASK_VALUE,
-    cost_estimate: pl.CostEstimate | None = None,
+  q: jax.Array,
+  k: jax.Array,
+  v: jax.Array,
+  lengths: jax.Array,
+  *,
+  block_size: int = 256,
+  mask_value: float = DEFAULT_MASK_VALUE,
+  cost_estimate: pl.CostEstimate | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Ragged multi query attention.
 
@@ -251,51 +251,51 @@ def ragged_mqa(
     return b_next, i_next, 0
 
   out, m, l = pl.pallas_call(
-      functools.partial(
-          ragged_flash_attention_kernel,
-          block_size=block_size,
-          mask_value=mask_value,
-      ),
-      grid_spec=pltpu.PrefetchScalarGridSpec(
-          num_scalar_prefetch=1,
-          in_specs=[
-              pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
-              pl.BlockSpec((None, block_size, head_dim), compute_ragged_block_indices),
-              pl.BlockSpec((None, block_size, head_dim), compute_ragged_block_indices),
-          ],
-          out_specs=[
-              pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
-              pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
-              pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
-          ],
-          grid=(batch_size, seq_len // block_size),
-      ),
-      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary")),
-      out_shape=[
-          jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
-          jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
-          jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
+    functools.partial(
+      ragged_flash_attention_kernel,
+      block_size=block_size,
+      mask_value=mask_value,
+    ),
+    grid_spec=pltpu.PrefetchScalarGridSpec(
+      num_scalar_prefetch=1,
+      in_specs=[
+        pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
+        pl.BlockSpec((None, block_size, head_dim), compute_ragged_block_indices),
+        pl.BlockSpec((None, block_size, head_dim), compute_ragged_block_indices),
       ],
-      cost_estimate=cost_estimate,
+      out_specs=[
+        pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
+        pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
+        pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
+      ],
+      grid=(batch_size, seq_len // block_size),
+    ),
+    compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary")),
+    out_shape=[
+      jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
+      jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
+      jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
+    ],
+    cost_estimate=cost_estimate,
   )(lengths, q, k, v)
   return out, m[..., 0], l[..., 0]
 
 
 @functools.partial(
-    jax.jit,
-    static_argnames=[
-        "block_size",
-        "mask_value",
-    ],
+  jax.jit,
+  static_argnames=[
+    "block_size",
+    "mask_value",
+  ],
 )
 def ragged_mha(
-    query: jax.Array,
-    key: jax.Array,
-    value: jax.Array,
-    lengths: jax.Array,
-    *,
-    block_size: int = 256,
-    mask_value: float = DEFAULT_MASK_VALUE,
+  query: jax.Array,
+  key: jax.Array,
+  value: jax.Array,
+  lengths: jax.Array,
+  *,
+  block_size: int = 256,
+  mask_value: float = DEFAULT_MASK_VALUE,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Ragged multi head attention.
 
@@ -320,14 +320,14 @@ def ragged_mha(
   key = jnp.swapaxes(key, 1, 2)
   value = jnp.swapaxes(value, 1, 2)
   o, m, l = jax.vmap(
-      functools.partial(
-          ragged_mqa,
-          block_size=block_size,
-          mask_value=mask_value,
-          cost_estimate=cost_estimate,
-      ),
-      in_axes=(1, 1, 1, None),
-      out_axes=2,
+    functools.partial(
+      ragged_mqa,
+      block_size=block_size,
+      mask_value=mask_value,
+      cost_estimate=cost_estimate,
+    ),
+    in_axes=(1, 1, 1, None),
+    out_axes=2,
   )(query, key, value, lengths)
   m = jnp.expand_dims(m, axis=-1)
   l = jnp.expand_dims(l, axis=-1)
@@ -336,20 +336,20 @@ def ragged_mha(
 
 
 @functools.partial(
-    jax.jit,
-    static_argnames=[
-        "block_size",
-        "mask_value",
-    ],
+  jax.jit,
+  static_argnames=[
+    "block_size",
+    "mask_value",
+  ],
 )
 def ragged_gqa(
-    query: jax.Array,
-    key: jax.Array,
-    value: jax.Array,
-    lengths: jax.Array,
-    *,
-    block_size: int = 256,
-    mask_value: float = DEFAULT_MASK_VALUE,
+  query: jax.Array,
+  key: jax.Array,
+  value: jax.Array,
+  lengths: jax.Array,
+  *,
+  block_size: int = 256,
+  mask_value: float = DEFAULT_MASK_VALUE,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Ragged group query attention.
 
@@ -378,14 +378,14 @@ def ragged_gqa(
   value = jnp.swapaxes(value, 1, 2)
 
   o, m, l = jax.vmap(
-      functools.partial(
-          ragged_mqa,
-          block_size=block_size,
-          mask_value=mask_value,
-          cost_estimate=cost_estimate,
-      ),
-      in_axes=(1, 1, 1, None),
-      out_axes=1,
+    functools.partial(
+      ragged_mqa,
+      block_size=block_size,
+      mask_value=mask_value,
+      cost_estimate=cost_estimate,
+    ),
+    in_axes=(1, 1, 1, None),
+    out_axes=1,
   )(query, key, value, lengths)
 
   m = jnp.reshape(m, (batch_size, 1, num_heads_q, 1))

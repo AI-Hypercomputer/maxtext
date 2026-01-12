@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with
-""" Standalone data loader - only loads data for each training step, accesses storage needs."""
+"""Standalone data loader - only loads data for each training step, accesses storage needs."""
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
@@ -51,7 +51,7 @@ def data_load_loop(config, state=None):
   time_to_load_first_batch = first_end - start
   if jax.process_index() == 0:
     max_logging.log(
-        f"STANDALONE DATALOADER : First step completed in {time_to_load_first_batch.seconds} seconds, on host 0"
+      f"STANDALONE DATALOADER : First step completed in {time_to_load_first_batch.seconds} seconds, on host 0"
     )
 
   for _ in np.arange(start_step + 1, config.steps):
@@ -60,7 +60,9 @@ def data_load_loop(config, state=None):
   jax.block_until_ready(example_batch)  # wait until the last batch is read
   end = datetime.datetime.now()
   if jax.process_index() == 0:
-    max_logging.log(f"STANDALONE DATALOADER : {config.steps} batches loaded in {(end-start).seconds} seconds, on host 0")
+    max_logging.log(
+      f"STANDALONE DATALOADER : {config.steps} batches loaded in {(end - start).seconds} seconds, on host 0"
+    )
   return state
 
 

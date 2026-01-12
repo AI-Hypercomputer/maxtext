@@ -89,9 +89,9 @@ from MaxText.experimental.agent.code_generation_agent.prompt_code_generation imp
 
 # Set up basic configuration
 logging.basicConfig(
-    level=logging.INFO,  # You can use DEBUG, INFO, WARNING, ERROR, CRITICAL
-    format="%(asctime)s - %(name)s.%(funcName)s - %(levelname)s - %(message)s",
-    datefmt="%H:%M:%S",
+  level=logging.INFO,  # You can use DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format="%(asctime)s - %(name)s.%(funcName)s - %(levelname)s - %(message)s",
+  datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("__name__")
 

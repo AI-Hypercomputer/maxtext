@@ -14,6 +14,7 @@
 
 # pytype: skip-file
 """Pydantic-based configuration management for MaxText."""
+
 import logging
 import os
 import sys
@@ -111,7 +112,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   for key, value in raw_keys.items():
     if key not in valid_fields:
       logger.warning("Ignoring invalid/unsupported field from YAML/CLI: %s", repr(key))
-      raise ValueError(f"{key!r} not in {", ".join(map(repr, valid_fields))}.")
+      raise ValueError(f"{key!r} not in {', '.join(map(repr, valid_fields))}.")
 
     new_value = value
     if isinstance(new_value, str) and new_value.lower() == "none":
@@ -161,7 +162,7 @@ class HyperParameters:
     final_dict["grad_dtype"] = jnp.dtype(final_dict["grad_dtype"])
     final_dict["weight_dtype"] = jnp.dtype(final_dict["weight_dtype"])
     final_dict["mu_dtype"] = (
-        final_dict["weight_dtype"] if not final_dict["mu_dtype"] else jnp.dtype(final_dict["mu_dtype"])
+      final_dict["weight_dtype"] if not final_dict["mu_dtype"] else jnp.dtype(final_dict["mu_dtype"])
     )
 
     final_dict["logical_axis_rules"] = _lists_to_tuples(final_dict["logical_axis_rules"])
@@ -282,7 +283,7 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
     if env_key in os.environ:
       if k in cli_keys or k in kwargs_keys:
         raise ValueError(
-            f"Key '{k}' is overridden by both CLI/kwargs and environment variable '{env_key}'. This is not allowed."
+          f"Key '{k}' is overridden by both CLI/kwargs and environment variable '{env_key}'. This is not allowed."
         )
 
       new_proposal = os.environ.get(env_key)

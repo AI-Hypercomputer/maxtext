@@ -14,8 +14,8 @@
 
 """
 This file defines the `EmbeddingAgent` class, which acts as an interface for interacting
-with the Google Gemini model. It handles model initialization, configuration, and robust 
-API calls with retry mechanisms. Please add your API key and chosen model name in .env file. 
+with the Google Gemini model. It handles model initialization, configuration, and robust
+API calls with retry mechanisms. Please add your API key and chosen model name in .env file.
 
 Example Invocation:
 
@@ -31,6 +31,7 @@ embedding = embedding_agent(text_to_embed)
 print(f"Generated embedding: {embedding}")
 ```
 """
+
 from dotenv import load_dotenv  # If this is not available, try ``pip install python-dotenv``
 
 load_dotenv()
@@ -63,14 +64,14 @@ class EmbeddingAgent:
     self.model = "gemini-embedding-001"
 
   @backoff.on_exception(
-      backoff.expo, (DeadlineExceeded, InternalServerError, RetryError, ValueError, TypeError), max_tries=10
+    backoff.expo, (DeadlineExceeded, InternalServerError, RetryError, ValueError, TypeError), max_tries=10
   )
   def __call__(self, text):
     return (
-        self.client.models.embed_content(
-            model=self.model,
-            contents=text,
-        )
-        .embeddings[0]
-        .values
+      self.client.models.embed_content(
+        model=self.model,
+        contents=text,
+      )
+      .embeddings[0]
+      .values
     )

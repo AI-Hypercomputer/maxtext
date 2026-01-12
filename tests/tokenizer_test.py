@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for tokenizer
-"""
+"""Tests for tokenizer"""
 
 import numpy as np
 from MaxText import train_tokenizer
@@ -40,22 +39,22 @@ class TokenizerTest(unittest.TestCase):
     vocab_model_name = "test_tokenizer"
     cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"), "sentencepiece", add_bos=False, add_eos=False
+      os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"), "sentencepiece", add_bos=False, add_eos=False
     )
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
-        shuffle_seed=0,
+      shuffle_seed=0,
     )
     train_ds_builder = tfds.builder(dataset_name)
     cls.dataset = train_ds_builder.as_dataset(split="train", read_config=read_config, shuffle_files=True)
     train_tokenizer.train_tokenizer(
-        cls.dataset,
-        vocab_path=cls.tokenizer_path,
-        vocab_size=cls.vocab_size,
-        max_corpus_chars=cls.max_corpus_chars,
+      cls.dataset,
+      vocab_path=cls.tokenizer_path,
+      vocab_size=cls.vocab_size,
+      max_corpus_chars=cls.max_corpus_chars,
     )
     cls.test_tokenizer = _input_pipeline_utils.get_tokenizer(
-        cls.tokenizer_path, "sentencepiece", add_bos=False, add_eos=False
+      cls.tokenizer_path, "sentencepiece", add_bos=False, add_eos=False
     )
 
   @classmethod
@@ -81,14 +80,14 @@ class TikTokenTest(unittest.TestCase):
     dataset_name = "c4/en:3.0.1"
     dataset_path = "gs://maxtext-dataset"
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-        "tiktoken",
-        add_bos=False,
-        add_eos=False,
+      os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
+      "tiktoken",
+      add_bos=False,
+      add_eos=False,
     )
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
-        shuffle_seed=0,
+      shuffle_seed=0,
     )
     train_ds_builder = tfds.builder(dataset_name)
     cls.dataset = train_ds_builder.as_dataset(split="train", read_config=read_config, shuffle_files=True)
@@ -114,14 +113,14 @@ class HFTokenizerTest(unittest.TestCase):
     source = "gs://maxtext-gemma/huggingface/gemma2-2b"
     destination = os.path.join(MAXTEXT_ASSETS_ROOT, "")
     subprocess.run(
-        ["gcloud", "storage", "cp", "-R", source, destination],
-        check=True,
+      ["gcloud", "storage", "cp", "-R", source, destination],
+      check=True,
     )
     cls.hf_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(MAXTEXT_ASSETS_ROOT, "gemma2-2b"), "huggingface", add_bos=False, add_eos=False
+      os.path.join(MAXTEXT_ASSETS_ROOT, "gemma2-2b"), "huggingface", add_bos=False, add_eos=False
     )
     cls.sp_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
+      os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
     )
 
   @pytest.mark.tpu_only

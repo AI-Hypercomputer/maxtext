@@ -32,18 +32,17 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 
 
 class DataLoaderTest(unittest.TestCase):
-
   def setUp(self):
     super().setUp()
     self.config = self.get_test_config(reuse_example_batch=False, per_device_batch_size=1)
     self.config_reuse_example = self.get_test_config(reuse_example_batch=True, per_device_batch_size=1)
     self.config_rampup = self.get_test_config(
-        reuse_example_batch=False,
-        per_device_batch_size=4.0,  # This is the 'end' batch size
-        enable_rampup_batch_size=True,
-        per_device_batch_size_start=1.0,
-        per_device_batch_size_increment=1.0,
-        global_rampup_samples=60,
+      reuse_example_batch=False,
+      per_device_batch_size=4.0,  # This is the 'end' batch size
+      enable_rampup_batch_size=True,
+      per_device_batch_size_start=1.0,
+      per_device_batch_size_increment=1.0,
+      global_rampup_samples=60,
     )
     self.mesh = Mesh(create_device_mesh(self.config), self.config.mesh_axes)
     self.mock_data_iterator = MagicMock()
@@ -51,14 +50,14 @@ class DataLoaderTest(unittest.TestCase):
   def get_test_config(self, reuse_example_batch, **kwargs):
     """Generate config for tests"""
     args = {
-        "run_name": "test",
-        "enable_checkpointing": False,
-        "reuse_example_batch": reuse_example_batch,
+      "run_name": "test",
+      "enable_checkpointing": False,
+      "reuse_example_batch": reuse_example_batch,
     }
     args.update(kwargs)
     return pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **args,
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **args,
     )
 
   def test_load_next_batch_success(self):
@@ -146,9 +145,9 @@ class DataLoaderTest(unittest.TestCase):
       batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
       expected_shape = (expected_size, self.config_rampup.max_target_length)
       self.assertEqual(
-          batch["inputs"].shape,
-          expected_shape,
-          f"Mismatch at step {i+1}: expected {expected_shape}, got {batch['inputs'].shape}",
+        batch["inputs"].shape,
+        expected_shape,
+        f"Mismatch at step {i + 1}: expected {expected_shape}, got {batch['inputs'].shape}",
       )
       self.assertTrue((batch["inputs"] == 1).all())
 
@@ -174,9 +173,9 @@ class DataLoaderTest(unittest.TestCase):
       batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
       expected_shape = (expected_size, self.config_rampup.max_target_length)
       self.assertEqual(
-          batch["inputs"].shape,
-          expected_shape,
-          f"Mismatch at step {i+1}: expected {expected_shape}, got {batch['inputs'].shape}",
+        batch["inputs"].shape,
+        expected_shape,
+        f"Mismatch at step {i + 1}: expected {expected_shape}, got {batch['inputs'].shape}",
       )
       self.assertTrue((batch["inputs"] == 1).all())
 

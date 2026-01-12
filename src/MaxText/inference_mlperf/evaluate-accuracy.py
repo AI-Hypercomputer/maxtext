@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Evaluation script based on MLPerf requirements"""
+"""Evaluation script based on MLPerf requirements"""
 
 import argparse
 import json
@@ -56,7 +56,6 @@ def postprocess_text(preds, targets):
 
 
 def main():
-
   args = get_args()
   metric = evaluate.load("rouge")
   nltk.download("punkt")
@@ -64,10 +63,10 @@ def main():
   if args.checkpoint_path:
     print(f"Loading checkpoint from {args.checkpoint_path}")
     tokenizer = AutoTokenizer.from_pretrained(
-        args.checkpoint_path,
-        model_max_length=2048,
-        padding_side="left",
-        use_fast=False,
+      args.checkpoint_path,
+      model_max_length=2048,
+      padding_side="left",
+      use_fast=False,
     )
   elif args.tokenizer_path:
     print(f"Loading tokenizer from {args.tokenizer_path}")
@@ -115,11 +114,11 @@ def main():
   gen_num = len(preds)
 
   result = {
-      **result,
-      "gen_len": np.sum(prediction_lens),
-      "gen_num": gen_num,
-      "gen_tok_len": gen_tok_len,
-      "tokens_per_sample": round(gen_tok_len / gen_num, 1),
+    **result,
+    "gen_len": np.sum(prediction_lens),
+    "gen_num": gen_num,
+    "gen_tok_len": gen_tok_len,
+    "tokens_per_sample": round(gen_tok_len / gen_num, 1),
   }
 
   print("\nResults\n")

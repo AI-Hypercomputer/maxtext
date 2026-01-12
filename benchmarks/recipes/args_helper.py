@@ -40,11 +40,11 @@ def _handle_delete(cluster_config: XpkClusterConfig, user: str, **kwargs) -> int
   xpk_path = kwargs.get("xpk_path", "xpk")  # Default to "xpk" if not provided
   first_three_chars = user[:3]
   delete_command = (
-      f"python3 {xpk_path}/xpk.py workload delete "
-      f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
-      f" --filter-by-job={first_three_chars} --zone={cluster_config.zone}"
+    f"python3 {xpk_path}/xpk.py workload delete "
+    f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
+    f" --filter-by-job={first_three_chars} --zone={cluster_config.zone}"
   )
-  print(f"Deleting workloads starting with: {first_three_chars} using command:" f" {delete_command}")
+  print(f"Deleting workloads starting with: {first_three_chars} using command: {delete_command}")
   os.system(delete_command)
 
 
@@ -58,11 +58,11 @@ def handle_delete_specific_workload(cluster_config: XpkClusterConfig, workload_n
   """
   xpk_path = kwargs.get("xpk_path", "xpk")  # Default to "xpk" if not provided
   delete_command = (
-      f"python3 {xpk_path}/xpk.py workload delete "
-      f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
-      f" --filter-by-job={workload_name} --zone={cluster_config.zone}"
+    f"python3 {xpk_path}/xpk.py workload delete "
+    f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
+    f" --filter-by-job={workload_name} --zone={cluster_config.zone}"
   )
-  print(f"Deleting workload: {workload_name} using command:" f" {delete_command}")
+  print(f"Deleting workload: {workload_name} using command: {delete_command}")
   os.system(f"yes | {delete_command}")
 
 
@@ -85,9 +85,9 @@ def handle_cmd_args(cluster_config: XpkClusterConfig, *actions: str, **kwargs) -
 
   if DELETE in actions:
     parser.add_argument(
-        "--delete",
-        action="store_true",
-        help="Delete workloads starting with the user's first five characters.",
+      "--delete",
+      action="store_true",
+      help="Delete workloads starting with the user's first five characters.",
     )
 
   known_args, unknown_args = parser.parse_known_args()

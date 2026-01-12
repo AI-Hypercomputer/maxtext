@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for kernels. """
+"""Tests for kernels."""
 
 import unittest
 
@@ -23,7 +23,14 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from MaxText.kernels.ragged_attention import ragged_mqa, reference_mqa, ragged_mha, reference_mha, ragged_gqa, reference_gqa
+from MaxText.kernels.ragged_attention import (
+  ragged_mqa,
+  reference_mqa,
+  ragged_mha,
+  reference_mha,
+  ragged_gqa,
+  reference_gqa,
+)
 
 
 class RaggedAttentionTest(unittest.TestCase):
@@ -51,12 +58,12 @@ class RaggedAttentionTest(unittest.TestCase):
     ragged_out, _, _ = ragged_mqa(q, k, v, lengths)
     reference_out, _, _ = reference_mqa(q, k, v, lengths)
     self.assertTrue(
-        jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
-        msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
+      jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
+      msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
     )
     self.assertTrue(
-        jnp.average(abs(ragged_out - reference_out)) < 1e-2,
-        msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2",
+      jnp.average(abs(ragged_out - reference_out)) < 1e-2,
+      msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2",
     )
 
   @pytest.mark.tpu_only
@@ -66,10 +73,10 @@ class RaggedAttentionTest(unittest.TestCase):
 
     q = jax.random.normal(k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
     k = jax.random.normal(
-        k2, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
+      k2, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
     )
     v = jax.random.normal(
-        k3, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
+      k3, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
     )
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
@@ -77,12 +84,12 @@ class RaggedAttentionTest(unittest.TestCase):
     ragged_out = ragged_out / ragged_denom
     reference_out, _, _ = reference_mha(q, k, v, lengths)
     self.assertTrue(
-        jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
-        msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
+      jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
+      msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
     )
     self.assertTrue(
-        jnp.average(abs(ragged_out - reference_out)) < 1e-2,
-        msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2",
+      jnp.average(abs(ragged_out - reference_out)) < 1e-2,
+      msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2",
     )
 
   @pytest.mark.tpu_only
@@ -92,10 +99,10 @@ class RaggedAttentionTest(unittest.TestCase):
 
     q = jax.random.normal(k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
     k = jax.random.normal(
-        k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
+      k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
     )
     v = jax.random.normal(
-        k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
+      k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
     )
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
@@ -103,12 +110,12 @@ class RaggedAttentionTest(unittest.TestCase):
     ragged_out = ragged_out / ragged_denom
     reference_out, _, _ = reference_gqa(jnp.squeeze(q), jnp.swapaxes(k, 1, 2), jnp.swapaxes(v, 1, 2), lengths)
     self.assertTrue(
-        jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
-        msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
+      jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
+      msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
     )
     self.assertTrue(
-        jnp.average(abs(ragged_out - reference_out)) < 1e-2,
-        msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2",
+      jnp.average(abs(ragged_out - reference_out)) < 1e-2,
+      msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2",
     )
 
 

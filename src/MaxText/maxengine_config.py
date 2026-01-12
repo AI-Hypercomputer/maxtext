@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Configure MaxText For JetStream"""
+
 import functools
 from typing import Any, Type
 
@@ -39,24 +40,24 @@ def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerCon
   match config_str:
     case "MaxtextInterleavedServer":
       server_config = config_lib.ServerConfig(
-          prefill_slices=(),
-          generate_slices=(),
-          interleaved_slices=("tpu=" + str(jax.device_count()),),
-          prefill_engine_create_fns=(),
-          generate_engine_create_fns=(),
-          interleaved_engine_create_fns=(functools.partial(create_maxengine, config=config),),
+        prefill_slices=(),
+        generate_slices=(),
+        interleaved_slices=("tpu=" + str(jax.device_count()),),
+        prefill_engine_create_fns=(),
+        generate_engine_create_fns=(),
+        interleaved_engine_create_fns=(functools.partial(create_maxengine, config=config),),
       )
     case "ExperimentalMaxtextDisaggregatedServer":
       # ExperimentalMaxtextDisaggregatedServer is still under development.
       # Its dependencies IFRT Proxy and other components are not publicly available
       # either.
       server_config = config_lib.ServerConfig(
-          prefill_slices=(config.prefill_slice,),
-          generate_slices=(config.generate_slice,),
-          interleaved_slices=(),
-          prefill_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
-          generate_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
-          interleaved_engine_create_fns=(),
+        prefill_slices=(config.prefill_slice,),
+        generate_slices=(config.generate_slice,),
+        interleaved_slices=(),
+        prefill_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
+        generate_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
+        interleaved_engine_create_fns=(),
       )
     case _:
       raise NotImplementedError

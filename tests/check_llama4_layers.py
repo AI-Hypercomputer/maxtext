@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for Llama4 Vision RoPE """
+"""Tests for Llama4 Vision RoPE"""
+
 from typing import Callable, NamedTuple
 import os.path
 import sys
@@ -56,9 +57,9 @@ def reshape_for_broadcast(freqs_ci: torch.Tensor, query: torch.Tensor):
 
 
 def vision_apply_rotary_emb(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    freqs_ci: torch.Tensor,
+  query: torch.Tensor,
+  key: torch.Tensor,
+  freqs_ci: torch.Tensor,
 ):
   """Apply the rotary embedding to the query and key tensors."""
   query_ = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
@@ -117,7 +118,7 @@ class Llama4VisionRotaryEmbeddingTest(unittest.TestCase):
 
         # # Create and initialize the JAX Llama4 Vision RoPE
         model_jax = embeddings.LlamaVisionRotaryEmbedding(
-            image_size, patch_size, hidden_size, num_attention_heads, rope_theta
+          image_size, patch_size, hidden_size, num_attention_heads, rope_theta
         )
 
         # Apply the JAX RoPE
@@ -193,7 +194,6 @@ class Llama4UnfoldConvolutionTest(unittest.TestCase):
 
     # JAX implementation
     class JaxConfig:
-
       def __init__(self):
         self.dtype_mm = jnp.float32
         self.hidden_size_for_vit = hidden_size
@@ -234,10 +234,10 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
     updated_params = jax.tree_util.tree_map(lambda x: x, params)
     # Copy weights for both MLP layers
     updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc1"]["kernel"] = to_jax(
-        pt_model.mlp.fc1.weight
+      pt_model.mlp.fc1.weight
     ).T
     updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc2"]["kernel"] = to_jax(
-        pt_model.mlp.fc2.weight
+      pt_model.mlp.fc2.weight
     ).T
     return updated_params
 
@@ -267,7 +267,7 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
       reshaped_tensor = reshaped_tensor.permute(0, 2, 1, 3).contiguous()
 
       reshaped_tensor = reshaped_tensor.view(
-          batch_size, int(height * shuffle_ratio), int(width * shuffle_ratio), int(channels / (shuffle_ratio**2))
+        batch_size, int(height * shuffle_ratio), int(width * shuffle_ratio), int(channels / (shuffle_ratio**2))
       )
       reshaped_tensor = reshaped_tensor.permute(0, 2, 1, 3).contiguous()
 
@@ -311,7 +311,6 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
 
     # Initialize PyTorch model
     class Config:
-
       def __init__(self):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -329,7 +328,6 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
 
     # JAX implementation
     class JaxConfig:
-
       def __init__(self):
         self.dtype_mm = jnp.float32
         self.intermediate_size_for_vit = 5632
@@ -390,17 +388,14 @@ class Llama4MultiModalProjectorTest(unittest.TestCase):
 
     # PyTorch implementation
     class VisionConfig:
-
       def __init__(self):
         self.vision_output_dim = vision_output_dim
 
     class TextConfig:
-
       def __init__(self):
         self.hidden_size = hidden_size
 
     class Config:
-
       def __init__(self):
         self.vision_config = VisionConfig()
         self.text_config = TextConfig()
@@ -411,9 +406,9 @@ class Llama4MultiModalProjectorTest(unittest.TestCase):
       def __init__(self, config):
         super().__init__()
         self.linear_1 = nn.Linear(
-            config.vision_config.vision_output_dim,
-            config.text_config.hidden_size,
-            bias=False,
+          config.vision_config.vision_output_dim,
+          config.text_config.hidden_size,
+          bias=False,
         )
 
       def forward(self, image_features):
@@ -432,7 +427,6 @@ class Llama4MultiModalProjectorTest(unittest.TestCase):
 
     # JAX implementation
     class JaxConfig:
-
       def __init__(self):
         self.dtype_mm = dtype_mm
         self.matmul_precision = matmul_precision
@@ -472,14 +466,14 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 def eager_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: None | torch.Tensor,
-    scaling: float,
-    dropout: float = 0.0,
-    **kwargs,
+  module: nn.Module,
+  query: torch.Tensor,
+  key: torch.Tensor,
+  value: torch.Tensor,
+  attention_mask: None | torch.Tensor,
+  scaling: float,
+  dropout: float = 0.0,
+  **kwargs,
 ):
   """
   Pytorch implementation from HuggingFace:
@@ -522,12 +516,12 @@ class Llama4VisionAttention(nn.Module):
     self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.embed_dim, bias=True)
 
   def forward(
-      self,
-      hidden_states: torch.Tensor,
-      freqs_ci: torch.Tensor,
-      attention_mask: None | torch.Tensor = None,
-      past_key_value: None | torch.Tensor = None,
-      **kwargs,
+    self,
+    hidden_states: torch.Tensor,
+    freqs_ci: torch.Tensor,
+    attention_mask: None | torch.Tensor = None,
+    past_key_value: None | torch.Tensor = None,
+    **kwargs,
   ) -> tuple[torch.Tensor, None | torch.Tensor]:
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, self.head_dim)
@@ -555,15 +549,15 @@ class Llama4VisionAttention(nn.Module):
     attention_interface: Callable = eager_attention_forward
 
     attn_output, attn_weights = attention_interface(
-        self,
-        query_states,
-        key_states,
-        value_states,
-        None,
-        dropout=0.0 if not self.training else self.attention_dropout,
-        scaling=None,
-        is_causal=False,  # HAS TO BE ENFORCED
-        **kwargs,
+      self,
+      query_states,
+      key_states,
+      value_states,
+      None,
+      dropout=0.0 if not self.training else self.attention_dropout,
+      scaling=None,
+      is_causal=False,  # HAS TO BE ENFORCED
+      **kwargs,
     )
 
     attn_output = attn_output.reshape(*input_shape, -1).contiguous()
@@ -601,22 +595,22 @@ class Llama4VisionAttentionTest(unittest.TestCase):
     attention_dropout: int = 0
 
   config_arguments = {
-      "per_device_batch_size": 1.0,
-      "run_name": "test",
-      "enable_checkpointing": False,
-      "model_name": "llama4-17b-16e",
-      "scan_layers": False,
-      "dtype_mm": "float32",
-      "weight_dtype": "float32",
-      "float32_qk_product": True,
-      "float32_logits": True,
+    "per_device_batch_size": 1.0,
+    "run_name": "test",
+    "enable_checkpointing": False,
+    "model_name": "llama4-17b-16e",
+    "scan_layers": False,
+    "dtype_mm": "float32",
+    "weight_dtype": "float32",
+    "float32_qk_product": True,
+    "float32_logits": True,
   }
 
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **self.config_arguments,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **self.config_arguments,
     )
     self.rng = jax.random.PRNGKey(0)
 
@@ -628,65 +622,65 @@ class Llama4VisionAttentionTest(unittest.TestCase):
     """Test for the Llama4 vision attention."""
 
     pt_config = self.Config(
-        num_attention_heads=self.cfg.num_attention_heads_for_vit, hidden_size=self.cfg.hidden_size_for_vit
+      num_attention_heads=self.cfg.num_attention_heads_for_vit, hidden_size=self.cfg.hidden_size_for_vit
     )
 
     model_pt = Llama4VisionAttention(pt_config)
     hidden_states_pt = torch.rand(
-        self.cfg.global_batch_size_to_load, self.seq_len_for_vit, self.cfg.hidden_size_for_vit, dtype=torch.float32
+      self.cfg.global_batch_size_to_load, self.seq_len_for_vit, self.cfg.hidden_size_for_vit, dtype=torch.float32
     )
 
     # Create proper freq_ci using the existing rotary embedding class
     freqs_ci_model = Llama4VisionRotaryEmbedding(
-        self.cfg.image_size_for_vit,
-        self.cfg.patch_size_for_vit,
-        self.cfg.hidden_size_for_vit,
-        self.cfg.num_attention_heads_for_vit,
-        self.cfg.rope_theta_for_vit,
+      self.cfg.image_size_for_vit,
+      self.cfg.patch_size_for_vit,
+      self.cfg.hidden_size_for_vit,
+      self.cfg.num_attention_heads_for_vit,
+      self.cfg.rope_theta_for_vit,
     )
     freqs_ci = freqs_ci_model.forward()
     attn_output_pt, _ = model_pt(hidden_states_pt, freqs_ci=freqs_ci)
 
     lnx = to_jax(hidden_states_pt)
     attention_layer = attentions.attention_as_linen(
-        config=self.cfg,
-        num_query_heads=self.cfg.num_attention_heads_for_vit,
-        num_kv_heads=self.cfg.num_attention_heads_for_vit,
-        head_dim=self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit,
-        max_target_length=self.seq_len_for_vit,
-        attention_kernel="dot_product",  # TODO aireenmei: support flash attention
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        float32_qk_product=self.cfg.float32_qk_product,
-        float32_logits=self.cfg.float32_logits,
-        dtype=self.cfg.dtype_mm,
-        weight_dtype=self.cfg.weight_dtype,
-        mesh=self.mesh,
-        dropout_rate=0,
-        name="self_attention_vision",
-        attention_type=AttentionType.FULL,
-        is_nope_layer=False,
-        use_bias_in_projections=True,
-        is_vision=True,
-        use_qk_norm=False,
-        query_pre_attn_scalar=1 / math.sqrt(self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit),
-        model_mode=MODEL_MODE_TRAIN,
+      config=self.cfg,
+      num_query_heads=self.cfg.num_attention_heads_for_vit,
+      num_kv_heads=self.cfg.num_attention_heads_for_vit,
+      head_dim=self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit,
+      max_target_length=self.seq_len_for_vit,
+      attention_kernel="dot_product",  # TODO aireenmei: support flash attention
+      inputs_q_shape=lnx.shape,
+      inputs_kv_shape=lnx.shape,
+      float32_qk_product=self.cfg.float32_qk_product,
+      float32_logits=self.cfg.float32_logits,
+      dtype=self.cfg.dtype_mm,
+      weight_dtype=self.cfg.weight_dtype,
+      mesh=self.mesh,
+      dropout_rate=0,
+      name="self_attention_vision",
+      attention_type=AttentionType.FULL,
+      is_nope_layer=False,
+      use_bias_in_projections=True,
+      is_vision=True,
+      use_qk_norm=False,
+      query_pre_attn_scalar=1 / math.sqrt(self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit),
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     key = jax.random.PRNGKey(0)
     attention_layer_params = attention_layer.init(
-        key,
-        lnx,
-        lnx,
+      key,
+      lnx,
+      lnx,
     )
     params_from_pt = self._copy_weights_bias(
-        model_pt, attention_layer_params, self.cfg.hidden_size_for_vit, self.cfg.num_attention_heads_for_vit
+      model_pt, attention_layer_params, self.cfg.hidden_size_for_vit, self.cfg.num_attention_heads_for_vit
     )
     attn_ouput_jax = attention_layer.apply(
-        params_from_pt,
-        lnx,
-        lnx,
-        deterministic=True,
+      params_from_pt,
+      lnx,
+      lnx,
+      deterministic=True,
     )
     np.testing.assert_allclose(attn_ouput_jax, to_jax(attn_output_pt), rtol=1e-3, atol=0.05)
 
@@ -726,19 +720,19 @@ class Llama4VisionEncoderLayer(nn.Module):
     self.post_attention_layernorm = nn.LayerNorm(config.hidden_size)
 
   def forward(
-      self,
-      hidden_state: torch.Tensor,
-      freqs_ci: torch.Tensor,
-      attention_mask: None | torch.Tensor = None,
-      output_attentions: None | bool = None,
+    self,
+    hidden_state: torch.Tensor,
+    freqs_ci: torch.Tensor,
+    attention_mask: None | torch.Tensor = None,
+    output_attentions: None | bool = None,
   ):
     # Self Attention
     residual = hidden_state
     hidden_state = self.input_layernorm(hidden_state)
     hidden_state, attn_weights = self.self_attn(
-        hidden_state,
-        freqs_ci=freqs_ci,
-        attention_mask=attention_mask,
+      hidden_state,
+      freqs_ci=freqs_ci,
+      attention_mask=attention_mask,
     )
     hidden_state = residual + hidden_state
 
@@ -765,23 +759,23 @@ class Llama4VisionEncoder(nn.Module):
     self.layers = nn.ModuleList([Llama4VisionEncoderLayer(config) for _ in range(config.num_hidden_layers)])
 
   def forward(
-      self,
-      hidden_states: torch.Tensor,
-      freqs_ci: torch.Tensor,
-      attention_mask: None | torch.Tensor = None,
-      output_attentions: None | bool = None,
-      output_hidden_states: None | bool = None,
-      return_dict: None | bool = None,
+    self,
+    hidden_states: torch.Tensor,
+    freqs_ci: torch.Tensor,
+    attention_mask: None | torch.Tensor = None,
+    output_attentions: None | bool = None,
+    output_hidden_states: None | bool = None,
+    return_dict: None | bool = None,
   ):
     # all_hidden_states = () if output_hidden_states else None
     # all_attentions = () if output_attentions else None
 
     for encoder_layer in self.layers:
       layer_outputs = encoder_layer(
-          hidden_state=hidden_states,
-          attention_mask=attention_mask,
-          output_attentions=output_attentions,
-          freqs_ci=freqs_ci,
+        hidden_state=hidden_states,
+        attention_mask=attention_mask,
+        output_attentions=output_attentions,
+        freqs_ci=freqs_ci,
       )
 
       # if output_attentions:
@@ -812,60 +806,60 @@ class Llama4VisionEncoderTest(unittest.TestCase):
     for i, _ in enumerate(pt_model.layers):
       # Copy attention weights
       updated_params["params"][f"layers_{i}"]["self_attention_vision"]["query"]["kernel"] = to_jax(
-          pt_model.layers[i].self_attn.q_proj.weight.T.view(hidden_size, num_head, head_dim)
+        pt_model.layers[i].self_attn.q_proj.weight.T.view(hidden_size, num_head, head_dim)
       )
       updated_params["params"][f"layers_{i}"]["self_attention_vision"]["key"]["kernel"] = to_jax(
-          pt_model.layers[i].self_attn.k_proj.weight.T.view(hidden_size, num_head, head_dim)
+        pt_model.layers[i].self_attn.k_proj.weight.T.view(hidden_size, num_head, head_dim)
       )
       updated_params["params"][f"layers_{i}"]["self_attention_vision"]["value"]["kernel"] = to_jax(
-          pt_model.layers[i].self_attn.v_proj.weight.T.view(hidden_size, num_head, head_dim)
+        pt_model.layers[i].self_attn.v_proj.weight.T.view(hidden_size, num_head, head_dim)
       )
       updated_params["params"][f"layers_{i}"]["self_attention_vision"]["out"]["kernel"] = to_jax(
-          pt_model.layers[i].self_attn.o_proj.weight.T.view(num_head, head_dim, hidden_size)
+        pt_model.layers[i].self_attn.o_proj.weight.T.view(num_head, head_dim, hidden_size)
       )
 
       # Copy attention biases
       updated_params["params"][f"layers_{i}"]["self_attention_vision"]["query"]["bias"] = to_jax(
-          pt_model.layers[i].self_attn.q_proj.bias.view(num_head, head_dim)
+        pt_model.layers[i].self_attn.q_proj.bias.view(num_head, head_dim)
       )
       updated_params["params"][f"layers_{i}"]["self_attention_vision"]["key"]["bias"] = to_jax(
-          pt_model.layers[i].self_attn.k_proj.bias.view(num_head, head_dim)
+        pt_model.layers[i].self_attn.k_proj.bias.view(num_head, head_dim)
       )
       updated_params["params"][f"layers_{i}"]["self_attention_vision"]["value"]["bias"] = to_jax(
-          pt_model.layers[i].self_attn.v_proj.bias.view(num_head, head_dim)
+        pt_model.layers[i].self_attn.v_proj.bias.view(num_head, head_dim)
       )
       updated_params["params"][f"layers_{i}"]["self_attention_vision"]["out"]["bias"] = to_jax(
-          pt_model.layers[i].self_attn.o_proj.bias
+        pt_model.layers[i].self_attn.o_proj.bias
       )
 
       # Copy MLP weights
       updated_params["params"][f"layers_{i}"]["Llama4VisionMLP_0"]["vit_encoder_layer_mlp_fc1"]["kernel"] = to_jax(
-          pt_model.layers[i].mlp.fc1.weight.T
+        pt_model.layers[i].mlp.fc1.weight.T
       )
       updated_params["params"][f"layers_{i}"]["Llama4VisionMLP_0"]["vit_encoder_layer_mlp_fc2"]["kernel"] = to_jax(
-          pt_model.layers[i].mlp.fc2.weight.T
+        pt_model.layers[i].mlp.fc2.weight.T
       )
 
       # Copy MLP biases
       updated_params["params"][f"layers_{i}"]["Llama4VisionMLP_0"]["vit_encoder_layer_mlp_fc1"]["bias"] = to_jax(
-          pt_model.layers[i].mlp.fc1.bias
+        pt_model.layers[i].mlp.fc1.bias
       )
       updated_params["params"][f"layers_{i}"]["Llama4VisionMLP_0"]["vit_encoder_layer_mlp_fc2"]["bias"] = to_jax(
-          pt_model.layers[i].mlp.fc2.bias
+        pt_model.layers[i].mlp.fc2.bias
       )
 
       # Copy layer norm weights
       updated_params["params"][f"layers_{i}"]["input_layer_norm"]["scale"] = to_jax(
-          pt_model.layers[i].input_layernorm.weight
+        pt_model.layers[i].input_layernorm.weight
       )
       updated_params["params"][f"layers_{i}"]["input_layer_norm"]["bias"] = to_jax(
-          pt_model.layers[i].input_layernorm.bias
+        pt_model.layers[i].input_layernorm.bias
       )
       updated_params["params"][f"layers_{i}"]["post_attention_layer_norm"]["scale"] = to_jax(
-          pt_model.layers[i].post_attention_layernorm.weight
+        pt_model.layers[i].post_attention_layernorm.weight
       )
       updated_params["params"][f"layers_{i}"]["post_attention_layer_norm"]["bias"] = to_jax(
-          pt_model.layers[i].post_attention_layernorm.bias
+        pt_model.layers[i].post_attention_layernorm.bias
       )
 
     return updated_params
@@ -878,24 +872,24 @@ class Llama4VisionEncoderTest(unittest.TestCase):
     attention_dropout: int = 0
 
   config_arguments = {
-      "run_name": "test",
-      "enable_checkpointing": False,
-      "model_name": "llama4-17b-16e",
-      "scan_layers": False,
-      "dtype": "float32",
-      "dtype_mm": "float32",
-      "weight_dtype": "float32",
-      "matmul_precision": "float32",
-      "float32_qk_product": True,
-      "float32_logits": True,
-      "activations_in_float32": True,
+    "run_name": "test",
+    "enable_checkpointing": False,
+    "model_name": "llama4-17b-16e",
+    "scan_layers": False,
+    "dtype": "float32",
+    "dtype_mm": "float32",
+    "weight_dtype": "float32",
+    "matmul_precision": "float32",
+    "float32_qk_product": True,
+    "float32_logits": True,
+    "activations_in_float32": True,
   }
 
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **self.config_arguments,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **self.config_arguments,
     )
     self.rng = jax.random.PRNGKey(0)
 
@@ -908,11 +902,11 @@ class Llama4VisionEncoderTest(unittest.TestCase):
 
     # PyTorch config using the loaded configuration values
     pt_config = self.Config(
-        num_attention_heads=self.cfg.num_attention_heads_for_vit,
-        hidden_size=self.cfg.hidden_size_for_vit,
-        intermediate_size=self.cfg.intermediate_size_for_vit,
-        num_hidden_layers=self.cfg.num_hidden_layers_for_vit,
-        attention_dropout=0,
+      num_attention_heads=self.cfg.num_attention_heads_for_vit,
+      hidden_size=self.cfg.hidden_size_for_vit,
+      intermediate_size=self.cfg.intermediate_size_for_vit,
+      num_hidden_layers=self.cfg.num_hidden_layers_for_vit,
+      attention_dropout=0,
     )
 
     # Create PyTorch model
@@ -928,11 +922,11 @@ class Llama4VisionEncoderTest(unittest.TestCase):
     # Generate random numbers in (-1, 1) as input
     key = jax.random.PRNGKey(0)
     inputs = jax.random.uniform(
-        key,
-        (batch_size, self.seq_len_for_vit, self.cfg.hidden_size_for_vit),
-        minval=-1.0,
-        maxval=1.0,
-        dtype=jnp.float32,
+      key,
+      (batch_size, self.seq_len_for_vit, self.cfg.hidden_size_for_vit),
+      minval=-1.0,
+      maxval=1.0,
+      dtype=jnp.float32,
     )
 
     # Initialize JAX parameters using Linen's init method
@@ -942,11 +936,11 @@ class Llama4VisionEncoderTest(unittest.TestCase):
     params = self._copy_weights(pt_model, params, self.cfg.hidden_size_for_vit, self.cfg.num_attention_heads_for_vit)
 
     freqs_ci_model = Llama4VisionRotaryEmbedding(
-        self.cfg.image_size_for_vit,
-        self.cfg.patch_size_for_vit,
-        self.cfg.hidden_size_for_vit,
-        self.cfg.num_attention_heads_for_vit,
-        self.cfg.rope_theta_for_vit,
+      self.cfg.image_size_for_vit,
+      self.cfg.patch_size_for_vit,
+      self.cfg.hidden_size_for_vit,
+      self.cfg.num_attention_heads_for_vit,
+      self.cfg.rope_theta_for_vit,
     )
     freqs_ci = freqs_ci_model.forward()
 

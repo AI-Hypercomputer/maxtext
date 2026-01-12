@@ -78,19 +78,19 @@ def recover_tuning_params(tuning_params: str) -> dict[str, Any]:
 
 
 def write_run(
-    options: Namespace,
-    metrics: Metrics,
-    mfu: float,
-    number_of_steps: int,
-    number_of_nodes: int,
-    number_of_chips: int,
-    run_success: bool = True,  # True because if mfu is none, writing to db will fail anyway.
-    framework_config_in_json: str = "",
-    env_variables: str = "",
-    run_release_status: str = "local",
-    other_metrics_in_json: str = "",
-    comment: str = "",
-    nccl_driver_nickname: str = "",
+  options: Namespace,
+  metrics: Metrics,
+  mfu: float,
+  number_of_steps: int,
+  number_of_nodes: int,
+  number_of_chips: int,
+  run_success: bool = True,  # True because if mfu is none, writing to db will fail anyway.
+  framework_config_in_json: str = "",
+  env_variables: str = "",
+  run_release_status: str = "local",
+  other_metrics_in_json: str = "",
+  comment: str = "",
+  nccl_driver_nickname: str = "",
 ):
   """Writes a workload benchmark run manually to the database.
 
@@ -145,7 +145,7 @@ def write_run(
   from benchmark_db_writer.schema.workload_benchmark_v2 import workload_benchmark_v2_schema
 
   def get_db_client(
-      project: str, dataset: str, table: str, dataclass_type: Type, is_test: bool = False
+    project: str, dataset: str, table: str, dataclass_type: Type, is_test: bool = False
   ) -> dataclass_bigquery_writer.DataclassBigQueryWriter:
     """Creates a BigQuery client object.
 
@@ -159,59 +159,59 @@ def write_run(
     """
 
     return bq_writer_utils.create_bq_writer_object(
-        project=project,
-        dataset=dataset,
-        table=table,
-        dataclass_type=dataclass_type,
+      project=project,
+      dataset=dataset,
+      table=table,
+      dataclass_type=dataclass_type,
     )
 
   print(options.model_id)
 
   if (
-      sample_run_summary_writer.validate_model_id(options.model_id, options.is_test)
-      and sample_run_summary_writer.validate_hardware_id(options.hardware_id, options.is_test)
-      and sample_run_summary_writer.validate_software_id(options.software_id, options.is_test)
+    sample_run_summary_writer.validate_model_id(options.model_id, options.is_test)
+    and sample_run_summary_writer.validate_hardware_id(options.hardware_id, options.is_test)
+    and sample_run_summary_writer.validate_software_id(options.software_id, options.is_test)
   ):
     summary = workload_benchmark_v2_schema.WorkloadBenchmarkV2Schema(
-        run_id=f"run-{uuid.uuid4()}",
-        model_id=options.model_id,
-        software_id=options.software_id,
-        hardware_id=options.hardware_id,
-        hardware_num_chips=number_of_chips,
-        hardware_num_nodes=number_of_nodes,
-        result_success=run_success,
-        configs_framework=framework_config_in_json,
-        configs_env=env_variables,
-        configs_container_version=options.container_image_name,
-        configs_xla_flags=options.xla_flags.replace(",", " "),
-        configs_dataset=options.dataset,
-        logs_artifact_directory="",
-        update_person_ldap=getpass.getuser(),
-        run_source="automation",
-        run_type=options.run_type,
-        run_release_status=run_release_status,
-        workload_precision=options.precision,
-        workload_gbs=int(options.global_batch_size),
-        workload_optimizer=options.optimizer,
-        workload_sequence_length=int(options.seq_length),
-        metrics_e2e_time=metrics.e2e_step_time,
-        metrics_mfu=mfu,
-        metrics_step_time=metrics.median_step_time,
-        metrics_tokens_per_second=metrics.avg_tokens_per_sec,
-        metrics_num_steps=number_of_steps,
-        metrics_other=other_metrics_in_json,
-        hardware_nccl_driver_nickname=nccl_driver_nickname,
-        hardware_topology=options.topology,
-        hardware_num_superblocks=0,
-        logs_comments=comment,
+      run_id=f"run-{uuid.uuid4()}",
+      model_id=options.model_id,
+      software_id=options.software_id,
+      hardware_id=options.hardware_id,
+      hardware_num_chips=number_of_chips,
+      hardware_num_nodes=number_of_nodes,
+      result_success=run_success,
+      configs_framework=framework_config_in_json,
+      configs_env=env_variables,
+      configs_container_version=options.container_image_name,
+      configs_xla_flags=options.xla_flags.replace(",", " "),
+      configs_dataset=options.dataset,
+      logs_artifact_directory="",
+      update_person_ldap=getpass.getuser(),
+      run_source="automation",
+      run_type=options.run_type,
+      run_release_status=run_release_status,
+      workload_precision=options.precision,
+      workload_gbs=int(options.global_batch_size),
+      workload_optimizer=options.optimizer,
+      workload_sequence_length=int(options.seq_length),
+      metrics_e2e_time=metrics.e2e_step_time,
+      metrics_mfu=mfu,
+      metrics_step_time=metrics.median_step_time,
+      metrics_tokens_per_second=metrics.avg_tokens_per_sec,
+      metrics_num_steps=number_of_steps,
+      metrics_other=other_metrics_in_json,
+      hardware_nccl_driver_nickname=nccl_driver_nickname,
+      hardware_topology=options.topology,
+      hardware_num_superblocks=0,
+      logs_comments=comment,
     )
 
     client = get_db_client(
-        options.db_project,
-        options.db_dataset,
-        "run_summary",
-        workload_benchmark_v2_schema.WorkloadBenchmarkV2Schema,
-        options.is_test,
+      options.db_project,
+      options.db_dataset,
+      "run_summary",
+      workload_benchmark_v2_schema.WorkloadBenchmarkV2Schema,
+      options.is_test,
     )
     client.write([summary])
 

@@ -31,31 +31,41 @@ from flax import nnx
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention_kernel_v2
 from MaxText.sharding import logical_to_mesh_axes
-from MaxText.common_types import Array, DType, AxisNames, BATCH, LENGTH, HEAD, D_KV, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import (
+  Array,
+  DType,
+  AxisNames,
+  BATCH,
+  LENGTH,
+  HEAD,
+  D_KV,
+  MODEL_MODE_PREFILL,
+  MODEL_MODE_AUTOREGRESSIVE,
+)
 from MaxText.layers.initializers import variable_to_logically_partitioned
 
 _use_kernel_v2 = False
 
 
 def paged_attention_op_as_linen(
-    *,
-    mesh: Mesh,
-    num_pages: int,
-    tokens_per_page: int,
-    max_pages_per_slot: int,
-    max_pages_per_prefill: int,
-    pages_per_compute_block: int,
-    num_kv_heads: int,
-    kv_head_dim_size: int,
-    dtype: DType = jnp.float32,
-    attn_logits_soft_cap: float | None = None,
-    query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
-    kv_pages_axis_names: AxisNames = (
-        "paged_kv_heads",
-        "num_pages",
-        "tokens_per_page",
-        "paged_kv_head_dim_size",
-    ),
+  *,
+  mesh: Mesh,
+  num_pages: int,
+  tokens_per_page: int,
+  max_pages_per_slot: int,
+  max_pages_per_prefill: int,
+  pages_per_compute_block: int,
+  num_kv_heads: int,
+  kv_head_dim_size: int,
+  dtype: DType = jnp.float32,
+  attn_logits_soft_cap: float | None = None,
+  query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+  kv_pages_axis_names: AxisNames = (
+    "paged_kv_heads",
+    "num_pages",
+    "tokens_per_page",
+    "paged_kv_head_dim_size",
+  ),
 ):
   """A factory function to create a PagedAttentionOp as a Linen module.
 
@@ -83,20 +93,20 @@ def paged_attention_op_as_linen(
   """
 
   return nnx.bridge.to_linen(
-      PagedAttentionOp,
-      mesh=mesh,
-      num_pages=num_pages,
-      tokens_per_page=tokens_per_page,
-      max_pages_per_slot=max_pages_per_slot,
-      max_pages_per_prefill=max_pages_per_prefill,
-      pages_per_compute_block=pages_per_compute_block,
-      num_kv_heads=num_kv_heads,
-      kv_head_dim_size=kv_head_dim_size,
-      dtype=dtype,
-      attn_logits_soft_cap=attn_logits_soft_cap,
-      query_axis_names=query_axis_names,
-      kv_pages_axis_names=kv_pages_axis_names,
-      metadata_fn=variable_to_logically_partitioned,
+    PagedAttentionOp,
+    mesh=mesh,
+    num_pages=num_pages,
+    tokens_per_page=tokens_per_page,
+    max_pages_per_slot=max_pages_per_slot,
+    max_pages_per_prefill=max_pages_per_prefill,
+    pages_per_compute_block=pages_per_compute_block,
+    num_kv_heads=num_kv_heads,
+    kv_head_dim_size=kv_head_dim_size,
+    dtype=dtype,
+    attn_logits_soft_cap=attn_logits_soft_cap,
+    query_axis_names=query_axis_names,
+    kv_pages_axis_names=kv_pages_axis_names,
+    metadata_fn=variable_to_logically_partitioned,
   )
 
 
@@ -109,28 +119,28 @@ class PagedAttentionOp(nnx.Module):
   """
 
   def __init__(
-      self,
-      mesh: Mesh,
-      num_pages: int,
-      tokens_per_page: int,
-      max_pages_per_slot: int,
-      max_pages_per_prefill: int,
-      pages_per_compute_block: int,
-      num_kv_heads: int,
-      kv_head_dim_size: int,
-      dtype: DType = jnp.float32,
-      attn_logits_soft_cap: float | None = None,
-      query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
-      kv_pages_axis_names: AxisNames = (
-          "paged_kv_heads",
-          "num_pages",
-          "tokens_per_page",
-          "paged_kv_head_dim_size",
-      ),
-      *,
-      # Not used in Embed but passed in by nnx.bridge.to_linen.
-      # TODO: Remove when bridge no longer needed
-      rngs: nnx.Rngs,
+    self,
+    mesh: Mesh,
+    num_pages: int,
+    tokens_per_page: int,
+    max_pages_per_slot: int,
+    max_pages_per_prefill: int,
+    pages_per_compute_block: int,
+    num_kv_heads: int,
+    kv_head_dim_size: int,
+    dtype: DType = jnp.float32,
+    attn_logits_soft_cap: float | None = None,
+    query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+    kv_pages_axis_names: AxisNames = (
+      "paged_kv_heads",
+      "num_pages",
+      "tokens_per_page",
+      "paged_kv_head_dim_size",
+    ),
+    *,
+    # Not used in Embed but passed in by nnx.bridge.to_linen.
+    # TODO: Remove when bridge no longer needed
+    rngs: nnx.Rngs,
   ):
     """Initializes the PagedAttentionOp module.
 
@@ -164,19 +174,19 @@ class PagedAttentionOp(nnx.Module):
     self.kv_pages_axis_names = kv_pages_axis_names
 
     self.kv_pages_shape = (
-        self.num_kv_heads,
-        self.num_pages,
-        self.tokens_per_page,
-        self.kv_head_dim_size,
+      self.num_kv_heads,
+      self.num_pages,
+      self.tokens_per_page,
+      self.kv_head_dim_size,
     )
 
     self.key_pages = nnx.Cache(
-        jnp.zeros(self.kv_pages_shape, dtype=self.dtype),
-        sharding=self.kv_pages_axis_names,
+      jnp.zeros(self.kv_pages_shape, dtype=self.dtype),
+      sharding=self.kv_pages_axis_names,
     )
     self.value_pages = nnx.Cache(
-        jnp.zeros(self.kv_pages_shape, dtype=self.dtype),
-        sharding=self.kv_pages_axis_names,
+      jnp.zeros(self.kv_pages_shape, dtype=self.dtype),
+      sharding=self.kv_pages_axis_names,
     )
 
   def _maybe_materialize_cache(self, cache: nnx.Cache) -> nnx.Cache:
@@ -186,8 +196,8 @@ class PagedAttentionOp(nnx.Module):
       # need to ensure the cache state is accessible at runtime.
       # TODO: Delete this function when the to_linen bridge is no longer needed.
       return nnx.Cache(
-          jnp.zeros(self.kv_pages_shape, dtype=self.dtype),
-          sharding=cache.sharding,
+        jnp.zeros(self.kv_pages_shape, dtype=self.dtype),
+        sharding=cache.sharding,
       )
     return cache
 
@@ -216,10 +226,10 @@ class PagedAttentionOp(nnx.Module):
     def pad_to_kv_head_dim_size(x):
       if x.shape[-1] != self.kv_head_dim_size:
         return jnp.pad(
-            x,
-            ((0, 0), (0, 0), (0, 0), (0, self.kv_head_dim_size - x.shape[-1])),
-            mode="constant",
-            constant_values=0.0,
+          x,
+          ((0, 0), (0, 0), (0, 0), (0, self.kv_head_dim_size - x.shape[-1])),
+          mode="constant",
+          constant_values=0.0,
         )
       else:
         return x
@@ -256,11 +266,11 @@ class PagedAttentionOp(nnx.Module):
 
   # TODO(rupliu): add sharding when SPMD is fully supported
   def paged_attention_v2_prefill(
-      self,
-      query: Array,
-      key_pages_cache: nnx.Cache,
-      value_pages_cache: nnx.Cache,
-      page_state: page_manager.PageState,
+    self,
+    query: Array,
+    key_pages_cache: nnx.Cache,
+    value_pages_cache: nnx.Cache,
+    page_state: page_manager.PageState,
   ) -> Array:
     """Apply ragged input Paged Attention in prefill only. The assumption
     is the batch_size is only 1
@@ -273,25 +283,25 @@ class PagedAttentionOp(nnx.Module):
     num_seqs = jnp.array([1])
     query = query[0]  # [batch_size, max_num_tokens, num_kv_heads, head_dim] to [max_num_tokens, num_kv_heads, head_dim]
     result = paged_attention_kernel_v2.ragged_paged_attention(
-        q=query,
-        k_pages=k_p,  # [total_num_pages, page_size, num_kv_heads, head_dim]
-        v_pages=v_p,
-        kv_lens=jnp.array([query.shape[0]]),  # max_prefill_length
-        cu_q_lens=c_q_l,  # the accumulative real lengths of requests, starting from 0
-        page_indices=page_state.page_map,
-        num_seqs=num_seqs,
-        # TODO(rupliu) debug: repeated response when enabled below
-        # num_kv_pages_per_block=self.pages_per_compute_block,
+      q=query,
+      k_pages=k_p,  # [total_num_pages, page_size, num_kv_heads, head_dim]
+      v_pages=v_p,
+      kv_lens=jnp.array([query.shape[0]]),  # max_prefill_length
+      cu_q_lens=c_q_l,  # the accumulative real lengths of requests, starting from 0
+      page_indices=page_state.page_map,
+      num_seqs=num_seqs,
+      # TODO(rupliu) debug: repeated response when enabled below
+      # num_kv_pages_per_block=self.pages_per_compute_block,
     )
     return jnp.expand_dims(result, axis=0)  # [batch_size, seq_len, n_kv_head, head_dim] and batch_size is 1 for now
 
   # TODO(rupliu): add sharding when SPMD is fully supported
   def paged_attention_v2_decode(
-      self,
-      query: Array,
-      key_pages_cache: nnx.Cache,
-      value_pages_cache: nnx.Cache,
-      page_state: page_manager.PageState,
+    self,
+    query: Array,
+    key_pages_cache: nnx.Cache,
+    value_pages_cache: nnx.Cache,
+    page_state: page_manager.PageState,
   ) -> Array:
     """Apply ragged input Paged Attention in decode only."""
     batch_size = query.shape[0]
@@ -301,76 +311,76 @@ class PagedAttentionOp(nnx.Module):
     c_q_l = jnp.arange(batch_size + 1)  # one token per sequence
     num_seqs = jnp.array([batch_size])  # real number of requests, set it to batch_size
     result = paged_attention_kernel_v2.ragged_paged_attention(
-        q=query,  # [max_batched_num_tokens, num_kv_heads, head_dim]
-        k_pages=k_p,  # [total_num_pages, page_size, num_kv_heads, head_dim]
-        v_pages=v_p,  # [total_num_pages, page_size, num_kv_heads, head_dim]
-        kv_lens=page_state.sequence_lengths,  # [max_num_seqs]
-        cu_q_lens=c_q_l,  # [max_num_seqs+1]
-        page_indices=page_state.page_map,  # [max_num_seqs, pages_per_seq]
-        num_seqs=num_seqs,
-        num_kv_pages_per_block=self.pages_per_compute_block,
+      q=query,  # [max_batched_num_tokens, num_kv_heads, head_dim]
+      k_pages=k_p,  # [total_num_pages, page_size, num_kv_heads, head_dim]
+      v_pages=v_p,  # [total_num_pages, page_size, num_kv_heads, head_dim]
+      kv_lens=page_state.sequence_lengths,  # [max_num_seqs]
+      cu_q_lens=c_q_l,  # [max_num_seqs+1]
+      page_indices=page_state.page_map,  # [max_num_seqs, pages_per_seq]
+      num_seqs=num_seqs,
+      num_kv_pages_per_block=self.pages_per_compute_block,
     )
     return jnp.expand_dims(
-        result, axis=1
+      result, axis=1
     )  # [batch_size, n_kv_head, head_dim] to [batch_size, seq_len, n_kv_head, head_dim]
 
   # v1 kernel has around 20% performance gain than v2 kernel in decode only task
   def paged_attention_v1_decode(
-      self,
-      query: Array,
-      key_pages_cache: nnx.Cache,
-      value_pages_cache: nnx.Cache,
-      page_state: page_manager.PageState,
+    self,
+    query: Array,
+    key_pages_cache: nnx.Cache,
+    value_pages_cache: nnx.Cache,
+    page_state: page_manager.PageState,
   ) -> Array:
     """Apply Paged Attention v1 in decode only."""
     kv_pages_pspec = logical_to_mesh_axes(("paged_kv_heads", None, None, None), self.mesh)
     q_pspec = logical_to_mesh_axes((None, None, "paged_kv_heads", None), self.mesh)
 
     @functools.partial(
-        jax.shard_map,
-        mesh=self.mesh,
-        in_specs=(
-            q_pspec,
-            kv_pages_pspec,
-            kv_pages_pspec,
-            P(None),
-            P(None, None),
-            None,
-        ),
-        out_specs=q_pspec,
-        check_vma=False,
+      jax.shard_map,
+      mesh=self.mesh,
+      in_specs=(
+        q_pspec,
+        kv_pages_pspec,
+        kv_pages_pspec,
+        P(None),
+        P(None, None),
+        None,
+      ),
+      out_specs=q_pspec,
+      check_vma=False,
     )
     def wrap_paged_attention(q, k_pages, v_pages, lengths, page_indices, pages_per_compute_block):
       q = jnp.squeeze(q, axis=1)
       result = paged_attention_kernel.paged_attention(
-          q=q,  # [batch_size, num_heads, head_dim]
-          k_pages=k_pages,
-          v_pages=v_pages,
-          lengths=lengths,
-          page_indices=page_indices,
-          pages_per_compute_block=pages_per_compute_block,
+        q=q,  # [batch_size, num_heads, head_dim]
+        k_pages=k_pages,
+        v_pages=v_pages,
+        lengths=lengths,
+        page_indices=page_indices,
+        pages_per_compute_block=pages_per_compute_block,
       )
       return jnp.expand_dims(result, axis=1)  # [batch_size, n_kv_head, head_dim] to [batch_size, 1, n_kv_head, head_dim]
 
     return wrap_paged_attention(
-        query,
-        key_pages_cache.value,
-        value_pages_cache.value,
-        page_state.sequence_lengths,
-        page_state.page_map,
-        self.pages_per_compute_block,
+      query,
+      key_pages_cache.value,
+      value_pages_cache.value,
+      page_state.sequence_lengths,
+      page_state.page_map,
+      self.pages_per_compute_block,
     )
 
   def __call__(
-      self,
-      query: Array,
-      key: Array,
-      value: Array,
-      decoder_segment_ids: Array,
-      model_mode: str,
-      previous_chunk=None,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
+    self,
+    query: Array,
+    key: Array,
+    value: Array,
+    decoder_segment_ids: Array,
+    model_mode: str,
+    previous_chunk=None,
+    slot: None | int = None,
+    page_state: None | page_manager.PageState = None,
   ):
     """Applies the paged attention mechanism.
 
@@ -407,45 +417,45 @@ class PagedAttentionOp(nnx.Module):
       self.update_prefill_step_pages(key_pages_cache, value_pages_cache, key, value, slot, page_state)
       if _use_kernel_v2:
         return (
-            self.paged_attention_v2_prefill(query, key_pages_cache, value_pages_cache, page_state),
-            None,
-            None,
+          self.paged_attention_v2_prefill(query, key_pages_cache, value_pages_cache, page_state),
+          None,
+          None,
         )
       return self.paged_dot_product_attention_with_max_and_sum(query, key, value)
     elif model_mode == MODEL_MODE_AUTOREGRESSIVE and page_state is not None:
       self.update_decode_step_pages(key_pages_cache, value_pages_cache, key, value, page_state)
       if _use_kernel_v2:
         return (
-            self.paged_attention_v2_decode(query, key_pages_cache, value_pages_cache, page_state),
-            None,
-            None,
+          self.paged_attention_v2_decode(query, key_pages_cache, value_pages_cache, page_state),
+          None,
+          None,
         )
       return (
-          self.paged_attention_v1_decode(query, key_pages_cache, value_pages_cache, page_state),
-          None,
-          None,
+        self.paged_attention_v1_decode(query, key_pages_cache, value_pages_cache, page_state),
+        None,
+        None,
       )
     else:
       raise NotImplementedError(model_mode)
 
   def update_prefill_step_pages(
-      self,
-      key_pages_cache: nnx.Cache,  # [num_kv_heads, num_pages, tokens_per_page, head_dim]
-      value_pages_cache: nnx.Cache,
-      key: Array,
-      value: Array,
-      slot: int,
-      page_state: page_manager.PageState,
+    self,
+    key_pages_cache: nnx.Cache,  # [num_kv_heads, num_pages, tokens_per_page, head_dim]
+    value_pages_cache: nnx.Cache,
+    key: Array,
+    value: Array,
+    slot: int,
+    page_state: page_manager.PageState,
   ) -> None:
     """Update pages for prefill step."""
-    assert (
-        key.shape == value.shape
-    ), f"prefill_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
+    assert key.shape == value.shape, (
+      f"prefill_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
+    )
     batch_size, seq_len, n_kv_head, head_dim = key.shape
     assert seq_len % self.tokens_per_page == 0, f"seq_length {seq_len} and  tokens_per_page {self.tokens_per_page}"
     assert key_pages_cache.value.shape == value_pages_cache.value.shape, (
-        f"prefill_step key/value_pages_cache should have the same shape, but "
-        f"getting {key_pages_cache.shape=} and {value_pages_cache.shape=} instead"
+      f"prefill_step key/value_pages_cache should have the same shape, but "
+      f"getting {key_pages_cache.shape=} and {value_pages_cache.shape=} instead"
     )
 
     v_n_kv, _, v_p, v_d = key_pages_cache.value.shape
@@ -453,8 +463,8 @@ class PagedAttentionOp(nnx.Module):
     assert v_p == self.tokens_per_page, f"{v_p=} {self.tokens_per_page=}"
     assert v_d == head_dim, f"{v_d=} {head_dim=}"
     assert page_state.page_map.shape == (
-        page_state.num_pages_used.shape[0],
-        self.max_pages_per_slot,
+      page_state.num_pages_used.shape[0],
+      self.max_pages_per_slot,
     )
 
     # Handle both init (b>1) and runtime (b=1) cases
@@ -469,22 +479,22 @@ class PagedAttentionOp(nnx.Module):
     value = jnp.transpose(value, axes=(1, 0, 2))
 
     key = jnp.reshape(
-        key,
-        shape=(
-            n_kv_head,
-            max(1, seq_len // self.tokens_per_page),
-            self.tokens_per_page,
-            head_dim,
-        ),
+      key,
+      shape=(
+        n_kv_head,
+        max(1, seq_len // self.tokens_per_page),
+        self.tokens_per_page,
+        head_dim,
+      ),
     )
     value = jnp.reshape(
-        value,
-        shape=(
-            n_kv_head,
-            max(1, seq_len // self.tokens_per_page),
-            self.tokens_per_page,
-            head_dim,
-        ),
+      value,
+      shape=(
+        n_kv_head,
+        max(1, seq_len // self.tokens_per_page),
+        self.tokens_per_page,
+        head_dim,
+      ),
     )
 
     key_pages_cache.value = nn.with_logical_constraint(key, self.kv_pages_axis_names)

@@ -57,10 +57,10 @@ from MaxText import model_creation_utils
 from MaxText.train import loss_fn
 from MaxText.sft import hooks
 from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    create_goodput_recorder,
-    maybe_monitor_goodput,
-    maybe_record_goodput,
+  GoodputEvent,
+  create_goodput_recorder,
+  maybe_monitor_goodput,
+  maybe_record_goodput,
 )
 
 
@@ -75,8 +75,8 @@ def get_tunix_config(mt_config):
   """
   # Checkpointing configurations
   checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=mt_config.checkpoint_period,
-      enable_async_checkpointing=mt_config.async_checkpointing,
+    save_interval_steps=mt_config.checkpoint_period,
+    enable_async_checkpointing=mt_config.async_checkpointing,
   )
 
   # Metrics configurations
@@ -91,20 +91,20 @@ def get_tunix_config(mt_config):
       max_logging.log("Pathways backend detected. Disabling setting profile options.")
       set_profile_options = False
     profiler_options = profiler.ProfilerOptions(
-        log_dir=mt_config.tensorboard_dir,
-        skip_first_n_steps=mt_config.skip_first_n_steps_for_profiler,
-        profiler_steps=mt_config.profiler_steps,
-        set_profile_options=set_profile_options,
+      log_dir=mt_config.tensorboard_dir,
+      skip_first_n_steps=mt_config.skip_first_n_steps_for_profiler,
+      profiler_steps=mt_config.profiler_steps,
+      set_profile_options=set_profile_options,
     )
 
   return peft_trainer.TrainingConfig(
-      eval_every_n_steps=mt_config.eval_interval,
-      max_steps=mt_config.steps,
-      gradient_accumulation_steps=mt_config.gradient_accumulation_steps,
-      checkpoint_root_directory=mt_config.checkpoint_dir,
-      checkpointing_options=checkpointing_options,
-      metrics_logging_options=metrics_logging_options,
-      profiler_options=profiler_options,
+    eval_every_n_steps=mt_config.eval_interval,
+    max_steps=mt_config.steps,
+    gradient_accumulation_steps=mt_config.gradient_accumulation_steps,
+    checkpoint_root_directory=mt_config.checkpoint_dir,
+    checkpointing_options=checkpointing_options,
+    metrics_logging_options=metrics_logging_options,
+    profiler_options=profiler_options,
   )
 
 
@@ -124,12 +124,12 @@ def use_maxtext_loss_function(trainer, mt_config):
 
   def loss_func(model, inputs, inputs_position, inputs_segmentation, targets, targets_position, targets_segmentation):
     data = {
-        "inputs": inputs,
-        "inputs_position": inputs_position,
-        "inputs_segmentation": inputs_segmentation,
-        "targets": targets,
-        "targets_position": targets_position,
-        "targets_segmentation": targets_segmentation,
+      "inputs": inputs,
+      "inputs_position": inputs_position,
+      "inputs_segmentation": inputs_segmentation,
+      "targets": targets,
+      "targets_position": targets_position,
+      "targets_segmentation": targets_segmentation,
     }
     return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=True)
 

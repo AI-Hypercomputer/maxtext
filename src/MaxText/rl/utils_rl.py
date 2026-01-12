@@ -14,6 +14,7 @@
 
 # pylint: disable=bare-except, consider-using-generator, chained-comparison
 """RL Utils Module."""
+
 import re
 import optax
 from MaxText import max_logging
@@ -24,18 +25,18 @@ from MaxText import max_logging
 def get_match_format_regex(tmvp_config):
   """Returns a compiled regex to extract the answer from a completion."""
   match_format = re.compile(
-      (
-          r"^[\s]{0,}"
-          rf"{tmvp_config.reasoning_start_token}.+?{tmvp_config.reasoning_end_token}.*?"
-          rf"{tmvp_config.solution_start_token}(.+?){tmvp_config.solution_end_token}"
-          r"[\s]{0,}$"
-      ),
-      flags=re.MULTILINE | re.DOTALL,
+    (
+      r"^[\s]{0,}"
+      rf"{tmvp_config.reasoning_start_token}.+?{tmvp_config.reasoning_end_token}.*?"
+      rf"{tmvp_config.solution_start_token}(.+?){tmvp_config.solution_end_token}"
+      r"[\s]{0,}$"
+    ),
+    flags=re.MULTILINE | re.DOTALL,
   )
   if tmvp_config.debug["rl"]:
     match_format.search(
-        f"{tmvp_config.reasoning_start_token}Let me"
-        f" think!{tmvp_config.reasoning_end_token}{tmvp_config.solution_start_token}2{tmvp_config.solution_end_token}",
+      f"{tmvp_config.reasoning_start_token}Let me"
+      f" think!{tmvp_config.reasoning_end_token}{tmvp_config.solution_start_token}2{tmvp_config.solution_end_token}",
     )
   return match_format
 
@@ -67,24 +68,24 @@ def match_format_approximately(prompts, completions, tmvp_config, **kargs):
     # Count how many keywords are seen - we penalize if too many!
     # If we see 1, then plus some points!
     score += (
-        tmvp_config.reward_partial_format_match
-        if completion.count(tmvp_config.reasoning_start_token) == 1
-        else tmvp_config.penalty_incorrect_format
+      tmvp_config.reward_partial_format_match
+      if completion.count(tmvp_config.reasoning_start_token) == 1
+      else tmvp_config.penalty_incorrect_format
     )
     score += (
-        tmvp_config.reward_partial_format_match
-        if completion.count(tmvp_config.reasoning_end_token) == 1
-        else tmvp_config.penalty_incorrect_format
+      tmvp_config.reward_partial_format_match
+      if completion.count(tmvp_config.reasoning_end_token) == 1
+      else tmvp_config.penalty_incorrect_format
     )
     score += (
-        tmvp_config.reward_partial_format_match
-        if completion.count(tmvp_config.solution_start_token) == 1
-        else tmvp_config.penalty_incorrect_format
+      tmvp_config.reward_partial_format_match
+      if completion.count(tmvp_config.solution_start_token) == 1
+      else tmvp_config.penalty_incorrect_format
     )
     score += (
-        tmvp_config.reward_partial_format_match
-        if completion.count(tmvp_config.solution_end_token) == 1
-        else tmvp_config.penalty_incorrect_format
+      tmvp_config.reward_partial_format_match
+      if completion.count(tmvp_config.solution_end_token) == 1
+      else tmvp_config.penalty_incorrect_format
     )
     scores.append(score)
   return scores
@@ -182,19 +183,19 @@ def extract_hash_answer(text: str) -> str | None:
 def get_optimizer(tmvp_config, max_train_steps):
   """Function to obtain an optax optimizer, currently we use adamw."""
   optimizer = optax.adamw(
-      learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-          init_value=0.0,
-          peak_value=tmvp_config.learning_rate,
-          # Linearly increase learning rate from 0. to learning_rate in the first
-          # warmup_steps_fraction training steps, and then gradually decrease the
-          # learning rate to 0 using cosine scheduler.
-          warmup_steps=int(tmvp_config.warmup_steps_fraction * max_train_steps),
-          decay_steps=max_train_steps,
-          end_value=0.0,
-      ),
-      b1=tmvp_config.adam_b1,
-      b2=tmvp_config.adam_b2,
-      weight_decay=tmvp_config.adam_weight_decay,
+    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
+      init_value=0.0,
+      peak_value=tmvp_config.learning_rate,
+      # Linearly increase learning rate from 0. to learning_rate in the first
+      # warmup_steps_fraction training steps, and then gradually decrease the
+      # learning rate to 0 using cosine scheduler.
+      warmup_steps=int(tmvp_config.warmup_steps_fraction * max_train_steps),
+      decay_steps=max_train_steps,
+      end_value=0.0,
+    ),
+    b1=tmvp_config.adam_b1,
+    b2=tmvp_config.adam_b2,
+    weight_decay=tmvp_config.adam_weight_decay,
   )
 
   # TODO: @mazumdera: try optimizer offloading with adamw
@@ -203,7 +204,7 @@ def get_optimizer(tmvp_config, max_train_steps):
   # important to keep KL divergence in check.
   if tmvp_config.gradient_clipping_threshold > 0:
     optimizer = optax.chain(
-        optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold),
-        optimizer,
+      optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold),
+      optimizer,
     )
   return optimizer

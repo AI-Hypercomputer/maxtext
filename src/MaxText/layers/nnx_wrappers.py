@@ -100,9 +100,9 @@ def _recursive_merge(dict1, dict2):
 def linen_vars_to_nnx_attrs(variables: tp.Mapping[str, Any]) -> dict[str, Any]:
   """Convert a dict of Linen-style variables to NNX variables."""
   nnx_vars = jax.tree_util.tree_map_with_path(
-      lambda kp, x: to_nnx_var(get_col_name(kp), x),
-      variables,
-      is_leaf=lambda x: not isinstance(x, dict),
+    lambda kp, x: to_nnx_var(get_col_name(kp), x),
+    variables,
+    is_leaf=lambda x: not isinstance(x, dict),
   )
 
   flat_paths: dict[tuple, tp.Any] = {}
@@ -111,9 +111,9 @@ def linen_vars_to_nnx_attrs(variables: tp.Mapping[str, Any]) -> dict[str, Any]:
     for path, variable in nnx.traversals.flatten_mapping(col_variables).items():
       if path in flat_paths:
         raise ValueError(
-            f"Found duplicate variable path {path} with variables "
-            f"{flat_paths[path]} and {variable}. "
-            "This is not allowed in NNX."
+          f"Found duplicate variable path {path} with variables "
+          f"{flat_paths[path]} and {variable}. "
+          "This is not allowed in NNX."
         )
       flat_paths[path] = variable
 
@@ -201,9 +201,9 @@ class ToNNX(Module):
   """
 
   def __init__(
-      self,
-      module: linen.Module,
-      rngs: Rngs | jax.Array | None = None,
+    self,
+    module: linen.Module,
+    rngs: Rngs | jax.Array | None = None,
   ):
     self.to_nnx__module = module
 
@@ -230,12 +230,12 @@ class ToNNX(Module):
     return super().__getattribute__(name)
 
   def __call__(
-      self,
-      *args: Any,
-      rngs: Rngs | jax.Array | None = None,
-      method: tp.Callable[..., Any] | str | None = None,
-      mutable: tp.Any = None,
-      **kwargs: Any,
+    self,
+    *args: Any,
+    rngs: Rngs | jax.Array | None = None,
+    method: tp.Callable[..., Any] | str | None = None,
+    mutable: tp.Any = None,
+    **kwargs: Any,
   ) -> Any:
     # Shape-based lazy init of the flax variables
     if rngs is None:
@@ -253,9 +253,9 @@ class ToNNX(Module):
       out, updates = self.to_nnx__module.init_with_output(_rngs, *args, method=method, **kwargs)
     else:
       nnx_attrs = {
-          k: v
-          for k, v in vars(self).items()
-          if not k.startswith("to_nnx__") and not k.startswith("_pytree__") and not k.startswith("_object__")
+        k: v
+        for k, v in vars(self).items()
+        if not k.startswith("to_nnx__") and not k.startswith("_pytree__") and not k.startswith("_object__")
       }
       variables = nnx_attrs_to_linen_vars(nnx_attrs)
 
@@ -360,11 +360,11 @@ def _fix_for_qwix_quantization(module: Module):
     # Only enable it on non-root nnx modules.
     if path and isinstance(node, nnx.Module):
       node.__class__ = type(
-          node.__class__.__name__,
-          (node.__class__,),
-          {
-              "__call__": wrap(node.__class__.__call__, str(path[-1])),
-          },
+        node.__class__.__name__,
+        (node.__class__,),
+        {
+          "__call__": wrap(node.__class__.__call__, str(path[-1])),
+        },
       )
 
   # Set the correct weight names. We call QtProvider.process_model_inputs here
@@ -447,9 +447,9 @@ class ToLinen(linen.Module):
       return x
 
     states = jtu.tree_map(
-        maybe_unbox,
-        list(core.unfreeze(self.variables).values()),  # type: ignore[wrong-arg-types]
-        is_leaf=lambda x: isinstance(x, meta.AxisMetadata),
+      maybe_unbox,
+      list(core.unfreeze(self.variables).values()),  # type: ignore[wrong-arg-types]
+      is_leaf=lambda x: isinstance(x, meta.AxisMetadata),
     )
     if not states:
       states = ({},)
@@ -514,46 +514,45 @@ class ToLinen(linen.Module):
 
         collection_state = nnx.traversals.unflatten_mapping(flat_state)
         collection_state = jax.tree.map(
-            _to_linen_var,
-            collection_state,
-            is_leaf=lambda x: isinstance(x, nnx.VariableState),
+          _to_linen_var,
+          collection_state,
+          is_leaf=lambda x: isinstance(x, nnx.VariableState),
         )
         for k, v in collection_state.items():
           self.put_variable(collection, k, v)
 
 
-class _Missing:
-  ...
+class _Missing: ...
 
 
 _MISSING = _Missing()
 
 
 def to_linen(
-    nnx_class: tp.Callable[..., Module],
-    *args,
-    metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var,
-    name: str | None = None,
-    skip_rng: bool = False,
-    abstract_init: bool = True,
-    **kwargs,
+  nnx_class: tp.Callable[..., Module],
+  *args,
+  metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var,
+  name: str | None = None,
+  skip_rng: bool = False,
+  abstract_init: bool = True,
+  **kwargs,
 ):
   """Shortcut of `nnx.bridge.ToLinen` if user is not changing any of its default fields."""
   return ToLinen(
-      nnx_class,
-      args=args,
-      kwargs=FrozenDict(kwargs),
-      metadata_fn=metadata_fn,
-      skip_rng=skip_rng,
-      name=name,
+    nnx_class,
+    args=args,
+    kwargs=FrozenDict(kwargs),
+    metadata_fn=metadata_fn,
+    skip_rng=skip_rng,
+    name=name,
   )
 
 
 def to_linen_class(
-    base_nnx_class: type[M],
-    base_metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var,
-    base_skip_rng: bool = False,
-    **partial_kwargs: tp.Any,
+  base_nnx_class: type[M],
+  base_metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var,
+  base_skip_rng: bool = False,
+  **partial_kwargs: tp.Any,
 ) -> type[ToLinen]:
   """A dynamically created Linen Module that wraps a specific NNX Module.
 
@@ -587,15 +586,15 @@ def to_linen_class(
   """
 
   def __init__(
-      self,
-      args=None,
-      kwargs=None,
-      nnx_class=None,
-      skip_rng=None,
-      metadata_fn=None,
-      name=_MISSING,
-      parent=_MISSING,
-      **other_kwargs,
+    self,
+    args=None,
+    kwargs=None,
+    nnx_class=None,
+    skip_rng=None,
+    metadata_fn=None,
+    name=_MISSING,
+    parent=_MISSING,
+    **other_kwargs,
   ):
     linen_kwargs = {}
     if not isinstance(parent, _Missing):
@@ -603,13 +602,13 @@ def to_linen_class(
     if not isinstance(name, _Missing):
       linen_kwargs["name"] = name
     ToLinen.__init__(
-        self,
-        nnx_class=nnx_class or base_nnx_class,
-        args=args or (),
-        metadata_fn=metadata_fn or base_metadata_fn,
-        skip_rng=skip_rng or base_skip_rng,
-        kwargs=FrozenDict({**partial_kwargs, **(kwargs or {}), **other_kwargs}),
-        **linen_kwargs,
+      self,
+      nnx_class=nnx_class or base_nnx_class,
+      args=args or (),
+      metadata_fn=metadata_fn or base_metadata_fn,
+      skip_rng=skip_rng or base_skip_rng,
+      kwargs=FrozenDict({**partial_kwargs, **(kwargs or {}), **other_kwargs}),
+      **linen_kwargs,
     )
 
   class ToLinenPartial(ToLinen):

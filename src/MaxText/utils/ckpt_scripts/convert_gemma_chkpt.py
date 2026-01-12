@@ -75,30 +75,30 @@ def main(raw_args=None) -> None:
   print(f"head_dim: {head_dim}")
 
   jax_weights = {
-      "decoder": {
-          "decoder_norm": {"scale": params["transformer"]["final_norm"]["scale"] + 1},
-      },
-      "token_embedder": {"embedding": params["transformer"]["embedder"]["input_embedding"] * jnp.sqrt(embed_dim)},
+    "decoder": {
+      "decoder_norm": {"scale": params["transformer"]["final_norm"]["scale"] + 1},
+    },
+    "token_embedder": {"embedding": params["transformer"]["embedder"]["input_embedding"] * jnp.sqrt(embed_dim)},
   }
   self_attention = dict(
-      {
-          "query": {"kernel": []},
-          "key": {"kernel": []},
-          "value": {"kernel": []},
-          "out": {"kernel": []},
-      }
+    {
+      "query": {"kernel": []},
+      "key": {"kernel": []},
+      "value": {"kernel": []},
+      "out": {"kernel": []},
+    }
   )
 
   layer_weight = dict(
-      {
-          "mlp": {
-              "wi_0": {"kernel": []},
-              "wi_1": {"kernel": []},
-              "wo": {"kernel": []},
-          },
-          "pre_self_attention_norm": {"scale": []},
-          "pre_ffw_norm": {"scale": []},
-      }
+    {
+      "mlp": {
+        "wi_0": {"kernel": []},
+        "wi_1": {"kernel": []},
+        "wo": {"kernel": []},
+      },
+      "pre_self_attention_norm": {"scale": []},
+      "pre_ffw_norm": {"scale": []},
+    }
   )
 
   for layer_idx in range(num_layers):
@@ -106,23 +106,23 @@ def main(raw_args=None) -> None:
     # attention block
     if args.model_size in ("2b", "9b"):  # MQA
       self_attention["query"]["kernel"].append(
-          params["transformer"][in_layer_name]["attn"]["q_einsum"]["w"].transpose((1, 0, 2)) * head_dim**-0.5
+        params["transformer"][in_layer_name]["attn"]["q_einsum"]["w"].transpose((1, 0, 2)) * head_dim**-0.5
       )
       self_attention["key"]["kernel"].append(
-          params["transformer"][in_layer_name]["attn"]["kv_einsum"]["w"][0].transpose((1, 0, 2))
+        params["transformer"][in_layer_name]["attn"]["kv_einsum"]["w"][0].transpose((1, 0, 2))
       )
       self_attention["value"]["kernel"].append(
-          params["transformer"][in_layer_name]["attn"]["kv_einsum"]["w"][1].transpose((1, 0, 2))
+        params["transformer"][in_layer_name]["attn"]["kv_einsum"]["w"][1].transpose((1, 0, 2))
       )
     else:
       self_attention["query"]["kernel"].append(
-          params["transformer"][in_layer_name]["attn"]["qkv_einsum"]["w"][0].transpose((1, 0, 2)) * head_dim**-0.5
+        params["transformer"][in_layer_name]["attn"]["qkv_einsum"]["w"][0].transpose((1, 0, 2)) * head_dim**-0.5
       )
       self_attention["key"]["kernel"].append(
-          params["transformer"][in_layer_name]["attn"]["qkv_einsum"]["w"][1].transpose((1, 0, 2))
+        params["transformer"][in_layer_name]["attn"]["qkv_einsum"]["w"][1].transpose((1, 0, 2))
       )
       self_attention["value"]["kernel"].append(
-          params["transformer"][in_layer_name]["attn"]["qkv_einsum"]["w"][2].transpose((1, 0, 2))
+        params["transformer"][in_layer_name]["attn"]["qkv_einsum"]["w"][2].transpose((1, 0, 2))
       )
     self_attention["out"]["kernel"].append(params["transformer"][in_layer_name]["attn"]["attn_vec_einsum"]["w"])
     # mlp
@@ -130,7 +130,7 @@ def main(raw_args=None) -> None:
     layer_weight["mlp"]["wi_1"]["kernel"].append(params["transformer"][in_layer_name]["mlp"]["gating_einsum"]["w"][1])
     layer_weight["mlp"]["wo"]["kernel"].append(params["transformer"][in_layer_name]["mlp"]["linear"]["w"])
     layer_weight["pre_self_attention_norm"]["scale"].append(
-        params["transformer"][in_layer_name]["pre_attention_norm"]["scale"] + 1
+      params["transformer"][in_layer_name]["pre_attention_norm"]["scale"] + 1
     )
     layer_weight["pre_ffw_norm"]["scale"].append(params["transformer"][in_layer_name]["pre_ffw_norm"]["scale"] + 1)
 
@@ -143,7 +143,7 @@ def main(raw_args=None) -> None:
   layer_weight["mlp"]["wi_1"]["kernel"] = np.array(layer_weight["mlp"]["wi_1"]["kernel"]).transpose((1, 0, 2))
   layer_weight["mlp"]["wo"]["kernel"] = np.array(layer_weight["mlp"]["wo"]["kernel"]).transpose((1, 0, 2))
   layer_weight["pre_self_attention_norm"]["scale"] = np.array(layer_weight["pre_self_attention_norm"]["scale"]).transpose(
-      (1, 0)
+    (1, 0)
   )
   layer_weight["pre_ffw_norm"]["scale"] = np.array(layer_weight["pre_ffw_norm"]["scale"]).transpose((1, 0))
 
@@ -164,11 +164,15 @@ def main(raw_args=None) -> None:
   save_interval_steps = 1
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      args.maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
+    args.maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
   )
 
   state_new = train_state.TrainState(
-      step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+    step=0,
+    apply_fn=None,
+    params={"params": jax_weights},
+    tx=None,
+    opt_state={},  # type: ignore
   )
 
   if checkpoint_manager is not None:

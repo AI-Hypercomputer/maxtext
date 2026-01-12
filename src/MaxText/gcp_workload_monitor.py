@@ -100,35 +100,35 @@ class GCPWorkloadMonitor:
 
       # Create a TimeSeries object for the heartbeat metric
       series = monitoring_v3.TimeSeries(
-          metric=metric_pb2.Metric(
-              type="compute.googleapis.com/workload_process/heartbeat",
-              labels={
-                  "local_rank": local_rank,
-                  "instance_id": _get_gcp_metadata(category="instance", attribute="id"),
-              },
+        metric=metric_pb2.Metric(
+          type="compute.googleapis.com/workload_process/heartbeat",
+          labels={
+            "local_rank": local_rank,
+            "instance_id": _get_gcp_metadata(category="instance", attribute="id"),
+          },
+        ),
+        resource=monitored_resource_pb2.MonitoredResource(
+          type="compute.googleapis.com/WorkloadProcess",
+          labels={
+            "project_id": self.project_id,
+            "location": self.zone,
+            "workload_id": self.workload_id,
+            "replica_id": "0",
+            "process_id": global_rank,
+          },
+        ),
+        points=[
+          monitoring_v3.Point(
+            interval=monitoring_v3.TimeInterval(end_time={"seconds": seconds, "nanos": nanos}),
+            value=monitoring_v3.TypedValue(bool_value=True),
           ),
-          resource=monitored_resource_pb2.MonitoredResource(
-              type="compute.googleapis.com/WorkloadProcess",
-              labels={
-                  "project_id": self.project_id,
-                  "location": self.zone,
-                  "workload_id": self.workload_id,
-                  "replica_id": "0",
-                  "process_id": global_rank,
-              },
-          ),
-          points=[
-              monitoring_v3.Point(
-                  interval=monitoring_v3.TimeInterval(end_time={"seconds": seconds, "nanos": nanos}),
-                  value=monitoring_v3.TypedValue(bool_value=True),
-              ),
-          ],
+        ],
       )
 
       # Send data to Google Cloud Monitoring
       self.client.create_time_series(
-          request={"name": f"projects/{self.project_id}", "time_series": [series]},
-          timeout=30,
+        request={"name": f"projects/{self.project_id}", "time_series": [series]},
+        timeout=30,
       )
       max_logging.log("Heartbeat metric successfully sent to GCP.")
     except GoogleAPIError as e:
@@ -145,29 +145,29 @@ class GCPWorkloadMonitor:
 
       # Create a TimeSeries object for the performance metric
       series = monitoring_v3.TimeSeries(
-          metric=metric_pb2.Metric(
-              type="compute.googleapis.com/workload/performance",
+        metric=metric_pb2.Metric(
+          type="compute.googleapis.com/workload/performance",
+        ),
+        resource=monitored_resource_pb2.MonitoredResource(
+          type="compute.googleapis.com/Workload",
+          labels={
+            "location": self.zone,
+            "workload_id": self.workload_id,
+            "replica_id": "0",
+          },
+        ),
+        points=[
+          monitoring_v3.Point(
+            interval=monitoring_v3.TimeInterval(end_time={"seconds": seconds, "nanos": nanos}),
+            value=monitoring_v3.TypedValue(double_value=performance_metric),
           ),
-          resource=monitored_resource_pb2.MonitoredResource(
-              type="compute.googleapis.com/Workload",
-              labels={
-                  "location": self.zone,
-                  "workload_id": self.workload_id,
-                  "replica_id": "0",
-              },
-          ),
-          points=[
-              monitoring_v3.Point(
-                  interval=monitoring_v3.TimeInterval(end_time={"seconds": seconds, "nanos": nanos}),
-                  value=monitoring_v3.TypedValue(double_value=performance_metric),
-              ),
-          ],
+        ],
       )
 
       # Send data to Google Cloud Monitoring
       self.client.create_time_series(
-          request={"name": f"projects/{self.project_id}", "time_series": [series]},
-          timeout=30,
+        request={"name": f"projects/{self.project_id}", "time_series": [series]},
+        timeout=30,
       )
       max_logging.log("Performance metric successfully sent to GCP.")
     except GoogleAPIError as e:
@@ -193,10 +193,10 @@ def _get_gcp_metadata(category: str, attribute: str, timeout=5, retries=3):
 
   session = requests.Session()
   retry_strategy = Retry(
-      total=retries,
-      backoff_factor=0.5,
-      # Retry on the following status codes
-      status_forcelist=[429, 500, 502, 503, 504],
+    total=retries,
+    backoff_factor=0.5,
+    # Retry on the following status codes
+    status_forcelist=[429, 500, 502, 503, 504],
   )
   adapter = requests.adapters.HTTPAdapter(max_retries=retry_strategy)
   session.mount("http://", adapter)

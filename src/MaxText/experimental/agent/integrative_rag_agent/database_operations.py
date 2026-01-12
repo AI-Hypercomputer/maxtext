@@ -46,7 +46,7 @@ def create_db():
   conn = sqlite3.connect(rag_db_file)
   cur = conn.cursor()
   cur.execute(
-      """
+    """
     CREATE TABLE IF NOT EXISTS documents (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -84,7 +84,7 @@ def save_document(name, text, desc, file, embedding):
   # Convert NumPy embedding to binary
   emb_binary = pickle.dumps(embedding.astype(np.float32))
   cur.execute(
-      "INSERT INTO documents (name,text,desc,file, embedding) VALUES (?, ?,?,?,?)", (name, text, desc, file, emb_binary)
+    "INSERT INTO documents (name,text,desc,file, embedding) VALUES (?, ?,?,?,?)", (name, text, desc, file, emb_binary)
   )
   conn.commit()
   conn.close()

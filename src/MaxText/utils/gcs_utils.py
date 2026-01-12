@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Common GCS Utils needed by multiple modules"""
+"""Common GCS Utils needed by multiple modules"""
+
 import shutil
 import json
 import os

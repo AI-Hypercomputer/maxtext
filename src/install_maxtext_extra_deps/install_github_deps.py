@@ -52,14 +52,14 @@ def main():
     sys.exit(1)
 
   command = [
-      sys.executable,  # Use the current Python executable's pip to ensure the correct environment
-      "-m",
-      "uv",
-      "pip",
-      "install",
-      "-r",
-      str(extra_deps_file),
-      "--no-deps",
+    sys.executable,  # Use the current Python executable's pip to ensure the correct environment
+    "-m",
+    "uv",
+    "pip",
+    "install",
+    "-r",
+    str(extra_deps_file),
+    "--no-deps",
   ]
 
   print(f"Installing extra dependencies from '{extra_deps_file}' using uv...")

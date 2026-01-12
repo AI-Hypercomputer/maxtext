@@ -74,16 +74,16 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   """convert ckpt."""
 
   base_args = [
-      "",
-      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),  # base arg
-      "per_device_batch_size=1",
-      "ici_fsdp_parallelism=-1",
-      "ici_tensor_parallelism=1",
-      f"model_name={maxtext_model_name}",
-      f"run_name={run_name}",
-      f"base_output_directory={base_output_directory}",
-      "checkpoint_period=1",
-      "async_checkpointing=false",
+    "",
+    os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),  # base arg
+    "per_device_batch_size=1",
+    "ici_fsdp_parallelism=-1",
+    "ici_tensor_parallelism=1",
+    f"model_name={maxtext_model_name}",
+    f"run_name={run_name}",
+    f"base_output_directory={base_output_directory}",
+    "checkpoint_period=1",
+    "async_checkpointing=false",
   ]
   cfg = pyconfig.initialize(base_args)
   init_rng, _ = random.split(random.PRNGKey(cfg.init_weights_seed), 2)
@@ -96,10 +96,10 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      cfg.checkpoint_dir,
-      cfg.enable_checkpointing,
-      cfg.async_checkpointing,
-      cfg.checkpoint_period,
+    cfg.checkpoint_dir,
+    cfg.enable_checkpointing,
+    cfg.async_checkpointing,
+    cfg.checkpoint_period,
   )
 
   state, _, _, _ = maxtext_utils.setup_training_state(model, None, tx, cfg, init_rng, mesh, checkpoint_manager)
@@ -108,87 +108,87 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   # maxtext keystr: (paxml keystr, transform_fn)
   keystr_map = {
-      "['token_embedder']['embedding']": (".params.lm.softmax.logits_ffn.linear.w", lambda x: x.T),
-      "['decoder']['position_embedder']['embedding']": (".params.lm.position_emb.emb_var", None),
-      "['decoder']['layers']['pre_self_attention_norm']['scale']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.layer_norm.scale",
-          lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['pre_self_attention_norm']['bias']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.layer_norm.bias",
-          lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['self_attention']['query']['kernel']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w",
-          lambda x: np.moveaxis(x[:, 0], 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['self_attention']['query']['bias']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b",
-          lambda x: np.moveaxis(x[:, 0], 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['self_attention']['key']['kernel']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w",
-          lambda x: np.moveaxis(x[:, 1], 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['self_attention']['key']['bias']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b",
-          lambda x: np.moveaxis(x[:, 1], 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['self_attention']['value']['kernel']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w",
-          lambda x: np.moveaxis(x[:, 2], 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['self_attention']['value']['bias']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b",
-          lambda x: np.moveaxis(x[:, 2], 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['self_attention']['qkv_proj']['kernel']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w",
-          lambda x: np.moveaxis(x, [2, 0], [0, cfg.param_scan_axis]),
-      ),
-      "['decoder']['layers']['self_attention']['qkv_proj']['bias']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b",
-          lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['self_attention']['out']['kernel']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.post.w",
-          lambda x: np.moveaxis(x, [0, 1], [cfg.param_scan_axis, -1]),
-      ),
-      "['decoder']['layers']['self_attention']['out']['bias']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.post.b",
-          lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['mlp']['mlp_layer_norm']['scale']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.layer_norm.scale",
-          lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['mlp']['mlp_layer_norm']['bias']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.layer_norm.bias",
-          lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['mlp']['wi']['kernel']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.ffn_layer1.linear.w",
-          lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['mlp']['wi']['bias']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.ffn_layer1.bias.b",
-          lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['mlp']['wo']['kernel']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.ffn_layer2.linear.w",
-          lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['layers']['mlp']['wo']['bias']": (
-          ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.ffn_layer2.bias.b",
-          lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
-      ),
-      "['decoder']['decoder_norm']['scale']": (".params.lm.final_ln.scale", lambda x: x.T),
-      "['decoder']['decoder_norm']['bias']": (".params.lm.final_ln.bias", None),
+    "['token_embedder']['embedding']": (".params.lm.softmax.logits_ffn.linear.w", lambda x: x.T),
+    "['decoder']['position_embedder']['embedding']": (".params.lm.position_emb.emb_var", None),
+    "['decoder']['layers']['pre_self_attention_norm']['scale']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.layer_norm.scale",
+      lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['pre_self_attention_norm']['bias']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.layer_norm.bias",
+      lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['self_attention']['query']['kernel']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w",
+      lambda x: np.moveaxis(x[:, 0], 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['self_attention']['query']['bias']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b",
+      lambda x: np.moveaxis(x[:, 0], 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['self_attention']['key']['kernel']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w",
+      lambda x: np.moveaxis(x[:, 1], 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['self_attention']['key']['bias']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b",
+      lambda x: np.moveaxis(x[:, 1], 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['self_attention']['value']['kernel']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w",
+      lambda x: np.moveaxis(x[:, 2], 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['self_attention']['value']['bias']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b",
+      lambda x: np.moveaxis(x[:, 2], 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['self_attention']['qkv_proj']['kernel']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w",
+      lambda x: np.moveaxis(x, [2, 0], [0, cfg.param_scan_axis]),
+    ),
+    "['decoder']['layers']['self_attention']['qkv_proj']['bias']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b",
+      lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['self_attention']['out']['kernel']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.post.w",
+      lambda x: np.moveaxis(x, [0, 1], [cfg.param_scan_axis, -1]),
+    ),
+    "['decoder']['layers']['self_attention']['out']['bias']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.self_attention.post.b",
+      lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['mlp']['mlp_layer_norm']['scale']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.layer_norm.scale",
+      lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['mlp']['mlp_layer_norm']['bias']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.layer_norm.bias",
+      lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['mlp']['wi']['kernel']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.ffn_layer1.linear.w",
+      lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['mlp']['wi']['bias']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.ffn_layer1.bias.b",
+      lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['mlp']['wo']['kernel']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.ffn_layer2.linear.w",
+      lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['layers']['mlp']['wo']['bias']": (
+      ".params.lm.transformer.repeat.sub.x_layers_0.ff_layer.ffn_layer2.bias.b",
+      lambda x: np.moveaxis(x, 0, cfg.param_scan_axis),
+    ),
+    "['decoder']['decoder_norm']['scale']": (".params.lm.final_ln.scale", lambda x: x.T),
+    "['decoder']['decoder_norm']['bias']": (".params.lm.final_ln.bias", None),
   }
 
   state_map = {
-      ".step": ("step", None),
-      ".opt_state.count": ("opt_states_0.no_prefix_0.count", None),
+    ".step": ("step", None),
+    ".opt_state.count": ("opt_states_0.no_prefix_0.count", None),
   }
 
   def get_layer_prefix(keystr_pax):
@@ -206,13 +206,13 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
     prefix_pax_opt_state = get_layer_prefix(keystr_pax)
     # first momentum in optimizer state
     state_map[f".opt_state.mu['params']{keystr_maxtext}"] = (
-        f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}",
-        transform_fn,
+      f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}",
+      transform_fn,
     )
     # second momentum in optimizer state
     state_map[f".opt_state.nu['params']{keystr_maxtext}"] = (
-        f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}",
-        transform_fn,
+      f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}",
+      transform_fn,
     )
 
   def verify_fn(key_path, _):
@@ -231,9 +231,9 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
     full_path = os.path.join(paxml_ckpt_prefix, file_path)
     spec = {"driver": "zarr", "metadata_key": ".zarray", "kvstore": {}}
     spec["kvstore"] = {
-        "bucket": bucket_name,
-        "driver": "gcs",
-        "path": full_path,
+      "bucket": bucket_name,
+      "driver": "gcs",
+      "path": full_path,
     }
 
     arr = ts.open(ts.Spec(spec), open=True).result().read().result()
@@ -244,9 +244,9 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
     shape = value.shape
     sharding = value.sharding
     result = jax.make_array_from_single_device_arrays(
-        shape,
-        sharding,
-        [jax.device_put(np.array(arr[index]), d) for d, index in sharding.addressable_devices_indices_map(shape).items()],
+      shape,
+      sharding,
+      [jax.device_put(np.array(arr[index]), d) for d, index in sharding.addressable_devices_indices_map(shape).items()],
     )
 
     # log peak cpu memory
@@ -279,10 +279,10 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument(
-      "--paxml-ckpt-path",
-      type=str,
-      default="gs://mlperf-llm-public2/gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000",
-      required=True,
+    "--paxml-ckpt-path",
+    type=str,
+    default="gs://mlperf-llm-public2/gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000",
+    required=True,
   )
   parser.add_argument("--maxtext-model-name", choices=["gpt3-175b", "gpt3-52k"], type=str, required=True)
   parser.add_argument("--base-output-directory", type=str, required=True)

@@ -73,13 +73,17 @@ from MaxText.experimental.agent.code_evaluation_agent.prompt_code_evaluation imp
 from MaxText.experimental.agent.code_evaluation_agent.utils import get_last_defined_module, run_pytest_capture_output
 from MaxText.experimental.agent.orchestration_agent.utils import parse_python_code
 from MaxText.experimental.agent.code_generation_agent.llm_code_generation import convert_code_from_torch_to_jax
-from MaxText.experimental.agent.self_debugging_agent.utils import save_in_file_and_check_code_syntax, parse_json_response, smartly_copy_code
+from MaxText.experimental.agent.self_debugging_agent.utils import (
+  save_in_file_and_check_code_syntax,
+  parse_json_response,
+  smartly_copy_code,
+)
 from MaxText.experimental.agent.self_debugging_agent.prompt_debugging import CodeDebugging
 
 logging.basicConfig(
-    format="%(asctime)s %(levelname)-8s %(message)s",
-    level=logging.INFO,
-    datefmt="%Y-%m-%d %H:%M:%S",
+  format="%(asctime)s %(levelname)-8s %(message)s",
+  level=logging.INFO,
+  datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
@@ -101,9 +105,9 @@ def get_file_pairs(module_name, pytorch_path, jax_path):
   """
   pytorch_files = list(filter(lambda x: x.endswith(".py"), os.listdir(pytorch_path)))
   if module_name is not None:
-    assert all(
-        os.path.exists(os.path.join(pytorch_path, m_name)) for m_name in module_name
-    ), f"{module_name} should be present at {pytorch_path}"
+    assert all(os.path.exists(os.path.join(pytorch_path, m_name)) for m_name in module_name), (
+      f"{module_name} should be present at {pytorch_path}"
+    )
     pytorch_files = list(filter(lambda x: x in module_name, pytorch_files))
   return list(map(lambda x: pytorch_path + x, pytorch_files)), list(map(lambda x: jax_path + x, pytorch_files))
 
@@ -128,13 +132,9 @@ def generate_test_case(python_file, entry_module, python_code, jax_code, jax_fil
   """
   prompt = CodeEvaluation["TESTCASE"]
   python_code = (
-      f"from {'.'.join(python_file.split(os.path.sep)[1:]).removesuffix('.py')}"
-      f" import {entry_module}\n\n"
-      f"{python_code}"
+    f"from {'.'.join(python_file.split(os.path.sep)[1:]).removesuffix('.py')} import {entry_module}\n\n{python_code}"
   )
-  jax_code = (
-      f"from {".".join(jax_file.split(os.path.sep)[1:]).removesuffix('.py')}" f" import {entry_module}\n\n" f"{jax_code}"
-  )
+  jax_code = f"from {'.'.join(jax_file.split(os.path.sep)[1:]).removesuffix('.py')} import {entry_module}\n\n{jax_code}"
   prompt = prompt.replace("<module.path.to.pytorch_code>", python_code)
   prompt = prompt.replace("<module.path.to.jax_code>", jax_code)
   prompt = prompt.replace("<function_or_class_to_call>", entry_module)
@@ -215,16 +215,16 @@ def code_debugging(args, python_file, jax_file, test_file_path, last_output, cod
       if try_count == 0:
         prompt = CodeDebugging["CODE"]
         python_code = (
-            "from "
-            + ".".join(python_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module)
-            + "\n\n"
-            + python_code
+          "from "
+          + ".".join(python_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module)
+          + "\n\n"
+          + python_code
         )
         jax_code = (
-            "from "
-            + ".".join(jax_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module)
-            + "\n\n"
-            + jax_code
+          "from "
+          + ".".join(jax_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module)
+          + "\n\n"
+          + jax_code
         )
         prompt = prompt.replace("<module.path.to.pytorch_code>", python_code)
         prompt = prompt.replace("<module.path.to.jax_code>", jax_code)
@@ -244,7 +244,7 @@ def code_debugging(args, python_file, jax_file, test_file_path, last_output, cod
       if len(json_code["test_code"]) > 5 and json_code["jax_code"] != "NOTESTCASE":
         test_case_code = json_code["test_code"]
       last_output, exit_code, _, passed, failed = save_and_run_test_case(
-          jax_code, test_case_code, jax_file, test_file_path
+        jax_code, test_case_code, jax_file, test_file_path
       )
       code_history.append({"passed": passed, "failed": failed, "jax_code": jax_code, "test_case_code": test_case_code})
       if passed > 0 and failed == 0:
@@ -278,11 +278,11 @@ def make_code_and_debug(args, python_file, jax_file):
   try:
     # copy code if exists or generate if not
     if smartly_copy_code(
-        python_file.split(os.path.sep)[-1],
-        base_jax_path=args.base_jax_path,
-        base_testcase_path=args.base_testcase_path,
-        dest_jax_path=args.jax_path,
-        dest_testcase_path=args.testcase_path,
+      python_file.split(os.path.sep)[-1],
+      base_jax_path=args.base_jax_path,
+      base_testcase_path=args.base_testcase_path,
+      dest_jax_path=args.jax_path,
+      dest_testcase_path=args.testcase_path,
     ):
       logger.info("Copied code for %s from Single run code", python_file.split(os.path.sep)[-1])
     with open(python_file, "rt", encoding="utf-8") as f:
@@ -305,19 +305,19 @@ def make_code_and_debug(args, python_file, jax_file):
             logger.error("It seems JAX have syntax error so regenerating %d time", syntax_index + 2)
           elif get_last_defined_module(jax_code) != entry_module:
             logger.error(
-                "It seems inconsistency in %s code PyTorch have %s and JAX have %s as entry Module so regenerating",
-                python_file,
-                entry_module,
-                get_last_defined_module(jax_code),
+              "It seems inconsistency in %s code PyTorch have %s and JAX have %s as entry Module so regenerating",
+              python_file,
+              entry_module,
+              get_last_defined_module(jax_code),
             )
           else:
             break
         else:
           logger.error(
-              "Not able to solve the syntax error in %s in %d tries for %d times",
-              jax_file,
-              args.code_syntax_error_tries,
-              base_try + 1,
+            "Not able to solve the syntax error in %s in %d tries for %d times",
+            jax_file,
+            args.code_syntax_error_tries,
+            base_try + 1,
           )
           continue
       else:
@@ -326,7 +326,7 @@ def make_code_and_debug(args, python_file, jax_file):
           jax_code = f.read()
       if base_try > 0 or not os.path.exists(test_file_path):
         test_case_code = generate_test_case(
-            python_file, entry_module, python_code, args.jax_code, jax_file, test_file_path
+          python_file, entry_module, python_code, args.jax_code, jax_file, test_file_path
         )
         if test_case_code == "NOTESTCASE":
           logger.info("Test case is not possible")
@@ -338,7 +338,7 @@ def make_code_and_debug(args, python_file, jax_file):
           test_case_code = f.read()
       file = test_file_path.split(os.path.sep)[-1]
       output, exit_code, is_dependency_error, num_passed, num_failed = run_pytest_capture_output(
-          file, code_folder=args.testcase_path
+        file, code_folder=args.testcase_path
       )
       if num_passed > 0 and num_failed == 0:
         # find the working code. no need to debug
@@ -347,10 +347,10 @@ def make_code_and_debug(args, python_file, jax_file):
         if is_dependency_error:
           logger.error("There are some missing dependency please check %s", output)
         code_history.append(
-            {"passed": num_passed, "failed": num_failed, "jax_code": args.jax_code, "test_case_code": args.test_case_code}
+          {"passed": num_passed, "failed": num_failed, "jax_code": args.jax_code, "test_case_code": args.test_case_code}
         )
         exit_code, num_passed, num_failed, code_history = code_debugging(
-            args, python_file, jax_file, test_file_path, output, code_history, base_try
+          args, python_file, jax_file, test_file_path, output, code_history, base_try
         )
         if exit_code == 0 and num_passed > 0 and num_failed == 0:
           return num_passed, num_failed
@@ -359,7 +359,7 @@ def make_code_and_debug(args, python_file, jax_file):
       logger.info("Code %s have some issue LLM not able to solve", args.jax_code)
       return 0, args.error_penalty
     best_code = max(
-        code_history, key=lambda x: x["passed"] / (x["passed"] + x["failed"] if (x["passed"] + x["failed"]) > 0 else 0)
+      code_history, key=lambda x: x["passed"] / (x["passed"] + x["failed"] if (x["passed"] + x["failed"]) > 0 else 0)
     )
     with open(jax_file, "wt", encoding="utf-8") as f:
       f.write(best_code["jax_code"])
@@ -415,55 +415,55 @@ def main():
 
   parser = argparse.ArgumentParser(description="Code Evaluation Agent")
   parser.add_argument(
-      "--code_syntax_error_tries", type=int, default=5, help="for how many times to tries in case wrong syntax."
+    "--code_syntax_error_tries", type=int, default=5, help="for how many times to tries in case wrong syntax."
   )
   parser.add_argument(
-      "--code_debug_error_tries", type=int, default=5, help="for how many times to tries in case code failed."
+    "--code_debug_error_tries", type=int, default=5, help="for how many times to tries in case code failed."
   )
   parser.add_argument(
-      "--code_generation_tries",
-      type=int,
-      default=2,
-      help="for how many times to tries in case code failed and debugging also failed.",
+    "--code_generation_tries",
+    type=int,
+    default=2,
+    help="for how many times to tries in case code failed and debugging also failed.",
   )
   parser.add_argument(
-      "--error_penalty", type=int, default=10, help="Penalty for errors in test case generation or execution."
+    "--error_penalty", type=int, default=10, help="Penalty for errors in test case generation or execution."
   )
   parser.add_argument(
-      "--module_name",
-      type=str,
-      nargs="+",
-      help="Name of one or more modules to process. If not provided, all modules in the pytorch_path will be processed.",
+    "--module_name",
+    type=str,
+    nargs="+",
+    help="Name of one or more modules to process. If not provided, all modules in the pytorch_path will be processed.",
   )
   parser.add_argument(
-      "--pytorch_path",
-      type=str,
-      default=os.path.join(_AGENT_DIR, "code_generation_agent/dataset/PyTorch/"),
-      help="Path to the directory containing PyTorch files.",
+    "--pytorch_path",
+    type=str,
+    default=os.path.join(_AGENT_DIR, "code_generation_agent/dataset/PyTorch/"),
+    help="Path to the directory containing PyTorch files.",
   )
   parser.add_argument(
-      "--jax_path",
-      type=str,
-      default=os.path.join(_SCRIPT_DIR, "dataset/jax_converted/"),
-      help="Path to the directory containing JAX files.",
+    "--jax_path",
+    type=str,
+    default=os.path.join(_SCRIPT_DIR, "dataset/jax_converted/"),
+    help="Path to the directory containing JAX files.",
   )
   parser.add_argument(
-      "--testcase_path",
-      type=str,
-      default=os.path.join(_SCRIPT_DIR, "dataset/test_cases/"),
-      help="Path to the directory for generated test cases.",
+    "--testcase_path",
+    type=str,
+    default=os.path.join(_SCRIPT_DIR, "dataset/test_cases/"),
+    help="Path to the directory for generated test cases.",
   )
   parser.add_argument(
-      "--base_jax_path",
-      type=str,
-      default=os.path.join(_AGENT_DIR, "code_generation_agent/dataset/jax_converted/"),
-      help="Base path for JAX files.",
+    "--base_jax_path",
+    type=str,
+    default=os.path.join(_AGENT_DIR, "code_generation_agent/dataset/jax_converted/"),
+    help="Base path for JAX files.",
   )
   parser.add_argument(
-      "--base_testcase_path",
-      type=str,
-      default=os.path.join(_AGENT_DIR, "code_generation_agent/dataset/test_cases/"),
-      help="Base path for test cases.",
+    "--base_testcase_path",
+    type=str,
+    default=os.path.join(_AGENT_DIR, "code_generation_agent/dataset/test_cases/"),
+    help="Base path for test cases.",
   )
   _args = parser.parse_args()
 

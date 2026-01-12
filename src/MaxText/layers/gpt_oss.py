@@ -46,8 +46,8 @@ from MaxText.layers import nnx_wrappers
 # -----------------------------------------
 
 GPT_OSS_ATTENTION_PATTERN = (
-    attentions.AttentionType.LOCAL_SLIDING,
-    attentions.AttentionType.GLOBAL,
+  attentions.AttentionType.LOCAL_SLIDING,
+  attentions.AttentionType.GLOBAL,
 )
 
 
@@ -61,13 +61,13 @@ class GptOssDecoderLayer(nnx.Module):
   """Transformer decoder layer that attends to the encoder."""
 
   def __init__(
-      self,
-      config: models.Config,
-      mesh: Mesh,
-      model_mode: str,
-      attention_type: AttentionType,
-      quant: Optional[Quant] = None,
-      rngs: nnx.Rngs = None,
+    self,
+    config: models.Config,
+    mesh: Mesh,
+    model_mode: str,
+    attention_type: AttentionType,
+    quant: Optional[Quant] = None,
+    rngs: nnx.Rngs = None,
   ):
     self.config = config
     self.mesh = mesh
@@ -79,74 +79,74 @@ class GptOssDecoderLayer(nnx.Module):
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.pre_self_attention_layer_norm = RMSNorm(
-        num_features=dummy_inputs_shape[-1],
-        dtype=config.dtype,
-        weight_dtype=jnp.float32,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+      num_features=dummy_inputs_shape[-1],
+      dtype=config.dtype,
+      weight_dtype=jnp.float32,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=rngs,
     )
 
     self.post_self_attention_layer_norm = RMSNorm(
-        num_features=dummy_inputs_shape[-1],
-        dtype=config.dtype,
-        weight_dtype=jnp.float32,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+      num_features=dummy_inputs_shape[-1],
+      dtype=config.dtype,
+      weight_dtype=jnp.float32,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=rngs,
     )
 
     # Self-attention block
     self.GptOssAttention = Attention(
-        config=config,
-        num_query_heads=config.num_query_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        attention_kernel=config.attention,
-        inputs_q_shape=dummy_inputs_shape,
-        inputs_kv_shape=dummy_inputs_shape,
-        mesh=mesh,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        dropout_rate=config.dropout_rate,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(config),
-        use_bias_in_projections=config.attention_bias,
-        attention_type=self.attention_type,
-        sliding_window_size=config.sliding_window_size,
-        query_pre_attn_scalar=(config.head_dim**-0.5),
-        model_mode=model_mode,
-        rngs=rngs,
+      config=config,
+      num_query_heads=config.num_query_heads,
+      num_kv_heads=config.num_kv_heads,
+      head_dim=config.head_dim,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      attention_kernel=config.attention,
+      inputs_q_shape=dummy_inputs_shape,
+      inputs_kv_shape=dummy_inputs_shape,
+      mesh=mesh,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      dropout_rate=config.dropout_rate,
+      quant=self.quant,
+      kv_quant=quantizations.configure_kv_quant(config),
+      use_bias_in_projections=config.attention_bias,
+      attention_type=self.attention_type,
+      sliding_window_size=config.sliding_window_size,
+      query_pre_attn_scalar=(config.head_dim**-0.5),
+      model_mode=model_mode,
+      rngs=rngs,
     )
 
     self.GptOssMlp = moe.RoutedMoE(
-        config=config,
-        num_experts=config.num_experts,
-        num_experts_per_tok=config.num_experts_per_tok,
-        mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
-        intermediate_dim=config.mlp_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        quant=self.quant,
-        rngs=rngs,
+      config=config,
+      num_experts=config.num_experts,
+      num_experts_per_tok=config.num_experts_per_tok,
+      mesh=mesh,
+      kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes=("embed", None),
+      intermediate_dim=config.mlp_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      quant=self.quant,
+      rngs=rngs,
     )
 
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      previous_chunk=None,
-      page_state=None,
-      slot=None,
-      kv_cache=None,
-      attention_metadata=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    previous_chunk=None,
+    page_state=None,
+    slot=None,
+    kv_cache=None,
+    attention_metadata=None,
   ):
     cfg = self.config
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
@@ -160,25 +160,25 @@ class GptOssDecoderLayer(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     attention_lnx, kv_cache = self.GptOssAttention(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
+      lnx,
+      lnx,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=model_mode,
+      kv_cache=kv_cache,
+      attention_metadata=attention_metadata,
     )
 
     attention_lnx = nn.with_logical_constraint(
-        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+      attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
     hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
     hidden_states = nn.with_logical_constraint(
-        hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
+      hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
     )
 
     load_balance_loss = None
@@ -189,8 +189,8 @@ class GptOssDecoderLayer(nnx.Module):
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
 
     layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
+      layer_output,
+      ("activation_batch", "activation_norm_length", "activation_embed"),
     )
 
     if cfg.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
@@ -200,9 +200,9 @@ class GptOssDecoderLayer(nnx.Module):
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
-          "activation_fraction_zero",
-          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+        "intermediates",
+        "activation_fraction_zero",
+        jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
     if cfg.scan_layers:
@@ -212,8 +212,8 @@ class GptOssDecoderLayer(nnx.Module):
 
 
 GptOssDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    GptOssDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  GptOssDecoderLayer,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
 
 
@@ -232,12 +232,12 @@ class GptOssScannableBlock(nnx.Module):
   """
 
   def __init__(
-      self,
-      config: models.Config,
-      mesh: Mesh,
-      model_mode: str,
-      quant: Optional[Quant] = None,
-      rngs: nnx.Rngs = None,
+    self,
+    config: models.Config,
+    mesh: Mesh,
+    model_mode: str,
+    quant: Optional[Quant] = None,
+    rngs: nnx.Rngs = None,
   ):
     self.config = config
     self.mesh = mesh
@@ -247,22 +247,22 @@ class GptOssScannableBlock(nnx.Module):
       attention_type = get_attention_type(layer_id)
       layer_name = f"layers_{layer_id}"
       layer = GptOssDecoderLayer(
-          config=config,
-          mesh=mesh,
-          model_mode=model_mode,
-          attention_type=attention_type,
-          quant=self.quant,
-          rngs=rngs,
+        config=config,
+        mesh=mesh,
+        model_mode=model_mode,
+        attention_type=attention_type,
+        quant=self.quant,
+        rngs=rngs,
       )
       setattr(self, layer_name, layer)
 
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
   ):
     cfg = self.config
 
@@ -273,11 +273,11 @@ class GptOssScannableBlock(nnx.Module):
       layer_name = f"layers_{layer_id}"
       layer = getattr(self, layer_name)
       y = layer(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
+        y,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
       )
       if cfg.scan_layers:
         y = y[0]
@@ -288,6 +288,6 @@ class GptOssScannableBlock(nnx.Module):
 
 
 GptOssScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    GptOssScannableBlock,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  GptOssScannableBlock,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )

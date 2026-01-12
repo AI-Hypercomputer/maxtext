@@ -48,14 +48,14 @@ from benchmarks.command_utils import run_command_with_updates
 
 
 hardware_id_to_bf16_tflops = {
-    "v4": 275,
-    "v5e": 197,
-    "v5p": 459,
-    "v6e": 918,
-    "v6e-8": 918,
-    "v6e-1": 918,
-    "a3mega": 989,
-    "a3ultra": 989,
+  "v4": 275,
+  "v5e": 197,
+  "v5p": 459,
+  "v6e": 918,
+  "v6e-8": 918,
+  "v6e-1": 918,
+  "a3mega": 989,
+  "a3ultra": 989,
 }
 
 
@@ -66,125 +66,125 @@ def add_parser_arguments(parser: argparse.ArgumentParser):
     parser: parser to add shared arguments to.
   """
   parser.add_argument(
-      "--metrics_gcs_file",
-      type=str,
-      required=True,
-      help="Path to the metrics file in GCS",
+    "--metrics_gcs_file",
+    type=str,
+    required=True,
+    help="Path to the metrics file in GCS",
   )
   parser.add_argument(
-      "--model_id",
-      type=str,
-      required=True,
-      help="ID of the model",
+    "--model_id",
+    type=str,
+    required=True,
+    help="ID of the model",
   )
   parser.add_argument(
-      "--hardware_id",
-      type=str,
-      required=True,
-      help="ID of the hardware",
+    "--hardware_id",
+    type=str,
+    required=True,
+    help="ID of the hardware",
   )
   parser.add_argument(
-      "--software_id",
-      type=str,
-      required=True,
-      help="ID of the software",
+    "--software_id",
+    type=str,
+    required=True,
+    help="ID of the software",
   )
   parser.add_argument(
-      "--number_of_chips",
-      type=int,
-      required=True,
-      help="Number of chips used",
+    "--number_of_chips",
+    type=int,
+    required=True,
+    help="Number of chips used",
   )
   parser.add_argument(
-      "--container_image_name",
-      type=str,
-      required=True,
-      help="Name of the container image used",
+    "--container_image_name",
+    type=str,
+    required=True,
+    help="Name of the container image used",
   )
   parser.add_argument(
-      "--global_batch_size",
-      type=int,
-      required=True,
-      help="Global batch size",
+    "--global_batch_size",
+    type=int,
+    required=True,
+    help="Global batch size",
   )
   parser.add_argument(
-      "--precision",
-      type=str,
-      required=True,
-      help="Precision used (e.g. fp32, bf16)",
+    "--precision",
+    type=str,
+    required=True,
+    help="Precision used (e.g. fp32, bf16)",
   )
   parser.add_argument(
-      "--optimizer",
-      type=str,
-      required=True,
-      help="Optimizer used (e.g. adam, sgd)",
+    "--optimizer",
+    type=str,
+    required=True,
+    help="Optimizer used (e.g. adam, sgd)",
   )
   parser.add_argument(
-      "--seq_length",
-      type=int,
-      required=True,
-      help="Sequence length",
+    "--seq_length",
+    type=int,
+    required=True,
+    help="Sequence length",
   )
   parser.add_argument(
-      "--number_of_steps",
-      type=int,
-      required=True,
-      help="Number of steps",
+    "--number_of_steps",
+    type=int,
+    required=True,
+    help="Number of steps",
   )
   parser.add_argument(
-      "--xla_flags",
-      type=str,
-      required=True,
-      help="XLA flags",
+    "--xla_flags",
+    type=str,
+    required=True,
+    help="XLA flags",
   )
   parser.add_argument(
-      "--dataset",
-      type=str,
-      required=True,
-      help="Dataset used",
+    "--dataset",
+    type=str,
+    required=True,
+    help="Dataset used",
   )
   parser.add_argument(
-      "--run_type",
-      type=str,
-      required=True,
-      help="Type of run (e.g. perf_optimization)",
+    "--run_type",
+    type=str,
+    required=True,
+    help="Type of run (e.g. perf_optimization)",
   )
   parser.add_argument(
-      "--config_file",
-      type=str,
-      required=True,
-      help="Configuration file path",
+    "--config_file",
+    type=str,
+    required=True,
+    help="Configuration file path",
   )
   parser.add_argument(
-      "--topology",
-      type=str,
-      required=True,
-      help="The topology of the hardware used in the run (valid for TPUs)",
+    "--topology",
+    type=str,
+    required=True,
+    help="The topology of the hardware used in the run (valid for TPUs)",
   )
   parser.add_argument(
-      "--tuning_params",
-      type=str,
-      required=True,
-      help="Tuning parameters",
+    "--tuning_params",
+    type=str,
+    required=True,
+    help="Tuning parameters",
   )
   parser.add_argument(
-      "--db_project",
-      type=str,
-      required=True,
-      help="Project of the database",
+    "--db_project",
+    type=str,
+    required=True,
+    help="Project of the database",
   )
   parser.add_argument(
-      "--db_dataset",
-      type=str,
-      required=True,
-      help="Dataset of the database",
+    "--db_dataset",
+    type=str,
+    required=True,
+    help="Dataset of the database",
   )
   parser.add_argument(
-      "--is_test",
-      type=str2bool,
-      required=False,
-      default=True,
-      help="Whether to use the testing project or production project",
+    "--is_test",
+    type=str2bool,
+    required=False,
+    default=True,
+    help="Whether to use the testing project or production project",
   )
 
 
@@ -258,10 +258,10 @@ def parse_metrics(local_metrics_file, total_steps, last_n_steps=10) -> Metrics:
   e2e_step_time = get_metrics_sum(local_metrics_file, "perf/step_time_seconds", n=total_steps)
 
   metrics = Metrics(
-      avg_tflops_per_sec=avg_tflops,
-      avg_tokens_per_sec=avg_tokens_per_second,
-      median_step_time=median_step_time,
-      e2e_step_time=e2e_step_time,
+    avg_tflops_per_sec=avg_tflops,
+    avg_tokens_per_sec=avg_tokens_per_second,
+    median_step_time=median_step_time,
+    e2e_step_time=e2e_step_time,
   )
 
   return metrics
@@ -344,19 +344,19 @@ def main(argv: Sequence[str]) -> None:
 
   # Load metrics to bq
   write_run(
-      options=options,
-      metrics=metrics_from_file,
-      mfu=avg_mfu,
-      number_of_steps=number_of_steps,
-      number_of_nodes=number_of_nodes,
-      number_of_chips=number_of_chips,
-      run_success=True,
-      framework_config_in_json=framework_config,
-      env_variables=env_vars,
-      run_release_status=run_release_status,
-      other_metrics_in_json="",
-      comment="",
-      nccl_driver_nickname=None,
+    options=options,
+    metrics=metrics_from_file,
+    mfu=avg_mfu,
+    number_of_steps=number_of_steps,
+    number_of_nodes=number_of_nodes,
+    number_of_chips=number_of_chips,
+    run_success=True,
+    framework_config_in_json=framework_config,
+    env_variables=env_vars,
+    run_release_status=run_release_status,
+    other_metrics_in_json="",
+    comment="",
+    nccl_driver_nickname=None,
   )
   print(f"DB write complete in project: {options.db_project}, dataset: {options.db_dataset}.")
 

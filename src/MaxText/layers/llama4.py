@@ -57,14 +57,14 @@ class Llama4UnfoldConvolution(nnx.Module):
     self.config = config
     self.rngs = rngs
     self.vit_unfold_linear = linears.DenseGeneral(
-        in_features_shape=(
-            self.config.num_channels_for_vit * self.config.patch_size_for_vit * self.config.patch_size_for_vit
-        ),
-        out_features_shape=self.config.hidden_size_for_vit,
-        dtype=self.config.dtype_mm,
-        use_bias=False,
-        matmul_precision=self.config.matmul_precision,
-        rngs=rngs,
+      in_features_shape=(
+        self.config.num_channels_for_vit * self.config.patch_size_for_vit * self.config.patch_size_for_vit
+      ),
+      out_features_shape=self.config.hidden_size_for_vit,
+      dtype=self.config.dtype_mm,
+      use_bias=False,
+      matmul_precision=self.config.matmul_precision,
+      rngs=rngs,
     )
 
   def __call__(self, inputs: Array) -> Array:
@@ -72,17 +72,17 @@ class Llama4UnfoldConvolution(nnx.Module):
     num_patches = (img // self.config.patch_size_for_vit) ** 2
 
     patches = lax.conv_general_dilated_patches(
-        inputs,
-        filter_shape=[self.config.patch_size_for_vit, self.config.patch_size_for_vit],
-        window_strides=[self.config.patch_size_for_vit, self.config.patch_size_for_vit],
-        padding="VALID",
-        dimension_numbers=("NCHW", "HWIO", "NCHW"),
-        precision=lax.Precision(self.config.matmul_precision),
-        preferred_element_type=self.config.dtype_mm,
+      inputs,
+      filter_shape=[self.config.patch_size_for_vit, self.config.patch_size_for_vit],
+      window_strides=[self.config.patch_size_for_vit, self.config.patch_size_for_vit],
+      padding="VALID",
+      dimension_numbers=("NCHW", "HWIO", "NCHW"),
+      precision=lax.Precision(self.config.matmul_precision),
+      preferred_element_type=self.config.dtype_mm,
     )
 
     patches = patches.reshape(
-        batch_size, num_channels * self.config.patch_size_for_vit * self.config.patch_size_for_vit, num_patches
+      batch_size, num_channels * self.config.patch_size_for_vit * self.config.patch_size_for_vit, num_patches
     )
     patches = patches.transpose(0, 2, 1)
 
@@ -108,7 +108,7 @@ def pixel_shuffle(input_tensor: Array, shuffle_ratio: float) -> Array:
 
   # Reshape to [batch_size, height * shuffle_ratio, width * shuffle_ratio, channels / (shuffle_ratio^2)]
   reshaped_tensor = reshaped_tensor.reshape(
-      batch_size, int(height * shuffle_ratio), int(width * shuffle_ratio), int(channels / (shuffle_ratio**2))
+    batch_size, int(height * shuffle_ratio), int(width * shuffle_ratio), int(channels / (shuffle_ratio**2))
   )
 
   # Transpose to [batch_size, width * shuffle_ratio, height * shuffle_ratio, channels / (shuffle_ratio^2)]
@@ -130,20 +130,20 @@ class Llama4VisionMLP(nnx.Module):
     self.config = config
     self.rngs = rngs
     self.vit_encoder_layer_mlp_fc1 = linears.DenseGeneral(
-        in_features_shape=self.config.hidden_size_for_vit,
-        out_features_shape=self.config.intermediate_size_for_vit,
-        dtype=self.config.dtype_mm,
-        use_bias=True,
-        matmul_precision=self.config.matmul_precision,
-        rngs=self.rngs,
+      in_features_shape=self.config.hidden_size_for_vit,
+      out_features_shape=self.config.intermediate_size_for_vit,
+      dtype=self.config.dtype_mm,
+      use_bias=True,
+      matmul_precision=self.config.matmul_precision,
+      rngs=self.rngs,
     )
     self.vit_encoder_layer_mlp_fc2 = linears.DenseGeneral(
-        in_features_shape=self.config.intermediate_size_for_vit,
-        out_features_shape=self.config.hidden_size_for_vit,
-        dtype=self.config.dtype_mm,
-        use_bias=True,
-        matmul_precision=self.config.matmul_precision,
-        rngs=self.rngs,
+      in_features_shape=self.config.intermediate_size_for_vit,
+      out_features_shape=self.config.hidden_size_for_vit,
+      dtype=self.config.dtype_mm,
+      use_bias=True,
+      matmul_precision=self.config.matmul_precision,
+      rngs=self.rngs,
     )
 
   def __call__(self, hidden_states: Array) -> Array:
@@ -164,20 +164,20 @@ class Llama4VisionMLP2(nnx.Module):
     self.config = config
     self.rngs = rngs
     self.vit_pixel_shuffle_mlp_fc1 = linears.DenseGeneral(
-        in_features_shape=self.config.intermediate_size_for_vit,
-        out_features_shape=self.config.projector_input_dim_for_vit,
-        dtype=self.config.dtype_mm,
-        use_bias=False,
-        matmul_precision=self.config.matmul_precision,
-        rngs=self.rngs,
+      in_features_shape=self.config.intermediate_size_for_vit,
+      out_features_shape=self.config.projector_input_dim_for_vit,
+      dtype=self.config.dtype_mm,
+      use_bias=False,
+      matmul_precision=self.config.matmul_precision,
+      rngs=self.rngs,
     )
     self.vit_pixel_shuffle_mlp_fc2 = linears.DenseGeneral(
-        in_features_shape=self.config.projector_input_dim_for_vit,
-        out_features_shape=self.config.projector_output_dim_for_vit,
-        dtype=self.config.dtype_mm,
-        use_bias=False,
-        matmul_precision=self.config.matmul_precision,
-        rngs=self.rngs,
+      in_features_shape=self.config.projector_input_dim_for_vit,
+      out_features_shape=self.config.projector_output_dim_for_vit,
+      dtype=self.config.dtype_mm,
+      use_bias=False,
+      matmul_precision=self.config.matmul_precision,
+      rngs=self.rngs,
     )
     self.dropout = linears.Dropout(rate=self.config.projector_dropout_for_vit, rngs=self.rngs)
 
@@ -229,12 +229,12 @@ class Llama4MultiModalProjector(nnx.Module):
     self.mesh = mesh
     self.rngs = rngs
     self.vit_multi_modal_projector = linears.DenseGeneral(
-        in_features_shape=self.config.vision_output_dim_for_vit,
-        out_features_shape=self.config.base_emb_dim,
-        dtype=self.config.dtype_mm,
-        use_bias=False,
-        matmul_precision=self.config.matmul_precision,
-        rngs=self.rngs,
+      in_features_shape=self.config.vision_output_dim_for_vit,
+      out_features_shape=self.config.base_emb_dim,
+      dtype=self.config.dtype_mm,
+      use_bias=False,
+      matmul_precision=self.config.matmul_precision,
+      rngs=self.rngs,
     )
 
   def __call__(self, image_features: Array) -> Array:
@@ -258,12 +258,12 @@ class Llama4MultiModalProjector(nnx.Module):
 
 def llama4multimodalprojector_as_linen(config: Config, mesh: Mesh):
   return nnx_wrappers.to_linen(
-      Llama4MultiModalProjector,
-      config=config,
-      mesh=mesh,
-      name="Llama4MultiModalProjector_0",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
+    Llama4MultiModalProjector,
+    config=config,
+    mesh=mesh,
+    name="Llama4MultiModalProjector_0",
+    abstract_init=False,
+    metadata_fn=initializers.variable_to_logically_partitioned,
   )
 
 
@@ -297,9 +297,9 @@ def determine_is_moe_layer(layer_id: int, interleave_moe_layer_step: int) -> boo
     True if the layer is MoE layer, False otherwise.
   """
   return (
-      interleave_moe_layer_step is not None
-      and interleave_moe_layer_step > 0
-      and (layer_id + 1) % interleave_moe_layer_step == 0
+    interleave_moe_layer_step is not None
+    and interleave_moe_layer_step > 0
+    and (layer_id + 1) % interleave_moe_layer_step == 0
   )
 
 
@@ -312,14 +312,14 @@ class Llama4DecoderLayer(nnx.Module):
   """Transformer decoder layer for Llama4."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      rngs: nnx.Rngs,
-      quant: None | Quant = None,
-      is_nope_layer: bool = False,
-      is_moe_layer: bool = False,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    rngs: nnx.Rngs,
+    quant: None | Quant = None,
+    is_nope_layer: bool = False,
+    is_moe_layer: bool = False,
   ):
     """Initializes the Llama4 decoder layer.
 
@@ -344,88 +344,88 @@ class Llama4DecoderLayer(nnx.Module):
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.pre_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=rngs,
     )
 
     # Instead of scaling the query values in the checkpoint conversion (`llama_or_mistral_ckpt`)
     # we'll do it dynamically in the forward pass of Attention
     query_pre_attn_scalar = config.head_dim**-0.5
     self.self_attention = Attention(
-        config=config,
-        num_query_heads=config.num_query_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        attention_kernel=config.attention,
-        inputs_q_shape=dummy_inputs_shape,
-        inputs_kv_shape=dummy_inputs_shape,
-        mesh=mesh,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        dropout_rate=config.dropout_rate,
-        float32_qk_product=config.float32_qk_product,
-        float32_logits=config.float32_logits,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(config),
-        prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
-        ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
-        compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))),
-        reshape_q=config.reshape_q,
-        use_ragged_attention=config.use_ragged_attention,
-        ragged_block_size=config.ragged_block_size,
-        is_nope_layer=self.is_nope_layer,
-        use_qk_norm=config.use_qk_norm,
-        query_pre_attn_scalar=query_pre_attn_scalar,
-        temperature_tuning=config.temperature_tuning,
-        temperature_tuning_scale=0.1,
-        temperature_tuning_floor_scale=8192.0,
-        # note: chunk_attn_window_size is set in the config
-        attention_type=AttentionType.GLOBAL if self.is_nope_layer else AttentionType.CHUNK,
-        model_mode=model_mode,
-        rngs=rngs,
+      config=config,
+      num_query_heads=config.num_query_heads,
+      num_kv_heads=config.num_kv_heads,
+      head_dim=config.head_dim,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      attention_kernel=config.attention,
+      inputs_q_shape=dummy_inputs_shape,
+      inputs_kv_shape=dummy_inputs_shape,
+      mesh=mesh,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      dropout_rate=config.dropout_rate,
+      float32_qk_product=config.float32_qk_product,
+      float32_logits=config.float32_logits,
+      quant=self.quant,
+      kv_quant=quantizations.configure_kv_quant(config),
+      prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
+      ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
+      compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))),
+      reshape_q=config.reshape_q,
+      use_ragged_attention=config.use_ragged_attention,
+      ragged_block_size=config.ragged_block_size,
+      is_nope_layer=self.is_nope_layer,
+      use_qk_norm=config.use_qk_norm,
+      query_pre_attn_scalar=query_pre_attn_scalar,
+      temperature_tuning=config.temperature_tuning,
+      temperature_tuning_scale=0.1,
+      temperature_tuning_floor_scale=8192.0,
+      # note: chunk_attn_window_size is set in the config
+      attention_type=AttentionType.GLOBAL if self.is_nope_layer else AttentionType.CHUNK,
+      model_mode=model_mode,
+      rngs=rngs,
     )
 
     self.post_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=self.rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=self.rngs,
     )
 
     if self.is_moe_layer:
       # NOTE: the name Llama4MoEBlock_0 is to ensure reverse compatibility with
       # existing checkpoints for MoE block.
       self.Llama4MoEBlock_0 = RoutedAndSharedMoE(
-          config=config,
-          mesh=self.mesh,
-          kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-          kernel_axes=("embed", None),
-          dtype=config.dtype,
-          weight_dtype=config.weight_dtype,
-          quant=self.quant,
-          rngs=self.rngs,
+        config=config,
+        mesh=self.mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", None),
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        quant=self.quant,
+        rngs=self.rngs,
       )
     else:
       self.mlp = MlpBlock(
-          mesh=self.mesh,
-          in_features=config.emb_dim,
-          intermediate_dim=config.mlp_dim,
-          activations=config.mlp_activations,
-          intermediate_dropout_rate=config.dropout_rate,
-          dtype=config.dtype,
-          weight_dtype=config.weight_dtype,
-          config=config,
-          quant=self.quant,
-          model_mode=model_mode,
-          rngs=self.rngs,
+        mesh=self.mesh,
+        in_features=config.emb_dim,
+        intermediate_dim=config.mlp_dim,
+        activations=config.mlp_activations,
+        intermediate_dropout_rate=config.dropout_rate,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        config=config,
+        quant=self.quant,
+        model_mode=model_mode,
+        rngs=self.rngs,
       )
 
     self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
@@ -439,17 +439,17 @@ class Llama4DecoderLayer(nnx.Module):
     return self.Llama4MoEBlock_0
 
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
-      previous_chunk=None,
-      kv_cache=None,
-      attention_metadata=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    slot: None | int = None,
+    page_state: None | page_manager.PageState = None,
+    previous_chunk=None,
+    kv_cache=None,
+    attention_metadata=None,
   ):
     cfg = self.config
     assert cfg.num_experts >= 1, "Expected the Llama4 config to have `num_experts > 1`."
@@ -465,17 +465,17 @@ class Llama4DecoderLayer(nnx.Module):
 
     # Self-attention block
     attention_lnx, kv_cache = self.self_attention(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        slot=slot,
-        page_state=page_state,
-        previous_chunk=previous_chunk,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
+      lnx,
+      lnx,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=model_mode,
+      slot=slot,
+      page_state=page_state,
+      previous_chunk=previous_chunk,
+      kv_cache=kv_cache,
+      attention_metadata=attention_metadata,
     )
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
@@ -502,9 +502,9 @@ class Llama4DecoderLayer(nnx.Module):
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
-          "activation_fraction_zero",
-          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+        "intermediates",
+        "activation_fraction_zero",
+        jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
     if cfg.scan_layers:
@@ -514,8 +514,8 @@ class Llama4DecoderLayer(nnx.Module):
 
 
 Llama4DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Llama4DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  Llama4DecoderLayer,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
 
 
@@ -523,14 +523,14 @@ class Llama4ScannableBlock(nnx.Module):
   """A repeatable block given nope_layer_interval and interleave_moe_layer_step."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      rngs: nnx.Rngs,
-      quant: None | Quant = None,
-      nope_layer_interval: int = 1,
-      interleave_moe_layer_step: int = 1,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    rngs: nnx.Rngs,
+    quant: None | Quant = None,
+    nope_layer_interval: int = 1,
+    interleave_moe_layer_step: int = 1,
   ):
     """Initializes the scannable block.
 
@@ -556,28 +556,27 @@ class Llama4ScannableBlock(nnx.Module):
       moe_layer = determine_is_moe_layer(layer_id, self.interleave_moe_layer_step)
       layer_name = f"layers_{layer_id}"
       layer = Llama4DecoderLayer(
-          config=self.config,
-          mesh=self.mesh,
-          model_mode=self.model_mode,
-          rngs=self.rngs,
-          quant=self.quant,
-          is_nope_layer=nope_layer,
-          is_moe_layer=moe_layer,
+        config=self.config,
+        mesh=self.mesh,
+        model_mode=self.model_mode,
+        rngs=self.rngs,
+        quant=self.quant,
+        is_nope_layer=nope_layer,
+        is_moe_layer=moe_layer,
       )
       setattr(self, layer_name, layer)
 
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
-      previous_chunk=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    slot: None | int = None,
+    page_state: None | page_manager.PageState = None,
+    previous_chunk=None,
   ):
-
     cfg = self.config
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
@@ -585,14 +584,14 @@ class Llama4ScannableBlock(nnx.Module):
     y = inputs
     for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):
       y = getattr(self, f"layers_{layer_id}")(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk=previous_chunk,
-          page_state=page_state,
-          slot=slot,
+        y,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        previous_chunk=previous_chunk,
+        page_state=page_state,
+        slot=slot,
       )
       if cfg.scan_layers:
         y = y[0]
@@ -603,8 +602,8 @@ class Llama4ScannableBlock(nnx.Module):
 
 
 Llama4ScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    Llama4ScannableBlock,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  Llama4ScannableBlock,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
 
 
@@ -616,59 +615,59 @@ class Llama4VisionEncoderLayer(nnx.Module):
     self.mesh = mesh
     self.rngs = rngs
     self.hidden_states_shape = (
-        self.config.per_device_batch_size,
-        (self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
-        self.config.hidden_size_for_vit,
+      self.config.per_device_batch_size,
+      (self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
+      self.config.hidden_size_for_vit,
     )
 
     self.input_layer_norm = nnx.LayerNorm(
-        num_features=self.config.hidden_size_for_vit, epsilon=self.config.normalization_layer_epsilon, rngs=self.rngs
+      num_features=self.config.hidden_size_for_vit, epsilon=self.config.normalization_layer_epsilon, rngs=self.rngs
     )
     self.self_attention_vision = Attention(
-        config=self.config,
-        num_query_heads=self.config.num_attention_heads_for_vit,
-        num_kv_heads=self.config.num_attention_heads_for_vit,
-        head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
-        max_target_length=(self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
-        attention_kernel="dot_product",
-        inputs_q_shape=self.hidden_states_shape,
-        inputs_kv_shape=self.hidden_states_shape,
-        float32_qk_product=self.config.float32_qk_product,
-        float32_logits=self.config.float32_logits,
-        dtype=self.config.dtype_mm,
-        weight_dtype=self.config.weight_dtype,
-        mesh=self.mesh,
-        dropout_rate=0,
-        name="self_attention_vision",
-        attention_type=AttentionType.FULL,
-        is_nope_layer=False,
-        use_bias_in_projections=True,
-        is_vision=True,
-        use_qk_norm=False,
-        query_pre_attn_scalar=1 / math.sqrt(self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit),
-        # The vision encoder processes an image in a single forward pass to produce
-        # embeddings. It doesn't have the concept of "prefill" and "autoregressive"
-        # steps that a text decoder has. Therefore, it doesn't need a KV cache for
-        # its self-attention mechanism.
-        model_mode=MODEL_MODE_TRAIN,
-        rngs=self.rngs,
+      config=self.config,
+      num_query_heads=self.config.num_attention_heads_for_vit,
+      num_kv_heads=self.config.num_attention_heads_for_vit,
+      head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
+      max_target_length=(self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
+      attention_kernel="dot_product",
+      inputs_q_shape=self.hidden_states_shape,
+      inputs_kv_shape=self.hidden_states_shape,
+      float32_qk_product=self.config.float32_qk_product,
+      float32_logits=self.config.float32_logits,
+      dtype=self.config.dtype_mm,
+      weight_dtype=self.config.weight_dtype,
+      mesh=self.mesh,
+      dropout_rate=0,
+      name="self_attention_vision",
+      attention_type=AttentionType.FULL,
+      is_nope_layer=False,
+      use_bias_in_projections=True,
+      is_vision=True,
+      use_qk_norm=False,
+      query_pre_attn_scalar=1 / math.sqrt(self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit),
+      # The vision encoder processes an image in a single forward pass to produce
+      # embeddings. It doesn't have the concept of "prefill" and "autoregressive"
+      # steps that a text decoder has. Therefore, it doesn't need a KV cache for
+      # its self-attention mechanism.
+      model_mode=MODEL_MODE_TRAIN,
+      rngs=self.rngs,
     )
     self.post_attention_layer_norm = nnx.LayerNorm(
-        num_features=self.config.hidden_size_for_vit, epsilon=self.config.normalization_layer_epsilon, rngs=self.rngs
+      num_features=self.config.hidden_size_for_vit, epsilon=self.config.normalization_layer_epsilon, rngs=self.rngs
     )
     self.Llama4VisionMLP_0 = Llama4VisionMLP(config=self.config, rngs=self.rngs)
 
   def __call__(
-      self,
-      hidden_states: Array,
-      deterministic: bool = False,
+    self,
+    hidden_states: Array,
+    deterministic: bool = False,
   ):
     residual = hidden_states
     hidden_states = self.input_layer_norm(hidden_states)
     hidden_states, _ = self.self_attention_vision(
-        inputs_q=hidden_states,
-        inputs_kv=hidden_states,
-        deterministic=deterministic,
+      inputs_q=hidden_states,
+      inputs_kv=hidden_states,
+      deterministic=deterministic,
     )
     hidden_states = residual + hidden_states
     residual = hidden_states
@@ -696,9 +695,9 @@ class Llama4VisionEncoder(nnx.Module):
     for lyr in range(self.config.num_hidden_layers_for_vit):
       layer_name = f"layers_{lyr}"
       layer = Llama4VisionEncoderLayer(
-          config=self.config,
-          mesh=self.mesh,
-          rngs=self.rngs,
+        config=self.config,
+        mesh=self.mesh,
+        rngs=self.rngs,
       )
       setattr(self, layer_name, layer)
 
@@ -730,22 +729,22 @@ class Llama4VisionModel(nnx.Module):
     self.initializer = nnx.initializers.normal(self.scale)
 
     self.class_embedding = nnx.Param(
-        self.initializer(self.rngs.params(), (self.config.hidden_size_for_vit,), self.config.dtype_mm)
+      self.initializer(self.rngs.params(), (self.config.hidden_size_for_vit,), self.config.dtype_mm)
     )
     self.positional_embedding_vlm = nnx.Param(
-        self.initializer(self.rngs.params(), (self.num_patches, self.config.hidden_size_for_vit), self.config.dtype_mm)
+      self.initializer(self.rngs.params(), (self.num_patches, self.config.hidden_size_for_vit), self.config.dtype_mm)
     )
     self.layernorm_pre = nnx.LayerNorm(
-        num_features=self.config.hidden_size_for_vit,
-        epsilon=self.config.normalization_layer_epsilon,
-        dtype=self.config.dtype_mm,
-        rngs=self.rngs,
+      num_features=self.config.hidden_size_for_vit,
+      epsilon=self.config.normalization_layer_epsilon,
+      dtype=self.config.dtype_mm,
+      rngs=self.rngs,
     )
     self.layernorm_post = nnx.LayerNorm(
-        num_features=self.config.hidden_size_for_vit,
-        epsilon=self.config.normalization_layer_epsilon,
-        dtype=self.config.dtype_mm,
-        rngs=self.rngs,
+      num_features=self.config.hidden_size_for_vit,
+      epsilon=self.config.normalization_layer_epsilon,
+      dtype=self.config.dtype_mm,
+      rngs=self.rngs,
     )
 
     self.Llama4UnfoldConvolution_0 = Llama4UnfoldConvolution(config=self.config, rngs=self.rngs)
@@ -753,12 +752,12 @@ class Llama4VisionModel(nnx.Module):
     self.Llama4VisionPixelShuffleMLP_0 = Llama4VisionPixelShuffleMLP(config=self.config, rngs=self.rngs)
 
   def __call__(
-      self,
-      pixel_values: Array,
-      output_attentions: None | bool = None,
-      output_hidden_states: None | bool = None,
-      return_dict: None | bool = None,
-      deterministic: None | bool = False,
+    self,
+    pixel_values: Array,
+    output_attentions: None | bool = None,
+    output_hidden_states: None | bool = None,
+    return_dict: None | bool = None,
+    deterministic: None | bool = False,
   ) -> Array:
     """Forward pass of the Llama4 vision model.
 
@@ -780,7 +779,7 @@ class Llama4VisionModel(nnx.Module):
     # Add class embedding to the beginning of the sequence
     class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
     class_embedding = jnp.broadcast_to(
-        class_embedding_expanded, (hidden_states.shape[0], 1, self.config.hidden_size_for_vit)
+      class_embedding_expanded, (hidden_states.shape[0], 1, self.config.hidden_size_for_vit)
     )
     hidden_states = jnp.concatenate([hidden_states, class_embedding], axis=1)
 
@@ -804,10 +803,10 @@ class Llama4VisionModel(nnx.Module):
 
 def llama4visionmodel_as_linen(config: Config, mesh: Mesh) -> nn.Module:
   return nnx_wrappers.to_linen(
-      Llama4VisionModel,
-      config=config,
-      mesh=mesh,
-      name="Llama4VisionModel_0",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
+    Llama4VisionModel,
+    config=config,
+    mesh=mesh,
+    name="Llama4VisionModel_0",
+    abstract_init=False,
+    metadata_fn=initializers.variable_to_logically_partitioned,
   )

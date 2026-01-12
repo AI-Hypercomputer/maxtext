@@ -130,8 +130,7 @@ def check_predicted_tokens_match(logits_a, logits_b, tolerance=0.1):
 
   if disagreement_rate > tolerance:
     raise AssertionError(
-        f"Token prediction mismatch: {disagreement_rate:.1%} of tokens disagree "
-        f"(exceeds tolerance of {tolerance:.1%})"
+      f"Token prediction mismatch: {disagreement_rate:.1%} of tokens disagree (exceeds tolerance of {tolerance:.1%})"
     )
 
 
@@ -189,10 +188,10 @@ def get_logits_comparison_metrics(logitsA, logitsB):
   disagreement_top1 = torch.mean(((torch.abs(ranking_B_top1 - ranking_A_top1) > 0).sum(dim=1) > 0).float())
 
   metrics = {
-      "max_kl_div": float(max_kl_div),
-      "abs_diff": float(max_abs_diff),
-      "disagreement_top5": float(disagreement_top5),
-      "disagreement_top1": float(disagreement_top1),
+    "max_kl_div": float(max_kl_div),
+    "abs_diff": float(max_abs_diff),
+    "disagreement_top5": float(disagreement_top5),
+    "disagreement_top1": float(disagreement_top1),
   }
 
   table = [[key, value] for key, value in metrics.items()]

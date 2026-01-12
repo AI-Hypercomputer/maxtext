@@ -24,7 +24,6 @@ numbers for a specific model. Example:
   python3 -m MaxText.muon_utils qwen3-4b True
 """
 
-
 import os
 import sys
 from typing import Optional, Tuple
@@ -120,9 +119,9 @@ def _print_structure_debug(abstract_param, muon_weight_dimension_numbers):
   # Access the shape from the inner ShapeDtypeStruct and names from the wrapper
   # Return a new tree with the same structure containing only shapes/names
   info_tree = jax.tree_util.tree_map(
-      lambda leaf: {"shape": leaf.value.shape, "names": leaf.names},
-      abstract_param,
-      is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
+    lambda leaf: {"shape": leaf.value.shape, "names": leaf.names},
+    abstract_param,
+    is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
   )
   print(f"\n=== Model Structure ===\n{info_tree}")
   print(f"\n=== Muon Dimension Numbers ===\n{muon_weight_dimension_numbers}")
@@ -148,11 +147,11 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False):
   """
   # Setup config
   argv = [
-      None,
-      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-      f"model_name={model_name}",
-      f"scan_layers={scan_layers}",
-      "attention=dot_product",
+    None,
+    os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+    f"model_name={model_name}",
+    f"scan_layers={scan_layers}",
+    "attention=dot_product",
   ]
   config = pyconfig.initialize(argv)
   # Setup model

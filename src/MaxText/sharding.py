@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
-""" Utils that are only interesting to MaxText and sharding related. """
+"""Utils that are only interesting to MaxText and sharding related."""
 
 from flax import linen as nn
 
@@ -88,9 +88,9 @@ def logical_to_mesh(tree, mesh, rules=None):
   if tree is None:
     return None
   return jax.tree.map(
-      lambda x: logical_to_mesh_axes(x, mesh, rules=rules),
-      tree,
-      is_leaf=lambda x: isinstance(x, P),
+    lambda x: logical_to_mesh_axes(x, mesh, rules=rules),
+    tree,
+    is_leaf=lambda x: isinstance(x, P),
   )
 
 
@@ -99,9 +99,9 @@ def logical_to_mesh_sharding(tree, mesh, rules=None):
   if tree is None:
     return None
   return jax.tree.map(
-      lambda x: NamedSharding(mesh, x),
-      logical_to_mesh(tree, mesh, rules=rules),
-      is_leaf=lambda x: isinstance(x, P),
+    lambda x: NamedSharding(mesh, x),
+    logical_to_mesh(tree, mesh, rules=rules),
+    is_leaf=lambda x: isinstance(x, P),
   )
 
 
@@ -129,11 +129,11 @@ def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
   """
   # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')).
   tensor_sharding_spec = sum(
-      [
-          [axis] if isinstance(axis, str) else list(axis) if isinstance(axis, Iterable) else []
-          for axis in tensor_sharding_spec
-      ],
-      [],
+    [
+      [axis] if isinstance(axis, str) else list(axis) if isinstance(axis, Iterable) else []
+      for axis in tensor_sharding_spec
+    ],
+    [],
   )
   return tensor_sharding_spec
 
@@ -155,16 +155,16 @@ def _get_nontrival_mesh_axes(mesh):
   """
 
   target_sharding_axes_config = [
-      "fsdp",
-      "fsdp_transpose",
-      "sequence",
-      "context",
-      "context_autoregressive",
-      "tensor",
-      "tensor_transpose",
-      "tensor_sequence",
-      "stage",
-      "expert",
+    "fsdp",
+    "fsdp_transpose",
+    "sequence",
+    "context",
+    "context_autoregressive",
+    "tensor",
+    "tensor_transpose",
+    "tensor_sequence",
+    "stage",
+    "expert",
   ]
 
   # Filter the target axes to find those that exist in the current mesh
@@ -205,8 +205,8 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
     sharding = getattr(p_leaf, "sharding", None)
     spec = getattr(sharding, "spec", None)
     assert sharding is not None and spec is not None and isinstance(spec, P), (
-        f"Parameter '{param_name_str}' is missing a valid '.sharding.spec'."
-        "Expected 'p_leaf.sharding.spec' to be a non-null 'partitionspec'."
+      f"Parameter '{param_name_str}' is missing a valid '.sharding.spec'."
+      "Expected 'p_leaf.sharding.spec' to be a non-null 'partitionspec'."
     )
 
     current_sharding_spec = p_leaf.sharding.spec  # Extract the current tensor's sharding spec
@@ -221,14 +221,14 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
       unsharded_axes = set(valid_target_mesh_axes) - set(mesh_axes_used)
       # Add detailed info to list of problematic tensors
       problematic_tensors_details.append(
-          {
-              "name": param_name_str,  # Tensor name
-              "size": p_leaf.size,  # tensor size
-              "shape": p_leaf.shape,  # tensor shape
-              "spec": str(current_sharding_spec),  # Tensor sharding spec as string
-              "available_axes": sorted(list(valid_target_mesh_axes)),  # Axes that could be used for sharding
-              "unsharded_axes": sorted(list(unsharded_axes)),  # Unsharded axes
-          }
+        {
+          "name": param_name_str,  # Tensor name
+          "size": p_leaf.size,  # tensor size
+          "shape": p_leaf.shape,  # tensor shape
+          "spec": str(current_sharding_spec),  # Tensor sharding spec as string
+          "available_axes": sorted(list(valid_target_mesh_axes)),  # Axes that could be used for sharding
+          "unsharded_axes": sorted(list(unsharded_axes)),  # Unsharded axes
+        }
       )
   # Return the total size of unsharded parameters and the list of problematic tensors.
   return unsharded_params_total_size, problematic_tensors_details  # Return results
@@ -264,20 +264,17 @@ def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance,
     problematic_tensors_details.sort(key=lambda x: x["size"], reverse=True)
 
     # Begin constructing the error message.
-    error_msg_lines = [
-        f"Unsharded parameter percentage ({unsharded_param_perc:.2%})" f"exceeds tolerance ({tolerance:.2%})."
-    ]
+    error_msg_lines = [f"Unsharded parameter percentage ({unsharded_param_perc:.2%})exceeds tolerance ({tolerance:.2%})."]
     # Add a header explaining the issue.
     error_msg_lines.append(
-        "The following large tensors are replicated (unsharded) but could be sharded on at "
-        "least one of the available axes:"
+      "The following large tensors are replicated (unsharded) but could be sharded on at least one of the available axes:"
     )
     # Add details for the top 5 largest problematic tensors.
     for detail in problematic_tensors_details[:5]:  # Show top 5 largest problematic tensors
       error_msg_lines.append(
-          f" - Name: {detail['name']}(Size: {detail['size']}, Shape: {detail['spec']}, Spec: {detail['spec']}) "
-          f" is unsharded on axis: {detail['unsharded_axes']}"
-          f" could be sharded on: {detail['available_axes']}"
+        f" - Name: {detail['name']}(Size: {detail['size']}, Shape: {detail['spec']}, Spec: {detail['spec']}) "
+        f" is unsharded on axis: {detail['unsharded_axes']}"
+        f" could be sharded on: {detail['available_axes']}"
       )
 
     # Raise the assertion error with the combined, formatted message.
@@ -314,7 +311,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   # Check if the amount of unsharded parameters is within the tolerance and
   # raise an exception if it is not.
   _raise_if_unsharded_exceeds_tolerance(
-      unsharded_params_total_size, total_num_params, tolerance, problematic_tensors_details
+    unsharded_params_total_size, total_num_params, tolerance, problematic_tensors_details
   )
 
 
@@ -387,7 +384,7 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
     if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):
       sharded_fp32_params = state_mesh_shardings.opt_state.mu
     elif isinstance(state_mesh_shardings.opt_state, tuple) and isinstance(
-        state_mesh_shardings.opt_state[0], optax.ScaleByAdamState
+      state_mesh_shardings.opt_state[0], optax.ScaleByAdamState
     ):
       sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
     else:
@@ -477,7 +474,7 @@ def get_formatted_sharding_annotations(params, mesh=None):
       sharding_desc = "No .sharding attribute found"
 
     # Append the formatted details for the current parameter to our list of lines.
-    annotation_lines.append(f" - Param: {param_name_str}\n" f"   Shape: {shape_str}\n" f"   Sharding: {sharding_desc}")
+    annotation_lines.append(f" - Param: {param_name_str}\n   Shape: {shape_str}\n   Sharding: {sharding_desc}")
   # Join all the collected lines into a single string, separated by newlines.
   return "\n".join(annotation_lines)
 

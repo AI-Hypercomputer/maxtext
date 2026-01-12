@@ -50,14 +50,14 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
       padding_shape = (target_vocab_size - source_vocab_size, target_hidden_size)
       # Use jnp.zeros for JAX arrays, np.zeros for numpy arrays
       padding = (
-          jnp.zeros(padding_shape, dtype=scaled_tensor.dtype)
-          if isinstance(scaled_tensor, jax.Array)
-          else np.zeros(padding_shape, dtype=scaled_tensor.dtype)
+        jnp.zeros(padding_shape, dtype=scaled_tensor.dtype)
+        if isinstance(scaled_tensor, jax.Array)
+        else np.zeros(padding_shape, dtype=scaled_tensor.dtype)
       )
       output_tensor = (
-          jnp.concatenate([scaled_tensor, padding], axis=0)
-          if isinstance(scaled_tensor, jax.Array)
-          else np.concatenate([scaled_tensor, padding], axis=0)
+        jnp.concatenate([scaled_tensor, padding], axis=0)
+        if isinstance(scaled_tensor, jax.Array)
+        else np.concatenate([scaled_tensor, padding], axis=0)
       )
     else:  # Vocab sizes match
       output_tensor = scaled_tensor
@@ -119,12 +119,12 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
     hooks[pref + "self_attention-out-kernel"] = reshape_kernel
     # Norm scales
     for nm in [
-        "pre_self_attention_norm-scale",
-        "post_self_attention_norm-scale",
-        "self_attention-query_norm-scale",
-        "self_attention-key_norm-scale",
-        "pre_ffw_norm-scale",
-        "post_ffw_norm-scale",
+      "pre_self_attention_norm-scale",
+      "post_self_attention_norm-scale",
+      "self_attention-query_norm-scale",
+      "self_attention-key_norm-scale",
+      "pre_ffw_norm-scale",
+      "post_ffw_norm-scale",
     ]:
       hooks[pref + nm] = scale_rmsnorm
     # MLP
@@ -138,9 +138,9 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
   vision_layer_ids = list(range(nvis))
   for i in vision_layer_ids:
     base = (
-        f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-"
-        if i is not None
-        else "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock-"
+      f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-"
+      if i is not None
+      else "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock-"
     )
     # Attention kernels & biases
     for qkv in ["query", "key", "value"]:

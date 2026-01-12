@@ -37,72 +37,72 @@ CUSTOM_VMEM_LIMIT_FLAG = "--xla_tpu_scoped_vmem_limit_kib={vmem_limit}".format
 # Continuation Fusion (CF) for All Gather Collectives
 # Continuation Fusion is a form of parallelizing compute work with collectives.
 CF_FOR_ALL_GATHER = (
-    " --xla_tpu_enable_async_collective_fusion=true"
-    " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true"
-    " --xla_tpu_enable_async_collective_fusion_multiple_steps=true"
-    " --xla_tpu_overlap_compute_collective_tc=true"
-    " --xla_enable_async_all_gather=true"
+  " --xla_tpu_enable_async_collective_fusion=true"
+  " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true"
+  " --xla_tpu_enable_async_collective_fusion_multiple_steps=true"
+  " --xla_tpu_overlap_compute_collective_tc=true"
+  " --xla_enable_async_all_gather=true"
 )
 
 # Continuation Fusion (CF) for All Reduce Collectives
 # Continuation Fusion is a form of parallelizing compute work with collectives.
 CF_FOR_ALL_REDUCE = (
-    " --xla_tpu_enable_async_collective_fusion=true"
-    " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=true"
-    " --xla_tpu_enable_async_collective_fusion_multiple_steps=true"
-    " --xla_tpu_overlap_compute_collective_tc=true"
-    " --xla_enable_async_all_reduce=true"
+  " --xla_tpu_enable_async_collective_fusion=true"
+  " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=true"
+  " --xla_tpu_enable_async_collective_fusion_multiple_steps=true"
+  " --xla_tpu_overlap_compute_collective_tc=true"
+  " --xla_enable_async_all_reduce=true"
 )
 
 # Continuation Fusion (CF) for All Gather and All Reduce Collectives.
 # Continuation Fusion is a form of parallelizing compute work with collectives.
 CF_FOR_ALL_REDUCE_AND_ALL_GATHER = (
-    " --xla_enable_async_all_reduce=true"
-    " --xla_enable_async_all_gather=true"
-    " --xla_tpu_overlap_compute_collective_tc=true"
-    " --xla_tpu_enable_async_collective_fusion=true"
-    " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true"
-    " --xla_tpu_enable_async_collective_fusion_multiple_steps=true"
+  " --xla_enable_async_all_reduce=true"
+  " --xla_enable_async_all_gather=true"
+  " --xla_tpu_overlap_compute_collective_tc=true"
+  " --xla_tpu_enable_async_collective_fusion=true"
+  " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true"
+  " --xla_tpu_enable_async_collective_fusion_multiple_steps=true"
 )
 
 
 # Base Flags needed when enabling sparsecore offloading
 ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS = (
-    " --xla_tpu_use_tc_device_shape_on_sc=true"
-    " --xla_sc_enable_instruction_fusion=false"
-    " --xla_sc_disjoint_spmem=false"
-    " --xla_sc_disable_megacore_partitioning=true"
-    " --2a886c8_chip_config_name=megachip_tccontrol"
+  " --xla_tpu_use_tc_device_shape_on_sc=true"
+  " --xla_sc_enable_instruction_fusion=false"
+  " --xla_sc_disjoint_spmem=false"
+  " --xla_sc_disable_megacore_partitioning=true"
+  " --2a886c8_chip_config_name=megachip_tccontrol"
 )
 
 
 # Enable SparseCore All Gather (1D), Reduce Scatter (1D) and All Reduce (ND)
 ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR = (
-    " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
-    " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false"
-    " --xla_tpu_enable_async_collective_fusion_fuse_reduce_scatter=false"
-    " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
-    " --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
-    " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
-    " --xla_tpu_enable_all_gather_offload_tracing=true"
-    " --xla_tpu_enable_reduce_scatter_offload_tracing=true"
-    " --xla_tpu_enable_all_reduce_offload_tracing=true"
+  " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
+  " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false"
+  " --xla_tpu_enable_async_collective_fusion_fuse_reduce_scatter=false"
+  " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
+  " --xla_tpu_enable_all_gather_offload_tracing=true"
+  " --xla_tpu_enable_reduce_scatter_offload_tracing=true"
+  " --xla_tpu_enable_all_reduce_offload_tracing=true"
 ) + ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS
 
 # Enable SparseCore Reduce Scatter (SC RS)
 # Either one of CF or SC can be enabled at a time.
 ENABLE_SPARSECORE_OFFLOADING_FOR_REDUCE_SCATTER = (
-    " --xla_tpu_enable_async_collective_fusion_fuse_reduce_scatter=false"
-    " --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
-    " --xla_tpu_enable_reduce_scatter_offload_tracing=true"
+  " --xla_tpu_enable_async_collective_fusion_fuse_reduce_scatter=false"
+  " --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
+  " --xla_tpu_enable_reduce_scatter_offload_tracing=true"
 ) + ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS
 
 # Enable SparseCore All Gather (SC AG).
 # Either one of CF or SC can be enabled at a time.
 ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER = (
-    " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
-    " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
-    " --xla_tpu_enable_all_gather_offload_tracing=true"
+  " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
+  " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
+  " --xla_tpu_enable_all_gather_offload_tracing=true"
 ) + ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS
 
 # Enable SparseCore All Reduce (SC AR)
@@ -110,23 +110,23 @@ ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER = (
 # This is useful for reducing the gradient reduction all-reduce time with
 # overlapping with compute during that time.
 ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE = (
-    " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false"
-    " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
-    " --xla_tpu_enable_all_reduce_offload_tracing=true"
+  " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false"
+  " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
+  " --xla_tpu_enable_all_reduce_offload_tracing=true"
 ) + ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS
 
 # Better memory layout for all-reduce (AR).
 LAYOUT_FOR_ALL_REDUCE_SCATTER = (
-    " --xla_tpu_use_minor_sharding_for_major_trivial_input=true"
-    " --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1"
-    " --xla_tpu_assign_all_reduce_scatter_layout=true"
+  " --xla_tpu_use_minor_sharding_for_major_trivial_input=true"
+  " --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1"
+  " --xla_tpu_assign_all_reduce_scatter_layout=true"
 )
 
 # Enable Reduce Scatter (RS) Fusion in certain cases by merging
 # All-reduce (AR) and Dynamic-Slice (DS).
 REDUCE_SCATTER_FUSION = (
-    " --xla_tpu_use_minor_sharding_for_major_trivial_input=true"
-    " --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1"
+  " --xla_tpu_use_minor_sharding_for_major_trivial_input=true"
+  " --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1"
 )
 
 # xla_tpu_data_parallel_opt_different_sized_ops:
@@ -134,7 +134,7 @@ REDUCE_SCATTER_FUSION = (
 # xla_tpu_enable_data_parallel_all_reduce_opt:
 #   optimize DCN all-reduces used for data parallel sharding
 DATA_PARALLEL_OVERLAP = (
-    " --xla_tpu_enable_data_parallel_all_reduce_opt=true" " --xla_tpu_data_parallel_opt_different_sized_ops=true"
+  " --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true"
 )
 
 # Enable Enhanced Launch Barrier.
@@ -145,17 +145,17 @@ ENHANCED_LAUNCH_BARRIER = " --xla_tpu_use_enhanced_launch_barrier=true"
 # Host offloading Flags. These are optimizations recommended when using host
 # offloading.
 HOST_OFFLOAD_FLAGS = (
-    " --xla_tpu_enable_all_experimental_scheduler_features=true"
-    " --xla_tpu_enable_scheduler_memory_pressure_tracking=true"
-    " --xla_tpu_host_transfer_overlap_limit=24"
-    " --xla_tpu_aggressive_opt_barrier_removal=ENABLED"
-    " --xla_lhs_prioritize_async_depth_over_stall=ENABLED"
-    " --xla_tpu_enable_ag_backward_pipelining=true"
-    " --xla_should_allow_loop_variant_parameter_in_chain=ENABLED"
-    " --xla_should_add_loop_invariant_op_in_chain=ENABLED"
-    " --xla_max_concurrent_host_send_recv=100"
-    " --xla_tpu_scheduler_percent_shared_memory_limit=100"
-    " --xla_latency_hiding_scheduler_rerun=2"
+  " --xla_tpu_enable_all_experimental_scheduler_features=true"
+  " --xla_tpu_enable_scheduler_memory_pressure_tracking=true"
+  " --xla_tpu_host_transfer_overlap_limit=24"
+  " --xla_tpu_aggressive_opt_barrier_removal=ENABLED"
+  " --xla_lhs_prioritize_async_depth_over_stall=ENABLED"
+  " --xla_tpu_enable_ag_backward_pipelining=true"
+  " --xla_should_allow_loop_variant_parameter_in_chain=ENABLED"
+  " --xla_should_add_loop_invariant_op_in_chain=ENABLED"
+  " --xla_max_concurrent_host_send_recv=100"
+  " --xla_tpu_scheduler_percent_shared_memory_limit=100"
+  " --xla_latency_hiding_scheduler_rerun=2"
 )
 
 # Flags to optimize pipeline parallelism over DCN with large host offloading.
@@ -172,9 +172,9 @@ DISABLE_BUNDLE_AWARE_COST_MODEL = " --xla_tpu_use_bundle_aware_cost_model_for_fu
 # Enabling this will reduce performance by a factor of 1/(repeat_count + 1).
 ENABLE_SDC_CHECKER = False
 SDC_CHECKER = (
-    " --xla_tpu_enable_sdc_checker=true"
-    " --xla_tpu_sdc_check_halt_on_detection=true"
-    " --xla_tpu_sdc_replicate_llo=true --xla_tpu_sdc_check_repeat_count=5"
+  " --xla_tpu_enable_sdc_checker=true"
+  " --xla_tpu_sdc_check_halt_on_detection=true"
+  " --xla_tpu_sdc_replicate_llo=true --xla_tpu_sdc_check_repeat_count=5"
 )
 if ENABLE_SDC_CHECKER:
   ENABLE_DEBUG_LOGS = True
@@ -183,10 +183,10 @@ if ENABLE_SDC_CHECKER:
 # These are a set of debug logs recommended to be part of a workload.
 ENABLE_DEBUG_LOGS = False
 DEBUG_LOGS = {
-    "TPU_STDERR_LOG_LEVEL": "0",
-    "TF_CPP_MIN_LOG_LEVEL": "0",
-    "TPU_MIN_LOG_LEVEL": "0",
-    "TPU_VMODULE": "tpu_configuration_ops_impl=3",  # Enable TPU logging
+  "TPU_STDERR_LOG_LEVEL": "0",
+  "TF_CPP_MIN_LOG_LEVEL": "0",
+  "TPU_MIN_LOG_LEVEL": "0",
+  "TPU_VMODULE": "tpu_configuration_ops_impl=3",  # Enable TPU logging
 }
 
 # Disables collective matmul operations.

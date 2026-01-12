@@ -87,49 +87,49 @@ def main(raw_args=None) -> None:
     transpose_gating_einsum = True
 
   jax_weights = {
-      "decoder": {
-          "decoder_norm": {"scale": params["transformer"]["final_norm"]["scale"] + 1},
-      },
-      "token_embedder": {"embedding": params["transformer"]["embedder"]["input_embedding"] * jnp.sqrt(embed_dim)},
+    "decoder": {
+      "decoder_norm": {"scale": params["transformer"]["final_norm"]["scale"] + 1},
+    },
+    "token_embedder": {"embedding": params["transformer"]["embedder"]["input_embedding"] * jnp.sqrt(embed_dim)},
   }
   self_attention_local = dict(
-      {
-          "query": {"kernel": []},
-          "key": {"kernel": []},
-          "value": {"kernel": []},
-          "out": {"kernel": []},
-      }
+    {
+      "query": {"kernel": []},
+      "key": {"kernel": []},
+      "value": {"kernel": []},
+      "out": {"kernel": []},
+    }
   )
   self_attention_global = dict(
-      {
-          "query": {"kernel": []},
-          "key": {"kernel": []},
-          "value": {"kernel": []},
-          "out": {"kernel": []},
-      }
+    {
+      "query": {"kernel": []},
+      "key": {"kernel": []},
+      "value": {"kernel": []},
+      "out": {"kernel": []},
+    }
   )
 
   layer_weight = dict(
-      {
-          "mlp_local": {
-              "wi_0": {"kernel": []},
-              "wi_1": {"kernel": []},
-              "wo": {"kernel": []},
-          },
-          "mlp_global": {
-              "wi_0": {"kernel": []},
-              "wi_1": {"kernel": []},
-              "wo": {"kernel": []},
-          },
-          "pre_self_attention_norm_local": {"scale": []},
-          "pre_ffw_norm_local": {"scale": []},
-          "post_self_attention_norm_local": {"scale": []},
-          "post_ffw_norm_local": {"scale": []},
-          "pre_self_attention_norm_global": {"scale": []},
-          "pre_ffw_norm_global": {"scale": []},
-          "post_self_attention_norm_global": {"scale": []},
-          "post_ffw_norm_global": {"scale": []},
-      }
+    {
+      "mlp_local": {
+        "wi_0": {"kernel": []},
+        "wi_1": {"kernel": []},
+        "wo": {"kernel": []},
+      },
+      "mlp_global": {
+        "wi_0": {"kernel": []},
+        "wi_1": {"kernel": []},
+        "wo": {"kernel": []},
+      },
+      "pre_self_attention_norm_local": {"scale": []},
+      "pre_ffw_norm_local": {"scale": []},
+      "post_self_attention_norm_local": {"scale": []},
+      "post_ffw_norm_local": {"scale": []},
+      "pre_self_attention_norm_global": {"scale": []},
+      "pre_ffw_norm_global": {"scale": []},
+      "post_self_attention_norm_global": {"scale": []},
+      "post_ffw_norm_global": {"scale": []},
+    }
   )
 
   for layer_idx in range(0, num_layers, 2):
@@ -138,95 +138,95 @@ def main(raw_args=None) -> None:
 
     ######################## layer local attention ########################
     self_attention_local["query"]["kernel"].append(
-        params["transformer"][in_layer_name_local]["attn"]["q_einsum"]["w"].transpose((1, 0, 2)) * query_pre_attn_scalar
+      params["transformer"][in_layer_name_local]["attn"]["q_einsum"]["w"].transpose((1, 0, 2)) * query_pre_attn_scalar
     )
     self_attention_local["key"]["kernel"].append(
-        params["transformer"][in_layer_name_local]["attn"]["kv_einsum"]["w"][0].transpose((1, 0, 2))
+      params["transformer"][in_layer_name_local]["attn"]["kv_einsum"]["w"][0].transpose((1, 0, 2))
     )
     self_attention_local["value"]["kernel"].append(
-        params["transformer"][in_layer_name_local]["attn"]["kv_einsum"]["w"][1].transpose((1, 0, 2))
+      params["transformer"][in_layer_name_local]["attn"]["kv_einsum"]["w"][1].transpose((1, 0, 2))
     )
     self_attention_local["out"]["kernel"].append(
-        params["transformer"][in_layer_name_local]["attn"]["attn_vec_einsum"]["w"]
+      params["transformer"][in_layer_name_local]["attn"]["attn_vec_einsum"]["w"]
     )
 
     # mlp
     if transpose_gating_einsum:
       layer_weight["mlp_local"]["wi_0"]["kernel"].append(
-          np.transpose(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][0])
+        np.transpose(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][0])
       )
       layer_weight["mlp_local"]["wi_1"]["kernel"].append(
-          np.transpose(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][1])
+        np.transpose(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][1])
       )
     else:
       layer_weight["mlp_local"]["wi_0"]["kernel"].append(
-          params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][0]
+        params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][0]
       )
       layer_weight["mlp_local"]["wi_1"]["kernel"].append(
-          params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][1]
+        params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][1]
       )
 
     layer_weight["mlp_local"]["wo"]["kernel"].append(params["transformer"][in_layer_name_local]["mlp"]["linear"]["w"])
 
     layer_weight["pre_self_attention_norm_local"]["scale"].append(
-        params["transformer"][in_layer_name_local]["pre_attention_norm"]["scale"] + 1
+      params["transformer"][in_layer_name_local]["pre_attention_norm"]["scale"] + 1
     )
     layer_weight["pre_ffw_norm_local"]["scale"].append(
-        params["transformer"][in_layer_name_local]["pre_ffw_norm"]["scale"] + 1
+      params["transformer"][in_layer_name_local]["pre_ffw_norm"]["scale"] + 1
     )
 
     layer_weight["post_self_attention_norm_local"]["scale"].append(
-        params["transformer"][in_layer_name_local]["post_attention_norm"]["scale"] + 1
+      params["transformer"][in_layer_name_local]["post_attention_norm"]["scale"] + 1
     )
     layer_weight["post_ffw_norm_local"]["scale"].append(
-        params["transformer"][in_layer_name_local]["post_ffw_norm"]["scale"] + 1
+      params["transformer"][in_layer_name_local]["post_ffw_norm"]["scale"] + 1
     )
 
     ######################## layer global attention ########################
 
     self_attention_global["query"]["kernel"].append(
-        params["transformer"][in_layer_name_global]["attn"]["q_einsum"]["w"].transpose((1, 0, 2)) * query_pre_attn_scalar
+      params["transformer"][in_layer_name_global]["attn"]["q_einsum"]["w"].transpose((1, 0, 2)) * query_pre_attn_scalar
     )
     self_attention_global["key"]["kernel"].append(
-        params["transformer"][in_layer_name_global]["attn"]["kv_einsum"]["w"][0].transpose((1, 0, 2))
+      params["transformer"][in_layer_name_global]["attn"]["kv_einsum"]["w"][0].transpose((1, 0, 2))
     )
     self_attention_global["value"]["kernel"].append(
-        params["transformer"][in_layer_name_global]["attn"]["kv_einsum"]["w"][1].transpose((1, 0, 2))
+      params["transformer"][in_layer_name_global]["attn"]["kv_einsum"]["w"][1].transpose((1, 0, 2))
     )
     self_attention_global["out"]["kernel"].append(
-        params["transformer"][in_layer_name_global]["attn"]["attn_vec_einsum"]["w"]
+      params["transformer"][in_layer_name_global]["attn"]["attn_vec_einsum"]["w"]
     )
 
     # mlp
     if transpose_gating_einsum:
       layer_weight["mlp_global"]["wi_0"]["kernel"].append(
-          np.transpose(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][0])
+        np.transpose(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][0])
       )
       layer_weight["mlp_global"]["wi_1"]["kernel"].append(
-          np.transpose(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][1])
+        np.transpose(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][1])
       )
     else:
       layer_weight["mlp_global"]["wi_0"]["kernel"].append(
-          params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][0]
+        params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][0]
       )
       layer_weight["mlp_global"]["wi_1"]["kernel"].append(
-          params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][1]
+        params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][1]
       )
 
     layer_weight["mlp_global"]["wo"]["kernel"].append(params["transformer"][in_layer_name_global]["mlp"]["linear"]["w"])
 
     layer_weight["pre_self_attention_norm_global"]["scale"].append(
-        params["transformer"][in_layer_name_global]["pre_attention_norm"]["scale"] + 1
+      params["transformer"][in_layer_name_global]["pre_attention_norm"]["scale"] + 1
     )
     layer_weight["pre_ffw_norm_global"]["scale"].append(
-        params["transformer"][in_layer_name_global]["pre_ffw_norm"]["scale"] + 1
+      params["transformer"][in_layer_name_global]["pre_ffw_norm"]["scale"] + 1
     )
 
     layer_weight["post_self_attention_norm_global"]["scale"].append(
-        params["transformer"][in_layer_name_global]["post_attention_norm"]["scale"] + 1
+      params["transformer"][in_layer_name_global]["post_attention_norm"]["scale"] + 1
     )
     layer_weight["post_ffw_norm_global"]["scale"].append(
-        params["transformer"][in_layer_name_global]["post_ffw_norm"]["scale"] + 1
+      params["transformer"][in_layer_name_global]["post_ffw_norm"]["scale"] + 1
     )
 
   self_attention_local["query"]["kernel"] = np.array(self_attention_local["query"]["kernel"]).transpose((1, 0, 2, 3))
@@ -244,31 +244,31 @@ def main(raw_args=None) -> None:
   layer_weight["mlp_local"]["wo"]["kernel"] = np.array(layer_weight["mlp_local"]["wo"]["kernel"]).transpose((1, 0, 2))
 
   layer_weight["mlp_global"]["wi_0"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_0"]["kernel"]).transpose(
-      (1, 0, 2)
+    (1, 0, 2)
   )
   layer_weight["mlp_global"]["wi_1"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_1"]["kernel"]).transpose(
-      (1, 0, 2)
+    (1, 0, 2)
   )
   layer_weight["mlp_global"]["wo"]["kernel"] = np.array(layer_weight["mlp_global"]["wo"]["kernel"]).transpose((1, 0, 2))
 
   layer_weight["pre_self_attention_norm_local"]["scale"] = np.array(
-      layer_weight["pre_self_attention_norm_local"]["scale"]
+    layer_weight["pre_self_attention_norm_local"]["scale"]
   ).transpose((1, 0))
   layer_weight["pre_ffw_norm_local"]["scale"] = np.array(layer_weight["pre_ffw_norm_local"]["scale"]).transpose((1, 0))
   layer_weight["post_self_attention_norm_local"]["scale"] = np.array(
-      layer_weight["post_self_attention_norm_local"]["scale"]
+    layer_weight["post_self_attention_norm_local"]["scale"]
   ).transpose((1, 0))
   layer_weight["post_ffw_norm_local"]["scale"] = np.array(layer_weight["post_ffw_norm_local"]["scale"]).transpose((1, 0))
 
   layer_weight["pre_self_attention_norm_global"]["scale"] = np.array(
-      layer_weight["pre_self_attention_norm_global"]["scale"]
+    layer_weight["pre_self_attention_norm_global"]["scale"]
   ).transpose((1, 0))
   layer_weight["pre_ffw_norm_global"]["scale"] = np.array(layer_weight["pre_ffw_norm_global"]["scale"]).transpose((1, 0))
   layer_weight["post_self_attention_norm_global"]["scale"] = np.array(
-      layer_weight["post_self_attention_norm_global"]["scale"]
+    layer_weight["post_self_attention_norm_global"]["scale"]
   ).transpose((1, 0))
   layer_weight["post_ffw_norm_global"]["scale"] = np.array(layer_weight["post_ffw_norm_global"]["scale"]).transpose(
-      (1, 0)
+    (1, 0)
   )
 
   layer_weight["self_attention_local"] = copy.deepcopy(self_attention_local)
@@ -290,11 +290,15 @@ def main(raw_args=None) -> None:
   save_interval_steps = 1
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      args.maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
+    args.maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
   )
 
   state_new = train_state.TrainState(
-      step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+    step=0,
+    apply_fn=None,
+    params={"params": jax_weights},
+    tx=None,
+    opt_state={},  # type: ignore
   )
 
   if checkpoint_manager is not None:

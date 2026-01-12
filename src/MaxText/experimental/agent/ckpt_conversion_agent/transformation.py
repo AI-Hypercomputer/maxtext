@@ -13,9 +13,10 @@
 # limitations under the License.
 
 """
-A transformation agent to generate the 
+A transformation agent to generate the
 layerwise and bidirectional transformation hook functions between HF & Maxtext
 """
+
 import argparse
 import os
 from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_text_file, load_json
@@ -46,7 +47,7 @@ class TransformationAgent(BaseAgent):
   def _load_prompt_templates(self):
     """Loads all necessary prompt templates."""
     templates = {
-        "hook_fn": load_prompt_template(f"{self.dir_path}/prompts/04_hook_fn_dsl.txt"),
+      "hook_fn": load_prompt_template(f"{self.dir_path}/prompts/04_hook_fn_dsl.txt"),
     }
     return templates
 
@@ -59,11 +60,11 @@ class TransformationAgent(BaseAgent):
       return None
 
     prompt = self.prompt_templates["hook_fn"].format(
-        plan=self.analysis,
-        target_model=self.target_model,
-        dsl=self.dsl,
-        pitfalls=self.pitfalls,
-        param_mapping_code=self.param_mapping_code,
+      plan=self.analysis,
+      target_model=self.target_model,
+      dsl=self.dsl,
+      pitfalls=self.pitfalls,
+      param_mapping_code=self.param_mapping_code,
     )
 
     hook_fn_code = self.generate_text(prompt)
@@ -91,7 +92,7 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="A script to process model transformations.")
   parser.add_argument("--target_model", type=str, required=True, help='The name of the target model (e.g., "GEMMA3").')
   parser.add_argument(
-      "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
+    "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
   )
   parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
   args = parser.parse_args()

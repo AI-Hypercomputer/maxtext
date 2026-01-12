@@ -131,10 +131,10 @@ def main():
   if args.checkpoint_path:
     print(f"Loading checkpoint from {args.checkpoint_path}")
     tokenizer = AutoTokenizer.from_pretrained(
-        args.checkpoint_path,
-        model_max_length=2048,
-        padding_side="left",
-        use_fast=False,
+      args.checkpoint_path,
+      model_max_length=2048,
+      padding_side="left",
+      use_fast=False,
     )
   elif args.tokenizer_path:
     print(f"Loading tokenizer from {args.tokenizer_path}")
@@ -176,7 +176,7 @@ def main():
   print("Post-processing texts...")
   with Pool(num_workers) as pool:
     processed_pairs = list(
-        tqdm.tqdm(pool.starmap(postprocess_text, zip(all_preds, target_required)), total=len(all_preds))
+      tqdm.tqdm(pool.starmap(postprocess_text, zip(all_preds, target_required)), total=len(all_preds))
     )
   preds, refs = zip(*processed_pairs)
 
@@ -185,18 +185,18 @@ def main():
   data_chunks = split_data(preds, refs, num_workers)
   with Pool(num_workers) as pool:
     chunk_results = list(
-        tqdm.tqdm(pool.imap(partial(compute_rouge_chunk, metric=metric), data_chunks), total=len(data_chunks))
+      tqdm.tqdm(pool.imap(partial(compute_rouge_chunk, metric=metric), data_chunks), total=len(data_chunks))
     )
   rouge_scores = aggregate_rouge_scores(chunk_results)
 
   prediction_lens = [len(pred) for pred in preds]
   gen_num = len(preds)
   result = {
-      **rouge_scores,
-      "gen_len": np.sum(prediction_lens),
-      "gen_num": gen_num,
-      "gen_tok_len": total_gen_tok_len,
-      "tokens_per_sample": round(total_gen_tok_len / gen_num, 1),
+    **rouge_scores,
+    "gen_len": np.sum(prediction_lens),
+    "gen_num": gen_num,
+    "gen_tok_len": total_gen_tok_len,
+    "tokens_per_sample": round(total_gen_tok_len / gen_num, 1),
   }
 
   print("\nResults\n")

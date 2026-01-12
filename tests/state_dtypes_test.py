@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Test that all weights are expected dtype (default float32) """
+"""Test that all weights are expected dtype (default float32)"""
+
 import unittest
 import os.path
 
@@ -66,10 +67,10 @@ class StateDtypes(unittest.TestCase):
 
   def test_set_bf16(self):
     argv = [
-        None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-        "enable_checkpointing=False",
-        "weight_dtype=bfloat16",
+      None,
+      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      "enable_checkpointing=False",
+      "weight_dtype=bfloat16",
     ]
     weights = self.get_weights(argv)
     self.assert_pytree_is_dtype(weights, jnp.bfloat16)

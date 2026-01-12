@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Smoke test """
+"""Smoke test"""
+
 import os
 import unittest
 
@@ -28,19 +29,19 @@ class Train(unittest.TestCase):
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
     train_main(
-        [
-            None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "gpu_smoke_test.yml"),
-            # pylint: disable=f-string-without-interpolation
-            f"base_output_directory=gs://runner-maxtext-logs",
-            "run_name=runner_test",
-            r"dataset_path=gs://maxtext-dataset",
-            "enable_checkpointing=False",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-            "enable_goodput_recording=False",
-            "enable_checkpoint_cloud_logger=False",
-            "monitor_goodput=False",
-        ]
+      [
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "gpu_smoke_test.yml"),
+        # pylint: disable=f-string-without-interpolation
+        f"base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_test",
+        r"dataset_path=gs://maxtext-dataset",
+        "enable_checkpointing=False",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+        "enable_goodput_recording=False",
+        "enable_checkpoint_cloud_logger=False",
+        "monitor_goodput=False",
+      ]
     )
 
 

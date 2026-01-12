@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-This file contains prompts and templates used by the Integrative RAG Agent for code analysis, 
+This file contains prompts and templates used by the Integrative RAG Agent for code analysis,
 description generation, and module naming.
 """
 

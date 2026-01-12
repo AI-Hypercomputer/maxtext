@@ -36,9 +36,9 @@ from .pw_utils import build_user_models, get_cluster_config, get_pathways_config
 AVAILABLE_MODELS_FRAMEWORKS = ["mcjax", "pathways"]
 
 AVAILABLE_MODELS = {
-    "v6e": v6e_model_configs.trillium_model_dict,
-    "v5litepod": v5e_model_configs.v5e_model_dict,
-    "v5p": v5p_model_configs.v5p_model_dict,
+  "v6e": v6e_model_configs.trillium_model_dict,
+  "v5litepod": v5e_model_configs.v5e_model_dict,
+  "v5p": v5p_model_configs.v5p_model_dict,
 }
 
 
@@ -80,41 +80,41 @@ class UserConfig:
 
     self.region = "-".join(self.zone.split("-")[:-1])
     self.pathways_config = get_pathways_config(
-        self.server_image,
-        self.proxy_image,
-        self.runner,
-        self.colocated_python_image,
-        self.headless,
-        self.server_flags,
-        self.proxy_flags,
-        self.worker_flags,
+      self.server_image,
+      self.proxy_image,
+      self.runner,
+      self.colocated_python_image,
+      self.headless,
+      self.server_flags,
+      self.proxy_flags,
+      self.worker_flags,
     )
     self.headless_workload_name = f"{self.user[:3]}-headless"
     self.base_output_directory = f"gs://{self.user}-{self.region}/{self.user}-"
 
     device_base_type = self.device_type.split("-", maxsplit=1)[0]
     self.models = build_user_models(
-        self.selected_model_framework,
-        self.selected_model_names,
-        device_base_type,
-        AVAILABLE_MODELS_FRAMEWORKS,
-        AVAILABLE_MODELS,
+      self.selected_model_framework,
+      self.selected_model_names,
+      device_base_type,
+      AVAILABLE_MODELS_FRAMEWORKS,
+      AVAILABLE_MODELS,
     )
 
 
 # Define the required configuration here
 USER_CONFIG = UserConfig(
-    user="user_name",
-    cluster_name="v6e-256-cluster",
-    project="tpu-prod-env-cluster",
-    zone="us-east5-b",
-    device_type="v6e-256",
-    benchmark_steps=20,
-    num_slices_list=[2],
-    server_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server",
-    proxy_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server",
-    runner="us-docker.pkg.dev/path/to/maxtext_runner",
-    selected_model_framework=["pathways"],
-    selected_model_names=["llama3_1_8b_8192"],
-    priority="medium",
+  user="user_name",
+  cluster_name="v6e-256-cluster",
+  project="tpu-prod-env-cluster",
+  zone="us-east5-b",
+  device_type="v6e-256",
+  benchmark_steps=20,
+  num_slices_list=[2],
+  server_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server",
+  proxy_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server",
+  runner="us-docker.pkg.dev/path/to/maxtext_runner",
+  selected_model_framework=["pathways"],
+  selected_model_names=["llama3_1_8b_8192"],
+  priority="medium",
 )

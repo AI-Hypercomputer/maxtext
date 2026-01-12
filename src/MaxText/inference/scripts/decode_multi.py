@@ -32,12 +32,11 @@ _INITIAL_PREFILL_STREAMS = 2  # Example: Start generating after 2 streams are re
 def _validate_config(config):
   """Validate configuration settings."""
   assert config.load_full_state_path == "", (
-      "Decode doesn't operate on full states! Convert to parameter checkpoint first."
-      "Using generate_param_only_checkpoint."
+    "Decode doesn't operate on full states! Convert to parameter checkpoint first.Using generate_param_only_checkpoint."
   )
-  assert (
-      0 < _INITIAL_PREFILL_STREAMS <= _NUM_STREAMS
-  ), f"_INITIAL_PREFILL_STREAMS ({_INITIAL_PREFILL_STREAMS}) must be > 0 and <= _NUM_STREAMS ({_NUM_STREAMS})"
+  assert 0 < _INITIAL_PREFILL_STREAMS <= _NUM_STREAMS, (
+    f"_INITIAL_PREFILL_STREAMS ({_INITIAL_PREFILL_STREAMS}) must be > 0 and <= _NUM_STREAMS ({_NUM_STREAMS})"
+  )
 
 
 def main(argv: Sequence[str]) -> None:
@@ -61,9 +60,9 @@ def main(argv: Sequence[str]) -> None:
   assert true_length <= config.max_prefill_predict_length, "Prompt too long for prefill length"
 
   batch_size = int(config.per_device_batch_size * jax.device_count())
-  assert (
-      0 < _NUM_STREAMS <= batch_size
-  ), f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
+  assert 0 < _NUM_STREAMS <= batch_size, (
+    f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
+  )
 
   # Initialize decode state
   rng, rng_init_decode = jax.random.split(rng)
@@ -86,12 +85,12 @@ def main(argv: Sequence[str]) -> None:
     rng, rng_prefill = jax.random.split(rng)
     request_id = uuid.uuid4()
     prefill_result, first_token = engine.prefill(
-        params=params,
-        padded_tokens=tokens,
-        true_length=true_length,
-        rng=rng_prefill,
-        slot=slot_idx,
-        request_id=request_id,
+      params=params,
+      padded_tokens=tokens,
+      true_length=true_length,
+      rng=rng_prefill,
+      slot=slot_idx,
+      request_id=request_id,
     )
     prefill_results_to_insert[slot_idx] = prefill_result
     streams_results[slot_idx].append(first_token.get_result_at_slot(0).tokens.item())
@@ -103,10 +102,10 @@ def main(argv: Sequence[str]) -> None:
   for slot_idx, prefill_result in prefill_results_to_insert.items():
     request_id = uuid.uuid4()
     decode_state = engine.insert(
-        prefix=prefill_result,
-        decode_state=decode_state,
-        slot=slot_idx,
-        request_id=request_id,  # Pass request_id
+      prefix=prefill_result,
+      decode_state=decode_state,
+      slot=slot_idx,
+      request_id=request_id,  # Pass request_id
     )
     streams_active[slot_idx] = True  # Mark stream as active
     streams_inserted_count += 1
@@ -169,12 +168,12 @@ def main(argv: Sequence[str]) -> None:
         rng, rng_prefill = jax.random.split(rng)
         request_id = uuid.uuid4()
         prefill_result, first_token = engine.prefill(
-            params=params,
-            padded_tokens=tokens,
-            true_length=true_length,
-            rng=rng_prefill,
-            slot=next_available_slot,
-            request_id=request_id,
+          params=params,
+          padded_tokens=tokens,
+          true_length=true_length,
+          rng=rng_prefill,
+          slot=next_available_slot,
+          request_id=request_id,
         )
         streams_prefilled_count += 1
 
@@ -182,10 +181,10 @@ def main(argv: Sequence[str]) -> None:
         print(f"  Inserting new stream into slot {next_available_slot}...")
         request_id_insert = uuid.uuid4()
         decode_state = engine.insert(
-            prefix=prefill_result,
-            decode_state=decode_state,
-            slot=next_available_slot,
-            request_id=request_id_insert,
+          prefix=prefill_result,
+          decode_state=decode_state,
+          slot=next_available_slot,
+          request_id=request_id_insert,
         )
         streams_active[next_available_slot] = True
         streams_inserted_count += 1
@@ -205,9 +204,9 @@ def main(argv: Sequence[str]) -> None:
       print(f"Stream {i}: Input=`{text}` -> Output=`{output}`")
 
       if i == 0:  # Check first stream as an example
-        assert output.startswith(
-            config.autoregressive_decode_assert
-        ), f"Stream {i} generated text mismatch: `{output}` vs expected start `{config.autoregressive_decode_assert}`"
+        assert output.startswith(config.autoregressive_decode_assert), (
+          f"Stream {i} generated text mismatch: `{output}` vs expected start `{config.autoregressive_decode_assert}`"
+        )
     else:
       print(f"Stream {i}: Was not activated.")
 

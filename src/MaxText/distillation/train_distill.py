@@ -95,11 +95,11 @@ def get_distillation_optimizer(config, max_train_steps):
 
   # 1. Define Schedule
   schedule = optax.schedules.warmup_cosine_decay_schedule(
-      init_value=0.0,
-      peak_value=config.learning_rate,
-      warmup_steps=int(config.warmup_steps_fraction * max_train_steps),
-      decay_steps=max_train_steps,
-      end_value=config.cosine_learning_rate_final_fraction * config.learning_rate,
+    init_value=0.0,
+    peak_value=config.learning_rate,
+    warmup_steps=int(config.warmup_steps_fraction * max_train_steps),
+    decay_steps=max_train_steps,
+    end_value=config.cosine_learning_rate_final_fraction * config.learning_rate,
   )
 
   # 2. Define Factory (Required for inject_hyperparams)
@@ -111,8 +111,8 @@ def get_distillation_optimizer(config, max_train_steps):
     # Apply Gradient Clipping
     if config.gradient_clipping_threshold > 0:
       opt = optax.chain(
-          optax.clip_by_global_norm(max_norm=config.gradient_clipping_threshold),
-          opt,
+        optax.clip_by_global_norm(max_norm=config.gradient_clipping_threshold),
+        opt,
       )
     return opt
 
@@ -147,10 +147,10 @@ class MonitoredLogitStrategy(logit.LogitStrategy):
   """Logit Strategy that returns detailed metrics for TensorBoard."""
 
   def compute_loss(
-      self,
-      student_output: jax.Array,
-      teacher_output: jax.Array,
-      labels: jax.Array,
+    self,
+    student_output: jax.Array,
+    teacher_output: jax.Array,
+    labels: jax.Array,
   ) -> Tuple[jax.Array, Dict[str, jax.Array]]:
     """Computes Loss and Auxiliary Metrics."""
     # Calculate Distillation Loss (KL Divergence)
@@ -181,17 +181,17 @@ class MonitoredLogitStrategy(logit.LogitStrategy):
 
     # 4. Return Loss AND Metrics
     metrics = {
-        "distill/soft_loss": soft_loss,
-        "distill/hard_loss": hard_loss,
-        "distill/kl_div": jnp.mean(kl_div),
-        "distill/teacher_loss": teacher_hard_loss,
+      "distill/soft_loss": soft_loss,
+      "distill/hard_loss": hard_loss,
+      "distill/kl_div": jnp.mean(kl_div),
+      "distill/teacher_loss": teacher_hard_loss,
     }
     return total_loss, metrics
 
   def compute_eval_loss(
-      self,
-      student_output: jax.Array,
-      labels: jax.Array,
+    self,
+    student_output: jax.Array,
+    labels: jax.Array,
   ) -> Tuple[jax.Array, Dict[str, jax.Array]]:
     """Computes Eval Loss and returns empty aux dict (required for consistency)."""
     # Parent logic for task loss
@@ -215,7 +215,7 @@ def _log_config_details(config: pyconfig.HyperParameters, label: str) -> None:
   max_logging.log(f"--- {label} Configuration ---")
   max_logging.log(f"  Model Name:      {config.model_name}")
   max_logging.log(
-      f"  Dimensions:      {config.num_decoder_layers} Layers, " f"{config.emb_dim} Emb Dim, {config.head_dim} Head Dim"
+    f"  Dimensions:      {config.num_decoder_layers} Layers, {config.emb_dim} Emb Dim, {config.head_dim} Head Dim"
   )
   max_logging.log(f"  Attention Heads: {config.num_query_heads} Query, {kv_heads} KV")
   max_logging.log(f"  Vocab Size:      {config.vocab_size}")
@@ -254,12 +254,12 @@ class MaxTextDistillationTrainer(distillation_trainer.DistillationTrainer):
     # 3. Return extended object so fields are available for Student training step
     # pylint: disable=unexpected-keyword-arg
     return MaxTextTrainingInput(
-        input_tokens=input_data.input_tokens,
-        input_mask=input_data.input_mask,
-        teacher_output=teacher_output,
-        positions=input_data.positions,
-        decoder_segment_ids=input_data.decoder_segment_ids,
-        targets=input_data.targets,
+      input_tokens=input_data.input_tokens,
+      input_mask=input_data.input_mask,
+      teacher_output=teacher_output,
+      positions=input_data.positions,
+      decoder_segment_ids=input_data.decoder_segment_ids,
+      targets=input_data.targets,
     )
 
   def _post_process_train_step(self, aux: Dict[str, jax.Array]) -> None:
@@ -324,12 +324,12 @@ class MaxTextToTunixIterator:
 
     # pylint: disable=unexpected-keyword-arg
     return MaxTextTrainingInput(
-        input_tokens=batch["inputs"],
-        input_mask=input_mask,
-        teacher_output=None,
-        positions=batch["inputs_position"],
-        decoder_segment_ids=seg_ids,
-        targets=batch["targets"],
+      input_tokens=batch["inputs"],
+      input_mask=input_mask,
+      teacher_output=None,
+      positions=batch["inputs_position"],
+      decoder_segment_ids=seg_ids,
+      targets=batch["targets"],
     )
 
 
@@ -372,8 +372,8 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   # Validate vocab size match between Student and Teacher
   if student_config.vocab_size != teacher_config.vocab_size:
     raise ValueError(
-        f"Vocab size mismatch! Student: {student_config.vocab_size}, Teacher: {teacher_config.vocab_size}. "
-        "Distillation requires matching vocabularies."
+      f"Vocab size mismatch! Student: {student_config.vocab_size}, Teacher: {teacher_config.vocab_size}. "
+      "Distillation requires matching vocabularies."
     )
 
   # 1. Setup Mesh
@@ -383,12 +383,12 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
 
   # 2. Load Models & Tokenizer Info
   tok = tokenizer.build_tokenizer(
-      tokenizer_path=student_config.tokenizer_path,
-      tokenizer_type=student_config.tokenizer_type,
-      add_bos=student_config.add_bos,
-      add_eos=student_config.add_eos,
-      hf_access_token=student_config.hf_access_token,
-      dataset_type=student_config.dataset_type,
+    tokenizer_path=student_config.tokenizer_path,
+    tokenizer_type=student_config.tokenizer_type,
+    add_bos=student_config.add_bos,
+    add_eos=student_config.add_eos,
+    hf_access_token=student_config.hf_access_token,
+    dataset_type=student_config.dataset_type,
   )
   pad_id = tok.pad_id if tok.pad_id is not None else 0
 
@@ -413,11 +413,11 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
     del kwargs  # Unused
     # Tunix adapter ensures __call__ signature matches this
     outputs = model(
-        input_tokens=input_tokens,
-        positions=positions,
-        cache=cache,
-        attention_mask=attention_mask,
-        decoder_segment_ids=decoder_segment_ids,  # Support sequence packing
+      input_tokens=input_tokens,
+      positions=positions,
+      cache=cache,
+      attention_mask=attention_mask,
+      decoder_segment_ids=decoder_segment_ids,  # Support sequence packing
     )
     return outputs[0]  # Return logits only
 
@@ -427,49 +427,49 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
 
   # Use Monitored strategy to enable KL/Soft/Hard Loss logging
   strategy = MonitoredLogitStrategy(
-      student_forward_fn=student_forward_fn,
-      teacher_forward_fn=teacher_forward_fn,
-      labels_fn=labels_fn,
-      temperature=student_config.distill_temperature,
-      alpha=student_config.distill_alpha,
+    student_forward_fn=student_forward_fn,
+    teacher_forward_fn=teacher_forward_fn,
+    labels_fn=labels_fn,
+    temperature=student_config.distill_temperature,
+    alpha=student_config.distill_alpha,
   )
 
   # 4. Optimizer & Config
   optimizer = get_distillation_optimizer(student_config, student_config.steps)
 
   checkpointing_options = checkpoint.CheckpointManagerOptions(
-      save_interval_steps=student_config.checkpoint_period, max_to_keep=student_config.max_num_checkpoints_to_keep
+    save_interval_steps=student_config.checkpoint_period, max_to_keep=student_config.max_num_checkpoints_to_keep
   )
 
   profiler_options = None
   if student_config.profiler == "xplane":
     profiler_options = profiler.ProfilerOptions(
-        log_dir=student_config.tensorboard_dir,
-        skip_first_n_steps=student_config.skip_first_n_steps_for_profiler,
-        profiler_steps=student_config.profiler_steps,
-        set_profile_options=False,
+      log_dir=student_config.tensorboard_dir,
+      skip_first_n_steps=student_config.skip_first_n_steps_for_profiler,
+      profiler_steps=student_config.profiler_steps,
+      set_profile_options=False,
     )
 
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-      log_dir=student_config.tensorboard_dir, flush_every_n_steps=student_config.log_period
+    log_dir=student_config.tensorboard_dir, flush_every_n_steps=student_config.log_period
   )
 
   train_config = distillation_trainer.TrainingConfig(
-      max_steps=student_config.steps,
-      eval_every_n_steps=student_config.eval_interval,
-      metrics_logging_options=metrics_logging_options,
-      profiler_options=profiler_options,
-      checkpoint_root_directory=student_config.checkpoint_dir,
-      checkpointing_options=checkpointing_options,
+    max_steps=student_config.steps,
+    eval_every_n_steps=student_config.eval_interval,
+    metrics_logging_options=metrics_logging_options,
+    profiler_options=profiler_options,
+    checkpoint_root_directory=student_config.checkpoint_dir,
+    checkpointing_options=checkpointing_options,
   )
 
   # 5. Initialize Trainer
   trainer = MaxTextDistillationTrainer(
-      student_model=student_model,
-      teacher_model=teacher_model,
-      strategy=strategy,
-      optimizer=optimizer,
-      training_config=train_config,
+    student_model=student_model,
+    teacher_model=teacher_model,
+    strategy=strategy,
+    optimizer=optimizer,
+    training_config=train_config,
   )
   trainer.is_managed_externally = True
 
@@ -479,14 +479,14 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   # 6. Configure Input Mapping
   # Maps the attributes of MaxTextTrainingInput to the kwargs expected by the models
   trainer = trainer.with_gen_model_input_fn(
-      lambda batch: {
-          "input_tokens": batch.input_tokens,
-          "positions": batch.positions,
-          "attention_mask": batch.input_mask,
-          "decoder_segment_ids": batch.decoder_segment_ids,
-          "targets": batch.targets,  # Passed to strategy (labels_fn)
-          "cache": None,
-      }
+    lambda batch: {
+      "input_tokens": batch.input_tokens,
+      "positions": batch.positions,
+      "attention_mask": batch.input_mask,
+      "decoder_segment_ids": batch.decoder_segment_ids,
+      "targets": batch.targets,  # Passed to strategy (labels_fn)
+      "cache": None,
+    }
   )
 
   # 7. Data Iterators
@@ -518,7 +518,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
       max_logging.log(f"Saving final checkpoint to {student_config.checkpoint_dir}...")
       try:
         saved = trainer.checkpoint_manager.save(
-            trainer.train_steps, trainer.model, save_only_lora_params=getattr(trainer, "_lora_enabled", False), force=True
+          trainer.train_steps, trainer.model, save_only_lora_params=getattr(trainer, "_lora_enabled", False), force=True
         )
         if saved:
           # Ensure underlying orbax manager finishes writing

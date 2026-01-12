@@ -50,14 +50,14 @@ from MaxText.layers.moe import RoutedMoE
 
 
 def jax_chunk_gated_delta_rule(
-    query: Array,
-    key: Array,
-    value: Array,
-    g: Array,
-    beta: Array,
-    chunk_size: int = 64,
-    initial_state: None | Array = None,
-    use_qk_norm_in_gdn: bool = False,
+  query: Array,
+  key: Array,
+  value: Array,
+  g: Array,
+  beta: Array,
+  chunk_size: int = 64,
+  initial_state: None | Array = None,
+  use_qk_norm_in_gdn: bool = False,
 ) -> tuple[Array, None | Array]:
   """
   A JAX implementation of the chunked Gated Delta Rule, a parallel scan algorithm.
@@ -328,32 +328,32 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # Submodule instantiations
     self.in_proj_qkvz = linears.DenseGeneral(
-        in_features_shape=in_features,
-        out_features_shape=(self.key_dim * 2 + self.value_dim * 2),
-        dtype=cfg.dtype,
-        kernel_axes=("embed", "mlp"),
-        matmul_precision=cfg.matmul_precision,
-        rngs=rngs,
+      in_features_shape=in_features,
+      out_features_shape=(self.key_dim * 2 + self.value_dim * 2),
+      dtype=cfg.dtype,
+      kernel_axes=("embed", "mlp"),
+      matmul_precision=cfg.matmul_precision,
+      rngs=rngs,
     )
     self.in_proj_ba = linears.DenseGeneral(
-        in_features_shape=in_features,
-        out_features_shape=(self.num_v_heads * 2),
-        dtype=cfg.dtype,
-        kernel_axes=("embed", "mlp"),
-        matmul_precision=cfg.matmul_precision,
-        rngs=rngs,
+      in_features_shape=in_features,
+      out_features_shape=(self.num_v_heads * 2),
+      dtype=cfg.dtype,
+      kernel_axes=("embed", "mlp"),
+      matmul_precision=cfg.matmul_precision,
+      rngs=rngs,
     )
 
     self.conv1d = nnx.Conv(
-        in_features=conv_dim,
-        out_features=conv_dim,
-        kernel_size=(conv_kernel_size,),
-        feature_group_count=conv_dim,  # Depthwise
-        padding="CAUSAL",
-        use_bias=False,
-        dtype=cfg.dtype,
-        precision=cfg.matmul_precision,
-        rngs=rngs,
+      in_features=conv_dim,
+      out_features=conv_dim,
+      kernel_size=(conv_kernel_size,),
+      feature_group_count=conv_dim,  # Depthwise
+      padding="CAUSAL",
+      use_bias=False,
+      dtype=cfg.dtype,
+      precision=cfg.matmul_precision,
+      rngs=rngs,
     )
 
     # Initialize A_log to match torch.log(torch.uniform(0, 16))
@@ -366,19 +366,19 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     self.dt_bias = nnx.Param(nnx.initializers.ones(rngs.params(), (self.num_v_heads,)))
 
     self.norm = Qwen3NextRMSNormGated(
-        num_features=self.head_v_dim,  # Normalize over the head dimension (D_v)
-        eps=cfg.normalization_layer_epsilon,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        rngs=rngs,
+      num_features=self.head_v_dim,  # Normalize over the head dimension (D_v)
+      eps=cfg.normalization_layer_epsilon,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      rngs=rngs,
     )
     self.out_proj = linears.DenseGeneral(
-        in_features_shape=self.value_dim,
-        out_features_shape=(in_features,),
-        dtype=cfg.dtype,
-        kernel_axes=("mlp", "embed"),
-        matmul_precision=cfg.matmul_precision,
-        rngs=rngs,
+      in_features_shape=self.value_dim,
+      out_features_shape=(in_features,),
+      dtype=cfg.dtype,
+      kernel_axes=("mlp", "embed"),
+      matmul_precision=cfg.matmul_precision,
+      rngs=rngs,
     )
 
   def __call__(self, hidden_states: Array) -> Array:
@@ -397,18 +397,18 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # QKVZ Reshaping and Splitting
     # Per-K_head group dim: 2 * D_k + 2 * D_v * V_per_K
     new_shape_qkvz = (
-        batch,
-        seq_len,
-        self.num_k_heads,  # H_k
-        2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
+      batch,
+      seq_len,
+      self.num_k_heads,  # H_k
+      2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
     )
     # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
     mixed_qkvz = qkvz.reshape(new_shape_qkvz)
 
     split_indices_qkvz = [
-        self.head_k_dim,  # D_k
-        2 * self.head_k_dim,  # 2 * D_k
-        2 * self.head_k_dim + (self.v_heads_per_k_head * self.head_v_dim),  # 2 * D_k + V_per_K * D_v
+      self.head_k_dim,  # D_k
+      2 * self.head_k_dim,  # 2 * D_k
+      2 * self.head_k_dim + (self.v_heads_per_k_head * self.head_v_dim),  # 2 * D_k + V_per_K * D_v
     ]
     # query: (B, S, H_k, D_k)
     # key: (B, S, H_k, D_k)
@@ -423,10 +423,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # BA Reshaping and Splitting
     new_shape_ba = (
-        batch,
-        seq_len,
-        self.num_k_heads,  # H_k
-        2 * self.v_heads_per_k_head,
+      batch,
+      seq_len,
+      self.num_k_heads,  # H_k
+      2 * self.v_heads_per_k_head,
     )
     # mixed_ba: (B, S, H_k, 2 * V_per_K)
     mixed_ba = ba.reshape(new_shape_ba)
@@ -498,7 +498,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # TODO(parambole): Pass and update cache state for jax_chunk_gated_delta_rule
     # core_attn_out shape: (B, S, H_v, D_v)
     core_attn_out, _ = jax_chunk_gated_delta_rule(
-        query, key, value, g, beta, chunk_size=cfg.gdn_chunk_size, use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn
+      query, key, value, g, beta, chunk_size=cfg.gdn_chunk_size, use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn
     )
 
     # =========================================================================
@@ -548,7 +548,7 @@ class Qwen3NextFullAttention(nnx.Module):
   """
 
   def __init__(
-      self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
+    self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
   ):
     self.config = config
     self.mesh = mesh
@@ -562,48 +562,48 @@ class Qwen3NextFullAttention(nnx.Module):
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.attention = attentions.Attention(
-        config=cfg,
-        num_query_heads=cfg.num_query_heads,
-        num_kv_heads=cfg.num_kv_heads,
-        head_dim=cfg.head_dim,
-        max_target_length=cfg.max_target_length,
-        max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
-        inputs_q_shape=dummy_inputs_shape,
-        inputs_kv_shape=dummy_inputs_shape,
-        out_axis_names=(BATCH, LENGTH_NO_EXP, EMBED),
-        mesh=self.mesh,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        dropout_rate=cfg.dropout_rate,
-        name="self_attention",
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg),
-        use_qk_norm=cfg.use_qk_norm,
-        query_pre_attn_scalar=scaling_factor,
-        model_mode=model_mode,
-        rngs=rngs,
+      config=cfg,
+      num_query_heads=cfg.num_query_heads,
+      num_kv_heads=cfg.num_kv_heads,
+      head_dim=cfg.head_dim,
+      max_target_length=cfg.max_target_length,
+      max_prefill_predict_length=cfg.max_prefill_predict_length,
+      attention_kernel=cfg.attention,
+      inputs_q_shape=dummy_inputs_shape,
+      inputs_kv_shape=dummy_inputs_shape,
+      out_axis_names=(BATCH, LENGTH_NO_EXP, EMBED),
+      mesh=self.mesh,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      dropout_rate=cfg.dropout_rate,
+      name="self_attention",
+      quant=self.quant,
+      kv_quant=quantizations.configure_kv_quant(cfg),
+      use_qk_norm=cfg.use_qk_norm,
+      query_pre_attn_scalar=scaling_factor,
+      model_mode=model_mode,
+      rngs=rngs,
     )
 
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      kv_cache: None | jnp.ndarray = None,
-      attention_metadata: None | dict[str, Any] = None,
+    self,
+    inputs: jnp.ndarray,
+    decoder_segment_ids: None | jnp.ndarray,
+    decoder_positions: None | jnp.ndarray,
+    deterministic: bool,
+    model_mode: str,
+    kv_cache: None | jnp.ndarray = None,
+    attention_metadata: None | dict[str, Any] = None,
   ):
     attention_output, kv_cache = self.attention(
-        inputs_q=inputs,
-        inputs_kv=inputs,
-        inputs_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
+      inputs_q=inputs,
+      inputs_kv=inputs,
+      inputs_positions=decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=model_mode,
+      kv_cache=kv_cache,
+      attention_metadata=attention_metadata,
     )
     return attention_output, kv_cache
 
@@ -629,43 +629,43 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
 
     # 1. Instantiate and apply the routed experts block.
     self.routed_experts = moe.RoutedMoE(
-        config=cfg,
-        num_experts=cfg.num_experts,
-        num_experts_per_tok=cfg.num_experts_per_tok,
-        mesh=self.mesh,
-        kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
-        intermediate_dim=cfg.moe_mlp_dim,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        quant=self.quant,
-        rngs=rngs,
+      config=cfg,
+      num_experts=cfg.num_experts,
+      num_experts_per_tok=cfg.num_experts_per_tok,
+      mesh=self.mesh,
+      kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes=("embed", None),
+      intermediate_dim=cfg.moe_mlp_dim,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      quant=self.quant,
+      rngs=rngs,
     )
 
     # 2. Instantiate and apply the shared expert.
     self.shared_expert = linears.MlpBlock(
-        config=cfg,
-        mesh=mesh,
-        in_features=cfg.emb_dim,
-        intermediate_dim=cfg.moe_mlp_dim,
-        activations=cfg.mlp_activations,
-        intermediate_dropout_rate=cfg.dropout_rate,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        quant=self.quant,
-        model_mode=config.model_call_mode,
-        rngs=rngs,
+      config=cfg,
+      mesh=mesh,
+      in_features=cfg.emb_dim,
+      intermediate_dim=cfg.moe_mlp_dim,
+      activations=cfg.mlp_activations,
+      intermediate_dropout_rate=cfg.dropout_rate,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      quant=self.quant,
+      model_mode=config.model_call_mode,
+      rngs=rngs,
     )
 
     # 3. Instantiate and apply the gate for the shared expert.
     self.shared_expert_gate = linears.DenseGeneral(
-        in_features_shape=cfg.emb_dim,
-        out_features_shape=1,
-        use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
-        dtype=cfg.dtype,
-        kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", "vocab"),
-        rngs=rngs,
+      in_features_shape=cfg.emb_dim,
+      out_features_shape=1,
+      use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
+      dtype=cfg.dtype,
+      kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes=("embed", "vocab"),
+      rngs=rngs,
     )
 
   def __call__(self, hidden_states: Array, deterministic: bool) -> tuple[Array, Array | None]:
@@ -724,25 +724,25 @@ class Qwen3NextScannableBlock(nnx.Module):
       layer_rngs = self.rngs.fork()  # Fork RNGs for each layer
       layer_name = f"layer_{i}"
       layer = Qwen3NextDecoderLayer(
-          config=self.config,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=self.model_mode,
-          layer_idx=i,
-          rngs=layer_rngs,
+        config=self.config,
+        mesh=self.mesh,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        layer_idx=i,
+        rngs=layer_rngs,
       )
       setattr(self, layer_name, layer)
 
   def __call__(
-      self,
-      carry: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
-      slot: None | int = None,
+    self,
+    carry: jnp.ndarray,
+    decoder_segment_ids: None | jnp.ndarray,
+    decoder_positions: None | jnp.ndarray,
+    deterministic: bool,
+    model_mode: str,
+    previous_chunk=None,
+    page_state: None | page_manager.PageState = None,
+    slot: None | int = None,
   ) -> tuple[Array, None]:
     """Applies the block of decoder layers to the input carry.
 
@@ -763,14 +763,14 @@ class Qwen3NextScannableBlock(nnx.Module):
       # The second return value is kv_cache, which we ignore here because
       # it is not passed as a carry in scannable layers.
       x, _ = layer(
-          x,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk,
-          page_state,
-          slot,
+        x,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        previous_chunk,
+        page_state,
+        slot,
       )
 
     # The output of the block is the carry for the next scan iteration.
@@ -796,7 +796,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
   """
 
   def __init__(
-      self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
+    self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
   ):
     self.config = config
     self.mesh = mesh
@@ -808,11 +808,11 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # First LayerNorm, applied before the attention block.
     self.input_layernorm = Qwen3NextRMSNorm(
-        num_features=cfg.emb_dim,
-        eps=cfg.normalization_layer_epsilon,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        rngs=rngs,
+      num_features=cfg.emb_dim,
+      eps=cfg.normalization_layer_epsilon,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      rngs=rngs,
     )
 
     # Determine the type of attention mechanism for the current layer.
@@ -821,40 +821,40 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:
       self.attention = Qwen3NextFullAttention(
-          config=cfg,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=model_mode,
-          layer_idx=self.layer_idx,
-          rngs=rngs,
+        config=cfg,
+        mesh=self.mesh,
+        quant=self.quant,
+        model_mode=model_mode,
+        layer_idx=self.layer_idx,
+        rngs=rngs,
       )
     else:
       self.attention = Qwen3NextGatedDeltaNet(config=cfg, dtype=cfg.dtype, rngs=rngs)
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
-        num_features=cfg.emb_dim,
-        eps=cfg.normalization_layer_epsilon,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        rngs=rngs,
+      num_features=cfg.emb_dim,
+      eps=cfg.normalization_layer_epsilon,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      rngs=rngs,
     )
 
     # Instantiate our `Qwen3NextSparseMoeBlock`.
     self.mlp = Qwen3NextSparseMoeBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
 
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
-      slot: None | int = None,
-      kv_cache: None | jnp.ndarray = None,
-      attention_metadata: None | dict[str, Any] = None,
+    self,
+    inputs: jnp.ndarray,
+    decoder_segment_ids: None | jnp.ndarray,
+    decoder_positions: None | jnp.ndarray,
+    deterministic: bool,
+    model_mode: str,
+    previous_chunk=None,
+    page_state: None | page_manager.PageState = None,
+    slot: None | int = None,
+    kv_cache: None | jnp.ndarray = None,
+    attention_metadata: None | dict[str, Any] = None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -868,13 +868,13 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Conditionally apply either the Linear Attention or Full Attention block.
     if isinstance(self.attention, Qwen3NextFullAttention):
       attention_output, kv_cache = cast(Qwen3NextFullAttention, self.attention)(
-          hidden_states,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          kv_cache=kv_cache,
-          attention_metadata=attention_metadata,
+        hidden_states,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
       )
     elif isinstance(self.attention, Qwen3NextGatedDeltaNet):
       attention_output = cast(Qwen3NextGatedDeltaNet, self.attention)(hidden_states)
@@ -903,8 +903,8 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Final residual connection (after the MoE block)
     layer_output = residual + mlp_output
     layer_output = nn.with_logical_constraint(
-        layer_output,
-        self.activation_axis_names,
+      layer_output,
+      self.activation_axis_names,
     )
 
     return layer_output, kv_cache
@@ -917,12 +917,12 @@ class AttentionWithNorm(nnx.Module):
   """Base class with shared common components: self-attention block with normalization."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      quant: None | Quant,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    quant: None | Quant,
+    rngs: nnx.Rngs,
   ):
     self.config = config
     self.mesh = mesh
@@ -934,61 +934,61 @@ class AttentionWithNorm(nnx.Module):
 
     # Corresponds to Qwen3's `input_layernorm`
     self.pre_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=rngs,
     )
 
     # Self-attention block
     query_pre_attn_scalar = config.head_dim**-0.5  # Qwen3 specific scaling
     self.self_attention = Attention(
-        config=config,
-        num_query_heads=config.num_query_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        attention_kernel=config.attention,
-        inputs_q_shape=dummy_inputs_shape,
-        inputs_kv_shape=dummy_inputs_shape,
-        mesh=mesh,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        dropout_rate=config.dropout_rate,
-        float32_qk_product=config.float32_qk_product,
-        float32_logits=config.float32_logits,
-        quant=quant,
-        kv_quant=quantizations.configure_kv_quant(config),
-        use_ragged_attention=config.use_ragged_attention,
-        ragged_block_size=config.ragged_block_size,
-        use_qk_norm=config.use_qk_norm,
-        query_pre_attn_scalar=query_pre_attn_scalar,
-        model_mode=model_mode,
-        rngs=rngs,
+      config=config,
+      num_query_heads=config.num_query_heads,
+      num_kv_heads=config.num_kv_heads,
+      head_dim=config.head_dim,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      attention_kernel=config.attention,
+      inputs_q_shape=dummy_inputs_shape,
+      inputs_kv_shape=dummy_inputs_shape,
+      mesh=mesh,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      dropout_rate=config.dropout_rate,
+      float32_qk_product=config.float32_qk_product,
+      float32_logits=config.float32_logits,
+      quant=quant,
+      kv_quant=quantizations.configure_kv_quant(config),
+      use_ragged_attention=config.use_ragged_attention,
+      ragged_block_size=config.ragged_block_size,
+      use_qk_norm=config.use_qk_norm,
+      query_pre_attn_scalar=query_pre_attn_scalar,
+      model_mode=model_mode,
+      rngs=rngs,
     )
 
     # Post Attention LayerNorm (corresponds to Qwen3's `post_attention_layernorm`)
     self.post_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=rngs,
     )
 
   def apply_attention_with_norm(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      kv_cache: None | jnp.ndarray = None,
-      attention_metadata: None | dict[str, Any] = None,
+    self,
+    inputs: jnp.ndarray,
+    decoder_segment_ids: None | jnp.ndarray,
+    decoder_positions: None | jnp.ndarray,
+    deterministic: bool,
+    model_mode: str,
+    kv_cache: None | jnp.ndarray = None,
+    attention_metadata: None | dict[str, Any] = None,
   ):
     """Applies self-attention with pre and post-layer normalization."""
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
@@ -998,14 +998,14 @@ class AttentionWithNorm(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
     # Self attention
     attention_lnx, kv_cache = self.self_attention(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
+      lnx,
+      lnx,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=model_mode,
+      kv_cache=kv_cache,
+      attention_metadata=attention_metadata,
     )
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     # Residual connection after attention
@@ -1023,52 +1023,52 @@ class Qwen3DecoderLayer(AttentionWithNorm):
   """Qwen3 Transformer decoder layer (dense)."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      quant: None | Quant,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    quant: None | Quant,
+    rngs: nnx.Rngs,
   ):
     super().__init__(config, mesh, model_mode, quant, rngs)
     self.mlp = MlpBlock(
-        in_features=config.emb_dim,
-        intermediate_dim=config.mlp_dim,
-        activations=config.mlp_activations,
-        intermediate_dropout_rate=config.dropout_rate,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        config=config,
-        mesh=mesh,
-        quant=quant,
-        model_mode=model_mode,
-        rngs=rngs,
+      in_features=config.emb_dim,
+      intermediate_dim=config.mlp_dim,
+      activations=config.mlp_activations,
+      intermediate_dropout_rate=config.dropout_rate,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      config=config,
+      mesh=mesh,
+      quant=quant,
+      model_mode=model_mode,
+      rngs=rngs,
     )
 
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
-      slot: None | int = None,
-      kv_cache: None | jnp.ndarray = None,
-      attention_metadata: None | dict[str, Any] = None,
+    self,
+    inputs: jnp.ndarray,
+    decoder_segment_ids: None | jnp.ndarray,
+    decoder_positions: None | jnp.ndarray,
+    deterministic: bool,
+    model_mode: str,
+    previous_chunk=None,
+    page_state: None | page_manager.PageState = None,
+    slot: None | int = None,
+    kv_cache: None | jnp.ndarray = None,
+    attention_metadata: None | dict[str, Any] = None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
     hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
-        inputs,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      kv_cache=kv_cache,
+      attention_metadata=attention_metadata,
     )
 
     mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
@@ -1090,52 +1090,52 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
   """Qwen3 Transformer decoder layer (MoE)."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      quant: None | Quant,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    quant: None | Quant,
+    rngs: nnx.Rngs,
   ):
     super().__init__(config, mesh, model_mode, quant, rngs)
     self.moe_block = RoutedMoE(
-        config=config,
-        num_experts=config.num_experts,
-        num_experts_per_tok=config.num_experts_per_tok,
-        mesh=mesh,
-        kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
-        intermediate_dim=config.moe_mlp_dim,  # same as config.mlp_dim
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        quant=quant,
-        rngs=rngs,
+      config=config,
+      num_experts=config.num_experts,
+      num_experts_per_tok=config.num_experts_per_tok,
+      mesh=mesh,
+      kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes=("embed", None),
+      intermediate_dim=config.moe_mlp_dim,  # same as config.mlp_dim
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      quant=quant,
+      rngs=rngs,
     )
 
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
-      slot: None | int = None,
-      kv_cache: None | jnp.ndarray = None,
-      attention_metadata: None | dict[str, Any] = None,
+    self,
+    inputs: jnp.ndarray,
+    decoder_segment_ids: None | jnp.ndarray,
+    decoder_positions: None | jnp.ndarray,
+    deterministic: bool,
+    model_mode: str,
+    previous_chunk=None,
+    page_state: None | page_manager.PageState = None,
+    slot: None | int = None,
+    kv_cache: None | jnp.ndarray = None,
+    attention_metadata: None | dict[str, Any] = None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
     hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
-        inputs,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      kv_cache=kv_cache,
+      attention_metadata=attention_metadata,
     )
 
     mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states)
@@ -1169,13 +1169,13 @@ class Qwen3OmniMoeVisionPatchMerger(nnx.Module):
   """
 
   def __init__(
-      self,
-      config: Config,
-      use_postshuffle_norm: bool = False,
-      dtype: DType = jnp.float32,
-      weight_dtype: DType = jnp.float32,
-      kernel_init: max_initializers.NdInitializer = max_initializers.nd_dense_init(1.0, "fan_in", "normal"),
-      rngs: nnx.Rngs = None,
+    self,
+    config: Config,
+    use_postshuffle_norm: bool = False,
+    dtype: DType = jnp.float32,
+    weight_dtype: DType = jnp.float32,
+    kernel_init: max_initializers.NdInitializer = max_initializers.nd_dense_init(1.0, "fan_in", "normal"),
+    rngs: nnx.Rngs = None,
   ):
     """Initializes the Qwen3Omni vision patch merger.
 
@@ -1204,33 +1204,33 @@ class Qwen3OmniMoeVisionPatchMerger(nnx.Module):
     # LayerNorm before MLP
     ln_features = self.hidden_size if use_postshuffle_norm else base_hidden_size
     self.ln_q = nnx.LayerNorm(
-        num_features=ln_features,
-        epsilon=config.normalization_layer_epsilon,
-        dtype=dtype,
-        rngs=rngs,
+      num_features=ln_features,
+      epsilon=config.normalization_layer_epsilon,
+      dtype=dtype,
+      rngs=rngs,
     )
 
     # MLP layers: Linear -> GELU -> Linear
     self.mlp_0 = DenseGeneral(
-        in_features_shape=self.hidden_size,
-        out_features_shape=self.hidden_size,
-        use_bias=True,
-        dtype=dtype,
-        weight_dtype=weight_dtype,
-        kernel_init=kernel_init,
-        matmul_precision=config.matmul_precision,
-        rngs=rngs,
+      in_features_shape=self.hidden_size,
+      out_features_shape=self.hidden_size,
+      use_bias=True,
+      dtype=dtype,
+      weight_dtype=weight_dtype,
+      kernel_init=kernel_init,
+      matmul_precision=config.matmul_precision,
+      rngs=rngs,
     )
 
     self.mlp_2 = DenseGeneral(
-        in_features_shape=self.hidden_size,
-        out_features_shape=out_hidden_size,
-        use_bias=True,
-        dtype=dtype,
-        weight_dtype=weight_dtype,
-        kernel_init=kernel_init,
-        matmul_precision=config.matmul_precision,
-        rngs=rngs,
+      in_features_shape=self.hidden_size,
+      out_features_shape=out_hidden_size,
+      use_bias=True,
+      dtype=dtype,
+      weight_dtype=weight_dtype,
+      kernel_init=kernel_init,
+      matmul_precision=config.matmul_precision,
+      rngs=rngs,
     )
 
   def __call__(self, hidden: Array) -> Array:
@@ -1284,12 +1284,12 @@ class Qwen3OmniMoeVisionMLP(nnx.Module):
   """
 
   def __init__(
-      self,
-      config: Config,
-      dtype: DType = jnp.float32,
-      weight_dtype: DType = jnp.float32,
-      kernel_init: max_initializers.NdInitializer = max_initializers.nd_dense_init(1.0, "fan_in", "normal"),
-      rngs: nnx.Rngs = None,
+    self,
+    config: Config,
+    dtype: DType = jnp.float32,
+    weight_dtype: DType = jnp.float32,
+    kernel_init: max_initializers.NdInitializer = max_initializers.nd_dense_init(1.0, "fan_in", "normal"),
+    rngs: nnx.Rngs = None,
   ):
     """Initializes the Qwen3Omni vision MLP.
 
@@ -1310,25 +1310,25 @@ class Qwen3OmniMoeVisionMLP(nnx.Module):
     self.intermediate_size = config.intermediate_size_for_vit
 
     self.linear_fc1 = DenseGeneral(
-        in_features_shape=self.hidden_size,
-        out_features_shape=self.intermediate_size,
-        use_bias=True,
-        dtype=dtype,
-        weight_dtype=weight_dtype,
-        kernel_init=kernel_init,
-        matmul_precision=config.matmul_precision,
-        rngs=rngs,
+      in_features_shape=self.hidden_size,
+      out_features_shape=self.intermediate_size,
+      use_bias=True,
+      dtype=dtype,
+      weight_dtype=weight_dtype,
+      kernel_init=kernel_init,
+      matmul_precision=config.matmul_precision,
+      rngs=rngs,
     )
 
     self.linear_fc2 = DenseGeneral(
-        in_features_shape=self.intermediate_size,
-        out_features_shape=self.hidden_size,
-        use_bias=True,
-        dtype=dtype,
-        weight_dtype=weight_dtype,
-        kernel_init=kernel_init,
-        matmul_precision=config.matmul_precision,
-        rngs=rngs,
+      in_features_shape=self.intermediate_size,
+      out_features_shape=self.hidden_size,
+      use_bias=True,
+      dtype=dtype,
+      weight_dtype=weight_dtype,
+      kernel_init=kernel_init,
+      matmul_precision=config.matmul_precision,
+      rngs=rngs,
     )
 
   def __call__(self, hidden_state: Array) -> Array:
@@ -1361,11 +1361,11 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
   """
 
   def __init__(
-      self,
-      config: Config,
-      dtype: DType = jnp.float32,
-      weight_dtype: DType = jnp.float32,
-      rngs: nnx.Rngs = None,
+    self,
+    config: Config,
+    dtype: DType = jnp.float32,
+    weight_dtype: DType = jnp.float32,
+    rngs: nnx.Rngs = None,
   ):
     """Initializes the Qwen3Omni vision patch embedding.
 
@@ -1388,14 +1388,14 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
     kernel_size = (self.temporal_patch_size, self.patch_size, self.patch_size)
 
     self.proj = nnx.Conv(
-        in_features=self.in_channels,
-        out_features=self.embed_dim,
-        kernel_size=kernel_size,
-        strides=kernel_size,
-        use_bias=True,
-        dtype=dtype,
-        param_dtype=weight_dtype,
-        rngs=rngs,
+      in_features=self.in_channels,
+      out_features=self.embed_dim,
+      kernel_size=kernel_size,
+      strides=kernel_size,
+      use_bias=True,
+      dtype=dtype,
+      param_dtype=weight_dtype,
+      rngs=rngs,
     )
 
   def __call__(self, hidden_states: Array) -> Array:
@@ -1433,37 +1433,37 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
     head_dim = self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit
     # Vision uses full SA, no kv cache
     self.attn = Attention(
-        config=self.config,
-        num_query_heads=self.config.num_attention_heads_for_vit,
-        num_kv_heads=self.config.num_attention_heads_for_vit,
-        head_dim=head_dim,
-        max_target_length=self.config.num_position_embeddings_for_vit,
-        attention_kernel="dot_product",
-        inputs_q_shape=(1, 1, self.config.hidden_size_for_vit),
-        inputs_kv_shape=(1, 1, self.config.hidden_size_for_vit),
-        float32_qk_product=self.config.float32_qk_product,
-        float32_logits=self.config.float32_logits,
-        dtype=self.config.dtype_mm,
-        weight_dtype=self.config.weight_dtype,
-        mesh=mesh,
-        dropout_rate=0.0,
-        attention_type=AttentionType.FULL,
-        is_nope_layer=False,
-        use_bias_in_projections=True,
-        is_vision=True,
-        use_qk_norm=False,
-        query_pre_attn_scalar=head_dim ** (-0.5),
-        model_mode="train",
-        rngs=rngs,
+      config=self.config,
+      num_query_heads=self.config.num_attention_heads_for_vit,
+      num_kv_heads=self.config.num_attention_heads_for_vit,
+      head_dim=head_dim,
+      max_target_length=self.config.num_position_embeddings_for_vit,
+      attention_kernel="dot_product",
+      inputs_q_shape=(1, 1, self.config.hidden_size_for_vit),
+      inputs_kv_shape=(1, 1, self.config.hidden_size_for_vit),
+      float32_qk_product=self.config.float32_qk_product,
+      float32_logits=self.config.float32_logits,
+      dtype=self.config.dtype_mm,
+      weight_dtype=self.config.weight_dtype,
+      mesh=mesh,
+      dropout_rate=0.0,
+      attention_type=AttentionType.FULL,
+      is_nope_layer=False,
+      use_bias_in_projections=True,
+      is_vision=True,
+      use_qk_norm=False,
+      query_pre_attn_scalar=head_dim ** (-0.5),
+      model_mode="train",
+      rngs=rngs,
     )
 
   def __call__(
-      self,
-      hidden_states: Array,
-      num_frames: int,
-      height: int,
-      width: int,
-      deterministic: bool = True,
+    self,
+    hidden_states: Array,
+    num_frames: int,
+    height: int,
+    width: int,
+    deterministic: bool = True,
   ) -> Array:
     """
     Args:
@@ -1478,15 +1478,15 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
     """
     # Pass through attention with static dimensions via rope_kwargs
     rope_kwargs = {
-        "num_frames": num_frames,
-        "height": height,
-        "width": width,
+      "num_frames": num_frames,
+      "height": height,
+      "width": width,
     }
     output, _ = self.attn(
-        inputs_q=hidden_states,
-        inputs_kv=hidden_states,
-        deterministic=deterministic,
-        rope_kwargs=rope_kwargs,
+      inputs_q=hidden_states,
+      inputs_kv=hidden_states,
+      deterministic=deterministic,
+      rope_kwargs=rope_kwargs,
     )
 
     return output
@@ -1518,26 +1518,26 @@ class Qwen3OmniMoeVisionBlock(nnx.Module):
     self.ln2 = nnx.LayerNorm(num_features=hs, epsilon=config.normalization_layer_epsilon, rngs=rngs)
     self.attn = Qwen3OmniMoeVisionAttention(config=config, mesh=mesh, rngs=rngs)
     self.mlp = DenseGeneral(
-        in_features_shape=hs,
-        out_features_shape=self.config.intermediate_size_for_vit,
-        use_bias=True,
-        matmul_precision=config.matmul_precision,
-        rngs=rngs,
+      in_features_shape=hs,
+      out_features_shape=self.config.intermediate_size_for_vit,
+      use_bias=True,
+      matmul_precision=config.matmul_precision,
+      rngs=rngs,
     )
     self.mlp_out = DenseGeneral(
-        in_features_shape=self.config.intermediate_size_for_vit,
-        out_features_shape=hs,
-        use_bias=True,
-        matmul_precision=config.matmul_precision,
-        rngs=rngs,
+      in_features_shape=self.config.intermediate_size_for_vit,
+      out_features_shape=hs,
+      use_bias=True,
+      matmul_precision=config.matmul_precision,
+      rngs=rngs,
     )
 
   def __call__(
-      self,
-      x: Array,
-      num_frames: int,
-      height: int,
-      width: int,
+    self,
+    x: Array,
+    num_frames: int,
+    height: int,
+    width: int,
   ) -> Array:
     """
     Args:
@@ -1586,10 +1586,10 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
     self.spatial_merge_size = config.spatial_merge_size_for_vit
 
     self.pos_embed_interpolate = Qwen3OmniMoeVisionPosEmbedInterpolate(
-        num_position_embeddings=num_pos,
-        hidden_size=hs,
-        spatial_merge_size=self.spatial_merge_size,
-        rngs=rngs,
+      num_position_embeddings=num_pos,
+      hidden_size=hs,
+      spatial_merge_size=self.spatial_merge_size,
+      rngs=rngs,
     )
 
     self.depth = config.num_hidden_layers_for_vit
@@ -1608,9 +1608,9 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
       setattr(self, merger_name, merger)
 
   def __call__(
-      self,
-      hidden_states: Array,
-      deterministic: bool = True,
+    self,
+    hidden_states: Array,
+    deterministic: bool = True,
   ):
     """
     Args:
@@ -1684,78 +1684,78 @@ class Qwen3OmniMoeVisionProjector(nnx.Module):
 def qwen3omni_visionencoder_as_linen(config: Config, mesh: Mesh) -> nn.Module:
   """Convert Qwen3OmniMoeVisionEncoder to Linen module."""
   return nnx_wrappers.to_linen(
-      Qwen3OmniMoeVisionEncoder,
-      config=config,
-      mesh=mesh,
-      name="Qwen3OmniMoeVisionEncoder_0",
-      abstract_init=False,
-      metadata_fn=max_initializers.variable_to_logically_partitioned,
+    Qwen3OmniMoeVisionEncoder,
+    config=config,
+    mesh=mesh,
+    name="Qwen3OmniMoeVisionEncoder_0",
+    abstract_init=False,
+    metadata_fn=max_initializers.variable_to_logically_partitioned,
   )
 
 
 def qwen3omni_visionprojector_as_linen(config: Config, mesh: Mesh) -> nn.Module:
   """Convert Qwen3OmniMoeVisionProjector to Linen module."""
   return nnx_wrappers.to_linen(
-      Qwen3OmniMoeVisionProjector,
-      config=config,
-      name="Qwen3OmniMoeVisionProjector_0",
-      abstract_init=False,
-      metadata_fn=max_initializers.variable_to_logically_partitioned,
+    Qwen3OmniMoeVisionProjector,
+    config=config,
+    name="Qwen3OmniMoeVisionProjector_0",
+    abstract_init=False,
+    metadata_fn=max_initializers.variable_to_logically_partitioned,
   )
 
 
 # Vision encoder Linen wrappers
 Qwen3OmniMoeVisionPatchMergerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionPatchMerger,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+  Qwen3OmniMoeVisionPatchMerger,
+  base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
 Qwen3OmniMoeVisionMLPToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionMLP,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+  Qwen3OmniMoeVisionMLP,
+  base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
 Qwen3OmniMoeVisionPatchEmbedToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionPatchEmbed,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+  Qwen3OmniMoeVisionPatchEmbed,
+  base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
 Qwen3OmniMoeVisionAttentionToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionAttention,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+  Qwen3OmniMoeVisionAttention,
+  base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
 Qwen3OmniMoeVisionBlockToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionBlock,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+  Qwen3OmniMoeVisionBlock,
+  base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
 Qwen3OmniMoeVisionEncoderToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionEncoder,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+  Qwen3OmniMoeVisionEncoder,
+  base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
 Qwen3OmniMoeVisionProjectorToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionProjector,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+  Qwen3OmniMoeVisionProjector,
+  base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
 Qwen3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3DecoderLayer,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+  Qwen3DecoderLayer,
+  base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
 Qwen3MoeDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3MoeDecoderLayer,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+  Qwen3MoeDecoderLayer,
+  base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
 Qwen3NextDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextDecoderLayer,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+  Qwen3NextDecoderLayer,
+  base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
 Qwen3NextScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextScannableBlock,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+  Qwen3NextScannableBlock,
+  base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )

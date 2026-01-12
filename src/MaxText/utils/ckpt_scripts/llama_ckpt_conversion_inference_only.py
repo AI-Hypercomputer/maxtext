@@ -28,6 +28,7 @@ The script load and save weights in a single pass.
 To fit less memory, modify convert() to load/save weights in multiple passes.
 Each pass, load and save partial weights (subset of all weight variables).
 """
+
 # pylint: disable=g-line-too-long
 import argparse
 import sys
@@ -63,69 +64,69 @@ def permute_to_match_maxtext_rope(arr):
 # dims_per_head -> hidden_size / num_attention_heads
 # vocab -> vocab_size
 MODEL_PARAMS_DICT = {
-    "llama2-7b": {
-        "num_layers": 32,
-        "num_heads": 32,
-        "num_kv_heads": 32,
-        "dims_per_head": 128,
-        "vocab": 32000,
-    },
-    "llama2-13b": {
-        "num_layers": 40,
-        "num_heads": 40,
-        "num_kv_heads": 40,
-        "dims_per_head": 128,
-        "vocab": 32000,
-    },
-    "llama2-70b": {
-        "num_layers": 80,
-        "num_heads": 64,
-        "num_kv_heads": 8,
-        "dims_per_head": 128,
-        "vocab": 32000,
-    },
-    "llama3-8b": {
-        "num_layers": 32,
-        "num_heads": 32,
-        "num_kv_heads": 8,
-        "dims_per_head": 128,
-        "vocab": 128256,
-    },
-    "llama3-70b": {
-        "num_layers": 80,
-        "num_heads": 64,
-        "num_kv_heads": 8,
-        "dims_per_head": 128,
-        "vocab": 128256,
-    },
-    "llama3.1-8b": {
-        "num_layers": 32,
-        "num_heads": 32,
-        "num_kv_heads": 8,
-        "dims_per_head": 128,
-        "vocab": 128256,
-    },
-    "llama3.1-70b": {
-        "num_layers": 80,
-        "num_heads": 64,
-        "num_kv_heads": 8,
-        "dims_per_head": 128,
-        "vocab": 128256,
-    },
-    "llama3.1-405b": {
-        "num_layers": 126,
-        "num_heads": 128,
-        "num_kv_heads": 8,
-        "dims_per_head": 128,
-        "vocab": 128256,
-    },
-    "llama3.3-70b": {
-        "num_layers": 80,
-        "num_heads": 64,
-        "num_kv_heads": 8,
-        "dims_per_head": 128,
-        "vocab": 128256,
-    },
+  "llama2-7b": {
+    "num_layers": 32,
+    "num_heads": 32,
+    "num_kv_heads": 32,
+    "dims_per_head": 128,
+    "vocab": 32000,
+  },
+  "llama2-13b": {
+    "num_layers": 40,
+    "num_heads": 40,
+    "num_kv_heads": 40,
+    "dims_per_head": 128,
+    "vocab": 32000,
+  },
+  "llama2-70b": {
+    "num_layers": 80,
+    "num_heads": 64,
+    "num_kv_heads": 8,
+    "dims_per_head": 128,
+    "vocab": 32000,
+  },
+  "llama3-8b": {
+    "num_layers": 32,
+    "num_heads": 32,
+    "num_kv_heads": 8,
+    "dims_per_head": 128,
+    "vocab": 128256,
+  },
+  "llama3-70b": {
+    "num_layers": 80,
+    "num_heads": 64,
+    "num_kv_heads": 8,
+    "dims_per_head": 128,
+    "vocab": 128256,
+  },
+  "llama3.1-8b": {
+    "num_layers": 32,
+    "num_heads": 32,
+    "num_kv_heads": 8,
+    "dims_per_head": 128,
+    "vocab": 128256,
+  },
+  "llama3.1-70b": {
+    "num_layers": 80,
+    "num_heads": 64,
+    "num_kv_heads": 8,
+    "dims_per_head": 128,
+    "vocab": 128256,
+  },
+  "llama3.1-405b": {
+    "num_layers": 126,
+    "num_heads": 128,
+    "num_kv_heads": 8,
+    "dims_per_head": 128,
+    "vocab": 128256,
+  },
+  "llama3.3-70b": {
+    "num_layers": 80,
+    "num_heads": 64,
+    "num_kv_heads": 8,
+    "dims_per_head": 128,
+    "vocab": 128256,
+  },
 }
 
 SIMULATED_CPU_DEVICES_COUNT = 64
@@ -154,7 +155,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.pth"))
   pytorch_vars = {}
   for i, ckpt_path in enumerate(ckpt_paths):
-    print(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+    print(f"Loading checkpoint {i + 1} of {len(ckpt_paths)} ...")
 
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     pytorch_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
@@ -164,41 +165,41 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   if model_size[:6] == "llama3":
     token_embedder = np.concatenate(
-        [var["tok_embeddings.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
+      [var["tok_embeddings.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
     )
   else:
     token_embedder = np.concatenate(
-        [var["tok_embeddings.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=1
+      [var["tok_embeddings.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=1
     )[:vocab_size, :]
 
   for var in pytorch_vars:
     del var["tok_embeddings.weight"]
   jax_weights = {
-      "decoder": {
-          "decoder_norm": {"scale": pytorch_vars[0]["norm.weight"].type(torch.float16).numpy()},
-          "logits_dense": {
-              "kernel": np.concatenate(
-                  [var["output.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
-              ).transpose()[:, :vocab_size]
-          },
+    "decoder": {
+      "decoder_norm": {"scale": pytorch_vars[0]["norm.weight"].type(torch.float16).numpy()},
+      "logits_dense": {
+        "kernel": np.concatenate(
+          [var["output.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
+        ).transpose()[:, :vocab_size]
       },
-      "token_embedder": {"embedding": token_embedder},
+    },
+    "token_embedder": {"embedding": token_embedder},
   }
   for i in range(base_num_decoder_layers):
     jax_weights["decoder"][f"layers_{i}"] = {
-        "mlp": {
-            "wi_0": {"kernel": None},
-            "wi_1": {"kernel": None},
-            "wo": {"kernel": None},
-        },
-        "pre_self_attention_layer_norm": {"scale": None},
-        "post_self_attention_layer_norm": {"scale": None},
-        "self_attention": {
-            "query": {"kernel": None},
-            "key": {"kernel": None},
-            "value": {"kernel": None},
-            "out": {"kernel": None},
-        },
+      "mlp": {
+        "wi_0": {"kernel": None},
+        "wi_1": {"kernel": None},
+        "wo": {"kernel": None},
+      },
+      "pre_self_attention_layer_norm": {"scale": None},
+      "post_self_attention_layer_norm": {"scale": None},
+      "self_attention": {
+        "query": {"kernel": None},
+        "key": {"kernel": None},
+        "value": {"kernel": None},
+        "out": {"kernel": None},
+      },
     }
 
   # llama3.1-405b kv weight is replicated within every two files.
@@ -208,15 +209,15 @@ def convert(base_model_path, maxtext_model_path, model_size):
     print("layer idx: ", layer_idx)
     print("memory usage in GB: ", psutil.Process().memory_info().rss / (1024 * 1024))
     wq = np.concatenate(
-        [var[f"layers.{layer_idx}.attention.wq.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
+      [var[f"layers.{layer_idx}.attention.wq.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
     ).transpose()
     wk = np.concatenate(
-        [var[f"layers.{layer_idx}.attention.wk.weight"].type(torch.float16).numpy() for var in pytorch_vars[::wkv_step]],
-        axis=0,
+      [var[f"layers.{layer_idx}.attention.wk.weight"].type(torch.float16).numpy() for var in pytorch_vars[::wkv_step]],
+      axis=0,
     ).transpose()
     wv = np.concatenate(
-        [var[f"layers.{layer_idx}.attention.wv.weight"].type(torch.float16).numpy() for var in pytorch_vars[::wkv_step]],
-        axis=0,
+      [var[f"layers.{layer_idx}.attention.wv.weight"].type(torch.float16).numpy() for var in pytorch_vars[::wkv_step]],
+      axis=0,
     ).transpose()
 
     wq = np.reshape(wq, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
@@ -226,8 +227,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
     wk = permute_to_match_maxtext_rope(wk)
 
     w_post = np.concatenate(
-        [var[f"layers.{layer_idx}.attention.wo.weight"].type(torch.float16).numpy() for var in pytorch_vars],
-        axis=1,
+      [var[f"layers.{layer_idx}.attention.wo.weight"].type(torch.float16).numpy() for var in pytorch_vars],
+      axis=1,
     )
 
     w_post = np.reshape(w_post, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
@@ -240,26 +241,26 @@ def convert(base_model_path, maxtext_model_path, model_size):
     # base_num_query_heads * head_dim, base_num_query_heads, head_dim =>
     # base_num_query_heads, head_dim, base_num_query_heads * head_dim
     jax_weights["decoder"][f"layers_{layer_idx}"]["self_attention"]["out"]["kernel"] = np.transpose(
-        w_post, axes=(1, 2, 0)
+      w_post, axes=(1, 2, 0)
     )
 
     pre_self_attention_layernorm = (
-        pytorch_vars[0][f"layers.{layer_idx}.attention_norm.weight"].type(torch.float16).numpy()
+      pytorch_vars[0][f"layers.{layer_idx}.attention_norm.weight"].type(torch.float16).numpy()
     )
     post_self_attention_layernorm = pytorch_vars[0][f"layers.{layer_idx}.ffn_norm.weight"].type(torch.float16).numpy()
     jax_weights["decoder"][f"layers_{layer_idx}"]["pre_self_attention_layer_norm"]["scale"] = pre_self_attention_layernorm
-    jax_weights["decoder"][f"layers_{layer_idx}"]["post_self_attention_layer_norm"][
-        "scale"
-    ] = post_self_attention_layernorm
+    jax_weights["decoder"][f"layers_{layer_idx}"]["post_self_attention_layer_norm"]["scale"] = (
+      post_self_attention_layernorm
+    )
 
     wi_0 = np.concatenate(
-        [var[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
+      [var[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
     ).transpose()
     wi_1 = np.concatenate(
-        [var[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
+      [var[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
     ).transpose()
     wo = np.concatenate(
-        [var[f"layers.{layer_idx}.feed_forward.w2.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=1
+      [var[f"layers.{layer_idx}.feed_forward.w2.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=1
     ).transpose()
     jax_weights["decoder"][f"layers_{layer_idx}"]["mlp"]["wi_0"]["kernel"] = wi_0
     jax_weights["decoder"][f"layers_{layer_idx}"]["mlp"]["wi_1"]["kernel"] = wi_1
@@ -277,7 +278,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
   s2 = jax.sharding.NamedSharding(
-      mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis")
+    mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis")
   )  # shards second axis
   s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
 
@@ -302,11 +303,15 @@ def convert(base_model_path, maxtext_model_path, model_size):
   save_interval_steps = 1
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
+    maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
   )
 
   state_new = train_state.TrainState(
-      step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+    step=0,
+    apply_fn=None,
+    params={"params": jax_weights},
+    tx=None,
+    opt_state={},  # type: ignore
   )
 
   if checkpoint_manager is not None:

@@ -35,19 +35,19 @@ def inspect_weights(left_path, right_path):
 
   with open(right_path, "rb") as file:
     right_weights = pickle.load(file)
-  assert sorted(left_weights.keys()) == sorted(
-      right_weights.keys()
-  ), f"Weights structure does not match! {list(set(left_weights.keys()).symmetric_difference(right_weights.keys()))}"
+  assert sorted(left_weights.keys()) == sorted(right_weights.keys()), (
+    f"Weights structure does not match! {list(set(left_weights.keys()).symmetric_difference(right_weights.keys()))}"
+  )
 
   mismatched_keys = []
   # Iterate through keys common to both dictionaries
   for key in left_weights.keys() & right_weights.keys():  # Intersection of keys
     if ".0." in key:  # check only layer 0 of the model
-      assert (
-          left_weights[key].shape == right_weights[key].shape
-      ), f"Mismatched shapes left {left_weights[key].shape}, right right_weights[key].shape"
+      assert left_weights[key].shape == right_weights[key].shape, (
+        f"Mismatched shapes left {left_weights[key].shape}, right right_weights[key].shape"
+      )
       if not np.allclose(
-          left_weights[key].type(torch.float16).numpy(), right_weights[key].type(torch.float16).numpy(), atol=1e-8
+        left_weights[key].type(torch.float16).numpy(), right_weights[key].type(torch.float16).numpy(), atol=1e-8
       ):
         mismatched_keys.append(key)
 

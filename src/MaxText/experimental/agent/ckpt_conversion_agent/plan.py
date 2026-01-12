@@ -15,6 +15,7 @@
 """
 A plan agent to analysis the HF & Maxtext models architecture and generate a conversion plan in json format.
 """
+
 import argparse
 import json
 import os
@@ -50,9 +51,9 @@ class PlanAgent(BaseAgent):
   def _load_prompt_templates(self):
     """Loads all necessary prompt templates."""
     templates = {
-        "plan": load_prompt_template(f"{self.dir_path}/prompts/01_plan.txt"),
-        "plan_check": load_prompt_template(f"{self.dir_path}/prompts/01_plan_check.txt"),
-        "pitfalls": load_prompt_template(f"{self.dir_path}/prompts/04_pitfalls.txt"),
+      "plan": load_prompt_template(f"{self.dir_path}/prompts/01_plan.txt"),
+      "plan_check": load_prompt_template(f"{self.dir_path}/prompts/01_plan_check.txt"),
+      "pitfalls": load_prompt_template(f"{self.dir_path}/prompts/04_pitfalls.txt"),
     }
     return templates
 
@@ -62,15 +63,15 @@ class PlanAgent(BaseAgent):
     feedback = ""
     for attempt in range(1, self.max_retries + 1):
       prompt2 = self.prompt_templates["plan"].format(
-          analysis=self.analysis,
-          dsl=self.dsl,
-          feedback=feedback,
+        analysis=self.analysis,
+        dsl=self.dsl,
+        feedback=feedback,
       )
       plan = self.generate_text(prompt2)
 
       check_prompt = self.prompt_templates["plan_check"].format(
-          analysis=self.analysis,
-          plan=plan,
+        analysis=self.analysis,
+        plan=plan,
       )
 
       feedback = self.generate_text(check_prompt)
@@ -107,7 +108,7 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="A script to process model transformations.")
   parser.add_argument("--target_model", type=str, required=True, help='The name of the target model (e.g., "GEMMA3").')
   parser.add_argument(
-      "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
+    "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
   )
   parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
   args = parser.parse_args()

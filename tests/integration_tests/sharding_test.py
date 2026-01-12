@@ -14,7 +14,6 @@
 
 """Tests for MaxText sharding."""
 
-
 import datetime
 import numpy as np
 import jax
@@ -59,8 +58,8 @@ def gen_layer(random_key):
   """Generates a single simulated feed-forward layer's parameters."""
   keys = jax.random.split(random_key, num=4)
   return {
-      "EMB2FF": 1e-4 * jax.random.normal(keys[0], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
-      "FF2EMB": 1e-4 * jax.random.normal(keys[1], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
+    "EMB2FF": 1e-4 * jax.random.normal(keys[0], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
+    "FF2EMB": 1e-4 * jax.random.normal(keys[1], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
   }
 
 
@@ -116,7 +115,7 @@ def check_sharding(array_or_dict, expected_sharding):
   """Checks the sharding property only if the item is a JAX array."""
   if isinstance(array_or_dict, jax.Array):
     np.testing.assert_equal(
-        array_or_dict.sharding, expected_sharding, "Initial layer parameter sharding does not match expected sharding."
+      array_or_dict.sharding, expected_sharding, "Initial layer parameter sharding does not match expected sharding."
     )
 
 
@@ -132,10 +131,10 @@ def test_fsdp_sharding():
   assert len(devices) > 1, "Test requires multiple JAX devices."
 
   # Assert that we have correct inputs of sharding that fit the number of chips
-  assert (
-      np.prod(dcn_parallelism) * np.prod(ici_parallelism) == num_devices
-  ), f"Number of devices {num_devices} \
+  assert np.prod(dcn_parallelism) * np.prod(ici_parallelism) == num_devices, (
+    f"Number of devices {num_devices} \
         does not match the product of the parallelism {np.prod(dcn_parallelism) * np.prod(ici_parallelism)}"
+  )
 
   devices_array = mesh_utils.create_device_mesh(ici_parallelism)
   mesh = Mesh(devices_array, ["data", "fsdp", "tensor"])
@@ -160,9 +159,9 @@ def test_fsdp_sharding():
   jit_gen_data = jax.jit(gen_data, in_shardings=None, out_shardings=data_mesh_shardings)
 
   jit_func = jax.jit(
-      training_step,
-      in_shardings=(replicated_sharding, parameter_mesh_shardings),
-      out_shardings=output_mesh_shardings,
+    training_step,
+    in_shardings=(replicated_sharding, parameter_mesh_shardings),
+    out_shardings=output_mesh_shardings,
   )
 
   with Mesh(mesh.devices, mesh.axis_names):
@@ -172,24 +171,24 @@ def test_fsdp_sharding():
 
     # assert the data sharding
     np.testing.assert_equal(
-        presharded_X.sharding, data_mesh_shardings, "Input data sharding does not match expected sharding."
+      presharded_X.sharding, data_mesh_shardings, "Input data sharding does not match expected sharding."
     )
 
     # asset the parameter sharding for all layers
     for layer in range(NUM_LAYERS):
       np.testing.assert_equal(
-          presharded_layers[layer]["EMB2FF"].sharding,
-          parameter_mesh_shardings,
-          "The sharding was not applied correctly to the generated layers.",
+        presharded_layers[layer]["EMB2FF"].sharding,
+        parameter_mesh_shardings,
+        "The sharding was not applied correctly to the generated layers.",
       )
       np.testing.assert_equal(
-          presharded_layers[layer]["FF2EMB"].sharding,
-          parameter_mesh_shardings,
-          "The sharding was not applied correctly to the generated layers.",
+        presharded_layers[layer]["FF2EMB"].sharding,
+        parameter_mesh_shardings,
+        "The sharding was not applied correctly to the generated layers.",
       )
 
     # Time the training step
     parameters = 2 * D_FF * D_EMB * NUM_LAYERS
     TFLOPs_per_device = parameters * 6 * BATCH_SIZE / 10**12 / len(jax.devices())
     time = simple_timeit(lambda: jax.block_until_ready(jit_func(presharded_X, presharded_layers)))
-    print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}", flush=True)
+    print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device / time}", flush=True)

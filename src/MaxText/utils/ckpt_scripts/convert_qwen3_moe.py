@@ -38,66 +38,66 @@ from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
 
 # Static model parameters dictionary
 MODEL_PARAMS_DICT = {
-    "qwen3-235b-a22b": {
-        "num_hidden_layers": 94,
-        "num_attention_heads": 64,
-        "num_key_value_heads": 4,
-        "hidden_size": 4096,
-        "head_dim": 128,
-        "num_experts": 128,
-        "moe_intermediate_size": 1536,
-    },
-    "qwen3-30b-a3b": {
-        "num_hidden_layers": 48,
-        "num_attention_heads": 32,
-        "num_key_value_heads": 4,
-        "hidden_size": 2048,
-        "head_dim": 128,
-        "num_experts": 128,
-        "moe_intermediate_size": 768,
-    },
-    "qwen3-480b-a35b": {
-        "num_hidden_layers": 62,
-        "num_attention_heads": 96,
-        "num_key_value_heads": 8,
-        "hidden_size": 6144,
-        "head_dim": 128,
-        "num_experts": 160,
-        "moe_intermediate_size": 2560,
-    },
+  "qwen3-235b-a22b": {
+    "num_hidden_layers": 94,
+    "num_attention_heads": 64,
+    "num_key_value_heads": 4,
+    "hidden_size": 4096,
+    "head_dim": 128,
+    "num_experts": 128,
+    "moe_intermediate_size": 1536,
+  },
+  "qwen3-30b-a3b": {
+    "num_hidden_layers": 48,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 4,
+    "hidden_size": 2048,
+    "head_dim": 128,
+    "num_experts": 128,
+    "moe_intermediate_size": 768,
+  },
+  "qwen3-480b-a35b": {
+    "num_hidden_layers": 62,
+    "num_attention_heads": 96,
+    "num_key_value_heads": 8,
+    "hidden_size": 6144,
+    "head_dim": 128,
+    "num_experts": 160,
+    "moe_intermediate_size": 2560,
+  },
 }
 
 
 def hf_to_maxtext_mapping(layer_idx: int, num_experts: int) -> dict:
   """Creates a mapping from HF weight names to MaxText weight names."""
   mapping = {
-      "model.embed_tokens.weight": "token_embedder.embedding",
-      "model.norm.weight": "decoder.decoder_norm.scale",
-      "lm_head.weight": "decoder.logits_dense.kernel",
+    "model.embed_tokens.weight": "token_embedder.embedding",
+    "model.norm.weight": "decoder.decoder_norm.scale",
+    "lm_head.weight": "decoder.logits_dense.kernel",
   }
   # Layer-specific mappings for a pure MoE/scanned model
   mapping.update(
-      {
-          f"model.layers.{layer_idx}.input_layernorm.weight": (
-              f"decoder.layers.{layer_idx}.pre_self_attention_layer_norm.scale"
-          ),
-          f"model.layers.{layer_idx}.post_attention_layernorm.weight": (
-              f"decoder.layers.{layer_idx}.post_self_attention_layer_norm.scale"
-          ),
-          f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"decoder.layers.{layer_idx}.self_attention.query.kernel",
-          f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"decoder.layers.{layer_idx}.self_attention.key.kernel",
-          f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"decoder.layers.{layer_idx}.self_attention.value.kernel",
-          f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"decoder.layers.{layer_idx}.self_attention.out.kernel",
-          f"model.layers.{layer_idx}.self_attn.q_norm.weight": f"decoder.layers.{layer_idx}.self_attention.query_norm.scale",
-          f"model.layers.{layer_idx}.self_attn.k_norm.weight": f"decoder.layers.{layer_idx}.self_attention.key_norm.scale",
-          f"model.layers.{layer_idx}.mlp.gate.weight": f"decoder.layers.{layer_idx}.moe_block.gate.kernel",
-      }
+    {
+      f"model.layers.{layer_idx}.input_layernorm.weight": (
+        f"decoder.layers.{layer_idx}.pre_self_attention_layer_norm.scale"
+      ),
+      f"model.layers.{layer_idx}.post_attention_layernorm.weight": (
+        f"decoder.layers.{layer_idx}.post_self_attention_layer_norm.scale"
+      ),
+      f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"decoder.layers.{layer_idx}.self_attention.query.kernel",
+      f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"decoder.layers.{layer_idx}.self_attention.key.kernel",
+      f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"decoder.layers.{layer_idx}.self_attention.value.kernel",
+      f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"decoder.layers.{layer_idx}.self_attention.out.kernel",
+      f"model.layers.{layer_idx}.self_attn.q_norm.weight": f"decoder.layers.{layer_idx}.self_attention.query_norm.scale",
+      f"model.layers.{layer_idx}.self_attn.k_norm.weight": f"decoder.layers.{layer_idx}.self_attention.key_norm.scale",
+      f"model.layers.{layer_idx}.mlp.gate.weight": f"decoder.layers.{layer_idx}.moe_block.gate.kernel",
+    }
   )
 
   # MoE expert mappings
   for i in range(num_experts):
     mapping[f"model.layers.{layer_idx}.mlp.experts.{i}.gate_proj.weight"] = (
-        f"decoder.layers.{layer_idx}.moe_block.{i}.wi_0"
+      f"decoder.layers.{layer_idx}.moe_block.{i}.wi_0"
     )
     mapping[f"model.layers.{layer_idx}.mlp.experts.{i}.up_proj.weight"] = f"decoder.layers.{layer_idx}.moe_block.{i}.wi_1"
     mapping[f"model.layers.{layer_idx}.mlp.experts.{i}.down_proj.weight"] = f"decoder.layers.{layer_idx}.moe_block.{i}.wo"
@@ -119,7 +119,7 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict) -> dict:
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("*.safetensors"))
   chkpt_vars = {}
   for i, ckpt_path in enumerate(ckpt_paths):
-    max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)}...")
+    max_logging.log(f"Loading checkpoint {i + 1} of {len(ckpt_paths)}...")
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
       for key in f.keys():
         if "layers" not in key and "embed_tokens" not in key and "norm" not in key and "lm_head" not in key:
@@ -134,36 +134,36 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict) -> dict:
 
   # Part 2: Initialize, populate, and transform the weights for MaxText
   maxtext_weights = {
-      "decoder": {
-          "layers": {
-              "pre_self_attention_layer_norm": {"scale": None},
-              "post_self_attention_layer_norm": {"scale": None},
-              "self_attention": {
-                  "query": {"kernel": None},
-                  "key": {"kernel": None},
-                  "value": {"kernel": None},
-                  "out": {"kernel": None},
-                  "query_norm": {"scale": None},
-                  "key_norm": {"scale": None},
-              },
-              "moe_block": {
-                  "gate": {"kernel": None},
-                  "wi_0": None,
-                  "wi_1": None,
-                  "wo": None,
-              },
-          },
-          "decoder_norm": {"scale": None},
-          "logits_dense": {"kernel": None},
+    "decoder": {
+      "layers": {
+        "pre_self_attention_layer_norm": {"scale": None},
+        "post_self_attention_layer_norm": {"scale": None},
+        "self_attention": {
+          "query": {"kernel": None},
+          "key": {"kernel": None},
+          "value": {"kernel": None},
+          "out": {"kernel": None},
+          "query_norm": {"scale": None},
+          "key_norm": {"scale": None},
+        },
+        "moe_block": {
+          "gate": {"kernel": None},
+          "wi_0": None,
+          "wi_1": None,
+          "wo": None,
+        },
       },
-      "token_embedder": {"embedding": None},
+      "decoder_norm": {"scale": None},
+      "logits_dense": {"kernel": None},
+    },
+    "token_embedder": {"embedding": None},
   }
 
   max_logging.log("Populating non-layer weights...")
   maxtext_weights["token_embedder"]["embedding"] = chkpt_vars["token_embedder.embedding"].to(torch.float16).numpy()
   maxtext_weights["decoder"]["decoder_norm"]["scale"] = chkpt_vars["decoder.decoder_norm.scale"].to(torch.float16).numpy()
   maxtext_weights["decoder"]["logits_dense"]["kernel"] = (
-      chkpt_vars["decoder.logits_dense.kernel"].to(torch.float16).numpy().transpose()
+    chkpt_vars["decoder.logits_dense.kernel"].to(torch.float16).numpy().transpose()
   )
 
   max_logging.log("Allocating and stacking layer weights...")
@@ -189,50 +189,50 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict) -> dict:
   # pylint: disable=unsupported-assignment-operation
   for l in tqdm(range(num_layers), desc="Stacking layer weights"):
     ln["pre_self_attention_layer_norm"]["scale"][l, :] = (
-        chkpt_vars[f"decoder.layers.{l}.pre_self_attention_layer_norm.scale"].to(torch.float16).numpy()
+      chkpt_vars[f"decoder.layers.{l}.pre_self_attention_layer_norm.scale"].to(torch.float16).numpy()
     )
     ln["post_self_attention_layer_norm"]["scale"][l, :] = (
-        chkpt_vars[f"decoder.layers.{l}.post_self_attention_layer_norm.scale"].to(torch.float16).numpy()
+      chkpt_vars[f"decoder.layers.{l}.post_self_attention_layer_norm.scale"].to(torch.float16).numpy()
     )
 
     s_attn["query"]["kernel"][l, ...] = (
-        chkpt_vars[f"decoder.layers.{l}.self_attention.query.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-        .reshape(hidden_size, num_heads, head_dim)
+      chkpt_vars[f"decoder.layers.{l}.self_attention.query.kernel"]
+      .to(torch.float16)
+      .numpy()
+      .transpose()
+      .reshape(hidden_size, num_heads, head_dim)
     )
     s_attn["key"]["kernel"][l, ...] = (
-        chkpt_vars[f"decoder.layers.{l}.self_attention.key.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-        .reshape(hidden_size, num_kv_heads, head_dim)
+      chkpt_vars[f"decoder.layers.{l}.self_attention.key.kernel"]
+      .to(torch.float16)
+      .numpy()
+      .transpose()
+      .reshape(hidden_size, num_kv_heads, head_dim)
     )
     s_attn["value"]["kernel"][l, ...] = (
-        chkpt_vars[f"decoder.layers.{l}.self_attention.value.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-        .reshape(hidden_size, num_kv_heads, head_dim)
+      chkpt_vars[f"decoder.layers.{l}.self_attention.value.kernel"]
+      .to(torch.float16)
+      .numpy()
+      .transpose()
+      .reshape(hidden_size, num_kv_heads, head_dim)
     )
     s_attn["out"]["kernel"][l, ...] = (
-        chkpt_vars[f"decoder.layers.{l}.self_attention.out.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-        .reshape(num_heads, head_dim, hidden_size)
+      chkpt_vars[f"decoder.layers.{l}.self_attention.out.kernel"]
+      .to(torch.float16)
+      .numpy()
+      .transpose()
+      .reshape(num_heads, head_dim, hidden_size)
     )
 
     s_attn["query_norm"]["scale"][l, ...] = (
-        chkpt_vars[f"decoder.layers.{l}.self_attention.query_norm.scale"].to(torch.float16).numpy()
+      chkpt_vars[f"decoder.layers.{l}.self_attention.query_norm.scale"].to(torch.float16).numpy()
     )
     s_attn["key_norm"]["scale"][l, ...] = (
-        chkpt_vars[f"decoder.layers.{l}.self_attention.key_norm.scale"].to(torch.float16).numpy()
+      chkpt_vars[f"decoder.layers.{l}.self_attention.key_norm.scale"].to(torch.float16).numpy()
     )
 
     moe["gate"]["kernel"][l, ...] = (
-        chkpt_vars[f"decoder.layers.{l}.moe_block.gate.kernel"].to(torch.float16).numpy().transpose()
+      chkpt_vars[f"decoder.layers.{l}.moe_block.gate.kernel"].to(torch.float16).numpy().transpose()
     )
     for i in range(num_experts):
       moe["wi_0"][i, l, ...] = chkpt_vars[f"decoder.layers.{l}.moe_block.{i}.wi_0"].to(torch.float16).numpy().transpose()
@@ -272,7 +272,7 @@ def main(args):
   jax_weights = convert_hf_to_maxtext(args.base_model_path, model_params)
   max_logging.log(f"Conversion complete. Saving MaxText checkpoint to {args.maxtext_model_path}")
   llama_or_mistral_ckpt.save_weights_to_checkpoint(
-      args.maxtext_model_path, jax_weights, args.simulated_cpu_devices_count, args.use_ocdbt, args.use_zarr3
+    args.maxtext_model_path, jax_weights, args.simulated_cpu_devices_count, args.use_ocdbt, args.use_zarr3
   )
   max_logging.log("Checkpoint saved successfully.")
 
@@ -281,13 +281,13 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Convert Qwen3-MoE HF weights to MaxText.")
   parser.add_argument("--base_model_path", type=str, required=True, help="Path to the HF Qwen3-MoE checkpoint files.")
   parser.add_argument(
-      "--maxtext_model_path", type=str, required=True, help="Path to save the MaxText checkpoint (local or GCS)."
+    "--maxtext_model_path", type=str, required=True, help="Path to save the MaxText checkpoint (local or GCS)."
   )
   parser.add_argument(
-      "--model_size", type=str, required=True, choices=MODEL_PARAMS_DICT.keys(), help="The model size to convert."
+    "--model_size", type=str, required=True, choices=MODEL_PARAMS_DICT.keys(), help="The model size to convert."
   )
   parser.add_argument(
-      "--simulated_cpu_devices_count", type=int, default=16, help="Number of simulated CPU devices for saving."
+    "--simulated_cpu_devices_count", type=int, default=16, help="Number of simulated CPU devices for saving."
   )
   parser.add_argument("--use-ocdbt", type=str2bool, default=True, help="Use OCDBT format for saving.")
   parser.add_argument("--use-zarr3", type=str2bool, default=True, help="Use Zarr3 format for saving.")

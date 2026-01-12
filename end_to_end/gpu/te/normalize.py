@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Normalize the raw results to get the percentage difference from the baseline"""
+"""Normalize the raw results to get the percentage difference from the baseline"""
 
 # Usage: python normalize.py input_raw_results.csv output_summary.{csv|txt} format
 #   format = 'csv' for comma-separated, 'txt' or 'tsv' for tab-separated
@@ -76,15 +76,15 @@ for key in key_order:
     else:
       normalized = "-"
     rows.append(
-        [
-            testname,
-            row["dp"],
-            row["tpsp"],
-            row["fsdp"],
-            mean,
-            stddev,
-            normalized,
-        ]
+      [
+        testname,
+        row["dp"],
+        row["tpsp"],
+        row["fsdp"],
+        mean,
+        stddev,
+        normalized,
+      ]
     )
 
 if format_type in ("csv",):

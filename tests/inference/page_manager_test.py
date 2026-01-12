@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for Page Manager. """
+"""Tests for Page Manager."""
 
 import os
 import sys
@@ -38,15 +38,15 @@ class TestPageManager(unittest.TestCase):
     self.max_pages_per_group = (self.max_target_length + self.tokens_per_page - 1) // self.tokens_per_page
 
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        max_prefill_predict_length=self.max_prefill_predict_length,
-        max_target_length=self.max_target_length,
-        pagedattn_num_pages=self.num_pages,
-        pagedattn_tokens_per_page=self.tokens_per_page,
-        pagedattn_max_pages_per_group=self.max_pages_per_group,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      per_device_batch_size=1.0,
+      run_name="test",
+      enable_checkpointing=False,
+      max_prefill_predict_length=self.max_prefill_predict_length,
+      max_target_length=self.max_target_length,
+      pagedattn_num_pages=self.num_pages,
+      pagedattn_tokens_per_page=self.tokens_per_page,
+      pagedattn_max_pages_per_group=self.max_pages_per_group,
     )
     self.config = config
     self.max_page_groups = self.config.global_batch_size_to_load
@@ -60,22 +60,22 @@ class TestPageManager(unittest.TestCase):
     """Helper function to assert that all PageState arrays have correct global shapes."""
     # Expected shapes for the global state version
     expected_shapes = {
-        "page_status": (self.num_pages,),
-        "page_map": (self.max_page_groups, self.max_pages_per_group),
-        "sequence_lengths": (self.max_page_groups,),
-        "num_pages_used": (self.max_page_groups,),
-        "active_page": (self.max_page_groups,),
-        "has_active_page": (self.max_page_groups,),
-        "active_page_position": (self.max_page_groups,),
+      "page_status": (self.num_pages,),
+      "page_map": (self.max_page_groups, self.max_pages_per_group),
+      "sequence_lengths": (self.max_page_groups,),
+      "num_pages_used": (self.max_page_groups,),
+      "active_page": (self.max_page_groups,),
+      "has_active_page": (self.max_page_groups,),
+      "active_page_position": (self.max_page_groups,),
     }
 
     for field, expected in expected_shapes.items():
       self.assertTrue(hasattr(state, field), f"State object missing field: {field}")
       actual_shape = getattr(state, field).shape
       self.assertEqual(
-          actual_shape,
-          expected,
-          f"Shape mismatch for {field}: expected {expected}, got {actual_shape}",
+        actual_shape,
+        expected,
+        f"Shape mismatch for {field}: expected {expected}, got {actual_shape}",
       )
 
   def _assert_page_state_equal(self, state1: PageState, state2: PageState, msg=None):
@@ -87,8 +87,8 @@ class TestPageManager(unittest.TestCase):
       val1 = getattr(state1, field_name)
       val2 = getattr(state2, field_name)
       self.assertTrue(
-          jnp.array_equal(val1, val2),
-          msg=f"{msg or ''}: Field '{field_name}' mismatch.\nState1:\n{state1}\nState2:\n{state2}",
+        jnp.array_equal(val1, val2),
+        msg=f"{msg or ''}: Field '{field_name}' mismatch.\nState1:\n{state1}\nState2:\n{state2}",
       )
 
   def test_initialization(self):
@@ -99,8 +99,8 @@ class TestPageManager(unittest.TestCase):
     self.assertTrue(jnp.all(state.num_pages_used[1:] == 0), "No pages should be used initially")
     self.assertTrue(jnp.all(state.sequence_lengths[1:] == 0), "Sequence lengths should be 0 initially")
     self.assertTrue(
-        jnp.all(state.has_active_page[1:] == False),  # pylint: disable=singleton-comparison
-        "No groups should be active initially",
+      jnp.all(state.has_active_page[1:] == False),  # pylint: disable=singleton-comparison
+      "No groups should be active initially",
     )
 
   def test_reserve_prefill_group(self):
@@ -111,7 +111,7 @@ class TestPageManager(unittest.TestCase):
     initial_state = self.pm.get_initial_page_state()
 
     updated_state = self.pm.update_prefill_pages(
-        page_state=initial_state, page_group_id=page_group_id, true_length=true_length
+      page_state=initial_state, page_group_id=page_group_id, true_length=true_length
     )
 
     # Calculate the expected number of pages needed
@@ -134,7 +134,7 @@ class TestPageManager(unittest.TestCase):
     # Ensure no placeholder zeros remain if pages_needed > 0
     if pages_needed > 0:
       self.assertTrue(
-          jnp.all(used_page_indices >= 0), "Valid page indices should be non-negative"
+        jnp.all(used_page_indices >= 0), "Valid page indices should be non-negative"
       )  # Assuming 0 is a valid page index
 
     # Verify that the allocated pages are marked as used in the global page_status
@@ -159,7 +159,7 @@ class TestPageManager(unittest.TestCase):
 
     # Call update_prefill_pages; since no pages are free, the state for the group should be cleared/remain cleared.
     updated_state = self.pm.update_prefill_pages(
-        page_state=initial_state, page_group_id=page_group_id, true_length=true_length
+      page_state=initial_state, page_group_id=page_group_id, true_length=true_length
     )
 
     # Verify the state for the specific group is cleared (or unchanged from initial cleared state)
@@ -199,7 +199,7 @@ class TestPageManager(unittest.TestCase):
 
     # First, allocate some pages.
     allocated_state = self.pm.update_prefill_pages(
-        page_state=initial_state, page_group_id=page_group_id, true_length=initial_length
+      page_state=initial_state, page_group_id=page_group_id, true_length=initial_length
     )
     pages_needed = (initial_length + self.tokens_per_page - 1) // self.tokens_per_page
     self.assertEqual(int(allocated_state.num_pages_used[page_group_id]), pages_needed)
@@ -223,7 +223,7 @@ class TestPageManager(unittest.TestCase):
     # Verify that the previously allocated pages are now marked as free (status 0) in the global status.
     final_status_sum = jnp.sum(released_state.page_status)
     self.assertEqual(
-        final_status_sum, initial_status_sum - pages_needed, "Global page status sum should decrease by released amount"
+      final_status_sum, initial_status_sum - pages_needed, "Global page status sum should decrease by released amount"
     )
     for page_idx in allocated_page_indices:
       self.assertEqual(int(released_state.page_status[page_idx]), 0, f"Page {page_idx} should be marked as free")
@@ -239,7 +239,7 @@ class TestPageManager(unittest.TestCase):
     # Test case 2: Decode step causing page boundary crossing.
     # Prefill exactly one page full.
     prefill_state_boundary = self.pm.update_prefill_pages(
-        page_state=initial_state, page_group_id=0, true_length=self.tokens_per_page
+      page_state=initial_state, page_group_id=0, true_length=self.tokens_per_page
     )
     self.assertEqual(int(prefill_state_boundary.num_pages_used[0]), 1)
     self.assertEqual(int(prefill_state_boundary.sequence_lengths[0]), self.tokens_per_page)
@@ -249,9 +249,9 @@ class TestPageManager(unittest.TestCase):
     decode_state_boundary = self.pm.update_decode_pages(page_state=prefill_state_boundary)
 
     self.assertEqual(
-        int(decode_state_boundary.sequence_lengths[0]),
-        self.tokens_per_page + 1,
-        "Seq length incorrect after boundary cross",
+      int(decode_state_boundary.sequence_lengths[0]),
+      self.tokens_per_page + 1,
+      "Seq length incorrect after boundary cross",
     )
     self.assertEqual(int(decode_state_boundary.num_pages_used[0]), 2, "Page count incorrect after boundary cross")
     # Active page should be the newly allocated one (different from the first)
@@ -277,7 +277,7 @@ class TestPageManager(unittest.TestCase):
     self.assertEqual(int(decode_state_partial.num_pages_used[1]), 1, "Page count incorrect (no boundary cross)")
     # Active page should be the same
     self.assertEqual(
-        int(decode_state_partial.active_page[1]), first_page_partial, "Active page incorrect (no boundary cross)"
+      int(decode_state_partial.active_page[1]), first_page_partial, "Active page incorrect (no boundary cross)"
     )
     # Position should advance
     self.assertEqual(int(decode_state_partial.active_page_position[1]), 5, "Position incorrect (no boundary cross)")
@@ -295,7 +295,7 @@ class TestPageManager(unittest.TestCase):
 
     # Perform a prefill.
     state_alloc = self.pm.update_prefill_pages(
-        page_state=initial_state, page_group_id=page_group_id, true_length=true_length
+      page_state=initial_state, page_group_id=page_group_id, true_length=true_length
     )
 
     # Verify that the total number of allocated pages (status 1) equals the total number of mapped pages used.
@@ -346,7 +346,7 @@ class TestPageManager(unittest.TestCase):
     effective_max_length = min(max_possible_length, self.max_target_length)
 
     state_max_len = self.pm.update_prefill_pages(
-        page_state=initial_state, page_group_id=page_group_id, true_length=effective_max_length
+      page_state=initial_state, page_group_id=page_group_id, true_length=effective_max_length
     )
     expected_pages = (effective_max_length + self.tokens_per_page - 1) // self.tokens_per_page
 
@@ -367,7 +367,7 @@ class TestPageManager(unittest.TestCase):
       true_length = 10 + page_group_id * self.tokens_per_page
 
       current_state = self.pm.update_prefill_pages(
-          page_state=current_state, page_group_id=page_group_id, true_length=true_length
+        page_state=current_state, page_group_id=page_group_id, true_length=true_length
       )
 
       self.assertEqual(int(current_state.sequence_lengths[page_group_id]), true_length)
@@ -387,9 +387,9 @@ class TestPageManager(unittest.TestCase):
       original_length = 10 + page_group_id * self.tokens_per_page
       # Check that sequence length was incremented for each active group
       self.assertEqual(
-          int(decode_state.sequence_lengths[page_group_id]),
-          original_length + 1,
-          f"Group {page_group_id}: incorrect sequence length after decode step",
+        int(decode_state.sequence_lengths[page_group_id]),
+        original_length + 1,
+        f"Group {page_group_id}: incorrect sequence length after decode step",
       )
       # Page count might or might not increase depending on boundary crossing
       new_pages_req = (original_length + 1 + self.tokens_per_page - 1) // self.tokens_per_page
@@ -461,7 +461,7 @@ class TestPageManager(unittest.TestCase):
 
     # Set up a sequence exactly at a page boundary
     current_state = self.pm.update_prefill_pages(
-        page_state=initial_state, page_group_id=page_group_id, true_length=self.tokens_per_page
+      page_state=initial_state, page_group_id=page_group_id, true_length=self.tokens_per_page
     )
 
     # Record the initial number of pages used for this group
@@ -473,18 +473,18 @@ class TestPageManager(unittest.TestCase):
 
     # Verify that a new page was allocated for this group
     self.assertEqual(
-        int(updated_state.num_pages_used[page_group_id]),
-        initial_pages_used + 1,
-        "A new page should be allocated when crossing a page boundary",
+      int(updated_state.num_pages_used[page_group_id]),
+      initial_pages_used + 1,
+      "A new page should be allocated when crossing a page boundary",
     )
     # Check sequence length
     self.assertEqual(int(updated_state.sequence_lengths[page_group_id]), self.tokens_per_page + 1)
 
     # Check the current page position was reset for the new page
     self.assertEqual(
-        int(updated_state.active_page_position[page_group_id]),
-        0,
-        "Current page position should be reset to 0 for the new page",
+      int(updated_state.active_page_position[page_group_id]),
+      0,
+      "Current page position should be reset to 0 for the new page",
     )
     # Check active page index has updated
     self.assertNotEqual(int(current_state.active_page[page_group_id]), int(updated_state.active_page[page_group_id]))
@@ -497,14 +497,14 @@ class TestPageManager(unittest.TestCase):
 
     # Perform a series of allocations and deallocations
     for i in range(3):  # Repeat multiple times
-      print(f"Repetition {i+1}")
+      print(f"Repetition {i + 1}")
       # Allocate to multiple groups
       for j in range(num_test_groups):
         page_group_id = j
         length = (page_group_id + 1) * 3 + i  # Vary lengths slightly each repetition
         print(f"  Allocating group {page_group_id} with length {length}")
         current_state = self.pm.update_prefill_pages(
-            page_state=current_state, page_group_id=page_group_id, true_length=length
+          page_state=current_state, page_group_id=page_group_id, true_length=length
         )
         # Verify allocation for this group
         self.assertEqual(int(current_state.sequence_lengths[page_group_id]), length)
@@ -512,7 +512,7 @@ class TestPageManager(unittest.TestCase):
 
       # Perform some decode steps
       for k in range(2):
-        print(f"  Decode step {k+1}")
+        print(f"  Decode step {k + 1}")
         current_state = self.pm.update_decode_pages(page_state=current_state)
 
       # Release all groups used in this iteration
@@ -534,10 +534,10 @@ class TestPageManager(unittest.TestCase):
     # Final check: Verify final state is clean (all pages should be free)
     # Offset necessary due to error with page 0
     self.assertTrue(
-        jnp.all(current_state.page_status[1:] == 0), "After repeated allocation/deallocation, all pages should be free"
+      jnp.all(current_state.page_status[1:] == 0), "After repeated allocation/deallocation, all pages should be free"
     )
     self.assertTrue(
-        jnp.all(current_state.num_pages_used == 0), "After repeated cycles, num_pages_used should be all zero"
+      jnp.all(current_state.num_pages_used == 0), "After repeated cycles, num_pages_used should be all zero"
     )
 
 

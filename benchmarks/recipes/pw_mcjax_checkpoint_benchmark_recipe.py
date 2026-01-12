@@ -13,10 +13,10 @@
 # limitations under the License.
 
 """Recipe to test checkpointing and restore for Pathways and McJax.
- The recipe will run synchronously and will run the benchmark steps for each
- model and infrastructure combination. If TEST_RESTORE is set to True, it will
- restore from the initial run for the given number of steps and then continue
- the run.
+The recipe will run synchronously and will run the benchmark steps for each
+model and infrastructure combination. If TEST_RESTORE is set to True, it will
+restore from the initial run for the given number of steps and then continue
+the run.
 """
 
 import datetime
@@ -52,26 +52,26 @@ BENCHMARK_STEPS = 41
 RESTORE_BENCHMARK_STEPS = 20  # Define steps for restore run
 
 RESUME_CHECKPOINT_NAMES = {
-    "pathways": {
-        # Key is number of slices, value is a dictionary of run_name,
-        # base_output_directory, and num_steps.
-        32: {
-            "run_name": "restoring_run_name",
-            "base_output_directory": f"gs://{BASE_OUTPUT_DIRECTORY}/...",
-            "num_steps": BENCHMARK_STEPS + RESTORE_BENCHMARK_STEPS,
-        }
-    },
-    # "mcjax": {
-    # 32: {}
-    # },
+  "pathways": {
+    # Key is number of slices, value is a dictionary of run_name,
+    # base_output_directory, and num_steps.
+    32: {
+      "run_name": "restoring_run_name",
+      "base_output_directory": f"gs://{BASE_OUTPUT_DIRECTORY}/...",
+      "num_steps": BENCHMARK_STEPS + RESTORE_BENCHMARK_STEPS,
+    }
+  },
+  # "mcjax": {
+  # 32: {}
+  # },
 }
 
 
 def _get_xpk_commands(
-    models,
-    cluster_config,
-    pathways_config,
-    num_steps=BENCHMARK_STEPS,
+  models,
+  cluster_config,
+  pathways_config,
+  num_steps=BENCHMARK_STEPS,
 ):
   """Generates xpk commands for the given models and configurations.
 
@@ -103,7 +103,7 @@ def _get_xpk_commands(
 
         run_name = None
         base_output_directory = (
-            BASE_OUTPUT_DIRECTORY + f"{timestamp_str}_{infra}_{num_slices}_slice_{DEVICE_TYPE}_{model.model_name}/"
+          BASE_OUTPUT_DIRECTORY + f"{timestamp_str}_{infra}_{num_slices}_slice_{DEVICE_TYPE}_{model.model_name}/"
         )
         if infra in RESUME_CHECKPOINT_NAMES:
           if num_slices in RESUME_CHECKPOINT_NAMES[infra]:
@@ -112,19 +112,19 @@ def _get_xpk_commands(
             num_steps = RESUME_CHECKPOINT_NAMES[infra][num_slices]["num_steps"]
 
         wl_config = mxr.WorkloadConfig(
-            model=model,
-            num_slices=num_slices,
-            device_type=config.device_type,
-            base_output_directory=base_output_directory,
-            max_restarts=MAX_RESTARTS,
-            libtpu_type=None,
-            libtpu_nightly_version="",
-            base_docker_image=RUNNER if infra == "mcjax" else None,
-            pathways_config=pathways_config if infra == "pathways" else None,
-            xpk_path=XPK_PATH,
-            num_steps=num_steps,
-            priority="medium",
-            run_name=run_name,
+          model=model,
+          num_slices=num_slices,
+          device_type=config.device_type,
+          base_output_directory=base_output_directory,
+          max_restarts=MAX_RESTARTS,
+          libtpu_type=None,
+          libtpu_nightly_version="",
+          base_docker_image=RUNNER if infra == "mcjax" else None,
+          pathways_config=pathways_config if infra == "pathways" else None,
+          xpk_path=XPK_PATH,
+          num_steps=num_steps,
+          priority="medium",
+          run_name=run_name,
         )
         command, name = mxr.generate_xpk_workload_cmd(cluster_config=config, wl_config=wl_config, workload_name=run_name)
 
@@ -154,14 +154,14 @@ def _run_workloads_async(xpk_workloads, cluster_config, run_type="Initial"):
   workload_names = []
   for workload_name, workload_cmd, wl_config in xpk_workloads:
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] Launching {run_type} workload: {workload_name} with" f" command: {workload_cmd}")
+    print(f"[{timestamp}] Launching {run_type} workload: {workload_name} with command: {workload_cmd}")
     return_code = mxr.run_command_with_updates(workload_cmd, workload_name)
 
     if return_code != 0:
       print(
-          f"Warning: Unable to start {run_type} xpk workload:"
-          f" {workload_name}. Creation command failed, but continuing to"
-          " launch others."
+        f"Warning: Unable to start {run_type} xpk workload:"
+        f" {workload_name}. Creation command failed, but continuing to"
+        " launch others."
       )
       continue
     workload_names.append(workload_name)
@@ -178,10 +178,10 @@ def _run_workloads_async(xpk_workloads, cluster_config, run_type="Initial"):
 def main() -> int:
   # V6e cluster config
   cluster_config = XpkClusterConfig(
-      cluster_name=CLUSTER,
-      project=PROJECT,
-      zone=ZONE,
-      device_type=DEVICE_TYPE,
+    cluster_name=CLUSTER,
+    project=PROJECT,
+    zone=ZONE,
+    device_type=DEVICE_TYPE,
   )
 
   # Handle command line arguments using args_helper
@@ -191,40 +191,40 @@ def main() -> int:
     return 0
 
   models = {
-      "pathways": {
-          "models": [
-              model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
-          ],
-          "num_slices_list": [
-              2,
-          ],
-      },
-      "mcjax": {
-          "models": [
-              model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
-          ],
-          "num_slices_list": [
-              2,
-          ],
-      },
+    "pathways": {
+      "models": [
+        model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+      ],
+      "num_slices_list": [
+        2,
+      ],
+    },
+    "mcjax": {
+      "models": [
+        model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+      ],
+      "num_slices_list": [
+        2,
+      ],
+    },
   }
   pathways_config = mxr.PathwaysConfig(
-      server_image=SERVER_IMAGE,
-      proxy_server_image=PROXY_IMAGE,
-      runner_image=RUNNER,
-      # User can add additional flags here. We're adding StreamZ flags here.
-      server_flags="--enable_metrics_collection=true",
-      proxy_flags="--enable_metrics_collection=true",
-      worker_flags="--enable_metrics_collection=true",
+    server_image=SERVER_IMAGE,
+    proxy_server_image=PROXY_IMAGE,
+    runner_image=RUNNER,
+    # User can add additional flags here. We're adding StreamZ flags here.
+    server_flags="--enable_metrics_collection=true",
+    proxy_flags="--enable_metrics_collection=true",
+    worker_flags="--enable_metrics_collection=true",
   )
 
   # --- Initial Run for Benchmark Steps ---
   print("\n--- Starting Initial Benchmark Run ---")
   xpk_workloads_initial = _get_xpk_commands(
-      models,
-      cluster_config,
-      pathways_config,
-      num_steps=BENCHMARK_STEPS,
+    models,
+    cluster_config,
+    pathways_config,
+    num_steps=BENCHMARK_STEPS,
   )
 
   completed_initial_workloads = {}
@@ -232,9 +232,9 @@ def main() -> int:
 
   # Iterate through completed workloads as they yield
   for completed_workload_name, return_code, wl_config in _run_workloads_async(
-      xpk_workloads_initial, cluster_config, run_type="Initial"
+    xpk_workloads_initial, cluster_config, run_type="Initial"
   ):
-    print(f"\n--- Initial Workload '{completed_workload_name}' COMPLETED with" f" code: {return_code}. ---\n")
+    print(f"\n--- Initial Workload '{completed_workload_name}' COMPLETED with code: {return_code}. ---\n")
     if return_code == 0:
       completed_initial_workloads[completed_workload_name] = return_code  # Track completed workload names
       initial_workload_configs[completed_workload_name] = wl_config  # Store the config
@@ -252,23 +252,23 @@ def main() -> int:
 
       # Create new config for restore with the number of steps increased
       restore_wl_config = dataclasses.replace(
-          original_wl_config,
-          num_steps=original_wl_config.num_steps + RESTORE_BENCHMARK_STEPS,
+        original_wl_config,
+        num_steps=original_wl_config.num_steps + RESTORE_BENCHMARK_STEPS,
       )
 
       restore_command, _ = mxr.generate_xpk_workload_cmd(
-          cluster_config=cluster_config,
-          wl_config=restore_wl_config,
-          workload_name=completed_workload_name,
+        cluster_config=cluster_config,
+        wl_config=restore_wl_config,
+        workload_name=completed_workload_name,
       )
       print(f"Restore command for '{completed_workload_name}': {restore_command}")
 
       print(f"Launching restore workload: {completed_workload_name}")
       restore_return_code = mxr.run_command_with_updates(restore_command, f"Restore {completed_workload_name}")
       if restore_return_code == 0:
-        print(f"\n--- Restore Workload for '{completed_workload_name}' launched" " successfully. ---")
+        print(f"\n--- Restore Workload for '{completed_workload_name}' launched successfully. ---")
       else:
-        print(f"\n--- Restore Workload for '{completed_workload_name}' FAILED to" " launch. ---")
+        print(f"\n--- Restore Workload for '{completed_workload_name}' FAILED to launch. ---")
 
   return 0
 

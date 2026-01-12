@@ -22,8 +22,8 @@ from jax.experimental import checkify
 from MaxText import exceptions
 from MaxText.sharding import get_input_data_sharding, maybe_shard_with_name
 from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    maybe_record_goodput,
+  GoodputEvent,
+  maybe_record_goodput,
 )
 
 
@@ -71,9 +71,9 @@ class DataLoader:
   def load_next_batch(self, *args, **kwargs):
     """Loads the next batch with sharding hint"""
     return maybe_shard_with_name(
-        self.load_next_batch_pre_sharding(),
-        self.input_data_shardings,
-        self.config.shard_mode,
+      self.load_next_batch_pre_sharding(),
+      self.input_data_shardings,
+      self.config.shard_mode,
     )
 
   def check_example_batch(self):
@@ -126,16 +126,16 @@ class RampUpDataLoader(DataLoader):
       # self.global_batch_size_end is batch_buffer size
       def _slice_and_concat(old_data, new_data):
         sliced_old_data = jax.lax.dynamic_slice_in_dim(
-            old_data,
-            slice_start,
-            rampup_manager.global_batch_size_end - slice_start,
-            axis=0,
+          old_data,
+          slice_start,
+          rampup_manager.global_batch_size_end - slice_start,
+          axis=0,
         )
         sliced_new_data = jax.lax.dynamic_slice_in_dim(
-            new_data,
-            0,
-            slice_end - rampup_manager.global_batch_size_end,
-            axis=0,
+          new_data,
+          0,
+          slice_end - rampup_manager.global_batch_size_end,
+          axis=0,
         )
         return jax.lax.concatenate((sliced_old_data, sliced_new_data), dimension=0)
 
@@ -145,10 +145,10 @@ class RampUpDataLoader(DataLoader):
 
       def _slice(data):
         return jax.lax.dynamic_slice_in_dim(
-            data,
-            slice_start,
-            rampup_manager.global_batch_size_current,
-            axis=0,
+          data,
+          slice_start,
+          rampup_manager.global_batch_size_current,
+          axis=0,
         )
 
       self.buffer_start = slice_end

@@ -34,17 +34,17 @@ class TunixMaxTextAdapter(nnx.Module):
   """Adapter exposing Tunix Trainer call signature over a Transformer model."""
 
   def __init__(
-      self,
-      base_model: Transformer,
-      use_standalone_mappings: bool = True,
-      use_no_op_mappings: bool = False,
+    self,
+    base_model: Transformer,
+    use_standalone_mappings: bool = True,
+    use_no_op_mappings: bool = False,
   ):
     super().__init__()
     self.base = base_model
     self._vllm_weight_mapping = VllmWeightMapping(
-        self.base.config.model_name,
-        HF_MODEL_CONFIGS[self.base.config.model_name].to_dict(),
-        use_standalone_mappings,
+      self.base.config.model_name,
+      HF_MODEL_CONFIGS[self.base.config.model_name].to_dict(),
+      use_standalone_mappings,
     )
     self.use_no_op_mappings = use_no_op_mappings
 
@@ -52,21 +52,21 @@ class TunixMaxTextAdapter(nnx.Module):
   # Tunix call signature
   # ------------------------------------------------------------------ #
   def __call__(
-      self,
-      input_tokens: Array,  # [B, L]
-      positions: Array,  # [B, L]
-      cache: Optional[Any],  # Tunix currently passes None from Trainers
-      attention_mask: Optional[Array],  # [B, L, L] or None
-      decoder_segment_ids: Optional[Array] = None,
-      output_hidden_states: bool = False,  # ignored
+    self,
+    input_tokens: Array,  # [B, L]
+    positions: Array,  # [B, L]
+    cache: Optional[Any],  # Tunix currently passes None from Trainers
+    attention_mask: Optional[Array],  # [B, L, L] or None
+    decoder_segment_ids: Optional[Array] = None,
+    output_hidden_states: bool = False,  # ignored
   ) -> Tuple[Array, None]:
     """Forward compatible with Tunix Trainers default loss.
     Returns logits, None.
     """
     logits = self.base(
-        decoder_input_tokens=input_tokens,
-        decoder_positions=positions,
-        decoder_segment_ids=decoder_segment_ids,
+      decoder_input_tokens=input_tokens,
+      decoder_positions=positions,
+      decoder_segment_ids=decoder_segment_ids,
     )
     return logits, None
 

@@ -85,7 +85,7 @@ class PrefillBucket:
     """
     if not self.try_add(slot, row_id, token_ids):
       raise ValueError(
-          f"Not enough space. prefill length: {len(token_ids)}, unallocated length: {self.capacity - self.length}"
+        f"Not enough space. prefill length: {len(token_ids)}, unallocated length: {self.capacity - self.length}"
       )
 
   def is_empty(self) -> bool:
@@ -108,20 +108,20 @@ class PrefillProcessor:
     return self._process_compiled(params, input_padding)
 
   def process(
-      self,
-      model_params: Params,
-      decode_state: DecodeState,
-      decode_slot: int,
-      input_tokens_padded: jax.Array,
-      input_true_length: int,
-      rng: PRNGKeyType,
-      return_prompt_logp: bool = False,
+    self,
+    model_params: Params,
+    decode_state: DecodeState,
+    decode_slot: int,
+    input_tokens_padded: jax.Array,
+    input_true_length: int,
+    rng: PRNGKeyType,
+    return_prompt_logp: bool = False,
   ) -> tuple[engine_api.ResultTokens, DecodeState]:
     """Process a new input."""
 
     process_fn = self._process_compiled(model_params, len(input_tokens_padded), return_prompt_logp)
     return process_fn(
-        model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, rng, return_prompt_logp
+      model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, rng, return_prompt_logp
     )
 
   def _process_compiled(self, params: Params, padded_length: int, return_prompt_logp: bool = False):
@@ -130,43 +130,43 @@ class PrefillProcessor:
     if padded_length not in self.process_func:
       log.info("compile prefill process(%d)", padded_length)
       self.process_func[(padded_length, return_prompt_logp)] = (
-          jax.jit(
-              self._process,
-              in_shardings=(self.engine.param_layouts, None, None, None, self.engine.decode_state_layouts, None),
-              out_shardings=(
-                  None,
-                  self.engine.decode_state_layouts,
-              ),
-              donate_argnames=("decode_state"),
-              static_argnames=("return_prompt_logp",),
-          )
-          .lower(
-              params,
-              jax.ShapeDtypeStruct((padded_length,), jnp.dtype("int32")),
-              jax.ShapeDtypeStruct((), int),
-              jax.ShapeDtypeStruct((), int),
-              self.engine.decode_state_shapes,
-              jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32")),
-              return_prompt_logp,
-          )
-          .compile(compiler_options=None)
+        jax.jit(
+          self._process,
+          in_shardings=(self.engine.param_layouts, None, None, None, self.engine.decode_state_layouts, None),
+          out_shardings=(
+            None,
+            self.engine.decode_state_layouts,
+          ),
+          donate_argnames=("decode_state"),
+          static_argnames=("return_prompt_logp",),
+        )
+        .lower(
+          params,
+          jax.ShapeDtypeStruct((padded_length,), jnp.dtype("int32")),
+          jax.ShapeDtypeStruct((), int),
+          jax.ShapeDtypeStruct((), int),
+          self.engine.decode_state_shapes,
+          jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32")),
+          return_prompt_logp,
+        )
+        .compile(compiler_options=None)
       )
     return self.process_func[(padded_length, return_prompt_logp)]
 
   def _process(
-      self,
-      params: Params,
-      tokens: jax.Array,
-      slot: int,
-      true_length: int,
-      decode_state: DecodeState,
-      rng: PRNGKeyType,
-      return_prompt_logp: bool = False,
+    self,
+    params: Params,
+    tokens: jax.Array,
+    slot: int,
+    true_length: int,
+    decode_state: DecodeState,
+    rng: PRNGKeyType,
+    return_prompt_logp: bool = False,
   ) -> tuple[engine_api.ResultTokens, DecodeState]:
     """Prefill and insert a request."""
 
     prefill_result, first_token = self.engine.prefill(
-        params=params, padded_tokens=tokens, true_length=true_length, rng=rng, return_prompt_logp=return_prompt_logp
+      params=params, padded_tokens=tokens, true_length=true_length, rng=rng, return_prompt_logp=return_prompt_logp
     )
     decode_state = self.engine.insert(prefill_result, decode_state, slot)
     if return_prompt_logp:
@@ -184,29 +184,29 @@ class BatchedPrefillProcessor:
     self.max_batch_size = max_batch_size
     self.auto_layout_supported = auto_layout_supported
     self.jitted_process_batch = jax.jit(
-        self._process_batch,
-        static_argnames=("num_prompts", "padded_length", "return_prompt_logp"),
-        donate_argnames=("decode_state"),
+      self._process_batch,
+      static_argnames=("num_prompts", "padded_length", "return_prompt_logp"),
+      donate_argnames=("decode_state"),
     )
 
   def aot_compile(
-      self, params: Params, input_padding: int, capacity: int, num_prompts: int, return_prompt_logp: bool = False
+    self, params: Params, input_padding: int, capacity: int, num_prompts: int, return_prompt_logp: bool = False
   ):
     """Ahead-of-time compile prefill processing routines."""
 
     return self._process_batch_compiled(params, input_padding, capacity, num_prompts, return_prompt_logp)
 
   def process(
-      self,
-      model_params: Params,
-      decode_state: DecodeState,
-      decode_slot: int,
-      input_id: int,
-      input_prompt: jax.Array,
-      input_padding: int,
-      capacity: int,
-      prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
-      return_prompt_logp: bool = False,
+    self,
+    model_params: Params,
+    decode_state: DecodeState,
+    decode_slot: int,
+    input_id: int,
+    input_prompt: jax.Array,
+    input_padding: int,
+    capacity: int,
+    prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
+    return_prompt_logp: bool = False,
   ) -> None:
     """Process a new input.
 
@@ -214,13 +214,13 @@ class BatchedPrefillProcessor:
     length = len(input_prompt)
     if length > capacity or length > input_padding:
       raise ValueError(
-          f"Prefill length exceeds limit. prefill length: {length} padding: {input_padding} capacity: {capacity}"
+        f"Prefill length exceeds limit. prefill length: {length} padding: {input_padding} capacity: {capacity}"
       )
 
     bucket = self.buckets.setdefault(input_padding, PrefillBucket(capacity))
     if len(input_prompt) > bucket.unallocated():
       prefill_result, decode_state = self._process_bucket(
-          model_params, bucket, input_padding, decode_state, return_prompt_logp
+        model_params, bucket, input_padding, decode_state, return_prompt_logp
       )
       if prefill_done:
         prefill_done(prefill_result, bucket.row_ids, decode_state)
@@ -228,40 +228,40 @@ class BatchedPrefillProcessor:
     bucket.add(decode_slot, input_id, input_prompt)
 
     log.debug(
-        "prefill: slot=%d, id=%d, length=%d, padding=%d, capacity=%d, unallocated=%d",
-        decode_slot,
-        input_id,
-        length,
-        input_padding,
-        capacity,
-        bucket.unallocated(),
+      "prefill: slot=%d, id=%d, length=%d, padding=%d, capacity=%d, unallocated=%d",
+      decode_slot,
+      input_id,
+      length,
+      input_padding,
+      capacity,
+      bucket.unallocated(),
     )
 
   def flush(
-      self,
-      model_params: Params,
-      decode_state: DecodeState,
-      prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
-      return_prompt_logp: bool = False,
+    self,
+    model_params: Params,
+    decode_state: DecodeState,
+    prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
+    return_prompt_logp: bool = False,
   ) -> None:
     """Process all remaining items in buckets."""
 
     for input_padding, bucket in self.buckets.items():
       if not bucket.is_empty():
         prefill_result, decode_state = self._process_bucket(
-            model_params, bucket, input_padding, decode_state, return_prompt_logp
+          model_params, bucket, input_padding, decode_state, return_prompt_logp
         )
         if prefill_done:
           prefill_done(prefill_result, bucket.row_ids, decode_state)
         bucket.clear()
 
   def _process_bucket(
-      self,
-      model_params: Params,
-      bucket: PrefillBucket,
-      input_padding: int,
-      decode_state: DecodeState,
-      return_prompt_logp: bool = False,
+    self,
+    model_params: Params,
+    bucket: PrefillBucket,
+    input_padding: int,
+    decode_state: DecodeState,
+    return_prompt_logp: bool = False,
   ) -> tuple[list[tuple[engine_api.ResultTokens, int]], DecodeState]:
     """Process all items in a bucket."""
     # pylint: disable=import-outside-toplevel
@@ -298,24 +298,24 @@ class BatchedPrefillProcessor:
     lengths_jax = zero_padded(lengths, self.max_batch_size)
     if not self.auto_layout_supported:
       first_tokens, decode_state = self.jitted_process_batch(
-          model_params,
-          tok_ids,
-          slots,
-          bucket.count,
-          pos_ids,
-          seg_ids,
-          offsets_jax,
-          input_padding,
-          lengths_jax,
-          decode_state,
-          return_prompt_logp,
+        model_params,
+        tok_ids,
+        slots,
+        bucket.count,
+        pos_ids,
+        seg_ids,
+        offsets_jax,
+        input_padding,
+        lengths_jax,
+        decode_state,
+        return_prompt_logp,
       )
     else:
       prefill_fn = self._process_batch_compiled(
-          model_params, input_padding, bucket.capacity, bucket.count, return_prompt_logp
+        model_params, input_padding, bucket.capacity, bucket.count, return_prompt_logp
       )
       first_tokens, decode_state = prefill_fn(
-          model_params, tok_ids, slots, pos_ids, seg_ids, offsets_jax, lengths_jax, decode_state, return_prompt_logp
+        model_params, tok_ids, slots, pos_ids, seg_ids, offsets_jax, lengths_jax, decode_state, return_prompt_logp
       )
 
     prefill_result = []
@@ -331,84 +331,84 @@ class BatchedPrefillProcessor:
     return prefill_result, decode_state
 
   def _process_batch_compiled(
-      self, params: Params, padded_length: int, capacity: int, num_prompts: int, return_prompt_logp: bool
+    self, params: Params, padded_length: int, capacity: int, num_prompts: int, return_prompt_logp: bool
   ):
     """Ahead-of-time compilation wrapper of _process_batch()."""
 
     if (padded_length, num_prompts) not in self.process_batch_func:
       log.info("compile prefill process_batch{(%d, %d)} capacity=%d", padded_length, num_prompts, capacity)
       self.process_batch_func[(padded_length, num_prompts, return_prompt_logp)] = (
-          jax.jit(
-              self._process_batch,
-              in_shardings=(
-                  self.engine.param_layouts,
-                  None,
-                  None,
-                  None,
-                  None,
-                  None,
-                  None,
-                  self.engine.decode_state_layouts,
-              ),
-              out_shardings=(None, self.engine.decode_state_layouts),
-              static_argnames=(
-                  "num_prompts",
-                  "padded_length",
-                  "return_prompt_logp",
-              ),
-              donate_argnames=("decode_state"),
-          )
-          .lower(
-              params,
-              jax.ShapeDtypeStruct((capacity,), jnp.dtype("int32")),
-              jnp.arange(0, self.max_batch_size, dtype=int),
-              num_prompts,
-              jnp.arange(0, capacity, dtype=int),
-              jnp.ones(capacity, dtype=int),
-              jnp.arange(0, capacity, capacity // self.max_batch_size, dtype=int),
-              padded_length,
-              jnp.full(self.max_batch_size, padded_length, dtype=int),
-              self.engine.decode_state_shapes,
-              return_prompt_logp,
-          )
-          .compile(compiler_options=None)
+        jax.jit(
+          self._process_batch,
+          in_shardings=(
+            self.engine.param_layouts,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            self.engine.decode_state_layouts,
+          ),
+          out_shardings=(None, self.engine.decode_state_layouts),
+          static_argnames=(
+            "num_prompts",
+            "padded_length",
+            "return_prompt_logp",
+          ),
+          donate_argnames=("decode_state"),
+        )
+        .lower(
+          params,
+          jax.ShapeDtypeStruct((capacity,), jnp.dtype("int32")),
+          jnp.arange(0, self.max_batch_size, dtype=int),
+          num_prompts,
+          jnp.arange(0, capacity, dtype=int),
+          jnp.ones(capacity, dtype=int),
+          jnp.arange(0, capacity, capacity // self.max_batch_size, dtype=int),
+          padded_length,
+          jnp.full(self.max_batch_size, padded_length, dtype=int),
+          self.engine.decode_state_shapes,
+          return_prompt_logp,
+        )
+        .compile(compiler_options=None)
       )
     return self.process_batch_func[(padded_length, num_prompts, return_prompt_logp)]
 
   def _process_batch(  # pylint: disable=too-many-positional-arguments
-      self,
-      params: Params,
-      tokens: jax.Array,
-      slots: jax.Array,
-      num_prompts: int,
-      decoder_positions: jax.Array,
-      decoder_segment_ids: jax.Array,
-      start_pos: jax.Array,
-      padded_length: int,
-      true_lengths: jax.Array,
-      decode_state: DecodeState,
-      return_prompt_logp: bool = False,
+    self,
+    params: Params,
+    tokens: jax.Array,
+    slots: jax.Array,
+    num_prompts: int,
+    decoder_positions: jax.Array,
+    decoder_segment_ids: jax.Array,
+    start_pos: jax.Array,
+    padded_length: int,
+    true_lengths: jax.Array,
+    decode_state: DecodeState,
+    return_prompt_logp: bool = False,
   ) -> tuple[list[engine_api.ResultTokens], DecodeState]:
     """Prefill and insert a packed request."""
 
     cache, prefix_state, first_tokens = self.engine.prefill_concat(
-        params=params,
-        padded_tokens=tokens,
-        decoder_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        start_pos=start_pos,
-        true_lengths=true_lengths,
-        num_prompts=num_prompts,
-        return_prompt_logp=return_prompt_logp,
+      params=params,
+      padded_tokens=tokens,
+      decoder_positions=decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      start_pos=start_pos,
+      true_lengths=true_lengths,
+      num_prompts=num_prompts,
+      return_prompt_logp=return_prompt_logp,
     )
     decode_state = self.engine.insert_partial(
-        prefix=prefix_state,
-        decode_state=decode_state,
-        cache=cache,
-        slots=slots,
-        start_indices=start_pos,
-        num_prompts=num_prompts,
-        seq_len=padded_length,
+      prefix=prefix_state,
+      decode_state=decode_state,
+      cache=cache,
+      slots=slots,
+      start_indices=start_pos,
+      num_prompts=num_prompts,
+      seq_len=padded_length,
     )
     if return_prompt_logp:
       decode_state["prompt_logp"] = prefix_state["prompt_logp"]

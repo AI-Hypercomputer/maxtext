@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Common Max Utils needed by multiple modules.
+"""Common Max Utils needed by multiple modules.
 All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
 
 import collections
@@ -186,24 +186,24 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     initialize_jax_for_cpu(raw_keys)
     max_logging.log("Jax distributed system initialized on CPUs!")
   elif raw_keys["enable_multi_tier_checkpointing"]:
-    max_logging.log("Attempting to initialize the jax distributed system for multi-tier " "checkpointing...")
+    max_logging.log("Attempting to initialize the jax distributed system for multi-tier checkpointing...")
     initialize_multi_tier_checkpointing(
-        local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
-        backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
-        run_name=raw_keys["run_name"],
-        jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
-        data_parallelism=raw_keys["mtc_data_parallelism"],
+      local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
+      backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
+      run_name=raw_keys["run_name"],
+      jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
+      data_parallelism=raw_keys["mtc_data_parallelism"],
     )
     max_logging.log("Jax distributed system initialized for multi-tier checkpointing!")
   elif (raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1) or raw_keys[
-      "hardware"
+    "hardware"
   ] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
       if raw_keys["hardware"] == "gpu_multiprocess":
-        max_logging.log("Initializing jax distribtued to support local checkpointing with" " GPUs...")
+        max_logging.log("Initializing jax distribtued to support local checkpointing with GPUs...")
         jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
         ocp.multihost.initialize_runtime_to_distributed_ids()
         ocp.multihost.initialize_distributed_to_device_ids()
@@ -218,10 +218,10 @@ def initialize_jax_for_gpu(raw_keys):
     coordinator_ip = str(os.getenv("JAX_COORDINATOR_IP"))
     coordinator_port = str(os.getenv("JAX_COORDINATOR_PORT"))
     jax.distributed.initialize(
-        coordinator_address=f"{coordinator_ip}:{coordinator_port}",
-        num_processes=int(os.getenv("NNODES")),
-        process_id=int(os.getenv("NODE_RANK")),
-        initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
+      coordinator_address=f"{coordinator_ip}:{coordinator_port}",
+      num_processes=int(os.getenv("NNODES")),
+      process_id=int(os.getenv("NODE_RANK")),
+      initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
     )
     max_logging.log(f"JAX global devices: {jax.devices()}")
 
@@ -238,10 +238,10 @@ def initialize_jax_for_cpu(raw_keys):
   max_logging.log(f" Jax process id is {pid} ")
   # Explicit initialize is needed only for CPUs
   jax.distributed.initialize(
-      coordinator_address=coordinator_address,
-      process_id=pid,
-      num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),
-      initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
+    coordinator_address=coordinator_address,
+    process_id=pid,
+    num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),
+    initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
   )
 
 
@@ -255,13 +255,13 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
 
   if process_id != "" and coordinator_address != "":
     max_logging.log(
-        f"Using {process_id} as the process_id and {coordinator_address} as the"
-        " coordinator_address to initialize JAX distributed runtime..."
+      f"Using {process_id} as the process_id and {coordinator_address} as the"
+      " coordinator_address to initialize JAX distributed runtime..."
     )
     jax.distributed.initialize(
-        coordinator_address=coordinator_address,
-        process_id=int(process_id),
-        initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
+      coordinator_address=coordinator_address,
+      process_id=int(process_id),
+      initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
     )
 
     ocp.multihost.initialize_runtime_to_distributed_ids()
@@ -283,7 +283,7 @@ def _retrieve_jax_init_info(raw_keys):
     max_logging.log(f"Unable to locate {JAX_INIT_INFO_FILE} after {i} seconds, sleeping for 1 second before retrying...")
     time.sleep(1)
   max_logging.log(
-      f"Unable to locate {JAX_INIT_INFO_FILE} after 900 seconds," "returning empty process id and coordinator address."
+    f"Unable to locate {JAX_INIT_INFO_FILE} after 900 seconds,returning empty process id and coordinator address."
   )
   return "", ""
 
@@ -331,7 +331,7 @@ def get_coordinator_ip_address():
         coordinator_found = True
       except socket.gaierror:
         max_logging.log(
-            f"Failed to recognize coordinator address {coordinator_address} on attempt {lookup_attempt}, retrying..."
+          f"Failed to recognize coordinator address {coordinator_address} on attempt {lookup_attempt}, retrying..."
         )
         lookup_attempt += 1
         time.sleep(5)
@@ -342,24 +342,24 @@ def get_coordinator_ip_address():
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
   if -1 in parallelism_vals:
-    assert (
-        parallelism_vals.count(-1) == 1
-    ), f"Found unspecified values (-1) for more than one {parallelism_type}\
+    assert parallelism_vals.count(-1) == 1, (
+      f"Found unspecified values (-1) for more than one {parallelism_type}\
       parallelism axis. At most one axis can be unspecified."
+    )
 
     determined_val = target_product / np.prod(parallelism_vals) * -1
 
-    assert (
-        determined_val >= 1 and determined_val.is_integer
-    ), f"Unspecified value unable to be determined with the given\
+    assert determined_val >= 1 and determined_val.is_integer, (
+      f"Unspecified value unable to be determined with the given\
       {parallelism_type} parallelism values"
+    )
 
     parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
 
   target_type = "slices" if parallelism_type == "DCN" else "devices per slice"
   assert np.prod(parallelism_vals) == target_product, (
-      f"Number of {target_type} {target_product} does not match"
-      f" the product of the {parallelism_type} parallelism {np.prod(parallelism_vals)}"
+    f"Number of {target_type} {target_product} does not match"
+    f" the product of the {parallelism_type} parallelism {np.prod(parallelism_vals)}"
   )
 
   return parallelism_vals
@@ -386,16 +386,16 @@ def reshape_mesh_to_rings(a, strategy):
         a_j = j * 4
         # forms a ring of size 8
         b[i].append(
-            [
-                a[a_i, a_j],
-                a[a_i, a_j + 1],
-                a[a_i, a_j + 2],
-                a[a_i, a_j + 3],
-                a[a_i + 1, a_j + 3],
-                a[a_i + 1, a_j + 2],
-                a[a_i + 1, a_j + 1],
-                a[a_i + 1, a_j],
-            ]
+          [
+            a[a_i, a_j],
+            a[a_i, a_j + 1],
+            a[a_i, a_j + 2],
+            a[a_i, a_j + 3],
+            a[a_i + 1, a_j + 3],
+            a[a_i + 1, a_j + 2],
+            a[a_i + 1, a_j + 1],
+            a[a_i + 1, a_j],
+          ]
         )
     b = np.array(b)
     b = np.reshape(b, (32, 8))
@@ -405,33 +405,33 @@ def reshape_mesh_to_rings(a, strategy):
 
 
 def create_custom_device_mesh(
-    mesh_shape: Sequence[int],
-    dcn_mesh_shape: Sequence[int],
-    devices: Sequence[Any],
-    custom_strategy: str,
-    process_is_granule: bool = False,
-    should_sort_granules_by_key: bool = True,
+  mesh_shape: Sequence[int],
+  dcn_mesh_shape: Sequence[int],
+  devices: Sequence[Any],
+  custom_strategy: str,
+  process_is_granule: bool = False,
+  should_sort_granules_by_key: bool = True,
 ) -> np.ndarray:
   """Custom device mesh for 64x4 ici parallelism"""
   assert len(devices) % 256 == 0, f"This custom mesh is not valid for {len(devices)} devices"
   attr = "process_index" if process_is_granule else "slice_index"
   if not hasattr(devices[0], attr):
-    raise ValueError(f"Device {devices[0]} does not have attribute {attr}. See" " `process_is_granule` option.")
+    raise ValueError(f"Device {devices[0]} does not have attribute {attr}. See `process_is_granule` option.")
   granule_dict = collections.defaultdict(list)
   for dev in devices:
     granule_dict[getattr(dev, attr)].append(dev)
   granules = (
-      [granule_dict[key] for key in sorted(granule_dict.keys())] if should_sort_granules_by_key else granule_dict.values()
+    [granule_dict[key] for key in sorted(granule_dict.keys())] if should_sort_granules_by_key else granule_dict.values()
   )
   if np.prod(dcn_mesh_shape) != len(granules):
-    raise ValueError(f"Number of slices {len(granules)} must equal the product of " f"dcn_mesh_shape {dcn_mesh_shape}")
+    raise ValueError(f"Number of slices {len(granules)} must equal the product of dcn_mesh_shape {dcn_mesh_shape}")
   per_granule_meshes = [
-      mesh_utils.create_device_mesh(
-          [16, 16],
-          granule,
-          allow_split_physical_axes=False,
-      )
-      for granule in granules
+    mesh_utils.create_device_mesh(
+      [16, 16],
+      granule,
+      allow_split_physical_axes=False,
+    )
+    for granule in granules
   ]
 
   per_granule_meshes = [np.reshape(reshape_mesh_to_rings(x, custom_strategy), mesh_shape) for x in per_granule_meshes]
@@ -448,8 +448,8 @@ def is_valid_custom_mesh(ici_parallelism, strategy):
     return False
 
   valid_strategies = {
-      HYBRID_RING_64X4: [1, 4, 64],
-      HYBRID_RING_32X8: [1, 8, 32],
+    HYBRID_RING_64X4: [1, 4, 64],
+    HYBRID_RING_32X8: [1, 8, 32],
   }
 
   if strategy in valid_strategies:
@@ -495,9 +495,9 @@ def unbox_logicallypartioned(boxed_pytree):
     a pytree where all all LogicallyPartitioned leaves have been unboxed.
   """
   return jax.tree_util.tree_map(
-      lambda x: x.unbox() if isinstance(x, flax.linen.spmd.LogicallyPartitioned) else x,
-      boxed_pytree,
-      is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned),
+    lambda x: x.unbox() if isinstance(x, flax.linen.spmd.LogicallyPartitioned) else x,
+    boxed_pytree,
+    is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned),
   )
 
 
@@ -505,9 +505,9 @@ def unbox_logicallypartioned(boxed_pytree):
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
 @jax.custom_vjp
 def cross_entropy_with_logits(
-    logits: jnp.ndarray,
-    targets: jnp.ndarray,
-    z_loss: float = 0.0,
+  logits: jnp.ndarray,
+  targets: jnp.ndarray,
+  z_loss: float = 0.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Computes cross entropy loss with stable custom gradient.
   Computes a stabilized-gradient version of:
@@ -537,16 +537,18 @@ def cross_entropy_with_logits(
   return loss, total_z_loss
 
 
-def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> tuple[
-    tuple[jnp.ndarray, jnp.ndarray],
-    tuple[
-        jnp.ndarray,
-        jnp.ndarray,
-        jnp.ndarray,
-        jnp.ndarray,
-        jnp.ndarray,
-        jnp.ndarray,
-    ],
+def _cross_entropy_with_logits_fwd(
+  logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0
+) -> tuple[
+  tuple[jnp.ndarray, jnp.ndarray],
+  tuple[
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+  ],
 ]:
   """Forward-mode of `cross_entropy_with_logits`."""
   max_logit = logits.max(axis=-1, keepdims=True)
@@ -560,25 +562,25 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
   total_z_loss = z_loss * jax.lax.square(log_z)
   loss += total_z_loss
   return (loss, total_z_loss), (
-      logits,
-      targets,
-      z_loss,
-      exp_shifted,
-      sum_exp,  # pytype: disable=bad-return-type  #jax-ndarray
-      log_z,
+    logits,
+    targets,
+    z_loss,
+    exp_shifted,
+    sum_exp,  # pytype: disable=bad-return-type  #jax-ndarray
+    log_z,
   )
 
 
 def _cross_entropy_with_logits_bwd(
-    res: tuple[
-        jnp.ndarray,
-        jnp.ndarray,
-        jnp.ndarray,
-        jnp.ndarray,
-        jnp.ndarray,
-        jnp.ndarray,
-    ],
-    g: tuple[jnp.ndarray, jnp.ndarray],
+  res: tuple[
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+  ],
+  g: tuple[jnp.ndarray, jnp.ndarray],
 ) -> tuple[jnp.ndarray, None, None]:
   """Backward-mode of `cross_entropy_with_logits`."""
   g = g[0]  # Ignore z_loss component as that is only used for logging.
@@ -588,9 +590,9 @@ def _cross_entropy_with_logits_bwd(
   g_logits = jnp.expand_dims(g, axis=-1) * deriv
 
   return (
-      jnp.asarray(g_logits, logits.dtype),
-      None,  # we don't need gradients on targets
-      None,  # we don't need gradients on z_loss
+    jnp.asarray(g_logits, logits.dtype),
+    None,  # we don't need gradients on targets
+    None,  # we don't need gradients on z_loss
   )  # sets z-loss coeff gradient to 0
 
 
@@ -635,17 +637,17 @@ def summarize_pytree_data(params, name="Params", raw=False):
     num_params_in_billions = num_params / 1e9
     total_param_size_in_gb = total_param_size / 1e9
     print(
-        f"{name} stats: \n"
-        f"\tTotal number of params: {num_params_in_billions:.3f} billion \n"
-        f"\tTotal memory usage: {total_param_size_in_gb:.3f} GB \n"
-        f"\tAvg size: {avg_param_size:.3f} bytes\n"
+      f"{name} stats: \n"
+      f"\tTotal number of params: {num_params_in_billions:.3f} billion \n"
+      f"\tTotal memory usage: {total_param_size_in_gb:.3f} GB \n"
+      f"\tAvg size: {avg_param_size:.3f} bytes\n"
     )
   else:
     print(
-        f"{name} stats: \n"
-        f"\tTotal number of params: {num_params:.3f} \n"
-        f"\tTotal memory usage: {total_param_size:.3f} bytes \n"
-        f"\tAvg size: {avg_param_size:.3f} bytes\n"
+      f"{name} stats: \n"
+      f"\tTotal number of params: {num_params:.3f} \n"
+      f"\tTotal memory usage: {total_param_size:.3f} bytes \n"
+      f"\tAvg size: {avg_param_size:.3f} bytes\n"
     )
   return num_params, total_param_size, avg_param_size
 
@@ -657,7 +659,7 @@ def print_mem_stats(label: str):
       stats = d.memory_stats()
       used = round(stats["bytes_in_use"] / 2**30, 2)
       limit = round(stats["bytes_limit"] / 2**30, 2)
-      max_logging.log(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
+      max_logging.log(f"\tUsing (GB) {used} / {limit} ({used / limit:%}) on {d}")
   except (RuntimeError, KeyError, TypeError) as ex:
     max_logging.log(f"\tMemstats unavailable, error: {ex}")
 
@@ -672,7 +674,7 @@ def print_cpu_ram_stats(label: str):
     available = round(ram.available / 2**30, 2)
     used = round(ram.used / 2**30, 2)
 
-    max_logging.log(f"\tUsing (GB) {used} / {total} ({used/total:%}) -->  Available:{available}")
+    max_logging.log(f"\tUsing (GB) {used} / {total} ({used / total:%}) -->  Available:{available}")
   except (RuntimeError, KeyError, TypeError) as ex:
     max_logging.log(f"\tRAM stats unavailable, error: {ex}")
 
@@ -693,8 +695,8 @@ def print_compiled_memory_stats(compiled_stats):
   total_gb = output_gb + temp_gb + argument_gb - alias_gb
 
   max_logging.log(
-      f"Total memory size: {total_gb:.1f} GB, Output size: {output_gb:.1f} GB, Temp size: {temp_gb:.1f} GB, "
-      f"Argument size: {argument_gb:.1f} GB, Host temp size: {host_temp_gb:.1f} GB."
+    f"Total memory size: {total_gb:.1f} GB, Output size: {output_gb:.1f} GB, Temp size: {temp_gb:.1f} GB, "
+    f"Argument size: {argument_gb:.1f} GB, Host temp size: {host_temp_gb:.1f} GB."
   )
 
 
@@ -752,10 +754,10 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
   # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
   ori_tensor_shape = tensor.shape
   reshaped = tensor.reshape(
-      *ori_tensor_shape[:seq_dim],
-      2 * cp_size,
-      group_size,
-      *ori_tensor_shape[seq_dim + 1 :],
+    *ori_tensor_shape[:seq_dim],
+    2 * cp_size,
+    group_size,
+    *ori_tensor_shape[seq_dim + 1 :],
   )
 
   if not to_contiguous:
@@ -767,7 +769,6 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
     src_indices = jnp.stack([first_half, second_half], axis=1).reshape(-1)
 
   else:
-
     half = cp_size // 2
 
     # Build the 1st and 2nd groups of contiguous‑pair indices:
@@ -795,14 +796,13 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
 def reorder_causal_load_balanced(batch, cp_size):
   """Reorders the example batch sequences"""
   return {
-      key: reorder_sequence(
-          value,  # Pass each key's value inside batch separately
-          cp_size=cp_size,
-      )
-      if key
-      in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
-      else value
-      for key, value in batch.items()
+    key: reorder_sequence(
+      value,  # Pass each key's value inside batch separately
+      cp_size=cp_size,
+    )
+    if key in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
+    else value
+    for key, value in batch.items()
   }
 
 
@@ -835,10 +835,10 @@ def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
   # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
   ori_tensor_shape = tensor.shape
   reshaped = tensor.reshape(
-      *ori_tensor_shape[:seq_dim],
-      2 * cp_size,
-      group_size,
-      *ori_tensor_shape[seq_dim + 1 :],
+    *ori_tensor_shape[:seq_dim],
+    2 * cp_size,
+    group_size,
+    *ori_tensor_shape[seq_dim + 1 :],
   )
 
   # Create first and second halves
@@ -900,15 +900,15 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
     # 1. Compute the target sharding for a single, unscanned layer.
     # This is done once per layer group, with no expensive compilation.
     unscanned_sharding_spec = jax.tree_util.tree_map(
-        strip_scan_axis, jax.tree_util.tree_map(lambda x: x.spec, scanned_sharding)
+      strip_scan_axis, jax.tree_util.tree_map(lambda x: x.spec, scanned_sharding)
     )
     unscanned_sharding = jax.tree_util.tree_map(lambda ps: jax.sharding.NamedSharding(mesh, ps), unscanned_sharding_spec)
 
     # 2. Create a list of PyTrees, one for each layer, by slicing the original.
     # This is more direct than repeatedly calling a JIT'd function.
     layer_pytrees = [
-        jax.tree_util.tree_map(functools.partial(jnp.take, indices=i, axis=scan_axis), scanned_layers)
-        for i in range(num_layers)
+      jax.tree_util.tree_map(functools.partial(jnp.take, indices=i, axis=scan_axis), scanned_layers)
+      for i in range(num_layers)
     ]
 
     # 3. Reshard each layer's PyTree and assign it to the new key.
@@ -940,9 +940,9 @@ def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups)
 
     # Create a wrapper that allows pjit + donation
     compiled_stack = jax.jit(
-        stack_layers,
-        out_shardings=sharding[layer_name],
-        # donate_argnums=tuple(range(num_layers)),
+      stack_layers,
+      out_shardings=sharding[layer_name],
+      # donate_argnums=tuple(range(num_layers)),
     )
 
     # Collect per-layer entries for stacking
@@ -1019,14 +1019,15 @@ def transformer_engine_context():
   the library with MaxText-specific details needed for correcct operation."""
   try:
     from transformer_engine.jax.sharding import global_shard_guard, MeshResource  # pylint: disable=import-outside-toplevel
+
     # Inform TransformerEngine of MaxText's physical mesh resources.
     mesh_resource = MeshResource(  # pytype: disable=wrong-arg-types
-        dp_resource="data",
-        tp_resource="tensor",
-        # tpsp_resource = "tensor_sequence", #TODO(Phuong): add this back when upstreaming CGEMM
-        fsdp_resource="fsdp",
-        pp_resource=None,
-        cp_resource="context",
+      dp_resource="data",
+      tp_resource="tensor",
+      # tpsp_resource = "tensor_sequence", #TODO(Phuong): add this back when upstreaming CGEMM
+      fsdp_resource="fsdp",
+      pp_resource=None,
+      cp_resource="context",
     )
     with global_shard_guard(mesh_resource):
       yield

@@ -25,6 +25,7 @@ functions, and try/if blocks, and saves them to a JSON file.
 Example Invocation:
 python scrap_all_python_blocks.py
 """
+
 import ast
 import base64
 import json
@@ -34,7 +35,12 @@ import dotenv
 import requests
 
 from MaxText.experimental.agent.integrative_rag_agent import system_setup
-from MaxText.experimental.agent.integrative_rag_agent.config import repo_name, repo_owner, maxtext_code_block, block_for_rag
+from MaxText.experimental.agent.integrative_rag_agent.config import (
+  repo_name,
+  repo_owner,
+  maxtext_code_block,
+  block_for_rag,
+)
 
 dotenv.load_dotenv()
 

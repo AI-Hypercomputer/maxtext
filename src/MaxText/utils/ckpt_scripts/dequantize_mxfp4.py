@@ -161,16 +161,16 @@ if __name__ == "__main__":
   parser.add_argument("--cache-size", type=int, required=False, default=2)
   args = parser.parse_args()
   dtype_map = {
-      "bf16": torch.bfloat16,
-      "bfloat16": torch.bfloat16,
-      "f32": torch.float32,
-      "float32": torch.float32,
-      "f16": torch.float16,
-      "float16": torch.float16,
+    "bf16": torch.bfloat16,
+    "bfloat16": torch.bfloat16,
+    "f32": torch.float32,
+    "float32": torch.float32,
+    "f16": torch.float16,
+    "float16": torch.float16,
   }
   parsed_dtype = dtype_map.get(args.dtype_str.lower())
   if parsed_dtype is None:
     raise ValueError(
-        f"Unsupported dtype: {args.dtype_str}, please select one from bf16, bfloat16, f32, float32, f16, float16."
+      f"Unsupported dtype: {args.dtype_str}, please select one from bf16, bfloat16, f32, float32, f16, float16."
     )
   main(args.input_path, args.output_path, parsed_dtype, args.cache_size)

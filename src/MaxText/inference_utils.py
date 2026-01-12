@@ -48,11 +48,11 @@ def str2bool(v: str) -> bool:
 
 @jax.jit
 def prompt_logprobs_from_packed_prefill(
-    logits: jax.Array,  # [B, S, V] predicts token t+1 at position t
-    input_tokens: jax.Array,  # [B, S]
-    decoder_positions: jax.Array,  # [B, S] position within its own prompt
-    decoder_segment_ids: jax.Array,  # [B, S] which prompt each token belongs to
-    true_lengths: jax.Array,  # [num_prompts] true lengths per prompt
+  logits: jax.Array,  # [B, S, V] predicts token t+1 at position t
+  input_tokens: jax.Array,  # [B, S]
+  decoder_positions: jax.Array,  # [B, S] position within its own prompt
+  decoder_segment_ids: jax.Array,  # [B, S] which prompt each token belongs to
+  true_lengths: jax.Array,  # [num_prompts] true lengths per prompt
 ) -> jax.Array:
   """
   Returns [B, S] where out[b, t] = log P(token[t] | tokens[:t] of its prompt).
@@ -81,9 +81,9 @@ def prompt_logprobs_from_packed_prefill(
 
 @jax.jit
 def prompt_logprobs_from_prefill(
-    logits: jax.Array,  # [B, S, V]  predicts token t+1 at position t
-    input_tokens: jax.Array,  # [B, S]
-    true_length,  # int or jax.Array with shape [] or [B]
+  logits: jax.Array,  # [B, S, V]  predicts token t+1 at position t
+  input_tokens: jax.Array,  # [B, S]
+  true_length,  # int or jax.Array with shape [] or [B]
 ) -> jax.Array:
   """
   Returns [B, S] where out[:, t] = log P(token[t] | tokens[:t]).
@@ -237,7 +237,7 @@ def sample_topk_topp_weighted(logits, topk, nucleus_topp, temperature, rng):
 
   # Map the index back to the original vocabulary
   sampled_token = jnp.squeeze(
-      jnp.take_along_axis(topk_idxs, jnp.expand_dims(sampled_topk_index, axis=-1), axis=-1), axis=-1
+    jnp.take_along_axis(topk_idxs, jnp.expand_dims(sampled_topk_index, axis=-1), axis=-1), axis=-1
   ).astype(jnp.int32)
 
   return sampled_token

@@ -53,9 +53,9 @@ Transformer = models.transformer_as_linen
 
 def validate_config(config):
   """Validates the config is is setup correctly to compile, returning a useful error message if not."""
-  assert (
-      config.compile_topology != ""
-  ), "You must pass your desired target hardware in compile_topology, e.g. compile_topology=v5e-256"
+  assert config.compile_topology != "", (
+    "You must pass your desired target hardware in compile_topology, e.g. compile_topology=v5e-256"
+  )
   assert config.compile_topology_num_slices > 0, "You must set compile_topology_num_slices to a positive integer"
 
 
@@ -70,12 +70,12 @@ def get_topology_mesh(config):
     topology_devices = jax.devices()
   else:
     topology_devices = get_topology_desc(
-        platform=target_hardware.platform,
-        topology_name=target_hardware.topology_name,
-        chip_config_name=target_hardware.chip_config_name,
-        chips_per_host_bounds=target_hardware.chips_per_host_bounds,
-        num_slices=config.compile_topology_num_slices,
-        wrap=target_hardware.wrap,
+      platform=target_hardware.platform,
+      topology_name=target_hardware.topology_name,
+      chip_config_name=target_hardware.chip_config_name,
+      chips_per_host_bounds=target_hardware.chips_per_host_bounds,
+      num_slices=config.compile_topology_num_slices,
+      wrap=target_hardware.wrap,
     ).devices
   if config.shard_mode == ShardMode.EXPLICIT:
     jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
@@ -101,7 +101,7 @@ def get_shaped_inputs(topology_mesh, config):
 
   # Shaped state
   abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
-      model, tx, config, example_rng, topology_mesh
+    model, tx, config, example_rng, topology_mesh
   )
 
   # Shaped batch
@@ -113,24 +113,24 @@ def get_shaped_inputs(topology_mesh, config):
 
 
 def jit_and_compile(
-    func,
-    func_input_args,
-    func_input_kwargs,
-    mesh,
-    in_shardings,
-    out_shardings,
-    static_argnums,
-    donate_argnums,
-    logical_axis_rules,
+  func,
+  func_input_args,
+  func_input_kwargs,
+  mesh,
+  in_shardings,
+  out_shardings,
+  static_argnums,
+  donate_argnums,
+  logical_axis_rules,
 ):
   """Jit, lower, and compile func."""
   with jax.set_mesh(mesh), logical_axis_rules:
     jitted = jax.jit(
-        func,
-        in_shardings=in_shardings,
-        out_shardings=out_shardings,
-        static_argnums=static_argnums,
-        donate_argnums=donate_argnums,
+      func,
+      in_shardings=in_shardings,
+      out_shardings=out_shardings,
+      static_argnums=static_argnums,
+      donate_argnums=donate_argnums,
     )
     lowered = jitted.lower(*func_input_args, **func_input_kwargs)
   compiled = lowered.compile()
@@ -165,22 +165,22 @@ def is_oom(argv: Sequence[str]) -> bool:
 
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
-      maxtext_utils.get_functional_train_with_signature(
-          train.train_step, data_sharding, state_mesh_shardings, model, config
-      )
+    maxtext_utils.get_functional_train_with_signature(
+      train.train_step, data_sharding, state_mesh_shardings, model, config
+    )
   )
 
   try:
     _ = jit_and_compile(
-        func_to_compile,
-        shaped_train_args,
-        shaped_train_kwargs,
-        topology_mesh,
-        in_shard,
-        out_shard,
-        static_argnums,
-        donate_argnums,
-        nn_partitioning.axis_rules(config.logical_axis_rules),
+      func_to_compile,
+      shaped_train_args,
+      shaped_train_kwargs,
+      topology_mesh,
+      in_shard,
+      out_shard,
+      static_argnums,
+      donate_argnums,
+      nn_partitioning.axis_rules(config.logical_axis_rules),
     )
     return False
   except Exception as e:
@@ -197,7 +197,7 @@ def is_oom(argv: Sequence[str]) -> bool:
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["LIBTPU_INIT_ARGS"] = (
-      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   )
   print("Starting train_compile.py...", flush=True)
 
@@ -220,9 +220,9 @@ def main(argv: Sequence[str]) -> None:
 
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
-      maxtext_utils.get_functional_train_with_signature(
-          train.train_step, data_sharding, state_mesh_shardings, model, config
-      )
+    maxtext_utils.get_functional_train_with_signature(
+      train.train_step, data_sharding, state_mesh_shardings, model, config
+    )
   )
 
   # print weights sharding info under debug sharding mode
@@ -233,15 +233,15 @@ def main(argv: Sequence[str]) -> None:
   # Compile
   print("Jitting and compiling train step...", flush=True)
   compiled = jit_and_compile(
-      func_to_compile,
-      shaped_train_args,
-      shaped_train_kwargs,
-      topology_mesh,
-      in_shard,
-      out_shard,
-      static_argnums,
-      donate_argnums,
-      nn_partitioning.axis_rules(config.logical_axis_rules),
+    func_to_compile,
+    shaped_train_args,
+    shaped_train_kwargs,
+    topology_mesh,
+    in_shard,
+    out_shard,
+    static_argnums,
+    donate_argnums,
+    nn_partitioning.axis_rules(config.logical_axis_rules),
   )
   print("Jitting and compilation complete!", flush=True)
 
@@ -257,11 +257,11 @@ def main(argv: Sequence[str]) -> None:
   # Dump HLO if requested
   if config.dump_hlo:
     gcs_utils.upload_dump(
-        config.dump_hlo_local_dir,
-        config.dump_hlo_gcs_dir,
-        module_name=config.dump_hlo_module_name,
-        delete_local_after=config.dump_hlo_delete_local_after,
-        all_host_upload=config.dump_hlo_upload_all,
+      config.dump_hlo_local_dir,
+      config.dump_hlo_gcs_dir,
+      module_name=config.dump_hlo_module_name,
+      delete_local_after=config.dump_hlo_delete_local_after,
+      all_host_upload=config.dump_hlo_upload_all,
     )
 
 

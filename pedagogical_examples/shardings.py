@@ -32,63 +32,63 @@ from jax.lax import with_sharding_constraint
 import numpy as np
 
 parser = argparse.ArgumentParser(
-    description="Experiment different sharding techniques with a simple NN.\
+  description="Experiment different sharding techniques with a simple NN.\
   Ensure 1) The product of dcn dimensions == number of slices \
   2) product of ici dimension = number of devices per slice"
 )
 parser.add_argument(
-    "--profiler_path",
-    "-p",
-    required=False,
-    default="",
-    help="Path to the profiler where the script will write to.",
-    type=str,
+  "--profiler_path",
+  "-p",
+  required=False,
+  default="",
+  help="Path to the profiler where the script will write to.",
+  type=str,
 )
 parser.add_argument("--embedding_dimension", "-d", required=False, default=2048, type=int)
 parser.add_argument("--batch_size", "-b", required=False, default=131072, type=int)
 parser.add_argument("--num_layers", "-n", required=False, default=4, type=int)
 parser.add_argument(
-    "--dcn_data_parallelism", "-dd", help="N-way Data Parallelism across slices", required=False, default=1, type=int
+  "--dcn_data_parallelism", "-dd", help="N-way Data Parallelism across slices", required=False, default=1, type=int
 )
 parser.add_argument(
-    "--dcn_fsdp_parallelism",
-    "-df",
-    help="Fsdp parallelism across slices that is expected to be 1 in most cases",
-    required=False,
-    default=1,
-    type=int,
+  "--dcn_fsdp_parallelism",
+  "-df",
+  help="Fsdp parallelism across slices that is expected to be 1 in most cases",
+  required=False,
+  default=1,
+  type=int,
 )
 parser.add_argument(
-    "--dcn_tensor_parallelism",
-    "-dt",
-    help="Tensor parallelism across slices that is expected to be 1 in most cases",
-    required=False,
-    default=1,
-    type=int,
+  "--dcn_tensor_parallelism",
+  "-dt",
+  help="Tensor parallelism across slices that is expected to be 1 in most cases",
+  required=False,
+  default=1,
+  type=int,
 )
 parser.add_argument(
-    "--ici_data_parallelism",
-    "-id",
-    help="Data parallelism within each slice that is expected to be 1 in most cases",
-    required=False,
-    default=1,
-    type=int,
+  "--ici_data_parallelism",
+  "-id",
+  help="Data parallelism within each slice that is expected to be 1 in most cases",
+  required=False,
+  default=1,
+  type=int,
 )
 parser.add_argument(
-    "--ici_fsdp_parallelism",
-    "-if",
-    help="Number of shards for Fsdp Parallelism within each slice.",
-    required=False,
-    default=4,
-    type=int,
+  "--ici_fsdp_parallelism",
+  "-if",
+  help="Number of shards for Fsdp Parallelism within each slice.",
+  required=False,
+  default=4,
+  type=int,
 )
 parser.add_argument(
-    "--ici_tensor_parallelism",
-    "-it",
-    help="Number of shards for Tensor Parallelism within each slice.",
-    required=False,
-    default=1,
-    type=int,
+  "--ici_tensor_parallelism",
+  "-it",
+  help="Number of shards for Tensor Parallelism within each slice.",
+  required=False,
+  default=1,
+  type=int,
 )
 args = parser.parse_args()
 
@@ -126,19 +126,19 @@ def main(_argv: Sequence[str]) -> None:
   assert len(devices) > 1, "You must have at least two devices"
 
   # Assert that we have correct inputs of sharding that fit the number of chips
-  assert (
-      np.prod(dcn_parallelism) * np.prod(ici_parallelism) == num_devices
-  ), f"Number of devices {num_devices} \
+  assert np.prod(dcn_parallelism) * np.prod(ici_parallelism) == num_devices, (
+    f"Number of devices {num_devices} \
         does not match the product of the parallelism {np.prod(dcn_parallelism) * np.prod(ici_parallelism)}"
+  )
 
   multi_slice_env = hasattr(jax.devices()[0], "slice_index")
   # Create device mesh
 
   if multi_slice_env:
-    assert args.dcn_data_parallelism == 1 + max(
-        x.slice_index for x in jax.devices()
-    ), f"Number of slices given {args.dcn_data_parallelism} \
+    assert args.dcn_data_parallelism == 1 + max(x.slice_index for x in jax.devices()), (
+      f"Number of slices given {args.dcn_data_parallelism} \
           does not match the number fetched from jax devices {jax.devices()[0]}"
+    )
     devices_array = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
   else:
     devices_array = mesh_utils.create_device_mesh(ici_parallelism)
@@ -161,13 +161,13 @@ def main(_argv: Sequence[str]) -> None:
   activation_bytes = 2 * (BATCH * (D_FF + D_EMB)) * NUM_LAYERS
   memory_bytes = parameter_bytes + activation_bytes
 
-  print(f"total {memory_bytes/1e9} GB, parameters {parameter_bytes/1e9} GB, activations {activation_bytes/1e9} GB")
+  print(f"total {memory_bytes / 1e9} GB, parameters {parameter_bytes / 1e9} GB, activations {activation_bytes / 1e9} GB")
 
   def gen_layer(random_key):
     keys = jax.random.split(random_key, num=4)
     return {
-        "EMB2FF": 1e-4 * jax.random.normal(keys[0], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
-        "FF2EMB": 1e-4 * jax.random.normal(keys[1], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
+      "EMB2FF": 1e-4 * jax.random.normal(keys[0], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
+      "FF2EMB": 1e-4 * jax.random.normal(keys[1], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
     }
 
   def gen_layers(random_key):
@@ -219,9 +219,9 @@ def main(_argv: Sequence[str]) -> None:
   data_pspec_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), parameter_sharding)
 
   jit_func = jax.jit(
-      training_step,
-      in_shardings=(replicated_sharding, parameter_mesh_shardings),
-      out_shardings=data_pspec_shardings,
+    training_step,
+    in_shardings=(replicated_sharding, parameter_mesh_shardings),
+    out_shardings=data_pspec_shardings,
   )
 
   data_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_sharding)
@@ -242,7 +242,7 @@ def main(_argv: Sequence[str]) -> None:
     presharded_layers = jax.block_until_ready(jit_gen_layers(key))
     TFLOPs_per_device = parameters * 6 * BATCH / 10**12 / len(jax.devices())
     time = simple_timeit(lambda: jax.block_until_ready(jit_func(presharded_X, presharded_layers)))
-    print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}", flush=True)
+    print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device / time}", flush=True)
   deactivate_profiler(args.profiler_path)
 
 

@@ -82,12 +82,12 @@ def process_dataset(config, dataset):  # pylint: disable=redefined-outer-name
   dataset = dataset.select_columns(data_column_names)
 
   supported_columns = [["prompt", "completion"], ["messages"]]
-  assert any(
-      set(data_column_names) == set(supported) for supported in supported_columns
-  ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_column_names}"
-  assert _input_pipeline_utils.is_conversational(
-      dataset.features, data_column_names
-  ), "Dataset is not in conversational format."
+  assert any(set(data_column_names) == set(supported) for supported in supported_columns), (
+    f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_column_names}"
+  )
+  assert _input_pipeline_utils.is_conversational(dataset.features, data_column_names), (
+    "Dataset is not in conversational format."
+  )
 
   # maps "messages" to "prompt" and "completion" pairs
   if "messages" in data_column_names:
@@ -104,9 +104,9 @@ def load_dataset(config):  # pylint: disable=redefined-outer-name
   assert config.dataset_type == "huggingface", "Only dataset from Hugging Face is supported."
 
   return datasets.load_dataset(
-      config.dataset_path,
-      split=config.data_split,
-      token=config.hf_access_token,
+    config.dataset_path,
+    split=config.data_split,
+    token=config.hf_access_token,
   )
 
 

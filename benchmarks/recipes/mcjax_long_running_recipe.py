@@ -50,10 +50,10 @@ BENCHMARK_STEPS = 10_000_000
 def main() -> None:
   # V6e cluster config
   cluster_config = XpkClusterConfig(
-      cluster_name=CLUSTER,
-      project=PROJECT,
-      zone=ZONE,
-      device_type=DEVICE_TYPE,
+    cluster_name=CLUSTER,
+    project=PROJECT,
+    zone=ZONE,
+    device_type=DEVICE_TYPE,
   )
 
   # Handle command line arguments using args_helper
@@ -63,10 +63,10 @@ def main() -> None:
     return
 
   model_list = [
-      # model_configs.llama3_1_70b_8192_pw_lr_real_data,
-      # model_configs.llama3_1_8b_8192,
-      model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
-      # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
+    # model_configs.llama3_1_70b_8192_pw_lr_real_data,
+    # model_configs.llama3_1_8b_8192,
+    model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+    # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
   ]
   num_slices_list = [2]
 
@@ -76,9 +76,8 @@ def main() -> None:
   for model in model_list:
     # Run workloads on the below clusters
     for cluster_config in [
-        cluster_config,
+      cluster_config,
     ]:
-
       # Make modifications to the model config here to add in any additional
       # flags or changes to the model config.
       model.tuning_params["use_vertex_tensorboard"] = True
@@ -88,17 +87,17 @@ def main() -> None:
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:
         wl_config = mxr.WorkloadConfig(
-            model=model,
-            num_slices=num_slices,
-            device_type=cluster_config.device_type,
-            base_output_directory=BASE_OUTPUT_DIRECTORY,
-            max_restarts=MAX_RESTARTS,
-            libtpu_type=mxr.LibTpuType.MAXTEXT,
-            libtpu_nightly_version="",
-            base_docker_image=RUNNER,
-            xpk_path=XPK_PATH,
-            num_steps=BENCHMARK_STEPS,
-            priority="medium",
+          model=model,
+          num_slices=num_slices,
+          device_type=cluster_config.device_type,
+          base_output_directory=BASE_OUTPUT_DIRECTORY,
+          max_restarts=MAX_RESTARTS,
+          libtpu_type=mxr.LibTpuType.MAXTEXT,
+          libtpu_nightly_version="",
+          base_docker_image=RUNNER,
+          xpk_path=XPK_PATH,
+          num_steps=BENCHMARK_STEPS,
+          priority="medium",
         )
         command, name = mxr.generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
 
@@ -110,7 +109,7 @@ def main() -> None:
 
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] Running workload: {xpk_workload_name} with command:" f" {xpk_workload_cmd}")
+    print(f"[{timestamp}] Running workload: {xpk_workload_name} with command: {xpk_workload_cmd}")
     return_code = mxr.run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
       print(f"Unable to run xpk workload: {xpk_workload_name}")

@@ -40,26 +40,26 @@ v6e_env_configs = SWconfig(base_docker_image=BASE_DOCKER_IMAGE, libtpu_version=D
 v6e_256_configs = HWConfig(num_slices=NUM_SLICES, device_type=DEVICE_TYPE)
 
 llama2_70b_4096 = BenchmarkRunner(
-    model_name=model_configs.llama2_70b_4096,
-    software_config=v6e_env_configs,
-    hardware_config=v6e_256_configs,
+  model_name=model_configs.llama2_70b_4096,
+  software_config=v6e_env_configs,
+  hardware_config=v6e_256_configs,
 )
 
 llama2_7b_4096 = BenchmarkRunner(
-    model_name=model_configs.llama2_7b_4096,
-    software_config=v6e_env_configs,
-    hardware_config=v6e_256_configs,
+  model_name=model_configs.llama2_7b_4096,
+  software_config=v6e_env_configs,
+  hardware_config=v6e_256_configs,
 )
 
 
 def main() -> None:
   cluster_config = XpkConfig(
-      cluster_name=CLUSTER_NAME,
-      project=PROJECT,
-      zone=ZONE,
-      num_slices=NUM_SLICES,
-      device_type=DEVICE_TYPE,
-      base_output_directory=BASE_OUTPUT_DIR,
+    cluster_name=CLUSTER_NAME,
+    project=PROJECT,
+    zone=ZONE,
+    num_slices=NUM_SLICES,
+    device_type=DEVICE_TYPE,
+    base_output_directory=BASE_OUTPUT_DIR,
   )
 
   xpk_benchmark_runner(cluster_config, [llama2_7b_4096, llama2_70b_4096])

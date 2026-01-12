@@ -34,12 +34,16 @@ import logging
 import os.path
 from typing import TypedDict, cast
 
-from MaxText.experimental.agent.orchestration_agent.utils import get_github_file_content, get_absolute_imports, check_github_file_exists
+from MaxText.experimental.agent.orchestration_agent.utils import (
+  get_github_file_content,
+  get_absolute_imports,
+  check_github_file_exists,
+)
 
 logger = logging.getLogger("__name__")
 
 SortedStructure = TypedDict(
-    "SortedStructure", {"sorted_modules": dict, "component_dependencies": list, "warning": str}, total=False
+  "SortedStructure", {"sorted_modules": dict, "component_dependencies": list, "warning": str}, total=False
 )
 
 # Cache file for storing results of Python file splitting operations
@@ -248,12 +252,12 @@ class DependencyAnalyzer:
         absimports = get_absolute_imports(scode, self.file_path, project_root=self.project_root)
         if absimports is not None:
           deque(
-              (
-                  self.git_dependencies.update(self.convert_package_to_path(absimport))
-                  for absimport in absimports.split("\n")
-                  if absimport.startswith(f"from {self.project_root}")
-              ),
-              maxlen=0,
+            (
+              self.git_dependencies.update(self.convert_package_to_path(absimport))
+              for absimport in absimports.split("\n")
+              if absimport.startswith(f"from {self.project_root}")
+            ),
+            maxlen=0,
           )
 
       for node in self.conditional_imports:
@@ -262,12 +266,12 @@ class DependencyAnalyzer:
           absimports = get_absolute_imports(scode, self.file_path, project_root=self.project_root)
           if absimports is not None:
             deque(
-                (
-                    self.git_dependencies.update(self.convert_package_to_path(absimport))
-                    for absimport in absimports.split("\n")
-                    if absimport.startswith(f"from {self.project_root}")
-                ),
-                maxlen=0,
+              (
+                self.git_dependencies.update(self.convert_package_to_path(absimport))
+                for absimport in absimports.split("\n")
+                if absimport.startswith(f"from {self.project_root}")
+              ),
+              maxlen=0,
             )
 
     # --- Pass 2: Find dependencies and build graph ---
@@ -455,7 +459,7 @@ class DependencyAnalyzer:
 
           # Backtrack to include leading comments or blank lines
           while start_lineno > 0 and (
-              lines[start_lineno - 1].strip() == "" or lines[start_lineno - 1].lstrip().startswith("#")
+            lines[start_lineno - 1].strip() == "" or lines[start_lineno - 1].lstrip().startswith("#")
           ):
             start_lineno -= 1
 
@@ -471,7 +475,7 @@ class DependencyAnalyzer:
       if is_cycle:
         comp_name += "_cycle"
         warning_message = (
-            "Warning: Circular dependencies were detected and grouped into single components ending in '_cycle'."
+          "Warning: Circular dependencies were detected and grouped into single components ending in '_cycle'."
         )
 
       self.sorted_components[comp_name] = "\n\n".join(component_source)
@@ -536,12 +540,12 @@ class DependencyAnalyzer:
           component_dependencies[original_name] = list(deps)
 
     self.sorted_structure = cast(
-        SortedStructure,
-        {
-            "sorted_modules": self.sorted_components,
-            "component_dependencies": component_dependencies,
-            "warning": warning_message,
-        },
+      SortedStructure,
+      {
+        "sorted_modules": self.sorted_components,
+        "component_dependencies": component_dependencies,
+        "warning": warning_message,
+      },
     )
 
   def load_cache(self):
@@ -592,13 +596,13 @@ class DependencyAnalyzer:
   def get_structure_for_module(self, module):
     """Return a structure filtered to a single component `module`."""
     return {
-        "sorted_modules": {module: self.sorted_structure["sorted_modules"][module]}
-        if module in self.sorted_structure["sorted_modules"]
-        else {},
-        "component_dependencies": {module: self.sorted_structure["component_dependencies"][module]}
-        if module in self.sorted_structure["component_dependencies"]
-        else {},
-        "warning": self.sorted_structure["warning"],
+      "sorted_modules": {module: self.sorted_structure["sorted_modules"][module]}
+      if module in self.sorted_structure["sorted_modules"]
+      else {},
+      "component_dependencies": {module: self.sorted_structure["component_dependencies"][module]}
+      if module in self.sorted_structure["component_dependencies"]
+      else {},
+      "warning": self.sorted_structure["warning"],
     }
 
   def get_module_code(self, module_name):
@@ -665,22 +669,22 @@ def parse_args():
   """
   parser = argparse.ArgumentParser(description="Analyze Python file dependencies and split into components.")
   parser.add_argument(
-      "filepath",
-      nargs="?",
-      default="https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama4/modeling_llama4.py",
-      help="Path to the Python file to analyze.",
+    "filepath",
+    nargs="?",
+    default="https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama4/modeling_llama4.py",
+    help="Path to the Python file to analyze.",
   )
   parser.add_argument(
-      "--project-root",
-      nargs="?",
-      default="transformers",
-      help="Path to the Python file to analyze.",
+    "--project-root",
+    nargs="?",
+    default="transformers",
+    help="Path to the Python file to analyze.",
   )
   parser.add_argument(
-      "--module",
-      nargs="?",
-      default=None,
-      help="Path to the Python file to analyze.",
+    "--module",
+    nargs="?",
+    default=None,
+    help="Path to the Python file to analyze.",
   )
   return parser
 
@@ -689,14 +693,14 @@ def save_results_in_file(result: SortedStructure, filename, outFile="file_compon
   """Write a summary of components and dependencies to `outFile`."""
   standalone_modules = [mod for mod in result["sorted_modules"].keys() if mod not in result["component_dependencies"]]
   dependent_sorted_modules = {
-      mod: result["component_dependencies"][mod]
-      for mod in result["sorted_modules"].keys()
-      if mod in result["component_dependencies"]
+    mod: result["component_dependencies"][mod]
+    for mod in result["sorted_modules"].keys()
+    if mod in result["component_dependencies"]
   }
   with open(outFile, "wt", encoding="utf-8") as f:
     f.write(f"Components for {filename}\n")
     f.write(f"Standalone Modules: {json.dumps(standalone_modules)}\n")
-    f.write(f"Dependent  Modules\n {json.dumps(dependent_sorted_modules,indent=4)}")
+    f.write(f"Dependent  Modules\n {json.dumps(dependent_sorted_modules, indent=4)}")
 
 
 def main():

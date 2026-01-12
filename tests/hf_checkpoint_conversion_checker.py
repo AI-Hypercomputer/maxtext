@@ -62,9 +62,9 @@ def compare_pytrees(tree1, tree2, atol=0.001):
   # Ensure both trees have the same structure
   if jax.tree_util.tree_structure(tree1) != jax.tree_util.tree_structure(tree2):
     print(
-        "Pytrees have different structures! Tree1:"
-        f"{jax.tree_util.tree_structure(tree1)} \n\n\n"
-        f"Tree2: {jax.tree_util.tree_structure(tree2)}"
+      "Pytrees have different structures! Tree1:"
+      f"{jax.tree_util.tree_structure(tree1)} \n\n\n"
+      f"Tree2: {jax.tree_util.tree_structure(tree2)}"
     )
     return
 
@@ -105,16 +105,16 @@ def compare_pytrees(tree1, tree2, atol=0.001):
 def main():
   parser = argparse.ArgumentParser(description="Compares the original checkpoint and converted back checkpoint.")
   parser.add_argument(
-      "--original_ckpt",
-      type=str,
-      default="",
-      help="The original huggingface checkpoint",
+    "--original_ckpt",
+    type=str,
+    default="",
+    help="The original huggingface checkpoint",
   )
   parser.add_argument(
-      "--converted_ckpt",
-      type=str,
-      default="",
-      help="The original huggingface checkpoint",
+    "--converted_ckpt",
+    type=str,
+    default="",
+    help="The original huggingface checkpoint",
   )
   args = parser.parse_args()
 

@@ -49,38 +49,38 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
     A list of strings representing the command line arguments.
   """
   model_params = [
-      "base_emb_dim=384",
-      "base_num_query_heads=8",
-      "base_num_kv_heads=8",
-      "base_mlp_dim=192",
-      "base_num_decoder_layers=8",
-      "head_dim=128",
+    "base_emb_dim=384",
+    "base_num_query_heads=8",
+    "base_num_kv_heads=8",
+    "base_mlp_dim=192",
+    "base_num_decoder_layers=8",
+    "head_dim=128",
   ]
   pathways_command = []
   if os.getenv("JAX_PLATFORMS") == "proxy":
     pathways_command = [
-        "enable_single_controller=True",
-        "checkpoint_storage_use_zarr3=False",
+      "enable_single_controller=True",
+      "checkpoint_storage_use_zarr3=False",
     ]
   return (
-      [
-          None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-          f"hardware={hardware}",
-          f"run_name=runner_{run_date}",
-          f"steps={steps}",
-          "max_target_length=128",
-          "per_device_batch_size=1",
-          f"metrics_file={metrics_file}",
-          "checkpoint_period=3",
-          "base_output_directory=gs://runner-maxtext-logs",
-          f"dataset_path={dataset_path}",
-          f"dataset_type={dataset_type}",
-          "async_checkpointing=False",
-          f"attention={attention_type}",
-      ]
-      + model_params
-      + pathways_command
+    [
+      None,
+      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      f"hardware={hardware}",
+      f"run_name=runner_{run_date}",
+      f"steps={steps}",
+      "max_target_length=128",
+      "per_device_batch_size=1",
+      f"metrics_file={metrics_file}",
+      "checkpoint_period=3",
+      "base_output_directory=gs://runner-maxtext-logs",
+      f"dataset_path={dataset_path}",
+      f"dataset_type={dataset_type}",
+      "async_checkpointing=False",
+      f"attention={attention_type}",
+    ]
+    + model_params
+    + pathways_command
   )
 
 
@@ -95,8 +95,8 @@ def check_loss(metrics_file, target):
   metrics_file_restored = "restored_" + metrics_file
 
   with (
-      open(metrics_file_saved, "rt", encoding="utf8") as saved,
-      open(metrics_file_restored, "rt", encoding="utf8") as restored,
+    open(metrics_file_saved, "rt", encoding="utf8") as saved,
+    open(metrics_file_restored, "rt", encoding="utf8") as restored,
   ):
     saved_loss = json.loads(saved.readlines()[-1])[target]
     restored_loss = json.loads(restored.readlines()[0])[target]
@@ -116,33 +116,33 @@ def run_checkpointing(hardware, attention_type):
   """
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   grain_command = [
-      "grain_worker_count=0",
-      "grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
+    "grain_worker_count=0",
+    "grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
   ]
   train_main(
-      get_checkpointing_command(
-          run_date,
-          hardware=hardware,
-          steps=1,
-          metrics_file="saved_metrics.txt",
-          attention_type=attention_type,
-          dataset_type="grain",
-          dataset_path="/tmp/gcsfuse",
-      )
-      + grain_command
+    get_checkpointing_command(
+      run_date,
+      hardware=hardware,
+      steps=1,
+      metrics_file="saved_metrics.txt",
+      attention_type=attention_type,
+      dataset_type="grain",
+      dataset_path="/tmp/gcsfuse",
+    )
+    + grain_command
   )
 
   train_main(
-      get_checkpointing_command(
-          run_date,
-          hardware=hardware,
-          steps=2,
-          metrics_file="restored_metrics.txt",
-          attention_type=attention_type,
-          dataset_type="grain",
-          dataset_path="/tmp/gcsfuse",
-      )
-      + grain_command
+    get_checkpointing_command(
+      run_date,
+      hardware=hardware,
+      steps=2,
+      metrics_file="restored_metrics.txt",
+      attention_type=attention_type,
+      dataset_type="grain",
+      dataset_path="/tmp/gcsfuse",
+    )
+    + grain_command
   )
 
   check_loss("metrics.txt", "learning/loss")

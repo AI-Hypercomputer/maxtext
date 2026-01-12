@@ -84,8 +84,8 @@ def ensure_dir(path: str) -> None:
 def list_matching(client: Minio, bucket: str, prefix: str) -> List:
   """Return a sorted list of objects under prefix."""
   return sorted(
-      (obj for obj in client.list_objects(bucket, prefix=prefix, recursive=True)),
-      key=lambda o: o.object_name,
+    (obj for obj in client.list_objects(bucket, prefix=prefix, recursive=True)),
+    key=lambda o: o.object_name,
   )
 
 
@@ -98,12 +98,12 @@ def pick_smallest(objects):
 
 
 def download_shard_with_optional_range(
-    client,
-    bucket,
-    obj,
-    tmp_dir,
-    allow_range: bool = False,
-    max_bytes: int = MAX_TEMP_DOWNLOAD_BYTES,
+  client,
+  bucket,
+  obj,
+  tmp_dir,
+  allow_range: bool = False,
+  max_bytes: int = MAX_TEMP_DOWNLOAD_BYTES,
 ):
   """Download shard to a temp file.
 
@@ -130,12 +130,12 @@ def download_shard_with_optional_range(
 
 
 def write_sharded_with_byte_caps_from_arrayrecord(
-    src_path,
-    dst_dir,
-    split_name,
-    num_shards,
-    max_total_records,
-    max_shard_bytes,
+  src_path,
+  dst_dir,
+  split_name,
+  num_shards,
+  max_total_records,
+  max_shard_bytes,
 ):
   """Write multiple ArrayRecord shards from a single ArrayRecord source.
 
@@ -170,19 +170,19 @@ def write_sharded_with_byte_caps_from_arrayrecord(
     writer.close()
 
   print(
-      f"[{split_name}] Wrote {written} records across {num_shards} shards; "
-      f"per-shard sizes: {[round(b/1024/1024, 2) for b in shard_bytes]} MiB",
+    f"[{split_name}] Wrote {written} records across {num_shards} shards; "
+    f"per-shard sizes: {[round(b / 1024 / 1024, 2) for b in shard_bytes]} MiB",
   )
   return written, shard_bytes
 
 
 def write_sharded_with_byte_caps_from_tfrecord(
-    src_path,
-    dst_dir,
-    split_name,
-    num_shards,
-    max_total_records,
-    max_shard_bytes,
+  src_path,
+  dst_dir,
+  split_name,
+  num_shards,
+  max_total_records,
+  max_shard_bytes,
 ):
   """Write multiple ArrayRecord shards from a TFRecord source file."""
   ensure_dir(dst_dir)
@@ -211,8 +211,8 @@ def write_sharded_with_byte_caps_from_tfrecord(
     writer.close()
 
   print(
-      f"[{split_name}] Wrote {count} records across {num_shards} shards; "
-      f"per-shard sizes: {[round(b/1024/1024, 2) for b in shard_bytes]} MiB",
+    f"[{split_name}] Wrote {count} records across {num_shards} shards; "
+    f"per-shard sizes: {[round(b / 1024 / 1024, 2) for b in shard_bytes]} MiB",
   )
   return count, shard_bytes
 
@@ -233,13 +233,13 @@ def main() -> None:
   """CLI entry point for building a minimal C4/en dataset from MinIO."""
   # Parse command-line arguments.
   parser = argparse.ArgumentParser(
-      description="Create minimal c4/en dataset shards from MinIO Instance",
+    description="Create minimal c4/en dataset shards from MinIO Instance",
   )
   parser.add_argument(
-      "--force",
-      action="store_true",
-      default=False,
-      help="Force overwrite all existing dataset files without prompting",
+    "--force",
+    action="store_true",
+    default=False,
+    help="Force overwrite all existing dataset files without prompting",
   )
   args = parser.parse_args()
 
@@ -269,10 +269,10 @@ def main() -> None:
       print("Use --force to overwrite all versions.\n")
 
   client = Minio(
-      MINIO_ENDPOINT,
-      access_key=MINIO_ACCESS_KEY,
-      secret_key=MINIO_SECRET_KEY,
-      secure=MINIO_SECURE,
+    MINIO_ENDPOINT,
+    access_key=MINIO_ACCESS_KEY,
+    secret_key=MINIO_SECRET_KEY,
+    secure=MINIO_SECURE,
   )
 
   if not client.bucket_exists(BUCKET):
@@ -307,14 +307,14 @@ def main() -> None:
 
     # Find source shards for train/validation (prefer ArrayRecord).
     train_src_objs = list_matching(
-        client,
-        BUCKET,
-        ARRAY_RECORD_TRAIN_PREFIX.format(ver=ver),
+      client,
+      BUCKET,
+      ARRAY_RECORD_TRAIN_PREFIX.format(ver=ver),
     )
     val_src_objs = list_matching(
-        client,
-        BUCKET,
-        ARRAY_RECORD_VAL_PREFIX.format(ver=ver),
+      client,
+      BUCKET,
+      ARRAY_RECORD_VAL_PREFIX.format(ver=ver),
     )
 
     train_is_arrayrec = True
@@ -322,16 +322,16 @@ def main() -> None:
 
     if not train_src_objs:
       train_src_objs = list_matching(
-          client,
-          BUCKET,
-          TFRECORD_TRAIN_PREFIX.format(ver=ver),
+        client,
+        BUCKET,
+        TFRECORD_TRAIN_PREFIX.format(ver=ver),
       )
       train_is_arrayrec = False
     if not val_src_objs:
       val_src_objs = list_matching(
-          client,
-          BUCKET,
-          TFRECORD_VAL_PREFIX.format(ver=ver),
+        client,
+        BUCKET,
+        TFRECORD_VAL_PREFIX.format(ver=ver),
       )
       val_is_arrayrec = False
 
@@ -340,7 +340,7 @@ def main() -> None:
       continue
     if not val_src_objs:
       print(
-          "Warning: No validation shards found for " f"{ver}. Skipping validation for this version.",
+        f"Warning: No validation shards found for {ver}. Skipping validation for this version.",
       )
       continue
 
@@ -352,20 +352,20 @@ def main() -> None:
     tmp_dir = os.path.join(local_version_dir, "_tmp_download")
     try:
       train_src_local = download_shard_with_optional_range(
-          client,
-          BUCKET,
-          smallest_train,
-          tmp_dir,
-          allow_range=not train_is_arrayrec,
-          max_bytes=MAX_TEMP_DOWNLOAD_BYTES,
+        client,
+        BUCKET,
+        smallest_train,
+        tmp_dir,
+        allow_range=not train_is_arrayrec,
+        max_bytes=MAX_TEMP_DOWNLOAD_BYTES,
       )
       val_src_local = download_shard_with_optional_range(
-          client,
-          BUCKET,
-          smallest_val,
-          tmp_dir,
-          allow_range=not val_is_arrayrec,
-          max_bytes=MAX_TEMP_DOWNLOAD_BYTES,
+        client,
+        BUCKET,
+        smallest_val,
+        tmp_dir,
+        allow_range=not val_is_arrayrec,
+        max_bytes=MAX_TEMP_DOWNLOAD_BYTES,
       )
     except S3Error as exc:
       print(f"Download error for version {ver}: {exc}")
@@ -383,52 +383,52 @@ def main() -> None:
     try:
       if train_is_arrayrec:
         write_sharded_with_byte_caps_from_arrayrecord(
-            train_src_local,
-            local_version_dir,
-            "train",
-            NUM_SHARDS_TRAIN,
-            EXACT_TRAIN_RECORDS,
-            MAX_OUTPUT_SHARD_BYTES,
+          train_src_local,
+          local_version_dir,
+          "train",
+          NUM_SHARDS_TRAIN,
+          EXACT_TRAIN_RECORDS,
+          MAX_OUTPUT_SHARD_BYTES,
         )
       else:
         write_sharded_with_byte_caps_from_tfrecord(
-            train_src_local,
-            local_version_dir,
-            "train",
-            NUM_SHARDS_TRAIN,
-            EXACT_TRAIN_RECORDS,
-            MAX_OUTPUT_SHARD_BYTES,
+          train_src_local,
+          local_version_dir,
+          "train",
+          NUM_SHARDS_TRAIN,
+          EXACT_TRAIN_RECORDS,
+          MAX_OUTPUT_SHARD_BYTES,
         )
 
       if val_is_arrayrec:
         write_sharded_with_byte_caps_from_arrayrecord(
-            val_src_local,
-            local_version_dir,
-            "validation",
-            NUM_SHARDS_VAL,
-            EXACT_VAL_RECORDS,
-            MAX_OUTPUT_SHARD_BYTES,
+          val_src_local,
+          local_version_dir,
+          "validation",
+          NUM_SHARDS_VAL,
+          EXACT_VAL_RECORDS,
+          MAX_OUTPUT_SHARD_BYTES,
         )
       else:
         write_sharded_with_byte_caps_from_tfrecord(
-            val_src_local,
-            local_version_dir,
-            "validation",
-            NUM_SHARDS_VAL,
-            EXACT_VAL_RECORDS,
-            MAX_OUTPUT_SHARD_BYTES,
+          val_src_local,
+          local_version_dir,
+          "validation",
+          NUM_SHARDS_VAL,
+          EXACT_VAL_RECORDS,
+          MAX_OUTPUT_SHARD_BYTES,
         )
 
       # Post-write size check.
       total_bytes = compute_dir_size_bytes(
-          local_version_dir, patterns=["c4-train.array_record-*", "c4-validation.array_record-*"]
+        local_version_dir, patterns=["c4-train.array_record-*", "c4-validation.array_record-*"]
       )
       mb = total_bytes / (1024 * 1024)
       print(f"Total size for {ver}: {mb:.2f} MiB")
       if total_bytes > MAX_VERSION_BYTES:
         print(
-            f"Note: {ver} exceeds {MAX_VERSION_BYTES/(1024*1024):.0f} MiB. "
-            "Consider reducing records or MAX_OUTPUT_SHARD_BYTES.",
+          f"Note: {ver} exceeds {MAX_VERSION_BYTES / (1024 * 1024):.0f} MiB. "
+          "Consider reducing records or MAX_OUTPUT_SHARD_BYTES.",
         )
     finally:
       # Clean up temp downloads.

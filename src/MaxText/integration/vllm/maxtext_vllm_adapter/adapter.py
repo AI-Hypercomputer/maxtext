@@ -57,7 +57,7 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   if vllm_config.load_config.load_format == "dummy":
     if overrides.get("load_parameters_path") is not None:
       max_logging.log(
-          "Warning: load_parameters_path is set when using dummy load format. Checkpoint loading will be skipped."
+        "Warning: load_parameters_path is set when using dummy load format. Checkpoint loading will be skipped."
       )
       overrides["load_parameters_path"] = None
 
@@ -109,12 +109,12 @@ class MaxTextForCausalLM(nnx.Module):
       max_logging.log("Warning: No load_parameters_path provided. The model will be initialized with random weights.")
 
   def __call__(
-      self,
-      kv_caches: list[jax.Array],
-      input_ids: jax.Array,
-      attention_metadata: AttentionMetadata,
-      *args,
-      **kwargs,
+    self,
+    kv_caches: list[jax.Array],
+    input_ids: jax.Array,
+    attention_metadata: AttentionMetadata,
+    *args,
+    **kwargs,
   ) -> tuple[list[jax.Array], jax.Array, list[jax.Array]]:
     """Performs a forward pass through the causal language model.
 
@@ -144,12 +144,12 @@ class MaxTextForCausalLM(nnx.Module):
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
       hidden, updated_kv_caches = self.model(
-          decoder_input_tokens=input_ids,
-          decoder_positions=input_positions,
-          kv_caches=kv_caches,
-          attention_metadata=attention_metadata,
-          model_mode=self.model_mode,
-          **kwargs,
+        decoder_input_tokens=input_ids,
+        decoder_positions=input_positions,
+        kv_caches=kv_caches,
+        attention_metadata=attention_metadata,
+        model_mode=self.model_mode,
+        **kwargs,
       )
 
       # To be compatible with vLLM, we reshape to (batch * seq, dim).
@@ -229,6 +229,6 @@ class MaxTextForCausalLM(nnx.Module):
 
     with self.mesh, nn.logical_axis_rules(""):
       model, _ = model_creation_utils.create_nnx_model(
-          self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
+        self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
       self.model = nnx.data(model)

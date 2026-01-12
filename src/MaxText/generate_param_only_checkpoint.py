@@ -14,11 +14,11 @@
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Transforms a "full state" including optimizer state to a bfloat16 "parameter state" without optimizer state.
-   This typically used for turning a state output by training.py into a state than can be consumed by decode.py.
+This typically used for turning a state output by training.py into a state than can be consumed by decode.py.
 
-   The input "fullstate" is passed in via:
-     load_full_state_path.
-   The output "parameter state" is output to the checkpoint directory. Additionally it is cast down to bf16.
+The input "fullstate" is passed in via:
+  load_full_state_path.
+The output "parameter state" is output to the checkpoint directory. Additionally it is cast down to bf16.
 """
 
 import os.path
@@ -99,10 +99,10 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   state, state_mesh_notations, _, _ = maxtext_utils.setup_training_state(
-      model, None, tx, config, rng, mesh, checkpoint_manager
+    model, None, tx, config, rng, mesh, checkpoint_manager
   )
   num_params = max_utils.calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"In input checkpoint Number of model params={num_params/1e9:.3f} billion")
+  max_logging.log(f"In input checkpoint Number of model params={num_params / 1e9:.3f} billion")
   return state, state_mesh_notations
 
 
@@ -124,14 +124,14 @@ def _generate_lora_decode_checkpoints(config, mesh):
 
     # Create a checkpoint manager to save decode checkpoint at lora_checkpoint_dir
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-        lora_checkpoint_dir,
-        config.enable_checkpointing,
-        config.async_checkpointing,
-        config.checkpoint_period,
+      lora_checkpoint_dir,
+      config.enable_checkpointing,
+      config.async_checkpointing,
+      config.checkpoint_period,
     )
 
     lora_config, lora_state, lora_state_annotations = lora_utils.setup_initial_lora_state(
-        model, None, tx, config, rng, mesh, checkpoint_manager, lora_adapter_path
+      model, None, tx, config, rng, mesh, checkpoint_manager, lora_adapter_path
     )
 
     _possibly_unroll_params(config, lora_state, lora_state_annotations, mesh)
@@ -146,7 +146,7 @@ def _generate_lora_decode_checkpoints(config, mesh):
 def _save_decode_checkpoint(config, state, checkpoint_manager):
   """Generate checkpoint for decode from the training_state."""
   decode_state = maxtext_utils.init_decode_state(
-      None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params)
+    None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params)
   )
   if checkpoint_manager is not None:
     if checkpointing.save_checkpoint(checkpoint_manager, 0, decode_state):
@@ -178,10 +178,10 @@ def generate_decode_checkpoint(config):
     base_checkpoint_dir += "base/"
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      base_checkpoint_dir,
-      config.enable_checkpointing,
-      config.async_checkpointing,
-      config.checkpoint_period,
+    base_checkpoint_dir,
+    config.enable_checkpointing,
+    config.async_checkpointing,
+    config.checkpoint_period,
   )
   # Read training state from config.load_paramaters_path
   max_logging.log(f"Read training checkpoint from: {config.load_full_state_path}")

@@ -65,21 +65,21 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
   inputs_segmentation = jnp.concatenate([data["chosen_segmentation"], data["rejected_segmentation"]], 0)
 
   logits, intermediate_outputs = model.apply(
-      params,
-      inputs,
-      inputs_position,
-      decoder_segment_ids=inputs_segmentation,
-      enable_dropout=config.enable_dropout if is_train else False,
-      rngs={"dropout": rng1, "params": aqt_rng},
-      mutable="intermediates",
+    params,
+    inputs,
+    inputs_position,
+    decoder_segment_ids=inputs_segmentation,
+    enable_dropout=config.enable_dropout if is_train else False,
+    rngs={"dropout": rng1, "params": aqt_rng},
+    mutable="intermediates",
   )
   ref_logits = model.apply(
-      {"params": reference_params},
-      inputs,
-      inputs_position,
-      decoder_segment_ids=inputs_segmentation,
-      enable_dropout=False,
-      rngs={"dropout": rng1, "params": aqt_rng},
+    {"params": reference_params},
+    inputs,
+    inputs_position,
+    decoder_segment_ids=inputs_segmentation,
+    enable_dropout=False,
+    rngs={"dropout": rng1, "params": aqt_rng},
   )
   ref_logits = jax.lax.stop_gradient(ref_logits)
 
@@ -99,21 +99,21 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
 
   # compute logratios from the sequence-reduced observed token log-probability
   chosen_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(chosen_logits[..., :-1, :], axis=-1), chosen_ids[..., None], axis=-1
+    jax.nn.log_softmax(chosen_logits[..., :-1, :], axis=-1), chosen_ids[..., None], axis=-1
   )[..., 0]
   chosen_logps = jnp.sum(chosen_logps_seq * valid_seq_mask, axis=-1)  # [B]
   chosen_ref_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(chosen_ref_logits[..., :-1, :], axis=-1), chosen_ids[..., None], axis=-1
+    jax.nn.log_softmax(chosen_ref_logits[..., :-1, :], axis=-1), chosen_ids[..., None], axis=-1
   )[..., 0]
   chosen_ref_logps = jnp.sum(chosen_ref_logps_seq * valid_seq_mask, axis=-1)  # [B]
   chosen_logratios = chosen_logps - chosen_ref_logps  # [B]
 
   rejected_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(rejected_logits[..., :-1, :], axis=-1), rejected_ids[..., None], axis=-1
+    jax.nn.log_softmax(rejected_logits[..., :-1, :], axis=-1), rejected_ids[..., None], axis=-1
   )[..., 0]
   rejected_logps = jnp.sum(rejected_logps_seq * valid_seq_mask, axis=-1)  # [B]
   rejected_ref_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(rejected_ref_logits[..., :-1, :], axis=-1), rejected_ids[..., None], axis=-1
+    jax.nn.log_softmax(rejected_ref_logits[..., :-1, :], axis=-1), rejected_ids[..., None], axis=-1
   )[..., 0]
   rejected_ref_logps = jnp.sum(rejected_ref_logps_seq * valid_seq_mask, axis=-1)  # [B]
   rejected_logratios = rejected_logps - rejected_ref_logps  # [B]
@@ -122,8 +122,8 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
   LABEL_SMOOTHING, BETA = config.dpo_label_smoothing, config.dpo_beta
   logratios_delta = BETA * (chosen_logratios - rejected_logratios)  # [B]
   losses = (  # [B]
-      -jax.nn.log_sigmoid(BETA * logratios_delta) * (1 - LABEL_SMOOTHING)
-      - jax.nn.log_sigmoid(-BETA * logratios_delta) * LABEL_SMOOTHING
+    -jax.nn.log_sigmoid(BETA * logratios_delta) * (1 - LABEL_SMOOTHING)
+    - jax.nn.log_sigmoid(-BETA * logratios_delta) * LABEL_SMOOTHING
   )
   total_loss, total_weights = jnp.mean(losses), losses.shape[0]
   loss = total_loss
@@ -136,11 +136,11 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
     loss += moe_lb_loss
   reward_accuracy = jnp.mean(chosen_logratios > rejected_logratios)
   aux = {
-      "intermediate_outputs": intermediate_outputs,
-      "total_loss": total_loss,
-      "total_weights": total_weights,
-      "moe_lb_loss": moe_lb_loss,
-      "reward_accuracy": reward_accuracy,
+    "intermediate_outputs": intermediate_outputs,
+    "total_loss": total_loss,
+    "total_weights": total_weights,
+    "moe_lb_loss": moe_lb_loss,
+    "reward_accuracy": reward_accuracy,
   }
   return loss, aux
 
