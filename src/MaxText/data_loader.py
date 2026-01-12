@@ -20,7 +20,7 @@ import jax.numpy as jnp
 from jax.experimental import checkify
 
 from MaxText import exceptions
-from MaxText.sharding import get_input_data_sharding, maybe_shard_with_name
+from MaxText.sharding import get_input_data_sharding
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     maybe_record_goodput,
@@ -70,10 +70,9 @@ class DataLoader:
 
   def load_next_batch(self, *args, **kwargs):
     """Loads the next batch with sharding hint"""
-    return maybe_shard_with_name(
+    return jax.device_put(
         self.load_next_batch_pre_sharding(),
         self.input_data_shardings,
-        self.config.shard_mode,
     )
 
   def check_example_batch(self):
@@ -154,7 +153,7 @@ class RampUpDataLoader(DataLoader):
       self.buffer_start = slice_end
       output = jax.tree.map(_slice, self.batch_buffer)
     self.rampup_active = rampup_manager.update()
-    return maybe_shard_with_name(output, self.input_data_shardings, self.config.shard_mode)
+    return jax.device_put(output, self.input_data_shardings)
 
 
 def create_dataloader(config, mesh, data_iterator, goodput_recorder, rampup_manager):

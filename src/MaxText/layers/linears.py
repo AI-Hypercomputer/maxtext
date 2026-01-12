@@ -459,6 +459,7 @@ class MlpBlock(nnx.Module):
         maybe_shard_with_logical,
         mesh=mesh,
         shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
     )
 
   def get_norm_layer(self, num_features: int):

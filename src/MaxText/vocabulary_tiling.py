@@ -88,7 +88,9 @@ def vocab_tiling_linen_loss(
       ("activation_embed_and_logits_batch_sequence", "activation_vocab"),
   )
 
-  _maybe_shard_with_name = functools.partial(maybe_shard_with_name, shard_mode=config.shard_mode)
+  _maybe_shard_with_name = functools.partial(
+      maybe_shard_with_name, shard_mode=config.shard_mode, debug_sharding=config.debug_sharding
+  )
 
   def _reshape(inputs, out_shape, out_sharding):
     reshape_out_sharding = out_sharding if config.shard_mode == ShardMode.EXPLICIT else None

@@ -133,11 +133,17 @@ class Pipeline(nn.Module):
         shard_mode=self.config.shard_mode,
         mesh=self.mesh,
         rules=self.config.logical_axis_rules,
+        debug_sharding=self.config.debug_sharding,
     )
 
   def _maybe_shard_with_name(self, inputs, sharding_name):
     """Wrapper of maybe_shard_with_name"""
-    return maybe_shard_with_name(inputs, sharding_name, shard_mode=self.config.shard_mode)
+    return maybe_shard_with_name(
+        inputs,
+        sharding_name,
+        shard_mode=self.config.shard_mode,
+        debug_sharding=self.config.debug_sharding,
+    )
 
   def init_states(self, inputs):
     """Initialize components of state: state_io, shift, circular_storage and circular_storage_mover

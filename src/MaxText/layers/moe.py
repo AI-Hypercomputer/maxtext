@@ -444,7 +444,13 @@ class RoutedMoE(nnx.Module):
       self.wo_bias = None
 
   def _maybe_shard_with_logical(self, inputs, logical_name):
-    return maybe_shard_with_logical(inputs, logical_name, mesh=self.mesh, shard_mode=self.config.shard_mode)
+    return maybe_shard_with_logical(
+        inputs,
+        logical_name,
+        mesh=self.mesh,
+        shard_mode=self.config.shard_mode,
+        debug_sharding=self.config.debug_sharding,
+    )
 
   def _logical_to_mesh_axes(self, logical_name):
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=self.config.logical_axis_rules)
