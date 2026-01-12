@@ -19,13 +19,17 @@
 # Without it, PRs would show a significant coverage drop as they would 'overwrite' the full-suite results.
 #
 # Scheme:
-# - 'regular': Updated by every PR/Schedule. Used to evaluate 'patch' (new code) coverage.
-# - 'scheduled': Updated ONLY by scheduled full runs. Used to anchor 'project' (total health) coverage.
+# - 'regular': Updated by every PR. Used to evaluate 'patch' (new code) coverage.
+# - 'scheduled': Updated by scheduled full runs. Used to anchor 'project' (total health) coverage.
 # During PRs, the 'scheduled' flag is carried forward from the last full run on 'main' to keep the score stable.
 
 # Exclude non-source code, deprecated and experimental folders from coverage tracking
 codecov: 
  token: 35742a22-fb1f-4839-97ff-b54da5588689
+# By default file names in the coverage report will have their path in the file system, which in our
+# runners would be /__w/maxtext/maxtext/src/MaxText/* but Codecov expects src/MaxText/* so we need to fix the path
+fixes:
+  - ".*/maxtext/src/::src/"
 ignore:
   - "src/MaxText/assets"
   - "src/MaxText/configs"
