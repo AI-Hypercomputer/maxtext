@@ -359,6 +359,24 @@ llama31_405b_config = transformers.LlamaConfig(
     eos_token_id=128001,
 )
 
+llama2_7b_config = transformers.LlamaConfig(
+    vocab_size=32000,
+    hidden_size=4096,
+    intermediate_size=11008,
+    num_hidden_layers=32,
+    num_attention_heads=32,
+    num_key_value_heads=32,
+    hidden_act="silu",
+    max_position_embeddings=4096,
+    initializer_range=0.02,
+    rms_norm_eps=1e-5,
+    use_cache=True,
+    pad_token_id=0,
+    bos_token_id=1,
+    eos_token_id=2,
+    tie_word_embeddings=False,
+)
+
 qwen3_30b_a3b_thinking_2507_config = transformers.Qwen3MoeConfig(
     architectures=["Qwen3MoeForCausalLM"],
     attention_bias=False,
@@ -772,6 +790,7 @@ HF_MODEL_CONFIGS = {
     "llama3.1-8b-Instruct": llama31_8b_config,
     "llama3.1-70b": llama31_70b_config,
     "llama3.1-405b": llama31_405b_config,
+    "llama2-7b": llama2_7b_config,
     "qwen3-30b-a3b": qwen3_30b_a3b_thinking_2507_config,
     "qwen3-235b-a22b": qwen3_235b_a22b_thinking_2507_config,
     "qwen3-480b-a35b": qwen3_coder_480b_a35b_config,

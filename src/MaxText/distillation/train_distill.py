@@ -55,6 +55,7 @@ from MaxText import pyconfig
 from MaxText import tokenizer
 from MaxText import train_utils
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from MaxText.vertex_tensorboard import VertexTensorboardManager
 
 # Tunix Imports
 from tunix.distillation import distillation_trainer
@@ -369,6 +370,11 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
     student_config: Configuration object for the Student model (learnable).
     teacher_config: Configuration object for the Teacher model (frozen).
   """
+  # 0. Setup Vertex Tensorboard
+  vertex_tensorboard_manager = VertexTensorboardManager()
+  if student_config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
+    vertex_tensorboard_manager.configure_vertex_tensorboard(student_config)
+
   # Validate vocab size match between Student and Teacher
   if student_config.vocab_size != teacher_config.vocab_size:
     raise ValueError(
