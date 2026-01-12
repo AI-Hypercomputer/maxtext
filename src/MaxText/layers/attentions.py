@@ -916,9 +916,6 @@ class Attention(nnx.Module):
           "vLLM RPA attention ops require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
       ) from e
 
-    if self.config.attention_sink:
-      raise NotImplementedError("Attention sink is not supported in MaxText vLLM RPA attention.")
-
     if rpa_kv_cache is None or rpa_metadata is None:
       raise ValueError("kv_cache and attention_metadata must be provided when using vLLM.")
 
@@ -926,7 +923,12 @@ class Attention(nnx.Module):
     key = key.reshape(-1, key.shape[2], key.shape[3])
     value = value.reshape(-1, value.shape[2], value.shape[3])
 
-    attention_chunk_size = self.config.chunk_attn_window_size if self.config.chunk_attn_window_size > 0 else None
+    if self.config.sliding_window_size > 0:
+      attention_chunk_size = self.config.sliding_window_size
+    else:
+      # Chunked attention currently not used in vLLM RPA.
+      attention_chunk_size = None
+
     q_scale, k_scale, v_scale = None, None, None
 
     md = rpa_metadata
@@ -941,7 +943,7 @@ class Attention(nnx.Module):
         md.block_tables,
         md.query_start_loc,
         md.request_distribution,
-        None,
+        self.sinks.astype(jnp.float32) if self.sinks is not None else None,
         1.0,
         attention_chunk_size,
         q_scale,
