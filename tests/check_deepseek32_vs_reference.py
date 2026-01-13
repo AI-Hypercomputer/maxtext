@@ -889,9 +889,6 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     # === FIX: Initialize the zeroed weights ===
     # Using normal distribution (standard for linear layers)
     init_torch_weights(self.pt_indexer)
-    # torch.nn.init.normal_(self.pt_indexer.weights_proj.weight, mean=0.0, std=0.02)
-    # torch.nn.init.normal_(self.pt_indexer.wq_b.weight, mean=0.0, std=0.02)
-    # torch.nn.init.normal_(self.pt_indexer.wk.weight, mean=0.0, std=0.02)
 
     # 4. Input Data
     self.x = torch.randn(self.batch_size, self.seq_len, self.pt_args.dim)
@@ -1010,7 +1007,6 @@ class DeepseekV32IndexerTest(unittest.TestCase):
         },
     }
     nnx.update(jax_indexer, indexer_state)
-    # assert (jax_indexer.wq_b.kernel.value == to_jax(self.pt_indexer.wq_b.weight.T)).all()
 
     # D. Run JAX Forward
     # Returns bias mask [B, 1, S, T]
@@ -1020,17 +1016,13 @@ class DeepseekV32IndexerTest(unittest.TestCase):
         inputs_positions=positions,
         mask=to_jax(mask.unsqueeze(1)) if mask is not None else None,
     )
-    # print("jax_bias")
-    # print(jax_bias.shape)
-    # print(jax_bias)
 
-    # np.testing.assert_allclose(jax_index_score, to_jax(pt_index_score), rtol=0.1, atol=0.1)
+    np.testing.assert_allclose(jax_index_score, to_jax(pt_index_score), rtol=1e-3, atol=1e-3)
+    np.testing.assert_array_equal(jax_bias.squeeze(1) == 0, to_jax(pt_mask == 0))
     # print(jax_indices)
     # print(to_jax(pt_indices))
     # np.testing.assert_array_equal(jax_indices, to_jax(pt_indices))
-
-    chex.assert_trees_all_close(jax_index_score, jax.tree.map(to_jax, pt_index_score), rtol=1e-3, atol=1e-3)
-    np.testing.assert_array_equal(jax_bias.squeeze(1) == 0, to_jax(pt_mask == 0))
+    # chex.assert_trees_all_close(jax_index_score, jax.tree.map(to_jax, pt_index_score), rtol=1e-3, atol=1e-3)
 
 
 class DeepseekV32MLATest(unittest.TestCase):
@@ -1044,8 +1036,6 @@ class DeepseekV32MLATest(unittest.TestCase):
     # jax config
     self.config = Config()
     # data, test long context
-    # self.batch_size = 1
-    # self.seq_len = 4096
     # self.dtype = "bfloat16"
     self.dtype = "float32"
     self.batch_size = 1
@@ -1187,30 +1177,13 @@ class DeepseekV32MLATest(unittest.TestCase):
             },
         },
     }
-
-    # def g(prefix, i):
-    #   if not isinstance(i, dict):
-    #     print("".join(prefix), i.shape)
-    #   else:
-    #     for key in i:
-    #       g(prefix + [key], i[key])
-
-    # g([], mla_state)
+ 
 
     # Apply the update
     nnx.update(jax_mla, mla_state)
 
     # C. Run Forward, JAX
-    # Construct segment IDs (simple 0..S)
-    # decoder_segment_ids = jnp.broadcast_to(jnp.arange(self.seq_len, dtype=jnp.int32), (self.batch_size, self.seq_len))
-    # # RoPE positions
-    # inputs_positions = jnp.broadcast_to(jnp.arange(self.seq_len, dtype=jnp.int32), (self.batch_size, self.seq_len))
-
     # self.rng = jax.random.PRNGKey(0)
-    # decoder_segment_ids = jax.random.randint(self.rng, (cfg.global_batch_size, cfg.max_target_length), 0, 4)
-    # decoder_positions = jax.random.randint(
-    #     self.rng, (cfg.global_batch_size, cfg.max_target_length), 0, cfg.max_target_length
-    # )
     decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
     decoder_positions = jnp.broadcast_to(
         jnp.arange(start_pos, start_pos + self.seq_len, dtype=jnp.int32), (self.batch_size, self.seq_len)

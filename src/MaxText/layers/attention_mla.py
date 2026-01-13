@@ -213,48 +213,6 @@ def mla_as_linen(
   )
 
 
-# # Mocking a configuration object type for type hinting
-# class ModelArgs:
-#     dim: int
-#     index_n_heads: int
-#     index_head_dim: int
-#     qk_rope_head_dim: int
-#     index_topk: int
-#     q_lora_rank: int
-#     max_batch_size: int
-#     max_seq_len: int
-#     scale_fmt: str = "fp8"  # Placeholder
-
-# def apply_rotary_emb(x: jax.Array, freqs_cis: jax.Array) -> jax.Array:
-#     """
-#     Minimal JAX implementation of RoPE corresponding to the PyTorch snippet.
-#     Assumes x is [B, L, H, D] or [B, L, D] and D corresponds to complex dimension.
-#     """
-#     # Reshape x into complex pairs: [..., D] -> [..., D/2, 2] -> complex
-#     # This logic depends heavily on how freqs_cis is passed (complex vs sin/cos).
-#     # Assuming freqs_cis is complex [L, D/2] broadcastable to x.
-
-#     x_complex = jax.lax.complex(x[..., ::2], x[..., 1::2])
-
-#     # Reshape freqs_cis to broadcast:
-#     # If x is [B, S, H, D/2], freqs needs to align with S and D/2.
-#     # We assume the caller handles broadcasting or freqs_cis is pre-shaped.
-#     out_complex = x_complex * freqs_cis
-
-#     # Convert back to real [..., D]
-#     out_real = jnp.stack([out_complex.real, out_complex.imag], axis=-1).reshape(x.shape)
-#     return out_real
-
-
-# def _apply_partial_rope(self, x, freqs_cis):
-#     """Helper to apply RoPE only to the first rope_head_dim features."""
-#     # x shape: [..., D]
-#     x_pe, x_nope = jnp.split(x, [self.rope_head_dim], axis=-1)
-#     # Apply RoPE (Assuming standard MaxText apply_rotary_emb is available in scope)
-#     x_pe = apply_rotary_emb(x_pe, freqs_cis)
-#     return jnp.concatenate([x_pe, x_nope], axis=-1)
-
-
 class Indexer(nnx.Module):
   """
   DeepSeek V3.2 Sparse Attention Indexer.
@@ -286,30 +244,6 @@ class Indexer(nnx.Module):
     self.weight_dtype = config.weight_dtype
     self.config = config
     self.model_mode = model_mode
-
-    # # Projection: Latent Query (qr) -> Indexer Heads
-    # self.wq_b = nnx.Linear(
-    #     in_features=self.q_lora_rank,
-    #     out_features=self.n_heads * self.head_dim,
-    #     use_bias=False,
-    #     dtype=config.weight_dtype,
-    #     rngs=rngs,
-    # )
-
-    # # Projection: Input (x) -> Shared Indexer Key (MQA)
-    # self.wk = nnx.Linear(
-    #     in_features=self.dim, out_features=self.head_dim, use_bias=False, dtype=config.weight_dtype, rngs=rngs
-    # )
-
-    # # Projection: Input (x) -> Importance Weights (fp32)
-    # self.weights_proj = nnx.Linear(
-    #     in_features=self.dim,
-    #     out_features=self.n_heads,
-    #     use_bias=False,
-    #     dtype=jnp.float32,
-    #     param_dtype=jnp.float32,
-    #     rngs=rngs,
-    # )
 
     # Projection: Latent Query (qr) -> Indexer Heads
     # Maps q_lora_rank -> [n_heads, head_dim]
@@ -367,28 +301,6 @@ class Indexer(nnx.Module):
     # Shape: [Batch, MaxLen, HeadDim]
     self.k_cache = nnx.Variable(jnp.zeros((config.max_target_length, self.head_dim), dtype=config.weight_dtype))
 
-  def _apply_hadamard(self, x):
-    """
-    Applies Fast Walsh-Hadamard Transform via Matrix Multiplication.
-    Equivalent to: rotate_activation(x) in PyTorch.
-    """
-    return x
-    # import scipy
-
-    # dim = x.shape[-1]
-
-    # # 1. Create Hadamard Matrix (One-time constant)
-    # # This must be done on CPU via scipy, then moved to JAX device.
-    # # Note: dim must be a power of 2 (e.g., 128).
-    # h_mat = jnp.array(scipy.linalg.hadamard(dim), dtype=x.dtype)
-
-    # # 2. Scaling Factor
-    # # PyTorch uses: scale = hidden_size**-0.5
-    # scale = dim**-0.5
-
-    # # 3. Apply: x @ H * scales
-    # return (x @ h_mat) * scale
-
   def apply_rotary_embedding(
       self, inputs: Array, inputs_positions: Optional[Array | None] = None, rope_kwargs: dict | None = None
   ):
@@ -441,7 +353,7 @@ class Indexer(nnx.Module):
     # print("after rope")
     # return None, None, q
 
-    q = self._apply_hadamard(q)
+    # q = self._apply_hadamard(q)
 
     # 2. Key Processing: Project from Input X
     k = self.wk(x)
@@ -452,7 +364,7 @@ class Indexer(nnx.Module):
     # Input: [B, S, D] -> [B, S, 1, D]
     k = k[:, :, None, :]
     k = self._apply_partial_rope(k, positions)
-    k = self._apply_hadamard(k)
+    # k = self._apply_hadamard(k)
     k = k.squeeze(2)  # Back to [B, S, D]
 
     k_active = k
@@ -484,7 +396,6 @@ class Indexer(nnx.Module):
       index_score += mask[:, 0]
 
     print("mask", mask)
-
     print("jax_index_score", index_score)
 
     # Select TopK Indices (Values, Indices) after masking
