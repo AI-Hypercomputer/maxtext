@@ -994,3 +994,5 @@ use_jax_splash: false
 vllm_hf_config_path: ""
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
+
+use_two_init: false

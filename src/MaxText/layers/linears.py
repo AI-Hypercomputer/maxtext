@@ -383,6 +383,7 @@ class MlpBlock(nnx.Module):
     self.intermediate_dim = intermediate_dim
     self.activations = activations
     self.kernel_init = kernel_init
+    self.kernel_init_down = nd_dense_init(1.0 / (2.0 * config.base_num_decoder_layers), "fan_in", "truncated_normal")
     self.intermediate_dropout_rate = intermediate_dropout_rate
     self.dtype = dtype
     self.weight_dtype = weight_dtype
@@ -441,12 +442,17 @@ class MlpBlock(nnx.Module):
         )
         setattr(self, dense_name, module)
     self.dropout = Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+
+    if self.config.use_two_init:
+      kernel_init_func = self.kernel_init_down
+    else:
+      kernel_init_func = self.kernel_init
     self.wo = DenseGeneral(
         in_features_shape=self.intermediate_dim,
         out_features_shape=in_features,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
-        kernel_init=self.kernel_init,
+        kernel_init=kernel_init_func,
         kernel_axes=("mlp", "embed"),
         quant=self.quant,
         use_bias=self.use_bias,

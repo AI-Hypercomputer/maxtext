@@ -335,6 +335,7 @@ class RoutedMoE(nnx.Module):
     self.num_experts_per_tok = num_experts_per_tok
     self.mesh = mesh
     self.kernel_init = kernel_init
+    self.kernel_init_down = nd_dense_init(1.0 / (2.0 * config.base_num_decoder_layers), "fan_in", "truncated_normal")
     self.kernel_axes = kernel_axes
     self.intermediate_dim = intermediate_dim
     self.weight_dtype = weight_dtype
@@ -410,16 +411,28 @@ class RoutedMoE(nnx.Module):
           ),
           sharding=self.wi_kernel_axes,
       )
-      self.wo = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (self.num_experts, self.intermediate_dim, self.config.emb_dim),
-              self.weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
-          sharding=self.wo_kernel_axes,
-      )
+      if self.config.use_two_init:
+        self.wo = nnx.Param(
+            self.kernel_init_down(
+                self.rngs.params(),
+                (self.num_experts, self.intermediate_dim, self.config.emb_dim),
+                self.weight_dtype,
+                kernel_in_axis,
+                kernel_out_axis,
+            ),
+            sharding=self.wo_kernel_axes,
+        )
+      else:
+        self.wo = nnx.Param(
+            self.kernel_init(
+                self.rngs.params(),
+                (self.num_experts, self.intermediate_dim, self.config.emb_dim),
+                self.weight_dtype,
+                kernel_in_axis,
+                kernel_out_axis,
+            ),
+            sharding=self.wo_kernel_axes,
+        )
 
     if self.config.mlp_bias:
       wi_bias_axes = ("exp", "activation_mlp")
