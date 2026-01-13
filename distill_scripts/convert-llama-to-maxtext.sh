@@ -2,7 +2,7 @@
 set -ex
 
 # Set output directory
-export BASE_OUTPUT_DIRECTORY="gs://chfu-a4-west3-ckpts/checkpoints/llama31-8b/maxtext-base"
+export BASE_OUTPUT_DIRECTORY="/tmp/maxtext_teacher_checkpoint"
 
 export PYTHONPATH=$PYTHONPATH:src
 

@@ -554,6 +554,13 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: List of command-line arguments. Expects [script_name, config_file, ...].
   """
+  # 0. Initialize distributed system early
+  # We do a quick initial parse to get jax_distributed_initialization_timeout
+  # and skip_jax_distributed_system if they are in the argv.
+  # But pyconfig.initialize also does this. The problem is it does more JAX calls.
+  # We should probably call maybe_initialize_jax_distributed_system directly if we can.
+  # For now, let's try to just use the first initialize call.
+  
   # 1. Parse Global Config to extract Overrides
   global_config = pyconfig.initialize(argv)
 
@@ -577,6 +584,20 @@ def main(argv: Sequence[str]) -> None:
   # Construct sanitized argv: [script_name, config_file]
   # This ensures flags like `num_query_heads=16` passed in CLI don't affect the Teacher.
   teacher_argv = [argv[0], argv[1]]
+
+  # Propagate system-level settings from global_config to teacher_overrides
+  # to ensure consistency (e.g., if hardware=cpu or skip_jax_distributed_system=true)
+  system_keys = [
+      "hardware",
+      "skip_jax_distributed_system",
+      "enable_single_controller",
+      "jax_distributed_initialization_timeout",
+      "compile_topology",
+  ]
+  for k in system_keys:
+    if k not in teacher_overrides:
+      teacher_overrides[k] = getattr(global_config, k)
+
   teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
 
   # 4. Run Training

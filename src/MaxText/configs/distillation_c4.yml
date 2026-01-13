@@ -21,13 +21,18 @@ base_config: "base.yml"
 # These are passed as kwargs to the Student config initialization
 student_overrides:
   model_name: "llama3.1-8b"
+  load_parameters_path: "/tmp/maxtext_checkpoint/maxtext-llama3-1-8b-tpu/0/items"
+  base_num_query_heads: 16
+  # num_query_heads: 16
+  head_dim: 256
+  base_num_kv_heads: 4
+  # num_kv_heads: 4
 
 # --- Teacher Specifics ---
 # These are passed as kwargs to the Teacher config initialization
 teacher_overrides:
   model_name: "llama3.1-8b"
-  load_parameters_path: "gs://chfu-a4-west3-ckpts/checkpoints/llama31-8b/maxtext-base/0/items"
-  # load_parameters_path: "gs://maxtext-llama/llama3.1_8b_instruct/0/items"
+  load_parameters_path: "gs://chfu-eu-maxtext/checkpoints/maxtext-llama-3-1-8b/0/items"  # load_parameters_path: "gs://maxtext-llama/llama3.1_8b_instruct/0/items"
 
 # --- Distillation Loss ---
 distill_alpha: 0.5
