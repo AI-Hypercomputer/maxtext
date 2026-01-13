@@ -31,9 +31,8 @@ if jax.__version_info__ >= (0, 6, 3):
 else:
   from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore
 
-from flax import linen as nn
+from flax import nnx
 from flax import struct
-from flax.linen import partitioning as nn_partitioning
 import flax
 
 from jetstream.core import config_lib
@@ -52,6 +51,7 @@ from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_IN
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.inference.page_manager import PageManager, PageState
 from MaxText.layers import models, quantizations
+from MaxText.sharding import logical_to_mesh
 from MaxText.utils import lora_utils
 
 
@@ -493,7 +493,25 @@ class MaxEngine(engine_api.Engine):
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    # with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    #   flat_logits, new_vars = self.model.apply(
+    #       input_params,
+    #       input_tokens,
+    #       positions,
+    #       encoder_images=images,
+    #       encoder_image_masks=image_masks,
+    #       decoder_segment_ids=sequence_indicator,
+    #       enable_dropout=False,
+    #       model_mode=MODEL_MODE_PREFILL,
+    #       rngs={"params": new_rng},
+    #       mutable=["cache"],
+    #       previous_chunk=previous_chunk,
+    #       true_length=true_length,
+    #       slot=slot,
+    #       page_state=page_state,
+    #   )
+
+    with self._mesh, nnx.logical_axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           input_params,
           input_tokens,
@@ -714,7 +732,7 @@ class MaxEngine(engine_api.Engine):
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    with self._mesh, nnx.logical_axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           params,
           input_tokens,
@@ -836,7 +854,7 @@ class MaxEngine(engine_api.Engine):
     decoder_positions = jnp.expand_dims(decoder_positions, 0)
     decoder_segment_ids = jnp.expand_dims(decoder_segment_ids, 0)
     rng, new_rng = jax.random.split(rng)
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    with self._mesh, nnx.logical_axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           params,
           input_tokens,
@@ -999,7 +1017,7 @@ class MaxEngine(engine_api.Engine):
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
     # run one step generation
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    with self._mesh, nnx.logical_axis_rules(self.config.logical_axis_rules):
       out_logits, new_vars = self.model.apply(
           params | {"cache": decode_state["cache"]},
           previous_token,
@@ -1587,12 +1605,12 @@ class MaxEngine(engine_api.Engine):
           "token_logp": token_logp,
       }
 
-    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    with nnx.logical_axis_rules(self.config.logical_axis_rules):
       abstract_outputs = jax.eval_shape(init, self.abstract_params, page_state)
-    logical_annotations = nn.get_partition_spec(abstract_outputs)
+    logical_annotations = nnx.get_partition_spec(abstract_outputs)
 
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      mesh_annotations = nn.logical_to_mesh(logical_annotations)
+    with self._mesh, nnx.logical_axis_rules(self.config.logical_axis_rules):
+      mesh_annotations = logical_to_mesh(logical_annotations, self._mesh, self.config.logical_axis_rules)
 
     shardings = jax.tree_util.tree_map(
         lambda mesh_annotation: jax.sharding.NamedSharding(self._mesh, mesh_annotation),
