@@ -69,7 +69,6 @@ If your model checkpoint is from Hugging Face, you need to run a conversion scri
 
 ```sh
 export MODEL_CKPT_DIRECTORY=${BASE_OUTPUT_DIRECTORY}/maxtext-checkpoint
-export MODEL_CKPT_PATH=${MODEL_CKPT_DIRECTORY}/0/items
 ```
 
 2. **Run the Conversion Script:** Execute the following command that downloads the specified Hugging Face model and converts its weights into the MaxText format. The conversion script only supports official versions of models from Hugging Face. To see the specific models and versions currently supported for conversion, please refer to the `HF_IDS` dictionary in the MaxText utility file [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/utils.py).
@@ -83,6 +82,13 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml
     base_output_directory=${MODEL_CKPT_DIRECTORY} \
     scan_layers=True skip_jax_distributed_system=True
 ```
+
+3. **Use the Converted Checkpoint:** Set the following environment variable to use the converted checkpoint:
+
+```sh
+export MODEL_CKPT_PATH=${MODEL_CKPT_DIRECTORY}/0/items
+```
+
 ## Dataset
 
 MaxText provides examples to work with [Common Crawl](https://commoncrawl.org/). The dataset is available in TFRecords format in a cloud bucket. MaxText provides scripts to copy the dataset to a Google Cloud Storage Bucket.
