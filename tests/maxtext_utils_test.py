@@ -682,5 +682,113 @@ class TestCalculateBytesFromPytree(unittest.TestCase):
     self.assertEqual(max_utils.calculate_bytes_from_pytree({}), 0)
 
 
+class TestLearningRateSchedules(unittest.TestCase):
+  """Test suite for learning rate schedule functions."""
+
+  def test_cosine_schedule(self):
+    """Tests cosine learning rate schedule."""
+    learning_rate = 1e-3
+    learning_rate_schedule_steps = 1000
+    steps = 1200
+    warmup_steps_fraction = 0.1
+    learning_rate_final_fraction = 0.1
+
+    warmup_steps = int(learning_rate_schedule_steps * warmup_steps_fraction)
+
+    config = pyconfig.initialize(
+        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        enable_checkpointing=False,
+        learning_rate=learning_rate,
+        learning_rate_schedule_steps=learning_rate_schedule_steps,
+        steps=steps,
+        warmup_steps_fraction=warmup_steps_fraction,
+        lr_schedule_type="cosine",
+        learning_rate_final_fraction=learning_rate_final_fraction,
+    )
+
+    schedule_fn = maxtext_utils.create_learning_rate_schedule(config)
+
+    # Warmup phase: 0 -> peak
+    self.assertAlmostEqual(float(schedule_fn(0)), 0.0, places=6)
+    self.assertAlmostEqual(float(schedule_fn(warmup_steps)), learning_rate, places=6)
+
+    # Cosine decay phase
+    lr_end = schedule_fn(learning_rate_schedule_steps - 1)
+    expected_final = learning_rate * learning_rate_final_fraction
+    self.assertLess(float(lr_end), learning_rate)
+    self.assertAlmostEqual(float(lr_end), expected_final, places=6)
+
+    # Zero phase
+    self.assertAlmostEqual(float(schedule_fn(steps - 1)), 0.0, places=6)
+
+  def test_wsd_schedule(self):
+    """Tests WSD learning rate schedule with both linear and cosine decay styles."""
+    learning_rate = 1e-3
+    learning_rate_schedule_steps = 1000
+    steps = 1200
+    warmup_steps_fraction = 0.1
+    learning_rate_final_fraction = 0.1
+    wsd_decay_steps_fraction = 0.1
+
+    warmup_steps = int(learning_rate_schedule_steps * warmup_steps_fraction)
+    decay_steps = int(learning_rate_schedule_steps * wsd_decay_steps_fraction)
+    stable_steps = learning_rate_schedule_steps - warmup_steps - decay_steps
+    decay_start = warmup_steps + stable_steps
+
+    # Test both decay styles: linear and cosine
+    for decay_style in ["linear", "cosine"]:
+      config = pyconfig.initialize(
+          [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+          enable_checkpointing=False,
+          learning_rate=learning_rate,
+          learning_rate_schedule_steps=learning_rate_schedule_steps,
+          steps=steps,
+          warmup_steps_fraction=warmup_steps_fraction,
+          lr_schedule_type="wsd",
+          learning_rate_final_fraction=learning_rate_final_fraction,
+          wsd_decay_steps_fraction=wsd_decay_steps_fraction,
+          wsd_decay_style=decay_style,
+      )
+      schedule_fn = maxtext_utils.create_learning_rate_schedule(config)
+
+      # Warmup phase: 0 -> peak
+      self.assertAlmostEqual(float(schedule_fn(0)), 0.0, places=6)
+      self.assertAlmostEqual(float(schedule_fn(warmup_steps)), learning_rate, places=6)
+
+      # Stable phase: constant at peak
+      self.assertAlmostEqual(float(schedule_fn(warmup_steps + 10)), learning_rate, places=6)
+      self.assertAlmostEqual(float(schedule_fn(warmup_steps + stable_steps // 2)), learning_rate, places=6)
+      self.assertAlmostEqual(float(schedule_fn(decay_start - 1)), learning_rate, places=6)
+
+      # Decay phase: peak -> final
+      lr_mid_decay = schedule_fn(decay_start + decay_steps // 2)
+      expected_final = learning_rate * learning_rate_final_fraction
+      self.assertLess(float(lr_mid_decay), learning_rate)
+      self.assertGreater(float(lr_mid_decay), expected_final)
+
+      # End of decay phase: should reach expected_final
+      lr_end = schedule_fn(learning_rate_schedule_steps - 1)
+      self.assertAlmostEqual(float(lr_end), expected_final, places=6)
+
+      # Zero phase
+      self.assertAlmostEqual(float(schedule_fn(steps - 1)), 0.0, places=6)
+
+    # Test invalid fractions - should raise during config initialization
+    with self.assertRaises(ValueError) as cm:
+      pyconfig.initialize(
+          [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+          enable_checkpointing=False,
+          learning_rate=learning_rate,
+          learning_rate_schedule_steps=learning_rate_schedule_steps,
+          steps=steps,
+          warmup_steps_fraction=0.6,
+          lr_schedule_type="wsd",
+          learning_rate_final_fraction=learning_rate_final_fraction,
+          wsd_decay_steps_fraction=0.5,  # Sum > 1.0
+      )
+    self.assertIn("warmup_steps_fraction", str(cm.exception))
+    self.assertIn("wsd_decay_steps_fraction", str(cm.exception))
+
+
 if __name__ == "__main__":
   unittest.main()

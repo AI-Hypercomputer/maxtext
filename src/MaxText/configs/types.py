@@ -124,6 +124,20 @@ class OptimizerType(str, Enum):
   MUON = "muon"
 
 
+class LearningRateScheduleType(str, Enum):
+  """Supported learning rate schedule types."""
+
+  COSINE = "cosine"
+  WSD = "wsd"
+
+
+class WsdDecayStyle(str, Enum):
+  """Supported decay styles for WSD schedule."""
+
+  LINEAR = "linear"
+  COSINE = "cosine"
+
+
 class RopeType(str, Enum):
   """Supported Rotary Positional Embedding (RoPE) implementations."""
 
@@ -1005,8 +1019,17 @@ class Optimizer(BaseModel):
       1.0, description="The threshold for gradient clipping. 0 disables clipping."
   )
   learning_rate: NonNegativeFloat = Field(3.0e-5, description="The peak learning rate.")
-  cosine_learning_rate_final_fraction: float = Field(
-      0.1, description="Final LR as a fraction of peak LR in cosine decay."
+  lr_schedule_type: LearningRateScheduleType = Field(
+      LearningRateScheduleType.COSINE, description="The type of learning rate schedule to use."
+  )
+  learning_rate_final_fraction: float = Field(
+      0.1, description="Final LR as a fraction of peak LR (applies to both cosine and WSD schedules)."
+  )
+  wsd_decay_steps_fraction: float = Field(
+      0.1, ge=0.0, le=1.0, description="Fraction of total steps for decay phase in WSD schedule."
+  )
+  wsd_decay_style: WsdDecayStyle = Field(
+      WsdDecayStyle.LINEAR, description="The decay style for WSD schedule ('linear' or 'cosine')."
   )
   warmup_steps_fraction: float = Field(0.1, ge=0.0, le=1.0, description="Fraction of total steps for LR warmup.")
   learning_rate_schedule_steps: int = Field(
@@ -1748,6 +1771,17 @@ class MaxTextConfig(
     # If steps is -1, it defaults to the length of the learning rate schedule.
     if self.steps == -1:
       self.steps = self.learning_rate_schedule_steps
+
+    # Validate WSD learning rate schedule fractions
+    if self.lr_schedule_type == LearningRateScheduleType.WSD:
+      total_fraction = self.warmup_steps_fraction + self.wsd_decay_steps_fraction
+      if total_fraction > 1.0:
+        raise ValueError(
+            f"Invalid WSD schedule: warmup_steps_fraction ({self.warmup_steps_fraction}) + "
+            f"wsd_decay_steps_fraction ({self.wsd_decay_steps_fraction}) must not exceed 1.0. "
+            f"Current sum: {total_fraction}"
+        )
+
     # If eval_per_device_batch_size is not set, it defaults to the training per_device_batch_size.
     if getattr(self, "eval_per_device_batch_size", 0.0) == 0.0:
       self.eval_per_device_batch_size = self.per_device_batch_size
