@@ -199,7 +199,7 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shap
   if current_hook_fns:
     processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
   numpy_slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
-  if numpy_slice.shape != target_hf_shape:
+  if numpy_slice.shape != tuple(target_hf_shape):
     raise ValueError(f"Shape mismatch for {hf_path}: Expect {target_hf_shape}, got {numpy_slice.shape}")
   output_weights.append((hf_path, numpy_slice))
 
