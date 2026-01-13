@@ -29,7 +29,8 @@ codecov:
 # By default file names in the coverage report will have their path in the file system, which in our
 # runners would be /__w/maxtext/maxtext/src/MaxText/* but Codecov expects src/MaxText/* so we need to fix the path
 fixes:
-  - ".*/maxtext/src/::src/"
+  # - ".*/maxtext/src/::src/"
+  - "/github/workspace/::"
 ignore:
   - "src/MaxText/assets"
   - "src/MaxText/configs"
