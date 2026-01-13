@@ -40,12 +40,14 @@ from typing import Any, Sequence
 
 from absl import app
 from absl import flags
+from flax.linen import partitioning as nn_partitioning
 import jax
 import transformers
 
 from MaxText import model_creation_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config
+from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
@@ -137,17 +139,17 @@ def decode_with_vllm(
   vllm_args["hf_config_path"] = hf_config_path
   vllm_args["gpu_memory_utilization"] = gpu_memory_utilization
 
-  if load_parameters_path is None:
-    vllm_args["load_format"] = "dummy"
-
   # Prepare MaxText and sharding configs (Parallelism is dynamic)
   vllm_args["additional_config"]["maxtext_config"] = {
       "model_name": model_name,
       "max_target_length": max_target_length,
       "weight_dtype": "bfloat16",
       "allow_split_physical_axes": True,
-      "load_parameters_path": load_parameters_path,
   }
+  if load_parameters_path is not None:
+    vllm_args["additional_config"]["maxtext_config"]["load_parameters_path"] = load_parameters_path
+  else:
+    vllm_args["load_format"] = "dummy"
 
   vllm_args["additional_config"]["sharding"] = {
       "sharding_strategy": {
@@ -173,7 +175,13 @@ def decode_with_vllm(
       f"Initializing LLM with DP={vllm_args['data_parallel_size']}, TP={vllm_args['tensor_parallel_size']} "
       f"and EP={ici_expert_parallelism if enable_expert_parallel else 0}..."
   )
-  llm = LLM(**vllm_args)
+
+  vllm_config_path = os.path.join(MAXTEXT_PKG_DIR, "configs", "vllm.yml")
+  argv_list = ["", str(vllm_config_path), "log_config=False"]
+  vllm_config = pyconfig.initialize(argv_list)
+
+  with nn_partitioning.axis_rules(vllm_config.logical_axis_rules):
+    llm = LLM(**vllm_args)
 
   print("Generating output...")
   outputs = llm.generate([prompt], sampling_params)
