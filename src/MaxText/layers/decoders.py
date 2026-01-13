@@ -18,6 +18,7 @@
 
 from typing import Any, Callable
 import functools
+import inspect
 
 import jax
 import jax.numpy as jnp
@@ -36,6 +37,7 @@ from MaxText import max_utils
 from MaxText.sharding import create_sharding
 from MaxText.inference import page_manager
 from MaxText.layers import linears
+from MaxText.layers import initializers
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
@@ -43,7 +45,7 @@ from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.layers.attentions import attention_as_linen
-from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.embeddings import Embed, attend_on_embedding, embed_as_linen, positional_embedding_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
@@ -64,9 +66,6 @@ from MaxText.layers import (
     simple_layer,
 )
 
-# ------------------------------------------------------------------------------
-# The network: Decoder Definitions
-# ------------------------------------------------------------------------------
 
 class DecoderLayer(nnx.Module):
     """
@@ -88,7 +87,6 @@ class DecoderLayer(nnx.Module):
         
         cfg = self.config
 
-        # 1. Pre-Self-Attention Norm
         self.pre_self_attention_norm = RMSNorm(
             num_features=cfg.emb_dim, 
             dtype=cfg.dtype,
@@ -97,7 +95,6 @@ class DecoderLayer(nnx.Module):
             kernel_axes=("norm",),
         )
 
-        # 2. Self Attention
         self.self_attention = Attention(
             config=self.config,
             num_query_heads=cfg.num_query_heads,
@@ -123,7 +120,6 @@ class DecoderLayer(nnx.Module):
             model_mode=model_mode,
         )
 
-        # 3. MLP Block
         self.mlp = linears.MLPBlock(
             in_features=cfg.emb_dim,
             intermediate_dim=cfg.mlp_dim,
@@ -138,7 +134,6 @@ class DecoderLayer(nnx.Module):
             rngs=rngs
         )
         
-        # 4. Dropout
         self.dropout = linears.Dropout(rate=cfg.dropout_rate, rngs=rngs, broadcast_dims=(-2,))
 
 
@@ -173,11 +168,9 @@ class DecoderLayer(nnx.Module):
         inputs = _maybe_shard_with_logical(inputs, logical_axis_names)
         inputs = checkpoint_name(inputs, "decoder_layer_input")
 
-        # --- Norm ---
         lnx = self.pre_self_attention_norm(inputs)
         lnx = _maybe_shard_with_logical(lnx, logical_axis_names)
 
-        # --- Attention ---
         attention_lnx, kv_cache = self.self_attention(
             lnx,
             lnx,
@@ -190,11 +183,9 @@ class DecoderLayer(nnx.Module):
         )
         attention_lnx = _maybe_shard_with_logical(attention_lnx, logical_axis_names)
 
-        # --- MLP ---
         mlp_lnx = self.mlp(lnx, deterministic=deterministic)
         mlp_lnx = _maybe_shard_with_logical(mlp_lnx, logical_axis_names)
 
-        # --- Residuals & Dropout ---
         next_layer_addition = mlp_lnx + attention_lnx
         next_layer_addition_dropped_out = self.dropout(
             next_layer_addition, deterministic=deterministic
@@ -213,8 +204,6 @@ class DecoderLayer(nnx.Module):
            ) 
 
         if cfg.scan_layers:
-            # For scanned layers, we typically return (carry, accumulator)
-            # In MaxText scan convention: return output, None (as per instructions)
             return layer_output, None
         else:
             return layer_output, kv_cache
@@ -237,11 +226,9 @@ class Decoder(nnx.Module):
         self.model_mode = model_mode
         self.rngs = rngs
 
-        # Initialize Layers
         decoder_block_classes = self.get_decoder_layers()
         
-        # Norm Layer
-        self.norm_layer = self.get_norm_layer(num_features=config.emb_dim, rngs=rngs)(
+        self.decoder_norm = self.get_norm_layer(num_features=config.emb_dim, rngs=rngs)(
             dtype=config.dtype,
             weight_dtype=config.weight_dtype,
             epsilon=config.normalization_layer_epsilon,
@@ -264,10 +251,9 @@ class Decoder(nnx.Module):
        
         self.positional_embedding = PositionalEmbedding(embedding_dims=config.base_emb_dim)
 
-        # Output Logits Dense
         if not config.logits_via_embedding:
             self.logits_dense = linears.DenseGeneral(
-              inputs_shape=(1, 1, config.emb_dim), # placeholder
+              in_features_shape=config.emb_dim,
               out_features_shape=config.vocab_size,
               weight_dtype=config.weight_dtype,
               dtype=jnp.float32 if config.logits_dot_in_fp32 else config.dtype,
@@ -278,8 +264,6 @@ class Decoder(nnx.Module):
               rngs=rngs
             )
 
-        # Logic for creating layer stack (Scanned vs Sequential)
-        self.layers = []
         self.scanned_layers = None
         self.is_deepseek = (self.config.decoder_block == DecoderBlockType.DEEPSEEK)
 
@@ -288,27 +272,23 @@ class Decoder(nnx.Module):
                 assert len(decoder_block_classes) == 2
                 dense_cls, moe_cls = decoder_block_classes
                 
-                # Create Dense Stack
                 num_dense = config.first_num_dense_layers
                 self.dense_stack = self._create_scanned_layers(
                     dense_cls, length=num_dense, rngs=rngs
                 )
                 
-                # Create MoE Stack
                 num_moe = config.num_decoder_layers - config.first_num_dense_layers
                 self.moe_stack = self._create_scanned_layers(
                     moe_cls, length=num_moe, rngs=rngs
                 )
             else:
-                # Standard homogeneous stack
                 layer_cls = decoder_block_classes[0]
                 num_layers = config.num_decoder_layers
-                self.layers_stack = self._create_scanned_layers(
+                self.layers = self._create_scanned_layers(
                     layer_cls, length=num_layers, rngs=rngs
                 )
         else:
-            # Sequential (List of layers)
-            # Using simple loop to create individual NNX layers
+            self.layers = []
             if self.is_deepseek:
                 dense_cls, moe_cls = decoder_block_classes
                 for i in range(config.first_num_dense_layers):
@@ -334,7 +314,6 @@ class Decoder(nnx.Module):
     
     def _create_scanned_layers(self, decoder_layer_class, length: int, rngs: nnx.Rngs, **layer_kwargs):
         """Creates a VMapped stack of layers, forcing parameter init for Compact modules."""
-        
         def create_layer_fn(rng):
             layer = decoder_layer_class(
                 config=self.config,
@@ -352,8 +331,8 @@ class Decoder(nnx.Module):
           create_layer_fn,
           in_axes=0,
           out_axes=0,
-          axis_name="layers",  # Named axis for sharding
-          transform_metadata={nnx.PARTITION_NAME: "layers"},  # Sharding metadata
+          axis_name="layers",
+          transform_metadata={nnx.PARTITION_NAME: "layers"},
         )(rngs)
 
         return layers_vmapped
@@ -363,70 +342,96 @@ class Decoder(nnx.Module):
       policy = self.get_remat_policy()
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
       graphdef, params, state = nnx.split(layers, nnx.Param, ...)  # state: the mutable state we carry (KV cache, RNGs, etc.)
-      def layer_fn(carry, layer_params):
-          layer = nnx.merge(graphdef, layer_params, other_state)
-          # layer_i is a slice of the vmapped layers, representing one layer
-          layer_out = layer(carry, *args, **kwargs)
-          # handle tuple returns (output, aux) -> just take output for carry
-          new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
-          _, new_layer_state = nnx.split(layer)
-          return new_carry, new_layer_state
       
-      # Apply checkpointing to the step function
-      if policy is not None:
-          pure_layer_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
+      layer_cls = layers.__class__ # Access the underlying class
+      sig = inspect.signature(layer_cls.__call__)
+      
+      # Filter kwargs to only include keys that exist in the layer's signature
+      valid_kwargs = {
+          k: v for k, v in kwargs.items() 
+          if k in sig.parameters or 'kwargs' in sig.parameters
+      }
+
+      def layer_fn(carry, scanned_vars):
+          # Unpack the sliced variables for THIS layer
+          current_params, current_state = scanned_vars
+          
+          # Merge using the SLICED state
+          layer = nnx.merge(graphdef, current_params, current_state)
+          
+          # Run the layer (Filter kwargs if using the solution from previous turn)
+          layer_out = layer(carry, *args, **valid_kwargs)
+          
+          new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+          
+          # Extract the updated state to return it
+          # _, new_current_state = nnx.split(layer, nnx.Param, ...)
+          new_current_state = nnx.state(layer)
+          return new_carry, new_current_state
+
+      """ 
+      def layer_fn(carry, layer_params):
+          layer = nnx.merge(graphdef, layer_params, state)
+          layer_out = layer(carry, *args, **valid_kwargs)
+          new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+          new_layer_state = nnx.state(layer)
+          return new_carry, new_layer_state
+      """
       layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
       
       final_carry, scanned_state = jax.lax.scan(
           layer_fn,
           x_in,
-          params
+          (params, state)
       )
       nnx.update(layers, scanned_state)
 
       return final_carry, None
+  
 
     def get_decoder_layers(self):
-      """Retrieves decoder layer classes based on config."""
-      match self.config.decoder_block:
-        case DecoderBlockType.DEFAULT:
-          return [DecoderLayerNNX]
-        case DecoderBlockType.LLAMA2:
-          return [llama2.LlamaDecoderLayer]
-        case DecoderBlockType.MISTRAL:
-          return [mistral.MistralDecoderLayer]
-        case DecoderBlockType.MIXTRAL:
-          return [mixtral.MixtralDecoderLayer]
-        case DecoderBlockType.DEEPSEEK:
-          if self.config.use_batch_split_schedule:
-            return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
-          else:
-            return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
-        case DecoderBlockType.GEMMA:
-          return [gemma.GemmaDecoderLayer]
-        case DecoderBlockType.GEMMA2:
-          return [gemma2.Gemma2DecoderLayer]
-        case DecoderBlockType.GEMMA3:
-          return [gemma3.Gemma3DecoderLayer]
-        case DecoderBlockType.GPT3:
-          return [gpt3.Gpt3DecoderLayer]
-        case DecoderBlockType.GPT_OSS:
-          return [gpt_oss.GptOssScannableBlock] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayer]
-        case DecoderBlockType.QWEN3:
-          return [qwen3.Qwen3DecoderLayer]
-        case DecoderBlockType.QWEN3_MOE:
-          return [qwen3.Qwen3MoeDecoderLayer]
-        case DecoderBlockType.QWEN3_NEXT:
-          return [qwen3.Qwen3NextScannableBlock] if self.config.scan_layers else [qwen3.Qwen3NextDecoderLayer]
-        case DecoderBlockType.SIMPLE:
-          return [simple_layer.SimpleDecoderLayer]
-        case DecoderBlockType.SIMPLE_MLP:
-          return [simple_layer.SimpleMlpDecoderLayer]
-        case DecoderBlockType.LLAMA4:
-          return [llama4.Llama4ScannableBlock] if self.config.scan_layers else [llama4.Llama4DecoderLayer]
-        case _:
-          raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}") 
-  
+      """Retrieves decoder layer classes based on config using a dictionary lookup."""
+      cfg = self.config
+
+      def get_scannable(normal_cls, scannable_cls):
+          return [scannable_cls] if cfg.scan_layers else [normal_cls]
+
+      def get_deepseek():
+          if cfg.use_batch_split_schedule:
+              return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
+          return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
+      
+      layer_map = {
+          DecoderBlockType.DEFAULT: [DecoderLayer],
+          DecoderBlockType.LLAMA2: [llama2.LlamaDecoderLayer],
+          DecoderBlockType.MISTRAL: [mistral.MistralDecoderLayer],
+          DecoderBlockType.MIXTRAL: [mixtral.MixtralDecoderLayer],
+          DecoderBlockType.GEMMA: [gemma.GemmaDecoderLayer],
+          DecoderBlockType.GEMMA2: [gemma2.Gemma2DecoderLayer],
+          DecoderBlockType.GEMMA3: [gemma3.Gemma3DecoderLayer],
+          DecoderBlockType.GPT3: [gpt3.Gpt3DecoderLayer],
+          DecoderBlockType.QWEN3: [qwen3.Qwen3DecoderLayer],
+          DecoderBlockType.QWEN3_MOE: [qwen3.Qwen3MoeDecoderLayer],
+          DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
+          DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
+          DecoderBlockType.DEEPSEEK: get_deepseek(),
+          DecoderBlockType.GPT_OSS: get_scannable(
+              gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock
+          ),
+          DecoderBlockType.QWEN3_NEXT: get_scannable(
+              qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock
+          ),
+          DecoderBlockType.LLAMA4: get_scannable(
+              llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock
+          ),
+      }
+
+      if cfg.decoder_block not in layer_map:
+          raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
+      
+      return layer_map[cfg.decoder_block]
+    
+
     def get_remat_policy(self):
       """Get remat policy for jax.checkpoint."""
       policy = None
@@ -528,7 +533,7 @@ class Decoder(nnx.Module):
           DecoderBlockType.SIMPLE_MLP,
           DecoderBlockType.LLAMA4,
       ):
-        return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
+        return functools.partial(RMSNorm, num_features=num_features, shard_mode=self.config.shard_mode, rngs=rngs)
       elif self.config.decoder_block == DecoderBlockType.GPT3:
           return functools.partial(gpt3.Gpt3LayerNorm, num_features=num_features, reductions_in_fp32=False, use_bias=True, rngs=rngs)
       else:
@@ -548,13 +553,7 @@ class Decoder(nnx.Module):
     ):
         cfg = self.config
         
-        # Handle shared embedding execution
-        # If shared_embedding is NNX module, access params directly or call it
-        if isinstance(shared_embedding, nnx.Module):
-             y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
-        else:
-            # Fallback for Linen module passed in
-            y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+        y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
         # Merge Multimodal
         if image_embeddings is not None and cfg.use_multimodal:
@@ -583,7 +582,7 @@ class Decoder(nnx.Module):
         else:
             norm_out_sharding = None
 
-        y = self.norm_layer(y) # NNX call
+        y = self.decoder_norm(y)
         y = self.dropout(y, deterministic=deterministic) # NNX call
 
         if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
@@ -594,12 +593,9 @@ class Decoder(nnx.Module):
             )
 
         if cfg.logits_via_embedding:
-            # NNX Access to embedding table
             if isinstance(shared_embedding, nnx.Module):
-                # Assuming shared_embedding has an 'embedding' parameter which is a Variable/Param
                 embedding_table = shared_embedding.embedding.value
             else:
-                 # Legacy Linen
                 embedding_table = shared_embedding.variables["params"]["embedding"]
             
             if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):
@@ -614,7 +610,6 @@ class Decoder(nnx.Module):
                 logits = logits / cfg.final_logits_soft_cap
                 logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
         else:
-            # Use the NNX dense layer defined in __init__
             logits = self.logits_dense(y)
         
         if self.config.cast_logits_to_fp32:
@@ -624,7 +619,7 @@ class Decoder(nnx.Module):
 
     def __call__(
         self,
-        shared_embedding: Any, # Can be nnx.Module or Linen Module
+        shared_embedding: Any,
         decoder_input_tokens,
         decoder_positions,
         decoder_segment_ids=None,
@@ -643,7 +638,6 @@ class Decoder(nnx.Module):
         mesh = self.mesh
         assert decoder_input_tokens.ndim == 2  # [batch, len]
 
-        # 1. Apply Embeddings
         y = self._apply_embedding(
             shared_embedding,
             decoder_input_tokens,
@@ -655,8 +649,6 @@ class Decoder(nnx.Module):
             image_masks,
         )
 
-        # 2. Prepare Arguments for Layers
-        # Positional arguments that all layers accept
         layer_args = (
              decoder_segment_ids,
              decoder_positions,
@@ -664,7 +656,6 @@ class Decoder(nnx.Module):
              model_mode
         )
         
-        # Keyword arguments: Start with common ones
         layer_kwargs = {
             "previous_chunk": previous_chunk,
             "page_state": page_state,
@@ -672,33 +663,24 @@ class Decoder(nnx.Module):
             "attention_metadata": attention_metadata,
         }
 
-        # CONDITIONAL ARGUMENT LOGIC (Crucial Fix)
-        # Only pass bidirectional_mask if the model is GEMMA3, matching original code behavior.
         if cfg.decoder_block == DecoderBlockType.GEMMA3:
             layer_kwargs["bidirectional_mask"] = bidirectional_mask
 
-        # 3. Apply Layers (Scanned or Sequential)
         if cfg.scan_layers:
             if self.is_deepseek:
-                # DeepSeek has two distinct stacks (Dense and MoE)
-                # 1. Run Dense Stack
                 y, _ = self._apply_layers_sequentially(
                     self.dense_stack, y, *layer_args, length=cfg.first_num_dense_layers, **layer_kwargs
                 )
                 
-                # 2. Run MoE Stack
                 num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
                 y, _ = self._apply_layers_sequentially(
                     self.moe_stack, y, *layer_args, length=num_moe, **layer_kwargs
                 )
             else:
-                # Standard Scanned Stack (Works for GPT3, Llama, Gemma, etc.)
                 y, _ = self._apply_layers_sequentially(
-                    self.layers_stack, y, *layer_args, length=cfg.num_decoder_layers, **layer_kwargs
+                    self.layers, y, *layer_args, length=cfg.num_decoder_layers, **layer_kwargs
                 )
         else:
-            # Unscanned Loop
-            # self.layers is a flat list of initialized NNX modules created in __init__
             for i, layer in enumerate(self.layers):
                 kv_cache = kv_caches[i] if kv_caches is not None else None
                 
@@ -710,7 +692,6 @@ class Decoder(nnx.Module):
                     **layer_kwargs
                 )
                 
-                # Handle Return formats: (output, kv_cache) or just output
                 if isinstance(out, tuple):
                     y, kv_cache_out = out
                 else:
@@ -723,10 +704,31 @@ class Decoder(nnx.Module):
         assert isinstance(y, jax.Array)
         hidden_state = y
 
-        # 4. Output Head / Logits
         if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
             logits = None
         else:
             logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
         return logits, hidden_state, kv_caches
+
+def decoder_as_linen(
+    config: Config,
+    mesh: Mesh,
+    rngs: nnx.Rngs,
+    model_mode: str,
+    quant: None | Quant = None,
+):
+  """Creates a Decoder module."""
+  module = nnx_wrappers.to_linen(
+      Decoder,
+      config=config,
+      mesh=mesh,
+      model_mode=model_mode,
+      rngs=rngs,
+      quant=quant,
+      name="decoder",
+      abstract_init=False,
+      metadata_fn=initializers.variable_to_logically_partitioned,
+  )
+  return module
+
