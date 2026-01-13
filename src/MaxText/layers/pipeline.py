@@ -276,31 +276,6 @@ class Pipeline(nn.Module):
     stages_in = self._maybe_shard_with_logical(stages_in, self.stages_in_logical)
     return stages_in
 
-  def shard_dim_by_stages(self, x, dim: int, physical_partition_spec: P | None, is_stage_weight: bool = False):
-    """Shards x using the provided partition_spec, but adds the "stage" mesh axis to the existing sharding at
-    the specified dimension."""
-    # placeholder = None if self.config.shard_mode == ShardMode.EXPLICIT else P.UNCONSTRAINED
-    # if physical_partition_spec is None:
-    #   dims_mapping = [placeholder] * x.ndim
-    # else:
-    #   physical_partition_spec = self._remove_fsdp_from_physical_partition_spec(physical_partition_spec)
-    #   dims_mapping = list(physical_partition_spec)
-    #   # If not a stage weight, we handle the repeat dimension offset
-    #   if not is_stage_weight:
-    #     dims_mapping = [placeholder] * (dim + 1) + dims_mapping[dim:]  # inflat one dimension for num_repeats
-    # dims_mapping[dim] = "stage"
-    # dims_mapping = tuple(dims_mapping)
-    # # We add reduced rule only when pspec is given for a stage weight
-    # if physical_partition_spec and is_stage_weight and self.config.shard_mode == ShardMode.EXPLICIT:
-    #   batch_mesh_axis = ["data", "fsdp"]
-    #   reduced_mark = [mesh_axis for mesh_axis in batch_mesh_axis if self.mesh.shape[mesh_axis] > 1]
-    #   pspec = P(*dims_mapping, reduced=set(reduced_mark))
-    # else:
-    #   pspec = P(*dims_mapping)
-    # sharding = jax.sharding.NamedSharding(self.mesh, pspec)
-    # return self._maybe_shard_with_name(x, sharding)
-    return x
-
   def get_microbatch_and_repeat_ids(self, loop_iteration):
     """Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and
     non-circular"""
@@ -308,14 +283,6 @@ class Pipeline(nn.Module):
     microbatches_processed = jnp.maximum(loop_iteration - self.forwarding_delay * jnp.arange(self.num_stages), 0)
     microbatch_ids = microbatches_processed % self.config.num_pipeline_microbatches
     repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
-    return microbatch_ids, repeat_ids
-
-  def get_microbatch_and_repeat_ids_for_bsw(self, loop_iteration):
-    """Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and
-    non-circular"""
-    raw_processed = loop_iteration - self.forwarding_delay * jnp.arange(self.num_stages)
-    repeat_ids = raw_processed // self.config.num_pipeline_microbatches
-    microbatch_ids = jnp.maximum(raw_processed, 0) % self.config.num_pipeline_microbatches
     return microbatch_ids, repeat_ids
 
   def vmap_parallel_gather(
@@ -340,17 +307,8 @@ class Pipeline(nn.Module):
       return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, repeat_id, 1, repeat_dim_in_weights), repeat_dim_in_weights)
 
     gathered_weights_stage_dim = 0
-    repeat_ids = self.shard_dim_by_stages(repeat_ids, 0, physical_partition_spec=None)
-    # num_repeats x num_stages x *param_dim
-    weights = self.shard_dim_by_stages(
-        weights, stages_dim_in_weights, physical_partition_spec=physical_partition_spec, is_stage_weight=False
-    )
     stage_weights = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=gathered_weights_stage_dim)(
         weights, repeat_ids
-    )
-    # num_stages x *param_dim
-    stage_weights = self.shard_dim_by_stages(
-        stage_weights, gathered_weights_stage_dim, physical_partition_spec=physical_partition_spec, is_stage_weight=True
     )
     return stage_weights
 
@@ -375,9 +333,7 @@ class Pipeline(nn.Module):
       replicated_sharding = NamedSharding(self.mesh, P())
       return x.at[idx].get(out_sharding=replicated_sharding)
 
-    ids = self.shard_dim_by_stages(ids, 0, physical_partition_spec=None)
-    outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
-    return self.shard_dim_by_stages(outs, 0, physical_partition_spec=None)
+    return jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
 
   def get_new_loop_state(self, output, loop_state):
     """
@@ -534,17 +490,6 @@ class Pipeline(nn.Module):
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
     target_repeat_id = repeat_ids[0]
 
-    # path = ("params", "mlp", "wi_0", "kernel")
-    # path = ("params", "weights")
-
-    # jax.debug.print(
-    #     "Iteration: {iter} | Global Target Repeat ID: {target} | Repeat_ids: {rids} | "
-    #     "BSW[0] per-stage means: {bsw0} | BSW[1] per-stage means: {bsw1}",
-    #     iter=loop_iteration, target=target_repeat_id, rids=repeat_ids,
-    #     bsw0=maxtext_utils.get_nested_value(bsw[0], path).mean(axis=(1, 2)),
-    #     bsw1=maxtext_utils.get_nested_value(bsw[1], path).mean(axis=(1, 2)),
-    # )
-
     @jax.shard_map(
         mesh=self.mesh,
         in_specs=((bsw_pps, bsw_pps), P("stage")),
@@ -557,14 +502,7 @@ class Pipeline(nn.Module):
           bsw[0],
           bsw[1],
       )
-      # jax.debug.print(
-      #     "Iteration: {iter} | "
-      #     "Selected weights mean for Stage {s} with repeat id {i}: {m}",
-      #     iter=loop_iteration,
-      #     s=jax.lax.axis_index("stage"),
-      #     m=maxtext_utils.get_nested_value(weights, path).mean(),
-      #     i=repeat_id[0],
-      # )
+
       return weights
 
     weights = select_weights_from_bsw(bsw, repeat_ids)
