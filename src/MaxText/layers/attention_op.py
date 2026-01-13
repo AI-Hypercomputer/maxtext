@@ -607,7 +607,7 @@ class AttentionOp(nnx.Module):
 
     Returns:
       An `Array` representing the attention mask, broadcastable to the shape
-      `[batch_size, num_heads, q_sequence_length, kv_sequence_length]`.
+      `[batch_size, num_heads=1, q_group=1, q_sequence_length, kv_sequence_length]`.
       Positions with `0.0` allow attention, while positions with
       `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
       Returns `None` if no masking is determined to be necessary based on
@@ -1642,9 +1642,13 @@ class AttentionOp(nnx.Module):
     # Apply DeepSeek index mask
     # The bias from Indexer contains 0.0 for kept tokens and large negative for masked tokens.
     if index_mask is not None:
-      # attn_weights: [B, H, G, Q_Len, KV_Len] or similar
-      # index_mask:  [B, 1, Q_Len, KV_Len] (usually)
+      print("before", attn_weights)
+      # attn_weights: [B, H, G, Q_Len, KV_Len]
+      # index_mask:  [B, 1, 1, Q_Len, KV_Len]
+      print("attn_weight", attn_weights.shape)
+      print("index_mask", index_mask.shape)
       attn_weights = apply_mask_to_logits(attn_weights, index_mask)
+      print("after", attn_weights)
 
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
@@ -1805,6 +1809,7 @@ class AttentionOp(nnx.Module):
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
 
+    print("index_mask", index_mask)
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=key,

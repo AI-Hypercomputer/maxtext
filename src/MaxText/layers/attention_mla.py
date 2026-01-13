@@ -315,16 +315,19 @@ class Indexer(nnx.Module):
 
   def __call__(self, x, qr, inputs_positions, mask=None):
     """
-    Returns:
-        index_mask: A bias mask [Batch, 1, SeqLen, TotalLen] with 0.0 for TopK and -inf otherwise.
+    Args:
+      x: [batch_size, seq_len, dim]
+      qr: TOOO
+      inputs_positions: [batch_size, seq_len]
+      mask: An `Array` representing the attention mask, with shape
+        `[batch_size, q_sequence_length, kv_sequence_length]`.
+        Positions with `0.0` allow attention, while positions with
+        `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
+        Returns `None` if no masking is determined to be necessary based on
+        the inputs and configuration.
 
-    Arg
-      mask: An `Array` representing the attention mask, broadcastable to the shape
-      `[batch_size, num_heads, q_sequence_length, kv_sequence_length]`.
-      Positions with `0.0` allow attention, while positions with
-      `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
-      Returns `None` if no masking is determined to be necessary based on
-      the inputs and configuration.
+    Returns:
+        index_mask: A bias mask [Batch, SeqLen, TotalLen] with 0.0 for TopK and large negative otherwise.
     """
     bsz, seqlen, _ = x.shape
     positions = inputs_positions
@@ -337,7 +340,7 @@ class Indexer(nnx.Module):
 
     # 1. Query Processing: Project from Latent QR
     q = self.wq_b(qr)
-    q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)
+    q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)  # [B, T, H, D]
     q = self._apply_partial_rope(q, positions)
     # q = self._apply_hadamard(q)
 
@@ -371,13 +374,13 @@ class Indexer(nnx.Module):
     # Weighted Sum: [B,S,T,H] * [B,S,H] -> [B,S,T]
     index_score = jnp.einsum("bsth, bsh -> bst", logits, weights, precision=self.config.matmul_precision)
 
+    # print("1", index_score.shape)
+    # print(mask.shape)
     # 5. Masking & TopK
     if mask is not None:
-      # Ensure mask broadcasts [B, 1, S, T] -> [B, S, T]
-      # index_score += mask.squeeze(1)
-      index_score += mask[:, 0]
-
-    print("jax_index_score", index_score)
+      index_score += mask
+    # print("2", index_score.shape)
+    # print("jax_index_score", index_score)
 
     # Select TopK Indices (Values, Indices) after masking
     _, topk_indices = jax.lax.top_k(index_score, k=self.index_topk)
@@ -387,15 +390,11 @@ class Indexer(nnx.Module):
     # Scatter 0.0 at topk indices
     batch_idx = jnp.arange(bsz)[:, None, None]
     seq_idx = jnp.arange(seqlen)[None, :, None]
-    # JAX scatter update
     index_mask = index_mask.at[batch_idx, seq_idx, topk_indices].set(0.0)
 
     # Re-apply causal mask if present
     if mask is not None:
-      # index_mask += mask.squeeze(1)
-      index_mask += mask[:, 0]
-
-    index_mask = index_mask[:, None, :, :]  # [B, 1, S, T]
+      index_mask += mask
 
     return index_mask, topk_indices, index_score
 
@@ -959,14 +958,17 @@ class MLA(Attention):
     # Apply Indexer Logic
     index_mask = None
     if self.use_sparse_indexer and low_rank_q is not None:
-      # generate mask [batch_size, num_heads, q_sequence_length, kv_sequence_length]
+      # generate mask [batch_size, num_heads=1, q_group=1, q_sequence_length, kv_sequence_length]
       # filled with `0.0` and `DEFAULT_MASK_VALUE` (a large negative number)
       attn_mask = self.attention_op.generate_attention_mask(
           query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
       )
-      print("attn_mask", attn_mask)
+      attn_mask = jnp.squeeze(attn_mask, axis=(1, 2))
+      print("attn_mask", attn_mask, attn_mask.shape)
+      print("inputs_positions", inputs_positions)
 
       index_mask, _, _ = self.indexer(x=inputs_q, qr=low_rank_q, inputs_positions=inputs_positions, mask=attn_mask)
+      index_mask = index_mask[:, None, None, :, :]  # [B, S, T] -> [B, 1, 1, S, T]
 
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       if index_mask:
