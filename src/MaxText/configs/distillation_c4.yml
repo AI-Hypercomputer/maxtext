@@ -21,7 +21,8 @@ base_config: "base.yml"
 # These are passed as kwargs to the Student config initialization
 student_overrides:
   model_name: "llama3.1-8b"
-  load_parameters_path: "/tmp/maxtext_checkpoint/maxtext-llama3-1-8b-tpu/0/items"
+  # load_parameters_path: "/tmp/maxtext_checkpoint/maxtext-llama3-1-8b-tpu/0/items"
+  load_parameters_path: "gs://chfu-eu-maxtext/checkpoints/maxtext-llama3-1-8b-tpu/0/items"
   base_num_query_heads: 16
   # num_query_heads: 16
   head_dim: 256
@@ -45,11 +46,11 @@ dataset_name: "c4/en:3.0.1"
 tokenizer_path: "/tmp/llama3.1-tokenizer"
 tokenizer_type: "huggingface"
 
-max_target_length: 2048
+max_target_length: 8192
 
 # --- Training Loop ---
-steps: 200000
-checkpoint_period: 2000
+steps: 2000
+checkpoint_period: 1000
 log_period: 10
 save_checkpoint_on_completion: True
 
@@ -59,7 +60,7 @@ per_device_batch_size: 1
 gradient_accumulation_steps: 8
 
 # --- Learning Rate Schedule ---
-learning_rate: 2.0e-4 
-learning_rate_schedule_steps: 200000
-warmup_steps_fraction: 0.1
+learning_rate: 1.0e-4 
+learning_rate_schedule_steps: 2000
+warmup_steps_fraction: 0.03
 cosine_learning_rate_final_fraction: 0.1
