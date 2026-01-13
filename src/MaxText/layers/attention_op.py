@@ -827,14 +827,14 @@ class AttentionOp(nnx.Module):
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
-      sparse_bias: Array | None = None,
+      index_mask: Array | None = None,
   ):
     """Apply attention"""
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
 
-    if sparse_bias is not None and self.attention_kernel != "dot_product":
+    if index_mask is not None and self.attention_kernel != "dot_product":
       raise NotImplementedError
 
     if use_ragged_attention and model_mode == MODEL_MODE_AUTOREGRESSIVE:
@@ -867,8 +867,7 @@ class AttentionOp(nnx.Module):
           previous_chunk,
           bidirectional_mask=bidirectional_mask,
           sinks=sinks,
-          # [CHANGE] Pass to dot product
-          sparse_bias=sparse_bias,
+          index_mask=index_mask,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -1568,8 +1567,7 @@ class AttentionOp(nnx.Module):
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
       sinks: Array | None = None,
-      # [CHANGE] Add argument
-      sparse_bias: Array | None = None,
+      index_mask: Array | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1641,15 +1639,12 @@ class AttentionOp(nnx.Module):
       moba_mask = self._generate_moba_mask(query, key, q_positions)
       attn_weights += moba_mask
 
-    # [CHANGE] Apply DeepSeek Sparse Bias
-    # The bias from Indexer contains 0.0 for kept tokens and -inf for masked tokens.
-    # We simply add it to the logits.
-    if sparse_bias is not None:
-      # Ensure shapes align or broadcast.
+    # Apply DeepSeek index mask
+    # The bias from Indexer contains 0.0 for kept tokens and large negative for masked tokens.
+    if index_mask is not None:
       # attn_weights: [B, H, G, Q_Len, KV_Len] or similar
-      # sparse_bias:  [B, 1, Q_Len, KV_Len] (usually)
-      # attn_weights = attn_weights + sparse_bias
-      attn_weights = apply_mask_to_logits(attn_weights, sparse_bias)
+      # index_mask:  [B, 1, Q_Len, KV_Len] (usually)
+      attn_weights = apply_mask_to_logits(attn_weights, index_mask)
 
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
@@ -1800,8 +1795,7 @@ class AttentionOp(nnx.Module):
       sinks=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
-      # [CHANGE] Add sparse_bias argument
-      sparse_bias: Optional[Array] = None,
+      index_mask: Optional[Array] = None,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -1824,8 +1818,7 @@ class AttentionOp(nnx.Module):
         sinks=sinks,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
-        # [CHANGE] Pass it to apply_attention
-        sparse_bias=sparse_bias,
+        index_mask=index_mask,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache

@@ -906,7 +906,6 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     # mask = None
 
     # C. Run PyTorch Reference
-    # TODO: double check
     self.start_pos = 0
     self.freqs_cis_slice = self.freqs_cis[self.start_pos : self.start_pos + self.seq_len]
     with torch.no_grad():
@@ -919,9 +918,6 @@ class DeepseekV32IndexerTest(unittest.TestCase):
       )
       if mask is not None:
         pt_mask += mask
-    # print("pt_bias")
-    # print(pt_mask.shape)
-    # print(pt_mask)
 
     # jax position, Shape: [B, S]
     start_pos = self.start_pos
@@ -1019,8 +1015,6 @@ class DeepseekV32IndexerTest(unittest.TestCase):
 
     np.testing.assert_allclose(jax_index_score, to_jax(pt_index_score), rtol=1e-3, atol=1e-3)
     np.testing.assert_array_equal(jax_bias.squeeze(1) == 0, to_jax(pt_mask == 0))
-    # print(jax_indices)
-    # print(to_jax(pt_indices))
     # np.testing.assert_array_equal(jax_indices, to_jax(pt_indices))
     # chex.assert_trees_all_close(jax_index_score, jax.tree.map(to_jax, pt_index_score), rtol=1e-3, atol=1e-3)
 
@@ -1059,10 +1053,9 @@ class DeepseekV32MLATest(unittest.TestCase):
 
     # PyTorch: mask is needed for MHA mode in reference code
     # Shape [B, S, S], causal mask
+    start_pos = 0
     causal_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
     causal_mask_bias = torch.where(causal_mask == 1, 0.0, float("-inf"))
-    start_pos = 0
-
     # RoPE
     self.freqs_cis = precompute_freqs_cis(self.pt_args).to(self.x.device)
     self.freqs_cis_slice = self.freqs_cis[start_pos : start_pos + self.seq_len]
@@ -1177,8 +1170,6 @@ class DeepseekV32MLATest(unittest.TestCase):
             },
         },
     }
- 
-
     # Apply the update
     nnx.update(jax_mla, mla_state)
 
