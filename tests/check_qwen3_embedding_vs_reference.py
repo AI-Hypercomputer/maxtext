@@ -46,6 +46,7 @@ from MaxText.layers.qwen3 import (
     Qwen3OmniMoeVisionPatchMerger as JaxQwen3OmniMoeVisionPatchMerger,
     Qwen3OmniMoeVisionProjector as JaxQwen3OmniMoeVisionProjector,
 )
+from MaxText.multimodal import preprocessor
 from tests.multimodal_test_utils import (
     assert_all_close_jax_torch,
     copy_attention_weights_to_maxtext,
@@ -523,6 +524,77 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
           atol=1e-2,
           error_msg=f"Deep feature {i} differs",
       )
+
+
+class TextQwen3OmniPreprocessing(unittest.TestCase):
+  """Test MaxText Qwen3 Omni preprocessor against HuggingFace reference."""
+
+  def setUp(self):
+    self.base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "configs", "base.yml")
+    self.image_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "test_assets", "test_image.jpg")
+    self.video_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "test_assets", "test_video.mp4")
+    self.maxtext_config = pyconfig.initialize(
+        ["", self.base_config_path],
+        model_name="qwen3-omni-30b-a3b",
+        use_multimodal=True,
+        image_path=self.image_path,
+        video_path=self.video_path,
+        use_audio_in_video=True,
+    )
+
+  def test_preprocess_mm_data(self):
+    # MaxText preprocessor
+    mt_processor_outputs = preprocessor.preprocess_mm_data(self.maxtext_config)
+
+    # HuggingFace preprocessor
+    from transformers import Qwen3OmniMoeProcessor  # pylint: disable=import-outside-toplevel
+    from qwen_omni_utils import process_mm_info  # pylint: disable=import-outside-toplevel
+
+    MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    processor = Qwen3OmniMoeProcessor.from_pretrained(MODEL_PATH)
+    conversation = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": self.image_path},
+                {"type": "video", "video": self.video_path},
+                {"type": "text", "text": "What can you see and hear? Answer in one short sentence."},
+            ],
+        },
+    ]
+    USE_AUDIO_IN_VIDEO = True
+    text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+    audios, images, videos = process_mm_info(conversation, use_audio_in_video=USE_AUDIO_IN_VIDEO)
+    hf_processor_outputs = processor(
+        text=text,
+        audio=audios,
+        images=images,
+        videos=videos,
+        return_tensors="pt",
+        padding=True,
+        use_audio_in_video=USE_AUDIO_IN_VIDEO,
+    )
+
+    # Add assertions to check the output
+    self.assertIsNotNone(mt_processor_outputs)
+    assert np.allclose(
+        mt_processor_outputs.pixel_values,
+        np.array(hf_processor_outputs["pixel_values"]).astype(np.float32),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+    assert np.allclose(
+        mt_processor_outputs.video_values,
+        np.array(hf_processor_outputs["pixel_values_videos"]).astype(np.float32),
+        rtol=5e-2,
+        atol=5e-2,
+    )
+    assert np.allclose(
+        mt_processor_outputs.audio_values,
+        np.array(hf_processor_outputs["input_features"]).astype(np.float32),
+        rtol=1e-2,
+        atol=1e-2,
+    )
 
 
 if __name__ == "__main__":

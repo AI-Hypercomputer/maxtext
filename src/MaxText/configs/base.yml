@@ -930,6 +930,9 @@ remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision en
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding, can be multiple paths separated by comma, exp "/path/image1.jpg,/path/image2.jpg"
 image_placeholder: "<|image|>"
+video_path: "" # Local video path used for decoding, can be multiple paths separated by comma, exp "/path/video1.mp4,/path/video2.mp4"
+audio_path: "" # Local audio path used for decoding, can be multiple paths separated by comma, exp "/path/audio1.wav,/path/audio2.wav"
+use_audio_in_video: False
 posemb_type_for_vit: "learn"
 # max_num_images_per_example only applies for training when your image column is a list of images.
 # -1 means no limit, and will pad to the max possible number of images determined by sequence length.
