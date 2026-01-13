@@ -68,6 +68,10 @@ rl:
 #   model_name: llama3.1-70b
 #   HF tokenizer_path: meta-llama/Llama-3.1-70B-Instruct
 
+model_name: llama3.1-70b
+tokenizer_path: meta-llama/Llama-3.1-70B-Instruct
+load_parameters_path: gs://mazumdera-test-bucket-europe-west4/llama3.1_70b_instruct/2025-10-15/pathways/scanned/0/items/
+
 # ====== MaxText configs ======
 weight_dtype: 'bfloat16'
 attention: 'dot_product'
@@ -86,16 +90,16 @@ debug:
   rl: True
 # If True, Tunix-managed metrics measurement will be enabled. The metrics will be
 # uploaded to tensorboard.
-enable_tunix_perf_metrics: False
+enable_tunix_perf_metrics: True
 
 # ====== Training ======
-batch_size: 1
+batch_size: 16
 # Increase `batch_size` and `MAX_STEPS` for better results.
 # num_batches: 3738
 num_batches: 4  # 200
 # A batch can be split into multiple micro batches for memory management
 # and/or async sampling and training.
-micro_batch_size: -1
+micro_batch_size: 4
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200
@@ -134,10 +138,10 @@ eval_make_lst: False # If True, return a list of (question, answer, responses) d
 # === Generation during GRPO training ===
 # max Lengths for prompt and completion
 max_prefill_predict_length: 256
-max_target_length: 1024
+max_target_length: 320
 kv_cache_buffer: 256
 hbm_utilization_vllm: 0.72
-swap_space_vllm_gb: 2
+swap_space_vllm_gb: 1
 # Generation Configuration During Training
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.

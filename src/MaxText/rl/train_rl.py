@@ -408,8 +408,8 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           # Profiling
           profiler_options=profiler_options,
           # Checkpoint saving
-          checkpoint_root_directory=trainer_config.checkpoint_dir,
-          checkpointing_options=checkpointing_options,
+          # checkpoint_root_directory=trainer_config.checkpoint_dir,
+          # checkpointing_options=checkpointing_options,
       ),
       rollout_config=base_rollout.RolloutConfig(
           max_tokens_to_generate=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
