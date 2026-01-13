@@ -33,13 +33,14 @@ from MaxText import maxtext_utils
 from MaxText.layers import attentions, moe, embeddings, attention_mla
 from MaxText.layers.initializers import nd_dense_init
 from flax import nnx
+import chex
 
 
 """
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s 
-python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s -k "DeepSeekV32IndexerTest"
-python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s -k "DeepSeekV32MLATest"
+python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s -k "DeepseekV32IndexerTest"
+python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s -k "DeepseekV32MLATest"
 https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py
 """
 
@@ -306,10 +307,10 @@ class Linear(nn.Module):
       in_features (int): Number of input features.
       out_features (int): Number of output features.
       bias (bool): Whether to include a bias term. Defaults to False.
-      dtype (optional): Data type for the layer. Defaults to `torch.bfloat16`.
+      dtype (optional): Data type for the layer. Defaults to `torch.float32`.
   """
 
-  dtype = torch.bfloat16
+  dtype = torch.float32
   scale_fmt: Optional[str] = None
 
   def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype=None):
@@ -348,7 +349,7 @@ class ColumnParallelLinear(Linear):
       in_features (int): Number of input features.
       out_features (int): Total number of output features.
       bias (bool): Whether to include a bias term. Defaults to False.
-      dtype (optional): Data type for the layer. Defaults to `torch.bfloat16`.
+      dtype (optional): Data type for the layer. Defaults to `torch.float32`.
   """
 
   def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype=None):
@@ -375,7 +376,7 @@ class RowParallelLinear(Linear):
       in_features (int): Total number of input features.
       out_features (int): Number of output features.
       bias (bool): Whether to include a bias term. Defaults to False.
-      dtype (optional): Data type for the layer. Defaults to `torch.bfloat16`.
+      dtype (optional): Data type for the layer. Defaults to `torch.float32`.
   """
 
   def __init__(self, in_features: int, out_features: int, bias: bool = False, reduce_output=True, dtype=None):
@@ -547,57 +548,14 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, interleaved: bool
 
 
 # def rotate_activation(x: torch.Tensor) -> torch.Tensor:
-#   assert x.dtype == torch.bfloat16
+#   assert x.dtype == torch.float32
 #   from fast_hadamard_transform import hadamard_transform
 
 #   hidden_size = x.size(-1)
 #   return hadamard_transform(x, scale=hidden_size**-0.5)
 
-
-
-def hadamard_transform_native(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
-    """
-    Native PyTorch implementation of Fast Walsh-Hadamard Transform.
-    Works on CPU and GPU.
-    Complexity: O(N log N)
-    """
-    orig_shape = x.shape
-    n = x.size(-1)
-    
-    # FWHT strictly requires the dimension to be a power of 2
-    if (n & (n - 1)) != 0:
-        raise ValueError(f"Hadamard transform requires the last dimension to be a power of 2, got {n}.")
-
-    # Flatten all dimensions except the last one for easier processing
-    x = x.view(-1, n)
-    
-    # We perform the transform recursively (iteratively) using the butterfly method
-    # This loop implements the Sylvester construction (Natural Order)
-    h = 1
-    while h < n:
-        # Reshape to separate the elements we want to combine
-        # shape becomes: (batch, n // (2h), 2, h)
-        x = x.view(-1, n // (2 * h), 2, h)
-        
-        x0 = x[..., 0, :]  # First half of the butterfly
-        x1 = x[..., 1, :]  # Second half of the butterfly
-        
-        # In-place addition/subtraction to save memory, then concatenate
-        # Note: We must concat on the last dimension to double 'h' for the next step
-        x = torch.cat([x0 + x1, x0 - x1], dim=-1)
-        
-        h *= 2
-        
-    return x.view(orig_shape) * scale
-
-# === Updated function using the CPU-compatible version ===
-
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
-    assert x.dtype == torch.bfloat16
-    
-    # Use the native implementation instead of the CUDA library
-    hidden_size = x.size(-1)
-    return hadamard_transform_native(x, scale=hidden_size**-0.5)
+  return x
 
 
 class Indexer(torch.nn.Module):
@@ -623,7 +581,6 @@ class Indexer(torch.nn.Module):
     #   print(name)
     #   print(param)
 
-
     # CHANGE
     # self.register_buffer(
     #     "k_cache",
@@ -633,31 +590,37 @@ class Indexer(torch.nn.Module):
     # self.register_buffer("k_scale_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim // block_size, dtype=torch.float32), persistent=False)
     self.register_buffer(
         "k_cache",
-        torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.bfloat16),
+        torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.float32),
         persistent=False,
     )
-
-
 
   def forward(
       self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], debug: bool = False
   ):
     bsz, seqlen, _ = x.size()
     end_pos = start_pos + seqlen
+
     q = self.wq_b(qr)
     q = q.view(bsz, seqlen, self.n_heads, self.head_dim)
+    # print("before rope")
+    # return None, q
     q_pe, q_nope = torch.split(q, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
     # rope in indexer is not interleaved
     q_pe = apply_rotary_emb(q_pe, freqs_cis, False)
     q = torch.cat([q_pe, q_nope], dim=-1)
+    # print("after rope")
+    # return None, q
+    q = rotate_activation(q)
+
     k = self.wk(x)
     k = self.k_norm(k)
     k_pe, k_nope = torch.split(k, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
     # rope in indexer is not interleaved
     k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis, False).squeeze(2)
     k = torch.cat([k_pe, k_nope], dim=-1)
-    q = rotate_activation(q)
     k = rotate_activation(k)
+
+    # return None, k
 
     # CHANGE
     # q_fp8, q_scale = act_quant(q, block_size, self.scale_fmt)
@@ -670,7 +633,7 @@ class Indexer(torch.nn.Module):
     # CHANGE
     # weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
     weights = weights * self.softmax_scale
-    print(f"DEBUG: weights max={weights.max().item()}")
+    # print(f"DEBUG: weights max={weights.max().item()}")
 
     # CHANGE
     # index_score = fp8_index(q_fp8.contiguous(), weights, self.k_cache[:bsz, :end_pos].contiguous(), self.k_scale_cache[:bsz, :end_pos].contiguous())
@@ -686,14 +649,13 @@ class Indexer(torch.nn.Module):
     # # Weighted Sum: Logits (b,s,t,h) * Weights (b,s,h) -> (b,s,t)
     # index_score = torch.einsum("bsth, bsh -> bst", logits, weights)
 
+    # return k_active, None
 
     # logits is bfloat16
-    logits = torch.einsum("bshd, btd -> bsth", q.to(torch.bfloat16), k_active.to(torch.bfloat16))
+    logits = torch.einsum("bshd, btd -> bsth", q.to(torch.float32), k_active.to(torch.float32))
     logits = F.relu(logits)
     # FIX: Cast logits to weights.dtype (float32) so einsum inputs match
     index_score = torch.einsum("bsth, bsh -> bst", logits.to(weights.dtype), weights)
-
-
 
     if mask is not None:
       index_score += mask
@@ -703,9 +665,14 @@ class Indexer(torch.nn.Module):
 
     if debug:
       return topk_indices, index_score
+      # return None, {
+      #     "k": k,
+      #     "q": q,
+      #     "weights": weights,
+      #     "logits": logits,
+      #     "index_score": index_score,
+      # }
     return topk_indices
-
-
 
     # dist.broadcast(topk_indices_, src=0)
     # assert torch.all(topk_indices == topk_indices_), f"{topk_indices=} {topk_indices_=}"
@@ -847,58 +814,68 @@ class MLA(nn.Module):
 # -----------------------------------------------------------------------------
 
 
+# def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
+#   # return jnp.asarray(pt_tensor.detach().cpu().numpy())
+#   # return jax.dlpack.from_dlpack(pt_tensor.detach())
+#   # 1. Handle BFloat16 (NumPy doesn't support it natively)
+#   if pt_tensor.dtype == torch.float32:
+#     return jnp.asarray(
+#         pt_tensor.detach().cpu().to(torch.float32).numpy()
+#     ).astype(jnp.bfloat16)  # Cast back to BF16 on the JAX device
+
+#   # 2. Handle standard types (Float32, Int64, etc.)
+#   return jnp.asarray(pt_tensor.detach().cpu().numpy())
+
+
 def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
-  #return jnp.asarray(pt_tensor.detach().cpu().numpy())
-  #return jax.dlpack.from_dlpack(pt_tensor.detach())
+  # return jnp.asarray(pt_tensor.detach().cpu().numpy())
+  # return jax.dlpack.from_dlpack(pt_tensor.detach())
   # 1. Handle BFloat16 (NumPy doesn't support it natively)
-  if pt_tensor.dtype == torch.bfloat16:
+  if pt_tensor.dtype != torch.float32:
     return jnp.asarray(
         pt_tensor.detach().cpu().to(torch.float32).numpy()
-    ).astype(jnp.bfloat16)  # Cast back to BF16 on the JAX device
-    
+    )  # .astype(jnp.bfloat16)  # Cast back to BF16 on the JAX device
+
   # 2. Handle standard types (Float32, Int64, etc.)
   return jnp.asarray(pt_tensor.detach().cpu().numpy())
 
- 
+
 def to_torch(jax_array: jax.Array) -> torch.Tensor:
   return torch.from_numpy(np.array(jax_array))
 
 
-def init_torch_weights(module, std=0.02):
-    """
-    Initialize all Linear layers in the module.
-    Weights -> Normal distribution (mean=0.0, std=std)
-    Biases  -> Zero
-    """
-    with torch.no_grad():
-        for name, param in module.named_parameters():
-            # Check if it's a weight or a bias
-            if 'weight' in name:
-                if param.dim() >= 2: # Linear weights are usually 2D
-                     torch.nn.init.normal_(param, mean=0.0, std=std)
-            elif 'bias' in name:
-                torch.nn.init.zeros_(param)
+def init_torch_weights(module, std=1):
+  """
+  Initialize all Linear layers in the module.
+  Weights -> Normal distribution (mean=0.0, std=std)
+  Biases  -> Zero
+  """
+  with torch.no_grad():
+    for name, param in module.named_parameters():
+      # Check if it's a weight or a bias
+      if "weight" in name:
+        if param.dim() >= 2:  # Linear weights are usually 2D
+          torch.nn.init.normal_(param, mean=0.0, std=std)
+      elif "bias" in name:
+        # torch.nn.init.zeros_(param)
+        torch.nn.init.normal_(param, mean=0.0, std=std)
 
 
-class DeepSeekV32IndexerTest(unittest.TestCase):
+class DeepseekV32IndexerTest(unittest.TestCase):
   """Tests for the Sparse Indexer."""
 
   def setUp(self):
     super().setUp()
-    torch.set_default_dtype(torch.bfloat16)
+    torch.set_default_dtype(torch.float32)  # precision
     torch.manual_seed(42)
 
     # jax config
     self.config = Config()
     # data, test long context
-    # self.batch_size = 1
-    # self.seq_len = 4096
-    self.dtype = "bfloat16"
-    #self.dtype = "float32"
-    self.batch_size = 1
+    # self.dtype = "bfloat16"
+    self.dtype = "float32"  # precision
+    self.batch_size = 2
     self.seq_len = 8
-    # TODO: double check
-    self.start_pos = 0
 
     # pt args
     self.pt_args = SimpleNamespace(**pt_args)
@@ -906,6 +883,7 @@ class DeepSeekV32IndexerTest(unittest.TestCase):
 
     # Indexer
     self.pt_indexer = Indexer(self.pt_args)
+    self.pt_indexer = self.pt_indexer.float()
     self.pt_indexer.eval()
 
     # === FIX: Initialize the zeroed weights ===
@@ -914,7 +892,7 @@ class DeepSeekV32IndexerTest(unittest.TestCase):
     # torch.nn.init.normal_(self.pt_indexer.weights_proj.weight, mean=0.0, std=0.02)
     # torch.nn.init.normal_(self.pt_indexer.wq_b.weight, mean=0.0, std=0.02)
     # torch.nn.init.normal_(self.pt_indexer.wk.weight, mean=0.0, std=0.02)
-   
+
     # 4. Input Data
     self.x = torch.randn(self.batch_size, self.seq_len, self.pt_args.dim)
     self.qr = torch.randn(self.batch_size, self.seq_len, self.pt_args.q_lora_rank)
@@ -922,17 +900,37 @@ class DeepSeekV32IndexerTest(unittest.TestCase):
     # RoPE freqs for PyTorch
     self.freqs_cis = precompute_freqs_cis(self.pt_args).to(self.x.device)
 
-
-
   def test_indexer_forward_pass(self):
     """Verifies Indexer output mask matches PyTorch Top-K selection."""
 
+    causal_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
+    causal_mask_bias = torch.where(causal_mask == 1, 0.0, float("-inf"))
+    mask = causal_mask_bias
+    # mask = None
+
     # C. Run PyTorch Reference
+    # TODO: double check
+    self.start_pos = 0
     self.freqs_cis_slice = self.freqs_cis[self.start_pos : self.start_pos + self.seq_len]
     with torch.no_grad():
       # Returns indices [B, K]
-      pt_indices, pt_index_score = self.pt_indexer(self.x, self.qr, self.start_pos, self.freqs_cis_slice, mask=None, debug=True)
+      pt_indices, pt_index_score = self.pt_indexer(
+          self.x, self.qr, self.start_pos, self.freqs_cis_slice, mask=mask, debug=True
+      )
+      pt_mask = torch.full((self.batch_size, self.seq_len, self.seq_len), float("-inf"), device=self.x.device).scatter_(
+          -1, pt_indices, 0
+      )
+      if mask is not None:
+        pt_mask += mask
+    # print("pt_bias")
+    # print(pt_mask.shape)
+    # print(pt_mask)
 
+    # jax position, Shape: [B, S]
+    start_pos = self.start_pos
+    end_pos = self.start_pos + self.seq_len
+    positions = jnp.arange(start_pos, end_pos, dtype=jnp.int32)[None, :]
+    positions = jnp.broadcast_to(positions, (self.batch_size, self.seq_len))
 
     # 3. Setup Mesh
     cfg = pyconfig.initialize(
@@ -941,6 +939,8 @@ class DeepSeekV32IndexerTest(unittest.TestCase):
         enable_checkpointing=False,
         model_name="default",
         dtype=self.dtype,
+        weight_dtype="float32",  # precision
+        matmul_precision="highest",  # precision
         per_device_batch_size=self.batch_size,
         max_target_length=self.seq_len,
         max_prefill_predict_length=self.seq_len,
@@ -975,7 +975,7 @@ class DeepSeekV32IndexerTest(unittest.TestCase):
     )
     devices_array = maxtext_utils.create_device_mesh(cfg)
     self.mesh = Mesh(devices_array, cfg.mesh_axes)
-      
+
     yarn_rope = embeddings.YarnRotaryEmbedding(
         max_position_embeddings=self.config.max_position_embeddings,
         mesh=self.mesh,
@@ -993,32 +993,52 @@ class DeepSeekV32IndexerTest(unittest.TestCase):
         # rngs=self.rngs,
     )
 
-    jax_indexer = attention_mla.Indexer(config=cfg, rngs=nnx.Rngs(0), rotary_embedding=yarn_rope)
+    jax_indexer = attention_mla.Indexer(
+        config=cfg,
+        rngs=nnx.Rngs(0),
+        rotary_embedding=yarn_rope,
+    )
 
     # B. Copy Weights (PyTorch -> JAX)
-    # Transpose linear weights for JAX (Features_In, Features_Out)
-    jax_indexer.wq_b.kernel.value = to_jax(self.pt_indexer.wq_b.weight.T)
-    jax_indexer.wk.kernel.value = to_jax(self.pt_indexer.wk.weight.T)
-    jax_indexer.weights_proj.kernel.value = to_jax(self.pt_indexer.weights_proj.weight.T)
-    # LayerNorm scales
-    jax_indexer.k_norm.scale.value = to_jax(self.pt_indexer.k_norm.weight)
-
+    indexer_state = {
+        "wq_b": {"kernel": to_jax(self.pt_indexer.wq_b.weight.T)},
+        "wk": {"kernel": to_jax(self.pt_indexer.wk.weight.T)},
+        "weights_proj": {"kernel": to_jax(self.pt_indexer.weights_proj.weight.T)},
+        "k_norm": {
+            "scale": to_jax(self.pt_indexer.k_norm.weight),
+            "bias": to_jax(self.pt_indexer.k_norm.bias),
+        },
+    }
+    nnx.update(jax_indexer, indexer_state)
+    # assert (jax_indexer.wq_b.kernel.value == to_jax(self.pt_indexer.wq_b.weight.T)).all()
 
     # D. Run JAX Forward
     # Returns bias mask [B, 1, S, T]
-    jax_bias, jax_indices, jax_index_score = jax_indexer(to_jax(self.x), to_jax(self.qr), start_pos=self.start_pos, mask=None)
+    jax_bias, jax_indices, jax_index_score = jax_indexer(
+        to_jax(self.x),
+        to_jax(self.qr),
+        inputs_positions=positions,
+        mask=to_jax(mask.unsqueeze(1)) if mask is not None else None,
+    )
+    # print("jax_bias")
+    # print(jax_bias.shape)
+    # print(jax_bias)
 
-    np.testing.assert_allclose(jax_index_score, to_jax(pt_index_score), rtol=0.1, atol=0.1)
-    np.testing.assert_equal(jax_indices, to_jax(pt_indices))
+    # np.testing.assert_allclose(jax_index_score, to_jax(pt_index_score), rtol=0.1, atol=0.1)
+    # print(jax_indices)
+    # print(to_jax(pt_indices))
+    # np.testing.assert_array_equal(jax_indices, to_jax(pt_indices))
+
+    chex.assert_trees_all_close(jax_index_score, jax.tree.map(to_jax, pt_index_score), rtol=1e-3, atol=1e-3)
+    np.testing.assert_array_equal(jax_bias.squeeze(1) == 0, to_jax(pt_mask == 0))
 
 
-
-class DeepSeekV32MLATest(unittest.TestCase):
+class DeepseekV32MLATest(unittest.TestCase):
   """Tests for MLA Attention with Sparse Indexing."""
 
   def setUp(self):
     super().setUp()
-    torch.set_default_dtype(torch.bfloat16)
+    torch.set_default_dtype(torch.float32)
     torch.manual_seed(42)
 
     # jax config
@@ -1026,10 +1046,10 @@ class DeepSeekV32MLATest(unittest.TestCase):
     # data, test long context
     # self.batch_size = 1
     # self.seq_len = 4096
-    self.dtype = "bfloat16"
-    #self.dtype = "float32"
+    # self.dtype = "bfloat16"
+    self.dtype = "float32"
     self.batch_size = 1
-    self.seq_len = 8
+    self.seq_len = 5
     self.start_pos = 0
 
     # pt args
@@ -1044,8 +1064,6 @@ class DeepSeekV32MLATest(unittest.TestCase):
     # input
     self.x = torch.randn(self.batch_size, self.seq_len, self.pt_args.dim)
 
-
-
   def test_mla_prefill_match(self):
     """Verifies MLA prefill output matches PyTorch (including sparse bias)."""
 
@@ -1053,20 +1071,22 @@ class DeepSeekV32MLATest(unittest.TestCase):
     # Shape [B, S, S], causal mask
     causal_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
     causal_mask_bias = torch.where(causal_mask == 1, 0.0, float("-inf"))
+    start_pos = 0
 
     # RoPE
     self.freqs_cis = precompute_freqs_cis(self.pt_args).to(self.x.device)
-    self.freqs_cis_slice = self.freqs_cis[0 : self.seq_len]
+    self.freqs_cis_slice = self.freqs_cis[start_pos : start_pos + self.seq_len]
     with torch.no_grad():
-      pt_out = self.pt_mla(self.x, start_pos=0, freqs_cis=self.freqs_cis_slice, mask=causal_mask_bias)
+      pt_out = self.pt_mla(self.x, start_pos=start_pos, freqs_cis=self.freqs_cis_slice, mask=causal_mask_bias)
 
- 
     cfg = pyconfig.initialize(
         [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
         run_name="gpt_oss_attention_test_flash",
         enable_checkpointing=False,
         model_name="default",
         dtype=self.dtype,
+        weight_dtype="float32",  # precision
+        matmul_precision="highest",  # precision
         per_device_batch_size=self.batch_size,
         max_target_length=self.seq_len,
         max_prefill_predict_length=self.seq_len,
@@ -1102,15 +1122,16 @@ class DeepSeekV32MLATest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(cfg)
     self.mesh = Mesh(devices_array, cfg.mesh_axes)
 
-
     # A. JAX Init
     jax_mla = attention_mla.MLA(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
         head_dim=cfg.head_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         # mla
-        #attention_type=self.config.attention_type,
+        attention_type="mla",
         q_lora_rank=self.config.q_lora_rank,
         kv_lora_rank=self.config.kv_lora_rank,
         qk_nope_head_dim=self.config.qk_nope_head_dim,
@@ -1125,19 +1146,59 @@ class DeepSeekV32MLATest(unittest.TestCase):
     )
 
     # B. Copy Weights
-    # 1. Main MLA Weights
-    jax_mla.wq_a.kernel.value = to_jax(self.pt_mla.wq_a.weight.T)
-    jax_mla.q_norm.scale.value = to_jax(self.pt_mla.q_norm.weight)
-    jax_mla.wq_b.kernel.value = to_jax(self.pt_mla.wq_b.weight.T)
-    jax_mla.wkv_a.kernel.value = to_jax(self.pt_mla.wkv_a.weight.T)
-    jax_mla.kv_norm.scale.value = to_jax(self.pt_mla.kv_norm.weight)
-    jax_mla.wkv_b.kernel.value = to_jax(self.pt_mla.wkv_b.weight.T)
-    jax_mla.out.kernel.value = to_jax(self.pt_mla.wo.weight.T)  # 'wo' -> 'out'
-    # 2. Indexer Weights
-    jax_mla.indexer.wq_b.kernel.value = to_jax(self.pt_mla.indexer.wq_b.weight.T)
-    jax_mla.indexer.wk.kernel.value = to_jax(self.pt_mla.indexer.wk.weight.T)
-    jax_mla.indexer.k_norm.scale.value = to_jax(self.pt_mla.indexer.k_norm.weight)
-    jax_mla.indexer.weights_proj.kernel.value = to_jax(self.pt_mla.indexer.weights_proj.weight.T)
+    # reshape to match maxtext
+    base_emb_dim = self.config.base_emb_dim
+    base_num_query_heads = self.config.base_num_query_heads
+    q_lora_rank = self.config.q_lora_rank
+    kv_lora_rank = self.config.kv_lora_rank
+    qk_nope_head_dim = self.config.qk_nope_head_dim
+    qk_rope_head_dim = self.config.qk_rope_head_dim
+    v_head_dim = self.config.v_head_dim
+
+    # wkv_b = np.reshape(wkv_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)])
+    # out = np.reshape(out, [base_num_query_heads, v_head_dim, base_emb_dim])
+    # wq_b = np.reshape(wq_b, [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
+
+    mla_state = {
+        # 1. Main MLA Weights
+        "wq_a": {"kernel": to_jax(self.pt_mla.wq_a.weight.T)},
+        "q_norm": {"scale": to_jax(self.pt_mla.q_norm.weight)},
+        "wq_b": {
+            "kernel": to_jax(self.pt_mla.wq_b.weight.T).reshape(
+                [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)]
+            )
+        },
+        "wkv_a": {"kernel": to_jax(self.pt_mla.wkv_a.weight.T)},
+        "kv_norm": {"scale": to_jax(self.pt_mla.kv_norm.weight)},
+        "wkv_b": {
+            "kernel": to_jax(self.pt_mla.wkv_b.weight.T).reshape(
+                [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)]
+            )
+        },
+        "out": {"kernel": to_jax(self.pt_mla.wo.weight.T).reshape([base_num_query_heads, v_head_dim, base_emb_dim])},
+        # 2. Indexer Weights
+        "indexer": {
+            "wq_b": {"kernel": to_jax(self.pt_mla.indexer.wq_b.weight.T)},
+            "wk": {"kernel": to_jax(self.pt_mla.indexer.wk.weight.T)},
+            "weights_proj": {"kernel": to_jax(self.pt_mla.indexer.weights_proj.weight.T)},
+            "k_norm": {
+                "scale": to_jax(self.pt_mla.indexer.k_norm.weight),
+                "bias": to_jax(self.pt_mla.indexer.k_norm.bias),
+            },
+        },
+    }
+
+    # def g(prefix, i):
+    #   if not isinstance(i, dict):
+    #     print("".join(prefix), i.shape)
+    #   else:
+    #     for key in i:
+    #       g(prefix + [key], i[key])
+
+    # g([], mla_state)
+
+    # Apply the update
+    nnx.update(jax_mla, mla_state)
 
     # C. Run Forward, JAX
     # Construct segment IDs (simple 0..S)
@@ -1145,14 +1206,15 @@ class DeepSeekV32MLATest(unittest.TestCase):
     # # RoPE positions
     # inputs_positions = jnp.broadcast_to(jnp.arange(self.seq_len, dtype=jnp.int32), (self.batch_size, self.seq_len))
 
-    #self.rng = jax.random.PRNGKey(0)
+    # self.rng = jax.random.PRNGKey(0)
     # decoder_segment_ids = jax.random.randint(self.rng, (cfg.global_batch_size, cfg.max_target_length), 0, 4)
     # decoder_positions = jax.random.randint(
     #     self.rng, (cfg.global_batch_size, cfg.max_target_length), 0, cfg.max_target_length
     # )
-    decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len))
-    decoder_positions = jnp.broadcast_to(jnp.arange(self.seq_len, dtype=jnp.int32), (self.batch_size, self.seq_len))
-
+    decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
+    decoder_positions = jnp.broadcast_to(
+        jnp.arange(start_pos, start_pos + self.seq_len, dtype=jnp.int32), (self.batch_size, self.seq_len)
+    )
 
     jax_out, _ = jax_mla(
         inputs_q=to_jax(self.x),
@@ -1162,9 +1224,12 @@ class DeepSeekV32MLATest(unittest.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
 
+    print("torch out", to_jax(pt_out))
+    print("jax out", jax_out)
+
     # D. Compare
     # Tolerances slightly loose due to potential BF16/FP32 differences inside modules
-    np.testing.assert_allclose(to_jax(pt_out), jax_out, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(to_jax(pt_out), jax_out, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":

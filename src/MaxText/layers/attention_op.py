@@ -834,7 +834,7 @@ class AttentionOp(nnx.Module):
     length = query.shape[-3]
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
 
-    if sparse_bias and self.attention_kernel != "dot_product":
+    if sparse_bias is not None and self.attention_kernel != "dot_product":
       raise NotImplementedError
 
     if use_ragged_attention and model_mode == MODEL_MODE_AUTOREGRESSIVE:
@@ -1648,7 +1648,8 @@ class AttentionOp(nnx.Module):
       # Ensure shapes align or broadcast.
       # attn_weights: [B, H, G, Q_Len, KV_Len] or similar
       # sparse_bias:  [B, 1, Q_Len, KV_Len] (usually)
-      attn_weights = attn_weights + sparse_bias
+      # attn_weights = attn_weights + sparse_bias
+      attn_weights = apply_mask_to_logits(attn_weights, sparse_bias)
 
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))

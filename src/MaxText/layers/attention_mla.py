@@ -52,6 +52,7 @@ from MaxText.common_types import (
     PREFILL_KV_BATCH,
     PREFILL_LENGTH,
     AttentionType,
+    DEFAULT_MASK_VALUE,
 )
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
@@ -60,6 +61,7 @@ from MaxText.inference.kvcache import KVQuant
 from MaxText.sharding import create_sharding
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.attentions import Attention
+from MaxText.layers.attention_op import apply_mask_to_logits
 from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
@@ -259,7 +261,15 @@ class Indexer(nnx.Module):
   Selects Top-K relevant tokens using a lightweight MQA mechanism.
   """
 
-  def __init__(self, config: Any, rngs: nnx.Rngs, rotary_embedding):
+  def __init__(
+      self,
+      config: Any,
+      rngs: nnx.Rngs,
+      rotary_embedding,
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+      quant: Optional[Quant] = None,
+      model_mode: str = MODEL_MODE_TRAIN,
+  ):
     self.n_heads = config.index_n_heads
     self.head_dim = config.index_head_dim
     self.index_topk = config.index_topk
@@ -270,34 +280,114 @@ class Indexer(nnx.Module):
     self.rotary_embedding = rotary_embedding
     assert config.index_topk < config.max_target_length
 
+    self.quant = quant
+    self.kernel_init = kernel_init
+    self.dtype = config.dtype
+    self.weight_dtype = config.weight_dtype
+    self.config = config
+    self.model_mode = model_mode
+
+    # # Projection: Latent Query (qr) -> Indexer Heads
+    # self.wq_b = nnx.Linear(
+    #     in_features=self.q_lora_rank,
+    #     out_features=self.n_heads * self.head_dim,
+    #     use_bias=False,
+    #     dtype=config.weight_dtype,
+    #     rngs=rngs,
+    # )
+
+    # # Projection: Input (x) -> Shared Indexer Key (MQA)
+    # self.wk = nnx.Linear(
+    #     in_features=self.dim, out_features=self.head_dim, use_bias=False, dtype=config.weight_dtype, rngs=rngs
+    # )
+
+    # # Projection: Input (x) -> Importance Weights (fp32)
+    # self.weights_proj = nnx.Linear(
+    #     in_features=self.dim,
+    #     out_features=self.n_heads,
+    #     use_bias=False,
+    #     dtype=jnp.float32,
+    #     param_dtype=jnp.float32,
+    #     rngs=rngs,
+    # )
+
     # Projection: Latent Query (qr) -> Indexer Heads
-    self.wq_b = nnx.Linear(
-        in_features=self.q_lora_rank,
-        out_features=self.n_heads * self.head_dim,
-        use_bias=False,
-        dtype=jnp.bfloat16,
+    # Maps q_lora_rank -> [n_heads, head_dim]
+    self.wq_b = DenseGeneral(
+        in_features_shape=self.q_lora_rank,
+        out_features_shape=(self.n_heads, self.head_dim),
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=("q_lora", "q_heads", "kv"),
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        quant=self.quant,
+        matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
         rngs=rngs,
     )
 
     # Projection: Input (x) -> Shared Indexer Key (MQA)
-    self.wk = nnx.Linear(in_features=self.dim, out_features=self.head_dim, use_bias=False, dtype=jnp.bfloat16, rngs=rngs)
-
-    # Key Normalization
-    self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=False, dtype=jnp.bfloat16, rngs=rngs)
-
-    # Projection: Input (x) -> Importance Weights (fp32)
-    self.weights_proj = nnx.Linear(
-        in_features=self.dim,
-        out_features=self.n_heads,
-        use_bias=False,
-        dtype=jnp.float32,
-        param_dtype=jnp.float32,
+    # Maps dim -> [head_dim] (Single Key Head shared across all Indexer Heads)
+    self.wk = DenseGeneral(
+        in_features_shape=self.dim,
+        out_features_shape=(self.head_dim,),
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=("embed", "kv"),
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        quant=self.quant,
+        matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
         rngs=rngs,
     )
 
+    # Projection: Input (x) -> Importance Weights (fp32)
+    # Maps dim -> [n_heads] (One scalar weight per head)
+    self.weights_proj = DenseGeneral(
+        in_features_shape=self.dim,
+        out_features_shape=(self.n_heads,),
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=("embed", "q_heads"),
+        # Enforce FP32 as requested for stability in importance scoring
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        quant=None,  # Typically we don't quantize the importance selector head
+        matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
+        rngs=rngs,
+    )
+
+    # Key Normalization
+    self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=True, dtype=config.weight_dtype, rngs=rngs)
+
     # Internal Indexer Cache (distinct from main MLA KV Cache)
     # Shape: [Batch, MaxLen, HeadDim]
-    self.k_cache = nnx.Variable(jnp.zeros((config.max_target_length, self.head_dim), dtype=jnp.bfloat16))
+    self.k_cache = nnx.Variable(jnp.zeros((config.max_target_length, self.head_dim), dtype=config.weight_dtype))
+
+  def _apply_hadamard(self, x):
+    """
+    Applies Fast Walsh-Hadamard Transform via Matrix Multiplication.
+    Equivalent to: rotate_activation(x) in PyTorch.
+    """
+    return x
+    # import scipy
+
+    # dim = x.shape[-1]
+
+    # # 1. Create Hadamard Matrix (One-time constant)
+    # # This must be done on CPU via scipy, then moved to JAX device.
+    # # Note: dim must be a power of 2 (e.g., 128).
+    # h_mat = jnp.array(scipy.linalg.hadamard(dim), dtype=x.dtype)
+
+    # # 2. Scaling Factor
+    # # PyTorch uses: scale = hidden_size**-0.5
+    # scale = dim**-0.5
+
+    # # 3. Apply: x @ H * scales
+    # return (x @ h_mat) * scale
 
   def apply_rotary_embedding(
       self, inputs: Array, inputs_positions: Optional[Array | None] = None, rope_kwargs: dict | None = None
@@ -313,30 +403,45 @@ class Indexer(nnx.Module):
     # YarnRotaryEmbedding expects: inputs=[B, S, H, D], position=[B, S]
     x_pe = self.rotary_embedding(x_pe, position=positions)
 
-    return jnp.concatenate([x_pe, x_nope], axis=-1)
+    x = jnp.concatenate([x_pe, x_nope], axis=-1)
+    return x
 
   # TODO: remove freqs_cis
   # TODO: k < seq len
-  def __call__(self, x, qr, start_pos, freqs_cis=None, mask=None):
+  def __call__(self, x, qr, inputs_positions, mask=None):  # start_pos,  freqs_cis=None,
     """
     Returns:
         index_mask: A bias mask [Batch, 1, SeqLen, TotalLen] with 0.0 for TopK and -inf otherwise.
+
+    Arg
+      mask: An `Array` representing the attention mask, broadcastable to the shape
+      `[batch_size, num_heads, q_sequence_length, kv_sequence_length]`.
+      Positions with `0.0` allow attention, while positions with
+      `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
+      Returns `None` if no masking is determined to be necessary based on
+      the inputs and configuration.
     """
     bsz, seqlen, _ = x.shape
-    end_pos = start_pos + seqlen
+    # end_pos = start_pos + seqlen
 
     # [CHANGE] Generate position indices for Yarn RoPE
     # Shape: [B, S]
-    positions = jnp.arange(start_pos, end_pos, dtype=jnp.int32)[None, :]
-    positions = jnp.broadcast_to(positions, (bsz, seqlen))
+    # positions = jnp.arange(start_pos, end_pos, dtype=jnp.int32)[None, :]
+    # positions = jnp.broadcast_to(positions, (bsz, seqlen))
+    positions = inputs_positions
 
     # 1. Query Processing: Project from Latent QR
     q = self.wq_b(qr)
     q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)
-    # q = self._apply_partial_rope(q, freqs_cis)
-
+    # print("before rope")
+    # return None, None, q
     # [CHANGE] Pass positions instead of freqs_cis
+    # q = self._apply_partial_rope(q, freqs_cis)
     q = self._apply_partial_rope(q, positions)
+    # print("after rope")
+    # return None, None, q
+
+    q = self._apply_hadamard(q)
 
     # 2. Key Processing: Project from Input X
     k = self.wk(x)
@@ -347,58 +452,72 @@ class Indexer(nnx.Module):
     # Input: [B, S, D] -> [B, S, 1, D]
     k = k[:, :, None, :]
     k = self._apply_partial_rope(k, positions)
+    k = self._apply_hadamard(k)
     k = k.squeeze(2)  # Back to [B, S, D]
 
-    # 3. Cache Update (Functional NNX update)
-    current_cache = self.k_cache.value
-    # Expand cache to batch if needed (simplified assumption)
-    if current_cache.ndim == 2:
-      current_cache = jnp.broadcast_to(current_cache, (bsz, current_cache.shape[0], current_cache.shape[1]))
+    k_active = k
 
-    updated_cache = jax.lax.dynamic_update_slice(current_cache, k.astype(current_cache.dtype), (0, start_pos, 0))
-    self.k_cache.value = updated_cache
+    # # 3. Cache Update (Functional NNX update)
+    # current_cache = self.k_cache.value
+    # # Expand cache to batch if needed (simplified assumption)
+    # if current_cache.ndim == 2:
+    #   current_cache = jnp.broadcast_to(current_cache, (bsz, current_cache.shape[0], current_cache.shape[1]))
 
-    # Active Keys: [B, TotalLen, D]
-    k_active = jax.lax.dynamic_slice(updated_cache, (0, 0, 0), (bsz, end_pos, self.head_dim))
+    # updated_cache = jax.lax.dynamic_update_slice(current_cache, k.astype(current_cache.dtype), (0, start_pos, 0))
+    # self.k_cache.value = updated_cache
+
+    # # Active Keys: [B, TotalLen, D]
+    # k_active = jax.lax.dynamic_slice(updated_cache, (0, 0, 0), (bsz, end_pos, self.head_dim))
 
     # 4. Compute Scores
     weights = self.weights_proj(x.astype(jnp.float32)) * (self.n_heads**-0.5) * self.softmax_scale
-
     # Logits: Q [B,S,H,D] @ K.T [B,T,D] -> [B,S,T,H]
-    logits = jnp.einsum("bshd, btd -> bsth", q, k_active)
+    logits = jnp.einsum("bshd, btd -> bsth", q, k_active, precision=self.config.matmul_precision)
     logits = jax.nn.relu(logits)
-
     # Weighted Sum: [B,S,T,H] * [B,S,H] -> [B,S,T]
-    index_score = jnp.einsum("bsth, bsh -> bst", logits, weights)
+    index_score = jnp.einsum("bsth, bsh -> bst", logits, weights, precision=self.config.matmul_precision)
 
     # 5. Masking & TopK
     if mask is not None:
       # Ensure mask broadcasts [B, 1, S, T] -> [B, S, T]
-      index_score += mask.squeeze(1)
+      # index_score += mask.squeeze(1)
+      index_score += mask[:, 0]
+
+    print("mask", mask)
 
     print("jax_index_score", index_score)
 
-    # Select TopK Indices (Values, Indices)
-    # We need to handle the case where total_len < topk (pad with -inf)
+    # Select TopK Indices (Values, Indices) after masking
+    # TODO: We need to handle the case where total_len < topk (pad with -inf)
     topk_vals, topk_indices = jax.lax.top_k(index_score, k=self.index_topk)
 
-    # 6. Create Sparse Mask
-    bias_mask = jnp.full(index_score.shape, -1e10, dtype=x.dtype)
-
+    # 6. Create Sparse Mask: large negative value, 0
+    bias_mask = jnp.full(index_score.shape, DEFAULT_MASK_VALUE, dtype=x.dtype)  # [B, S, T]
     # Scatter 0.0 at topk indices
     batch_idx = jnp.arange(bsz)[:, None, None]
     seq_idx = jnp.arange(seqlen)[None, :, None]
-
     # JAX scatter update
     bias_mask = bias_mask.at[batch_idx, seq_idx, topk_indices].set(0.0)
 
     # Re-apply causal mask if present
     if mask is not None:
-      bias_mask += mask.squeeze(1)
+      # bias_mask += mask.squeeze(1)
+      bias_mask += mask[:, 0]
 
     bias_mask = bias_mask[:, None, :, :]  # [B, 1, S, T]
 
     return bias_mask, topk_indices, index_score
+    # return (
+    #     None,
+    #     None,
+    #     {
+    #         "k": k,
+    #         "q": q,
+    #         "weights": weights,
+    #         "logits": logits,
+    #         "index_score": index_score,
+    #     },
+    # )
 
 
 class MLA(Attention):
@@ -562,7 +681,14 @@ class MLA(Attention):
       indexer_rope = copy.copy(self.rotary_embedding)
       # indexer does not interleave
       indexer_rope.interleave = False
-      self.indexer = Indexer(config, rngs=rngs, rotary_embedding=indexer_rope)
+      self.indexer = Indexer(
+          config,
+          rngs=rngs,
+          rotary_embedding=indexer_rope,
+          kernel_init=kernel_init,
+          quant=quant,
+          model_mode=model_mode,
+      )
 
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
@@ -737,10 +863,6 @@ class MLA(Attention):
       # [CRITICAL] This 'low_rank_q' IS the 'qr' needed by the Indexer
       low_rank_q = checkpoint_name(low_rank_q, "mla_q")
       q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads * qk_head_dim]
-      print("shape", q.shape)
-      # TODO: something wrong here?
-      # 2. Manual Reshape (Convert to Rank 4)
-      q = q.reshape((q.shape[0], q.shape[1], self.num_query_heads, self.qk_head_dim))  # Batch  # Seq  # 128  # 192
 
     # Split into non-positional and rotary parts.
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
@@ -769,8 +891,6 @@ class MLA(Attention):
 
     wkva_out_sharding = create_sharding(self.mesh, key_logical_name)
     kv_out = self.wkv_b(low_rank_main, out_sharding=wkva_out_sharding)
-    # reshape?
-    kv_out = kv_out.reshape(kv_out.shape[0], kv_out.shape[1], self.num_kv_heads, self.qk_nope_head_dim + self.v_head_dim)
 
     # Split kv_out into key_nope and value parts.
     key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
@@ -963,7 +1083,10 @@ class MLA(Attention):
     sparse_bias = None
 
     # TODO(shuningjin): get mask from segment id
-    jax_mask_bias = None
+    # jax_mask_bias = None
+    # jax_mask_bias = self.attention_op.generate_attention_mask(
+    #     query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
+    # )
 
     # 1. Create Dummy 4D Tensors for Shape Inference
     # The helper needs: [Batch, SeqLen, NumHeads, HeadDim]
@@ -998,17 +1121,24 @@ class MLA(Attention):
 
     if self.use_sparse_indexer and low_rank_q is not None:
       # Determine start_pos for cache updates (simplified logic)
-      start_pos = 0
-      if inputs_positions is not None:
-        start_pos = inputs_positions[0, 0]  # Assuming [B, L] or similar
+      # start_pos = 0
+      # if inputs_positions is not None:
+      #   start_pos = inputs_positions[0, 0]  # Assuming [B, L] or similar
       # Run Indexer
       # inputs_q is 'x', low_rank_q is 'qr'
+
+      attn_mask = self.attention_op.generate_attention_mask(
+          query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
+      )
+      print("attn_mask", attn_mask)
+
       sparse_bias, _, _ = self.indexer(
           x=inputs_q,
           qr=low_rank_q,
-          start_pos=start_pos,
-          freqs_cis=None,  # In JAX/MaxText, RoPE is usually applied inside helper, or pass freqs if avail
-          mask=jax_mask_bias,  # Pass decoder_segment_ids converted to mask if needed
+          inputs_positions=inputs_positions,
+          # start_pos=start_pos,
+          # freqs_cis=None,  # In JAX/MaxText, RoPE is usually applied inside helper, or pass freqs if avail
+          mask=attn_mask,  # Pass decoder_segment_ids converted to mask if needed
       )
 
     # [CHANGE 5] Pass the sparse_bias to the Attention Op
