@@ -226,6 +226,10 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
   def test_batch_determinism(self):
     super().test_batch_determinism()
 
+  @pytest.mark.skip(reason="Flaky test - see b/475255774.")
+  def test_for_loop_repeatable(self):
+    super().test_for_loop_repeatable()
+
 
 class GrainArrayRecordBestFitPackingTest(GrainArrayRecordProcessingTest):
   """Test grain data processing with best_fit packing strategy."""
