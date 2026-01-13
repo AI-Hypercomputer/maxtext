@@ -43,7 +43,7 @@ install_maxtext_github_deps
 
 ```sh
 # -- Model configuration --
-export MODEL_NAME=<model name> # e.g., 'llama2-7b'
+export MODEL_NAME=<model name> # e.g., 'llama3.1-8b'
 export MODEL_TOKENIZER=<tokenizer path> # e.g., 'meta-llama/Llama-3.1-8B-Instruct'
 export HF_TOKEN=<Hugging Face access token>
 
