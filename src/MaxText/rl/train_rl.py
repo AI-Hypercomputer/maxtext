@@ -240,7 +240,7 @@ def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices)
     )
   rollout_kwargs["tensor_parallel_size"] = tp
   rollout_kwargs["data_parallel_size"] = dp
-  rollout_kwargs["rollout_vllm_async_scheduling"] = True
+  rollout_kwargs["rollout_vllm_async_scheduling"] = False
 
   return rollout_kwargs
 
