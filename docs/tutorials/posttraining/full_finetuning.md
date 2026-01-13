@@ -69,6 +69,7 @@ If your model checkpoint is from Hugging Face, you need to run a conversion scri
 
 ```sh
 export MODEL_CKPT_DIRECTORY=${BASE_OUTPUT_DIRECTORY}/maxtext-checkpoint
+export MODEL_CKPT_PATH=${MODEL_CKPT_DIRECTORY}/0/items
 ```
 
 2. **Run the Conversion Script:** Execute the following command that downloads the specified Hugging Face model and converts its weights into the MaxText format. The conversion script only supports official versions of models from Hugging Face. To see the specific models and versions currently supported for conversion, please refer to the `HF_IDS` dictionary in the MaxText utility file [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/utils.py).
@@ -106,7 +107,7 @@ The above will download the c4 dataset to the GCS BUCKET.
 
 ## Sample Full Fine tuning script
 
-Below is a sample training script with an existing MaxText checkpoint (Option 1: Using an existing MaxText checkpoint).
+Below is a sample training script.
 
 ```sh
 python3 -m MaxText.train \
@@ -114,22 +115,6 @@ python3 -m MaxText.train \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   load_parameters_path=${MODEL_CKPT_PATH} \
-  model_name=${MODEL_NAME} \
-  dataset_path=${DATASET_GCS_BUCKET} \
-  async_checkpointing=False  \
-  tokenizer_path=${MODEL_TOKENIZER} \
-  hf_access_token=${HF_TOKEN} \
-  steps=10 per_device_batch_size=1
-```
-
-Below is a sample training script with a converted a Hugging Face checkpoint (Option 2: Converting a Hugging Face checkpoint).
-
-```sh
-python3 -m MaxText.train \
-  src/MaxText/configs/base.yml \
-  run_name=${RUN_NAME} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  load_parameters_path=${MODEL_CKPT_DIRECTORY}/0/items \
   model_name=${MODEL_NAME} \
   dataset_path=${DATASET_GCS_BUCKET} \
   async_checkpointing=False  \
