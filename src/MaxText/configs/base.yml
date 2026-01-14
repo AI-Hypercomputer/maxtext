@@ -582,8 +582,8 @@ sft_train_on_completion_only: False
 dataset_type: tfds
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_name: 'c4/en:3.0.1'
-eval_dataset_name: 'c4/en:3.0.1'
+dataset_name: 'c4/en:3.1.0'
+eval_dataset_name: 'c4/en:3.1.0'
 train_split: 'train'
 eval_split: 'validation'
 # for HuggingFace input pipeline (dataset_type=hf)
