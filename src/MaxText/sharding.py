@@ -85,7 +85,7 @@ def remove_size_one_mesh_axis(spec, mesh):
     return None
   new_spec = []  # type: ignore
   for s in spec:
-    if s is None:
+    if s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)  # type: ignore
     elif isinstance(s, tuple):
       new_spec.append(tuple(i for i in s if mesh.shape[i] != 1))
