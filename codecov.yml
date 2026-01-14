@@ -38,7 +38,6 @@ ignore:
   - "src/MaxText/inference"
   - "src/MaxText/inference_mlperf"
   - "src/MaxText/scratch_code"
-  - "src/MaxText/test_assets"
 
 
 flags:

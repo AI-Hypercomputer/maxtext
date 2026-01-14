@@ -19,7 +19,7 @@ may fail on different versions like v5p-8, v6e-8
 TODO: b/413146740 - Match logits on other TPU versions
 
 Runs GRPO trainer unit test correctness with golden logits generated
-  from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py
+  from maxtext/tests/assets/logits_generation/generate_grpo_golden_logits.py
 
 Usage:
   pytest tests/grpo_trainer_correctness_test.py
@@ -57,7 +57,11 @@ from MaxText.experimental.rl import grpo_utils
 
 def get_golden_data(config):
   """Get the golden data for GrpoTrainer from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py."""
-  input_golden_data_path = os.path.join(MAXTEXT_TEST_ASSETS_ROOT, f"golden_data_grpo_{config.model_name}.jsonl")
+  input_golden_data_path = os.path.join(
+      MAXTEXT_TEST_ASSETS_ROOT,
+      "golden_logits",
+      f"golden_data_grpo_{config.model_name}.jsonl",
+  )
   print(f"Loading {input_golden_data_path}")
   with jsonlines.open(input_golden_data_path, "r") as reader:
     return next(iter(reader))

@@ -17,10 +17,10 @@
 Usage:
 
 To check correctness for Llama2-7b:
-  python3 -m MaxText.scratch_code.generate_sft_golden_data
+  python3 -m tests.assets.logits_generation.generate_sft_golden_data
 
 To check correctness for other models:
-  python3 -m MaxText.scratch_code.generate_sft_golden_data
+  python3 -m tests.assets.logits_generation.generate_sft_golden_data \
     --model-name=deepseek2-16b \
     --tokenizer-path=deepseek-ai/DeepSeek-V2-Lite-chat \
     --model-ckpt-path=<MaxText-compatible checkpoint for the model>

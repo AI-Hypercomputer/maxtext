@@ -83,7 +83,7 @@ jobs:
           python3 --version
           python3 -m pip freeze
       - name: Copy test assets files
-        run : gcloud storage cp gs://maxtext-test-assets/* src/MaxText/test_assets
+        run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
         run: |
           if [ "${{ inputs.is_scheduled_run }}" = "true" ]; then
@@ -93,7 +93,7 @@ jobs:
           fi
           export MAXTEXT_REPO_ROOT=$(pwd)
           export MAXTEXT_ASSETS_ROOT=$(pwd)/src/MaxText/assets
-          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
+          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # TODO(b/454659463): Enable test_default_hlo_match after volume mount is supported.
           .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0

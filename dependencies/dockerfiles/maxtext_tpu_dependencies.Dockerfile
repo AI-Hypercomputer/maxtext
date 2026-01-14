@@ -33,7 +33,7 @@ ARG DEVICE
 ENV ENV_DEVICE=$DEVICE
 
 ENV MAXTEXT_ASSETS_ROOT=/deps/src/MaxText/assets
-ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/src/MaxText/test_assets
+ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/tests/assets
 ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
 ENV MAXTEXT_REPO_ROOT=/deps
 
@@ -59,7 +59,7 @@ COPY . .
 ARG INCLUDE_TEST_ASSETS=false
 RUN if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
         echo "Downloading test assets from GCS..."; \
-        if ! gcloud storage cp -r gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT}"; then \
+        if ! gcloud storage cp -r gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT}/golden_logits"; then \
         echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
         fi; \
     fi

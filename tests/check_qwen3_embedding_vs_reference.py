@@ -531,8 +531,8 @@ class TextQwen3OmniPreprocessing(unittest.TestCase):
 
   def setUp(self):
     self.base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "configs", "base.yml")
-    self.image_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "test_assets", "test_image.jpg")
-    self.video_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "test_assets", "test_video.mp4")
+    self.image_path = os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "test_image.jpg")
+    self.video_path = os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "test_video.mp4")
     self.maxtext_config = pyconfig.initialize(
         ["", self.base_config_path],
         model_name="qwen3-omni-30b-a3b",
