@@ -27,6 +27,7 @@ from absl import app
 from jax.tree_util import tree_flatten_with_path
 from jax.sharding import NamedSharding, PartitionSpec
 from MaxText import pyconfig
+from MaxText.globals import MAXTEXT_REPO_ROOT
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
 from MaxText.layers import models
 
@@ -267,7 +268,7 @@ def main(argv: Sequence[str]) -> None:
   validate_config(config)
 
   json_path = (
-      f"sharding_info/{config.model_name}/"
+      f"{MAXTEXT_REPO_ROOT}/tests/utils/sharding_info/{config.model_name}/"
       f"{config.compile_topology}/"
       f"slice_{config.compile_topology_num_slices}/"
       f"named_shardings.json"

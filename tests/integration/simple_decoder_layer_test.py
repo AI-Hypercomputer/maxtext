@@ -21,6 +21,8 @@ import pytest
 from MaxText.train import main as train_main
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
 
+pytestmark = pytest.mark.integration_test
+
 
 class SimpleDecoderLayerTest(unittest.TestCase):
 

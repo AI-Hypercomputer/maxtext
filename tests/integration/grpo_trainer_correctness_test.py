@@ -22,7 +22,7 @@ Runs GRPO trainer unit test correctness with golden logits generated
   from maxtext/tests/assets/logits_generation/generate_grpo_golden_logits.py
 
 Usage:
-  pytest tests/grpo_trainer_correctness_test.py
+  pytest tests/integration/grpo_trainer_correctness_test.py
 """
 
 import os
@@ -148,6 +148,7 @@ class GrpoTrainerTest(unittest.TestCase):
     )
 
   @pytest.mark.skip(reason="Logit output test fragile, failing on jax upgrade to 0.6.2 - see b/425997645")
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only  # ATTENTION: Only run on TPU V4-8
   def test_grpo_trainer_correctness(self):
     # Get the expected (golden) data.

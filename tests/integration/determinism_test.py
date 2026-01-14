@@ -29,6 +29,8 @@ import pytest
 from MaxText.train import main as train_main
 from MaxText.globals import MAXTEXT_PKG_DIR
 
+pytestmark = pytest.mark.integration_test
+
 
 def compare_target_metrics(metrics_files, target):
   """Asserts over loss values from two runs."""

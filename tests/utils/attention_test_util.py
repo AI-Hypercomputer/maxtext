@@ -74,16 +74,20 @@ class MLATestBase(parameterized.TestCase):
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
-    dummy_inputs_q = jnp.ones((
-        cfg.global_batch_size_to_train_on,
-        cfg.max_target_length,
-        cfg.base_emb_dim,
-    ))
-    dummy_inputs_kv = jnp.ones((
-        cfg.global_batch_size_to_train_on,
-        cfg.max_target_length,
-        cfg.base_emb_dim,
-    ))
+    dummy_inputs_q = jnp.ones(
+        (
+            cfg.global_batch_size_to_train_on,
+            cfg.max_target_length,
+            cfg.base_emb_dim,
+        )
+    )
+    dummy_inputs_kv = jnp.ones(
+        (
+            cfg.global_batch_size_to_train_on,
+            cfg.max_target_length,
+            cfg.base_emb_dim,
+        )
+    )
 
     mla = MLA(
         config=cfg,
@@ -150,16 +154,12 @@ class MLATestBase(parameterized.TestCase):
         dtype=dtype,
     )
 
-    decoder_positions = jnp.stack([
-        jnp.arange(cfg.max_target_length, dtype=jnp.int32)
-        for _ in range(cfg.global_batch_size_to_train_on)
-    ])
+    decoder_positions = jnp.stack(
+        [jnp.arange(cfg.max_target_length, dtype=jnp.int32) for _ in range(cfg.global_batch_size_to_train_on)]
+    )
 
     decoder_segment_ids = (
-        jax.numpy.zeros(
-            (cfg.global_batch_size_to_train_on, cfg.max_target_length)
-        )
-        + DECODING_ACTIVE_SEQUENCE_INDICATOR
+        jax.numpy.zeros((cfg.global_batch_size_to_train_on, cfg.max_target_length)) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     )
 
     return lnx, decoder_segment_ids, decoder_positions
@@ -184,9 +184,7 @@ def forward_with_context_expert_parallelism(
         "inputs_position": decoder_positions,
     }
     with mesh_cp:
-      reordered_batch = maxtext_utils.get_reorder_callable(
-          context_parallel_size, ShardMode.AUTO
-      )(batch)
+      reordered_batch = maxtext_utils.get_reorder_callable(context_parallel_size, ShardMode.AUTO)(batch)
     lnx = reordered_batch["inputs"]
     decoder_segment_ids = reordered_batch["inputs_segmentation"]
     decoder_positions = reordered_batch["inputs_position"]
@@ -202,9 +200,7 @@ def forward_with_context_expert_parallelism(
         (batch_axis, length_axis, "activation_embed"),
         nn_partitioning.get_axis_rules(),
     )
-    pos_spec = nn_partitioning.logical_to_mesh_axes(
-        (batch_axis, length_axis), nn_partitioning.get_axis_rules()
-    )
+    pos_spec = nn_partitioning.logical_to_mesh_axes((batch_axis, length_axis), nn_partitioning.get_axis_rules())
     lnx_sharding = NamedSharding(mesh_cp, lnx_spec)
     pos_sharding = NamedSharding(mesh_cp, pos_spec)
 
@@ -220,17 +216,11 @@ def forward_with_context_expert_parallelism(
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
-    attention_cp_output = (
-        attention_cp_output[0]
-        if isinstance(attention_cp_output, tuple)
-        else attention_cp_output
-    )
+    attention_cp_output = attention_cp_output[0] if isinstance(attention_cp_output, tuple) else attention_cp_output
 
     # All-gather before re-shuffle to avoid re-order sharding confusion
     repeat_sharding = NamedSharding(mesh_cp, P())
-    attention_cp_output = maybe_shard_with_name(
-        attention_cp_output, repeat_sharding, shard_mode=cfg_cp.shard_mode
-    )
+    attention_cp_output = maybe_shard_with_name(attention_cp_output, repeat_sharding, shard_mode=cfg_cp.shard_mode)
 
   # If load balanced cp, de-shuffle and gather along seq dim for output
   # Note training does not need post-shuffle. Since the target seq is also pre-shuffled, the loss remains correct

@@ -17,8 +17,8 @@
 
 from typing import Sequence
 
-from MaxText.globals import MAXTEXT_PKG_DIR
-from tests.sharding_dump import TEST_CASES
+from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_REPO_ROOT
+from tests.utils.sharding_dump import TEST_CASES
 import os
 import subprocess
 from absl import app
@@ -30,7 +30,7 @@ def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
       [
           "python3",
           "-m",
-          "tests.sharding_dump",
+          "tests.utils.sharding_dump",
           os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
           f"compile_topology={topology}",
           f"compile_topology_num_slices={num_slice}",
@@ -43,7 +43,16 @@ def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
 def main(argv: Sequence[str]) -> None:
   """Generate sharding json files for every combination of model, topology and slices."""
   for model_name, topology, num_slice in TEST_CASES:
-    json_path = f"sharding_info/{model_name}/{topology}/slice_{num_slice}/named_shardings.json"
+    json_path = os.path.join(
+        MAXTEXT_REPO_ROOT,
+        "tests",
+        "utils",
+        "sharding_info",
+        model_name,
+        topology,
+        f"slice_{num_slice}",
+        "named_shardings.json",
+    )
     if os.path.exists(json_path):
       continue
     run_single_dump(model_name, topology, str(num_slice))

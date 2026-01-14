@@ -26,6 +26,8 @@ from contextlib import redirect_stdout
 from MaxText.decode import main as decode_main
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
 
+pytestmark = pytest.mark.integration_test
+
 
 class DecodeTests(unittest.TestCase):
   """Tests decode with various configs."""

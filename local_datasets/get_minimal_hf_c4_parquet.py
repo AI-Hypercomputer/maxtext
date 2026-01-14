@@ -16,8 +16,8 @@
 
 Fetch the first train & validation TFRecord 00000-of shard for a version and
 sample rows into two tiny parquet files with fixed output names for the usage
-in tests/grain_data_processing_test.py, tests/hf_data_processing_test.py,
-tests/train_tests.py:
+in tests/unit/grain_data_processing_test.py, tests/unit/hf_data_processing_test.py,
+tests/integration/train_tests.py:
     c4-train-00000-of-01637.parquet
     c4-validation-00000-of-01637.parquet
 """

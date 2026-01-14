@@ -47,7 +47,7 @@ from MaxText.layers.qwen3 import (
     Qwen3OmniMoeVisionProjector as JaxQwen3OmniMoeVisionProjector,
 )
 from MaxText.multimodal import preprocessor
-from tests.multimodal_test_utils import (
+from tests.utils.multimodal_test_utils import (
     assert_all_close_jax_torch,
     copy_attention_weights_to_maxtext,
     copy_mlp_weights,
