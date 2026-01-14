@@ -205,8 +205,8 @@ def setup_configs_and_devices(argv: list[str]):
         "dcn_data_parallelism": config.num_samplers_slices,
     }
 
-    trainer_config = pyconfig.initialize_pydantic(config, **trainer_update)
-    sampler_config = pyconfig.initialize_pydantic(config, **sampler_update)
+    trainer_config = pyconfig.initialize_pydantic(argv, **trainer_update)
+    sampler_config = pyconfig.initialize_pydantic(argv, **sampler_update)
 
   else:
     raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
