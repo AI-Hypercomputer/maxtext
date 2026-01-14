@@ -130,6 +130,7 @@ def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
         "maxtext_state_dict must be a subset of flattened param_map"
         + f"\nparam map\n{param_map_keys}"
         + f"\nmaxtext:\n{maxtext_state_keys}"
+        + f"\nmissing keys:\n{missing_keys}"
     )
 
   # 2 Filter: param map may have extra keys

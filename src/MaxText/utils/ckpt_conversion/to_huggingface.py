@@ -247,6 +247,10 @@ def main(argv: Sequence[str]) -> None:
       for key, value in tree.items():
         current_path = f"{prefix}-{key}" if prefix else key
         
+        # Skip NNX RNG state variables (not model weights)
+        if "to_nnx__rngs" in current_path or key.endswith("_rngs"):
+          continue
+        
         if isinstance(value, dict):
           if "value" in value and isinstance(value["value"], (jax.Array, np.ndarray)):
             # This is a leaf node with the actual weight
