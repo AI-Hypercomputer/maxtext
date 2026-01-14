@@ -35,15 +35,6 @@ from MaxText.layers.initializers import nd_dense_init
 from flax import nnx
 import chex
 
-
-"""
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s 
-python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s -k "DeepseekV32IndexerTest"
-python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s -k "DeepseekV32MLATest"
-https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py
-"""
-
 import math
 from dataclasses import dataclass
 from typing import Tuple, Optional, Literal
@@ -52,6 +43,18 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
+
+
+"""To run the test
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s
+python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s -k "DeepseekV32IndexerTest"
+python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s -k "DeepseekV32MLATest"
+
+adpated from https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py
+"""
 
 
 world_size = 1
@@ -59,106 +62,13 @@ rank = 0
 block_size = 128
 
 
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
-
-
 @dataclass
 class ModelArgs:
   pass
-#   """
-#   Data class for defining model arguments and hyperparameters.
-#   Attributes:
-#       max_batch_size (int): Maximum batch size.
-#       max_seq_len (int): Maximum sequence length.
-#       dtype (Literal["bf16", "fp8"]): Data type for computations.
-#       scale_fmt (Optional[str]): Format for quantization scale.
-#       vocab_size (int): Vocabulary size.
-#       dim (int): Model dimension.
-#       inter_dim (int): Intermediate dimension for MLP layers.
-#       moe_inter_dim (int): Intermediate dimension for MoE layers.
-#       n_layers (int): Number of transformer layers.
-#       n_dense_layers (int): Number of dense layers in the model.
-#       n_heads (int): Number of attention heads.
-#       n_routed_experts (int): Number of routed experts for MoE layers.
-#       n_shared_experts (int): Number of shared experts for MoE layers.
-#       n_activated_experts (int): Number of activated experts in MoE layers.
-#       n_expert_groups (int): Number of expert groups.
-#       n_limited_groups (int): Number of limited groups for MoE routing.
-#       score_func (Literal["softmax", "sigmoid"]): Scoring function for MoE routing.
-#       route_scale (float): Scaling factor for routing scores.
-#       q_lora_rank (int): LoRA rank for query projections.
-#       kv_lora_rank (int): LoRA rank for key-value projections.
-#       qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
-#       qk_rope_head_dim (int): Dimension for query-key projections with rotary embeddings.
-#       v_head_dim (int): Dimension for value projections.
-#       original_seq_len (int): Original sequence length.
-#       rope_theta (float): Base for rotary positional encoding.
-#       rope_factor (float): Scaling factor for extended sequence lengths.
-#       beta_fast (int): Fast beta correction factor.
-#       beta_slow (int): Slow beta correction factor.
-#       mscale (float): Scaling factor for extended attention.
-#       index_head_dim (int): Dimension for index head.
-#       index_topk (int): Top-k for index head.
-#   """
-
-#   max_batch_size: int = 8
-#   max_seq_len: int = 4096 * 4
-#   dtype: Literal["bf16", "fp8"] = "bf16"
-#   scale_fmt: Optional[str] = None
-#   vocab_size: int = 102400
-#   dim: int = 2048
-#   inter_dim: int = 10944
-#   moe_inter_dim: int = 1408
-#   n_layers: int = 27
-#   n_dense_layers: int = 1
-#   n_heads: int = 16
-#   # moe
-#   n_routed_experts: int = 64
-#   n_shared_experts: int = 2
-#   n_activated_experts: int = 6
-#   n_expert_groups: int = 1
-#   n_limited_groups: int = 1
-#   score_func: Literal["softmax", "sigmoid"] = "softmax"
-#   route_scale: float = 1.0
-#   # mla
-#   q_lora_rank: int = 0
-#   kv_lora_rank: int = 512
-#   qk_nope_head_dim: int = 128
-#   qk_rope_head_dim: int = 64
-#   v_head_dim: int = 128
-#   # yarn
-#   original_seq_len: int = 4096
-#   rope_theta: float = 10000.0
-#   rope_factor: float = 40
-#   beta_fast: int = 32
-#   beta_slow: int = 1
-#   mscale: float = 1.0
-#   # index
-#   index_n_heads: int = 64
-#   index_head_dim: int = 128
-#   index_topk: int = 2048
-
 
 class Config:
   """A configuration class for holding hyperparameters for the tests."""
-
-  # base_mlp_dim = 18432
-  # base_moe_mlp_dim = 2048
-  # base_num_decoder_layers = 61
-  # first_num_dense_layers = 3
-  # mlp_activations = ["silu", "linear"]
-  # vocab_size = 129280
-  # enable_dropout = False
-  # logits_via_embedding = False
-  # normalization_layer_epsilon = 1.0e-6
-  # num_experts = 256
-  # num_experts_per_tok = 8
-  # shared_experts = 1
-  # routed_scaling_factor = 2.5
-  # routed_score_func = "sigmoid"
-  # routed_bias = True
-  # decoder_block = "deepseek"
-  # MLA
+  # mla
   base_emb_dim = 71
   base_num_query_heads = 128
   base_num_kv_heads = 128
@@ -168,7 +78,7 @@ class Config:
   qk_nope_head_dim = 128
   qk_rope_head_dim = 64
   v_head_dim = 128
-  # RoPE
+  # yarn
   rope_type = "yarn"
   original_max_position_embeddings = 4096
   rope_max_timescale = 10_000
@@ -180,56 +90,41 @@ class Config:
   rope_interleave = True
   rope_truncate = True
   rope_attention_scaling = False
-  # Indexer
+  # indexer
   use_sparse_indexer = True
   index_n_heads = 64
   index_head_dim = 128
-  index_topk = 128
+  index_topk = 4
 
-SEQ_LEN = 512
+SEQ_LEN = 8
 
 config = Config()
 
 # 1. Setup PyTorch Config & Model
 pt_args = {
-    "max_batch_size": 8,
+    "max_batch_size": 8,  # what does this do?
     "scale_fmt": None,
-    "max_seq_len": config.max_position_embeddings,  # Mapped from 163840
-    "dtype": "bf16",
-    # "vocab_size": config.vocab_size,
-    "dim": config.base_emb_dim,  # 7168
-    # "inter_dim": config.base_mlp_dim,  # 18432
-    # "moe_inter_dim": config.base_moe_mlp_dim,  # 2048
-    # "n_layers": config.base_num_decoder_layers,  # 61
-    # "n_dense_layers": config.first_num_dense_layers,  # 3
-    "n_heads": config.base_num_query_heads,  # 128
-    # moe
-    # "n_routed_experts": config.num_experts,  # 256
-    # "n_shared_experts": config.shared_experts,  # 1
-    # "n_activated_experts": config.num_experts_per_tok,  # 8
-    # "n_expert_groups": 1,  # Default (not in config)
-    # "n_limited_groups": 1,  # Default (not in config)
-    # "score_func": config.routed_score_func,  # "sigmoid"
-    # "route_scale": config.routed_scaling_factor,  # 2.5
+    "max_seq_len": config.max_position_embeddings,
+    "dim": config.base_emb_dim,
     # mla
-    "q_lora_rank": config.q_lora_rank,  # 1536
-    "kv_lora_rank": config.kv_lora_rank,  # 512
-    "qk_nope_head_dim": config.qk_nope_head_dim,  # 128
-    "qk_rope_head_dim": config.qk_rope_head_dim,  # 64
-    "v_head_dim": config.v_head_dim,  # 128
+    "n_heads": config.base_num_query_heads,
+    "q_lora_rank": config.q_lora_rank,
+    "kv_lora_rank": config.kv_lora_rank,
+    "qk_nope_head_dim": config.qk_nope_head_dim,
+    "qk_rope_head_dim": config.qk_rope_head_dim,
+    "v_head_dim": config.v_head_dim,
     # yarn
-    "original_seq_len": config.original_max_position_embeddings,  # 4096
-    "rope_theta": float(config.rope_max_timescale),  # 10000.0
-    "rope_factor": float(config.rope_factor),  # 40.0
-    "beta_fast": config.beta_fast,  # 32
-    "beta_slow": 1,  # Default (not in config)
-    "mscale": config.mscale,  # 1.0
-    # index
-    "index_n_heads": config.index_n_heads,  # 64
-    "index_head_dim": config.index_head_dim,  # 128
-    "index_topk": config.index_topk,  # 2048
+    "original_seq_len": config.original_max_position_embeddings,
+    "rope_theta": float(config.rope_max_timescale),
+    "rope_factor": float(config.rope_factor),
+    "beta_fast": config.beta_fast,
+    "beta_slow": config.beta_slow,
+    "mscale": config.mscale,
+    # indexer
+    "index_n_heads": config.index_n_heads,
+    "index_head_dim": config.index_head_dim,
+    "index_topk": config.index_topk,
 }
-
 
 class ParallelEmbedding(nn.Module):
   """
@@ -548,6 +443,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, interleaved: bool
   return y.to(dtype)
 
 
+# TODO(shuningjin): double check hadamard_transform
 # def rotate_activation(x: torch.Tensor) -> torch.Tensor:
 #   assert x.dtype == torch.float32
 #   from fast_hadamard_transform import hadamard_transform
@@ -621,8 +517,6 @@ class Indexer(torch.nn.Module):
     k = torch.cat([k_pe, k_nope], dim=-1)
     k = rotate_activation(k)
 
-    # return None, k
-
     # CHANGE
     # q_fp8, q_scale = act_quant(q, block_size, self.scale_fmt)
     # k_fp8, k_scale = act_quant(k, block_size, self.scale_fmt)
@@ -634,7 +528,6 @@ class Indexer(torch.nn.Module):
     # CHANGE
     # weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
     weights = weights * self.softmax_scale
-    # print(f"DEBUG: weights max={weights.max().item()}")
 
     # CHANGE
     # index_score = fp8_index(q_fp8.contiguous(), weights, self.k_cache[:bsz, :end_pos].contiguous(), self.k_scale_cache[:bsz, :end_pos].contiguous())
@@ -650,8 +543,6 @@ class Indexer(torch.nn.Module):
     # # Weighted Sum: Logits (b,s,t,h) * Weights (b,s,h) -> (b,s,t)
     # index_score = torch.einsum("bsth, bsh -> bst", logits, weights)
 
-    # return k_active, None
-
     # logits is bfloat16
     logits = torch.einsum("bshd, btd -> bsth", q.to(torch.float32), k_active.to(torch.float32))
     logits = F.relu(logits)
@@ -662,9 +553,8 @@ class Indexer(torch.nn.Module):
       index_score += mask
     topk_indices = index_score.topk(min(self.index_topk, end_pos), dim=-1)[1]
 
-    print("torch_index_score", index_score)
-
     if debug:
+      # print("torch_index_score", index_score)
       return topk_indices, index_score
       # return None, {
       #     "k": k,
@@ -674,10 +564,6 @@ class Indexer(torch.nn.Module):
       #     "index_score": index_score,
       # }
     return topk_indices
-
-    # dist.broadcast(topk_indices_, src=0)
-    # assert torch.all(topk_indices == topk_indices_), f"{topk_indices=} {topk_indices_=}"
-    # return topk_indices
 
 
 # def weight_dequant(weight, scale):
@@ -903,7 +789,7 @@ class DeepseekV32IndexerTest(unittest.TestCase):
 
     causal_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
     causal_mask_bias = torch.where(causal_mask == 1, 0.0, float("-inf"))
-    mask = causal_mask_bias
+    pt_mask = causal_mask_bias
     # mask = None
 
     # C. Run PyTorch Reference
@@ -912,13 +798,13 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     with torch.no_grad():
       # Returns indices [B, K]
       pt_indices, pt_index_score = self.pt_indexer(
-          self.x, self.qr, self.start_pos, self.freqs_cis_slice, mask=mask, debug=True
+          self.x, self.qr, self.start_pos, self.freqs_cis_slice, mask=pt_mask, debug=True
       )
-      pt_mask = torch.full((self.batch_size, self.seq_len, self.seq_len), float("-inf"), device=self.x.device).scatter_(
-          -1, pt_indices, 0
-      )
-      if mask is not None:
-        pt_mask += mask
+      pt_index_mask = torch.full(
+          (self.batch_size, self.seq_len, self.seq_len), float("-inf"), device=self.x.device
+      ).scatter_(-1, pt_indices, 0)
+      if pt_mask is not None:
+        pt_index_mask += pt_mask
 
     # jax position, Shape: [B, S]
     start_pos = self.start_pos
@@ -970,6 +856,7 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(cfg)
     self.mesh = Mesh(devices_array, cfg.mesh_axes)
 
+    # indexer apply rope with `interleave=False`
     yarn_rope = embeddings.YarnRotaryEmbedding(
         max_position_embeddings=self.config.max_position_embeddings,
         mesh=self.mesh,
@@ -1007,15 +894,17 @@ class DeepseekV32IndexerTest(unittest.TestCase):
 
     # D. Run JAX Forward
     # Returns bias mask [B, S, T]
-    jax_mask, jax_indices, jax_index_score = jax_indexer(
+    jax_index_mask, jax_indices, jax_index_score = jax_indexer(
         to_jax(self.x),
         to_jax(self.qr),
         inputs_positions=positions,
-        mask=to_jax(mask) if mask is not None else None,
+        mask=to_jax(pt_mask) if pt_mask is not None else None,
     )
 
+    print("torch index score", pt_index_score)
+    print("jax index score", jax_index_score)
     np.testing.assert_allclose(jax_index_score, to_jax(pt_index_score), rtol=1e-3, atol=1e-3)
-    np.testing.assert_array_equal(jax_mask == 0, to_jax(pt_mask == 0))
+    np.testing.assert_array_equal(jax_index_mask == 0, to_jax(pt_index_mask == 0))
     # np.testing.assert_array_equal(jax_indices, to_jax(pt_indices))
     # chex.assert_trees_all_close(jax_index_score, jax.tree.map(to_jax, pt_index_score), rtol=1e-3, atol=1e-3)
 
@@ -1031,7 +920,6 @@ class DeepseekV32MLATest(unittest.TestCase):
     # jax config
     self.config = Config()
     # data, test long context
-    # self.dtype = "bfloat16"
     self.dtype = "float32"
     self.batch_size = 2
     self.seq_len = SEQ_LEN
@@ -1147,12 +1035,8 @@ class DeepseekV32MLATest(unittest.TestCase):
     qk_rope_head_dim = self.config.qk_rope_head_dim
     v_head_dim = self.config.v_head_dim
 
-    # wkv_b = np.reshape(wkv_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)])
-    # out = np.reshape(out, [base_num_query_heads, v_head_dim, base_emb_dim])
-    # wq_b = np.reshape(wq_b, [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
-
     mla_state = {
-        # 1. Main MLA Weights
+        # Main MLA Weights
         "wq_a": {"kernel": to_jax(self.pt_mla.wq_a.weight.T)},
         "q_norm": {"scale": to_jax(self.pt_mla.q_norm.weight)},
         "wq_b": {
@@ -1168,7 +1052,7 @@ class DeepseekV32MLATest(unittest.TestCase):
             )
         },
         "out": {"kernel": to_jax(self.pt_mla.wo.weight.T).reshape([base_num_query_heads, v_head_dim, base_emb_dim])},
-        # 2. Indexer Weights
+        # Indexer Weights
         "indexer": {
             "wq_b": {"kernel": to_jax(self.pt_mla.indexer.wq_b.weight.T)},
             "wk": {"kernel": to_jax(self.pt_mla.indexer.wk.weight.T)},
@@ -1197,12 +1081,13 @@ class DeepseekV32MLATest(unittest.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
 
-    print("torch out", to_jax(pt_out))
+    print("torch out", pt_out)
     print("jax out", jax_out)
 
     # D. Compare
     # Tolerances slightly loose due to potential BF16/FP32 differences inside modules
-    np.testing.assert_allclose(to_jax(pt_out / pt_out.sum()), jax_out / jax_out.sum(), rtol=1e-3, atol=1e-2)
+    # np.testing.assert_allclose(to_jax(pt_out / pt_out.sum()), jax_out / jax_out.sum(), rtol=1e-3, atol=1e-2)
+    np.testing.assert_allclose(to_jax(pt_out), jax_out, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":

@@ -192,6 +192,7 @@ type ModelName = Literal[
     "deepseek3-671b-2dfsdp",
     "deepseek3-test",
     "deepseek3-tiny",
+    "deepseek3.2-671b",
     "kimi-k2-1t",
     "gemma-7b",
     "gemma-2b",

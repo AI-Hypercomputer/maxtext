@@ -217,8 +217,10 @@ class Indexer(nnx.Module):
   """
   DeepSeek V3.2 Sparse Attention Indexer.
   Selects Top-K relevant tokens using a lightweight MQA mechanism.
+  TODO(shuingjin): what does this mean
   """
 
+  # TODO(shuningjin):  improve this initialization, what goes here, what goes to config
   def __init__(
       self,
       config: Any,
@@ -236,8 +238,6 @@ class Indexer(nnx.Module):
     self.q_lora_rank = config.q_lora_rank
     self.softmax_scale = self.head_dim**-0.5
     self.rotary_embedding = rotary_embedding
-    assert config.index_topk < config.max_target_length
-
     self.quant = quant
     self.kernel_init = kernel_init
     self.dtype = config.dtype
@@ -294,12 +294,8 @@ class Indexer(nnx.Module):
         rngs=rngs,
     )
 
-    # Key Normalization
+    # Key Normalization with bias
     self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=True, dtype=config.weight_dtype, rngs=rngs)
-
-    # Internal Indexer Cache (distinct from main MLA KV Cache)
-    # Shape: [Batch, MaxLen, HeadDim]
-    # self.k_cache = nnx.Variable(jnp.zeros((config.max_target_length, self.head_dim), dtype=config.weight_dtype))
 
   def _apply_partial_rope(
       self,
@@ -313,7 +309,13 @@ class Indexer(nnx.Module):
     x = jnp.concatenate([x_pe, x_nope], axis=-1)
     return x
 
-  def __call__(self, x, qr, inputs_positions, mask=None):
+  def __call__(
+      self,
+      x: Array,
+      qr: Array,
+      inputs_positions: Optional[Array | None] = None,
+      mask: Optional[Array | None] = None,
+  ):
     """
     Args:
       x: [batch_size, seq_len, dim]
@@ -327,46 +329,34 @@ class Indexer(nnx.Module):
         the inputs and configuration.
 
     Returns:
-        index_mask: A bias mask [Batch, SeqLen, TotalLen] with 0.0 for TopK and large negative otherwise.
+        - index_mask: A bias mask [batch_size, q_len, kv_len] with 0.0 for TopK and large negative otherwise.
+        - topk_indices
+        - index_score: TODO(shuningjin): refine this docstring
     """
+    # NOTE: If sequence length <= topk, indexer always selects all tokens.
+    # if self.config.max_target_length <= self.index_topk:
+    #   return None, None, None
+
     bsz, seqlen, _ = x.shape
     positions = inputs_positions
 
-    # Generate position indices for Yarn RoPE
-    # Shape: [B, S]
-    # end_pos = start_pos + seqlen
-    # positions = jnp.arange(start_pos, end_pos, dtype=jnp.int32)[None, :]
-    # positions = jnp.broadcast_to(positions, (bsz, seqlen))
-
-    # 1. Query Processing: Project from Latent QR
+    # Query Processing: Project from Latent QR
     q = self.wq_b(qr)
     q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)  # [B, T, H, D]
     q = self._apply_partial_rope(q, positions)
+    # TODO(shuningjin): check hadamard
     # q = self._apply_hadamard(q)
 
-    # 2. Key Processing: Project from Input X
+    # Key Processing: Project from Input X
     k = self.wk(x)
     k = self.k_norm(k)
     k = k[:, :, None, :]  # [B, S, D] -> [B, S, 1, D]
     k = self._apply_partial_rope(k, positions)
     # k = self._apply_hadamard(k)
     k = k.squeeze(2)  # Back to [B, S, D]
-
     k_active = k
 
-    # # 3. Cache Update (Functional NNX update)
-    # current_cache = self.k_cache.value
-    # # Expand cache to batch if needed (simplified assumption)
-    # if current_cache.ndim == 2:
-    #   current_cache = jnp.broadcast_to(current_cache, (bsz, current_cache.shape[0], current_cache.shape[1]))
-
-    # updated_cache = jax.lax.dynamic_update_slice(current_cache, k.astype(current_cache.dtype), (0, start_pos, 0))
-    # self.k_cache.value = updated_cache
-
-    # # Active Keys: [B, TotalLen, D]
-    # k_active = jax.lax.dynamic_slice(updated_cache, (0, 0, 0), (bsz, end_pos, self.head_dim))
-
-    # 4. Compute Scores
+    # Compute Index Scores
     weights = self.weights_proj(x.astype(jnp.float32)) * (self.n_heads**-0.5) * self.softmax_scale
     # Logits: Q [B,S,H,D] @ K.T [B,T,D] -> [B,S,T,H]
     logits = jnp.einsum("bshd, btd -> bsth", q, k_active, precision=self.config.matmul_precision)
@@ -374,25 +364,22 @@ class Indexer(nnx.Module):
     # Weighted Sum: [B,S,T,H] * [B,S,H] -> [B,S,T]
     index_score = jnp.einsum("bsth, bsh -> bst", logits, weights, precision=self.config.matmul_precision)
 
-    # print("1", index_score.shape)
-    # print(mask.shape)
-    # 5. Masking & TopK
+    # Masking before TopK
     if mask is not None:
       index_score += mask
-    # print("2", index_score.shape)
-    # print("jax_index_score", index_score)
 
     # Select TopK Indices (Values, Indices) after masking
     _, topk_indices = jax.lax.top_k(index_score, k=self.index_topk)
 
-    # 6. Create Sparse Mask: 0 and large negatives
+    # TODO(shuningjin): check optimization
+    # Create Sparse Index Mask: 0 and large negatives
     index_mask = jnp.full(index_score.shape, DEFAULT_MASK_VALUE, dtype=x.dtype)  # [B, S, T]
     # Scatter 0.0 at topk indices
     batch_idx = jnp.arange(bsz)[:, None, None]
     seq_idx = jnp.arange(seqlen)[None, :, None]
     index_mask = index_mask.at[batch_idx, seq_idx, topk_indices].set(0.0)
 
-    # Re-apply causal mask if present
+    # Re-apply mask: in case number of unmasked tokens < TopK
     if mask is not None:
       index_mask += mask
 
@@ -553,12 +540,12 @@ class MLA(Attention):
         rngs=rngs,
     )
 
-    # [CHANGE 1] Initialize Indexer
-    # We check a config flag to see if we are in Sparse/DeepSeek3.2 mode
+    # Initialize Indexer
     self.use_sparse_indexer = config.use_sparse_indexer
     if self.use_sparse_indexer:
+      # Need two versions of rope. MLA applies yarn with interleave layout.
+      # Indexer applies yarn with concatenate layout.
       indexer_rope = copy.copy(self.rotary_embedding)
-      # indexer does not interleave
       indexer_rope.interleave = False
       self.indexer = Indexer(
           config,
@@ -738,6 +725,7 @@ class MLA(Attention):
       # LoRA path
       low_rank_q = self.wq_a(inputs_q, out_sharding=wqa_out_sharding)  # [B, L, q_lora_rank]
       low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
+      # TODO(shuningjin): what is this
       # [CRITICAL] This 'low_rank_q' IS the 'qr' needed by the Indexer
       low_rank_q = checkpoint_name(low_rank_q, "mla_q")
       q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads * qk_head_dim]
@@ -955,32 +943,31 @@ class MLA(Attention):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
+    # TODO(shuningjin): decide whether we initiaze it or not
     # Apply Indexer Logic
     index_mask = None
     if self.use_sparse_indexer and low_rank_q is not None:
-      # generate mask [batch_size, num_heads=1, q_group=1, q_sequence_length, kv_sequence_length]
-      # filled with `0.0` and `DEFAULT_MASK_VALUE` (a large negative number)
+      if model_mode != MODEL_MODE_TRAIN:
+        raise NotImplementedError("Sparse indexer has not implemented for inference yet.")
+      # generate mask [batch_size, num_heads=1, group=1, q_seq_length, kv_seq_length], with 0 and large negative
       attn_mask = self.attention_op.generate_attention_mask(
           query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
       )
-      attn_mask = jnp.squeeze(attn_mask, axis=(1, 2))
-      print("attn_mask", attn_mask, attn_mask.shape)
-      print("inputs_positions", inputs_positions)
-
+      attn_mask = jnp.squeeze(attn_mask, axis=(1, 2))  # [B, S, T]
       index_mask, _, _ = self.indexer(x=inputs_q, qr=low_rank_q, inputs_positions=inputs_positions, mask=attn_mask)
-      index_mask = index_mask[:, None, None, :, :]  # [B, S, T] -> [B, 1, 1, S, T]
+      if index_mask is not None:
+        index_mask = index_mask[:, None, None, :, :]  # [B, S, T] -> [B, 1, 1, S, T]
 
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
-      if index_mask:
-        raise NotImplementedError
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
       unnormalized_out = unnormalized_out[..., : self.v_head_dim]
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
+      # TODO(shuningjin)
       # Pass the index_mask to the Attention Op
-      # ds3.2, MHA mode for train / prefill, TODO: MQA model for decode (mathematically equivalent but speed faster)?
+      # ds3.2, MHA mode for train / prefill, MQA model for decode (mathematically equivalent but speed faster)?
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, index_mask=index_mask)
 
     if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
