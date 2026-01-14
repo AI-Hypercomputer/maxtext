@@ -61,6 +61,8 @@ import numpy as np
 from transformers import AutoTokenizer, AutoProcessor
 
 from absl import app
+from etils import epath
+import orbax.checkpoint as ocp
 
 from MaxText import max_utils
 from MaxText import maxengine
@@ -133,14 +135,57 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
   overall_start = time.time()
 
-  # Load Maxtext checkpoint
+  # Load Maxtext checkpoint directly from disk (bypassing model structure)
   max_logging.log("\nLoading Orbax checkpoint...")
+  max_logging.log(f"Loading from: {config.load_parameters_path}")
   start = time.time()
-  engine = maxengine.MaxEngine(config)
-  rng = jax.random.PRNGKey(1234)
-  rng, rng_load_params = jax.random.split(rng)
-  # load params from maxengine
-  loaded_params_from_engine = engine.load_params(rng_load_params)
+  
+  # Create Orbax checkpointer to load the full checkpoint
+  ckptr = ocp.Checkpointer(
+      ocp.PyTreeCheckpointHandler(
+          restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+      )
+  )
+  
+  # First, get the checkpoint metadata to understand its structure
+  checkpoint_path = epath.Path(config.load_parameters_path)
+  metadata = ckptr.metadata(checkpoint_path)
+  
+  # Create a tree of ArrayRestoreArgs with unsharded (replicated) sharding
+  # This allows us to load all arrays onto a single device/host
+  # Create a mesh with all devices in a single dimension for replicated restoration
+  devices = np.array(jax.devices()).reshape((-1,))
+  single_device_mesh = jax.sharding.Mesh(devices, ('x',))
+  
+  def create_restore_args(tree_metadata):
+    """Create restore args for unsharded restoration."""
+    if hasattr(tree_metadata, 'shape'):
+      # This is an array - restore it unsharded (replicated across all devices)
+      return ocp.ArrayRestoreArgs(
+          sharding=jax.sharding.NamedSharding(
+              single_device_mesh, 
+              jax.sharding.PartitionSpec()
+          )
+      )
+    elif isinstance(tree_metadata, dict):
+      return {k: create_restore_args(v) for k, v in tree_metadata.items()}
+    else:
+      return None
+  
+  restore_args = jax.tree_util.tree_map(
+      lambda x: create_restore_args(x) if hasattr(x, 'shape') else None,
+      metadata.item_metadata.tree,
+      is_leaf=lambda x: hasattr(x, 'shape')
+  )
+  
+  # Restore the entire checkpoint with unsharded arrays
+  loaded_params_from_engine = ckptr.restore(
+      checkpoint_path,
+      restore_args=restore_args
+  )
+  
   max_logging.log(f"Elapse for checkpoint load: {(time.time() - start) / 60:.2f} min")
 
   if not config.base_output_directory:
@@ -171,22 +216,62 @@ def main(argv: Sequence[str]) -> None:
   hook_fn_map = mappings["hook_fn_mapping"]
 
   # 4. Transform Weights
-  # MaxText `engine.load_params()` returns `state.params` (a FrozenDict).
-  # The actual weights are typically under `state.params['params']`.
+  # Detect checkpoint type by structure:
+  # - Linen: {'params': {'params': {'decoder': ...}}}
+  # - NNX: {'decoder': {'value': ...}} or direct structure
+  is_nnx_checkpoint = False
   actual_weights_dict = loaded_params_from_engine.get("params")
+  
   if actual_weights_dict is None:
-    raise ValueError("Loaded parameters from engine do not contain a 'params' key. Structure might be unexpected.")
-  leaves_with_paths = jax.tree_util.tree_leaves_with_path(actual_weights_dict)
-
+    # For NNX checkpoints, the structure is directly at the root
+    actual_weights_dict = loaded_params_from_engine
+    is_nnx_checkpoint = True
+    max_logging.log("Detected NNX checkpoint structure")
+  else:
+    # For Linen, check if there's a nested 'params' key
+    if isinstance(actual_weights_dict, dict) and "params" in actual_weights_dict:
+      actual_weights_dict = actual_weights_dict["params"]
+      max_logging.log("Detected Linen checkpoint structure")
+    else:
+      max_logging.log("Detected Linen checkpoint structure (single params layer)")
+  
   # Construct maxtext_state_dict: {parameter name: parameter weight}
   maxtext_state_dict = {}
-  for path_tuple, leaf_value in leaves_with_paths:
-    # Construct maxtext_param_key from path_tuple
-    maxtext_param_key = "params-" + "-".join(k.key for k in path_tuple)
-    # Check leaf value is an array
-    if not isinstance(leaf_value, (jax.Array, np.ndarray)):
-      raise ValueError(f"Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}.")
-    maxtext_state_dict[maxtext_param_key] = leaf_value
+  
+  if is_nnx_checkpoint:
+    # For NNX: Flatten the tree and extract 'value' from each leaf dict
+    # Tree structure: {'decoder': {'layers': {0: {'mlp': {'wi_0': {'kernel': {'value': array}}}}}}}
+    def extract_nnx_leaves(tree, prefix=""):
+      """Recursively extract leaves from NNX checkpoint structure."""
+      result = {}
+      for key, value in tree.items():
+        current_path = f"{prefix}-{key}" if prefix else key
+        
+        if isinstance(value, dict):
+          if "value" in value and isinstance(value["value"], (jax.Array, np.ndarray)):
+            # This is a leaf node with the actual weight
+            maxtext_param_key = f"params-{current_path}"
+            result[maxtext_param_key] = value["value"]
+          else:
+            # Continue recursing
+            result.update(extract_nnx_leaves(value, current_path))
+        elif isinstance(value, (jax.Array, np.ndarray)):
+          # Direct array (might occur in some NNX variants)
+          maxtext_param_key = f"params-{current_path}"
+          result[maxtext_param_key] = value
+      return result
+    
+    maxtext_state_dict = extract_nnx_leaves(actual_weights_dict)
+  else:
+    # For Linen: Use tree_leaves_with_path
+    leaves_with_paths = jax.tree_util.tree_leaves_with_path(actual_weights_dict)
+    for path_tuple, leaf_value in leaves_with_paths:
+      # Construct maxtext_param_key from path_tuple
+      maxtext_param_key = "params-" + "-".join(k.key for k in path_tuple)
+      # Check leaf value is an array
+      if not isinstance(leaf_value, (jax.Array, np.ndarray)):
+        raise ValueError(f"Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}.")
+      maxtext_state_dict[maxtext_param_key] = leaf_value
 
   # The param_map may contain tuples as keys, which represent N-to-1 mappings from maxtext to huggingface
   # Check maxtext_state_dict is a subset of flattened param_map
