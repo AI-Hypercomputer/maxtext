@@ -121,13 +121,18 @@ jobs:
             -m "${FINAL_PYTEST_MARKER}" \
             --durations=0 \
             --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize" \
-            --cov=src/MaxText \
+            --cov=MaxText \
             --cov-report=xml \
+            --cov-report=term \
             $SPLIT_ARGS
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src"
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
           # If scheduled, upload to BOTH flags. If PR, upload ONLY to regular.
-          flags: ${{ inputs.is_scheduled_run == 'true' && 'scheduled' || 'regular' }}
+          flags: ${{ inputs.is_scheduled_run == 'true' && 'regular,scheduled' || 'regular' }}
+          verbose: true
