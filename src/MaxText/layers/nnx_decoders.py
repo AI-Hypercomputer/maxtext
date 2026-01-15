@@ -16,37 +16,28 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any
 import functools
 import inspect
+from typing import Any
 
 import jax
 import jax.numpy as jnp
+from flax import linen as nn
+from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 
-from flax import linen as nn
-from flax import nnx
-from flax.nnx import wrappers as nnx_wrappers
-
-from MaxText.configs.types import PositionalEmbedding
-from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONTEXT
-from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText import max_logging
-from MaxText.sharding import create_sharding
+from MaxText import max_logging, maxtext_utils, multimodal_utils, sharding
+from MaxText.common_types import (
+    EP_AS_CONTEXT,
+    MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_PREFILL,
+    MODEL_MODE_TRAIN,
+    Config,
+    DecoderBlockType,
+    ShardMode,
+)
 from MaxText.inference import page_manager
-from MaxText.layers import linears
-from MaxText.layers import initializers
-from MaxText.layers import quantizations
-from MaxText import maxtext_utils
-from MaxText import multimodal_utils
-from MaxText import sharding
-from MaxText.layers.attentions import Attention
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.embeddings import Embed, attend_on_embedding
-from MaxText.layers.quantizations import AqtQuantization as Quant
-
-# Import specific layer definitions (assuming these files exist)
 from MaxText.layers import (
     deepseek,
     deepseek_batchsplit,
@@ -55,86 +46,102 @@ from MaxText.layers import (
     gemma3,
     gpt3,
     gpt_oss,
+    initializers,
+    linears,
     llama2,
     llama4,
     mistral,
     mixtral,
+    nnx_wrappers,
+    quantizations,
     qwen3,
     simple_layer,
 )
+from MaxText.layers import nnx_pipeline as pipeline
+
+# Assumes these modules are adapted for NNX
+from MaxText.layers.attentions import Attention
+from MaxText.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
+from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.sharding import create_sharding
 
 
 class NNXDecoderLayer(nnx.Module):
   """
-  Transformer decoder layer converted to NNX.
+  Transformer decoder layer that attends to the encoder.
+  This is the core, reusable building block for both the main model's
+  decoder stack and the auxiliary MTP layers.
   """
 
   def __init__(
       self,
       config: Config,
       mesh: Mesh,
-      model_mode: str,
-      quant: None | Quant = None,
-      name: str = "decoder_layer",
+      quant: Quant | None = None,
+      model_mode: str = MODEL_MODE_TRAIN,
       *,
       rngs: nnx.Rngs,
   ):
     self.config = config
     self.mesh = mesh
-    self.model_mode = model_mode
     self.quant = quant
+    self.model_mode = model_mode
 
-    cfg = self.config
-
+    # Initialize Pre-Attention Norm
     self.pre_self_attention_norm = RMSNorm(
-        num_features=cfg.emb_dim,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        epsilon=cfg.normalization_layer_epsilon,
+        num_features=self.config.emb_dim,
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
+        epsilon=self.config.normalization_layer_epsilon,
         kernel_axes=("norm",),
         rngs=rngs,
     )
 
+    # Initialize Attention
     self.self_attention = Attention(
         config=self.config,
-        num_query_heads=cfg.num_query_heads,
-        num_kv_heads=cfg.num_kv_heads,
-        head_dim=cfg.head_dim,
-        max_target_length=cfg.max_target_length,
-        max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
-        inputs_q_shape=(1, 1, cfg.emb_dim),
-        inputs_kv_shape=(1, 1, cfg.emb_dim),
+        num_query_heads=self.config.num_query_heads,
+        num_kv_heads=self.config.num_kv_heads,
+        head_dim=self.config.head_dim,
+        max_target_length=self.config.max_target_length,
+        max_prefill_predict_length=self.config.max_prefill_predict_length,
+        attention_kernel=self.config.attention,
+        inputs_q_shape=(1, 1, self.config.emb_dim),
+        inputs_kv_shape=(1, 1, self.config.emb_dim),
         mesh=mesh,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        dropout_rate=cfg.dropout_rate,
-        float32_qk_product=cfg.float32_qk_product,
-        float32_logits=cfg.float32_logits,
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
+        dropout_rate=self.config.dropout_rate,
+        float32_qk_product=self.config.float32_qk_product,
+        float32_logits=self.config.float32_logits,
         quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg),
-        prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
-        ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
-        compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
-        reshape_q=cfg.reshape_q,
+        kv_quant=quantizations.configure_kv_quant(config),
+        prefill_cache_axis_order=tuple(map(int, self.config.prefill_cache_axis_order.split(","))),
+        ar_cache_axis_order=tuple(map(int, self.config.ar_cache_axis_order.split(","))),
+        compute_axis_order=tuple(map(int, self.config.compute_axis_order.split(","))),
+        reshape_q=self.config.reshape_q,
         model_mode=model_mode,
+        rngs=rngs,
     )
 
-    self.mlp = linears.MLPBlock(
-        in_features=cfg.emb_dim,
-        intermediate_dim=cfg.mlp_dim,
-        activations=cfg.mlp_activations,
-        intermediate_dropout_rate=cfg.dropout_rate,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+    # Initialize MLP
+    self.mlp = linears.MlpBlock(
+        in_features=self.config.emb_dim,
+        intermediate_dim=self.config.mlp_dim,
+        activations=self.config.mlp_activations,
+        intermediate_dropout_rate=self.config.dropout_rate,
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
         model_mode=model_mode,
-        config=cfg,
+        config=self.config,
         quant=self.quant,
         mesh=self.mesh,
         rngs=rngs,
     )
 
-    self.dropout = linears.Dropout(rate=cfg.dropout_rate, rngs=rngs, broadcast_dims=(-2,))
+    # Initialize Dropout
+    self.dropout = linears.Dropout(rate=config.dropout_rate, rngs=rngs, broadcast_dims=(-2,))
 
   def __call__(
       self,
@@ -191,19 +198,72 @@ class NNXDecoderLayer(nnx.Module):
     layer_output = next_layer_addition_dropped_out + inputs
     layer_output = _maybe_shard_with_logical(layer_output, logical_axis_names)
 
-    if cfg.record_internal_nn_metrics:
-      self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
-      self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
+    if self.config.record_internal_nn_metrics:
+      self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
+      self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
+          nnx.Intermediate,
           "activation_fraction_zero",
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if cfg.scan_layers:
+    if self.config.scan_layers:
       return layer_output, None
-    else:
-      return layer_output, kv_cache
+
+    return layer_output, kv_cache
+
+
+class NNXSequentialBlockDecoderLayers(nnx.Module):
+  """Sequential unscanned series of decoder layers."""
+
+  def __init__(
+      self,
+      decoder_layer: Any,
+      num_decoder_layers: int,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      rngs: nnx.Rngs,
+      quant: Quant,
+      **kwargs,
+  ):
+    self.config = config
+    self.num_decoder_layers = num_decoder_layers
+
+    layers_list = []
+
+    for _ in range(num_decoder_layers):
+      layers_list.append(decoder_layer(config=config, mesh=mesh, model_mode=model_mode, rngs=rngs, quant=quant, **kwargs))
+    self.layers = nnx.List(layers_list)
+
+  def __call__(
+      self,
+      inputs: jnp.ndarray,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic: bool,
+      model_mode,
+      slot: int | None = None,
+      page_state: Any | None = None,  # page_manager.PageState
+  ) -> jnp.ndarray:
+
+    # Iterate over the pre-initialized layers
+    for layer in self.layers:
+      inputs = layer(
+          inputs,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          slot=slot,
+          page_state=page_state,
+      )
+
+      if self.config.scan_layers:
+        inputs = inputs[0]
+    if self.config.scan_layers:
+      return inputs, None  # pytype: disable=bad-return-type
+    return inputs
 
 
 class NNXDecoder(nnx.Module):
@@ -239,7 +299,7 @@ class NNXDecoder(nnx.Module):
           num_embeddings=config.trainable_position_size,
           num_features=config.emb_dim,
           dtype=config.dtype,
-          embedding_init=nn.initializers.normal(stddev=1.0),
+          embedding_init=nnx.initializers.normal(stddev=1.0),
           config=config,
           mesh=self.mesh,
           rngs=rngs,
@@ -263,8 +323,12 @@ class NNXDecoder(nnx.Module):
       )
 
     self.scanned_layers = None
+    self.using_pipeline = config.using_pipeline_parallelism
     self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
+
+    if self.using_pipeline:
+      self.pipeline_module = self.get_pipeline_stage_module(decoder_block_classes)
 
     if self.config.scan_layers:
       if self.is_deepseek:
@@ -305,6 +369,45 @@ class NNXDecoder(nnx.Module):
         for i in range(config.num_decoder_layers):
           self._create_and_register_layer(layer_cls, rngs, "layers", i)
 
+  def get_pipeline_stage_module(self, decoder_blocks):
+    """Creates the Pipeline module with the correct stage configuration."""
+    cfg = self.config
+
+    def get_layer_to_pipeline(blocks, cfg):
+      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+        return blocks[1]
+      else:
+        return blocks[0]
+
+    base_stage_cls = get_layer_to_pipeline(decoder_blocks, cfg)
+
+    if cfg.num_layers_per_pipeline_stage == 1:
+      stage_module = self._create_single_layer(base_stage_cls, self.rngs)
+    elif cfg.scan_layers_per_stage:
+      stage_module = self._create_scanned_layers(
+          base_stage_cls,
+          length=cfg.num_layers_per_pipeline_stage,
+          rngs=self.rngs,
+      )
+    else:
+      stage_module = NNXSequentialBlockDecoderLayers(
+          decoder_layer=base_stage_cls,
+          num_decoder_layers=cfg.num_layers_per_pipeline_stage,
+          config=cfg,
+          mesh=self.mesh,
+          model_mode=self.model_mode,
+          rngs=self.rngs,
+          quant=self.quant,
+      )
+
+    return pipeline.Pipeline(
+        config=cfg,
+        layers=stage_module,
+        mesh=self.mesh,
+        remat_policy=self.get_remat_policy(),
+        rngs=self.rngs,  # Pipeline keeps original RNGs
+    )
+
   def _create_and_register_layer(self, layer_cls, rngs, base_name, i):
     attr_name = f"{base_name}_{i}"
     layer = self._create_single_layer(layer_cls, rngs)
@@ -337,7 +440,8 @@ class NNXDecoder(nnx.Module):
     # TODO: Handle this properly.
     try:
       nnx.split_rngs(rngs, splits=length)
-    except:  # pylint: disable=bare-except
+    except Exception as e:  # pylint: disable=bare-except
+      max_logging.log(f"Warning: could not split rngs for scanned layers: {e}")  # pylint: disable=logging-fstring-interpolation
       pass
 
     layers_vmapped = nnx.vmap(
@@ -696,7 +800,15 @@ class NNXDecoder(nnx.Module):
     if cfg.decoder_block == DecoderBlockType.GEMMA3:
       layer_kwargs["bidirectional_mask"] = bidirectional_mask
 
-    if cfg.scan_layers:
+    if self.using_pipeline:
+      if cfg.pipeline_fsdp_ag_once:
+        logical_partition_spec = None
+      else:
+        logical_partition_spec = None
+      layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
+      y = self.pipeline_module(y, *layer_args, logical_partition_spec=logical_partition_spec)
+
+    elif cfg.scan_layers:
       if self.is_deepseek:
         y, _ = self._apply_layers_sequentially(
             self.dense_stack, y, *layer_args, length=cfg.first_num_dense_layers, **layer_kwargs
