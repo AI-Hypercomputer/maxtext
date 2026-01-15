@@ -25,7 +25,7 @@ weight_dtype: bfloat16
 
 
 # -------------- Logical Axis Rules --------------
-mesh_axes: ['data', 'model', 'expert']
+mesh_axes: ['data', 'attn_dp', 'model', 'expert']
 logical_axis_rules: [
                       ['activation_batch', ['expert']],
                       ['activation_batch_no_exp', []],
@@ -33,35 +33,41 @@ logical_axis_rules: [
                       ['activation_embed_and_logits_batch_sequence', ['expert']],
                       ['activation_heads', ['model']],
                       ['activation_kv_heads', ['model']],
+                      ['activation_attn_length', ['expert']],
+                      ['activation_attn_length_no_exp', []],
                       ['activation_length', ['data', 'expert']],
-                      ['activation_q_length', ['data', 'expert']],
-                      ['activation_embed', ['model']],
-                      ['activation_mlp', ['model']],
+                      ['activation_length_no_exp', 'data'],
+                      ['activation_q_length', ['expert']],
+                      ['activation_attn_embed', 'model'],
+                      ['activation_embed', ['model', 'attn_dp']],
+                      ['activation_mlp', ['model', 'attn_dp']],
                       ['activation_kv', ['model']],
                       ['activation_prefill_kv_batch', ['expert']],
                       ['activation_kv_batch', ['expert']],
                       ['activation_kv_batch_no_exp', []],
                       ['activation_kv_head_dim', ['model']],
-                      ['activation_vocab', ['model']],
-                      ['activation_embed', ['model']],
+                      ['activation_vocab', ['model', 'attn_dp']],
+                      ['activation_norm_length', []],
                       ['activation_exp', ['expert']],
                       ['decode_batch', ['expert']],
-                      ['mlp', ['model']],
-                      ['mlp_no_fsdp', ['model']],
-                      ['vocab', ['model']],
+                      ['decode_length', []],
+                      ['mlp', ['model', 'attn_dp']],
+                      ['mlp_no_fsdp', ['model', 'attn_dp']],
+                      ['vocab', ['model', 'attn_dp']],
                       ['heads', ['model']],
                       ['q_heads', ['model']],
                       ['kv_heads', ['model']],
                       ['kv_head_dim', []],
                       ['kv', []],
                       ['embed', ['expert']],
+                      ['embed_tensor_transpose', ['attn_dp', 'model']],
                       ['embed_no_exp', []],
                       ['q_lora', ['expert']],
                       ['kv_lora', ['expert']],
-                      ['norm', ['model']],
+                      ['norm', []],
                       ['cache_heads', ['model']],
                       ['exp', ['expert']],
                       ['paged_kv_heads', ['model']],
                     ]
-data_sharding: [['data', 'model', 'expert']]
+data_sharding: [['data', 'attn_dp', 'model', 'expert']]
 input_data_sharding_logical_axes: ['activation_embed_and_logits_batch']

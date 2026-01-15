@@ -355,7 +355,7 @@ class RoutedMoE(nnx.Module):
 
     if self.config.attention == "vllm_rpa":
       # vLLM uses 'model' as the tensor parallelism axis name
-      self._tensor_parallelism_name = "model"
+      self._tensor_parallelism_name = ("model", "attn_dp")
     else:
       self._tensor_parallelism_name = "tensor"
 
@@ -459,6 +459,11 @@ class RoutedMoE(nnx.Module):
     return self.mesh.shape.get("expert", 1)
 
   def get_tensor_parallelism_size(self):
+    if isinstance(self._tensor_parallelism_name, tuple):
+      size = 1
+      for axis in self._tensor_parallelism_name:
+        size *= self.mesh.shape.get(axis, 1)
+      return size
     return self.mesh.shape.get(self._tensor_parallelism_name, 1)
 
   def get_tensor_transpose_parallelism_size(self):

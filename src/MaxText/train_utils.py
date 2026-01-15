@@ -218,7 +218,7 @@ def setup_train_loop(config, recorder, devices=None):
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
       max_utils.print_non_trivial_mesh_axis(model.mesh)
-      maxtext_utils.print_state_mesh_shardings_params(state, state_mesh_shardings, model.mesh)
+      maxtext_utils.print_shardings_params(state.params, state_mesh_shardings.params, model.mesh)
 
     if config.use_dpo:
       abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
