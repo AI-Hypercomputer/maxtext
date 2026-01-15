@@ -39,6 +39,7 @@ ignore:
   - "src/MaxText/inference"
   - "src/MaxText/inference_mlperf"
   - "src/MaxText/scratch_code"
+  - "src/MaxText/distillation" # code moved to src/maxtext/trainers/post_train/distillation
 
 
 flags:
