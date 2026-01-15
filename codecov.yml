@@ -13,15 +13,15 @@
 # limitations under the License.
 
 # MaxText Codecov Configuration
-# 
+#
 # We use a two-flag scheme ('regular' and 'scheduled') to handle our tiered test suite.
-# 'carryforward' is enabled because Pull Requests only run a subset of tests (excluding 'scheduled_only').
-# Without it, PRs would show a significant coverage drop as they would 'overwrite' the full-suite results.
+# 'carryforward' is enabled because each flag is only updated by its respective run type.
 #
 # Scheme:
-# - 'regular': Updated by every PR. Used to evaluate 'patch' (new code) coverage.
-# - 'scheduled': Updated by scheduled full runs. Used to anchor 'project' (total health) coverage.
+# - 'regular': Updated ONLY by PRs (subset of tests, excluding 'scheduled_only'). Used for 'patch' coverage.
+# - 'scheduled': Updated ONLY by scheduled runs (all tests including 'scheduled_only'). Used for 'project' coverage.
 # During PRs, the 'scheduled' flag is carried forward from the last full run on 'main' to keep the score stable.
+# During scheduled runs, the 'regular' flag is carried forward from the last PR.
 
 # Exclude non-source code, deprecated and experimental folders from coverage tracking
 codecov: 
@@ -43,10 +43,10 @@ ignore:
 
 
 flags:
-  # Updated on every PR and during every scheduled run (contains a subset of tests).
+  # Updated ONLY by PRs (contains subset of tests, excluding scheduled_only).
   regular:
     carryforward: true
-  # Updated ONLY during scheduled runs (contains all tests).
+  # Updated ONLY by scheduled runs (contains all tests including scheduled_only).
   scheduled:
     carryforward: true
 
