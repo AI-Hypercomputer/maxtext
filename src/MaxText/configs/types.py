@@ -488,12 +488,12 @@ class MlaAttention(BaseModel):
 
 
 class AttentionIndexer(BaseModel):
-  """Configuration specific to Deepseek Sparse Attention (DSA) -- DeepSeek3.2-style of MLA."""
+  """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
 
   use_sparse_indexer: bool = Field(False, description="If True, enables sparse indexer.")
-  index_head_dim: NonNegativeInt = Field(128, description="head dim in indexer")
+  index_head_dim: NonNegativeInt = Field(128, description="head dim for indexer")
   index_n_heads: NonNegativeInt = Field(64, description="number of head for indexer")
-  index_topk: NonNegativeInt = Field(2048, description="topk in indexer")
+  index_topk: NonNegativeInt = Field(2048, description="topk for indexer")
 
 
 class Llama4Attention(BaseModel):

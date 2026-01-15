@@ -697,13 +697,21 @@ class YarnRotaryEmbedding(nnx.Module):
   Based on https://arxiv.org/abs/2309.00071
   This implementation uses DeepSeek-v3 PyTorch as reference
   https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L294
-  - The main difference between YaRN and standard RoPE is (1) freq initialization (2) attention scaling
-    commonly, we use attention_scaling = 0.1 * math.log(rope_factor) + 1.0 if rope_factor > 1.
-    alternatively, you can disable attention scaling and multiply the factor afterwards
-  - RoPE Implementation (not YaRN specific)
-    - Arithemetic: complex (equivalent to real)
-    - Input layout: interleave or concatenate (be careful)
-    - Output layout: concatenate (both concatenate or interleave should give same final attention output)
+
+  Implementation Notes:
+  - YaRN vs. Standard RoPE:
+    1. Frequency Initialization: YaRN modifies how frequencies are computed.
+    2. Attention Scaling: YaRN typically scales embeddings by `0.1 * ln(rope_factor) + 1.0`
+       when `rope_factor > 1`. This scaling can be applied within this layer (if `attention_scaling=True`)
+       or externally.
+  - RoPE Implementation Details (General):
+    - Arithmetic: Uses complex number arithmetic. Real number arithmetic is not implemented here,
+      though the resulting embeddings would be equivalent.
+    - Input Layout: Supports both interleaved (`interleave=True`, e.g., [real1, img1, real2, img2]) and
+      concatenated (`interleave=False`, e.g., [real1, real2, img1, img2]) formats.
+    - Output Layout: Always returns concatenated format ([real, imag]). Interleaved output is not
+      implemented: While the embedding is different, attention scores are invariant, as long as we apply
+      the same output layout for Q and K.
 
   Attributes:
     embedding_dims: Dimension of the embedding to be generated.

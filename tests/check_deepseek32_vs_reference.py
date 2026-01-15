@@ -93,7 +93,7 @@ class Config:
   # indexer
   use_sparse_indexer = True
   index_n_heads = 64
-  index_head_dim = 128
+  index_head_dim = 128  # > qk_rope_head_dim
   index_topk = 4
 
 SEQ_LEN = 8
@@ -473,10 +473,6 @@ class Indexer(torch.nn.Module):
     self.weights_proj = Linear(self.dim, self.n_heads, dtype=torch.float32)
     self.softmax_scale = self.head_dim**-0.5
     self.scale_fmt = args.scale_fmt
-
-    # for name, param in self.weights_proj.named_parameters():
-    #   print(name)
-    #   print(param)
 
     # CHANGE
     # self.register_buffer(
@@ -895,10 +891,11 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     # D. Run JAX Forward
     # Returns bias mask [B, S, T]
     jax_index_mask, jax_indices, jax_index_score = jax_indexer(
-        to_jax(self.x),
-        to_jax(self.qr),
+        inputs_q=to_jax(self.x),
+        low_rank_q=to_jax(self.qr),
+        inputs_kv=to_jax(self.x),
         inputs_positions=positions,
-        mask=to_jax(pt_mask) if pt_mask is not None else None,
+        attention_mask=to_jax(pt_mask) if pt_mask is not None else None,
     )
 
     print("torch index score", pt_index_score)

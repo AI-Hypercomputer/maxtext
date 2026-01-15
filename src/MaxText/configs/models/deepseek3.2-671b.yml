@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# model config for DeepSeek V3.2 - 685B
+# model config for DeepSeek V3.2 - 671B
 
 base_emb_dim: 7168
 base_num_query_heads: 128
@@ -51,7 +51,7 @@ beta_fast: 32
 rope_interleave: True
 rope_truncate: True
 rope_attention_scaling: False
-# Indexer
+# Indexer for DeepSeek Sparse Attention
 use_sparse_indexer: True
 index_n_heads: 64
 index_head_dim: 128

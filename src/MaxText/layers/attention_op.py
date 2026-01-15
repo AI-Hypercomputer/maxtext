@@ -606,12 +606,14 @@ class AttentionOp(nnx.Module):
           logical OR.
 
     Returns:
-      An `Array` representing the attention mask, broadcastable to the shape
-      `[batch_size, num_heads=1, q_group=1, q_sequence_length, kv_sequence_length]`.
+      An `Array` representing the attention mask, with shape
+       `[batch_size, 1, 1, q_sequence_length, kv_sequence_length]`.
+      It is broadcastable to the shape
+       `[batch_size, num_kv_heads, group_size=n_q // n_kv, q_sequence_length, kv_sequence_length]`.
       Positions with `0.0` allow attention, while positions with
-      `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
+       `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
       Returns `None` if no masking is determined to be necessary based on
-      the inputs and configuration.
+       the inputs and configuration.
 
     References:
       [1] JAX Pallas MHA Flash Attention:
@@ -824,10 +826,10 @@ class AttentionOp(nnx.Module):
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
       sinks: Array | None = None,
+      index_mask: Array | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
-      index_mask: Array | None = None,
   ):
     """Apply attention"""
     self.check_attention_inputs(query, key, value)
@@ -835,7 +837,7 @@ class AttentionOp(nnx.Module):
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
 
     if index_mask is not None and self.attention_kernel != "dot_product":
-      raise NotImplementedError
+      raise NotImplementedError("index mask currently only supports dot product attention.")
 
     if use_ragged_attention and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       if lengths is None:
@@ -1639,11 +1641,11 @@ class AttentionOp(nnx.Module):
       moba_mask = self._generate_moba_mask(query, key, q_positions)
       attn_weights += moba_mask
 
-    # Apply DeepSeek index mask
-    # The bias from Indexer contains 0.0 for kept tokens and large negative for masked tokens.
+    # Apply index mask, deepseek sparse attention
+    # index mask contains 0.0 for kept tokens and large negative for masked tokens.
     if index_mask is not None:
-      # attn_weights: [B, H, G, Q_Len, KV_Len]
-      # index_mask:  [B, 1, 1, Q_Len, KV_Len]
+      # attn_weights: [b, n_kv, n_q // n_kv, q_len, kv_len]
+      # index_mask: [b, 1, 1, q_len, kv_len]
       attn_weights = apply_mask_to_logits(attn_weights, index_mask)
 
     if self.is_partition_in_decode(q_seq_len):
@@ -1793,9 +1795,9 @@ class AttentionOp(nnx.Module):
       previous_chunk=None,
       bidirectional_mask=None,
       sinks=None,
+      index_mask: Optional[Array] = None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
-      index_mask: Optional[Array] = None,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -1816,9 +1818,9 @@ class AttentionOp(nnx.Module):
         previous_chunk=previous_chunk,
         bidirectional_mask=bidirectional_mask,
         sinks=sinks,
+        index_mask=index_mask,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
-        index_mask=index_mask,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
