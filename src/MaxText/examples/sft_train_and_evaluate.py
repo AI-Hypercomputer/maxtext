@@ -140,7 +140,7 @@ def get_test_dataset(config, tokenizer):
     A grain.MapDataset instance for the test split, with prompts and target
     answers.
   """
-  template_config = instruction_data_processing.load_template_from_file(CHAT_TEMPLATE_PATH)
+  template_config = instruction_data_processing.load_template_from_file(config.chat_template_path)
   dataset = datasets.load_dataset(
       DATASET_NAME,
       data_dir=DATASET_DATA_DIR,
@@ -295,10 +295,12 @@ def create_vllm_rollout(config, model, mesh, tokenizer):
       tokenizer=tokenizer,
       cache_config_or_size=MAX_PROMPT_LENGTH + MAX_TOKENS_TO_GENERATE + 256,
       mesh=mesh,
-      model_version=config.tokenizer_path,
-      hbm_utilization=0.2,
-      init_with_random_weights=True,
-      tpu_backend_type="jax",
+      rollout_config=base_rollout.RolloutConfig(
+          rollout_vllm_model_version=config.tokenizer_path,
+          rollout_vllm_hbm_utilization=0.2,
+          rollout_vllm_init_with_random_weights=True,
+          rollout_vllm_tpu_backend_type="jax",
+      ),
   )
 
 
