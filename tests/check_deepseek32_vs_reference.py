@@ -44,6 +44,7 @@ from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
+import scipy
 
 
 """To run the test
@@ -452,7 +453,8 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, interleaved: bool
 #   return hadamard_transform(x, scale=hidden_size**-0.5)
 
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
-  return x
+  hidden_size = x.size(-1)
+  return F.linear(x, torch.tensor(scipy.linalg.hadamard(hidden_size), dtype=x.dtype)) * hidden_size**-0.5
 
 
 class Indexer(torch.nn.Module):

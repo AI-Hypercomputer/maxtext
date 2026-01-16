@@ -68,11 +68,7 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 class Indexer(nnx.Module):
-  """
-  Indexer for DeepSeek Sparse Attention (DSA).
-  - compute index score based on qk product
-  - get top-k indices and index mask
-  """
+  """Indexer for DeepSeek Sparse Attention (DSA)."""
 
   def __init__(
       self,
@@ -114,11 +110,8 @@ class Indexer(nnx.Module):
         shard_mode=self.config.shard_mode,
         rngs=self.rngs,
     )
-    print("wq_b", self.wq_b.kernel.shape)
 
     # Projection: Input (x) -> Shared Indexer Key
-    # Similar to MQA, single Key Head shared across all Query Head
-    # Maps emb_dim -> [head_dim]
     self.wk = DenseGeneral(
         in_features_shape=self.emb_dim,
         out_features_shape=self.head_dim,
@@ -133,9 +126,7 @@ class Indexer(nnx.Module):
         rngs=self.rngs,
     )
 
-    # TODO(shuningjin): check fp32
-    # Projection: Input (x) -> Importance Weights (fp32)
-    # Maps dim -> [n_heads], one scalar weight per Query head
+    # Projection: Input (x) -> Importance Weights for Heads (with high precison)
     self.weights_proj = DenseGeneral(
         in_features_shape=self.emb_dim,
         out_features_shape=self.n_heads,
@@ -179,7 +170,6 @@ class Indexer(nnx.Module):
     x = jnp.concatenate([x_pe, x_nope], axis=-1)
     return x
 
-  # version 1
   def generate_mask(self, topk_indices, s):
     """
     Creates a mask for top-k indices.
@@ -191,36 +181,15 @@ class Indexer(nnx.Module):
     Returns:
         mask: [b, t, s] - `0.0` at topk_indices, `DEFAULT_MASK_VALUE` (large negative) elsewhere.
     """
-    b, t, k = topk_indices.shape
-    # 1. Initialize the full output tensor with the "masked out" value (`DEFAULT_MASK_VALUE` is large negative)
-    mask = jnp.full((b, t, s), DEFAULT_MASK_VALUE, dtype=self.config.dtype)
-    # 2. Prepare grid indices for the batch and sequence dimensions.
-    batch_idx = jnp.arange(b)[:, None, None]  # [b, 1, 1]  -> Broadcasts to [b, t, k]
-    seq_idx = jnp.arange(t)[None, :, None]  # [1, t, 1]  -> Broadcasts to [b, t, k]
-    # 3. Scatter Update (The "Sparse" Operation)
-    #    JAX optimizes this into a single kernel that only touches the 'k' spots.
-    #    No massive intermediate boolean tensor is created.
-    mask = mask.at[batch_idx, seq_idx, topk_indices].set(0.0)
-    return mask
-
-  # version 2
-  # def generate_mask(self, topk_indices, s):
-  #   """
-  #   Creates a mask for top-k indices.
-
-  #   Args:
-  #       topk_indices: [b, t, k] int - The indices to keep.
-  #       s: int - The total size to select from.
-
-  #   Returns:
-  #       mask: [b, t, s] - `0.0` at topk_indices, `DEFAULT_MASK_VALUE` (large negative) elsewhere.
-  #   """
-  #   # 1. Create a range [0, 1, ..., s-1]
-  #   # 2. Broadcast compare against [b, t, k] to get [b, t, k, s]
-  #   # 3. Use .any() to see if a s-index is present in any of the k slots
-  #   is_topk = (jnp.arange(s) == topk_indices[..., None]).any(axis=-2)
-  #   # 4. Use where to select between 0.0 and the mask value
-  #   return jnp.where(is_topk, 0.0, DEFAULT_MASK_VALUE)
+    # 1. Create a range [0, 1, ..., s-1]
+    # 2. Broadcast compare against [b, t, k] to get [b, t, k, s]
+    # 3. Use .any() to see if a s-index is present in any of the k slots
+    is_topk = (jnp.arange(s) == topk_indices[..., None]).any(axis=-2)
+    # 4. Use where to select between 0.0 and the mask value
+    # cast values to dtype
+    val_true = jnp.array(0.0, dtype=self.config.dtype)
+    val_false = jnp.array(DEFAULT_MASK_VALUE, dtype=self.config.dtype)
+    return jnp.where(is_topk, val_true, val_false)
 
   def __call__(
       self,
@@ -230,22 +199,34 @@ class Indexer(nnx.Module):
       inputs_positions: Optional[Array | None] = None,
       attention_mask: Optional[Array | None] = None,  # mask
   ):
-    """
+    """Computes the index score to determine the top-k relevant tokens.
+
+    This uses a ReLU-based similarity for QK with MQA-style broadcasting (shared K).
+    It uses weighted aggregation over heads to produce a single score per token pair.
+
+    Steps:
+      1. Q = RoPE(Wq @ q_lora)
+      2. K = RoPE(Norm(Wk @ X))
+      3. Logits = ReLU(Q @ K.T)                 # Pairwise similarity
+      4. Head_Weights = (W_proj @ X) * scale    # Dynamic head importance
+      5. Score = Sum(Logits * Head_Weights)     # Aggregate heads
+
     Args:
-      inputs_q: [b, t, embed_dim]
-      low_rank_q: [b, t, q_lora_rank]
-      inputs_kv: [b, s, embed_dim], same as inputs_q, pass in for semantic clarity
-      inputs_positions: [b, s]
-      attention_mask: [b, t, s].
+      inputs_q: Input of shape [b, t, embed_dim].
+      low_rank_q: Low-rank latent query representations of shape [b, t, q_lora_rank].
+      inputs_kv: Input of shape [b, s, embed_dim], same as inputs_q
+      inputs_positions: Position indices of shape [b, s].
+      attention_mask: Optional attention mask of shape [b, t, s].
         Positions with `0.0` allow attention, while positions with
         `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
         Returns `None` if no masking is determined to be necessary based on
         the inputs and configuration.
 
-    Returns: TODO(shuningjin): refine this docstring
-        - index_mask: A sparse mask [b, t, s] with 0.0 for top-k selected token and large negative otherwise.
-        - topk_indices
-        - index_score:
+    Returns:
+        - index_mask: A sparse mask [b, t, s] with 0.0 for top-k selected tokens
+          and large negative values otherwise.
+        - topk_indices: Indices of the top-k selected tokens [b, t, k].
+        - index_score: The computed relevance scores [b, t, s].
 
     Notation:
       b: Batch size
@@ -265,15 +246,12 @@ class Indexer(nnx.Module):
     q = self.wq_b(low_rank_q)  # [b, t, q_lora_rank] -> [b, t, h * d]
     q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)  # [b, t, h, d]
     q = self._apply_partial_rope(q, inputs_positions=inputs_positions)
-    # TODO(shuningjin): check hadamard
-    # q = self._apply_hadamard(q)
 
     # Key Processing: Project from Input X
     k = self.wk(inputs_kv)  # [b, s, embed_dim] -> [b, s, d]
     k = self.k_norm(k)
     k = k[:, :, None, :]  # [b, s, d] -> [b, s, 1, d]
     k = self._apply_partial_rope(k, inputs_positions=inputs_positions)
-    # k = self._apply_hadamard(k)
     k = k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
 
     # Compute Index Scores
