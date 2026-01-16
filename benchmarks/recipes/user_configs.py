@@ -31,7 +31,7 @@ from .. import maxtext_trillium_model_configs as v6e_model_configs
 from .. import maxtext_v5e_model_configs as v5e_model_configs
 from .. import maxtext_v5p_model_configs as v5p_model_configs
 from .pw_utils import build_user_models, get_cluster_config, get_pathways_config
-
+import maxtext_xpk_runner as mxr
 
 AVAILABLE_MODELS_FRAMEWORKS = ["mcjax", "pathways"]
 
@@ -135,10 +135,14 @@ USER_CONFIG = UserConfig(
     benchmark_steps=20,
     num_slices_list=[2],
     server_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest",
-    proxy_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest",
+    proxy_image=(
+        "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest"
+    ),
     colocated_python_image="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/sujinesh/sidecar:latest",
     runner="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/sujinesh/maxtext:latest",
     selected_model_framework=["pathways"],
     selected_model_names=["llama3_1_8b_8192_v5e_256"],
     priority="medium",
+    proxy_flags="--sidecar_name=external",
+    base_output_directory="gs://sujinesh-us-west1/colocated_checkpointing/",
 )
