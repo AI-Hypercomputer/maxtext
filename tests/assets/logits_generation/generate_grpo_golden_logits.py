@@ -16,7 +16,7 @@
 
 Usage:
 
-python3 -m MaxText.scratch_code.generate_grpo_golden_logits
+python3 -m tests.assets.logits_generation.generate_grpo_golden_logits
 """
 
 import functools

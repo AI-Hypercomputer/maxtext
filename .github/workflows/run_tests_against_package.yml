@@ -91,7 +91,7 @@ jobs:
           python3 -m pip freeze
           uv pip install pytest-cov
       - name: Copy test assets files
-        run : gcloud storage cp gs://maxtext-test-assets/* src/MaxText/test_assets
+        run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
         shell: bash
         run: |
@@ -103,7 +103,7 @@ jobs:
           # TODO: Use package data for testing and remove the env vars
           export MAXTEXT_REPO_ROOT=$(pwd)
           export MAXTEXT_ASSETS_ROOT=$(pwd)/src/MaxText/assets
-          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
+          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # omit this libtpu init args for gpu tests
           if [ "${{ inputs.device_type }}" != "cuda12" ]; then

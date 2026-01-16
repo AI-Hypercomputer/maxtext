@@ -4,7 +4,7 @@
 # 1. Converts the Mistral PyTorch checkpoint to MaxText(orbax) format.
 # 2. Loads the MaxText(orbax) checkpoint to run inference, and runs one forward pass on a given input.
 # 3. Compares the logits to pre-computed logits obtained by running the HF checkpoint directly,
-#    see scratch_code/golden-mistral-7b_export.ipynb and the resulting src/MaxText/test_assets/golden_data_mistral-7b.jsonl
+#    see tests/assets/logits_generation/golden-mistral-7b_export.ipynb and the resulting golden_data_mistral-7b.jsonl
 
 # Example Usage: export BASE_OUTPUT_PATH=/path/to/GCS/bucket; bash end_to_end/tpu/mistral/7b/test_mistral-7b.sh
 

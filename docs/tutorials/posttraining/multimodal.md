@@ -84,7 +84,7 @@ python -m MaxText.decode \
     scan_layers=false \
     use_multimodal=true \
     prompt='Describe image <start_of_image>' \
-    image_path='src/MaxText/test_assets/test_image.jpg' \
+    image_path='tests/assets/test_image.jpg' \
     attention='dot_product'
 ```
 
