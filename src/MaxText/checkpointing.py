@@ -54,6 +54,7 @@ EmergencyReplicatorCheckpointManager = emergency_replicator_checkpoint_manager.R
 class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
   """A CheckpointHandler that allows specifying process_index and process_count."""
 
+  # TODO(sujinesh): We will want to annotate this with colocated python so save and restore are on the worker rather than the controller.
   def save(
       self,
       directory: epath.Path,
@@ -80,6 +81,7 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
       process_index, process_count = jax.process_index(), jax.process_count()
       save_single_process(item, process_index, process_count)
 
+  # TODO(sujinesh): We will want to annotate this with colocated python so save and restore are on the worker rather than the controller.
   def restore(
       self,
       directory: epath.Path,
@@ -198,6 +200,8 @@ def create_orbax_checkpoint_manager(
     use_zarr3: bool = True,
     enable_continuous_checkpointing: bool = False,
     max_num_checkpoints_to_keep: int = 10,
+    enable_single_controller: bool = False,
+    colocated_python_checkpointing: bool = False,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -242,6 +246,17 @@ def create_orbax_checkpoint_manager(
           ),
       logger=orbax_logger,
   )
+
+  # Register the pathways colocated python array handler here.
+  if enable_single_controller and colocated_python_checkpointing:
+    checkpointing_impl = ocp.pathways.CheckpointingImpl.from_options(
+        use_colocated_python=True,
+    )
+    ocp.pathways.register_type_handlers(
+        checkpointing_impl=checkpointing_impl,
+        use_replica_parallel=False,
+        enable_replica_parallel_separate_folder=False,
+    )
 
   max_logging.log("Checkpoint manager created!")
   return manager

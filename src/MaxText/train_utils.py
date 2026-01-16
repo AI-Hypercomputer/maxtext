@@ -77,6 +77,8 @@ def create_training_tools(config, model, mesh):
         use_zarr3,
         config.enable_continuous_checkpointing,
         config.max_num_checkpoints_to_keep,
+        config.enable_single_controller,
+        config.colocated_python_checkpointing,
     )
 
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
