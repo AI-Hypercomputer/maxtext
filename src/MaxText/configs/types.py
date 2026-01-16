@@ -21,6 +21,7 @@ from math import prod
 from tempfile import gettempdir
 from typing import Any, NewType, Literal, Optional
 import datetime
+import enum
 import logging
 import math
 import os
@@ -37,6 +38,12 @@ from MaxText import accelerator_to_spec_map, max_utils
 from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from MaxText.utils import gcs_utils
+
+class XProfTPUPowerTraceMode(enum.IntEnum):  # pylint: disable=invalid-name
+  """Enum for XProfTPUPowerTraceMode."""
+  POWER_TRACE_NONE = 0
+  POWER_TRACE_NORMAL = 1
+  POWER_TRACE_SPI = 2
 
 logger = logging.getLogger(__name__)
 
@@ -1285,6 +1292,13 @@ class Profiling(BaseModel):
   hide_profiler_step_metric: bool = Field(False, description="Whether to enable profiler step metric.")
   enable_jax_profiler: bool = Field(False, description="Enable the JAX live profiler.")
   jax_profiler_port: int = Field(9999, description="Port for the JAX profiler.")
+  xprof_tpu_power_trace_level: XProfTPUPowerTraceMode = Field(
+      XProfTPUPowerTraceMode.POWER_TRACE_NONE,
+      description="TPU power trace level. The value should be 0 (POWER_TRACE_NONE), 1 (POWER_TRACE_NORMAL), or 2 (POWER_TRACE_SPI)"
+  )
+  xprof_e2e_enable_fw_throttle_event: bool = Field(False, description="Enable FW throttle event.")
+  xprof_e2e_enable_fw_power_level_event: bool = Field(False, description="Enable FW power level event.")
+  xprof_e2e_enable_fw_thermal_event: bool = Field(False, description="Enable FW thermal event.")
 
 
 class HloDump(BaseModel):
