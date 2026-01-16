@@ -44,6 +44,9 @@ from transformers import AutoModelForCausalLM
 from MaxText import max_logging
 import psutil
 
+from etils import epath
+import orbax.checkpoint as ocp
+
 
 SAFE_TENSORS_CONFIG_FILE = "config.json"
 SAFE_TENSORS_WEIGHTS_FILE = "model.safetensors"
@@ -130,6 +133,7 @@ def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
         "maxtext_state_dict must be a subset of flattened param_map"
         + f"\nparam map\n{param_map_keys}"
         + f"\nmaxtext:\n{maxtext_state_keys}"
+        + f"\nmissing keys:\n{missing_keys}"
     )
 
   # 2 Filter: param map may have extra keys
@@ -747,6 +751,146 @@ def print_ram_usage(stage=""):
   max_logging.log(
       f"[{stage}] RAM Usage: {memory.used / (1024**3):.2f}/{memory.total / (1024**3):.2f} GB ({memory.percent:.1f}%)"
   )
+
+
+def load_orbax_checkpoint(config) -> dict:
+  """Loads a full Orbax checkpoint from disk with unsharded arrays.
+
+  Args:
+    config: MaxText config containing checkpoint storage settings
+
+  Returns:
+    Dictionary containing the full checkpoint structure
+  """
+  # Create Orbax checkpointer
+  ckptr = ocp.Checkpointer(
+      ocp.PyTreeCheckpointHandler(
+          restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+      )
+  )
+
+  # Get checkpoint metadata
+  checkpoint_path = epath.Path(config.load_parameters_path)
+  metadata = ckptr.metadata(checkpoint_path)
+
+  # Create a mesh with all devices for unsharded restoration
+  devices = np.array(jax.devices()).reshape((-1,))
+  single_device_mesh = jax.sharding.Mesh(devices, ("x",))
+
+  def create_restore_args(tree_metadata):
+    """Create restore args for unsharded restoration."""
+    if hasattr(tree_metadata, "shape"):
+      return ocp.ArrayRestoreArgs(sharding=jax.sharding.NamedSharding(single_device_mesh, jax.sharding.PartitionSpec()))
+    elif isinstance(tree_metadata, dict):
+      return {k: create_restore_args(v) for k, v in tree_metadata.items()}
+    else:
+      return None
+
+  restore_args = jax.tree_util.tree_map(
+      lambda x: create_restore_args(x) if hasattr(x, "shape") else None,
+      metadata.item_metadata.tree,
+      is_leaf=lambda x: hasattr(x, "shape"),
+  )
+
+  # Restore the entire checkpoint
+  return ckptr.restore(checkpoint_path, restore_args=restore_args)
+
+
+def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
+  """Extract weights from NNX checkpoint structure.
+
+  NNX checkpoints have structure: {'decoder': {'decoder_norm': {'scale': {'value': array}}}}
+  This function flattens it to: {'params-decoder-decoder_norm-scale': array}
+
+  Args:
+    weights_dict: NNX checkpoint weights dictionary
+
+  Returns:
+    Dictionary mapping parameter names to weight arrays
+  """
+  result = {}
+  leaves_with_paths = jax.tree_util.tree_leaves_with_path(weights_dict)
+  for path_tuple, leaf_value in leaves_with_paths:
+    path_keys = [k.key for k in path_tuple]
+    # Skip NNX RNG state variables (not model weights)
+    if "to_nnx__rngs" in path_keys or any(k.endswith("_rngs") for k in path_keys):
+      continue
+    # Skip if this is the "value" key itself - we want the parent path
+    if path_keys[-1] == "value":
+      path_keys = path_keys[:-1]
+    maxtext_param_key = "params-" + "-".join(path_keys)
+    if not isinstance(leaf_value, (jax.Array, np.ndarray)):
+      raise ValueError(f"Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}.")
+    result[maxtext_param_key] = leaf_value
+  return result
+
+
+def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
+  """Extract weights from Linen checkpoint structure.
+
+  Linen checkpoints have structure: {'params': {'decoder': {'decoder_norm': {'scale': array}}}}
+  This function flattens it to: {'params-decoder-decoder_norm-scale': array}
+
+  Args:
+    weights_dict: Linen checkpoint weights dictionary
+
+  Returns:
+    Dictionary mapping parameter names to weight arrays
+  """
+  result = {}
+  leaves_with_paths = jax.tree_util.tree_leaves_with_path(weights_dict)
+  for path_tuple, leaf_value in leaves_with_paths:
+    path_keys = [k.key for k in path_tuple]
+    # Construct maxtext_param_key from path_tuple
+    maxtext_param_key = "params-" + "-".join(path_keys)
+    if not isinstance(leaf_value, (jax.Array, np.ndarray)):
+      raise ValueError(f"Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}.")
+    result[maxtext_param_key] = leaf_value
+  return result
+
+
+def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray]:
+  """Detect checkpoint type (Linen vs NNX) and extract weights.
+
+  Handles multiple NNX checkpoint variants:
+  - Linen: {'params': {'params': {'decoder': {...}, 'token_embedder': ... {WEIGHT_ARRAY}}}}
+  - NNX-SFT: {'decoder': {...}, 'token_embedder': ... {'value': WEIGHT_ARRAY}}
+  - NNX-RL: {'base': {'decoder': {...}, 'token_embedder': ... {'value': WEIGHT_ARRAY}}}
+
+  Currently, we align all extracted weights to MaxText-Linen naming convention
+  like "params-decoder-decoder_norm-scale". This allows reusing the same param_mapping
+  for both Linen and NNX checkpoints.
+
+  Args:
+    checkpoint_dict: Raw checkpoint dictionary from Orbax
+
+  Returns:
+    Dictionary mapping MaxText parameter names to weight arrays
+  """
+  # Detect checkpoint type by structure
+  actual_weights_dict = checkpoint_dict.get("params")
+
+  if actual_weights_dict is None:
+    # NNX checkpoint: structure is directly at the root
+    # Check for NNX-RL variant with 'base' wrapper
+    if "base" in checkpoint_dict and isinstance(checkpoint_dict["base"], dict):
+      # NNX-RL: {'base': {'decoder': ..., 'token_embedder': ...}}
+      max_logging.log("Detected NNX-RL checkpoint structure (with 'base' wrapper)")
+      return extract_nnx_weights(checkpoint_dict["base"])
+    else:
+      # NNX-SFT: {'decoder': ..., 'token_embedder': ...}
+      max_logging.log("Detected NNX-SFT checkpoint structure")
+      return extract_nnx_weights(checkpoint_dict)
+  else:
+    # Linen checkpoint: check if there's a nested 'params' key
+    if isinstance(actual_weights_dict, dict) and "params" in actual_weights_dict:
+      actual_weights_dict = actual_weights_dict["params"]
+      max_logging.log("Detected Linen checkpoint structure")
+    else:
+      max_logging.log("Detected Linen checkpoint structure (single params layer)")
+    return extract_linen_weights(actual_weights_dict)
 
 
 def get_hf_model(model_id: str, token: str):
