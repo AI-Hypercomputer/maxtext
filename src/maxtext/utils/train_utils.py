@@ -58,8 +58,6 @@ def create_training_tools(config, model, mesh):
     # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
     use_ocdbt = config.checkpoint_storage_use_ocdbt
     use_zarr3 = config.checkpoint_storage_use_zarr3
-    if config.enable_single_controller:
-      use_ocdbt, use_zarr3 = False, False
 
     checkpoint_dir = ""
     if config.enable_checkpointing:
