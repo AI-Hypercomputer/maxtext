@@ -19,7 +19,7 @@ SCAN_LAYERS=false
 # --- Step 1: Run the Hugging Face Conversion ---
 echo "Starting Hugging Face model conversion for gemma2-2b..."
 
-python3 -m "MaxText.utils.ckpt_conversion.to_huggingface" \
+python3 -m MaxText.utils.ckpt_conversion.to_huggingface \
     "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}configs/base.yml" \
     model_name="${MODEL_NAME}" \
     tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}/tokenizer.gemma" \
@@ -46,7 +46,7 @@ echo "Downloading HF checkpoints from ${HF_CHECKPOINT_GCS_PATH} to ${LOCAL_HF_CH
 gsutil -m cp -r "${HF_CHECKPOINT_GCS_PATH}/*" "${LOCAL_HF_CHECKPOINT_DIR}/"
 echo "Download complete."
 
-python3 -m "tests.forward_pass_logit_checker" \
+python3 -m tests.utils.forward_pass_logit_checker \
     "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}configs/base.yml" \
     tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path="${MAXTEXT_CHECKPOINT_DIR}"\

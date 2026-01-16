@@ -75,7 +75,7 @@ If outputs are wrong, you can use jax.debug.print() to print the layer-wise mean
 
 4. To further validate the converted checkpoint, we recommend to use the [forward_pass_logit_checker.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md#verifying-conversion-correctness) to compare the original ckpt with the converted ckpt:
 ```bash
-python3 -m MaxText.tests.forward_pass_logit_checker src/MaxText/configs/base.yml \
+python3 -m tests.utils.forward_pass_logit_checker src/MaxText/configs/base.yml \
     tokenizer_path=assets/<tokenizer> \
     load_parameters_path=<path-to-maxtext-checkpoint> \
     model_name=<MODEL_NAME> \

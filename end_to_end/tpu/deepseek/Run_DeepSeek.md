@@ -187,7 +187,7 @@ File is stored locally at golden_DeepSeek-V2-Lite.jsonl.
 Run command below to compare logits between HuggingFace and MaxText.
 
 ```sh
-python3 -m tests.forward_pass_logit_checker \
+python3 -m tests.utils.forward_pass_logit_checker \
     src/MaxText/configs/base.yml \
     tokenizer_type=huggingface \
     tokenizer_path=deepseek-ai/DeepSeek-V2-Lite \

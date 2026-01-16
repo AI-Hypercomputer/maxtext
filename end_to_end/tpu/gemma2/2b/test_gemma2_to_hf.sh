@@ -44,7 +44,7 @@ python3 -m MaxText.utils.ckpt_conversion.to_huggingface "${MAXTEXT_PKG_DIR:-${MA
 
 # We also test whether the forward pass logits match the original HF model
 # to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`
-python3 -m tests.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
+python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
     tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path=${CKPT_PATH} \
     model_name=${MODEL_NAME} \

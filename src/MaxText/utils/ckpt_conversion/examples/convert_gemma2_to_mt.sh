@@ -20,7 +20,7 @@ PROMPT="I love to"
 
 # --- Step 1: Convert Checkpoint to MaxText Format ---
 echo "--- Starting Checkpoint Conversion ---"
-python3 -m "MaxText.utils.ckpt_conversion.to_maxtext" \
+python3 -m MaxText.utils.ckpt_conversion.to_maxtext \
   "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}configs/base.yml" \
   model_name="${MODEL_NAME}" \
   base_output_directory="${OUTPUT_BASE_DIR}" \
@@ -34,8 +34,8 @@ echo "--- Checkpoint Conversion Complete ---"
 # --- Step 2 (Optional): Decode using the Converted Checkpoint ---
 
 echo "--- Starting Decoding ---"
-python3 -m "MaxText.decode" \
-  "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}configs/base.yml" \
+python3 -m MaxText.decode \
+  ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}configs/base.yml \
   model_name="${MODEL_NAME}" \
   tokenizer_path="${TOKENIZER_PATH}" \
   load_parameters_path="${OUTPUT_BASE_DIR}/0/items" \
@@ -54,8 +54,8 @@ echo "--- Decoding Complete ---"
 # --- Step 3: Compare the HF and MT Checkpoint ---
 
 echo "--- Starting Comparing Logits and Predicted Tokens ---"
-python3 -m "tests.forward_pass_logit_checker" \
-    "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml" \
+python3 -m tests.utils.forward_pass_logit_checker \
+    ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml \
     tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path="${OUTPUT_BASE_DIR}/0/items"\
     run_name=forward_pass_test_${MODEL_NAME}\

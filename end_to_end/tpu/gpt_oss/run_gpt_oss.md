@@ -181,7 +181,7 @@ File is stored locally at golden_data_gpt-oss-20b.jsonl.
 Run command below to compare logits between HuggingFace and MaxText.
 
 ```sh
-python3 -m tests.forward_pass_logit_checker \
+python3 -m tests.utils.forward_pass_logit_checker \
     src/MaxText/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=forward_logits_check \

@@ -86,12 +86,12 @@ python3 -m MaxText.utils.ckpt_conversion.to_huggingface src/MaxText/configs/base
 
 ## Verifying conversion correctness
 
-To ensure the conversion was successful, you can use the `tests/forward_pass_logit_checker.py` script. It runs a forward pass on both the original and converted models and compares the output logits to verify conversion. It is used to verify the bidirectional conversion. 
+To ensure the conversion was successful, you can use the `tests/utils.forward_pass_logit_checker.py` script. It runs a forward pass on both the original and converted models and compares the output logits to verify conversion. It is used to verify the bidirectional conversion. 
 
 ### Usage
 
 ```bash
-python3 -m tests.forward_pass_logit_checker src/MaxText/configs/base.yml \
+python3 -m tests.utils.forward_pass_logit_checker src/MaxText/configs/base.yml \
     tokenizer_path=assets/<tokenizer> \
     load_parameters_path=<path-to-maxtext-checkpoint> \
     model_name=<MODEL_NAME> \
