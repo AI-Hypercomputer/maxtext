@@ -179,30 +179,48 @@ class Indexer(nnx.Module):
     x = jnp.concatenate([x_pe, x_nope], axis=-1)
     return x
 
-
+  # version 1
   def generate_mask(self, topk_indices, s):
-      """
-      Creates a mask for top-k indices.
-      
-      Args:
-          topk_indices: [b, t, k] int - The indices to keep.
-          s: int - The total size to select from.
-          
-      Returns:
-          mask: [b, t, s] - `0.0` at topk_indices, `DEFAULT_MASK_VALUE` (large negative) elsewhere.
-      """
-      b, t, k = topk_indices.shape
-      # 1. Initialize the full output tensor with the "masked out" value (`DEFAULT_MASK_VALUE` is large negative)
-      mask = jnp.full((b, t, s), DEFAULT_MASK_VALUE, dtype=self.config.dtype)
-      # 2. Prepare grid indices for the batch and sequence dimensions.
-      batch_idx = jnp.arange(b)[:, None, None] # [b, 1, 1]  -> Broadcasts to [b, t, k]
-      seq_idx = jnp.arange(t)[None, :, None] # [1, t, 1]  -> Broadcasts to [b, t, k]
-      # 3. Scatter Update (The "Sparse" Operation)
-      #    JAX optimizes this into a single kernel that only touches the 'k' spots.
-      #    No massive intermediate boolean tensor is created.
-      mask = mask.at[batch_idx, seq_idx, topk_indices].set(0.0)
-      return mask
+    """
+    Creates a mask for top-k indices.
 
+    Args:
+        topk_indices: [b, t, k] int - The indices to keep.
+        s: int - The total size to select from.
+
+    Returns:
+        mask: [b, t, s] - `0.0` at topk_indices, `DEFAULT_MASK_VALUE` (large negative) elsewhere.
+    """
+    b, t, k = topk_indices.shape
+    # 1. Initialize the full output tensor with the "masked out" value (`DEFAULT_MASK_VALUE` is large negative)
+    mask = jnp.full((b, t, s), DEFAULT_MASK_VALUE, dtype=self.config.dtype)
+    # 2. Prepare grid indices for the batch and sequence dimensions.
+    batch_idx = jnp.arange(b)[:, None, None]  # [b, 1, 1]  -> Broadcasts to [b, t, k]
+    seq_idx = jnp.arange(t)[None, :, None]  # [1, t, 1]  -> Broadcasts to [b, t, k]
+    # 3. Scatter Update (The "Sparse" Operation)
+    #    JAX optimizes this into a single kernel that only touches the 'k' spots.
+    #    No massive intermediate boolean tensor is created.
+    mask = mask.at[batch_idx, seq_idx, topk_indices].set(0.0)
+    return mask
+
+  # version 2
+  # def generate_mask(self, topk_indices, s):
+  #   """
+  #   Creates a mask for top-k indices.
+
+  #   Args:
+  #       topk_indices: [b, t, k] int - The indices to keep.
+  #       s: int - The total size to select from.
+
+  #   Returns:
+  #       mask: [b, t, s] - `0.0` at topk_indices, `DEFAULT_MASK_VALUE` (large negative) elsewhere.
+  #   """
+  #   # 1. Create a range [0, 1, ..., s-1]
+  #   # 2. Broadcast compare against [b, t, k] to get [b, t, k, s]
+  #   # 3. Use .any() to see if a s-index is present in any of the k slots
+  #   is_topk = (jnp.arange(s) == topk_indices[..., None]).any(axis=-2)
+  #   # 4. Use where to select between 0.0 and the mask value
+  #   return jnp.where(is_topk, 0.0, DEFAULT_MASK_VALUE)
 
   def __call__(
       self,
