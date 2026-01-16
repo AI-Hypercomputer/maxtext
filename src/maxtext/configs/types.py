@@ -314,6 +314,10 @@ class Checkpointing(BaseModel):
       True, description="If True, saves a final checkpoint upon training completion."
   )
   enable_continuous_checkpointing: bool = Field(False, description="If True, enables continuous checkpointing.")
+  colocated_python_checkpointing: bool = Field(
+      False,
+      description="If True, enables checkpointing from remote TPU VMs instead of head node on pathways.",
+  )
 
 
 class OrbaxStorage(BaseModel):
@@ -599,7 +603,8 @@ class MoEGeneral(BaseModel):
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
   use_custom_sort_vjp: bool = Field(
-      True, description="Whether to use a custom VJP sort for efficient backward pass processing in sparse matmul."
+      True,
+      description="Whether to use a custom VJP sort for efficient backward pass processing in sparse matmul.",
   )
   use_ring_of_experts: bool = Field(
       False,
@@ -1003,7 +1008,8 @@ class GrainDataset(BaseModel):
   grain_train_files: PathStr = Field("", description="Path to Grain training files.")
   grain_eval_files: PathStr = Field("", description="Path to Grain evaluation files.")
   grain_train_mixture_config_path: PathStr = Field(
-      "", description="Path to a JSON file specifying the mixture weights for Grain training data."
+      "",
+      description="Path to a JSON file specifying the mixture weights for Grain training data.",
   )
   grain_file_type: str = Field("arrayrecord", description="File type for Grain data.")
   grain_worker_count: int = Field(1, description="Number of workers for Grain data loading.")
@@ -1049,10 +1055,12 @@ class Distillation(BaseModel):
   # These dictionaries allow flexible configuration injection for Student/Teacher
   # without needing to duplicate the entire MaxText schema here.
   student_overrides: dict[str, Any] = Field(
-      default_factory=dict, description="Overrides specific to the Student model (e.g., {'num_query_heads': 16})."
+      default_factory=dict,
+      description="Overrides specific to the Student model (e.g., {'num_query_heads': 16}).",
   )
   teacher_overrides: dict[str, Any] = Field(
-      default_factory=dict, description="Overrides specific to the Teacher model (e.g., {'num_query_heads': 64})."
+      default_factory=dict,
+      description="Overrides specific to the Teacher model (e.g., {'num_query_heads': 64}).",
   )
 
   # --- Loss Params ---
@@ -1122,16 +1130,22 @@ class Optimizer(BaseModel):
   )
   learning_rate: NonNegativeFloat = Field(3.0e-5, description="The peak learning rate.")
   lr_schedule_type: LearningRateScheduleType = Field(
-      LearningRateScheduleType.COSINE, description="The type of learning rate schedule to use."
+      LearningRateScheduleType.COSINE,
+      description="The type of learning rate schedule to use.",
   )
   learning_rate_final_fraction: float = Field(
-      0.1, description="Final LR as a fraction of peak LR (applies to both cosine and WSD schedules)."
+      0.1,
+      description="Final LR as a fraction of peak LR (applies to both cosine and WSD schedules).",
   )
   wsd_decay_steps_fraction: float = Field(
-      0.1, ge=0.0, le=1.0, description="Fraction of total steps for decay phase in WSD schedule."
+      0.1,
+      ge=0.0,
+      le=1.0,
+      description="Fraction of total steps for decay phase in WSD schedule.",
   )
   wsd_decay_style: WsdDecayStyle = Field(
-      WsdDecayStyle.LINEAR, description="The decay style for WSD schedule ('linear' or 'cosine')."
+      WsdDecayStyle.LINEAR,
+      description="The decay style for WSD schedule ('linear' or 'cosine').",
   )
   warmup_steps_fraction: float = Field(0.1, ge=0.0, le=1.0, description="Fraction of total steps for LR warmup.")
   learning_rate_schedule_steps: int = Field(
@@ -1172,10 +1186,12 @@ class Muon(BaseModel):
 
   muon_beta: float = Field(0.95, description="Decay rate for the exponentially weighted average of grads.")
   muon_weight_decay: float = Field(
-      0, description="Strength of the weight decay regularization. This is multiplied with the learning rate."
+      0,
+      description="Strength of the weight decay regularization. This is multiplied with the learning rate.",
   )
   muon_consistent_rms: None | float = Field(
-      None, description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2)."
+      None,
+      description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
   )
 
 
@@ -1552,7 +1568,8 @@ class RLHardware(BaseModel):
       "than one model replica in rollout.",
   )
   rollout_tensor_parallelism: int = Field(
-      -1, description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined."
+      -1,
+      description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined.",
   )
 
 
@@ -1567,7 +1584,8 @@ class VLLM(BaseModel):
   max_num_seqs: Optional[int] = Field(None, description="Max number of sequences in vLLM.")
   vllm_additional_config: dict[str, Any] = Field(default_factory=dict, description="Additional vLLM config options.")
   vllm_hf_overrides: dict[str, Any] = Field(
-      default_factory=dict, description="Overrides for HuggingFace model config for MaxText model."
+      default_factory=dict,
+      description="Overrides for HuggingFace model config for MaxText model.",
   )
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
 
@@ -1646,7 +1664,8 @@ class Engram(BaseModel):
   engram_num_heads: int = Field(8, description="Number of heads dedicated to the Engram.")
   engram_head_dim: int = Field(1280, description="Head dimension for heads.")
   engram_vocab_bases: list[int] = Field(
-      default_factory=list, description="List of minimum head vocab sizes for each n-gram order."
+      default_factory=list,
+      description="List of minimum head vocab sizes for each n-gram order.",
   )
   engram_max_ngram_size: int = Field(3, description="The max 'n' in N-gram.")
   engram_kernel_size: int = Field(4, description="Temporal window size for Engram convolution.")
@@ -1892,7 +1911,8 @@ class MaxTextConfig(
 
   debug: Debug = Field(default_factory=Debug, description="Configuration for debugging options.")
   rl: RL = Field(
-      default_factory=RL, description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO)."
+      default_factory=RL,
+      description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
   )
   model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
@@ -1941,7 +1961,11 @@ class MaxTextConfig(
           filter(
               os.path.exists,
               (
-                  os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", os.path.basename(tokenizer_path)),
+                  os.path.join(
+                      MAXTEXT_ASSETS_ROOT,
+                      "tokenizers",
+                      os.path.basename(tokenizer_path),
+                  ),
                   os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", tokenizer_path),
               ),
           ),
@@ -2093,7 +2117,10 @@ class MaxTextConfig(
         self.global_batch_size_to_eval_on,
         self.micro_batch_size_to_eval_on,
     ) = calculate_global_batch_sizes(
-        self.eval_per_device_batch_size, self.expansion_factor_real_data, self.num_target_devices, 1
+        self.eval_per_device_batch_size,
+        self.expansion_factor_real_data,
+        self.num_target_devices,
+        1,
     )
 
     # Calculate ramp-up batch size parameters if enabled.
@@ -2262,6 +2289,8 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for multi-tier checkpointing.")
       if self.multi_tier_checkpointing_backup_interval_minutes <= 0:
         raise ValueError("`multi_tier_checkpointing_backup_interval_minutes` must be > 0.")
+    if self.colocated_python_checkpointing and not self.enable_single_controller:
+      raise ValueError("`colocated_python_checkpointing` is only supported with `enable_single_controller` set to True.")
     if self.enable_emergency_checkpoint:
       if not self.local_checkpoint_directory:
         raise ValueError("`local_checkpoint_directory` must be set for emergency checkpointing.")
@@ -2423,7 +2452,10 @@ class MaxTextConfig(
         raise ValueError("When dataset_type=grain, please set grain_train_files or grain_train_mixture_config_path")
       if self.eval_interval > 0 and not self.grain_eval_files:
         raise ValueError("Please specify grain_eval_files or set eval_interval to <=0.")
-      if self.tokenizer_type not in (TokenizerType.SENTENCEPIECE, TokenizerType.HUGGINGFACE):
+      if self.tokenizer_type not in (
+          TokenizerType.SENTENCEPIECE,
+          TokenizerType.HUGGINGFACE,
+      ):
         raise ValueError(
             f"grain pipeline only supports tokenizer_type: sentencepiece, huggingface, but got {self.tokenizer_type}"
         )
