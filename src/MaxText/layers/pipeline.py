@@ -591,8 +591,9 @@ class Pipeline(nn.Module):
         return x
 
       new_variables = jax.tree.map(_all_gather_invariant, sharded_weights, fsdp_idx)
+      new_variables = jax.ad_checkpoint.checkpoint_name(new_variables, "bsw_gathered_weights")
 
-      return (cur_bsw[1], new_variables)
+      return jax.ad_checkpoint.checkpoint_name((cur_bsw[1], new_variables), "bsw")
 
     return _all_gather_inner(repeat_weights, bsw, fsdp_idx)
 
@@ -985,7 +986,7 @@ class Pipeline(nn.Module):
     if self.config.set_remat_policy_on_pipeline_iterations:
       run_iteration_scannable = nn.remat(
           run_iteration_scannable,
-          prevent_cse=not self.config.scan_pipeline_iterations,
+          prevent_cse=True,  # not self.config.scan_pipeline_iterations,
           policy=self.get_pipeline_remat_policy(),
       )
 
@@ -1018,7 +1019,7 @@ class Pipeline(nn.Module):
 
     run_one_repeat_scannable = nn.remat(
         run_one_repeat_scannable,
-        prevent_cse=not self.config.scan_pipeline_iterations,
+        prevent_cse=True,
         policy=self.get_pipeline_remat_policy(),
     )
 
