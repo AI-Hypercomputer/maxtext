@@ -14,88 +14,123 @@
  limitations under the License.
  -->
 
-(full-finetuning)=
 # Full fine-tuning on single-host TPUs
 
-MaxText can perform pre-training and full finetuning. To perform full fine
-tuning, you need to pass the checkpoint to the training script.
+Full Fine-Tuning (FFT) is a common technique used in post-training to adapt a pre-trained Large Language Model (LLM) to a specific downstream task or dataset. In this process, all the parameters (weights) of the original model are "unfrozen" and updated during training on the new task-specific data. This allows the entire model to adjust and specialize, potentially leading to the best performance on the new task.
 
-Following is the parameter to assign a checkpoint to the training script.
+This tutorial demonstrates step-by-step instructions for setting up the environment, convert checkpoint and then training the model on a Hugging Face dataset using FFT.
 
-- `load_parameters_path`: Path to the checkpoint directory
+In this tutorial we use a single host TPU VM such as `v6e-8/v5p-8`. Let's get started!
 
-The high level steps involve:
-- Converting the model checkpoints to MaxText formatted checkpoints
-- Preparing the dataset so that data can be fed into the training script.
-  MaxText provides sample pipelines to load the data via tf.data or Pygrain from
-  a disk or gcs bucket. Or it can also input data directly from the hugging face
-  dataset.
-- Running the training script with the checkpoint
-- Note: You may need to change the training parameters to fit the model to the
-  TPU or GPU shape and to obtain an optimized performance.
+## Install dependencies
 
-## MaxText checkpoints
+```sh
+# 1. Clone the repository
+git clone https://github.com/AI-Hypercomputer/maxtext.git
+cd maxtext
 
-MaxText checkpoints are in their own format. You can see the format in the script for llama conversion script.
+# 2. Create virtual environment
+export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
+pip install uv
+uv venv --python 3.12 --seed $VENV_NAME
+source $VENV_NAME/bin/activate
 
-The conversion scripts for LLama work with Meta’s original checkpoints and not with HuggingFace Checkpoint.
+# 3. Install dependencies in editable mode
+uv pip install -e .[tpu] --resolution=lowest
+install_maxtext_github_deps
+```
+## Setup environment variables
 
-E.g.
+```sh
+# -- Model configuration --
+export MODEL_NAME=<model name> # e.g., 'llama3.1-8b'
+export MODEL_TOKENIZER=<tokenizer path> # e.g., 'meta-llama/Llama-3.1-8B-Instruct'
+export HF_TOKEN=<Hugging Face access token>
 
-```bash
-python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
-    --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
+# -- MaxText configuration --
+export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
+export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
 ```
 
-The conversion scripts do not use accelerators but need large host memory to perform the conversion.
+## Hugging Face checkpoint to Maxtext checkpoint
+This section explains how to prepare your model checkpoint for use with MaxText. You have two options: using an existing MaxText checkpoint or converting a Hugging Face checkpoint.
 
-- The base model checkpoints should be in the format `{name}.{chkpt_idx}.pth` 
-    - For example: `mistral-7b.00.pth`
-- For large size model (e.g. 70B model), this script requires large memory VM.
-- The script load and save weights in a single pass.
+### Option 1: Using an existing MaxText checkpoint
+If you already have a MaxText-compatible model checkpoint, simply set the following environment variable and move on to the next section.
 
-### Sample full fine tuning script
+```sh
+export MODEL_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+```
 
-Below is a sample training script for LLama2-7b.
+### Option 2: Converting a Hugging Face checkpoint
+If your model checkpoint is from Hugging Face, you need to run a conversion script to make it MaxText-compatible.
 
-```bash
+1. **Set the Output Path:** First, define where the converted MaxText checkpoint will be saved. For example:
+
+```sh
+export MODEL_CKPT_DIRECTORY=${BASE_OUTPUT_DIRECTORY}/maxtext-checkpoint
+```
+
+2. **Run the Conversion Script:** Execute the following command that downloads the specified Hugging Face model and converts its weights into the MaxText format. The conversion script only supports official versions of models from Hugging Face. To see the specific models and versions currently supported for conversion, please refer to the `HF_IDS` dictionary in the MaxText utility file [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/utils.py).
+
+```sh
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu  # Ensure torch is installed for the conversion script
+
+python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml \
+    model_name=${MODEL_NAME} \
+    hf_access_token=${HF_TOKEN} \
+    base_output_directory=${MODEL_CKPT_DIRECTORY} \
+    scan_layers=True skip_jax_distributed_system=True
+```
+
+3. **Use the Converted Checkpoint:** Set the following environment variable to use the converted checkpoint:
+
+```sh
+export MODEL_CKPT_PATH=${MODEL_CKPT_DIRECTORY}/0/items
+```
+
+## Dataset
+
+MaxText provides examples to work with [Common Crawl](https://commoncrawl.org/). The dataset is available in TFRecords format in a cloud bucket. MaxText provides scripts to copy the dataset to a Google Cloud Storage Bucket.
+
+### Common Crawl (c4) dataset setup
+
+Run these steps once per project prior to any local development or cluster experiments.
+
+1. Create two gcs buckets in your project, one for downloading and retrieving the dataset and the other for storing the logs.
+2. Download the dataset in your gcs bucket.
+
+MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them.
+
+```sh
+export PROJECT=<Google Cloud Project ID>
+export DATASET_GCS_BUCKET=<GCS for dataset> # e.g., gs://my-bucket/my-dataset
+
+bash tools/data_generation/download_dataset.sh ${PROJECT} ${DATASET_GCS_BUCKET}
+```
+
+The above will download the c4 dataset to the GCS BUCKET.
+
+## Sample Full Fine tuning script
+
+Below is a sample training script.
+
+```sh
 python3 -m MaxText.train \
   src/MaxText/configs/base.yml \
-  run_name="llama2-finetune-maxtext" \
-  base_output_directory=${output_directory} \
-  load_parameters_path=${path_to_checkpoint} \
-  model_name='llama2-7b' \
-  dataset_path=${dataset_path} \
+  run_name=${RUN_NAME} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+  load_parameters_path=${MODEL_CKPT_PATH} \
+  model_name=${MODEL_NAME} \
+  dataset_path=${DATASET_GCS_BUCKET} \
   async_checkpointing=False  \
-  model_name='llama2-7b' \
-  steps=10 per_device_batch_size=.25
+  tokenizer_path=${MODEL_TOKENIZER} \
+  hf_access_token=${HF_TOKEN} \
+  steps=10 per_device_batch_size=1
 ```
 
 You can find some [end to end scripts here](https://github.com/AI-Hypercomputer/maxtext/tree/main/end_to_end/tpu).
 These scripts can provide a reference point for various scripts.
-
-### MaxText checkpoint to Hugging Face
-
-Post finetuning or pre-training, MaxText also provides scripts to convert MaxText format weights back to [Hugging Face](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_scripts/llama_mistral_mixtral_orbax_to_hf.py).
-
-#### Dataset
-
-MaxText provides examples to work with [Common Crawl](https://commoncrawl.org/). The dataset is available in TFRecords format in a cloud bucket. MaxText provides scripts to copy the dataset to a Google Cloud Storage Bucket.
-
-##### Common Crawl (c4) dataset setup
-
-You need to run these steps once per project prior to any local development or cluster experiments.
-
-1. Create two gcs buckets in your project, one for downloading and retrieving the dataset and the other for storing the logs.
-2. Download the dataset in your gcs bucket
-
-MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them:
-
-```bash
-bash tools/data_generation/download_dataset.sh ${GCS_PROJECT?} ${GCS_BUCKET_NAME?}
-```
-
-The above will download the c4 dataset to your GCS BUCKET.
 
 ## Parameters to achieve high MFU
 
