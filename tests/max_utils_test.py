@@ -130,7 +130,8 @@ class UnscanTest(unittest.TestCase):
     # Initialize a configuration for an 8B model.
     config = self.init_pyconfig()
 
-    _, _, sharding, _, mesh, *_, state = setup_train_loop(config, None)
+    ctx = setup_train_loop(config, None)
+    sharding, mesh, state = ctx.state_mesh_shardings, ctx.mesh, ctx.state
 
     scan_axis = config.param_scan_axis
     num_layers = config.base_num_decoder_layers

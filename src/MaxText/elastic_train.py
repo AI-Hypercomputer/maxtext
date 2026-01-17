@@ -115,19 +115,15 @@ def elastic_handler(
     checkpoint_manager.close()
 
   with jax.default_device(elastic_manager.default_device):
-    (
-        init_rng,
-        checkpoint_manager,
-        state_mesh_shardings,
-        model,
-        mesh,
-        learning_rate_schedule,
-        data_iterator,
-        _,
-        _,
-        _,
-        state,
-    ) = setup_train_loop(config, recorder, elastic_manager.good_devices)
+    ctx = setup_train_loop(config, recorder, elastic_manager.good_devices)
+    init_rng = ctx.init_rng
+    checkpoint_manager = ctx.checkpoint_manager
+    state_mesh_shardings = ctx.state_mesh_shardings
+    model = ctx.model
+    mesh = ctx.mesh
+    learning_rate_schedule = ctx.learning_rate_schedule
+    data_iterator = ctx.data_iterator
+    state = ctx.state
 
     p_train_step, _ = train_utils.jit_train_and_eval_step(config, model, mesh, state, state_mesh_shardings, train_step)
 
@@ -171,19 +167,15 @@ def elastic_handler(
 
 def train_loop(config, elastic_manager, recorder, state=None):
   """Main Training loop."""
-  (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      _,
-      _,
-      _,
-      state,
-  ) = setup_train_loop(config, recorder)
+  ctx = setup_train_loop(config, recorder)
+  init_rng = ctx.init_rng
+  checkpoint_manager = ctx.checkpoint_manager
+  state_mesh_shardings = ctx.state_mesh_shardings
+  model = ctx.model
+  mesh = ctx.mesh
+  learning_rate_schedule = ctx.learning_rate_schedule
+  data_iterator = ctx.data_iterator
+  state = ctx.state
 
   p_train_step, _ = train_utils.jit_train_and_eval_step(config, model, mesh, state, state_mesh_shardings, train_step)
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):

@@ -58,19 +58,16 @@ def train_loop(config, recorder, state=None):
   if not config.use_sft:
     raise TypeError("Set use_sft to True to run Supervised Fine Tuning.")
 
-  (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      _,
-      _,
-      eval_data_iterator,
-      state,
-  ) = setup_train_loop(config, recorder)
+  ctx = setup_train_loop(config, recorder)
+  init_rng = ctx.init_rng
+  checkpoint_manager = ctx.checkpoint_manager
+  state_mesh_shardings = ctx.state_mesh_shardings
+  model = ctx.model
+  mesh = ctx.mesh
+  learning_rate_schedule = ctx.learning_rate_schedule
+  data_iterator = ctx.data_iterator
+  eval_data_iterator = ctx.eval_data_iterator
+  state = ctx.state
 
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 

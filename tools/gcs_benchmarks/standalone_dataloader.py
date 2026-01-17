@@ -38,8 +38,9 @@ def data_load_loop(config, state=None):
   """Main data loader loop.
   Loads batches of data for each training step.
   """
-  _, _, _, _, mesh, _, data_iterator, _, _, _, state = setup_train_loop(config, recorder=None)
-  data_loader = DataLoader(config, mesh, data_iterator, None)
+  ctx = setup_train_loop(config, recorder=None)
+  state = ctx.state
+  data_loader = DataLoader(config, ctx.mesh, ctx.data_iterator, None)
 
   example_batch = None
 
