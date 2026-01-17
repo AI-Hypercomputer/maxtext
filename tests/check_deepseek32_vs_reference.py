@@ -47,15 +47,27 @@ from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 import scipy
 
 
-"""To run the test
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s
-python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s -k "DeepseekV32IndexerTest"
-python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s -k "DeepseekV32MLATest"
-
-adpated from https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py
 """
+Tests for DeepSeek v3.2: Attention (MLA with sparse indexer)
+
+DeepSeek 3.2 PyTorch implementation at: 
+https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py
+
+We adapted the reference to run on TPU/CPU 
+- Originally, it can only run on GPU. Indexer uses quantization and fp8 kernel (act_quant, fp8_gemm, fp8_index).
+- Remove quantization and use float32 for dtype and weight_dytpe
+- Replace fp8 kernel with naive dot product
+- Replace fast_hadamard_transform.hadamard_transform with F.linear
+
+To run the test
+  python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+  python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s
+"""
+
+
+# -----------------------------------------------------------------------------
+# Config
+# -----------------------------------------------------------------------------
 
 
 world_size = 1
@@ -126,6 +138,12 @@ pt_args = {
     "index_head_dim": config.index_head_dim,
     "index_topk": config.index_topk,
 }
+
+
+# -----------------------------------------------------------------------------
+# Reference Implementation
+# -----------------------------------------------------------------------------
+
 
 class ParallelEmbedding(nn.Module):
   """
@@ -444,13 +462,15 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, interleaved: bool
   return y.to(dtype)
 
 
-# TODO(shuningjin): double check hadamard_transform
-# def rotate_activation(x: torch.Tensor) -> torch.Tensor:
-#   assert x.dtype == torch.float32
-#   from fast_hadamard_transform import hadamard_transform
+# CHANGE
+# fast_hadamard_transform is gpu specfic: https://github.com/Dao-AILab/fast-hadamard-transform
+# `hadamard_transform(x, scale)` is equivalent to `F.linear(x, torch.tensor(scipy.linalg.hadamard(dim))) * scale`
 
-#   hidden_size = x.size(-1)
-#   return hadamard_transform(x, scale=hidden_size**-0.5)
+# def rotate_activation(x: torch.Tensor) -> torch.Tensor:
+#     assert x.dtype == torch.bfloat16
+#     from fast_hadamard_transform import hadamard_transform
+#     hidden_size = x.size(-1)
+#     return hadamard_transform(x, scale=hidden_size ** -0.5)
 
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
   hidden_size = x.size(-1)
@@ -494,25 +514,19 @@ class Indexer(torch.nn.Module):
   ):
     bsz, seqlen, _ = x.size()
     end_pos = start_pos + seqlen
-
     q = self.wq_b(qr)
     q = q.view(bsz, seqlen, self.n_heads, self.head_dim)
-    # print("before rope")
-    # return None, q
     q_pe, q_nope = torch.split(q, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
     # rope in indexer is not interleaved
     q_pe = apply_rotary_emb(q_pe, freqs_cis, False)
     q = torch.cat([q_pe, q_nope], dim=-1)
-    # print("after rope")
-    # return None, q
-    q = rotate_activation(q)
-
     k = self.wk(x)
     k = self.k_norm(k)
     k_pe, k_nope = torch.split(k, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
     # rope in indexer is not interleaved
     k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis, False).squeeze(2)
     k = torch.cat([k_pe, k_nope], dim=-1)
+    q = rotate_activation(q)
     k = rotate_activation(k)
 
     # CHANGE
@@ -523,53 +537,31 @@ class Indexer(torch.nn.Module):
     self.k_cache[:bsz, start_pos:end_pos] = k
 
     weights = self.weights_proj(x.float()) * self.n_heads**-0.5
+
     # CHANGE
     # weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
     weights = weights * self.softmax_scale
 
     # CHANGE
     # index_score = fp8_index(q_fp8.contiguous(), weights, self.k_cache[:bsz, :end_pos].contiguous(), self.k_scale_cache[:bsz, :end_pos].contiguous())
+
     # fp8_index is defined by: https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/kernel.py#L254
     # Replace fp_index with standard PyTorch: Sum_h( ReLU(Q @ K.T) * Weights
-    # b: Batch size, h: number of attention heads, d: head dim
-    # s (Sequence Length): The number of new tokens currently being processed (the queries). In inference, this is often 1.
-    # t (Total Cache Length): The number of tokens currently stored in the memory (the keys). This includes all past tokens plus the current ones.
-    k_active = self.k_cache[:bsz, :end_pos]
-    # Compute Logits: Q (b,s,h,d) @ K (b,t,d) -> (b,s,t,h)
-    # logits = torch.einsum("bshd, btd -> bsth", q, k_active)
-    # logits = F.relu(logits)
-    # # Weighted Sum: Logits (b,s,t,h) * Weights (b,s,h) -> (b,s,t)
-    # index_score = torch.einsum("bsth, bsh -> bst", logits, weights)
-
-    # logits is bfloat16
-    logits = torch.einsum("bshd, btd -> bsth", q.to(torch.float32), k_active.to(torch.float32))
+    # BEGIN CHANGE
+    logits = torch.einsum("bthd, bsd -> btsh", q, self.k_cache[:bsz, :end_pos])
     logits = F.relu(logits)
-    # FIX: Cast logits to weights.dtype (float32) so einsum inputs match
-    index_score = torch.einsum("bsth, bsh -> bst", logits.to(weights.dtype), weights)
+    index_score = torch.einsum("btsh, bth -> bts", logits, weights)
+    # END CHANGE
 
     if mask is not None:
       index_score += mask
     topk_indices = index_score.topk(min(self.index_topk, end_pos), dim=-1)[1]
 
+    # CHANGE: also return index_score for test
     if debug:
-      # print("torch_index_score", index_score)
       return topk_indices, index_score
-      # return None, {
-      #     "k": k,
-      #     "q": q,
-      #     "weights": weights,
-      #     "logits": logits,
-      #     "index_score": index_score,
-      # }
+
     return topk_indices
-
-
-# def weight_dequant(weight, scale):
-#     shape = weight.shape
-#     assert weight.dim() == 2
-#     weight = weight.view(shape[0] // block_size, block_size, shape[1] // block_size, block_size).transpose(1, 2).contiguous().view(-1, block_size * block_size)
-#     weight = (weight.float() * scale.view(-1, 1).float()).to(torch.get_default_dtype()).view(shape[0] // block_size, shape[1] // block_size, block_size, block_size).transpose(1, 2).contiguous().view(shape)
-#     return weight
 
 
 class MLA(nn.Module):
@@ -695,45 +687,25 @@ class MLA(nn.Module):
 
 
 # -----------------------------------------------------------------------------
-# Helper Functions
+# Test JAX Module
 # -----------------------------------------------------------------------------
 
 
-# def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
-#   # return jnp.asarray(pt_tensor.detach().cpu().numpy())
-#   # return jax.dlpack.from_dlpack(pt_tensor.detach())
-#   # 1. Handle BFloat16 (NumPy doesn't support it natively)
-#   if pt_tensor.dtype == torch.float32:
-#     return jnp.asarray(
-#         pt_tensor.detach().cpu().to(torch.float32).numpy()
-#     ).astype(jnp.bfloat16)  # Cast back to BF16 on the JAX device
-
-#   # 2. Handle standard types (Float32, Int64, etc.)
-#   return jnp.asarray(pt_tensor.detach().cpu().numpy())
-
-
 def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
-  # return jnp.asarray(pt_tensor.detach().cpu().numpy())
-  # return jax.dlpack.from_dlpack(pt_tensor.detach())
-  # 1. Handle BFloat16 (NumPy doesn't support it natively)
-  if pt_tensor.dtype != torch.float32:
-    return jnp.asarray(
-        pt_tensor.detach().cpu().to(torch.float32).numpy()
-    )  # .astype(jnp.bfloat16)  # Cast back to BF16 on the JAX device
+  """Converts a PyTorch tensor to a JAX array.
 
-  # 2. Handle standard types (Float32, Int64, etc.)
-  return jnp.asarray(pt_tensor.detach().cpu().numpy())
+  Args:
+    pt_tensor: The PyTorch tensor to convert.
 
-
-def to_torch(jax_array: jax.Array) -> torch.Tensor:
-  return torch.from_numpy(np.array(jax_array))
+  Returns:
+    The equivalent JAX array.
+  """
+  return jnp.asarray(pt_tensor.detach().numpy())
 
 
 def init_torch_weights(module, std=1):
   """
   Initialize all Linear layers in the module.
-  Weights -> Normal distribution (mean=0.0, std=std)
-  Biases  -> Zero
   """
   with torch.no_grad():
     for name, param in module.named_parameters():
@@ -771,7 +743,6 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     self.pt_indexer = self.pt_indexer.float()
     self.pt_indexer.eval()
 
-    # === FIX: Initialize the zeroed weights ===
     # Using normal distribution (standard for linear layers)
     init_torch_weights(self.pt_indexer)
 
@@ -902,10 +873,11 @@ class DeepseekV32IndexerTest(unittest.TestCase):
 
     print("torch index score", pt_index_score)
     print("jax index score", jax_index_score)
+    # check index score is close
     np.testing.assert_allclose(jax_index_score, to_jax(pt_index_score), rtol=1e-3, atol=1e-3)
-    np.testing.assert_array_equal(jax_index_mask == 0, to_jax(pt_index_mask == 0))
+    # check index mask is equal
     # np.testing.assert_array_equal(jax_indices, to_jax(pt_indices))
-    # chex.assert_trees_all_close(jax_index_score, jax.tree.map(to_jax, pt_index_score), rtol=1e-3, atol=1e-3)
+    np.testing.assert_array_equal(jax_index_mask == 0, to_jax(pt_index_mask == 0))
 
 
 class DeepseekV32MLATest(unittest.TestCase):
@@ -1066,7 +1038,6 @@ class DeepseekV32MLATest(unittest.TestCase):
     nnx.update(jax_mla, mla_state)
 
     # C. Run Forward, JAX
-    # self.rng = jax.random.PRNGKey(0)
     decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
     decoder_positions = jnp.broadcast_to(
         jnp.arange(start_pos, start_pos + self.seq_len, dtype=jnp.int32), (self.batch_size, self.seq_len)
@@ -1082,9 +1053,6 @@ class DeepseekV32MLATest(unittest.TestCase):
 
     print("torch out", pt_out)
     print("jax out", jax_out)
-
-    # D. Compare
-    # Tolerances slightly loose due to potential BF16/FP32 differences inside modules
     # np.testing.assert_allclose(to_jax(pt_out / pt_out.sum()), jax_out / jax_out.sum(), rtol=1e-3, atol=1e-2)
     np.testing.assert_allclose(to_jax(pt_out), jax_out, rtol=1e-2, atol=1e-2)
 
