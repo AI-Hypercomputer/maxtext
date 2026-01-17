@@ -14,7 +14,7 @@
 
 """
 Integration tests for SFT trainer correctness with golden data generated from
-`maxtext/MaxText/scratch_code/generate_sft_golden_data.py`.
+`maxtext/tests/assets/logits_generation/generate_sft_golden_data.py`.
 
 ATTENTION: This test should only be run on TPU v4-8. The test
 may fail on different versions like v5p-8, v6e-8.
@@ -48,8 +48,8 @@ from MaxText.layers import quantizations
 
 
 def get_golden_data(model_name):
-  """Get the golden data for sft_trainer from maxtext/MaxText/scratch_code/generate_sft_golden_data.py."""
-  input_golden_data_path = os.path.join(MAXTEXT_TEST_ASSETS_ROOT, f"golden_data_sft_{model_name}.jsonl")
+  """Get the golden data for sft_trainer from maxtext/tests/assets/logits_generation/generate_sft_golden_data.py."""
+  input_golden_data_path = os.path.join(MAXTEXT_TEST_ASSETS_ROOT, "golden_logits", f"golden_data_sft_{model_name}.jsonl")
   with jsonlines.open(input_golden_data_path, "r") as reader:
     return next(iter(reader))
 

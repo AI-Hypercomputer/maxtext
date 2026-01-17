@@ -179,7 +179,7 @@ class DeepSeekBatchSplitGenericLayer(nnx.Module):
   def with_logical_constraint(self, x):
     return maybe_shard_with_logical(
       x, logical_axes=self.logical_axis_names,
-      mesh=self.mesh, shard_mode=self.config.shard_mode
+      mesh=self.mesh, shard_mode=self.config.shard_mode, debug_sharding=self.config.debug_sharding,
     )
 
   def pre_attention_norm_op(self, x):

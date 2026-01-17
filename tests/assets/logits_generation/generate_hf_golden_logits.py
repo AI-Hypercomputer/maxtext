@@ -14,7 +14,7 @@
 """
 Usage:
 
-python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=deepseek-ai/DeepSeek-V2-Lite \
+python3 -m tests.assets.logits_generation.generate_hf_golden_logits --model-id=deepseek-ai/DeepSeek-V2-Lite \
      --output-path=golden_DeepSeek-V2-Lite.jsonl --prompts='I love to;Today is a;What is the' \
      --gcs-bucket=my-gcs-bucket
 
@@ -28,15 +28,15 @@ For multimodal logits, since the model is not suppose to generate image, the log
   tokens can be close to 0, using --output-format=pickle is recommended to preserve precision.
 
 More examples:
-python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=meta-llama/Llama-4-Scout-17B-16E \
+python3 -m tests.assets.logits_generation.generate_hf_golden_logits --model-id=meta-llama/Llama-4-Scout-17B-16E \
      --output-path=golden_Llama-4-Scout-17B-16E_vision.jsonl --prompts='Describe this image.' \
      --apply-chat-template --gcs-bucket=<bucket> --hf-model-path=<hf_checkpoint_path> \
-     --image-paths=src/MaxText/test_assets/test_image.jpg --output-format=pickle
+     --image-paths=tests/assets/test_image.jpg --output-format=pickle
 
-python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=google/gemma-3-4b-it \
+python3 -m tests.assets.logits_generation.generate_hf_golden_logits --model-id=google/gemma-3-4b-it \
      --output-path=golden_gemma-3-4b-it_vision.jsonl --prompts='<start_of_image>' \
      --gcs-bucket=<bucket> --hf-model-path=<hf_checkpoint_path> \
-     --image-paths=src/MaxText/test_assets/test_image.jpg
+     --image-paths=tests/assets/test_image.jpg
 """
 
 import torch

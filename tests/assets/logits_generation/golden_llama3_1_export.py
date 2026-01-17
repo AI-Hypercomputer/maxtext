@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Usage: python3 -m MaxText.scratch_code.golden_llama3_1_export --model-id meta-llama/Meta-Llama-3-70B \
+Usage: python3 -m tests.assets.logits_generation.golden_llama3_1_export --model-id meta-llama/Meta-Llama-3-70B \
   --output-path llama3-70b/golden_logits/golden_data_llama3-70b.jsonl
 """
 

@@ -56,14 +56,12 @@ import os
 from typing import Sequence
 import time
 from tqdm import tqdm
-import numpy as np
 
 from transformers import AutoTokenizer, AutoProcessor
 
 from absl import app
 
 from MaxText import max_utils
-from MaxText import maxengine
 from MaxText import pyconfig
 from MaxText import max_logging
 from MaxText.utils.ckpt_conversion.utils.param_mapping import (
@@ -76,6 +74,8 @@ from MaxText.utils.ckpt_conversion.utils.utils import (
     validate_and_filter_param_map_keys,
     process_maxtext_param,
     save_model_files,
+    load_orbax_checkpoint,
+    detect_and_extract_checkpoint,
     HF_IDS,
 )
 
@@ -133,14 +133,10 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
   overall_start = time.time()
 
-  # Load Maxtext checkpoint
-  max_logging.log("\nLoading Orbax checkpoint...")
+  # Load Maxtext checkpoint using Orbax to get full parameter dict
+  max_logging.log(f"\nLoading Orbax checkpoint from: {config.load_parameters_path}")
   start = time.time()
-  engine = maxengine.MaxEngine(config)
-  rng = jax.random.PRNGKey(1234)
-  rng, rng_load_params = jax.random.split(rng)
-  # load params from maxengine
-  loaded_params_from_engine = engine.load_params(rng_load_params)
+  checkpoint_dict = load_orbax_checkpoint(config)
   max_logging.log(f"Elapse for checkpoint load: {(time.time() - start) / 60:.2f} min")
 
   if not config.base_output_directory:
@@ -170,27 +166,10 @@ def main(argv: Sequence[str]) -> None:
   shape_map = mappings["shape_mapping"]  # HF target shapes
   hook_fn_map = mappings["hook_fn_mapping"]
 
-  # 4. Transform Weights
-  # MaxText `engine.load_params()` returns `state.params` (a FrozenDict).
-  # The actual weights are typically under `state.params['params']`.
-  actual_weights_dict = loaded_params_from_engine.get("params")
-  if actual_weights_dict is None:
-    raise ValueError("Loaded parameters from engine do not contain a 'params' key. Structure might be unexpected.")
-  leaves_with_paths = jax.tree_util.tree_leaves_with_path(actual_weights_dict)
+  # 4. Extract and transform weights for Linen/NNX-SFT/NNX-RL checkpoints
+  maxtext_state_dict = detect_and_extract_checkpoint(checkpoint_dict)
 
-  # Construct maxtext_state_dict: {parameter name: parameter weight}
-  maxtext_state_dict = {}
-  for path_tuple, leaf_value in leaves_with_paths:
-    # Construct maxtext_param_key from path_tuple
-    maxtext_param_key = "params-" + "-".join(k.key for k in path_tuple)
-    # Check leaf value is an array
-    if not isinstance(leaf_value, (jax.Array, np.ndarray)):
-      raise ValueError(f"Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}.")
-    maxtext_state_dict[maxtext_param_key] = leaf_value
-
-  # The param_map may contain tuples as keys, which represent N-to-1 mappings from maxtext to huggingface
-  # Check maxtext_state_dict is a subset of flattened param_map
-  # Skip extra keys from param_map
+  # Validate that checkpoint keys match the parameter mapping
   filtered_map_keys = validate_and_filter_param_map_keys(param_map.keys(), maxtext_state_dict.keys())
 
   # Iterate through the parameter map to transform and collect weights.

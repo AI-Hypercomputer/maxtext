@@ -40,6 +40,7 @@ from typing import Sequence
 from absl import app
 import os
 import jax
+import optax
 import pathwaysutils
 
 from flax.linen import partitioning as nn_partitioning
@@ -146,6 +147,12 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     # pass in model for muon
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
+
+    if mt_config.gradient_clipping_threshold > 0:
+      optimizer = optax.chain(
+          optax.clip_by_global_norm(max_norm=mt_config.gradient_clipping_threshold),
+          optimizer,
+      )
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
     training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)

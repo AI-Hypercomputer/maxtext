@@ -13,19 +13,24 @@
 # limitations under the License.
 
 # MaxText Codecov Configuration
-# 
+#
 # We use a two-flag scheme ('regular' and 'scheduled') to handle our tiered test suite.
-# 'carryforward' is enabled because Pull Requests only run a subset of tests (excluding 'scheduled_only').
-# Without it, PRs would show a significant coverage drop as they would 'overwrite' the full-suite results.
+# 'carryforward' is enabled because each flag is only updated by its respective run type.
 #
 # Scheme:
-# - 'regular': Updated by every PR/Schedule. Used to evaluate 'patch' (new code) coverage.
-# - 'scheduled': Updated ONLY by scheduled full runs. Used to anchor 'project' (total health) coverage.
+# - 'regular': Updated ONLY by PRs (subset of tests, excluding 'scheduled_only'). Used for 'patch' coverage.
+# - 'scheduled': Updated ONLY by scheduled runs (all tests including 'scheduled_only'). Used for 'project' coverage.
 # During PRs, the 'scheduled' flag is carried forward from the last full run on 'main' to keep the score stable.
+# During scheduled runs, the 'regular' flag is carried forward from the last PR.
 
 # Exclude non-source code, deprecated and experimental folders from coverage tracking
 codecov: 
  token: 35742a22-fb1f-4839-97ff-b54da5588689
+# By default file names in the coverage report will have their path in the file system, which in our
+# runners would be /__w/maxtext/maxtext/src/MaxText/* but Codecov expects src/MaxText/* so we need to fix the path
+fixes:
+  # - ".*/maxtext/src/::src/"
+  - "/github/workspace/::"
 ignore:
   - "src/MaxText/assets"
   - "src/MaxText/configs"
@@ -34,14 +39,13 @@ ignore:
   - "src/MaxText/inference"
   - "src/MaxText/inference_mlperf"
   - "src/MaxText/scratch_code"
-  - "src/MaxText/test_assets"
 
 
 flags:
-  # Updated on every PR and during every scheduled run (contains a subset of tests).
+  # Updated ONLY by PRs (contains subset of tests, excluding scheduled_only).
   regular:
     carryforward: true
-  # Updated ONLY during scheduled runs (contains all tests).
+  # Updated ONLY by scheduled runs (contains all tests including scheduled_only).
   scheduled:
     carryforward: true
 

@@ -764,8 +764,12 @@ def init_initial_state(model, tx, config, is_training, key):
   image_shape = multimodal_utils.get_dummy_image_shape_for_init(
       config.model_name, batch_size=config.micro_batch_size_to_train_on
   )
+  # Split the master key into independent keys for each RNG collection
+  # Reference: https://flax-linen.readthedocs.io/en/latest/guides/flax_fundamentals/rng_guide.html
+  params_key, dropout_key, aqt_key = jax.random.split(key, 3)
+
   model_vars = model.init(
-      {"params": key, "dropout": key, "aqt": key},
+      {"params": params_key, "dropout": dropout_key, "aqt": aqt_key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
       encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
@@ -1179,4 +1183,4 @@ def print_state_mesh_shardings_params(state, state_sharding, mesh):
     path_str = "/".join(str(p.key) for p in path)
     shape = jax.typeof(leaf_val)
     pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
-    print(f"{path_str:.<80} {shape} {pspec}", flush=True)
+    max_logging.log(f"{path_str:.<80} {shape} {tuple(pspec)}")

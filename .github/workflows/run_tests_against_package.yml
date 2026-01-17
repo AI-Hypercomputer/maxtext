@@ -91,7 +91,7 @@ jobs:
           python3 -m pip freeze
           uv pip install pytest-cov
       - name: Copy test assets files
-        run : gcloud storage cp gs://maxtext-test-assets/* src/MaxText/test_assets
+        run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
         shell: bash
         run: |
@@ -103,7 +103,7 @@ jobs:
           # TODO: Use package data for testing and remove the env vars
           export MAXTEXT_REPO_ROOT=$(pwd)
           export MAXTEXT_ASSETS_ROOT=$(pwd)/src/MaxText/assets
-          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
+          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # omit this libtpu init args for gpu tests
           if [ "${{ inputs.device_type }}" != "cuda12" ]; then
@@ -121,13 +121,18 @@ jobs:
             -m "${FINAL_PYTEST_MARKER}" \
             --durations=0 \
             --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize" \
-            --cov=src/MaxText \
+            --cov=MaxText \
             --cov-report=xml \
+            --cov-report=term \
             $SPLIT_ARGS
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src"
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          # If scheduled, upload to BOTH flags. If PR, upload ONLY to regular.
-          flags: ${{ inputs.is_scheduled_run == 'true' && 'regular,scheduled' || 'regular' }}
+          file: ./coverage.xml
+          # If scheduled, upload to scheduled flag only. If PR, upload to regular flag only.
+          flags: ${{ inputs.is_scheduled_run == 'true' && 'scheduled' || 'regular' }}
+          verbose: true

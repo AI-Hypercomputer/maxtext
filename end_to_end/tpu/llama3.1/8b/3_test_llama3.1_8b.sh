@@ -13,7 +13,7 @@ export RUN_NAME=unscanned_chkpt
 export CHECKPOINT_TPU_UNSCANNED=$BASE_OUTPUT_PATH/$RUN_NAME/checkpoints/0/items
 export CHECKPOINT_TPU_CONVERTED_BACK=${CHECKPOINT_ORIGINAL}/converted_back
 export MODEL_SIZE=llama3.1-8b
-export GOLDEN_LOGITS="${MAXTEXT_TEST_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/test_assets}"/golden_data_deepseek_r1_distill_llama3.1_8b.jsonl
+export GOLDEN_LOGITS="${MAXTEXT_TEST_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/tests/assets}"/golden_logits/golden_data_deepseek_r1_distill_llama3.1_8b.jsonl
 
 # Remove previous checkpoints to have a clean start
 rm $CHECKPOINT_ORIGINAL/scanned_chkpt $CHECKPOINT_ORIGINAL/unscanned_chkpt ${CHECKPOINT_ORIGINAL}/converted_back

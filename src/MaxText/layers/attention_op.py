@@ -1205,17 +1205,10 @@ class AttentionOp(nnx.Module):
         segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
       else:
         segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
-    elif (
-        self.config.use_jax_splash
-        and self.config.expert_shard_attention_option == EP_AS_FSDP
-    ):
+    elif self.config.use_jax_splash and self.config.expert_shard_attention_option == EP_AS_FSDP:
       if self.config.use_max_logit_estimate > 0:
-        sa_config = dataclasses.replace(
-            sa_config, max_logit_const=self.config.use_max_logit_estimate
-        )
-      segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((
-          Q_LENGTH_NO_EXP,
-      ))
+        sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
+      segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
     else:
       # Create multi-head mask
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
@@ -1334,7 +1327,13 @@ class AttentionOp(nnx.Module):
       if pspec is None:
         return None
       sharding = NamedSharding(self.mesh, pspec)
-      return maybe_shard_with_name(inputs, sharding, shard_mode=self.config.shard_mode)
+      return maybe_shard_with_name(
+          inputs,
+          sharding,
+          shard_mode=self.config.shard_mode,
+          debug_sharding=self.config.debug_sharding,
+          extra_stack_level=1,
+      )
 
     query = _maybe_shard_with_pspec(query, axis_names_q)
     key = _maybe_shard_with_pspec(key, axis_names_kv)
