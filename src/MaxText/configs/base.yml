@@ -882,6 +882,7 @@ dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: True
 context_parallel_strategy: "all_gather" # "all_gather" or "ring"
+context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 
 ### Paged Attention ###
 # These settings take effect only when `attention=paged`.

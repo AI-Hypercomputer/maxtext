@@ -40,7 +40,7 @@ from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import multimodal_utils
 from MaxText import sharding
-from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, ReorderStrategy
 from MaxText.inference.page_manager import PageState
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
@@ -107,9 +107,9 @@ def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shar
   return functional_eval, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
-def shard_reorder_causal_load_balanced(batch, cp_size, shard_mode):
+def shard_reorder_causal_load_balanced(batch, cp_size, shard_mode, reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP):
   """Shard the output of the reordered sequence."""
-  reordered = max_utils.reorder_causal_load_balanced(batch, cp_size)
+  reordered = max_utils.reorder_causal_load_balanced(batch, cp_size, reorder_strategy)
   for _, v in batch.items():
     if isinstance(v, jax.Array):
       reordered = sharding.maybe_shard_with_name(reordered, v.sharding, shard_mode)
@@ -117,9 +117,14 @@ def shard_reorder_causal_load_balanced(batch, cp_size, shard_mode):
   return reordered
 
 
-def get_reorder_callable(cp_size, shard_mode):
+def get_reorder_callable(cp_size, shard_mode, reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP):
   """Creates a callable that can be used with map() to reorder batches."""
-  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size, shard_mode=shard_mode)
+  return functools.partial(
+      shard_reorder_causal_load_balanced,
+      cp_size=cp_size,
+      shard_mode=shard_mode,
+      reorder_strategy=reorder_strategy,
+  )
 
 
 def get_shaped_batch(config):

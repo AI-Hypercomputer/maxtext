@@ -108,3 +108,13 @@ class AttentionType(enum.Enum):
 class ShardMode(enum.Enum):
   AUTO = "auto"  # default
   EXPLICIT = "explicit"
+
+
+class ReorderStrategy(enum.Enum):
+  """Reorder strategies for load-balanced context parallelism.
+  Maps to transformer_engine.jax.attention.ReorderStrategy at runtime.
+  """
+
+  AUTO = "auto"
+  DUAL_CHUNK_SWAP = "dual_chunk_swap"
+  STRIPED = "striped"

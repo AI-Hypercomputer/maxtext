@@ -32,7 +32,7 @@ from MaxText import accelerator_to_spec_map
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT, MAXTEXT_PKG_DIR
-from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode
+from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode, ReorderStrategy
 from MaxText.utils import gcs_utils
 
 
@@ -847,6 +847,7 @@ class _HyperParameters:
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
     raw_keys["shard_mode"] = ShardMode(raw_keys["shard_mode"])
+    raw_keys["context_parallel_reorder_strategy"] = ReorderStrategy(raw_keys["context_parallel_reorder_strategy"])
 
   @staticmethod
   def configure_gpt3_task(raw_keys):

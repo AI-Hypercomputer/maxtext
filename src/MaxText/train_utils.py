@@ -30,6 +30,7 @@ from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.utils.goodput_utils import GoodputEvent
 from MaxText.utils.goodput_utils import maybe_record_goodput
 from MaxText import model_creation_utils
+from MaxText.common_types import ReorderStrategy
 
 
 def create_training_tools(config, model, mesh):
@@ -186,25 +187,42 @@ def setup_train_loop(config, recorder, devices=None):
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
-    data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
     context_parallel_size = mesh.shape["context"]
-    # Check if context parallelism is being used with sequence packing
-    if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
-      raise ValueError(
-          "Context parallelism cannot be used with sequence packing. "
-          "Disable sequence packing (set packing=False). "
-          "Context parallelism with packing support will be added soon."
-      )
+    # Validate context parallelism with packing configuration
+    if context_parallel_size > 1 and config.packing:
+      if config.dataset_type == "synthetic":
+        raise ValueError(
+            "Context parallelism with sequence packing is not supported with synthetic data. "
+            "Please disable sequence packing (set packing=False)."
+        )
+      if config.context_parallel_strategy != "ring":
+        raise ValueError(
+            "Context parallelism with 'all_gather' strategy cannot be used with sequence packing. "
+            "Please use 'ring' strategy instead."
+        )
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
     with jax.set_mesh(mesh):
       if context_parallel_size > 1 and config.context_parallel_load_balance:
-        data_iterator = map(maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode), data_iterator)
+
+        # Determine load balancing reorder strategy based on whether packing is enabled
+        if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
+          reorder_strategy = ReorderStrategy.STRIPED if config.packing else ReorderStrategy.DUAL_CHUNK_SWAP
+        else:
+          reorder_strategy = config.context_parallel_reorder_strategy
+
+        data_iterator = map(
+            maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode, reorder_strategy),
+            data_iterator,
+        )
         if eval_data_iterator:
           eval_data_iterator = map(
-              maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode),
+              maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode, reorder_strategy),
               eval_data_iterator,
           )
+
+    # Create data_loader AFTER reordering wrapper is applied
+    data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
 
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
         model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager

@@ -34,7 +34,7 @@ from pydantic.main import BaseModel
 from pydantic.types import PositiveInt, NonNegativeFloat, NonNegativeInt
 
 from MaxText import accelerator_to_spec_map, max_utils
-from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode
+from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode, ReorderStrategy
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
 
 logger = logging.getLogger(__name__)
@@ -704,6 +704,10 @@ class HardwareAndMesh(BaseModel):
   context_parallel_strategy: str = Field(
       "all_gather",
       description="Strategy for context parallelism ('all_gather' or 'ring').",
+  )
+  context_parallel_reorder_strategy: ReorderStrategy = Field(
+      "auto",
+      description="Reorder strategy for load-balanced context parallelism.",
   )
   custom_mesh: str = Field("", description="Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']")
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
