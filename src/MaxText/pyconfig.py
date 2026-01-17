@@ -33,7 +33,7 @@ from MaxText.configs.types import MaxTextConfig
 from MaxText.inference_utils import str2bool
 
 logger = logging.getLogger(__name__)
-logger.setLevel(os.environ.get("LOGLEVEL", "INFO"))
+# logger.setLevel(os.environ.get("LOGLEVEL", "INFO"))
 
 _BASE_CONFIG_ATTR = "base_config"
 _MAX_PREFIX = "M_"

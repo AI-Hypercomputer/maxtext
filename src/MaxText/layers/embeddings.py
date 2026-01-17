@@ -698,6 +698,21 @@ class YarnRotaryEmbedding(nnx.Module):
   This implementation uses DeepSeek-v3 PyTorch as reference
   https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L294
 
+  Implementation Notes:
+  - YaRN vs. Standard RoPE:
+    1. Frequency Initialization: YaRN modifies how frequencies are computed.
+    2. Attention Scaling: YaRN typically scales embeddings by `0.1 * ln(rope_factor) + 1.0`
+       when `rope_factor > 1`. This scaling can be applied within this layer (if `attention_scaling=True`)
+       or externally.
+  - RoPE Implementation Details (General):
+    - Arithmetic: Uses complex number arithmetic. Real number arithmetic is not implemented here,
+      though the resulting embeddings would be equivalent.
+    - Input Layout: Supports both interleaved (`interleave=True`, e.g., [real1, img1, real2, img2]) and
+      concatenated (`interleave=False`, e.g., [real1, real2, img1, img2]) formats.
+    - Output Layout: Always returns concatenated format ([real, imag]). Interleaved output is not
+      implemented: While the embedding is different, attention scores are invariant, as long as we apply
+      the same output layout for Q and K.
+
   Attributes:
     embedding_dims: Dimension of the embedding to be generated.
     max_position_embeddings: The maximum sequence length that will be encountered.
