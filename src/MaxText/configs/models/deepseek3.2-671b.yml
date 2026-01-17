@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # model config for DeepSeek V3.2 - 671B
+# Identical to deepseek3-671b config, except adding indexer config.
 
 base_emb_dim: 7168
 base_num_query_heads: 128

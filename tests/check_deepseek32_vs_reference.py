@@ -41,7 +41,7 @@ from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 
 
 """
-Tests for DeepSeek v3.2: Attention (MLA with sparse indexer)
+Tests for DeepSeek V3.2: Indexer, MLA
 
 DeepSeek 3.2 PyTorch implementation at: 
 https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py
@@ -705,17 +705,12 @@ def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
 
 def init_torch_weights(module, std=1):
   """
-  Initialize all Linear layers in the module.
+  Initialize all parameters in the module with N(0,std).
+  This simple strategy is intended only for unit test.
   """
   with torch.no_grad():
-    for name, param in module.named_parameters():
-      # Check if it's a weight or a bias
-      if "weight" in name:
-        if param.dim() >= 2:  # Linear weights are usually 2D
-          torch.nn.init.normal_(param, mean=0.0, std=std)
-      elif "bias" in name:
-        # torch.nn.init.zeros_(param)
-        torch.nn.init.normal_(param, mean=0.0, std=std)
+    for _, param in module.named_parameters():
+      torch.nn.init.normal_(param, mean=0.0, std=std)
 
 
 class DeepseekV32IndexerTest(unittest.TestCase):

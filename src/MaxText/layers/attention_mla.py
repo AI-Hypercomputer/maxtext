@@ -105,6 +105,7 @@ class Indexer(nnx.Module):
         out_features_shape=(self.n_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
+        # TODO(shuningjin): double check kernel axes
         kernel_axes=("q_lora", "q_heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
@@ -114,7 +115,7 @@ class Indexer(nnx.Module):
         rngs=self.rngs,
     )
 
-    # Projection: Input (x) -> Shared Indexer Key
+    # Projection: Input -> Shared Indexer Key
     self.wk = DenseGeneral(
         in_features_shape=self.emb_dim,
         out_features_shape=self.head_dim,
@@ -129,7 +130,7 @@ class Indexer(nnx.Module):
         rngs=self.rngs,
     )
 
-    # Projection: Input (x) -> Importance Weights for Heads (with high precison)
+    # Projection: Input -> Importance Weights for Heads (with high precision)
     self.weights_proj = DenseGeneral(
         in_features_shape=self.emb_dim,
         out_features_shape=self.n_heads,
@@ -250,7 +251,7 @@ class Indexer(nnx.Module):
     q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)  # [b, t, h, d]
     q = self.apply_partial_rope(q, inputs_positions=inputs_positions)
 
-    # Key Processing: Project from Input X
+    # Key Processing: Project from Input
     k = self.wk(inputs_kv)  # [b, s, embed_dim] -> [b, s, d]
     k = self.k_norm(k)
     k = k[:, :, None, :]  # [b, s, d] -> [b, s, 1, d]
@@ -262,9 +263,9 @@ class Indexer(nnx.Module):
     # similar to MQA, each key is shared by h query head
     logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
     logits = jax.nn.relu(logits)
-    # compute weights, [b, t, embed_dim] -> [b, t, h]
+    # compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
     weights = self.weights_proj(inputs_q.astype(jnp.float32)) * (self.n_heads**-0.5) * self.softmax_scale
-    # weighted sum: sum_h(logits * weights)
+    # weighted sum over head: sum_h(logits * weights)
     index_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision) # [b, t, s]
 
     # Apply attention mask before TopK
