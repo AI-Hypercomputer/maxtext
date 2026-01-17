@@ -18,12 +18,12 @@ import math
 from typing import Any, Optional, Tuple
 import copy
 
+import jax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh, NamedSharding
 import jax.numpy as jnp
 
 from flax import nnx
-import jax
 
 from MaxText.common_types import (
     Array,
@@ -68,7 +68,10 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 class Indexer(nnx.Module):
-  """Indexer for DeepSeek Sparse Attention (DSA)."""
+  """
+  Indexer for DeepSeek Sparse Attention (DSA).
+  Introduced by DeepSeek V3.2: https://arxiv.org/pdf/2512.02556.
+  """
 
   def __init__(
       self,
@@ -85,6 +88,8 @@ class Indexer(nnx.Module):
     self.kernel_init = kernel_init
     self.model_mode = model_mode
     self.rngs = rngs
+    self.dtype = config.dtype
+    self.weight_dtype = config.weight_dtype
 
     self.n_heads = config.index_n_heads
     self.head_dim = config.index_head_dim
@@ -92,8 +97,6 @@ class Indexer(nnx.Module):
     self.emb_dim = config.emb_dim
     self.rope_head_dim = config.qk_rope_head_dim
     self.q_lora_rank = config.q_lora_rank
-    self.dtype = config.dtype
-    self.weight_dtype = config.weight_dtype
     self.softmax_scale = self.head_dim**-0.5
 
     # Projection: Latent Query -> Indexer Query
@@ -145,7 +148,7 @@ class Indexer(nnx.Module):
     # Key Normalization with bias
     self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=True, dtype=self.weight_dtype, rngs=rngs)
 
-  def _apply_partial_rope(
+  def apply_partial_rope(
       self,
       inputs: Array,
       inputs_positions: Optional[Array | None] = None,
@@ -245,13 +248,13 @@ class Indexer(nnx.Module):
     # TODO(shuningjin): why the shape is [b, t, h * d] rather than [b, t, h, d]?
     q = self.wq_b(low_rank_q)  # [b, t, q_lora_rank] -> [b, t, h * d]
     q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)  # [b, t, h, d]
-    q = self._apply_partial_rope(q, inputs_positions=inputs_positions)
+    q = self.apply_partial_rope(q, inputs_positions=inputs_positions)
 
     # Key Processing: Project from Input X
     k = self.wk(inputs_kv)  # [b, s, embed_dim] -> [b, s, d]
     k = self.k_norm(k)
     k = k[:, :, None, :]  # [b, s, d] -> [b, s, 1, d]
-    k = self._apply_partial_rope(k, inputs_positions=inputs_positions)
+    k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
     k = k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
 
     # Compute Index Scores

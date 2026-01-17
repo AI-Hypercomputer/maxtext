@@ -16,35 +16,28 @@
 from types import SimpleNamespace
 import os.path
 import unittest
-
-import numpy as np
-
-import torch
-from torch import nn
-import torch.nn.functional as F
-
-import jax
-from jax.sharding import Mesh
-import jax.numpy as jnp
-
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText import pyconfig
-from MaxText import maxtext_utils
-from MaxText.layers import attentions, moe, embeddings, attention_mla
-from MaxText.layers.initializers import nd_dense_init
-from flax import nnx
-import chex
-
 import math
 from dataclasses import dataclass
-from typing import Tuple, Optional, Literal
+from typing import Optional
+import numpy as np
+import scipy
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
-import scipy
+
+import jax
+from jax.sharding import Mesh
+import jax.numpy as jnp
+from flax import nnx
+
+from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText import pyconfig
+from MaxText import maxtext_utils
+from MaxText.layers import embeddings, attention_mla
+from MaxText.layers.initializers import nd_dense_init
+from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 
 
 """
@@ -53,11 +46,12 @@ Tests for DeepSeek v3.2: Attention (MLA with sparse indexer)
 DeepSeek 3.2 PyTorch implementation at: 
 https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py
 
-We adapted the reference to run on TPU/CPU 
-- Originally, it can only run on GPU. Indexer uses quantization and fp8 kernel (act_quant, fp8_gemm, fp8_index).
-- Remove quantization and use float32 for dtype and weight_dytpe
+We adapt the reference implementation to run on CPU:
+- Original code is GPU-specific, due to quantization and fp8 kernel
+- Remove quantization logic. Use float32 for dtype and weight_dytpe
 - Replace fp8 kernel with naive dot product
 - Replace fast_hadamard_transform.hadamard_transform with F.linear
+- Changes other than dtype are marked with `# [CHANGE]`, primarily in Indexer and MLA
 
 To run the test
   python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -115,7 +109,7 @@ config = Config()
 
 # 1. Setup PyTorch Config & Model
 pt_args = {
-    "max_batch_size": 8,  # what does this do?
+    "max_batch_size": 8,  # TODO(shuningjin): what does this do?
     "scale_fmt": None,
     "max_seq_len": config.max_position_embeddings,
     "dim": config.base_emb_dim,
@@ -209,7 +203,7 @@ def linear(
 
   if weight.dtype != torch.float8_e4m3fn:
     return F.linear(x, weight)
-  # CHANGE
+  # [CHANGE]: remove
   # else:
   #     x, scale = act_quant(x, block_size, scale_fmt)
   #     return fp8_gemm(x, scale, weight, weight.scale)
@@ -462,19 +456,19 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, interleaved: bool
   return y.to(dtype)
 
 
-# CHANGE
+# [CHANGE]
 # fast_hadamard_transform is gpu specfic: https://github.com/Dao-AILab/fast-hadamard-transform
 # `hadamard_transform(x, scale)` is equivalent to `F.linear(x, torch.tensor(scipy.linalg.hadamard(dim))) * scale`
-
+# OLD
 # def rotate_activation(x: torch.Tensor) -> torch.Tensor:
 #     assert x.dtype == torch.bfloat16
 #     from fast_hadamard_transform import hadamard_transform
 #     hidden_size = x.size(-1)
 #     return hadamard_transform(x, scale=hidden_size ** -0.5)
-
+# NEW
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
   hidden_size = x.size(-1)
-  return F.linear(x, torch.tensor(scipy.linalg.hadamard(hidden_size), dtype=x.dtype)) * hidden_size**-0.5
+  return F.linear(x, torch.tensor(scipy.linalg.hadamard(hidden_size), dtype=x.dtype, device=x.device)) * hidden_size**-0.5
 
 
 class Indexer(torch.nn.Module):
@@ -496,13 +490,15 @@ class Indexer(torch.nn.Module):
     self.softmax_scale = self.head_dim**-0.5
     self.scale_fmt = args.scale_fmt
 
-    # CHANGE
+    # [CHANGE]
+    # OLD
     # self.register_buffer(
     #     "k_cache",
     #     torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.float8_e4m3fn),
     #     persistent=False,
     # )
     # self.register_buffer("k_scale_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim // block_size, dtype=torch.float32), persistent=False)
+    # NEW
     self.register_buffer(
         "k_cache",
         torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.float32),
@@ -529,35 +525,39 @@ class Indexer(torch.nn.Module):
     q = rotate_activation(q)
     k = rotate_activation(k)
 
-    # CHANGE
+    # [CHANGE]
+    # OLD
     # q_fp8, q_scale = act_quant(q, block_size, self.scale_fmt)
     # k_fp8, k_scale = act_quant(k, block_size, self.scale_fmt)
     # self.k_cache[:bsz, start_pos:end_pos] = k_fp8
     # self.k_scale_cache[:bsz, start_pos:end_pos] = k_scale
+    # NEW
     self.k_cache[:bsz, start_pos:end_pos] = k
 
     weights = self.weights_proj(x.float()) * self.n_heads**-0.5
 
-    # CHANGE
+    # [CHANGE]
+    # OLD
     # weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
+    # NEW
     weights = weights * self.softmax_scale
 
-    # CHANGE
-    # index_score = fp8_index(q_fp8.contiguous(), weights, self.k_cache[:bsz, :end_pos].contiguous(), self.k_scale_cache[:bsz, :end_pos].contiguous())
-
+    # [CHANGE]
     # fp8_index is defined by: https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/kernel.py#L254
-    # Replace fp_index with standard PyTorch: Sum_h( ReLU(Q @ K.T) * Weights
-    # BEGIN CHANGE
+    # Replace fp8_index with standard PyTorch: Sum_h( ReLU(Q @ K.T) * Weights
+    # OLD
+    # index_score = fp8_index(q_fp8.contiguous(), weights, self.k_cache[:bsz, :end_pos].contiguous(), self.k_scale_cache[:bsz, :end_pos].contiguous())
+    # NEW
     logits = torch.einsum("bthd, bsd -> btsh", q, self.k_cache[:bsz, :end_pos])
     logits = F.relu(logits)
     index_score = torch.einsum("btsh, bth -> bts", logits, weights)
-    # END CHANGE
 
     if mask is not None:
       index_score += mask
     topk_indices = index_score.topk(min(self.index_topk, end_pos), dim=-1)[1]
 
-    # CHANGE: also return index_score for test
+    # [CHANGE]: add
+    # additionally return index_score for indexer test
     if debug:
       return topk_indices, index_score
 
@@ -639,7 +639,7 @@ class MLA(nn.Module):
     k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
 
     # we use fp8 kv cache in actual deployment, so here we simulate the precision by casting kv to fp8 and then back to bf16.
-    # CHANGE
+    # [CHANGE]: remove
     # kv_fp8, kv_scale = act_quant(kv, block_size, self.scale_fmt)
     # kv = (kv_fp8.view(-1, block_size).float() * kv_scale.view(-1, 1)).to(kv.dtype).view_as(kv)
 
@@ -663,7 +663,7 @@ class MLA(nn.Module):
       scores = scores.softmax(dim=-1)
       x = torch.einsum("bsht,bthd->bshd", scores, v)
     else:  # MQA decode
-      # CHANGE
+      # [CHANGE]: remove
       # if self.dequant_wkv_b is None and self.wkv_b.scale is not None:
       #     self.dequant_wkv_b = weight_dequant(self.wkv_b.weight, self.wkv_b.scale)
       wkv_b = self.wkv_b.weight if self.dequant_wkv_b is None else self.dequant_wkv_b
@@ -729,7 +729,6 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     # jax config
     self.config = Config()
     # data, test long context
-    # self.dtype = "bfloat16"
     self.dtype = "float32"  # precision
     self.batch_size = 2
     self.seq_len = SEQ_LEN
@@ -759,7 +758,6 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     causal_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
     causal_mask_bias = torch.where(causal_mask == 1, 0.0, float("-inf"))
     pt_mask = causal_mask_bias
-    # mask = None
 
     # C. Run PyTorch Reference
     self.start_pos = 0
@@ -775,16 +773,10 @@ class DeepseekV32IndexerTest(unittest.TestCase):
       if pt_mask is not None:
         pt_index_mask += pt_mask
 
-    # jax position, Shape: [B, S]
-    start_pos = self.start_pos
-    end_pos = self.start_pos + self.seq_len
-    positions = jnp.arange(start_pos, end_pos, dtype=jnp.int32)[None, :]
-    positions = jnp.broadcast_to(positions, (self.batch_size, self.seq_len))
-
     # 3. Setup Mesh
     cfg = pyconfig.initialize(
         [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        run_name="gpt_oss_attention_test_flash",
+        run_name="deepseek_indexer_test",
         enable_checkpointing=False,
         model_name="default",
         dtype=self.dtype,
@@ -826,6 +818,7 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     self.mesh = Mesh(devices_array, cfg.mesh_axes)
 
     # indexer apply rope with `interleave=False`
+    # different from mla rope with self.config.rope_interleave
     yarn_rope = embeddings.YarnRotaryEmbedding(
         max_position_embeddings=self.config.max_position_embeddings,
         mesh=self.mesh,
@@ -836,7 +829,7 @@ class DeepseekV32IndexerTest(unittest.TestCase):
         rope_factor=self.config.rope_factor,
         embedding_dims=self.config.qk_rope_head_dim,
         fprop_dtype=self.dtype,
-        interleave=False, #self.config.rope_interleave,
+        interleave=False,
         truncate=self.config.rope_truncate,
         attention_scaling=self.config.rope_attention_scaling,
         # shard_mode=self.config.shard_mode,
@@ -862,6 +855,11 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     nnx.update(jax_indexer, indexer_state)
 
     # D. Run JAX Forward
+    # jax position, Shape: [B, S]
+    start_pos = self.start_pos
+    end_pos = self.start_pos + self.seq_len
+    positions = jnp.arange(start_pos, end_pos, dtype=jnp.int32)[None, :]
+    positions = jnp.broadcast_to(positions, (self.batch_size, self.seq_len))
     # Returns bias mask [B, S, T]
     jax_index_mask, jax_indices, jax_index_score = jax_indexer(
         inputs_q=to_jax(self.x),
@@ -899,17 +897,15 @@ class DeepseekV32MLATest(unittest.TestCase):
     # pt args
     self.pt_args = SimpleNamespace(**pt_args)
     self.pt_args.max_batch_size = self.batch_size
-
-    # MLA
+    # pt MLA
     self.pt_mla = MLA(self.pt_args)
     self.pt_mla.eval()
     init_torch_weights(self.pt_mla)
-
-    # input
+    # pt input
     self.x = torch.randn(self.batch_size, self.seq_len, self.pt_args.dim)
 
-  def test_mla_prefill_match(self):
-    """Verifies MLA prefill output matches PyTorch (including sparse bias)."""
+  def test_mla_match(self):
+    """Verifies MLA output (train mode) matches PyTorch (MHA mode) with indexer."""
 
     # PyTorch: mask is needed for MHA mode in reference code
     # Shape [B, S, S], causal mask
@@ -924,7 +920,7 @@ class DeepseekV32MLATest(unittest.TestCase):
 
     cfg = pyconfig.initialize(
         [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        run_name="gpt_oss_attention_test_flash",
+        run_name="deepseek_mla_test",
         enable_checkpointing=False,
         model_name="default",
         dtype=self.dtype,
