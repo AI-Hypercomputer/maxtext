@@ -543,23 +543,43 @@ def setup_train_loop(
     max_logging.log("Training mesh used for the workload")
     num_inference_devices = config.inference_devices_per_replica * config.inference_replicas
     training_devices = jax.devices()[num_inference_devices:]
-    model = mt.from_config(config, devices=training_devices)
+    if config.pure_nnx:
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      model = mt.from_config(config, devices=training_devices)
     mesh = model.mesh
     max_logging.log("Inference mesh used for the workload")
     inference_devices = jax.devices()[:num_inference_devices]
-    inference_model = mt.from_config(config_inference, devices=inference_devices)
+    if config_inference.pure_nnx:
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      inference_model = mt.from_config(config_inference, devices=inference_devices)
     inference_mesh = inference_model.mesh
-    init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
+    init_rng = jax.random.PRNGKey(config.init_weights_seed)
+    learning_rate_schedule, tx = train_utils.create_training_optimizer(config, model)
+    if config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
+    checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator = grpo_input_pipeline.create_data_iterator(config_inference, inference_mesh)
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+        data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
 
   # create inference_state_mesh_shardings from inference_mesh
+  if config_inference.pure_nnx:
+    # NNX has a different function to init the training state.
+    raise NotImplementedError("Pure NNX support has not been implemented yet.")
+  else:
+    init_inference_state_fn = functools.partial(
+        maxtext_utils.init_initial_state, inference_model, tx, config_inference, False, init_rng
+    )
   inference_state_mesh_shardings = maxtext_utils.get_abstract_state(
-      inference_model, tx, config_inference, init_rng, inference_mesh, is_training=False
+      config_inference, inference_mesh, init_inference_state_fn, is_training=False
   )[2]
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
@@ -694,7 +714,7 @@ def train_loop(config, config_inference, recorder, state=None):
   data_buffer = []
   data_buffer_lock = threading.Lock()
 
-  start_step = get_first_step(state)  # this is the start_step for training
+  start_step = get_first_step(model, state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
   inference_prof = profiler.Profiler(config_inference, offset_step=start_step)
   data_loader = DataLoader(config_inference, inference_mesh, data_iterator, recorder)
