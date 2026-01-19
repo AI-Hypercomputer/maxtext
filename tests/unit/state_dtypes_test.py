@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """ Test that all weights are expected dtype (default float32) """
+from functools import partial
 import unittest
 
 import jax
@@ -50,7 +51,12 @@ class StateDtypes(unittest.TestCase):
     tx = optimizers.get_optimizer(config, learning_rate_schedule)
     _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
 
-    abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, example_rng, mesh)
+    if config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, example_rng)
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, True)
     return abstract_state
 
   def get_weights(self, argv):

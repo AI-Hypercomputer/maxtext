@@ -16,6 +16,8 @@
 """ Utils that are only interesting for training in MaxText. """
 
 import os
+from functools import partial
+
 import jax
 from MaxText import sharding
 from MaxText import optimizers
@@ -30,12 +32,17 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 
 
-def create_training_tools(config, model, mesh):
-  """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
-  init_rng = jax.random.PRNGKey(config.init_weights_seed)
+def create_training_optimizer(config, model):
+  """Creates the optimizer and learning rate schedule."""
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
   tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
+  return learning_rate_schedule, tx
+
+
+def create_checkpoint_manager(config, mesh, init_state_fn):
+  """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
+  # pass in model for muon
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_multi_tier_checkpointing:
     checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
@@ -44,7 +51,7 @@ def create_training_tools(config, model, mesh):
         mesh,
     )
   elif config.enable_emergency_checkpoint:
-    abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
     checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
         config.local_checkpoint_directory,
         config.checkpoint_dir,
@@ -78,7 +85,7 @@ def create_training_tools(config, model, mesh):
         config.checkpoint_storage_concurrent_gb,
     )
 
-  return init_rng, checkpoint_manager, learning_rate_schedule, tx
+  return checkpoint_manager
 
 
 def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings):
@@ -180,9 +187,21 @@ def setup_train_loop(config, recorder, devices=None):
   from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    model = model_creation_utils.from_config(config, devices)
+    is_training = True
+    init_rng = jax.random.PRNGKey(config.init_weights_seed)
+    if config.pure_nnx:
+      # Create abstract NNX model.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      model = model_creation_utils.from_config(config, devices)
     mesh = model.mesh
-    init_rng, checkpoint_manager, learning_rate_schedule, tx = create_training_tools(config, model, mesh)
+    learning_rate_schedule, tx = create_training_optimizer(config, model)
+    if config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
+    checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
@@ -208,7 +227,7 @@ def setup_train_loop(config, recorder, devices=None):
           )
 
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+        data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
 
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
@@ -218,14 +237,14 @@ def setup_train_loop(config, recorder, devices=None):
 
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
-      logical_annotations = maxtext_utils.get_logical_annotations(model, tx, config, init_rng, mesh, is_training=True)
+      logical_annotations = maxtext_utils.get_logical_annotations(config, mesh, init_state_fn)
       max_utils.print_non_trivial_mesh_axis(model.mesh)
       maxtext_utils.print_shardings_params(
           state.params, state_mesh_shardings.params, model.mesh, logical_annotations.params
       )
 
     if config.use_dpo:
-      abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+      abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training)
       max_logging.log(
           "Restoring reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
       )
