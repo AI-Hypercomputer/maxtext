@@ -75,8 +75,10 @@ diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configura
 VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
 
-def get_first_step(state):
-  return int(state.step)
+def get_first_step(model, state):
+  if isinstance(model, nn.Module):
+    return int(state.step)
+  return int(state.optimizer.step.get_value())
 
 
 # -----------------------------------------------------------------------------
@@ -528,7 +530,7 @@ def train_loop(config, recorder, state=None):
       compiled_stats = compiled.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_stats)
 
-  start_step = get_first_step(state)  # this is the start_step for training
+  start_step = get_first_step(model, state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
