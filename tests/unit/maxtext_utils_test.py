@@ -14,6 +14,8 @@
 
 """Tests for the common MaxText utilities"""
 
+import functools
+from typing import Any
 from collections.abc import Callable
 from typing import Any
 import unittest
@@ -40,8 +42,6 @@ from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_forma
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import optax
-
-Transformer = models.transformer_as_linen
 
 
 class TestGradientClipping(unittest.TestCase):
@@ -352,18 +352,31 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    if self.config.pure_nnx:
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      self.model = models.transformer_as_linen(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)
-    state, _ = maxtext_utils.setup_decode_state(self.model, self.config, rng, self.mesh, None)
+    if self.config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng)
+    state, _ = maxtext_utils.setup_decode_state(self.config, self.mesh, None, init_state_fn)
     self.assertEqual(state.tx, None)
     self.assertEqual(state.opt_state, {})
 
   def test_setup_initial_state(self):
     rng = random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
-    state, _, _, _ = maxtext_utils.setup_initial_state(self.model, None, tx, self.config, rng, self.mesh, None)
+    if self.config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
+    state, _, _, _ = maxtext_utils.setup_initial_state(None, self.config, self.mesh, None, init_state_fn)
     self.assertEqual(state.tx, tx)
     self.assertNotEqual(state.opt_state, {})
 

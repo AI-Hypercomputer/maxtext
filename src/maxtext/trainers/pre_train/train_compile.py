@@ -27,6 +27,7 @@ import pickle
 from typing import Sequence
 
 from absl import app
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
 from jax.experimental.serialize_executable import serialize
@@ -36,6 +37,7 @@ from maxtext.utils import accelerator_to_spec_map
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers import quantizations
+from maxtext.layers import train_state_nnx
 from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
@@ -44,6 +46,8 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
+from maxtext.utils import maxtext_utils_nnx
+from maxtext.utils import model_creation_utils
 
 # pylint: disable=too-many-positional-arguments
 
@@ -88,7 +92,10 @@ def get_shaped_inputs(topology_mesh, config):
   """Get shaped abstractions of inputs to train_step: state, batch and rng"""
   # Construct the model and optimizer to get shaped versions of the state
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  if config.pure_nnx:
+    _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, topology_mesh)
+  else:
+    model = Transformer(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
@@ -98,18 +105,39 @@ def get_shaped_inputs(topology_mesh, config):
   _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
-  # Shaped state
-  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
-      model, tx, config, example_rng, topology_mesh
-  )
+  if config.pure_nnx:
 
-  # unsharded logical annotations
-  logical_annotations = maxtext_utils.get_logical_annotations(model, tx, config, example_rng, topology_mesh)
+    def create_train_state_fn():
+      nnx_model = _create_model_partial()
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+
+    init_state_fn = create_train_state_fn
+  else:
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, example_rng)
+
+  # Shaped state
+  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(config, topology_mesh, init_state_fn, True)
+
+  if config.pure_nnx:
+    # NNX doesn't use Linen logical annotations; derive PartitionSpecs from the physical shardings.
+    logical_annotations = maxtext_utils_nnx.get_partition_spec_nnx(state_mesh_shardings)
+    # For NNX, get_functional_train_with_signature expects the graphdef (static structure),
+    # not the raw model — mirroring how the training loop does nnx.split(train_state).
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+      graphdef, _ = nnx.get_abstract_model(init_state_fn, topology_mesh)
+    model = graphdef
+  else:
+    # unsharded logical annotations
+    logical_annotations = maxtext_utils.get_logical_annotations(config, topology_mesh, init_state_fn)
 
   # Shaped batch
   shaped_batch = maxtext_utils.get_shaped_batch(config)
 
-  shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
+  if config.pure_nnx:
+    shaped_train_args = (abstract_state, shaped_batch)
+  else:
+    shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}
   return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, logical_annotations, model
 
@@ -264,12 +292,20 @@ def main(argv: Sequence[str]) -> None:
   # print weights sharding info under debug sharding mode
   if config.debug_sharding:
     max_utils.print_non_trivial_mesh_axis(topology_mesh)
-    maxtext_utils.print_shardings_params(
-        shaped_train_args[0].params,
-        state_mesh_shardings.params,
-        topology_mesh,
-        logical_annotations.params,
-    )
+    if config.pure_nnx:
+      maxtext_utils.print_shardings_params(
+          shaped_train_args[0],
+          state_mesh_shardings,
+          topology_mesh,
+          logical_annotations,
+      )
+    else:
+      maxtext_utils.print_shardings_params(
+          shaped_train_args[0].params,
+          state_mesh_shardings.params,
+          topology_mesh,
+          logical_annotations.params,
+      )
 
   # Compile
   print("Jitting and compiling train step...", flush=True)
