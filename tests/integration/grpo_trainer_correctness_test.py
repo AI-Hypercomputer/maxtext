@@ -25,6 +25,7 @@ Usage:
   pytest tests/integration/grpo_trainer_correctness_test.py
 """
 
+import functools
 import os
 import subprocess
 import sys
@@ -72,8 +73,13 @@ def setup_maxtext_model(config, mesh):
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
 
-  maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-  state, state_mesh_annotations = maxtext_utils.setup_decode_state(maxtext_model, config, init_rng, mesh, None)
+  if config.pure_nnx:
+    # NNX has a different function to init the training state.
+    raise NotImplementedError("Pure NNX support has not been implemented yet.")
+  else:
+    maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, maxtext_model, None, config, False, init_rng)
+  state, state_mesh_annotations = maxtext_utils.setup_decode_state(config, mesh, None, init_state_fn)
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, config.logical_axis_rules)
   data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
   reference_params = jax.tree.map(jnp.copy, state.params["params"])
