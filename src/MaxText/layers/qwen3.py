@@ -1096,6 +1096,7 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       model_mode: str,
       quant: None | Quant,
       rngs: nnx.Rngs,
+      num_active_expert: int = 0,
   ):
     super().__init__(config, mesh, model_mode, quant, rngs)
     if config.shared_experts > 0:
@@ -1104,6 +1105,20 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
           mesh=mesh,
           kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          quant=quant,
+          rngs=rngs,
+      )
+    elif num_active_expert > 0:
+      self.moe_block = RoutedMoE(
+          config=config,
+          num_experts=config.num_experts,
+          num_experts_per_tok=num_active_expert,
+          mesh=mesh,
+          kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", None),
+          intermediate_dim=config.moe_mlp_dim,  # same as config.mlp_dim
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
           quant=quant,
@@ -1769,5 +1784,85 @@ Qwen3NextDecoderLayerToLinen = nnx_wrappers.to_linen_class(
 
 Qwen3NextScannableBlockToLinen = nnx_wrappers.to_linen_class(
     Qwen3NextScannableBlock,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+
+class Qwen3MixedScannableBlock(nnx.Module):
+  """Qwen3MixedScannableBlock decoder layer (MoE)."""
+
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      rngs: nnx.Rngs,
+      quant: None | Quant = None,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.model_mode = model_mode
+    self.quant = quant
+    self.rngs = rngs
+    for index in range(self.config.inhomogeneous_layer_cycle_interval):
+      layer_name = f"layers_{index}"
+      layer = Qwen3MoeDecoderLayer(
+          config=self.config,
+          mesh=self.mesh,
+          model_mode=self.model_mode,
+          rngs=self.rngs,
+          quant=self.quant,
+          num_active_expert=self.config.mixed_num_active_experts[index],
+      )
+      setattr(self, layer_name, layer)
+      # for _ in range(scan_length):
+      #   layer_name = f"layers_{index}"
+      #   layer = Qwen3MoeDecoderLayer(
+      #       config=self.config,
+      #       mesh=self.mesh,
+      #       model_mode=self.model_mode,
+      #       rngs=self.rngs,
+      #       quant=self.quant,
+      #       num_active_expert=self.config.mixed_num_active_experts[index],
+      #   )
+      #   setattr(self, layer_name, layer)
+
+  def __call__(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
+      previous_chunk=None,
+  ):
+
+    cfg = self.config
+    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    y = inputs
+    for index in range(self.config.inhomogeneous_layer_cycle_interval):
+      y = getattr(self, f"layers_{index}")(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+      )
+      if cfg.scan_layers:
+        y = y[0]
+    if cfg.scan_layers:
+      return y, None
+    else:
+      return y
+
+
+Qwen3MixedScannableBlockToLinen = nnx_wrappers.to_linen_class(
+    Qwen3MixedScannableBlock,
     base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )

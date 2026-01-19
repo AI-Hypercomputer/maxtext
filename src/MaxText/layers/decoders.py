@@ -420,7 +420,10 @@ class Decoder(nn.Module):
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
-        return [qwen3.Qwen3MoeDecoderLayerToLinen]
+        if self.config.mixed_num_active_expert_layers:
+          return [qwen3.Qwen3MixedScannableBlockToLinen]
+        else:
+          return [qwen3.Qwen3MoeDecoderLayerToLinen]
       case DecoderBlockType.QWEN3_NEXT:
         return [qwen3.Qwen3NextScannableBlockToLinen] if self.config.scan_layers else [qwen3.Qwen3NextDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE:
@@ -810,6 +813,21 @@ class Decoder(nn.Module):
               page_state,
               slot,
           )
+        elif cfg.decoder_block == DecoderBlockType.QWEN3_MOE and cfg.inhomogeneous_layer_cycle_interval > 1:
+          RemattedBlockLayer = RemattedBlockLayers[0]
+          layer_kwargs = {}
+          for index in range(self.config.inhomogeneous_layer_cycle_interval):
+            scan_length = cfg.mixed_num_active_expert_layers[index]
+            y, _ = self.scan_decoder_layers(
+                cfg,
+                RemattedBlockLayer,
+                scan_length,
+                "layers",
+                mesh,
+                in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                model_mode=model_mode,
+                **layer_kwargs,
+            )(y, *broadcast_args)
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)

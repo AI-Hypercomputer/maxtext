@@ -550,7 +550,9 @@ class MoEGeneral(BaseModel):
   """General configuration for Mixture of Experts (MoE) layers."""
 
   num_experts: PositiveInt = Field(1, description="The total number of experts in each MoE layer.")
-  num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
+  num_experts_per_tok: int = Field(0, description="The number of experts to route each token to.")
+  mixed_num_active_experts: list[int] = Field([], description="Mixed number of active experts per layer.")
+  mixed_num_active_expert_layers: list[int] = Field([], description="Mixed number of active experts for layers.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
   use_custom_sort_vjp: bool = Field(
@@ -637,7 +639,7 @@ class DeepSeekMoE(BaseModel):
 
   base_moe_mlp_dim: int = Field(7168, description="Intermediate dimension at MoE layer (DeepSeek style).")
   first_num_dense_layers: NonNegativeInt = Field(0, description="Number of initial dense layers in the model.")
-  shared_experts: PositiveInt = Field(1, description="Number of shared experts.")
+  shared_experts: int = Field(0, description="Number of shared experts.")
   routed_scaling_factor: float = Field(1.0, description="Scaling factor for routing scores.")
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
@@ -1201,8 +1203,11 @@ class DevelopmentAndDebugging(BaseModel):
   enable_single_controller: bool = Field(False, description="Enable single-controller mode (Pathways).")
   subslice_shape: str = Field("", description="Subslice shape in the form of 'x,y,z' for Pathways.")
   max_checkify: bool = Field(
+      False, description="If True, perform extra checks using jax.checkify, affecting performance."
+  )
+  use_two_init: bool = Field(
       False,
-      description="If True, perform extra checks using jax.checkify, affecting performance.",
+      description="If True, use scaled down projection for init method.",
   )
 
   @classmethod
@@ -2032,6 +2037,19 @@ class MaxTextConfig(
           and self.first_num_dense_layers == 0
           and self.inhomogeneous_layer_cycle_interval == 1
       )
+      if self.mixed_num_active_experts and self.num_experts_per_tok > 0:
+        raise ValueError("mixed_num_active_experts and num_experts_per_tok cannot be set at the same time.")
+      if self.mixed_num_active_expert_layers:
+        total_layers = 0
+        for i in self.mixed_num_active_expert_layers:
+          total_layers += i
+        if total_layers != self.base_num_decoder_layers:
+          raise ValueError("mixed_num_active_expert_layers is not aligned with model total layers.")
+        if (
+            len(self.mixed_num_active_experts) != len(self.mixed_num_active_expert_layers)
+            or len(self.mixed_num_active_experts) != self.inhomogeneous_layer_cycle_interval
+        ):
+          raise ValueError("mixed_num_active_experts is not aligned with mixed_num_active_expert_layers.")
       if is_fully_moe and self.base_mlp_dim != self.base_moe_mlp_dim:
         if self.decoder_block == DecoderBlockType.QWEN3_MOE:
           self.base_mlp_dim = self.base_moe_mlp_dim
