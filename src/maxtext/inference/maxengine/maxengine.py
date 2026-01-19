@@ -113,7 +113,10 @@ class MaxEngine(_BaseEngine):
 
     # Model and Optimizer definition
     quant = quantizations.configure_quantization(config)
-    self.model = models.transformer_as_linen(config, mesh=self._mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
+    if config.pure_nnx:
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      self.model = models.transformer_as_linen(config, mesh=self._mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
     self.replicated_sharding = jax.sharding.NamedSharding(self._mesh, P(None))
 
     self.abstract_params = None
@@ -229,17 +232,25 @@ class MaxEngine(_BaseEngine):
     rng1, rng2, rng3 = jax.random.split(rng, 3)
     if params:
       print("Resharding given params")
+      if self.config.pure_nnx:
+        # NNX has a different function to init the training state.
+        raise NotImplementedError("Pure NNX support has not been implemented yet.")
+      else:
+        init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng)
       _, self.state_mesh_annotations, state_mesh_shardings = maxtext_utils.get_abstract_state(
-          self.model, None, self.config, rng, self._mesh, False
+          self.config, self._mesh, init_state_fn, False
       )
       # reshard given params based on shardings from config in MaxEngine
       params = jax.device_put(params, state_mesh_shardings.params)
       state = maxtext_utils.init_decode_state(None, params)
       state = max_utils.unbox_logicallypartioned(state)
     else:
-      state, self.state_mesh_annotations = maxtext_utils.setup_decode_state(
-          self.model, self.config, rng1, self._mesh, None
-      )
+      if self.config.pure_nnx:
+        # NNX has a different function to init the training state.
+        raise NotImplementedError("Pure NNX support has not been implemented yet.")
+      else:
+        init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng1)
+      state, self.state_mesh_annotations = maxtext_utils.setup_decode_state(self.config, self._mesh, None, init_state_fn)
     # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
