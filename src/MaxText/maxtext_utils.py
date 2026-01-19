@@ -18,8 +18,9 @@
 import functools
 import pickle
 
-from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
+# from flax import linen as nn
+from flax import nnx
+# from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 
 import numpy as np
@@ -40,6 +41,7 @@ from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import multimodal_utils
 from MaxText import sharding
+from MaxText.sharding import logical_to_mesh
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.inference.page_manager import PageState
 
@@ -778,7 +780,8 @@ def init_initial_state(model, tx, config, is_training, key):
 
 def get_abstract_param(model, config):
   """Get abstract model structure (name, shape) without materializing the weights to save memory"""
-  with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  # with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with model.mesh, nnx.logical_axis_rules(config.logical_axis_rules):
     key = jax.random.PRNGKey(0)
     input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
@@ -817,7 +820,8 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
     unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    # with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with nnx.logical_axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
           config.load_parameters_path,
           unboxed_abstract_state.params,
@@ -877,7 +881,8 @@ def setup_initial_state(
   )
 
   # Initialization
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  # with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with nnx.logical_axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,
@@ -928,12 +933,15 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
   init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
 
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  # with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with nnx.logical_axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)
 
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  # state_logical_annotations = nn.get_partition_spec(abstract_state)
+  state_logical_annotations = nnx.get_partition_spec(abstract_state)
 
-  state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
+  # state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
+  state_mesh_shardings = sharding.logical_to_mesh(state_logical_annotations, mesh, config.logical_axis_rules)
   if is_training and config.shard_optimizer_over_data:
     # Add data to sharding for optimizer state
     state_mesh_shardings = state_mesh_shardings.replace(
@@ -960,8 +968,10 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 
   unboxed_abstract_sharded_state = max_utils.unbox_logicallypartioned(abstract_sharded_state)
   # Initialization
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  # with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nnx.logical_axis_rules(config.logical_axis_rules):
+    # state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+    state_mesh_annotations = logical_to_mesh(state_logical_annotations, mesh, config.logical_axis_rules)
   return (
       unboxed_abstract_sharded_state,
       state_mesh_annotations,
@@ -992,12 +1002,16 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
     )
     return model_vars["cache"]
 
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  # with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with nnx.logical_axis_rules(config.logical_axis_rules):
     init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
     abstract_state = jax.eval_shape(init_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  # state_logical_annotations = nn.get_partition_spec(abstract_state)
+    state_logical_annotations = nnx.get_partition_spec(abstract_state)
+  # with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nnx.logical_axis_rules(config.logical_axis_rules):
+    # state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+    state_mesh_annotations = logical_to_mesh(state_logical_annotations, mesh, config.logical_axis_rules)
   return state_mesh_annotations
 
 
@@ -1021,12 +1035,16 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
     )
     return model_vars["cache"]
 
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  # with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with nnx.logical_axis_rules(config.logical_axis_rules):
     init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
     abstract_state = jax.eval_shape(init_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  # state_logical_annotations = nn.get_partition_spec(abstract_state)
+  state_logical_annotations = nnx.get_partition_spec(abstract_state)
+  # with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nnx.logical_axis_rules(config.logical_axis_rules):
+    # state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+    state_mesh_annotations = logical_to_mesh(state_logical_annotations, mesh, config.logical_axis_rules)
   return state_mesh_annotations
 
 

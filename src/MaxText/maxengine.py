@@ -31,6 +31,7 @@ if jax.__version_info__ >= (0, 6, 3):
 else:
   from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore
 
+# from flax import linen as nn
 from flax import nnx
 from flax import struct
 import flax
@@ -48,6 +49,7 @@ from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.inference.page_manager import PageManager, PageState
 from MaxText.layers import models, quantizations
@@ -114,7 +116,14 @@ class MaxEngine(engine_api.Engine):
 
     # Model and Optimizer definition
     quant = quantizations.configure_quantization(config)
-    self.model = models.transformer_as_linen(config, mesh=self._mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
+    # self.model = models.transformer_as_linen(config, mesh=self._mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
+    self.model = models.Transformer(
+      config=config,
+      mesh=self._mesh,
+      quant=quant,
+      model_mode=MODEL_MODE_PREFILL,
+      rngs=nnx.Rngs(0),
+    )
     self.replicated_sharding = jax.sharding.NamedSharding(self._mesh, P(None))
 
     self.abstract_params = None
@@ -330,21 +339,36 @@ class MaxEngine(engine_api.Engine):
       image_shape = multimodal_utils.get_dummy_image_shape_for_init(
           self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
       )
-      return self.model.apply(
-          _p | {"aqt": {}},
-          jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+      # return self.model.apply(
+      #     _p | {"aqt": {}},
+      #     jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+      #     jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+      #     encoder_images=jnp.ones(image_shape, dtype=jnp.float32) if self.config.use_multimodal else None,
+      #     # encoder_image_masks indicates valid tiles if image tiling + padding is used in vision encoder input.
+      #     encoder_image_masks=jnp.ones(image_shape[:2], dtype=jnp.int32)
+      #     if self.config.use_multimodal and "llama4" in self.config.model_name
+      #     else None,
+      #     decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+      #     enable_dropout=False,
+      #     model_mode=MODEL_MODE_PREFILL,
+      #     rngs={"params": _rng},
+      #     mutable=True,
+      # )
+
+      nnx.update(self.model, _p | {"aqt": {}})
+      output = self.model(
+          decoder_input_tokens=jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+          decoder_positions=jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           encoder_images=jnp.ones(image_shape, dtype=jnp.float32) if self.config.use_multimodal else None,
-          # encoder_image_masks indicates valid tiles if image tiling + padding is used in vision encoder input.
           encoder_image_masks=jnp.ones(image_shape[:2], dtype=jnp.int32)
           if self.config.use_multimodal and "llama4" in self.config.model_name
           else None,
           decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           enable_dropout=False,
           model_mode=MODEL_MODE_PREFILL,
-          rngs={"params": _rng},
-          mutable=True,
       )
+      _, new_vars = nnx.split(self.model)
+      return output, new_vars
 
     _, new_vars = model_apply(state.params, rng)
     # Remove param values which have corresponding qtensors in aqt to save memory.
@@ -512,17 +536,31 @@ class MaxEngine(engine_api.Engine):
     #   )
 
     with self._mesh, nnx.logical_axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_vars = self.model.apply(
-          input_params,
-          input_tokens,
-          positions,
+      # flat_logits, new_vars = self.model.apply(
+      #     input_params,
+      #     input_tokens,
+      #     positions,
+      #     encoder_images=images,
+      #     encoder_image_masks=image_masks,
+      #     decoder_segment_ids=sequence_indicator,
+      #     enable_dropout=False,
+      #     model_mode=MODEL_MODE_PREFILL,
+      #     rngs={"params": new_rng},
+      #     mutable=["cache"],
+      #     previous_chunk=previous_chunk,
+      #     true_length=true_length,
+      #     slot=slot,
+      #     page_state=page_state,
+      # )
+      nnx.update(self.model, params)
+      flat_logits = self.model(
+          decoder_input_tokens=input_tokens,
+          decoder_positions=positions,
+          decoder_segment_ids=sequence_indicator,
           encoder_images=images,
           encoder_image_masks=image_masks,
-          decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
-          mutable=["cache"],
           previous_chunk=previous_chunk,
           true_length=true_length,
           slot=slot,
@@ -571,6 +609,8 @@ class MaxEngine(engine_api.Engine):
         samples_per_slot=1,
     )
 
+    _, state = nnx.split(self.model)
+    new_vars = {"cache": state}
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
     next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
@@ -733,16 +773,26 @@ class MaxEngine(engine_api.Engine):
 
     rng, new_rng = jax.random.split(rng)
     with self._mesh, nnx.logical_axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_vars = self.model.apply(
-          params,
-          input_tokens,
-          positions,
+      # flat_logits, new_vars = self.model.apply(
+      #     params,
+      #     input_tokens,
+      #     positions,
+      #     decoder_segment_ids=sequence_indicator,
+      #     enable_dropout=False,
+      #     model_mode=MODEL_MODE_PREFILL,
+      #     rngs={"params": new_rng},
+      #     mutable=["cache"],
+      # )
+      nnx.update(self.model, params)
+      flat_logits = self.model(
+          decoder_input_tokens=input_tokens,
+          decoder_positions=positions,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
-          mutable=["cache"],
       )
+      _, state = nnx.split(self.model)
+      new_vars = {"cache": state}
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
@@ -855,16 +905,27 @@ class MaxEngine(engine_api.Engine):
     decoder_segment_ids = jnp.expand_dims(decoder_segment_ids, 0)
     rng, new_rng = jax.random.split(rng)
     with self._mesh, nnx.logical_axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_vars = self.model.apply(
-          params,
-          input_tokens,
-          decoder_positions,
+      # flat_logits, new_vars = self.model.apply(
+      #     params,
+      #     input_tokens,
+      #     decoder_positions,
+      #     decoder_segment_ids=decoder_segment_ids,
+      #     enable_dropout=False,
+      #     model_mode=MODEL_MODE_PREFILL,
+      #     rngs={"params": new_rng},
+      #     mutable=["cache"],
+      # )
+      nnx.update(self.model, params)
+      flat_logits = self.model(
+          decoder_input_tokens=input_tokens,
+          decoder_positions=decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
           enable_dropout=False,
           model_mode=MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
-          mutable=["cache"],
       )
+      _, state = nnx.split(self.model)
+      new_vars = {"cache": state}
+
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
     if return_prompt_logp:
@@ -1018,16 +1079,26 @@ class MaxEngine(engine_api.Engine):
     rng, new_rng = jax.random.split(rng)
     # run one step generation
     with self._mesh, nnx.logical_axis_rules(self.config.logical_axis_rules):
-      out_logits, new_vars = self.model.apply(
-          params | {"cache": decode_state["cache"]},
-          previous_token,
-          decode_state["next_pos"],
+      # out_logits, new_vars = self.model.apply(
+      #     params | {"cache": decode_state["cache"]},
+      #     previous_token,
+      #     decode_state["next_pos"],
+      #     enable_dropout=False,
+      #     model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      #     rngs={"params": new_rng},
+      #     mutable=["cache"],
+      #     page_state=page_state,
+      # )
+      nnx.update(self.model, params | {"cache": decode_state["cache"]})
+      out_logits = self.model(
+          decoder_input_tokens=previous_token,
+          decoder_positions=decode_state["next_pos"],
           enable_dropout=False,
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
-          rngs={"params": new_rng},
-          mutable=["cache"],
           page_state=page_state,
       )
+      _, state = nnx.split(self.model)
+      new_vars = {"cache": state}
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
     # sampling tokens
@@ -1561,18 +1632,30 @@ class MaxEngine(engine_api.Engine):
           ),
           dtype=jnp.int32,
       )
-      _, cache = self.model.apply(
-          abstract_params,
-          x,
-          x,
+      # _, cache = self.model.apply(
+      #     abstract_params,
+      #     x,
+      #     x,
+      #     encoder_images=dummy_image if self.config.use_multimodal else None,
+      #     enable_dropout=False,
+      #     model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      #     rngs={"params": rng},
+      #     mutable=["cache"],
+      #     page_state=page_state,
+      #     slot=0,
+      # )
+      nnx.update(self.model, abstract_params)
+      _ = self.model(
+          decoder_input_tokens=x,
+          decoder_positions=x,
           encoder_images=dummy_image if self.config.use_multimodal else None,
           enable_dropout=False,
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
-          rngs={"params": rng},
-          mutable=["cache"],
           page_state=page_state,
           slot=0,
       )
+      _, state = nnx.split(self.model)
+      cache = {"cache": state}
 
       next_pos = jnp.zeros(
           (int(self.config.per_device_batch_size * self.mesh.size), 1),
@@ -1625,7 +1708,7 @@ class MaxEngine(engine_api.Engine):
     cache = init_state["cache"]
 
     def is_lp(k):
-      return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
+      return isinstance(k, nnx.Variable)
 
     self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
     zeroed = max_utils.unbox_logicallypartioned(init_state)
