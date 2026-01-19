@@ -16,6 +16,8 @@
 """Utils that are only interesting for training in MaxText."""
 
 import os
+from functools import partial
+
 import jax
 import functools
 from flax.linen import partitioning as nn_partitioning
@@ -33,12 +35,17 @@ from maxtext.utils.rampup_batch import create_rampup_manager
 from maxtext.trainers.diloco import diloco
 
 
-def create_training_tools(config, model, mesh):
-  """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
-  init_rng = jax.random.PRNGKey(config.init_weights_seed)
+def create_training_optimizer(config, model):
+  """Creates the optimizer and learning rate schedule."""
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
   tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
+  return learning_rate_schedule, tx
+
+
+def create_checkpoint_manager(config, mesh, init_state_fn):
+  """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
+  # pass in model for muon
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_multi_tier_checkpointing:
     checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
@@ -47,7 +54,7 @@ def create_training_tools(config, model, mesh):
         mesh,
     )
   elif config.enable_emergency_checkpoint:
-    abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
     checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
         config.local_checkpoint_directory,
         config.checkpoint_dir,
@@ -85,10 +92,10 @@ def create_training_tools(config, model, mesh):
         config.enable_autocheckpoint,
     )
 
-  return init_rng, checkpoint_manager, learning_rate_schedule, tx
+  return checkpoint_manager
 
 
-def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings):
+def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings, mesh=None):
   """Returns a JIT-compiled train step function, which is loaded from a file if specified in the config."""
   if config.enable_diloco:
     functional_train = train_step
@@ -110,7 +117,9 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":
     max_logging.log("Loading the compiled function...")
-    execution_devices = model.mesh.devices.flatten().tolist()
+    # For NNX, model is the GraphDef (no .mesh); use the mesh passed explicitly instead.
+    execution_mesh = mesh if mesh is not None else model.mesh
+    execution_devices = execution_mesh.devices.flatten().tolist()
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
     p_train_step = maxtext_utils.load_compiled(config, functional_train, state, execution_devices)
     max_logging.log("Loaded compiled function!")
@@ -165,7 +174,9 @@ def jit_train_and_eval_step(
     train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
     train_step = diloco.build_diloco_train_step(config, train_step_partial, mesh=mesh)
   data_sharding = sharding.get_input_data_sharding(config, mesh)
-  p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings)
+  p_train_step = jit_train_step(
+      config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings, mesh=mesh
+  )
   p_eval_step = None
   if eval_data_iterator:
     p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
@@ -197,9 +208,21 @@ def setup_train_loop(config, recorder, devices=None):
   from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    model = model_creation_utils.from_config(config, devices)
+    is_training = True
+    init_rng = jax.random.PRNGKey(config.init_weights_seed)
+    if config.pure_nnx:
+      # Create abstract NNX model.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      model = model_creation_utils.from_config(config, devices)
     mesh = model.mesh
-    init_rng, checkpoint_manager, learning_rate_schedule, tx = create_training_tools(config, model, mesh)
+    learning_rate_schedule, tx = create_training_optimizer(config, model)
+    if config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
+    checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
@@ -225,7 +248,7 @@ def setup_train_loop(config, recorder, devices=None):
           )
 
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+        data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
 
     if config.enable_diloco:
@@ -248,14 +271,14 @@ def setup_train_loop(config, recorder, devices=None):
 
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
-      logical_annotations = maxtext_utils.get_logical_annotations(model, tx, config, init_rng, mesh, is_training=True)
+      logical_annotations = maxtext_utils.get_logical_annotations(config, mesh, init_state_fn)
       max_utils.print_non_trivial_mesh_axis(model.mesh)
       maxtext_utils.print_shardings_params(
           state.params, state_mesh_shardings.params, model.mesh, logical_annotations.params
       )
 
     if config.use_dpo:
-      abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+      abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training)
       max_logging.log(
           "Restoring reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
       )
