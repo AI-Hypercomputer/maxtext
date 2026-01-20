@@ -108,45 +108,73 @@ def get_dataset(model_tokenizer, tmvp_config, data_dir, split="train") -> grain.
   if not os.path.exists(data_dir):
     os.makedirs(data_dir)
 
-  data = tfds.data_source(
-      tmvp_config.dataset_name,
-      split=split,
-      data_dir=data_dir,
-      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
-      download=True,
-  )
+  dataset_name = tmvp_config.dataset_name
+  if dataset_name.startswith("huggingface:"):
+    import datasets
+    hf_dataset_name = dataset_name.replace("huggingface:", "")
+    data = datasets.load_dataset(hf_dataset_name, split=split, cache_dir=data_dir)
+  else:
+    builder_kwargs = {"file_format": tfds.core.FileFormat.ARRAY_RECORD}
+    data = tfds.data_source(
+        dataset_name,
+        split=split,
+        data_dir=data_dir,
+        builder_kwargs=builder_kwargs,
+        download=True,
+    )
 
   template_config = load_template_from_file(tmvp_config.chat_template_path)
+
+  def _process_data(x):
+    def _to_str(val):
+      if isinstance(val, bytes):
+        return val.decode("utf-8")
+      return str(val)
+
+    # Handle DAPO dataset schema (prompt is a list, answer is in reward_model)
+    q_raw = x.get("question", x.get("prompt"))
+    if isinstance(q_raw, list) and len(q_raw) > 0 and "content" in q_raw[0]:
+      question = q_raw[0]["content"]
+    else:
+      question = q_raw
+
+    answer = x.get("answer")
+    if answer is None and "reward_model" in x:
+      answer = x["reward_model"]["ground_truth"]
+
+    question = _to_str(question)
+    answer = _to_str(answer)
+
+    return {
+        # passed to model forward pass
+        "prompts": model_tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "user",
+                    "content": template_config["TEMPLATE"].format(
+                        system_prompt=template_config["SYSTEM_PROMPT"].format(
+                            reasoning_start_token=tmvp_config.reasoning_start_token,
+                            reasoning_end_token=tmvp_config.reasoning_end_token,
+                            solution_start_token=tmvp_config.solution_start_token,
+                            solution_end_token=tmvp_config.solution_end_token,
+                        ),
+                        question=question,
+                    ),
+                },
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        ),
+        # passed to reward functions
+        "question": question,
+        # passed to reward functions
+        "answer": utils_rl.extract_hash_answer(answer),
+    }
+
   loaded_dataset = (
       grain.MapDataset.source(data)
       .shuffle(seed=tmvp_config.data_shuffle_seed)
-      .map(
-          lambda x: {
-              # passed to model forward pass
-              "prompts": model_tokenizer.apply_chat_template(
-                  [
-                      {
-                          "role": "user",
-                          "content": template_config["TEMPLATE"].format(
-                              system_prompt=template_config["SYSTEM_PROMPT"].format(
-                                  reasoning_start_token=tmvp_config.reasoning_start_token,
-                                  reasoning_end_token=tmvp_config.reasoning_end_token,
-                                  solution_start_token=tmvp_config.solution_start_token,
-                                  solution_end_token=tmvp_config.solution_end_token,
-                              ),
-                              question=x["question"].decode("utf-8"),
-                          ),
-                      },
-                  ],
-                  tokenize=False,
-                  add_generation_prompt=True,
-              ),
-              # passed to reward functions
-              "question": x["question"].decode("utf-8"),
-              # passed to reward functions
-              "answer": utils_rl.extract_hash_answer(x["answer"].decode("utf-8")),
-          }
-      )
+      .map(_process_data)
   )
   return loaded_dataset
 
@@ -292,6 +320,9 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   dataset = get_dataset(model_tokenizer, trainer_config, train_data_dir, trainer_config.train_split).batch(
       trainer_config.batch_size
   )[: trainer_config.num_batches]
+  if trainer_config.debug.rl:
+    print("DEBUG: First batch of dataset:")
+    pprint(next(iter(dataset)))
 
   if trainer_config.train_fraction == 1.0:
     train_dataset = dataset.repeat(trainer_config.num_epoch)

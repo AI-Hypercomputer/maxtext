@@ -171,7 +171,7 @@ skip_jax_distributed_system: True
 
 # # TODO(@mazumdera): fix this
 # Dataset Configuration
-dataset_name: 'gsm8k'
+dataset_name: 'huggingface:BytedTsinghua-SIA/DAPO-Math-17k'
 train_split: 'train'
-eval_split: 'test'
+eval_split: 'train'
 tokenizer_type: 'huggingface'
