@@ -31,6 +31,9 @@ on:
       cloud_runner:
         required: false
         type: string
+      maxtext_sha:
+        required: true
+        type: string
     secrets:
       HF_TOKEN:
         required: true
@@ -43,7 +46,10 @@ jobs:
     container:
       image: gcr.io/tpu-prod-env-multipod/maxtext-unit-test-${{ inputs.device_type == 'cpu' && 'tpu' || inputs.device_type }}:${{ inputs.image_type != '' && inputs.image_type }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Checkout MaxText
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.maxtext_sha }}
       - name: Download the MaxText wheel
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
@@ -64,7 +70,8 @@ jobs:
           .venv/bin/python3 -m ipykernel install --user --name maxtext_venv
 
           # Install Tunix for post-training notebooks
-          uv pip install git+https://github.com/google/tunix
+          git clone https://github.com/google/tunix
+          uv pip install ./tunix
           
           # Install vllm for post-training notebooks
           git clone https://github.com/vllm-project/vllm.git
@@ -94,6 +101,20 @@ jobs:
             echo "------------------------------------------------------"
 
             .venv/bin/papermill "$notebook" "$output_name" -k maxtext_venv
+          done
+      - name: Record Commit IDs
+        shell: bash
+        run: |
+          echo "--- MaxText and Post-Training Repositories Commit IDs ---"
+          echo "maxtext: ${GITHUB_SHA:0:7}"
+
+          declare -a repos=("tunix" "vllm" "tpu-inference")
+          for repo_dir in "${repos[@]}"; do
+            if [ -d "$repo_dir" ]; then
+              echo "$repo_dir: $(git -C "$repo_dir" rev-parse --short HEAD)"
+            else
+              echo "Warning: $repo_dir directory not found."
+            fi
           done
       - name: Upload Outputs
         if: always()
