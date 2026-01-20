@@ -497,6 +497,8 @@ class Attention(BaseModel):
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
   use_jax_splash: bool = Field(False, description="Whether to use jax splash attention.")
   force_q_layout: bool = Field(False, description="Force the Q layout")
+  use_qk_clip: bool = Field(False, description="Whether to use QK-Clip (MuonClip) for training stability.")
+  qk_clip_threshold: float = Field(100.0, description="Threshold for QK-Clip (tau).")
 
 
 class MoBa(BaseModel):
@@ -2409,6 +2411,18 @@ class MaxTextConfig(
       )
     if self.force_q_layout and not self.use_jax_splash:
       raise ValueError("`force_q_layout` can only be true if `use_jax_splash` is also true.")
+
+    if self.use_qk_clip and self.attention_type != "mla":
+      raise ValueError(
+          f"QK-Clip is only supported when attention_type='mla', but found attention_type='{self.attention_type}'."
+      )
+
+    if self.use_qk_clip and self.attn_logits_soft_cap is not None:
+      raise ValueError(
+          "QK-Clip monitors raw dot products, but attn_logits_soft_cap is enabled. "
+          "Recording pre-cap max_logits is not fully supported yet. "
+          "Please disable attn_logits_soft_cap when using use_qk_clip."
+      )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
