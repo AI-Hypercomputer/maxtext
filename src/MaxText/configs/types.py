@@ -848,6 +848,7 @@ class RematAndOffload(BaseModel):
       description="Remat policy for the mla's key and value projection.",
   )
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
+  optimizer_compute_host_offload: bool = Field(False, description="Offload optimizer update to host.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
 
 
