@@ -636,15 +636,28 @@ skip_jax_distributed_system: False # If True we will not initialize the jax dist
 # However when run on google internal TPUs the coordination service is started automatically
 # and we should set this to True so we won't try to initialize a second time manually.
 
-# We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
-# Learning rate schedule has either two or three parts:
+# Learning rate schedule structure depends on lr_schedule_type:
+#
+# Cosine schedule (lr_schedule_type='cosine'):
+# Inspired by Llama2's learning rate schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 # 1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
-# 2) Cosine decay from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] from warmup to learning_rate_schedule_steps
-# 3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
+# 2) Cosine decay from [learning_rate] to [learning_rate * learning_rate_final_fraction] until learning_rate_schedule_steps
+# 3) Constant learning rate of 0 from learning_rate_schedule_steps to steps (if steps > learning_rate_schedule_steps)
+#
+# WSD schedule (lr_schedule_type='wsd', Warmup-Stable-Decay):
+# 1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
+# 2) Stable phase at [learning_rate] for the majority of training
+# 3) Decay from [learning_rate] to [learning_rate * learning_rate_final_fraction] over [learning_rate_schedule_steps * wsd_decay_steps_fraction] steps
+#    The decay can be either linear or cosine based on wsd_decay_style
+# 4) Constant learning rate of 0 from learning_rate_schedule_steps to steps (if steps > learning_rate_schedule_steps)
+#
 # The zero learning rate section can be used to more accurately measure the fully trained model's performance.
 learning_rate: 3.e-5
-cosine_learning_rate_final_fraction: 0.1
-warmup_steps_fraction: 0.1
+lr_schedule_type: 'cosine'  # Options: 'cosine' or 'wsd'
+learning_rate_final_fraction: 0.1  # Final LR as fraction of peak LR (applies to both cosine and WSD schedules)
+wsd_decay_steps_fraction: 0.1  # Fraction of learning_rate_schedule_steps used for decay phase in WSD (e.g., 0.1 = 10%)
+wsd_decay_style: 'linear'  # Decay style for WSD schedule: 'linear' or 'cosine'
+warmup_steps_fraction: 0.1  # Fraction of learning_rate_schedule_steps used for warmup phase (applies to both schedules)
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.
 # However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
