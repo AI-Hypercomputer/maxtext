@@ -1028,6 +1028,9 @@ class MLA(Attention):
       if index_mask is not None:
         index_mask = index_mask[:, None, None, :, :]  # [b, 1, 1, q_len, kv_len]
 
+    # Check if we need QK Clip stats
+    use_qk_clip = self.model_mode == MODEL_MODE_TRAIN and self.config.use_qk_clip
+
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
@@ -1035,8 +1038,16 @@ class MLA(Attention):
       unnormalized_out = unnormalized_out[..., : self.v_head_dim]
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
-      # Pass the index_mask to the Attention Op
-      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, index_mask=index_mask)
+      out = self.attention_op(
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          model_mode,
+          cached_values,
+          index_mask=index_mask,
+          record_max_logits=use_qk_clip,
+      )
 
     if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)

@@ -826,6 +826,7 @@ class AttentionOp(nnx.Module):
       bidirectional_mask: Any = None,
       sinks: Array | None = None,
       index_mask: Array | None = None,
+      record_max_logits: bool = False,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -845,7 +846,11 @@ class AttentionOp(nnx.Module):
         impl = self.gpu_ragged_attention
       else:
         raise NotImplementedError(target_hardware)
-      return impl(query, key, value, lengths, self.ragged_block_size)
+
+      local_out, local_max, local_sum = impl(query, key, value, lengths, self.ragged_block_size)
+      if record_max_logits:
+        self.sow("intermediates", "max_logits", local_max)
+      return local_out, local_max, local_sum
 
     # 'vllm_rpa' uses the same dot-attention wrapper but routes to the vLLM
     # ragged paged attention kernel in `Attention.__call__`.
@@ -866,6 +871,7 @@ class AttentionOp(nnx.Module):
           bidirectional_mask=bidirectional_mask,
           sinks=sinks,
           index_mask=index_mask,
+          record_max_logits=record_max_logits,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -881,8 +887,28 @@ class AttentionOp(nnx.Module):
               """Decode not supported with flash attention.
                               Use `dot_product` instead."""
           )
+        if record_max_logits:
+          out, max_logits = self.tpu_flash_attention(
+              query,
+              key,
+              value,
+              decoder_segment_ids,
+              self.attn_logits_soft_cap,
+              sinks,
+              record_max_logits=record_max_logits,
+          )
+          self.sow("intermediates", "max_logits", max_logits)
+          return out, None, None
         return (
-            self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, sinks),
+            self.tpu_flash_attention(
+                query,
+                key,
+                value,
+                decoder_segment_ids,
+                self.attn_logits_soft_cap,
+                sinks,
+                record_max_logits=record_max_logits,
+            ),
             None,
             None,
         )
@@ -897,6 +923,7 @@ class AttentionOp(nnx.Module):
               decoder_segment_ids,
               model_mode,
               bidirectional_mask=bidirectional_mask,
+              record_max_logits=record_max_logits,
               qk_product_einsum=qk_product_einsum,
               wv_product_einsum=wv_product_einsum,
           )
@@ -1039,7 +1066,8 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids: Array | None,
       attn_logits_soft_cap: float | None = None,
       sinks: Array | None = None,
-  ) -> Array:
+      record_max_logits: bool = False,
+  ) -> Array | tuple[Array, Array]:
     """TPU Flash Attention."""
 
     cp_size = self.config.context_parallel_size
@@ -1244,6 +1272,18 @@ class AttentionOp(nnx.Module):
     # 'segment_axis_names_q' maps to ['activation_q_length', ['context']] meaning that q is sharded over the context axis
     #  'segment_axis_names_kv' maps to ['activation_kv_length', []] meaning that K and V are not sharded
     # splash_kernel is sharded over (HEAD, LENGTH)
+
+    out_specs = axis_names_q
+    if record_max_logits:
+      # max_logits will share similar sharding as query but last dim is unrelated to model
+      # Using None for the last dimension of max_logits sharding
+      if isinstance(axis_names_q, jax.sharding.PartitionSpec):
+        max_logits_spec = axis_names_q[:-1] + (None,)
+      else:
+        # Fallback if axis_names_q is not a PartitionSpec (unlikely in this context)
+        max_logits_spec = axis_names_q
+      out_specs = (axis_names_q, max_logits_spec)
+
     @functools.partial(
         jax.shard_map,
         mesh=self.mesh,
@@ -1257,8 +1297,9 @@ class AttentionOp(nnx.Module):
             None,  # no sharding for cp_size
             None,  # no sharding for load_balanced_context_parallel
             sink_axis_names,  # sharding align with query heads
+            None,  # output_stats flag
         ),
-        out_specs=axis_names_q,
+        out_specs=out_specs,
         check_vma=False,
     )
     def wrap_flash_attention(
@@ -1271,6 +1312,7 @@ class AttentionOp(nnx.Module):
         cp_size,
         load_balanced_context_parallel,
         sinks,
+        output_stats_flag,
     ):
       # If load_balanced_context_parallel is enabled, reorder the key and value tensors
       # to ensure that they are contiguous in memory.
@@ -1297,9 +1339,24 @@ class AttentionOp(nnx.Module):
 
       if self.config.use_tokamax_splash:
         kernel = partial(splash_kernel, max_logit_value=max_logit_value)
-        attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
-            query, key, value, decoder_segment_ids_tuple, sinks
-        )
+
+        if output_stats_flag:
+
+          def kernel_fn(q, k, v, d, s):
+            # Pass save_residuals=True to force stats generation
+            out, stats = kernel(q, k, v, d, sinks=s, save_residuals=True)
+            return out, stats["max_logits"]
+
+          attention_output, max_logits = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(
+              query, key, value, decoder_segment_ids_tuple, sinks
+          )
+          return attention_output, max_logits
+        else:
+          attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
+              query, key, value, decoder_segment_ids_tuple, sinks
+          )
+          return attention_output
+
       elif self.config.use_jax_splash:
         materialized_mask = jnp.asarray(mask[:, :])
         attention_output = jax_flash_attention.flash_attention_block_masked(
@@ -1312,10 +1369,16 @@ class AttentionOp(nnx.Module):
             mask=materialized_mask,
             mask_value=DEFAULT_MASK_VALUE,
         )
+        if output_stats_flag:
+          # JAX splash currently does not return stats trivially, return dummy or error
+          raise NotImplementedError("output_stats not supported for jax_splash")
       else:
         attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
             query, key, value, decoder_segment_ids_tuple, sinks
         )
+        if output_stats_flag:
+          raise NotImplementedError("output_stats not supported for legacy splash")
+
       return attention_output
 
     def _maybe_shard_with_pspec(inputs, pspec: jax.sharding.PartitionSpec | None):
@@ -1338,7 +1401,7 @@ class AttentionOp(nnx.Module):
     decoder_segment_ids_kv = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
     sinks = _maybe_shard_with_pspec(sinks, sink_axis_names)
 
-    x = wrap_flash_attention(
+    ret = wrap_flash_attention(
         query,
         key,
         value,
@@ -1348,9 +1411,22 @@ class AttentionOp(nnx.Module):
         cp_size,
         load_balanced_context_parallel,
         sinks,
+        record_max_logits,
     )
 
-    x = jnp.transpose(x, axes=(0, 2, 1, 3))
+    if record_max_logits:
+      x, max_logits = ret
+      x = jnp.transpose(x, axes=(0, 2, 1, 3))
+
+      # Max over lanes and sequence length (dim 2 and 3 of max_logits)
+      # max_logits from kernel is (batch, heads, q_len, lanes)
+      # output needs to be (batch, heads)
+      # Note: q_len is sharded. We first reduce locally.
+      max_logits_local = jnp.max(max_logits, axis=(2, 3))
+
+      return x, max_logits_local
+
+    x = jnp.transpose(ret, axes=(0, 2, 1, 3))
 
     return x
 
@@ -1565,6 +1641,7 @@ class AttentionOp(nnx.Module):
       bidirectional_mask: Any = None,
       sinks: Array | None = None,
       index_mask: Array | None = None,
+      record_max_logits: bool = False,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1606,6 +1683,15 @@ class AttentionOp(nnx.Module):
       attn_weights = partitioning.with_sharding_constraint(attn_weights, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
       attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
+
+    if record_max_logits:
+      # attn_weights shape: [b, n_kv, g, t, s]
+      # Max over t (query len) and s (key len)
+      # Result shape: [b, n_kv, g] -> reshape to [b, n_heads]
+      max_logits_per_group = jnp.max(attn_weights, axis=(-2, -1))
+      b, n_kv, g = max_logits_per_group.shape
+      max_logits = max_logits_per_group.reshape(b, n_kv * g)
+      self.sow("intermediates", "max_logits", max_logits)
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -1649,7 +1735,12 @@ class AttentionOp(nnx.Module):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
-    return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode, wv_product_einsum, sinks)
+
+    local_out, local_max, local_sum = self.compute_local_attention(
+        attn_weights, value, q_seq_len, model_mode, wv_product_einsum, sinks
+    )
+
+    return local_out, local_max, local_sum
 
   def qk_product(
       self, query: Array, key: Array | KVTensor, q_seq_len: int, model_mode: str, einsum: Callable[..., Array]
@@ -1793,6 +1884,7 @@ class AttentionOp(nnx.Module):
       index_mask: Optional[Array] = None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
+      record_max_logits: bool = False,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -1802,7 +1894,7 @@ class AttentionOp(nnx.Module):
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
 
-    prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
+    ret = self.apply_attention(
         query=query,
         key=key,
         value=value,
@@ -1814,18 +1906,28 @@ class AttentionOp(nnx.Module):
         bidirectional_mask=bidirectional_mask,
         sinks=sinks,
         index_mask=index_mask,
+        record_max_logits=record_max_logits,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
     )
 
+    # Unpack consistently regardless of record_max_logits
+    prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = ret
+
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
     if ar_kv_cache is None:
       if prefill_exponentials_sum is not None:
-        return prefill_unnormalized_output / prefill_exponentials_sum
-      return prefill_unnormalized_output
+        out = prefill_unnormalized_output / prefill_exponentials_sum
+      else:
+        out = prefill_unnormalized_output
+
+      return out
 
     key, value, decoder_segment_ids, lengths = ar_kv_cache
-    ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
+
+    # Note: Autoregressive path does not support record_max_logits yet as it typically runs dot product attention
+    # without returning stats, and we don't expect training QK-Clip in autoregressive mode.
+    ar_ret = self.apply_attention(
         query=query,
         key=key,
         value=value,
@@ -1837,6 +1939,8 @@ class AttentionOp(nnx.Module):
         qk_product_einsum=self.AqtEinsum_2,
         wv_product_einsum=self.AqtEinsum_3,
     )
+
+    ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = ar_ret  # AR doesn't return stats
 
     if ar_unnormalized_output is not None:
       unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
@@ -1850,7 +1954,8 @@ class AttentionOp(nnx.Module):
       else:
         return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
     else:
-      return prefill_unnormalized_output / prefill_exponentials_sum
+      out = prefill_unnormalized_output / prefill_exponentials_sum
+      return out
 
 
 # pylint: disable=protected-access

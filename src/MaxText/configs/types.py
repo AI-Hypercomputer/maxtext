@@ -485,6 +485,8 @@ class Attention(BaseModel):
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
   use_jax_splash: bool = Field(False, description="Whether to use jax splash attention.")
   force_q_layout: bool = Field(False, description="Force the Q layout")
+  use_qk_clip: bool = Field(False, description="Whether to use QK-Clip (MuonClip) for training stability.")
+  qk_clip_threshold: float = Field(100.0, description="Threshold for QK-Clip (tau).")
 
 
 class MoBa(BaseModel):
