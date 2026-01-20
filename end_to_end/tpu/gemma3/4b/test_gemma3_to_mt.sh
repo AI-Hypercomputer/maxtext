@@ -55,7 +55,7 @@ export UNSCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx}/0
 # to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`
 
 # ToDo: improve forward_pass_logit_checker to test multi-modal prompt
-python3 -m tests.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
+python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
     tokenizer_path=${TOKENIZER_PATH}  \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
