@@ -748,6 +748,7 @@ class LayoutAndSharding(BaseModel):
 class DcnParallelism(BaseModel):
   """Parallelism dimensions across the DCN (Data Center Network)."""
 
+  dcn_diloco_parallelism: int = Field(-1, description="DCN axis for Diloco parallelism.")
   dcn_data_parallelism: int = Field(-1, description="DCN axis for data parallelism.")
   dcn_fsdp_parallelism: int = Field(1, description="DCN axis for FSDP.")
   dcn_fsdp_transpose_parallelism: int = Field(1, description="DCN axis for FSDP transpose.")
@@ -767,6 +768,7 @@ class DcnParallelism(BaseModel):
 class IciParallelism(BaseModel):
   """Parallelism dimensions within the ICI (Inter-Chip Interconnect)."""
 
+  ici_diloco_parallelism: int = Field(-1, description="ICI axis for Diloco parallelism.")
   ici_data_parallelism: int = Field(1, description="ICI axis for data parallelism.")
   ici_fsdp_parallelism: int = Field(-1, description="ICI axis for FSDP.")
   ici_fsdp_transpose_parallelism: int = Field(1, description="ICI axis for FSDP transpose.")
@@ -1032,6 +1034,15 @@ class TrainingLoop(BaseModel):
   enable_data_shuffling: bool = Field(True, description="Enables shuffling of the training data.")
   data_shuffle_seed: int = Field(0, description="Seed for data shuffling.")
   init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
+
+
+class DilocoParams(BaseModel):
+  """Diloco Hyperparameters"""
+
+  enable_diloco: bool = Field(False, description="Enable Diloco parallelism")
+  diloco_sync_period: int = Field(36, description="Diloco sync period.")
+  diloco_outer_lr: float = Field(0.3, description="learning rate for outer optimizer.")
+  diloco_outer_momentum: float = Field(0.9, description="momentum for outer optimizer.")
 
 
 class Optimizer(BaseModel):
@@ -1532,6 +1543,11 @@ class DerivedValues(BaseModel):
       description="Effective number of query heads, scaled by `global_parameter_scale`.",
   )
 
+  num_diloco_replicas: None | int = Field(
+      None,
+      description="The number of diloco replicas, derived from ICI and DCN values.",
+  )
+
   ici_parallelism: None | list[int] = Field(
       None,
       description="Aggregated list of all ICI parallelism values for legacy compatibility.",
@@ -1677,6 +1693,7 @@ class MaxTextConfig(
     # Training, Optimization, and Fine-Tuning
     RematAndOffload,
     TrainingLoop,
+    DilocoParams,
     Optimizer,
     AdamW,
     Muon,
@@ -2236,6 +2253,7 @@ class MaxTextConfig(
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
     if self.using_pipeline_parallelism and self.mesh_axes and self.mesh_axes[0] == "stage":
       self.ici_parallelism = [
+          self.ici_diloco_parallelism,
           self.ici_pipeline_parallelism,
           self.ici_data_parallelism,
           self.ici_fsdp_parallelism,
@@ -2250,6 +2268,7 @@ class MaxTextConfig(
           self.ici_autoregressive_parallelism,
       ]
       self.dcn_parallelism = [
+          self.dcn_diloco_parallelism,
           self.dcn_pipeline_parallelism,
           self.dcn_data_parallelism,
           self.dcn_fsdp_parallelism,
@@ -2265,6 +2284,7 @@ class MaxTextConfig(
       ]
     else:
       ici_map = {
+          "diloco": self.ici_diloco_parallelism,
           "data": self.ici_data_parallelism,
           "stage": self.ici_pipeline_parallelism,
           "fsdp": self.ici_fsdp_parallelism,
@@ -2283,6 +2303,7 @@ class MaxTextConfig(
       self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
       dcn_map = {
+          "diloco": self.dcn_diloco_parallelism,
           "data": self.dcn_data_parallelism,
           "stage": self.dcn_pipeline_parallelism,
           "fsdp": self.dcn_fsdp_parallelism,
@@ -2299,6 +2320,9 @@ class MaxTextConfig(
           "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
       }
       self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+
+    # Diloco params
+    self.num_diloco_replicas = int(self.ici_diloco_parallelism * self.dcn_diloco_parallelism)
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):
