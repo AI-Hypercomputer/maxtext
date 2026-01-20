@@ -746,6 +746,9 @@ class MLA(Attention):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
+    # Check if we need QK Clip stats
+    use_qk_clip = self.model_mode == MODEL_MODE_TRAIN and self.config.use_qk_clip
+
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
@@ -753,7 +756,15 @@ class MLA(Attention):
       unnormalized_out = unnormalized_out[..., : self.v_head_dim]
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
-      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
+      ret = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, output_stats=use_qk_clip)
+
+      if use_qk_clip:
+        out, max_logits = ret
+        # max_logits shape: [batch, num_heads]
+        # We sow it to the 'intermediates' collection to access it in train_step
+        self.sow("intermediates", "max_logits", max_logits)
+      else:
+        out = ret
 
     if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)

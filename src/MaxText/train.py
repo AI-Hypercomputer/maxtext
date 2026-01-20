@@ -62,6 +62,7 @@ from MaxText.utils.goodput_utils import (
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
+from MaxText.utils.qk_clip_utils import apply_qk_clip
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
@@ -325,12 +326,35 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     moe_bias_updates = jnp.array(moe_bias_updates[0]).transpose()
     new_state = maxtext_utils.update_state_param(new_state, target_path, moe_bias_updates)
 
+  # Apply QK-Clip
+  if config.use_qk_clip:
+    new_state = apply_qk_clip(new_state, intermediate_outputs, config)
+
   scalar_metrics = {
       "learning/loss": loss,
       "learning/moe_lb_loss": moe_lb_loss,
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
   }
+
+  # Report max_logits metric
+  if config.use_qk_clip:
+    all_max_logits = []
+
+    def extract_logits(path, val):
+      if path[-1] == "max_logits":
+        # val is tuple from sow: (max_logits_array,)
+        all_max_logits.append(val[0])
+
+    jax.tree_util.tree_map_with_path(extract_logits, intermediate_outputs)
+
+    if all_max_logits:
+      # Flatten and find global max across all layers/heads
+      flat_logits = jnp.concatenate([jnp.ravel(m) for m in all_max_logits])
+      local_max = jnp.max(flat_logits)
+      global_max_logit = jax.lax.pmax(local_max, axis_name="data")
+      scalar_metrics["learning/max_logits"] = global_max_logit
+
   if not config.optimizer_memory_host_offload:
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
