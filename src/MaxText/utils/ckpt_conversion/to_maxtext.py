@@ -821,7 +821,7 @@ if __name__ == "__main__":
   )
   local_args, _ = parser.parse_known_args()
   model_args = sys.argv
-  to_remove_args = ["--lazy_load_tensors", "--hf_model_path"]
+  to_remove_args = ["--lazy_load_tensors", "--hf_model_path", "--mode"]
   for a in to_remove_args:
     model_args = [s for s in model_args if not s.startswith(a)]
   main(model_args, local_args)
