@@ -201,7 +201,7 @@ class Indexer(nnx.Module):
       low_rank_q: Array,
       inputs_kv: Array,
       inputs_positions: Optional[Array | None] = None,
-      attention_mask: Optional[Array | None] = None,  # mask
+      attention_mask: Optional[Array | None] = None,
   ):
     """Computes the index score to determine the top-k relevant tokens.
 

@@ -73,8 +73,10 @@ block_size = 128
 class ModelArgs:
   pass
 
+
 class Config:
   """A configuration class for holding hyperparameters for the tests."""
+
   # mla
   base_emb_dim = 71
   base_num_query_heads = 128
@@ -102,6 +104,7 @@ class Config:
   index_n_heads = 64
   index_head_dim = 128  # > qk_rope_head_dim
   index_topk = 4
+
 
 SEQ_LEN = 8
 
@@ -142,6 +145,7 @@ pt_args = {
 class ParallelEmbedding(nn.Module):
   """
   Embedding layer with parallelism support across distributed processes.
+
   Args:
       vocab_size (int): Vocabulary size.
       dim (int): Embedding dimension.
@@ -160,10 +164,13 @@ class ParallelEmbedding(nn.Module):
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     """
     Forward pass for parallel embedding layer.
+
     Args:
         x (torch.Tensor): Input tensor containing token indices.
+
     Returns:
         torch.Tensor: Embedded representations.
+
     Raises:
         ValueError: If `world_size` is not defined.
     """
@@ -185,15 +192,18 @@ def linear(
   Applies a linear transformation to the incoming data: y = xA^T + b.
   This function supports specialized implementations based on quantization
   and tensor formats.
+
   Args:
       x (torch.Tensor): The input tensor.
       weight (torch.Tensor): The weight tensor. It may be quantized and
           requires dequantization for certain cases.
       bias (Optional[torch.Tensor]): The bias tensor to be added. Default is None.
       scale_fmt (Optional[str]): The format of scaling factors.
+
   Returns:
       torch.Tensor: The result of the linear transformation, which may involve
       quantization-aware computations depending on the input parameters.
+
   Notes:
       - If `weight` is quantized (e.g., `element_size() == 1`), a dequantized version
         is used for computation.
@@ -212,6 +222,7 @@ def linear(
 class Linear(nn.Module):
   """
   Custom linear layer with support for quantized weights and optional bias.
+
   Args:
       in_features (int): Number of input features.
       out_features (int): Number of output features.
@@ -243,8 +254,10 @@ class Linear(nn.Module):
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     """
     Forward pass for the custom linear layer.
+
     Args:
         x (torch.Tensor): Input tensor.
+
     Returns:
         torch.Tensor: Transformed tensor after linear computation.
     """
@@ -254,6 +267,7 @@ class Linear(nn.Module):
 class ColumnParallelLinear(Linear):
   """
   Linear layer with column parallelism, splitting output features across distributed processes.
+
   Args:
       in_features (int): Number of input features.
       out_features (int): Total number of output features.
@@ -269,8 +283,10 @@ class ColumnParallelLinear(Linear):
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     """
     Forward pass for column parallel linear layer.
+
     Args:
         x (torch.Tensor): Input tensor.
+
     Returns:
         torch.Tensor: Transformed tensor with column-parallel computation.
     """
@@ -281,6 +297,7 @@ class ColumnParallelLinear(Linear):
 class RowParallelLinear(Linear):
   """
   Linear layer with row parallelism, splitting input features across distributed processes.
+
   Args:
       in_features (int): Total number of input features.
       out_features (int): Number of output features.
@@ -297,8 +314,10 @@ class RowParallelLinear(Linear):
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     """
     Forward pass for row parallel linear layer.
+
     Args:
         x (torch.Tensor): Input tensor.
+
     Returns:
         torch.Tensor: Transformed tensor with row-parallel computation.
     """
@@ -314,6 +333,7 @@ class RowParallelLinear(Linear):
 class RMSNorm(nn.Module):
   """
   Root Mean Square Layer Normalization (RMSNorm).
+
   Args:
       dim (int): Dimension of the input tensor.
       eps (float): Epsilon value for numerical stability. Defaults to 1e-6.
@@ -328,8 +348,10 @@ class RMSNorm(nn.Module):
   def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
     """
     Forward pass for RMSNorm.
+
     Args:
         x (torch.Tensor): Input tensor.
+
     Returns:
         torch.Tensor: Normalized tensor with the same shape as input.
     """
@@ -365,8 +387,10 @@ class LayerNorm(nn.Module):
 def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
   """
   Precomputes frequency-based complex exponential values for rotary positional embeddings.
+
   Args:
       args (ModelArgs): Model arguments containing positional embedding parameters.
+
   Returns:
       torch.Tensor: Precomputed complex exponential values for positional embeddings.
   """
@@ -380,11 +404,13 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
   def find_correction_dim(num_rotations, dim, base, max_seq_len):
     """
     Computes the correction dimension for a given number of rotations in the rotary positional embedding.
+
     Args:
         num_rotations (float): Number of rotations to compute the correction for.
         dim (int): Dimensionality of the embedding space.
         base (float): Base value for the exponential computation.
         max_seq_len (int): Maximum sequence length.
+
     Returns:
         float: The correction dimension based on the input parameters.
     """
@@ -393,12 +419,14 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
   def find_correction_range(low_rot, high_rot, dim, base, max_seq_len):
     """
     Computes the range of correction dimensions for rotary positional embeddings.
+
     Args:
         low_rot (float): Lower bound for the number of rotations.
         high_rot (float): Upper bound for the number of rotations.
         dim (int): Dimensionality of the embedding space.
         base (float): Base value for the exponential computation.
         max_seq_len (int): Maximum sequence length.
+
     Returns:
         Tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
     """
@@ -409,10 +437,12 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
   def linear_ramp_factor(min, max, dim):
     """
     Computes a linear ramp function used to smooth values between a minimum and maximum range.
+
     Args:
         min (float): Minimum value for the ramp function.
         max (float): Maximum value for the ramp function.
         dim (int): Dimensionality of the ramp tensor.
+
     Returns:
         torch.Tensor: A tensor of shape (dim,) with values linearly interpolated between 0 and 1,
             clamped to the range [0, 1].
@@ -438,9 +468,11 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, interleaved: bool = True) -> torch.Tensor:
   """
   Applies rotary positional embeddings to the input tensor.
+
   Args:
       x (torch.Tensor): Input tensor with positional embeddings to be applied.
       freqs_cis (torch.Tensor): Precomputed complex exponential values for positional embeddings.
+
   Returns:
       torch.Tensor: Tensor with rotary embeddings applied.
   """
@@ -506,7 +538,13 @@ class Indexer(torch.nn.Module):
     )
 
   def forward(
-      self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], debug: bool = False
+      self,
+      x: torch.Tensor,
+      qr: torch.Tensor,
+      start_pos: int,
+      freqs_cis: torch.Tensor,
+      mask: Optional[torch.Tensor],
+      debug: bool = False,
   ):
     bsz, seqlen, _ = x.size()
     end_pos = start_pos + seqlen
@@ -567,6 +605,7 @@ class Indexer(torch.nn.Module):
 class MLA(nn.Module):
   """
   Multi-Head Latent Attention (MLA) Layer.
+
   Attributes:
       dim (int): Dimensionality of the input features.
       n_heads (int): Number of attention heads.
@@ -618,11 +657,13 @@ class MLA(nn.Module):
   def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
     """
     Forward pass for the Multi-Head Latent Attention (MLA) Layer.
+
     Args:
         x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
         start_pos (int): Starting position in the sequence for caching.
         freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
         mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
+
     Returns:
         torch.Tensor: Output tensor with the same shape as the input.
     """
@@ -645,7 +686,6 @@ class MLA(nn.Module):
 
     self.kv_cache[:bsz, start_pos:end_pos] = kv
     self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)
-    # train also uses MHA
     if mask is not None:  # MHA prefill
       q = torch.cat([q_nope, q_pe], dim=-1)
       kv = self.wkv_b(kv)
