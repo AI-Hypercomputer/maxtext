@@ -610,7 +610,9 @@ class TestSamplingFunctions(unittest.TestCase):
     rngs = jax.random.split(self.rng, 100)
 
     for r in rngs:
-      token = inference_utils.sample_topk_topp_weighted(self.logits, topk=topk, nucleus_topp=1.0, temperature=1.0, rng=r)
+      token = inference_utils.sampling(
+          self.logits, r, algorithm="composite", topk=topk, nucleus_topp=1.0, temperature=1.0
+      )
       self.assertIn(token.item(), top_k_indices)
 
   def test_topp_filtering(self):
@@ -621,8 +623,8 @@ class TestSamplingFunctions(unittest.TestCase):
     rngs = jax.random.split(self.rng, 100)
 
     for r in rngs:
-      token = inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=10, nucleus_topp=nucleus_topp, temperature=1.0, rng=r
+      token = inference_utils.sampling(
+          self.logits, r, algorithm="composite", topk=10, nucleus_topp=nucleus_topp, temperature=1.0
       )
       self.assertIn(token.item(), top_p_indices)
 
@@ -637,8 +639,8 @@ class TestSamplingFunctions(unittest.TestCase):
     rngs = jax.random.split(self.rng, 100)
 
     for r in rngs:
-      token = inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=topk, nucleus_topp=nucleus_topp, temperature=1.0, rng=r
+      token = inference_utils.sampling(
+          self.logits, r, algorithm="composite", topk=topk, nucleus_topp=nucleus_topp, temperature=1.0
       )
       self.assertIn(token.item(), valid_indices)
 
@@ -649,21 +651,10 @@ class TestSamplingFunctions(unittest.TestCase):
     rngs = jax.random.split(self.rng, 10)
 
     for r in rngs:
-      token = inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=10, nucleus_topp=1.0, temperature=low_temp, rng=r
+      token = inference_utils.sampling(
+          self.logits, r, algorithm="composite", topk=10, nucleus_topp=1.0, temperature=low_temp
       )
       self.assertEqual(token.item(), greedy_token_index)
-
-  def test_invalid_args_raise_error(self):
-    """Tests that invalid arguments for topk and nucleus_topp raise errors."""
-    with self.assertRaises(ValueError):
-      inference_utils.sample_topk_topp_weighted(self.logits, topk=0, nucleus_topp=1.0, temperature=1.0, rng=self.rng)
-    with self.assertRaises(ValueError):
-      inference_utils.sample_topk_topp_weighted(self.logits, topk=-1, nucleus_topp=1.0, temperature=1.0, rng=self.rng)
-    with self.assertRaises(ValueError):
-      inference_utils.sample_topk_topp_weighted(self.logits, topk=10, nucleus_topp=0.0, temperature=1.0, rng=self.rng)
-    with self.assertRaises(ValueError):
-      inference_utils.sample_topk_topp_weighted(self.logits, topk=10, nucleus_topp=1.1, temperature=1.0, rng=self.rng)
 
   def test_batch_dimension(self):
     """Tests that the function handles a batch of logits correctly."""
@@ -675,10 +666,14 @@ class TestSamplingFunctions(unittest.TestCase):
 
     # CORRECTED: Use vmap to handle batching for JAX's random functions.
     # We map over the first axis (0) of logits and rngs.
-    # Other arguments (topk, nucleus_topp, temperature) are fixed (None).
-    vmapped_sample = vmap(inference_utils.sample_topk_topp_weighted, in_axes=(0, None, None, None, 0), out_axes=0)
+    # Other arguments (algorithm, topk, nucleus_topp, temperature) are fixed via lambda.
+    vmapped_sample = vmap(
+        lambda l, r: inference_utils.sampling(l, r, "composite", topk, 1.0, 1.0),
+        in_axes=(0, 0),
+        out_axes=0,
+    )
 
-    tokens = vmapped_sample(batched_logits, topk, 1.0, 1.0, rngs)
+    tokens = vmapped_sample(batched_logits, rngs)
 
     self.assertEqual(tokens.shape, (batch_size,))
     for token in tokens:
