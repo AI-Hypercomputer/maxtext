@@ -738,6 +738,68 @@ qwen3_next_80b_a3b_dict = {
 qwen3_next_80b_a3b_config = transformers.Qwen3NextConfig(**qwen3_next_80b_a3b_dict)
 
 
+# from https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1/blob/main/config.json
+mixtral_8x7b_dict = {
+    "architectures": ["MixtralForCausalLM"],
+    "attention_dropout": 0.0,
+    "bos_token_id": 1,
+    "eos_token_id": 2,
+    "hidden_act": "silu",
+    "hidden_size": 4096,
+    "initializer_range": 0.02,
+    "intermediate_size": 14336,
+    "max_position_embeddings": 32768,
+    "model_type": "mixtral",
+    "num_attention_heads": 32,
+    "num_experts_per_tok": 2,
+    "num_hidden_layers": 32,
+    "num_key_value_heads": 8,
+    "num_local_experts": 8,
+    "output_router_logits": False,
+    "rms_norm_eps": 1e-05,
+    "rope_theta": 1000000.0,
+    "router_aux_loss_coef": 0.02,
+    "sliding_window": None,
+    "tie_word_embeddings": False,
+    "torch_dtype": "bfloat16",
+    "transformers_version": "4.36.0.dev0",
+    "use_cache": True,
+    "vocab_size": 32000,
+}
+mixtral_8x7b_config = transformers.MixtralConfig(**mixtral_8x7b_dict)
+
+
+# from https://huggingface.co/mistralai/Mixtral-8x22B-Instruct-v0.1/blob/main/config.json
+mixtral_8x22b_dict = {
+    "architectures": ["MixtralForCausalLM"],
+    "attention_dropout": 0.0,
+    "bos_token_id": 1,
+    "eos_token_id": 2,
+    "hidden_act": "silu",
+    "hidden_size": 6144,
+    "initializer_range": 0.02,
+    "intermediate_size": 16384,
+    "max_position_embeddings": 65536,
+    "model_type": "mixtral",
+    "num_attention_heads": 48,
+    "num_experts_per_tok": 2,
+    "num_hidden_layers": 56,
+    "num_key_value_heads": 8,
+    "num_local_experts": 8,
+    "output_router_logits": False,
+    "rms_norm_eps": 1e-05,
+    "rope_theta": 1000000.0,
+    "router_aux_loss_coef": 0.001,
+    "sliding_window": None,
+    "tie_word_embeddings": False,
+    "torch_dtype": "bfloat16",
+    "transformers_version": "4.38.0",
+    "use_cache": True,
+    "vocab_size": 32768,
+}
+mixtral_8x22b_config = transformers.MixtralConfig(**mixtral_8x22b_dict)
+
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
@@ -764,4 +826,6 @@ HF_MODEL_CONFIGS = {
     "gpt-oss-120b": gpt_oss_120b_config,
     "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,
     "qwen3-next-80b-a3b": qwen3_next_80b_a3b_config,
+    "mixtral-8x7b": mixtral_8x7b_config,
+    "mixtral-8x22b": mixtral_8x22b_config,
 }

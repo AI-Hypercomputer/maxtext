@@ -12,8 +12,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Stub for logging utilities. Right now just meant to avoid raw prints."""
+"""Logging utilities."""
+import logging as std_logging
+from absl import logging
 
 
 def log(user_str):
-  print(user_str, flush=True)
+  """Logs a message at the INFO level."""
+  # Note, stacklevel=2 makes the log show the caller of this function.
+  logging.info(user_str, stacklevel=2)
+
+
+def debug(user_str):
+  """Logs a message at the DEBUG level."""
+  logging.debug(user_str, stacklevel=2)
+
+
+def info(user_str, stacklevel=2):
+  """Logs a message at the INFO level."""
+  logging.info(user_str, stacklevel=stacklevel)
+
+
+def warning(user_str):
+  """Logs a message at the WARNING level."""
+  logging.warning(user_str, stacklevel=2)
+
+
+def error(user_str):
+  """Logs a message at the ERROR level."""
+  logging.error(user_str, stacklevel=2)
+
+
+# Define filter at module level to avoid pickling issues and ensure visibility
+class NoisyLogFilter(std_logging.Filter):
+  """
+  Class for defining log patterns to filter out
+  """
+
+  def filter(self, record):
+    # Get the message; check both the raw msg and formatted message
+    msg = record.getMessage()
+    # Suppress "Type mismatch" warnings from tunix/generate/utils.py
+    if "Type mismatch on" in msg:
+      return False
+    if "No mapping for flat state" in msg:
+      return False
+    return True

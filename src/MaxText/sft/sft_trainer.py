@@ -40,6 +40,7 @@ from typing import Sequence
 from absl import app
 import os
 import jax
+import optax
 import pathwaysutils
 
 from flax.linen import partitioning as nn_partitioning
@@ -144,7 +145,14 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.create_nnx_model(mt_config)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
-    optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule)
+    # pass in model for muon
+    optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
+
+    if mt_config.gradient_clipping_threshold > 0:
+      optimizer = optax.chain(
+          optax.clip_by_global_norm(max_norm=mt_config.gradient_clipping_threshold),
+          optimizer,
+      )
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
     training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
@@ -160,7 +168,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+  with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
     trainer.train(trainer.data_hooks.train_data_iterator, trainer.data_hooks.eval_data_iterator)
   return trainer
 

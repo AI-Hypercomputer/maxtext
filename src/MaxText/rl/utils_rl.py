@@ -32,7 +32,7 @@ def get_match_format_regex(tmvp_config):
       ),
       flags=re.MULTILINE | re.DOTALL,
   )
-  if tmvp_config.debug["rl"]:
+  if tmvp_config.debug.rl:
     match_format.search(
         f"{tmvp_config.reasoning_start_token}Let me"
         f" think!{tmvp_config.reasoning_end_token}{tmvp_config.solution_start_token}2{tmvp_config.solution_end_token}",
@@ -135,7 +135,7 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
 def get_match_numbers_regex(tmvp_config):
   """Returns a compiled regex to extract the answer from a completion."""
   match_numbers = re.compile(rf"{tmvp_config.solution_start_token}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL)
-  if tmvp_config.debug["rl"]:
+  if tmvp_config.debug.rl:
     match_numbers.findall(f"{tmvp_config.solution_start_token}  0.34  {tmvp_config.solution_end_token}")
   return match_numbers
 
@@ -150,7 +150,7 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
   extracted_responses = [guess.group(1) if (guess := match_numbers.search(c)) is not None else None for c in completions]
 
   scores = []
-  if tmvp_config.debug["rl"]:
+  if tmvp_config.debug.rl:
     max_logging.log("START ============================")
     max_logging.log(f"Question: {question[0]}")
     max_logging.log(f"Answer: {answer[0]}")

@@ -88,7 +88,9 @@ def vocab_tiling_linen_loss(
       ("activation_embed_and_logits_batch_sequence", "activation_vocab"),
   )
 
-  _maybe_shard_with_name = functools.partial(maybe_shard_with_name, shard_mode=config.shard_mode)
+  _maybe_shard_with_name = functools.partial(
+      maybe_shard_with_name, shard_mode=config.shard_mode, debug_sharding=config.debug_sharding
+  )
 
   def _reshape(inputs, out_shape, out_sharding):
     reshape_out_sharding = out_sharding if config.shard_mode == ShardMode.EXPLICIT else None
@@ -99,7 +101,7 @@ def vocab_tiling_linen_loss(
   labels = _maybe_shard_with_name(labels, label_spec)
   segmentation = _maybe_shard_with_name(segmentation, label_spec)
   # TODO (chengnuojin) all gather only embedding table instead of all params after NNX module is enabled
-  gathered_params = all_gather_over_fsdp(params, param_spec, model.mesh, config.logical_axis_rules)
+  gathered_params = all_gather_over_fsdp(params, param_spec, model.mesh, config.logical_axis_rules, config.shard_mode)
 
   # Customized forward and backward maps for the embedding tiling
   @jax.custom_vjp

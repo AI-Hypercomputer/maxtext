@@ -37,6 +37,7 @@ class TunixMaxTextAdapter(nnx.Module):
       self,
       base_model: Transformer,
       use_standalone_mappings: bool = True,
+      use_no_op_mappings: bool = False,
   ):
     super().__init__()
     self.base = base_model
@@ -45,6 +46,7 @@ class TunixMaxTextAdapter(nnx.Module):
         HF_MODEL_CONFIGS[self.base.config.model_name].to_dict(),
         use_standalone_mappings,
     )
+    self.use_no_op_mappings = use_no_op_mappings
 
   # ------------------------------------------------------------------ #
   # Tunix call signature
@@ -55,6 +57,7 @@ class TunixMaxTextAdapter(nnx.Module):
       positions: Array,  # [B, L]
       cache: Optional[Any],  # Tunix currently passes None from Trainers
       attention_mask: Optional[Array],  # [B, L, L] or None
+      decoder_segment_ids: Optional[Array] = None,
       output_hidden_states: bool = False,  # ignored
   ) -> Tuple[Array, None]:
     """Forward compatible with Tunix Trainers default loss.
@@ -63,19 +66,30 @@ class TunixMaxTextAdapter(nnx.Module):
     logits = self.base(
         decoder_input_tokens=input_tokens,
         decoder_positions=positions,
-        # TODO: @mazumdera - add support for packing
-        decoder_segment_ids=None,
+        decoder_segment_ids=decoder_segment_ids,
     )
     return logits, None
 
   def to_hf_mappings(self):
+    if self.use_no_op_mappings:
+      return {}
+
     return self._vllm_weight_mapping.to_hf_mapping()
 
   def to_hf_transpose_keys(self):
+    if self.use_no_op_mappings:
+      return {}
+
     return self._vllm_weight_mapping.to_hf_transpose_keys()
 
   def to_hf_hook_fns(self):
+    if self.use_no_op_mappings:
+      return {}
+
     return self._vllm_weight_mapping.to_hf_hook_fns()
 
   def lora_to_hf_mappings(self):
+    if self.use_no_op_mappings:
+      return {}
+
     return self._vllm_weight_mapping.lora_to_hf_mappings()

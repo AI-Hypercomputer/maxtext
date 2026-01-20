@@ -662,6 +662,77 @@ def LLAMA31_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def MIXTRAL_HF_WEIGHTS_TO_SHAPE(config):
+  """
+  Returns a mapping of Hugging Face parameter names to their tensor shapes.
+
+  Args:
+      config (dict): The model configuration dictionary.
+
+  Returns:
+      A dictionary mapping Hugging Face parameter paths to their tensor shapes.
+  """
+  shapes = {}
+
+  # Embedding and LM Head
+  shapes["model.embed_tokens.weight"] = [config["vocab_size"], config["hidden_size"]]
+  shapes["lm_head.weight"] = [config["vocab_size"], config["hidden_size"]]
+
+  # Final LayerNorm
+  shapes["model.norm.weight"] = [config["hidden_size"]]
+
+  # Calculated dimensions
+  head_dim = config["hidden_size"] // config["num_attention_heads"]
+  kv_dim = config["num_key_value_heads"] * head_dim
+
+  # Decoder Layers
+  for i in range(config["num_hidden_layers"]):
+    # Attention Projections
+    shapes[f"model.layers.{i}.self_attn.q_proj.weight"] = [
+        config["hidden_size"],
+        config["hidden_size"],
+    ]
+    shapes[f"model.layers.{i}.self_attn.k_proj.weight"] = [
+        kv_dim,
+        config["hidden_size"],
+    ]
+    shapes[f"model.layers.{i}.self_attn.v_proj.weight"] = [
+        kv_dim,
+        config["hidden_size"],
+    ]
+    shapes[f"model.layers.{i}.self_attn.o_proj.weight"] = [
+        config["hidden_size"],
+        config["hidden_size"],
+    ]
+
+    # LayerNorms
+    shapes[f"model.layers.{i}.input_layernorm.weight"] = [config["hidden_size"]]
+    shapes[f"model.layers.{i}.post_attention_layernorm.weight"] = [config["hidden_size"]]
+
+    # MOE Gate
+    shapes[f"model.layers.{i}.block_sparse_moe.gate.weight"] = [
+        config["num_local_experts"],
+        config["hidden_size"],
+    ]
+
+    # MOE Experts
+    for j in range(config["num_local_experts"]):
+      shapes[f"model.layers.{i}.block_sparse_moe.experts.{j}.w1.weight"] = [
+          config["intermediate_size"],
+          config["hidden_size"],
+      ]
+      shapes[f"model.layers.{i}.block_sparse_moe.experts.{j}.w2.weight"] = [
+          config["hidden_size"],
+          config["intermediate_size"],
+      ]
+      shapes[f"model.layers.{i}.block_sparse_moe.experts.{j}.w3.weight"] = [
+          config["intermediate_size"],
+          config["hidden_size"],
+      ]
+
+  return shapes
+
+
 # {maxtext model name: {hf weight name: hf shape}}
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -685,4 +756,6 @@ HF_SHAPE = {
     "deepseek3-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
+    "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
+    "mixtral-8x22b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
 }

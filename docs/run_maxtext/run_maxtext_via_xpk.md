@@ -117,8 +117,6 @@ pip install xpk
 
 ## 4. Build the MaxText Docker image
 
-A recommended approach for running MaxText is to build your image from a **JAX AI Image**, which ensures all core libraries are version-matched and stable.
-
 1.  **Clone the MaxText repository**
 
     ```
@@ -126,18 +124,18 @@ A recommended approach for running MaxText is to build your image from a **JAX A
     cd maxtext
     ```
 
-2.  **Build the image for your target hardware (TPU or GPU)** This script creates a local Docker image named `maxtext_base_image`. You can find a full list of available base images in the [JAX AI Images documentation](https://cloud.google.com/ai-hypercomputer/docs/images).
+2.  **Build the image for your target hardware (TPU or GPU)** This script creates a local Docker image named `maxtext_base_image`.
 
     -   **For TPUs:**
 
         ```
-        bash docker_build_dependency_image.sh DEVICE=tpu MODE=jax_ai_image BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:jax0.5.2-rev2
+        bash docker_build_dependency_image.sh DEVICE=tpu MODE=stable
         ```
 
     -   **For GPUs:**
 
         ```
-        bash docker_build_dependency_image.sh DEVICE=gpu MODE=jax_ai_image BASEIMAGE=us-central1-docker.pkg.dev/deeplearning-images/jax-ai-image/gpu:jax0.5.1-cuda_dl25.02-rev1
+        bash docker_build_dependency_image.sh DEVICE=gpu MODE=stable
         ```
 
 * * * * *

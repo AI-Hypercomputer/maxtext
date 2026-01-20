@@ -423,7 +423,7 @@ class Attention(nnx.Module):
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
         self.init_kv_caches(inputs_kv_shape=inputs_kv_shape)
-        if self.model_mode != MODEL_MODE_TRAIN and base_kv_cache
+        if self.model_mode != MODEL_MODE_TRAIN and base_kv_cache and config.attention != "vllm_rpa"
         else None
     )
 
@@ -525,6 +525,7 @@ class Attention(nnx.Module):
         maybe_shard_with_logical,
         mesh=mesh,
         shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
     )
 
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
@@ -909,14 +910,11 @@ class Attention(nnx.Module):
     try:
       # pylint: disable=import-outside-toplevel
       # pytype: disable=import-error
-      from tpu_inference.layers.jax.attention_interface import sharded_ragged_paged_attention as rpa_ops
+      from tpu_inference.layers.common.attention_interface import sharded_ragged_paged_attention as rpa_ops
     except ImportError as e:
       raise ImportError(
           "vLLM RPA attention ops require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
       ) from e
-
-    if self.config.attention_sink:
-      raise NotImplementedError("Attention sink is not supported in MaxText vLLM RPA attention.")
 
     if rpa_kv_cache is None or rpa_metadata is None:
       raise ValueError("kv_cache and attention_metadata must be provided when using vLLM.")
@@ -925,12 +923,18 @@ class Attention(nnx.Module):
     key = key.reshape(-1, key.shape[2], key.shape[3])
     value = value.reshape(-1, value.shape[2], value.shape[3])
 
-    attention_chunk_size = self.config.chunk_attn_window_size if self.config.chunk_attn_window_size > 0 else None
+    if self.config.sliding_window_size > 0:
+      attention_chunk_size = self.config.sliding_window_size
+    else:
+      # Chunked attention currently not used in vLLM RPA.
+      attention_chunk_size = None
+
     q_scale, k_scale, v_scale = None, None, None
 
     md = rpa_metadata
 
-    output, kv_cache = rpa_ops(1.0, self.mesh, attention_chunk_size, q_scale, k_scale, v_scale)(
+    output, kv_cache = rpa_ops(
+        self.mesh,
         query,
         key,
         value,
@@ -939,6 +943,12 @@ class Attention(nnx.Module):
         md.block_tables,
         md.query_start_loc,
         md.request_distribution,
+        self.sinks.astype(jnp.float32) if self.sinks is not None else None,
+        1.0,
+        attention_chunk_size,
+        q_scale,
+        k_scale,
+        v_scale,
     )
     return kv_cache, output
 

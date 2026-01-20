@@ -27,14 +27,8 @@ comments, or questions by creating a new
 ├── README.md
 ├── dependencies/
 │   ├── dockerfiles/
-│   │   ├── jetstream_pathways.Dockerfile
-│   │   ├── maxengine_server.Dockerfile
-│   │   ├── maxtext_custom_wheels.Dockerfile
-│   │   ├── maxtext_db_dependencies.Dockerfile
-│   │   ├── maxtext_dependencies.Dockerfile
+│   │   ├── maxtext_tpu_dependencies.Dockerfile
 │   │   ├── maxtext_gpu_dependencies.Dockerfile
-│   │   ├── maxtext_jax_ai_image.Dockerfile
-│   │   ├── maxtext_libtpu_path.Dockerfile
 │   │   └── maxtext_runner.Dockerfile
 │   ├── requirements/
 │   │   └── requirements.txt

@@ -48,11 +48,14 @@ from typing import Sequence
 import collections
 import grain
 import jax
+import json
+import logging
 import os
 import pathwaysutils
 import tensorflow_datasets as tfds
 
 from absl import app
+from absl import logging as absl_logging
 from etils import epath
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
@@ -70,6 +73,7 @@ os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 from MaxText import max_logging, max_utils, maxtext_utils, pyconfig
 from MaxText import model_creation_utils
+from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from MaxText.rl.evaluate_rl import evaluate
 from MaxText.rl import utils_rl
@@ -92,8 +96,9 @@ def get_maxtext_model(config, devices=None):
   # load_parameters_path=/path/to/your/output/directory/0/items
   """
   model, mesh = model_creation_utils.create_nnx_model(config, devices=devices)
-  with jax.set_mesh(mesh):
-    tunix_model = TunixMaxTextAdapter(base_model=model)
+  with mesh:
+    use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
+    tunix_model = TunixMaxTextAdapter(base_model=model, use_no_op_mappings=use_no_op_mappings)
     tunix_model.config = None
   return tunix_model, mesh
 
@@ -146,9 +151,9 @@ def get_dataset(model_tokenizer, tmvp_config, data_dir, split="train") -> grain.
   return loaded_dataset
 
 
-def setup_configs_and_devices(argv: Sequence[str]):
+def setup_configs_and_devices(argv: list[str]):
   """Setup device allocation and configs for training and inference."""
-  config = pyconfig.initialize(argv)
+  config = pyconfig.initialize_pydantic(argv)
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
     max_logging.log("Running RL on a single slice")
@@ -188,18 +193,21 @@ def setup_configs_and_devices(argv: Sequence[str]):
     for i in range(config.num_trainer_slices, config.num_trainer_slices + config.num_samplers_slices):
       sampler_devices.extend(devices_by_slice[slice_indices[i]])
 
-    trainer_config = pyconfig.initialize(
-        argv,
-        num_slices=config.num_trainer_slices,
-        ici_fsdp_parallelism=len(trainer_devices) // config.num_trainer_slices,
-        dcn_data_parallelism=config.num_trainer_slices,
-    )
-    sampler_config = pyconfig.initialize(
-        argv,
-        num_slices=config.num_samplers_slices,
-        ici_fsdp_parallelism=len(sampler_devices) // config.num_samplers_slices,
-        dcn_data_parallelism=config.num_samplers_slices,
-    )
+    trainer_update = {
+        "num_slices": config.num_trainer_slices,
+        "ici_fsdp_parallelism": len(trainer_devices) // config.num_trainer_slices,
+        "dcn_data_parallelism": config.num_trainer_slices,
+    }
+
+    sampler_update = {
+        "num_slices": config.num_samplers_slices,
+        "ici_fsdp_parallelism": len(sampler_devices) // config.num_samplers_slices,
+        "dcn_data_parallelism": config.num_samplers_slices,
+    }
+
+    trainer_config = pyconfig.initialize_pydantic(argv, **trainer_update)
+    sampler_config = pyconfig.initialize_pydantic(argv, **sampler_update)
+
   else:
     raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
 
@@ -246,6 +254,12 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
+  if not trainer_config.debug.rl:
+    # Apply filter to suppress noisy logs
+    noise_filter = max_logging.NoisyLogFilter()
+    logging.getLogger().addFilter(noise_filter)
+    absl_logging.get_absl_logger().addFilter(noise_filter)
+
   max_logging.log("Starting RL Training")
   max_logging.log(f"Ensuring TensorBoard log directory exists: {trainer_config.tensorboard_dir}")
   if not epath.Path(trainer_config.tensorboard_dir).exists():
@@ -257,11 +271,10 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   # Number of training steps.
   max_train_steps = int(
       trainer_config.num_batches
-      * trainer_config.num_iterations
+      * trainer_config.rl.num_iterations
       * trainer_config.train_fraction
       * trainer_config.num_epoch
   )
-
   # ====== Data ======
   # Setup data directories
   home = os.path.expanduser("~") + "/"
@@ -291,7 +304,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   )[: trainer_config.num_test_batches]
 
   # Let's see how one batch of the dataset looks like!
-  if trainer_config.debug["rl"]:
+  if trainer_config.debug.rl:
     for ele in train_dataset[:1]:
       pprint(ele)
 
@@ -302,7 +315,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   # if trainer_devices=sampler_devices, then rollout_mesh=reference_mesh
   # else rollout_mesh uses sampler_devices
   rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
-  if trainer_config.debug["rl"]:
+  if trainer_config.debug.rl:
     max_logging.log("Reference Model initialized successfully")
     nnx.display(reference_model)
     max_logging.log(f"Reference mesh shape: {reference_mesh.shape}")
@@ -312,7 +325,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
     max_logging.log(
         f"maxtext_state_flatten[base.token_embedder.embedding].value=\
-          {maxtext_state_flatten['base.token_embedder.embedding'].value}"
+          {maxtext_state_flatten['base.token_embedder.embedding'][...]}"
     )
 
   # TODO: @mazumdera: change this to use lora
@@ -321,7 +334,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   max_logging.log("Creating policy model with same config as reference model on trainer mesh")
   actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
 
-  if trainer_config.debug["rl"]:
+  if trainer_config.debug.rl:
     max_logging.log("Policy Model initialized successfully")
     nnx.display(actor_model)
     max_logging.log(f"Policy mesh shape: {actor_mesh.shape}")
@@ -351,6 +364,21 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
         profiler_steps=trainer_config.profiler_steps,
         set_profile_options=False,
     )
+
+  # Parse vllm_additional_config
+  rollout_additional_config = None
+  if trainer_config.vllm_additional_config:
+    if isinstance(trainer_config.vllm_additional_config, dict):
+      # It's already parsed into a dict
+      rollout_additional_config = trainer_config.vllm_additional_config
+    elif isinstance(trainer_config.vllm_additional_config, str):
+      # It's a string, so we need to parse it
+      try:
+        rollout_additional_config = json.loads(trainer_config.vllm_additional_config)
+      except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse additional_config JSON: {e}") from e
+
+    max_logging.log(f"Parsed additional config: {rollout_additional_config}")
 
   # RL Cluster config
   # Note that we use vLLM as the rollout engine.
@@ -394,15 +422,18 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
           rollout_vllm_tpu_backend_type="jax",
           rollout_vllm_swap_space_size_gb=trainer_config.swap_space_vllm_gb,
+          rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
+          rollout_vllm_additional_config=rollout_additional_config,
+          rollout_vllm_init_with_random_weights=True,
           **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
       ),
   )
   grpo_config = GrpoConfig(
-      num_generations=trainer_config.num_generations,
-      num_iterations=trainer_config.num_iterations,
-      beta=trainer_config.grpo_beta,
-      epsilon=trainer_config.grpo_epsilon,
-      loss_algo=trainer_config.loss_algo,
+      num_generations=trainer_config.rl.num_generations,
+      num_iterations=trainer_config.rl.num_iterations,
+      beta=trainer_config.rl.grpo_beta,
+      epsilon=trainer_config.rl.grpo_epsilon,
+      loss_algo=trainer_config.rl.loss_algo,
   )
 
   # Create RL cluster
@@ -423,7 +454,13 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       max_logging.log(
           "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
       )
-  with nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
+
+  pkg_dir = os.environ.get("MAXTEXT_PKG_DIR", MAXTEXT_PKG_DIR)
+  vllm_config_path = epath.Path(pkg_dir) / "configs" / "vllm.yml"
+  argv_list = ["", str(vllm_config_path), "log_config=False"]
+  vllm_config = pyconfig.initialize(argv_list)
+
+  with nn_partitioning.axis_rules(vllm_config.logical_axis_rules):
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=actor_model,
         reference=reference_model,
@@ -456,16 +493,17 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       corr_lst=trainer_config.eval_corr_lst,
       make_lst=trainer_config.eval_make_lst,
   )
-  max_logging.log(f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  # TODO: @mazumdera: Change this to max_logging.log once b/473703277 is resolved
+  max_logging.warning(f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
   # Start training
 
-  max_logging.log("Starting RL training...")
+  max_logging.warning("Starting RL training...")
 
   with reference_mesh, nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
     rl_trainer.train(train_dataset)
 
-  max_logging.log("RL Training Completed Successfully!")
+  max_logging.warning("RL Training Completed Successfully!")
 
   # Let's evaluate our model!
   (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
@@ -476,7 +514,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       corr_lst=trainer_config.eval_corr_lst,
       make_lst=trainer_config.eval_make_lst,
   )
-  max_logging.log(f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  max_logging.warning(f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
 
 def main(argv: Sequence[str]) -> None:

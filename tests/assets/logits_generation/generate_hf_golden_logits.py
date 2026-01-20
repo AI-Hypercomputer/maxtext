@@ -14,7 +14,7 @@
 """
 Usage:
 
-python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=deepseek-ai/DeepSeek-V2-Lite \
+python3 -m tests.assets.logits_generation.generate_hf_golden_logits --model-id=deepseek-ai/DeepSeek-V2-Lite \
      --output-path=golden_DeepSeek-V2-Lite.jsonl --prompts='I love to;Today is a;What is the' \
      --gcs-bucket=my-gcs-bucket
 
@@ -28,15 +28,15 @@ For multimodal logits, since the model is not suppose to generate image, the log
   tokens can be close to 0, using --output-format=pickle is recommended to preserve precision.
 
 More examples:
-python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=meta-llama/Llama-4-Scout-17B-16E \
+python3 -m tests.assets.logits_generation.generate_hf_golden_logits --model-id=meta-llama/Llama-4-Scout-17B-16E \
      --output-path=golden_Llama-4-Scout-17B-16E_vision.jsonl --prompts='Describe this image.' \
      --apply-chat-template --gcs-bucket=<bucket> --hf-model-path=<hf_checkpoint_path> \
-     --image-paths=src/MaxText/test_assets/test_image.jpg --output-format=pickle
+     --image-paths=tests/assets/test_image.jpg --output-format=pickle
 
-python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=google/gemma-3-4b-it \
+python3 -m tests.assets.logits_generation.generate_hf_golden_logits --model-id=google/gemma-3-4b-it \
      --output-path=golden_gemma-3-4b-it_vision.jsonl --prompts='<start_of_image>' \
      --gcs-bucket=<bucket> --hf-model-path=<hf_checkpoint_path> \
-     --image-paths=src/MaxText/test_assets/test_image.jpg
+     --image-paths=tests/assets/test_image.jpg
 """
 
 import torch
@@ -47,6 +47,7 @@ import pickle
 import numpy as np
 from google.cloud import storage
 from PIL import Image
+from MaxText.inference_utils import str2bool
 
 # Load the tokenizer and model from Hugging Face
 
@@ -184,11 +185,11 @@ def main(raw_args=None) -> None:
       default="float32",
       help="model_class.from_pretrained: dtype",
   )
-  # variable `args.trust_remote_code` is True by default, False only if with flag `--not-trust-remote-code`
   parser.add_argument(
-      "--not-trust-remote-code",
-      dest="trust_remote_code",
-      action="store_false",
+      "--trust-remote-code",
+      type=str2bool,
+      required=False,
+      default=True,
       help="model_class.from_pretrained: trust_remote_code",
   )
   parser.add_argument(

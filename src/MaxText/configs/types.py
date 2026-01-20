@@ -1,5 +1,5 @@
 # Copyright 2023–2025 Google LLC
-#
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -121,6 +121,7 @@ class OptimizerType(str, Enum):
   ADAMW = "adamw"
   ADAM_PAX = "adam_pax"
   SGD = "sgd"
+  MUON = "muon"
 
 
 class RopeType(str, Enum):
@@ -146,6 +147,7 @@ class DatasetType(str, Enum):
   HF = "hf"
   GRAIN = "grain"
   TFDS = "tfds"
+  C4MLPERF = "c4_mlperf"
 
 
 class SamplingStrategy(str, Enum):
@@ -242,6 +244,7 @@ class RunInfo(BaseModel):
       True,
       description="If True, prints the final configuration after initialization.",
   )
+  debug_sharding: bool = Field(False, description="If True, print model weight sharding details.")
   base_output_directory: PathStr = Field("", description="Base directory for all outputs, typically a GCS path.")
   sharding_strategy: None | Literal["experimental"] = Field(
       None,
@@ -279,9 +282,7 @@ class Checkpointing(BaseModel):
   save_checkpoint_on_completion: bool = Field(
       True, description="If True, saves a final checkpoint upon training completion."
   )
-  enable_continuous_checkpointing: bool = Field(
-      False, description="If True, enables continuous checkpointing."
-  )
+  enable_continuous_checkpointing: bool = Field(False, description="If True, enables continuous checkpointing.")
 
 
 class OrbaxStorage(BaseModel):
@@ -463,9 +464,7 @@ class Attention(BaseModel):
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for TE padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
-  use_jax_splash: bool = Field(
-      False, description="Whether to use jax splash attention."
-  )
+  use_jax_splash: bool = Field(False, description="Whether to use jax splash attention.")
 
 
 class MoBa(BaseModel):
@@ -553,8 +552,10 @@ class MoEGeneral(BaseModel):
   num_experts: PositiveInt = Field(1, description="The total number of experts in each MoE layer.")
   num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
-  load_balance_loss_weight: NonNegativeFloat = Field(0.01, description="Weight for the load balancing auxiliary loss.")
-  use_custom_sort_vjp: bool = Field(True, description="Whether to use a custom sort VJP for sparse matmul ops.")
+  load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
+  use_custom_sort_vjp: bool = Field(
+      True, description="Whether to use a custom VJP sort for efficient backward pass processing in sparse matmul."
+  )
   use_ring_of_experts: bool = Field(
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
@@ -569,10 +570,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Use two separate All-Gather calls for MoE weights sharded on both FSDP and FSDP-transpose.",
   )
-  fsdp_shard_on_exp: bool = Field(
+  shard_exp_on_fsdp: bool = Field(
       False,
-      description="Shard the MoE weights on the num_expert dimension. Can be performant when "
-      "num_experts % fsdp_parallelism != 0.",
+      description="Shard the expert dimension of the MLP weights on the FSDP axis, "
+      "and recommended only when num_experts is a multiple of fsdp_parallelism",
   )
   use_2d_fsdp_sharding: bool = Field(
       False,
@@ -584,7 +585,7 @@ class MoEGeneral(BaseModel):
   )
   float32_weight_sum: bool = Field(
       True,
-      description="Whether to use full fp32 precision for weight_sum during final unpermute in MoE.",
+      description="Whether to use full fp32 precision to sum expert weights for numerical stability.",
   )
 
 
@@ -640,13 +641,17 @@ class DeepSeekMoE(BaseModel):
   routed_scaling_factor: float = Field(1.0, description="Scaling factor for routing scores.")
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
-  mlp_bias: bool = Field(False, description="Whether to add a learnable bias for MLP matmul.")
+  routed_bias_update_rate: float = Field(0.0, description="Update rate applied to the router bias term.")
+  mlp_bias: bool = Field(
+      False,
+      description="Whether to add a learnable bias for MLP matmul, "
+      "and originally implemented to support the GPT-OSS model architecture",
+  )
   n_routing_groups: int = Field(-1, description="Number of groups for routing, disabled by default.")
   topk_routing_group: int = Field(-1, description="Number of top groups to route inputs to.")
   use_batch_split_schedule: bool = Field(
       False,
-      description="Splits the batch to allow for better scheduling when using expert parallelism by overlapping all-to-all "
-      "with compute.",
+      description="Whether to split batch into micro-batches to hide communications that yields performance benefits.",
   )
 
 
@@ -875,13 +880,13 @@ class DatasetGeneral(BaseModel):
       True,
       description="Whether to pack multiple short examples into a single sequence.",
   )
-  grain_packing_type: Literal["first_fit", "concat_then_split"] = Field(
+  grain_packing_type: Literal["first_fit", "best_fit", "concat_then_split"] = Field(
       "first_fit",
-      description="Packing type when using Grain pipeline. 'first_fit' or 'concat_then_split'.",
+      description="Packing type when using Grain pipeline. 'first_fit', 'best_fit' or 'concat_then_split'.",
   )
   max_segments_per_seq: int = Field(
-      32,
-      description="Maximum number of segments that can be packed into a single sequence.",
+      -1,
+      description="Maximum number of segments that can be packed into a single sequence. -1 or None for no limit.",
   )
   num_epoch: int = Field(1, description="Number of epochs to train for.")
   expansion_factor_real_data: float = Field(-1.0, description="Factor for partial data loading on hosts.")
@@ -914,7 +919,8 @@ class TfdsDataset(BaseModel):
 class HfDataset(BaseModel):
   """Configuration specific to HuggingFace datasets."""
 
-  hf_path: str = Field("", description="Path or name of the Hugging Face dataset.")
+  hf_path: str = Field("", description="Path of the Hugging Face dataset.")
+  hf_name: str = Field("", description="Name of the Hugging Face dataset.")
   hf_data_dir: PathStr = Field("", description="Data directory for the HF dataset.")
   hf_train_files: Optional[str] = Field(None, description="Files for the HF training split.")
   hf_eval_split: str = Field("", description="Name of the HF evaluation split.")
@@ -965,6 +971,24 @@ class FineTuning(BaseModel):
       False, description="If True, trains only on the completion part of the text."
   )
   use_grpo: None | bool = Field(None, description="If True, enables Group Relative Policy Optimization.")
+
+
+class Distillation(BaseModel):
+  """Configuration for Knowledge Distillation."""
+
+  # --- Overrides ---
+  # These dictionaries allow flexible configuration injection for Student/Teacher
+  # without needing to duplicate the entire MaxText schema here.
+  student_overrides: dict[str, Any] = Field(
+      default_factory=dict, description="Overrides specific to the Student model (e.g., {'num_query_heads': 16})."
+  )
+  teacher_overrides: dict[str, Any] = Field(
+      default_factory=dict, description="Overrides specific to the Teacher model (e.g., {'num_query_heads': 64})."
+  )
+
+  # --- Loss Params ---
+  distill_alpha: float = Field(0.5, description="Weight for the distillation loss component.")
+  distill_temperature: float = Field(1.0, description="Temperature for distillation softening.")
 
 
 class TrainingLoop(BaseModel):
@@ -1040,6 +1064,18 @@ class AdamW(BaseModel):
   mu_dtype: str = Field(
       "",
       description="Data type for 'mu' (first moment) in AdamW. Inherits from weight_dtype if empty.",
+  )
+
+
+class Muon(BaseModel):
+  """Configuration specific to the Muon optimizer."""
+
+  muon_beta: float = Field(0.95, description="Decay rate for the exponentially weighted average of grads.")
+  muon_weight_decay: float = Field(
+      0, description="Strength of the weight decay regularization. This is multiplied with the learning rate."
+  )
+  muon_consistent_rms: None | float = Field(
+      None, description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2)."
   )
 
 
@@ -1291,8 +1327,8 @@ class Tensorboard(BaseModel):
 
   enable_tensorboard: bool = Field(True, description="Enable Tensorboard logging.")
   use_vertex_tensorboard: bool = Field(False, description="Set to True for GCE, False if running via XPK.")
-  vertex_tensorboard_project: str = Field("", description="GCP project for Vertex AI Tensorboard.")
-  vertex_tensorboard_region: str = Field("", description="Region for Vertex AI Tensorboard.")
+  vertex_tensorboard_project: Optional[str] = Field("", description="GCP project for Vertex AI Tensorboard.")
+  vertex_tensorboard_region: Optional[str] = Field("", description="Region for Vertex AI Tensorboard.")
 
 
 class MultimodalGeneral(BaseModel):
@@ -1308,6 +1344,9 @@ class MultimodalGeneral(BaseModel):
       -1,
       description="Maximum number of images per example for training with image lists. -1 means no limit.",
   )
+  video_path: PathStr = Field("", description="Path to a video for decoding.")
+  audio_path: PathStr = Field("", description="Path to an audio file for decoding.")
+  use_audio_in_video: bool = Field(False, description="Extract and use audio from video files.")
 
 
 class VisionTower(BaseModel):
@@ -1376,16 +1415,18 @@ class VLLM(BaseModel):
   kv_cache_buffer: int = Field(256, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, description="Swap space in GB for vLLM.")
+  vllm_additional_config: dict[str, Any] = Field(default_factory=dict, description="Additional vLLM config options.")
+  vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
 
 
-class GRPO(BaseModel):
-  """Configuration for Group Relative Policy Optimization (GRPO)."""
+class RL(BaseModel):
+  """Configuration for RL algorithms like Group Relative Policy Optimization (GRPO) among others."""
 
   num_generations: int = Field(2, description="Number of responses to generate per prompt (G in GRPO paper).")
   num_iterations: int = Field(1, description="Number of iterations per batch (μ in GRPO paper).")
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
   grpo_epsilon: float = Field(0.2, description="Epsilon value for clipping in the GRPO loss.")
-  loss_algo: str = Field("grpo", description="Loss algorithm, e.g., 'grpo' or 'gspo-token'.")
+  loss_algo: Literal["grpo", "gspo-token"] = Field("grpo", description="Loss algorithm, i.e., 'grpo' or 'gspo-token'.")
 
 
 class RLDataset(BaseModel):
@@ -1395,7 +1436,7 @@ class RLDataset(BaseModel):
   num_batches: int = Field(4, description="Number of batches for RL training.")
   num_test_batches: int = Field(5, description="Number of batches for RL evaluation.")
   train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
-  micro_batch_size: float = Field(-1, description="Micro batch size for rollout and training.")
+  micro_batch_size: int = Field(-1, description="Micro batch size for rollout and training.")
 
 
 class RLEvaluation(BaseModel):
@@ -1479,10 +1520,6 @@ class DerivedValues(BaseModel):
   using_pipeline_parallelism: None | bool = Field(
       None,
       description="Boolean flag indicating if pipeline parallelism is active across ICI or DCN.",
-  )
-  model_fsdp_ag_once: bool = Field(
-      False,
-      description="An alias for `pipeline_fsdp_ag_once` for backward compatibility.",
   )
 
   context_parallel_size: None | int = Field(
@@ -1618,11 +1655,12 @@ class MaxTextConfig(
     TrainingLoop,
     Optimizer,
     AdamW,
+    Muon,
     FineTuning,
+    Distillation,
     # Reinforcement Learning
     RLHardware,
     VLLM,
-    GRPO,
     RLDataset,
     RLEvaluation,
     Reward,
@@ -1672,6 +1710,9 @@ class MaxTextConfig(
   """
 
   debug: Debug = Field(default_factory=Debug, description="Configuration for debugging options.")
+  rl: RL = Field(
+      default_factory=RL, description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO)."
+  )
   model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
   @model_validator(mode="before")
@@ -1975,8 +2016,6 @@ class MaxTextConfig(
       ):
         self.logical_axis_rules.append(["aqt_amax_history", ("stage",)])
 
-    self.model_fsdp_ag_once = self.pipeline_fsdp_ag_once  # Backward compatibility alias
-
     # H. RUN ALL CROSS-FIELD VALIDATIONS
     if self.load_parameters_path and self.load_full_state_path:
       raise ValueError("At most one of `load_parameters_path` or `load_full_state_path` should be set.")
@@ -2029,6 +2068,8 @@ class MaxTextConfig(
           )
       if self.decoder_block == DecoderBlockType.GPT_OSS and not self.sparse_matmul and self.capacity_factor != -1:
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
+      if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
+        raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
     if self.use_multimodal:
       valid_mm_models = (
           "gemma3-4b",
@@ -2036,6 +2077,7 @@ class MaxTextConfig(
           "gemma3-27b",
           "llama4-17b-16e",
           "llama4-17b-128e",
+          "qwen3-omni-30b-a3b",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
@@ -2065,6 +2107,8 @@ class MaxTextConfig(
         raise ValueError(
             "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs."
         )
+    if self.hardware == "gpu" and self.packing and self.attention == "cudnn_flash_te" and self.max_segments_per_seq <= 0:
+      raise ValueError("max_segments_per_seq must be set when using TransformerEngine attention and packing")
     dcn_product = (
         self.dcn_data_parallelism
         * self.dcn_pipeline_parallelism
@@ -2115,10 +2159,20 @@ class MaxTextConfig(
       raise ValueError("`eval_steps` must be > 0 when `generate_padding_batch_eval` is True.")
     if self.dataset_type == "hf" and self.num_epoch != 1:
       raise ValueError("HuggingFace pipeline only supports num_epoch=1.")
-    if self.loss_algo == "grpo":
+    if self.rl.loss_algo == "grpo":
       self.use_grpo = True
     else:
       self.use_grpo = False
+    if self.opt_type == "muon" and self.decoder_block not in [
+        DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.QWEN3,
+        DecoderBlockType.GEMMA3,
+        DecoderBlockType.LLAMA2,
+    ]:
+      raise ValueError(
+          "Muon dimension numbers haven't been tested for this model. Run this command first: "
+          f"`python3 -m MaxText.muon_utils {self.model_name} True`"
+      )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
@@ -2163,6 +2217,7 @@ class MaxTextConfig(
           "tensor": self.ici_tensor_parallelism,
           "tensor_transpose": self.ici_tensor_transpose_parallelism,
           "tensor_sequence": self.ici_tensor_sequence_parallelism,
+          "model": self.ici_tensor_parallelism,
           "expert": self.ici_expert_parallelism,
           "autoregressive": self.ici_autoregressive_parallelism,
       }
@@ -2179,6 +2234,7 @@ class MaxTextConfig(
           "tensor": self.dcn_tensor_parallelism,
           "tensor_transpose": self.dcn_tensor_transpose_parallelism,
           "tensor_sequence": self.dcn_tensor_sequence_parallelism,
+          "model": self.dcn_tensor_parallelism,
           "expert": self.dcn_expert_parallelism,
           "autoregressive": self.dcn_autoregressive_parallelism,
       }

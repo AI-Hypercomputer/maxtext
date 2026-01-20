@@ -98,6 +98,7 @@ class DecoderLayer(nn.Module):
         sharding.maybe_shard_with_logical,
         mesh=mesh,
         shard_mode=cfg.shard_mode,
+        debug_sharding=cfg.debug_sharding,
     )
 
     if self.model_mode == MODEL_MODE_PREFILL:
@@ -404,9 +405,9 @@ class Decoder(nn.Module):
         return [mixtral.MixtralDecoderLayerToLinen]
       case DecoderBlockType.DEEPSEEK:
         if self.config.use_batch_split_schedule:
-          return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
+          return [deepseek_batchsplit.DeepSeekDenseLayerToLinen, deepseek_batchsplit.DeepSeekMoELayerToLinen]
         else:
-          return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
+          return [deepseek.DeepSeekDenseLayerToLinen, deepseek.DeepSeekMoELayerToLinen]
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
@@ -717,11 +718,11 @@ class Decoder(nn.Module):
     )
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
-        partition_spec = self.pipeline_module.get_weight_sharding(
+        logical_partition_spec = self.pipeline_module.get_weight_sharding(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
         )
       else:
-        partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
+        logical_partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
         assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
         dense_layer = RemattedBlockLayers[0]
@@ -750,9 +751,9 @@ class Decoder(nn.Module):
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
                 model_mode=model_mode,
             )(y, *broadcast_args)
-        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+        y = self.pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
       else:  # Not DeepSeek
-        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+        y = self.pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
@@ -902,11 +903,21 @@ class Decoder(nn.Module):
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     hidden_state = y
 
+    # When initializing with vLLM RPA attention, we need to run the output head to
+    # initialize any parameters associated with it.
+    if self.is_initializing() and cfg.attention == "vllm_rpa":
+      _ = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+
+    # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
+    if cfg.attention == "vllm_rpa":
+      logits = None
+
     # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
     # Instead, we keep track on the hidden states, which has smaller size compared to full logits
-    if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+    elif cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow("intermediates", "hidden_states", hidden_state)
+
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 

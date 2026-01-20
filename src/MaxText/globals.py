@@ -30,8 +30,8 @@ MAXTEXT_REPO_ROOT = os.environ.get(
 # This is the assets root: with "tokenizer.gemma3"; &etc.
 MAXTEXT_ASSETS_ROOT = os.environ.get("MAXTEXT_ASSETS_ROOT", os.path.join(MAXTEXT_PKG_DIR, "assets"))
 
-# This is the test assets root: with "test_image.jpg"; &etc.
-MAXTEXT_TEST_ASSETS_ROOT = os.environ.get("MAXTEXT_TEST_ASSETS_ROOT", os.path.join(MAXTEXT_PKG_DIR, "test_assets"))
+# This is the test assets root: with "golden_logits"; &etc.
+MAXTEXT_TEST_ASSETS_ROOT = os.environ.get("MAXTEXT_TEST_ASSETS_ROOT", os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets"))
 
 EPS = 1e-8  # Epsilon to calculate loss
 DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3  # Default checkpoint file size

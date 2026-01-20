@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
+# This workflow builds and pushes MaxText images for both TPU and GPU devices.
+# It runs automatically daily at 12am UTC, on Pull Requests, or manually via Workflow Dispatch.
 
 name: Build Images
 
@@ -33,145 +33,98 @@ on:
           - tpu
           - gpu
 
+permissions:
+  contents: read
+
 jobs:
-  build-tpu:
-    # This job will only run for 'tpu', 'all', schedule, or PR triggers.
-    if: >
-      github.event_name == 'schedule' ||
-      github.event_name == 'pull_request' ||
-      github.event.inputs.target_device == 'all' ||
-      github.event.inputs.target_device == 'tpu'
-    
-    runs-on: linux-x86-n2-16-buildkit
-    container: google/cloud-sdk:524.0.0
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
+      image_date: ${{ steps.vars.outputs.image_date }}
+    steps:
+     - name: Checkout MaxText
+       uses: actions/checkout@v5
 
-    # Use Github Actions matrix to run image builds in parallel
+     - name: Get metadata
+       id: vars
+       run: |
+        # MaxText SHA
+        echo "maxtext_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+        # Image date
+        echo "image_date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+  tpu-pre-training:
+    name: ${{ matrix.image_name }}
+    needs: setup
     strategy:
       fail-fast: false
       matrix:
         include:
-          # TPU Image Builds
-          - image_name: maxtext_jax_stable
-            dockerfile: ./dependencies/dockerfiles/maxtext_dependencies.Dockerfile
-            build_args: |
-              MODE=stable
-              JAX_VERSION=NONE
-              LIBTPU_GCS_PATH=NONE
-          - image_name: maxtext_jax_nightly
-            dockerfile: ./dependencies/dockerfiles/maxtext_dependencies.Dockerfile
-            build_args: |
-              MODE=nightly
-              JAX_VERSION=NONE
-              LIBTPU_GCS_PATH=NONE
-          # TPU Image builds using JAX AI Image
-          - image_name: maxtext_jax_stable_stack
-            dockerfile: ./dependencies/dockerfiles/maxtext_jax_ai_image.Dockerfile
-            base_image: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
-          - image_name: maxtext_stable_stack_nightly_jax
-            dockerfile: ./dependencies/dockerfiles/maxtext_jax_ai_image.Dockerfile
-            base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/tpu/jax_nightly:latest
-          - image_name: maxtext_stable_stack_candidate
-            dockerfile: ./dependencies/dockerfiles/maxtext_jax_ai_image.Dockerfile
-            base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
+          - device: tpu
+            build_mode: stable
+            image_name: maxtext_jax_stable
+            dockerfile: ./dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
+          - device: tpu
+            build_mode: nightly
+            image_name: maxtext_jax_nightly
+            dockerfile: ./dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ matrix.image_name }}
+      device: ${{ matrix.device }}
+      build_mode: ${{ matrix.build_mode }}
+      dockerfile: ${{ matrix.dockerfile }}
+      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
+      image_date: ${{ needs.setup.outputs.image_date }}
 
-    # Setup for GKE runners per b/412986220#comment82 and b/412986220#comment90
-    steps:
-      - uses: actions/checkout@v5
-      - name: Mark git repository as safe
-        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
-      - name: Configure Docker
-        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
-      - name: Set up Docker BuildX
-        uses: docker/setup-buildx-action@v3.11.1
-        with:
-          driver: remote
-          endpoint: tcp://localhost:1234
-      # Env variables to be passed to Dockerfile
-      - name: Get short commit hash
-        id: vars
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-      - name: Get current date
-        id: date
-        run: echo "image_date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
-      # Docker BuildX command config
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v6
-        with:
-          push: true
-          context: .
-          file: ${{ matrix.dockerfile }}
-          tags: |
-            gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:${{ steps.date.outputs.image_date }}
-            gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
-          build-args: |
-            ${{ matrix.build_args }}
-            JAX_AI_IMAGE_BASEIMAGE=${{ matrix.base_image }}
-            COMMIT_HASH=${{ steps.vars.outputs.sha_short }}
-            DEVICE=tpu
-            TEST_TYPE=xlml
-
-  # Same as tpu-build step but mirrored for GPUs
-  build-gpu:
-    if: >
-      github.event_name == 'schedule' ||
-      github.event_name == 'pull_request' ||
-      github.event.inputs.target_device == 'all' ||
-      github.event.inputs.target_device == 'gpu'
-
-    runs-on: linux-x86-n2-16-buildkit
-    container: google/cloud-sdk:524.0.0
-
+  tpu-post-training:
+    name: ${{ matrix.image_name }}
+    needs: [setup, tpu-pre-training]
     strategy:
       fail-fast: false
       matrix:
-        # GPU Image Builds using JAX AI Image
         include:
-          - image_name: maxtext_gpu_jax_stable_stack
-            dockerfile: ./dependencies/dockerfiles/maxtext_jax_ai_image.Dockerfile
-            base_image: us-central1-docker.pkg.dev/deeplearning-images/jax-ai-image/gpu:latest
-          - image_name: maxtext_gpu_stable_stack_nightly_jax
-            dockerfile: ./dependencies/dockerfiles/maxtext_jax_ai_image.Dockerfile
-            base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/gpu/jax_nightly:latest
-          - image_name: maxtext_stable_stack_candidate_gpu
-            dockerfile: ./dependencies/dockerfiles/maxtext_jax_ai_image.Dockerfile
-            base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
+          - device: tpu
+            build_mode: post-training
+            image_name: maxtext_post_training_stable
+            dockerfile: ./dependencies/dockerfiles/maxtext_post_training_dependencies.Dockerfile
+          - device: tpu
+            build_mode: post-training
+            image_name: maxtext_post_training_nightly
+            dockerfile: ./dependencies/dockerfiles/maxtext_post_training_local_dependencies.Dockerfile
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ matrix.image_name }}
+      device: ${{ matrix.device }}
+      build_mode: ${{ matrix.build_mode }}
+      dockerfile: ${{ matrix.dockerfile }}
+      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
+      image_date: ${{ needs.setup.outputs.image_date }}
+      base_image: gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:${{ needs.setup.outputs.image_date }}
+      is_post_training: true
 
-    steps:
-      - uses: actions/checkout@v5
-      - name: Mark git repository as safe
-        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
-      - name: Configure Docker
-        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io,us-central1-docker.pkg.dev -q
-      - name: Set up Docker BuildX
-        uses: docker/setup-buildx-action@v3.11.1
-        with:
-          driver: remote
-          endpoint: tcp://localhost:1234
-      - name: Get short commit hash
-        id: vars
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-      - name: Get current date
-        id: date
-        run: echo "image_date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v6
-        with:
-          push: true
-          context: .
-          file: ${{ matrix.dockerfile }}
-          tags: |
-            gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:maxtext_${{ steps.vars.outputs.sha_short }}
-            gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:${{ steps.date.outputs.image_date }}
-            gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
-          build-args: |
-            ${{ matrix.build_args }}
-            JAX_AI_IMAGE_BASEIMAGE=${{ matrix.base_image }}
-            COMMIT_HASH=${{ steps.vars.outputs.sha_short }}
-            DEVICE=gpu
-            TEST_TYPE=xlml
+  gpu-pre-training:
+    name: ${{ matrix.image_name }}
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: gpu
+            build_mode: stable
+            image_name: maxtext_gpu_jax_stable
+            dockerfile: ./dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile
+          - device: gpu
+            build_mode: nightly
+            image_name: maxtext_gpu_jax_nightly
+            dockerfile: ./dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ matrix.image_name }}
+      device: ${{ matrix.device }}
+      build_mode: ${{ matrix.build_mode }}
+      dockerfile: ${{ matrix.dockerfile }}
+      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
+      image_date: ${{ needs.setup.outputs.image_date }}

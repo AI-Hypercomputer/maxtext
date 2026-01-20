@@ -2,6 +2,11 @@
 ARG BASEIMAGE=ghcr.io/nvidia/jax:base
 FROM $BASEIMAGE
 
+# Move the 'EXTERNALLY-MANAGED' file to allow system-wide pip installs
+RUN if [ -f /usr/lib/python3.12/EXTERNALLY-MANAGED ]; then \
+    mv /usr/lib/python3.12/EXTERNALLY-MANAGED /usr/lib/python3.12/EXTERNALLY-MANAGED.old; \
+fi
+
 # Stopgaps measure to circumvent gpg key setup issue.
 RUN echo "deb [trusted=yes] https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/ /" > /etc/apt/sources.list.d/devtools-ubuntu2204-amd64.list
 
@@ -34,7 +39,7 @@ ARG DEVICE
 ENV ENV_DEVICE=$DEVICE
 
 ENV MAXTEXT_ASSETS_ROOT=/deps/src/MaxText/assets
-ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/src/MaxText/test_assets
+ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/tests/assets
 ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
 ENV MAXTEXT_REPO_ROOT=/deps
 
@@ -52,6 +57,15 @@ RUN --mount=type=cache,target=/root/.cache/pip bash /deps/tools/setup/setup.sh M
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
+
+# Download test assets from GCS if building image with test assets
+ARG INCLUDE_TEST_ASSETS=false
+RUN if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
+        echo "Downloading test assets from GCS..."; \
+        if ! gcloud storage cp -r gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT}/golden_logits"; then \
+        echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
+        fi; \
+    fi
 
 # Install (editable) MaxText
 RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .

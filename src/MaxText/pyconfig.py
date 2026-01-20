@@ -132,6 +132,16 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
     if key == "run_name" and new_value is None:
       new_value = ""
 
+    # Preprocess muon_consistent_rms to be None or float
+    if key == "muon_consistent_rms":
+      if value in ["None", "none"]:
+        new_value = None
+      else:
+        try:
+          new_value = float(value)
+        except ValueError as e:
+          raise ValueError("muon_consistent_rms should be None or float") from e
+
     pydantic_kwargs[key] = new_value
 
   return pydantic_kwargs
@@ -293,13 +303,8 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
 
   pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict)
 
-  if pydantic_kwargs.get("use_tokamax_splash") and pydantic_kwargs.get(
-      "use_jax_splash"
-  ):
-    raise ValueError(
-        "At most one of `use_tokamax_splash` and `use_jax_splash` can be set to"
-        " True."
-    )
+  if pydantic_kwargs.get("use_tokamax_splash") and pydantic_kwargs.get("use_jax_splash"):
+    raise ValueError("At most one of `use_tokamax_splash` and `use_jax_splash` can be set to True.")
 
   # Initialize JAX distributed system before device backend is initialized.
   if pydantic_kwargs.get("jax_debug_log_modules"):

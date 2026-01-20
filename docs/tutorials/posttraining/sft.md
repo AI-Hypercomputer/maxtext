@@ -24,6 +24,7 @@ We use [Tunix](https://github.com/google/tunix), a JAX-based library designed fo
 In this tutorial we use a single host TPU VM such as `v6e-8/v5p-8`. Let's get started!
 
 ## Install dependencies
+
 ```sh
 # 1. Clone the repository
 git clone https://github.com/AI-Hypercomputer/maxtext.git
@@ -75,10 +76,10 @@ export PRE_TRAINED_MODEL_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs:
 ### Option 2: Converting a Hugging Face checkpoint
 If your model checkpoint is from Hugging Face, you need to run a conversion script to make it MaxText-compatible.
 
-1. **Set the Output Path:** First, define where the new MaxText checkpoint will be saved.
+1. **Set the Output Path:** First, define where the converted MaxText checkpoint will be saved. For example:
 
 ```sh
-export PRE_TRAINED_MODEL_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/maxtext-checkpoint/0/items
+export PRE_TRAINED_MODEL_CKPT_DIRECTORY=${BASE_OUTPUT_DIRECTORY}/maxtext-checkpoint
 ```
 
 2. **Run the Conversion Script:** Execute the following command that downloads the specified Hugging Face model and converts its weights into the MaxText format. The conversion script only supports official versions of models from Hugging Face. To see the specific models and versions currently supported for conversion, please refer to the `HF_IDS` dictionary in the MaxText utility file [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/utils.py).
@@ -89,8 +90,14 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu  #
 python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml \
     model_name=${PRE_TRAINED_MODEL} \
     hf_access_token=${HF_TOKEN} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/maxtext-checkpoint \
+    base_output_directory=${PRE_TRAINED_MODEL_CKPT_DIRECTORY} \
     scan_layers=True skip_jax_distributed_system=True
+```
+
+3. **Use the Converted Checkpoint:** Set the following environment variable to use the converted checkpoint:
+
+```sh
+export PRE_TRAINED_MODEL_CKPT_PATH=${PRE_TRAINED_MODEL_CKPT_DIRECTORY}/0/items
 ```
 
 ## Run SFT on Hugging Face Dataset

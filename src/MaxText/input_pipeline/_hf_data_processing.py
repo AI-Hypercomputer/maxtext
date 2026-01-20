@@ -192,6 +192,7 @@ def preprocessing_pipeline(
     use_sft=None,
     sft_train_on_completion_only=True,
     grain_worker_count=1,  # only support 0 or 1
+    max_segments_per_seq=None,
 ):
   """pipeline for preprocessing HF dataset"""
 
@@ -297,10 +298,14 @@ def preprocessing_pipeline(
 
   if packing and not use_dpo:
     length_struct = {col: max_target_length for col in data_column_names}
+    max_segments = max_segments_per_seq
+    if max_segments is not None and max_segments <= 0:
+      max_segments = None
     operations.append(
         grain.experimental.PackAndBatchOperation(
             batch_size=global_batch_size // jax.process_count(),
             length_struct=length_struct,
+            max_sequences_per_bin=max_segments,
         )
     )
     operations.append(_input_pipeline_utils.ReformatPacking(data_column_names))
@@ -347,6 +352,7 @@ def make_hf_train_iterator(
   """Load, preprocess dataset and return iterators"""
   train_ds = datasets.load_dataset(
       config.hf_path,
+      name=config.hf_name,
       data_dir=config.hf_data_dir,
       data_files=config.hf_train_files,
       split=config.train_split,
@@ -386,6 +392,7 @@ def make_hf_train_iterator(
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
         chat_template_path=config.chat_template_path,
+        max_segments_per_seq=config.max_segments_per_seq,
     )
   return train_iter
 
@@ -398,6 +405,7 @@ def make_hf_eval_iterator(
   """Make Hugging Face evaluation iterator. Load and preprocess eval dataset: and return iterator."""
   eval_ds = datasets.load_dataset(
       config.hf_path,
+      name=config.hf_name,
       data_dir=config.hf_data_dir,
       data_files=config.hf_eval_files,
       split=config.hf_eval_split,
@@ -437,5 +445,6 @@ def make_hf_eval_iterator(
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
         chat_template_path=config.chat_template_path,
+        max_segments_per_seq=config.max_segments_per_seq,
     )
   return eval_iter

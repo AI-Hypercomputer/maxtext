@@ -16,7 +16,7 @@
 
 # Llama4
 
-​Meta's Llama 4 is the latest generation of its open-source large language models (LLMs), unveiled in April 2025. These models are designed to be natively multimodal and multilingual, incorporating a mixture-of-experts (MoE) architecture to enhance performance and efficiency.  The currently supported models are:
+​Meta's Llama 4 is the latest generation of its open-source large language models (LLMs), unveiled in April 2025. These models are designed to be natively multimodal and multilingual, incorporating a mixture-of-experts (MoE) architecture to enhance performance and efficiency. The currently supported models are:
 * LLama4 Scout (17B-16E)
 * Llama4 Scout (17B-16E-Instruct)
 * LLama4 Maverick (17B-128E)
@@ -55,17 +55,33 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
     async_checkpointing=false \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
-    megablox=False \
     sparse_matmul=False \
+    megablox=False \
     dataset_type=synthetic
 ```
 
 
 ## Decoding
-In order to run an example decoding, you can use a command such as the following:
+In order to run an example decoding with Llama4 Scout, you can use a command such as the following:
 
-```
-python3 -m MaxText.decode src/MaxText/configs/base.yml scan_layers=false base_output_directory=... load_parameters_path=... run_name=... model_name=llama4-17b-16e force_unroll=false weight_dtype=bfloat16 sparse_matmul=false megablox=false tokenizer_path="meta-llama/Llama-4-Scout-17B-16E"  max_target_length=16 max_prefill_predict_length=4 per_device_batch_size=2 prompt="I love to" attention=dot_product
+```sh
+python3 -m MaxText.decode src/MaxText/configs/base.yml \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+    run_name=decode \
+    model_name=llama4-17b-16e \
+    tokenizer_path="meta-llama/Llama-4-Scout-17B-16E" \
+    hf_access_token=${HF_TOKEN} \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    scan_layers=false \
+    attention=dot_product \
+    sparse_matmul=false \    
+    megablox=false \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    per_device_batch_size=1 \
+    max_prefill_predict_length=4 \
+    max_target_length=16 \
+    prompt="I love to"
 ```
 
 ## Supported MoE strategy

@@ -23,7 +23,7 @@ import json
 
 import jax
 
-from grain.experimental import pick_performance_config
+from grain.experimental import BestFitPackIterDataset, pick_performance_config
 import grain.python as grain
 
 from MaxText.utils import gcs_utils
@@ -242,10 +242,18 @@ def pretrain_preprocessing_pipeline(
 
   if config.packing:
     length_struct = {col: config.max_target_length for col in data_columns}
+    max_segments = config.max_segments_per_seq
+    if max_segments is not None and max_segments <= 0:
+      max_segments = None
     if config.grain_packing_type == "first_fit":
       dataset = grain.experimental.FirstFitPackIterDataset(
-          dataset, length_struct=length_struct, num_packing_bins=batch_size
+          dataset,
+          length_struct=length_struct,
+          num_packing_bins=batch_size,
+          max_sequences_per_bin=max_segments,
       )
+    elif config.grain_packing_type == "best_fit":
+      dataset = BestFitPackIterDataset(dataset, length_struct=length_struct, num_packing_bins=batch_size)
     elif config.grain_packing_type == "concat_then_split":
       if config.add_bos and hasattr(tokenizer_model, "bos_id"):
         dataset = grain.experimental.ConcatThenSplitIterDataset(

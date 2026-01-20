@@ -23,33 +23,34 @@
 # ==================================
 
 # Build docker image with stable dependencies
-## bash dependencies/scripts/docker_build_dependency_image.sh MODE=stable
-## bash dependencies/scripts/docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK BASEIMAGE FROM ARTIFACT REGISTRY}}
+## bash dependencies/scripts/docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=stable
 
 # Build docker image with nightly dependencies
-## bash dependencies/scripts/docker_build_dependency_image.sh MODE=nightly
+## bash dependencies/scripts/docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=nightly
 
 # Build docker image with stable dependencies and, a pinned JAX_VERSION for TPUs
 ## bash dependencies/scripts/docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
 
-# Build docker image with stable dependencies and, a pinned JAX_VERSION for GPUs
+# Build docker image with a pinned JAX_VERSION and, a pinned LIBTPU_VERSION for TPUs
+## bash dependencies/scripts/docker_build_dependency_image.sh MODE={{stable|nightly}} JAX_VERSION=0.8.1 LIBTPU_VERSION=0.0.31.dev20251119+nightly
+
+# Build docker image with a custom libtpu.so for TPUs
+# Note: libtpu.so file must be present in the root directory of the MaxText repository
+## bash dependencies/scripts/docker_build_dependency_image.sh MODE={{stable|nightly}}
+
+# Build docker image with nightly dependencies and, a pinned JAX_VERSION for GPUs
 # Available versions listed at https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/jax
 ## bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109
-
-# MODE=custom_wheels builds the nightly environment, then reinstalls any
-# additional wheels present in the maxtext directory.
-# Use this mode to install custom dependencies, such as custom JAX or JAXlib builds.
-## bash dependencies/scripts/docker_build_dependency_image.sh MODE=custom_wheels
 
 # ==================================
 # POST-TRAINING BUILD EXAMPLES
 # ==================================
 
 # Build docker image with stable pre-training dependencies and stable post-training dependencies
-## bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training
+## bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
 
 # Build docker image with stable pre-training dependencies and post-training dependencies from GitHub head
-## bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training POST_TRAINING_SOURCE=local
+## bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training POST_TRAINING_SOURCE=local
 
 if [ "${BASH_SOURCE-}" ]; then
   this_file="${BASH_SOURCE[0]}"
@@ -75,13 +76,11 @@ if ! docker info > /dev/null 2>&1; then
   exit 1
 fi
 
-export LOCAL_IMAGE_NAME=maxtext_base_image
-echo "Building to $LOCAL_IMAGE_NAME"
-
 # Use Docker BuildKit so we can cache pip packages.
 export DOCKER_BUILDKIT=1
 
-echo "Starting to build your docker image. This will take a few minutes but the image can be reused as you iterate."
+export LOCAL_IMAGE_NAME=maxtext_base_image
+echo "Building docker image: $LOCAL_IMAGE_NAME. This will take a few minutes but the image can be reused as you iterate."
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -91,149 +90,94 @@ for ARGUMENT in "$@"; do
     echo "$KEY=$VALUE"
 done
 
-
+# Set default values if not provided
 if [[ -z ${JAX_VERSION+x} ]] ; then
   export JAX_VERSION=NONE
-  echo "Default JAX_VERSION=${JAX_VERSION}"
 fi
-
 if [[ -z ${MODE} ]]; then
   export MODE=stable
-  echo "Default MODE=${MODE}"
-  export CUSTOM_JAX=0
-  export INSTALL_POST_TRAINING=0
-elif [[ ${MODE} == "custom_wheels" ]] ; then
-  export MODE=nightly
-  export CUSTOM_JAX=1
-  export INSTALL_POST_TRAINING=0
-elif [[ ${MODE} == "post-training" || ${MODE} == "post-training-experimental" ]] ; then
-  export INSTALL_POST_TRAINING=1
-  export CUSTOM_JAX=0
-else
-  export CUSTOM_JAX=0
-  export INSTALL_POST_TRAINING=0
 fi
-
 if [[ -z ${DEVICE} ]]; then
   export DEVICE=tpu
-  echo "Default DEVICE=${DEVICE}"
+fi
+if [[ -z ${WORKFLOW} ]]; then
+  export WORKFLOW=pre-training
 fi
 
-# New flag for post-training source
-if [[ -z ${POST_TRAINING_SOURCE} ]]; then
- export POST_TRAINING_SOURCE=remote # Default to the original Dockerfile
- echo "Default POST_TRAINING_SOURCE=${POST_TRAINING_SOURCE}"
-fi
+# Create docker build arguments array
+docker_build_args=(
+  "DEVICE=${DEVICE}"
+  "WORKFLOW=${WORKFLOW}"
+  "MODE=${MODE}"
+  "JAX_VERSION=${JAX_VERSION}"
+)
 
-# Function to build with MODE=jax_ai_image
-build_ai_image() {
-    if [[ -z ${BASEIMAGE+x} ]]; then
-        echo "Error: BASEIMAGE is unset, please set it!"
-        exit 1
-    fi
-    COMMIT_HASH=$(git rev-parse --short HEAD)
-    echo "Building JAX AI MaxText Imageat commit hash ${COMMIT_HASH}..."
-
-    docker build \
-        --build-arg JAX_AI_IMAGE_BASEIMAGE=${BASEIMAGE} \
-        --build-arg COMMIT_HASH=${COMMIT_HASH} \
-        --build-arg DEVICE="$DEVICE" \
-        --network=host \
-        -t ${LOCAL_IMAGE_NAME} \
-        -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_jax_ai_image.Dockerfile' \
-        .
+run_docker_build() {
+  local dockerfile_path="$1"
+  shift 1 # Move past the first argument, the rest are build-args
+  docker build --network host $(printf -- '--build-arg %q ' "$@") -f "$dockerfile_path" -t "$LOCAL_IMAGE_NAME" .
 }
 
-if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
-  export LIBTPU_GCS_PATH=NONE
-  echo "Default LIBTPU_GCS_PATH=${LIBTPU_GCS_PATH}"
-  if [[ ${DEVICE} == "gpu" ]]; then
-    if [[ ${MODE} == "stable_stack" || ${MODE} == "jax_ai_image" ]]; then
-      build_ai_image
-    else
-      if [[ ${MODE} == "pinned" ]]; then
-        export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-12-04
-      else
-        export BASEIMAGE=ghcr.io/nvidia/jax:base
-      fi
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION \
-                   --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE \
-                   -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile' \
-                   -t ${LOCAL_IMAGE_NAME} .
-    fi
-  else
-    if [[ ${MODE} == "stable_stack" || ${MODE} == "jax_ai_image" ]]; then
-      build_ai_image
-    elif [[ ${MANTARAY} == "true" ]]; then
-      echo "Building with benchmark-db"
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION \
-                   --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE \
-                   -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_db_dependencies.Dockerfile' \
-                   -t ${LOCAL_IMAGE_NAME} .
-    elif [[ ${INSTALL_POST_TRAINING} -eq 1 && ${DEVICE} == "tpu" ]]; then
-      echo "Installing MaxText stable mode dependencies for post-training"
-      docker build --network host --build-arg MODE=stable --build-arg JAX_VERSION=$JAX_VERSION \
-                   --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE \
-                   -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_dependencies.Dockerfile' \
-                   -t ${LOCAL_IMAGE_NAME} .
-    else
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION \
-                   --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE \
-                   -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_dependencies.Dockerfile' \
-                   -t ${LOCAL_IMAGE_NAME} .
-    fi
-  fi
-else
-  docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION \
-               --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH \
-               -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_dependencies.Dockerfile' \
-               -t ${LOCAL_IMAGE_NAME} .
-  docker build --network host --build-arg CUSTOM_LIBTPU=true \
-               -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_libtpu_path.Dockerfile' \
-               -t ${LOCAL_IMAGE_NAME} .
-fi
-
-if [[ ${INSTALL_POST_TRAINING} -eq 1 ]] ; then
-  if [[ ${DEVICE} != "tpu" ]] ; then
-    echo "Error: MODE=post-training is only supported for DEVICE=tpu"
-    exit 1
-  fi
-
- DOCKERFILE_NAME=""
+# Function to build post-training image
+build_post_training_image() {
+  DOCKERFILE_NAME=""
   if [[ ${POST_TRAINING_SOURCE} == "local" ]] ; then
-    
-  # To install tpu-inference from a local path, we copy it into the build context, excluding __pycache__.
-  # This assumes vllm, tunix, tpu-inference is a sibling directory to the current one (maxtext).
-  rsync -a --exclude='__pycache__' ../tpu-inference .
-  # To install vllm from a local path, we copy it into the build context, excluding __pycache__.
-  # This assumes vllm is a sibling directory to the current one (maxtext).
-  rsync -a --exclude='__pycache__' ../vllm .
+    # To install vllm, tunix, tpu-inference from a local path, we copy it into the build context, excluding __pycache__.
+    # This assumes vllm, tunix, tpu-inference is a sibling directory to the current one (maxtext).
+    rsync -a --exclude='__pycache__' ../tpu-inference .
+    rsync -a --exclude='__pycache__' ../vllm .
+    rsync -a --exclude='__pycache__' ../tunix .
 
-  rsync -a --exclude='__pycache__' ../tunix .
+    # The cleanup is set to run even if the build fails to remove the copied directory.
+    trap "rm -rf ./tpu-inference ./vllm ./tunix" EXIT INT TERM
 
-  # The cleanup is set to run even if the build fails to remove the copied directory.
-  trap "rm -rf ./tpu-inference ./vllm ./tunix" EXIT INT TERM
+    DOCKERFILE_NAME='maxtext_post_training_local_dependencies.Dockerfile'
+    echo "Building local post-training dependencies: $DOCKERFILE_NAME"
+  else
+    DOCKERFILE_NAME='maxtext_post_training_dependencies.Dockerfile'
+    echo "Building remote post-training dependencies: $DOCKERFILE_NAME"
+  fi
+  run_docker_build "$MAXTEXT_REPO_ROOT/dependencies/dockerfiles/$DOCKERFILE_NAME" \
+    "MODE=${WORKFLOW}" "BASEIMAGE=${LOCAL_IMAGE_NAME}"
+}
 
-  DOCKERFILE_NAME='maxtext_post_training_local_dependencies.Dockerfile'
-  echo "Using local post-training dependencies Dockerfile: $DOCKERFILE_NAME"
- else
-  DOCKERFILE_NAME='maxtext_post_training_dependencies.Dockerfile'
-  echo "Using remote post-training dependencies Dockerfile: $DOCKERFILE_NAME"
- fi
+# Function to build image for GPUs
+build_gpu_image() {
+  if [[ ${MODE} == "pinned" ]]; then
+    local base_image=ghcr.io/nvidia/jax:base-2024-12-04
+    docker_build_args+=("BASEIMAGE=${base_image}")
+  fi
 
- docker build \
- --network host \
- --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
- --build-arg MODE=${MODE} \
- -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/'"$DOCKERFILE_NAME" \
- -t ${LOCAL_IMAGE_NAME} .
-fi
+  echo "Building docker image with arguments: ${docker_build_args[*]}"
+  run_docker_build "$MAXTEXT_REPO_ROOT/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile" "${docker_build_args[@]}"
+}
 
-if [[ ${CUSTOM_JAX} -eq 1 ]] ; then
-  echo "Installing custom jax and jaxlib"
-  docker build --network host \
-               -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_custom_wheels.Dockerfile' \
-               -t ${LOCAL_IMAGE_NAME} .
+# Function to build image for TPUs
+build_tpu_image() {
+  if [[ -n "$LIBTPU_VERSION" ]]; then
+    docker_build_args+=("LIBTPU_VERSION=${LIBTPU_VERSION}")
+  else
+    docker_build_args+=("LIBTPU_VERSION=NONE")
+  fi
+
+  if [[ ${MANTARAY} == "true" ]]; then
+    local base_image=gcr.io/tpu-prod-env-one-vm/benchmark-db:2025-02-14
+    docker_build_args+=("BASEIMAGE=${base_image}")
+  fi
+
+  echo "Building docker image with arguments: ${docker_build_args[*]}"
+  run_docker_build "$MAXTEXT_REPO_ROOT/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile" "${docker_build_args[@]}"
+
+  # Handle post-training workflow if specified
+  if [[ ${WORKFLOW} == "post-training" || ${WORKFLOW} == "post-training-experimental" ]]; then
+    build_post_training_image
+  fi
+}
+
+if [[ ${DEVICE} == "gpu" ]]; then
+  build_gpu_image
+else
+  build_tpu_image
 fi
 
 echo ""

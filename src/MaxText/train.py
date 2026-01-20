@@ -146,6 +146,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
           ("activation_embed_and_logits_batch", "activation_length"),
           model.mesh,
           config.shard_mode,
+          debug_sharding=config.debug_sharding,
       )
       # Mask out paddings at the end of each example.
       xent = xent * (data["targets_segmentation"] != 0)
@@ -190,13 +191,19 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     mtp_loss = calculate_mtp_loss(intermediate_outputs, config)
     loss += mtp_loss
 
-  # get moe load balance loss
+  # get MoE load balance loss
   moe_lb_loss = 0.0
   if config.num_experts > 1:
     nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
     total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
     moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
     loss += moe_lb_loss
+
+  # get MoE routed bias term updates
+  moe_bias_updates = None
+  if config.routed_bias and config.routed_bias_update_rate > 0.0:
+    nested_key = ("intermediates", "decoder", "moe_layers", "moe_bias_updates")
+    moe_bias_updates = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, None)
 
   # Add the model's primary output to the intermediates dict so it can be used
   # by the acceptance rate calculation in eval_step.
@@ -207,6 +214,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       "total_loss": total_loss,
       "total_weights": total_weights,
       "moe_lb_loss": moe_lb_loss,
+      "moe_bias_updates": moe_bias_updates,
       "mtp_loss": mtp_loss,
   }
   return loss, aux
@@ -261,7 +269,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         )
         extra_dpo_args = [reference_params]
     if config.shard_optimizer_over_data:
-      params = jax.tree.map(jax.lax.with_sharding_constraint, params, params_shardings)
+      params = jax.tree.map(
+          functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
+          params,
+          params_shardings,
+      )
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
 
@@ -272,6 +284,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
+  moe_bias_updates = aux["moe_bias_updates"]
   mtp_loss = aux["mtp_loss"]
 
   if config.gradient_clipping_threshold > 0:
@@ -303,6 +316,14 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         )
     )
   new_state = state.apply_gradients(grads=grads)
+
+  # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
+  if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
+    target_path = ("params", "decoder", "moe_layers", "DeepSeekMoeBlock_0", "MoeBlock_0", "gate", "bias")
+    # Flax 'sow' returns a tuple, so we take the first element [0].
+    # Updates the shape to be aligned with state.
+    moe_bias_updates = jnp.array(moe_bias_updates[0]).transpose()
+    new_state = maxtext_utils.update_state_param(new_state, target_path, moe_bias_updates)
 
   scalar_metrics = {
       "learning/loss": loss,
@@ -425,12 +446,6 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
-        # Reshard data from loaded sharding to performant activation sharding
-        example_batch = sharding.maybe_shard_with_name(
-            example_batch,
-            sharding.get_input_data_sharding(config, mesh),
-            shard_mode=config.shard_mode,
-        )
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):

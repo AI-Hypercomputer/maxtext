@@ -124,8 +124,6 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  # TODO (b/374764692) : Enable when v6e AOT test when stable Jax supports v6e AOT.
-  @pytest.mark.skip(reason="Enable when downstream v6e AOT support reaches stable Jax.")
   @pytest.mark.cpu_only
   def test_save_compiled_v6e(self):
     temp_dir = gettempdir()
@@ -137,6 +135,44 @@ class TrainCompile(unittest.TestCase):
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-16",
             "compile_topology_num_slices=1",
+            "base_emb_dim=256",
+            "base_mlp_dim=256",
+            "base_num_decoder_layers=2",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_save_compiled_tpu7x(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_tpu7x.pickle")
+    train_compile_main(
+        (
+            None,
+            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-16",
+            "compile_topology_num_slices=1",
+            "ici_fsdp_parallelism=16",
+            "base_emb_dim=256",
+            "base_mlp_dim=256",
+            "base_num_decoder_layers=2",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_save_compiled_tpu7x_two_slices(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_tpu7x_two_slices.pickle")
+    train_compile_main(
+        (
+            None,
+            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-8",
+            "compile_topology_num_slices=2",
+            "ici_fsdp_parallelism=4",
+            "ici_tensor_parallelism=2",
+            "dcn_data_parallelism=2",
             "base_emb_dim=256",
             "base_mlp_dim=256",
             "base_num_decoder_layers=2",

@@ -48,6 +48,7 @@ source_suffix = [".rst", ".ipynb", ".md"]
 html_theme = "sphinx_book_theme"
 html_static_path = ["_static"]
 html_css_files = ["css/custom.css"]
+html_js_files = ["js/editable_commands.js"]
 html_logo = "_static/maxtext.png"
 
 # -- Options for myst ----------------------------------------------

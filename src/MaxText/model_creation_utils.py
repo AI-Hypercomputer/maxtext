@@ -78,9 +78,9 @@ def from_config(
   Example:
       model = from_config(config)
   """
-  devices_array = maxtext_utils.create_device_mesh(config, devices)
-
   if mesh is None:
+    devices_array = maxtext_utils.create_device_mesh(config, devices)
+
     if config.shard_mode == ShardMode.EXPLICIT:
       axis_types = tuple([AxisType.Explicit] * len(config.mesh_axes))
     else:
@@ -96,16 +96,10 @@ def from_config(
 
 def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
   """Returns the transformer model based on the configuration."""
-  if config.model_fsdp_ag_once:
-    if rngs is not None:
-      raise NotImplementedError
-    else:
-      return models.ZeroOneTransformer(config, mesh, quant=quant, model_mode=model_mode)
+  if rngs is not None:
+    return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
   else:
-    if rngs is not None:
-      return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
-    else:
-      return models.transformer_as_linen(config, mesh, quant=quant, model_mode=model_mode)
+    return models.transformer_as_linen(config, mesh, quant=quant, model_mode=model_mode)
 
 
 def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
@@ -154,7 +148,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
     model = _create_model_partial()
     return nnx.state(model)
 
-  with jax.set_mesh(mesh):
+  with mesh:
     # Create the model with sharded parameters.
     with nn.logical_axis_rules(config.logical_axis_rules):
       sharded_state = create_sharded_state()

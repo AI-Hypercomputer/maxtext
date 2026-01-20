@@ -43,7 +43,8 @@ class DataLoaderTest(unittest.TestCase):
         enable_rampup_batch_size=True,
         per_device_batch_size_start=1.0,
         per_device_batch_size_increment=1.0,
-        global_rampup_samples=60,
+        # global_rampup_samples: (rampup increment number) * (Samples for initial 5 steps)
+        global_rampup_samples=3 * (1 * jax.device_count() * 5),
     )
     self.mesh = Mesh(create_device_mesh(self.config), self.config.mesh_axes)
     self.mock_data_iterator = MagicMock()
@@ -140,8 +141,10 @@ class DataLoaderTest(unittest.TestCase):
 
     # Expected batch sizes based on test config.
     # The end global batch size is self.num_devices * per_device_batch_size
-    # The rampup should be: 5 steps of size 4, 3 steps of size 8, 2 steps of size 12, then size 16.
-    expected_batch_sizes = [4, 4, 4, 4, 4, 8, 8, 8, 12, 12, 16, 16]
+    # The rampup of per_device_batch_size should be:
+    #   5 steps of size 1, 3 steps of size 2, 2 steps of size 3, then size 4.
+    multipliers = [1] * 5 + [2] * 3 + [3] * 2 + [4] * 2
+    expected_batch_sizes = [m * self.config_rampup.num_target_devices for m in multipliers]
     for i, expected_size in enumerate(expected_batch_sizes):
       batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
       expected_shape = (expected_size, self.config_rampup.max_target_length)
@@ -168,8 +171,10 @@ class DataLoaderTest(unittest.TestCase):
 
     # Expected batch sizes based on test config.
     # The end global batch size is self.num_devices * per_device_batch_size
-    # The rampup should be: 3 steps of size 8, 2 steps of size 12, then size 16.
-    expected_batch_sizes = [8, 8, 8, 12, 12, 16, 16]
+    # The rampup of per_device_batch_size should be:
+    #   3 steps of size 2, 2 steps of size 3, then size 4.
+    multipliers = [2] * 3 + [3] * 2 + [4] * 2
+    expected_batch_sizes = [m * self.config_rampup.num_target_devices for m in multipliers]
     for i, expected_size in enumerate(expected_batch_sizes):
       batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
       expected_shape = (expected_size, self.config_rampup.max_target_length)

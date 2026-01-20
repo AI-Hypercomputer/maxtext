@@ -18,6 +18,7 @@ name: MaxText Package Tests
 
 on:
   pull_request:
+  workflow_call:
   workflow_dispatch:
   schedule:
     # Run the job every 4 hours
@@ -36,21 +37,96 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  doc_only_check:
+    name: Check for Documentation-Only Changes
+    runs-on: ubuntu-latest
+    outputs:
+      run_tests: ${{ steps.check.outputs.run_tests }}
+      run_notebooks: ${{ steps.check.outputs.run_notebooks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check if only documentation changed
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Not a pull request, running all tests"
+            echo "run_tests=true" >> $GITHUB_OUTPUT
+            echo "run_notebooks=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          git fetch origin ${{ github.base_ref }}
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No files changed"
+            echo "run_tests=true" >> $GITHUB_OUTPUT
+            echo "run_notebooks=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check for source code changes (anything not .md and not .ipynb)
+          if echo "$CHANGED_FILES" | grep -v -E '\.(md|ipynb)$' > /dev/null; then
+            echo "Source code files changed, enabling unit tests."
+            echo "run_tests=true" >> $GITHUB_OUTPUT
+          else
+            echo "No source code changes, skipping unit tests."
+            echo "run_tests=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Check for notebook (.ipynb) changes specifically
+          if echo "$CHANGED_FILES" | grep '\.ipynb$' > /dev/null; then
+            echo "Notebook files changed, enabling notebook run."
+            echo "run_notebooks=true" >> $GITHUB_OUTPUT
+          else
+            echo "No notebook changes, skipping notebook run."
+            echo "run_notebooks=false" >> $GITHUB_OUTPUT
+          fi
+
+          exit 0
+
   build_and_upload_maxtext_package:
+    needs: doc_only_check
+    # Run if either tests or notebooks need to run
+    if: |
+      needs.doc_only_check.outputs.run_tests == 'true' || 
+      needs.doc_only_check.outputs.run_notebooks == 'true'
     uses: ./.github/workflows/build_package.yml
     with:
       device_type: tpu
       device_name: v4-8
       cloud_runner: linux-x86-n2-16-buildkit
 
+  maxtext_jupyter_notebooks:
+    needs: build_and_upload_maxtext_package
+    if: needs.doc_only_check.outputs.run_notebooks == 'true'
+    uses: ./.github/workflows/run_jupyter_notebooks.yml
+    strategy:
+        fail-fast: false
+        matrix:
+          image_type: ["py312"]
+    with:
+      device_type: tpu
+      device_name: v6e-4
+      image_type: ${{ matrix.image_type }}
+      cloud_runner: linux-x86-ct6e-180-4tpu
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
   maxtext_cpu_unit_tests:
     needs: build_and_upload_maxtext_package
+    if: needs.doc_only_check.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_tests_against_package.yml
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
           image_type: ["py312"]
-          worker_group: [1, 2, 3, 4]
+          worker_group: [1, 2]
     with:
       device_type: cpu
       device_name: X64
@@ -62,10 +138,11 @@ jobs:
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       worker_group: ${{ matrix.worker_group }}
-      total_workers: 4
+      total_workers: 2
 
   maxtext_tpu_unit_tests:
     needs: build_and_upload_maxtext_package
+    if: needs.doc_only_check.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_tests_against_package.yml
     strategy:
         fail-fast: false
@@ -73,9 +150,9 @@ jobs:
           image_type: ["py312"]
     with:
       device_type: tpu
-      device_name: v4-8
+      device_name: v6e-4
       image_type: ${{ matrix.image_type }}
-      cloud_runner: linux-x86-ct4p-240-4tpu
+      cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
@@ -84,6 +161,7 @@ jobs:
 
   maxtext_tpu_integration_tests:
     needs: build_and_upload_maxtext_package
+    if: needs.doc_only_check.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_tests_against_package.yml
     strategy:
         fail-fast: false
@@ -91,9 +169,9 @@ jobs:
           image_type: ["py312"]
     with:
       device_type: tpu
-      device_name: v4-8
+      device_name: v6e-4
       image_type: ${{ matrix.image_type }}
-      cloud_runner: linux-x86-ct4p-240-4tpu
+      cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and integration_test'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
@@ -102,6 +180,7 @@ jobs:
 
   maxtext_tpu_pathways_unit_tests:
     needs: build_and_upload_maxtext_package
+    if: needs.doc_only_check.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -109,9 +188,9 @@ jobs:
           image_type: ["py312"]
     with:
       device_type: tpu
-      device_name: v4-8
+      device_name: v6e-4
       image_type: ${{ matrix.image_type }}
-      cloud_runner: linux-x86-ct4p-240-4tpu
+      cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
@@ -120,6 +199,7 @@ jobs:
 
   maxtext_tpu_pathways_integration_tests:
     needs: build_and_upload_maxtext_package
+    if: needs.doc_only_check.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -127,9 +207,9 @@ jobs:
           image_type: ["py312"]
     with:
       device_type: tpu
-      device_name: v4-8
+      device_name: v6e-4
       image_type: ${{ matrix.image_type }}
-      cloud_runner: linux-x86-ct4p-240-4tpu
+      cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and integration_test'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
@@ -138,6 +218,7 @@ jobs:
 
   maxtext_gpu_unit_tests:
     needs: build_and_upload_maxtext_package
+    if: needs.doc_only_check.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_tests_against_package.yml
     strategy:
         fail-fast: false
@@ -158,6 +239,7 @@ jobs:
 
   maxtext_gpu_integration_tests:
     needs: build_and_upload_maxtext_package
+    if: needs.doc_only_check.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_tests_against_package.yml
     strategy:
         fail-fast: false
@@ -176,9 +258,66 @@ jobs:
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
+  all_tests_passed:
+    name: All Required Tests Passed
+    needs: [doc_only_check, build_and_upload_maxtext_package, maxtext_cpu_unit_tests, maxtext_tpu_unit_tests, maxtext_tpu_integration_tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, maxtext_gpu_unit_tests, maxtext_gpu_integration_tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check test results
+        run: |
+          # If doc-only, all tests should be skipped
+          if [ "${{ needs.doc_only_check.outputs.run_tests }}" == "false" ]; then
+            echo "Documentation-only changes detected, tests were skipped"
+            exit 0
+          fi
+
+          # Otherwise, check that build and all tests passed or were skipped
+          echo "Build result: ${{ needs.build_and_upload_maxtext_package.result }}"
+          echo "CPU tests: ${{ needs.maxtext_cpu_unit_tests.result }}"
+          echo "TPU tests: ${{ needs.maxtext_tpu_unit_tests.result }}"
+          echo "TPU integration: ${{ needs.maxtext_tpu_integration_tests.result }}"
+          echo "TPU pathways: ${{ needs.maxtext_tpu_pathways_unit_tests.result }}"
+          echo "TPU pathways integration: ${{ needs.maxtext_tpu_pathways_integration_tests.result }}"
+          echo "GPU tests: ${{ needs.maxtext_gpu_unit_tests.result }}"
+          echo "GPU integration: ${{ needs.maxtext_gpu_integration_tests.result }}"
+
+          # Fail only if any job failed or was cancelled (skipped is OK)
+          if [ "${{ contains(needs.*.result, 'failure') }}" == "true" ] || [ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]; then
+            echo "One or more jobs failed or were cancelled"
+            exit 1
+          fi
+
+          echo "All required tests passed successfully"
+
+  all_notebooks_passed:
+    name: All Notebooks Passed
+    needs: [doc_only_check, build_and_upload_maxtext_package, maxtext_jupyter_notebooks]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check notebooks results
+        run: |
+          if [ "${{ needs.doc_only_check.outputs.run_notebooks }}" == "false" ]; then
+            echo "Non-notebook changes detected, runs were skipped"
+            exit 0
+          fi
+
+          # Otherwise, check that build and notebooks run passed or were skipped
+          echo "Build result: ${{ needs.build_and_upload_maxtext_package.result }}"
+          echo "Jupyter Notebooks result: ${{ needs.maxtext_jupyter_notebooks.result }}"
+
+          # Fail only if any job failed or was cancelled (skipped is OK)
+          if [ "${{ contains(needs.*.result, 'failure') }}" == "true" ] || [ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]; then
+            echo "One or more jobs failed or were cancelled"
+            exit 1
+          fi
+
+          echo "All required notebooks passed successfully"
+
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [maxtext_cpu_unit_tests, maxtext_tpu_unit_tests, maxtext_tpu_integration_tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, maxtext_gpu_unit_tests, maxtext_gpu_integration_tests]
+    needs: [maxtext_jupyter_notebooks, maxtext_cpu_unit_tests, maxtext_tpu_unit_tests, maxtext_tpu_integration_tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, maxtext_gpu_unit_tests, maxtext_gpu_integration_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:

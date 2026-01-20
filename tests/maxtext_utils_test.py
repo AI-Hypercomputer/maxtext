@@ -108,6 +108,45 @@ class TestNestedValueRetrieval(unittest.TestCase):
     self.assertEqual(result, expected_value)
 
 
+class UpdateStateParamTest(unittest.TestCase):
+
+  def setUp(self):
+    self.model = nn.Dense(features=5)
+    self.initial_params = {
+        "layers": {"layer_0": {"bias": jnp.array([1.0, 1.0])}, "layer_1": {"bias": jnp.array([2.0, 2.0])}},
+        "decoder": {"gate": {"bias": jnp.array([0.5, 0.5])}},
+    }
+    self.state = train_state.TrainState(
+        step=0, apply_fn=self.model.apply, params=self.initial_params, tx=None, opt_state={}
+    )
+
+  def test_update_mode_add(self):
+    target_path = ("decoder", "gate", "bias")
+    update_value = jnp.array([0.1, 0.2])
+    new_state = maxtext_utils.update_state_param(self.state, target_path, update_value)
+
+    expected = jnp.array([0.6, 0.7])
+    actual = new_state.params["decoder"]["gate"]["bias"]
+    self.assertTrue(jnp.allclose(actual, expected))
+
+    # Other values are untouched
+    original_layer_0 = self.state.params["layers"]["layer_0"]["bias"]
+    new_layer_0 = new_state.params["layers"]["layer_0"]["bias"]
+    self.assertTrue(jnp.array_equal(original_layer_0, new_layer_0))
+    original_layer_1 = self.state.params["layers"]["layer_1"]["bias"]
+    new_layer_1 = new_state.params["layers"]["layer_1"]["bias"]
+    self.assertTrue(jnp.array_equal(original_layer_1, new_layer_1))
+
+  def test_invalid_path_does_nothing(self):
+    """If path doesn't exist (or is wrong), nothing should happen."""
+    # Note: tree_map only iterates over EXISTING leaves. If path is wrong,
+    # the if condition inside never triggers.
+    target_path = ("decoder", "non_existent", "bias")
+    new_state = maxtext_utils.update_state_param(self.state, target_path, jnp.array([1.0]))
+
+    self.assertTrue(jax.tree_util.tree_all(jax.tree_util.tree_map(jnp.array_equal, new_state.params, self.state.params)))
+
+
 class MaxUtilsInitState(unittest.TestCase):
   """Tests initialization of training and decode states in maxtext_utils.py"""
 
@@ -366,7 +405,7 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     multi-dimensional mesh passes the assertion.
     """
     # Create a mesh shape for a 5D mesh.
-    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    devices = np.array(jax.devices()).reshape((jax.device_count(), 1, 1, 1, 1))
     mesh = Mesh(devices, self.mesh_axes)
 
     # Shard across multiple axes, including the valid 'fsdp' axis.
@@ -381,7 +420,7 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     Tests that a tensor on a complex mesh fails if it's not sharded along any
     of the primary valid axes (like 'fsdp').
     """
-    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    devices = np.array(jax.devices()).reshape((jax.device_count(), 1, 1, 1, 1))
     mesh = Mesh(devices, self.mesh_axes)
     pspec = PartitionSpec(("sequence", "context"), "stage", "tensor", None)
     params = {"complex_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, pspec))}
@@ -393,7 +432,7 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     """
     Tests that a mix of sharded (correctly) and unsharded tensors on a complex mesh fails.
     """
-    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    devices = np.array(jax.devices()).reshape((jax.device_count(), 1, 1, 1, 1))
     mesh = Mesh(devices, self.mesh_axes)
     sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
     sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, sharded_pspec))
@@ -420,7 +459,7 @@ class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
       self.skipTest("This test suite requires at least 4 TPU devices")
 
     self.mesh_axes = ("fsdp", "sequence", "tensor", "stage", "context")
-    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    devices = np.array(jax.devices()).reshape((jax.device_count(), 1, 1, 1, 1))
     self.mesh = Mesh(devices, self.mesh_axes)
 
   def test_multi_axis_mixed_formating(self):

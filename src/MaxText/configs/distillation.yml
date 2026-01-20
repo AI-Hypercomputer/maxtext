@@ -1,0 +1,57 @@
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Soft Distillation Configuration
+
+# Inherit MaxText defaults
+base_config: "base.yml"
+
+# --- Student Specifics ---
+# These are passed as kwargs to the Student config initialization
+student_overrides:
+  model_name: "llama3.1-8b"
+
+# --- Teacher Specifics ---
+# These are passed as kwargs to the Teacher config initialization
+teacher_overrides:
+  model_name: "llama3.1-8b"
+
+# --- Distillation Loss ---
+distill_alpha: 0.5
+distill_temperature: 1.0
+
+# --- Dataset & Tokenizer ---
+hf_path: "OptimalScale/ClimbMix"
+dataset_type: "hf"
+tokenizer_path: "meta-llama/Llama-3.1-8B"
+tokenizer_type: "huggingface"
+
+max_target_length: 2048
+
+# --- Training Loop ---
+steps: 200000
+checkpoint_period: 2000
+log_period: 10
+save_checkpoint_on_completion: True
+
+# --- Batch Size Strategy ---
+# Global Batch Size = per_device_batch_size * num_devices * gradient_accumulation_steps
+per_device_batch_size: 2
+gradient_accumulation_steps: 8
+
+# --- Learning Rate Schedule ---
+learning_rate: 2.0e-4 
+learning_rate_schedule_steps: 200000
+warmup_steps_fraction: 0.1
+cosine_learning_rate_final_fraction: 0.1

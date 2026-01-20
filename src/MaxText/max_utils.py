@@ -546,7 +546,6 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
-        jnp.ndarray,
     ],
 ]:
   """Forward-mode of `cross_entropy_with_logits`."""
@@ -566,7 +565,6 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
       z_loss,
       exp_shifted,
       sum_exp,  # pytype: disable=bad-return-type  #jax-ndarray
-      log_softmax,
       log_z,
   )
 
@@ -579,21 +577,20 @@ def _cross_entropy_with_logits_bwd(
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
-        jnp.ndarray,
     ],
     g: tuple[jnp.ndarray, jnp.ndarray],
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, None, None]:
   """Backward-mode of `cross_entropy_with_logits`."""
   g = g[0]  # Ignore z_loss component as that is only used for logging.
-  logits, targets, z_loss, exp_shifted, sum_exp, log_softmax, log_z = res
+  logits, targets, z_loss, exp_shifted, sum_exp, log_z = res
   # z-loss term adds the (2 * z_loss * log_z) factor.
   deriv = jnp.expand_dims(1 + 2 * z_loss * log_z, -1) * exp_shifted / sum_exp - targets
   g_logits = jnp.expand_dims(g, axis=-1) * deriv
-  g_targets = -jnp.expand_dims(g, axis=-1) * log_softmax
+
   return (
       jnp.asarray(g_logits, logits.dtype),
-      jnp.asarray(g_targets, targets.dtype),
-      jnp.array(0.0),
+      None,  # we don't need gradients on targets
+      None,  # we don't need gradients on z_loss
   )  # sets z-loss coeff gradient to 0
 
 
@@ -990,6 +987,13 @@ def get_batch_seq_len_for_mode(config, model_mode):
     raise ValueError(f"Unknown model_mode: {model_mode}")
 
   return batch_size, seq_len
+
+
+def print_non_trivial_mesh_axis(mesh):
+  """Print mesh axis if its axis size is larger than one."""
+  for mesh_axis, axis_size in mesh.shape.items():
+    if axis_size > 1:
+      print(f"{mesh_axis}: {axis_size}", flush=True)
 
 
 @contextmanager
