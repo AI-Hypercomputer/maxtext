@@ -602,7 +602,7 @@ def calculate_tflops_training_per_device(config, log=True):
     if config.decoder_block == DecoderBlockType.QWEN3_NEXT:
       total_ffn_flops = calculate_qwen3_next_ffn_tflops_per_device(config)
     # calculation based on dropless implementation
-    if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
+    elif config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
