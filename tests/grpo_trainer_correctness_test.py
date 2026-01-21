@@ -142,9 +142,8 @@ class GrpoTrainerTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.config_inference)
     self.mesh = Mesh(devices_array, self.config_inference.mesh_axes)
     self.tokenizer_model.add_special_tokens({"pad_token": "<pad>"})
-    self.inference_engine = offline_engine.OfflineEngine(
-        config=self.config_inference,
-        mesh=self.inference_model.mesh,
+    self.inference_engine = (
+        offline_engine.OfflineEngineBuilder(self.config_inference).set_mesh(self.inference_model.mesh).build()
     )
 
   @pytest.mark.skip(reason="Logit output test fragile, failing on jax upgrade to 0.6.2 - see b/425997645")

@@ -21,7 +21,7 @@ import os.path
 import jax
 import jax.numpy as jnp
 import numpy as np
-from MaxText.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
+from MaxText.inference.offline_engine import OfflineEngineBuilder, InputData, CompletionOutput
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
 
@@ -68,7 +68,17 @@ class OfflineEngineTest(unittest.TestCase):
 
     config = self.cfg
     rng = jax.random.PRNGKey(0)
-    inference_engine = OfflineEngine(config=config, params=None, enable_batch_prefill=False, rng=rng, eos_ids=[])
+    # Use Builder instead of direct init
+    inference_engine = (
+        OfflineEngineBuilder(config)
+        .enable_batch_prefill(max_batch_size=16)  # Just demonstrating usage; test asked for False which is default
+        .set_rng(rng)
+        .set_eos_ids([])
+        .build()
+    )
+    # The test actually wanted enable_batch_prefill=False. To match previous behavior precisely:
+    inference_engine = OfflineEngineBuilder(config).set_rng(rng).set_eos_ids([]).build()
+
     input_lengths = list(range(10, 600, 100))
     input_data = [
         InputData(id=f"input_{i}", tokens=np.arange(length), true_length=length) for i, length in enumerate(input_lengths)
@@ -87,7 +97,7 @@ class OfflineEngineTest(unittest.TestCase):
   def test_multi_sampling(self):
     config = self.cfg
     rng = jax.random.PRNGKey(0)
-    inference_engine = OfflineEngine(config=config, params=None, enable_batch_prefill=False, rng=rng, eos_ids=[])
+    inference_engine = OfflineEngineBuilder(config).set_rng(rng).set_eos_ids([]).build()
     rng1, rng_2 = jax.random.split(rng, 2)
     input_data = [InputData(id=f"input_{i}", tokens=jnp.arange(128), true_length=128) for i in range(4)]
 

@@ -41,6 +41,7 @@ import os
 import functools
 import threading
 
+from copy import deepcopy
 from typing import Sequence, Callable, Iterator
 
 from absl import app
@@ -691,10 +692,9 @@ def train_loop(config, config_inference, recorder, state=None):
 
   data_sharding = sharding.get_input_data_sharding(config, mesh)
 
-  inference_engine = offline_engine.OfflineEngine(
-      config=config_inference,
-      mesh=inference_mesh,
-  )
+  config = deepcopy(config_inference)
+  config.mesh = inference_mesh
+  inference_engine = offline_engine.OfflineEngine(config=config)
   data_buffer = []
   data_buffer_lock = threading.Lock()
 
