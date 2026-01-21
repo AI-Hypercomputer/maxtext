@@ -12,196 +12,22 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""
-SFT training script that calls a trainer in Tunix to run SFT on a MaxText model
-using `HuggingFaceH4/ultrachat_200k` dataset. The configurations for the dataset
-are defined inside `src/MaxText/configs/sft.yml`.
+"""Shim for SFT Trainer in `src/maxtext/trainers/post_train/sft`."""
 
-Example command:
-Training & Evaluation:
-  python3 -m MaxText.sft.sft_trainer src/MaxText/configs/sft.yml \
-    run_name=$RUN_NAME base_output_directory=$BASE_OUTPUT_DIRECTORY \
-    model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \
-    hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH \
-    per_device_batch_size=1 max_target_length=1024 \
-    eval_interval=2 eval_steps=2 steps=10 profiler=xplane weight_dtype=bfloat16
+import sys
+import importlib
 
-Training:
-  python3 -m MaxText.sft.sft_trainer src/MaxText/configs/sft.yml \
-    run_name=$RUN_NAME base_output_directory=$BASE_OUTPUT_DIRECTORY \
-    model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \
-    hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH \
-    per_device_batch_size=1 max_target_length=1024 \
-    eval_interval=-1 steps=10 profiler=xplane weight_dtype=bfloat16
-"""
-
-from typing import Sequence
-
-from absl import app
-import os
-import jax
-import optax
-import pathwaysutils
-
-from flax.linen import partitioning as nn_partitioning
-
-from orbax import checkpoint as ocp
-
-from tunix.sft import metrics_logger, peft_trainer, profiler
-
-from MaxText import max_utils
 from MaxText import max_logging
-from MaxText import maxtext_utils
-from MaxText import optimizers
-from MaxText import pyconfig
-from MaxText import model_creation_utils
-from MaxText.train import loss_fn
-from MaxText.sft import hooks
-from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    create_goodput_recorder,
-    maybe_monitor_goodput,
-    maybe_record_goodput,
-)
 
-
-def get_tunix_config(mt_config):
-  """Gets the Tunix training configurations from the MaxText config.
-
-  Args:
-    mt_config: MaxText config.
-
-  Returns:
-    A Tunix `TrainingConfig` object.
-  """
-  # Checkpointing configurations
-  checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=mt_config.checkpoint_period,
-      enable_async_checkpointing=mt_config.async_checkpointing,
-  )
-
-  # Metrics configurations
-  metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=mt_config.tensorboard_dir)
-
-  # Profiler configurations
-  profiler_options = None
-  if mt_config.profiler:
-    set_profile_options = True
-    platform_version = jax.extend.backend.get_backend().platform_version.strip()
-    if platform_version.startswith("Pathways"):
-      max_logging.log("Pathways backend detected. Disabling setting profile options.")
-      set_profile_options = False
-    profiler_options = profiler.ProfilerOptions(
-        log_dir=mt_config.tensorboard_dir,
-        skip_first_n_steps=mt_config.skip_first_n_steps_for_profiler,
-        profiler_steps=mt_config.profiler_steps,
-        set_profile_options=set_profile_options,
-    )
-
-  return peft_trainer.TrainingConfig(
-      eval_every_n_steps=mt_config.eval_interval,
-      max_steps=mt_config.steps,
-      gradient_accumulation_steps=mt_config.gradient_accumulation_steps,
-      checkpoint_root_directory=mt_config.checkpoint_dir,
-      checkpointing_options=checkpointing_options,
-      metrics_logging_options=metrics_logging_options,
-      profiler_options=profiler_options,
-  )
-
-
-def use_maxtext_loss_function(trainer, mt_config):
-  """Configures the trainer to use MaxText's loss function.
-
-  This function creates a wrapper around MaxText's `loss_fn` to make it
-  compatible with the Tunix trainer's expected loss function signature.
-
-  Args:
-    trainer: The PeftTrainer instance.
-    mt_config: MaxText config.
-
-  Returns:
-    The trainer configured with the MaxText loss function.
-  """
-
-  def loss_func(model, inputs, inputs_position, inputs_segmentation, targets, targets_position, targets_segmentation):
-    data = {
-        "inputs": inputs,
-        "inputs_position": inputs_position,
-        "inputs_segmentation": inputs_segmentation,
-        "targets": targets,
-        "targets_position": targets_position,
-        "targets_segmentation": targets_segmentation,
-    }
-    return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=True)
-
-  trainer = trainer.with_loss_fn(loss_func, has_aux=True)
-  return trainer
-
-
-def setup_trainer_state(mt_config, goodput_recorder=None):
-  """Set up prerequisites for training loop."""
-  tunix_config = get_tunix_config(mt_config)
-
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
-    model, mesh = model_creation_utils.create_nnx_model(mt_config)
-    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
-    # pass in model for muon
-    optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
-
-    if mt_config.gradient_clipping_threshold > 0:
-      optimizer = optax.chain(
-          optax.clip_by_global_norm(max_norm=mt_config.gradient_clipping_threshold),
-          optimizer,
-      )
-
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
-    training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
-    data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
-
-    trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
-    trainer.with_training_hooks(training_hooks)
-    trainer.with_data_hooks(data_hooks)
-    trainer = use_maxtext_loss_function(trainer, mt_config)
-
-  return trainer, mesh
-
-
-def train_model(mt_config, trainer, mesh):
-  """Runs the SFT training loop in Tunix."""
-  with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-    trainer.train(trainer.data_hooks.train_data_iterator, trainer.data_hooks.eval_data_iterator)
-  return trainer
-
-
-def train(mt_config, goodput_recorder=None):
-  """Main method for SFT training.
-
-  Args:
-    mt_config: MaxText config.
-    goodput_recorder: An optional GoodputRecorder to record performance metrics.
-  """
-  trainer, mesh = setup_trainer_state(mt_config, goodput_recorder)
-  trainer = train_model(mt_config, trainer, mesh)
-  return trainer, mesh
-
-
-def main(argv: Sequence[str]) -> None:
-  """Main function to run SFT training.
-
-  Args:
-    argv: Command-line arguments.
-  """
-  pathwaysutils.initialize()
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-
-  mt_config = pyconfig.initialize(argv)
-  max_utils.print_system_information()
-
-  goodput_recorder = create_goodput_recorder(mt_config)
-
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB), maybe_monitor_goodput(mt_config):
-    train(mt_config, goodput_recorder)
-
+OLD_MODULE_PATH = "MaxText.sft.sft_trainer"
+NEW_MODULE_PATH = "maxtext.trainers.post_train.sft.train_sft"
 
 if __name__ == "__main__":
-  app.run(main)
+  try:
+    _new_module = importlib.import_module(NEW_MODULE_PATH)
+    if hasattr(_new_module, "main"):
+      max_logging.warning(f"'{OLD_MODULE_PATH}' is deprecated; use '{NEW_MODULE_PATH}' instead.\n")
+      _new_module.main(sys.argv)
+  except ImportError as e:
+    max_logging.error(f"Shim could not find target module: '{NEW_MODULE_PATH}'\n")
+    raise e

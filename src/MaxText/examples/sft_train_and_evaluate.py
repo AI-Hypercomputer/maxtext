@@ -92,7 +92,7 @@ from MaxText import max_utils
 from MaxText import pyconfig
 from MaxText.input_pipeline import instruction_data_processing
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
-from MaxText.sft import sft_trainer
+from maxtext.trainers.post_train.sft import train_sft
 
 # Suppress vLLM logging with a severity level below ERROR
 os.environ["VLLM_LOGGING_LEVEL"] = "ERROR"
@@ -330,7 +330,7 @@ def train_and_evaluate(config):
   test_dataset = get_test_dataset(config, tokenizer)
   test_dataset = test_dataset[:NUM_TEST_SAMPLES]
   test_dataset = test_dataset.to_iter_dataset().batch(BATCH_SIZE, drop_remainder=True)
-  trainer, mesh = sft_trainer.setup_trainer_state(config)
+  trainer, mesh = train_sft.setup_trainer_state(config)
   vllm_rollout = create_vllm_rollout(config, trainer.model, mesh, tokenizer)
 
   # 1. Pre-SFT Evaluation
@@ -340,7 +340,7 @@ def train_and_evaluate(config):
 
   # 2. SFT Training
   max_logging.log("Starting SFT training...")
-  trainer = sft_trainer.train_model(config, trainer, mesh)
+  trainer = train_sft.train_model(config, trainer, mesh)
 
   # 3. Post-SFT Evaluation
   max_logging.log("Running Post-SFT evaluation...")
