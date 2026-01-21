@@ -752,6 +752,7 @@ class TransformerEngineQuantization(Quantization):
         "te_fp8_currentscaling": recipe.Float8CurrentScaling,
         "te_mxfp8": recipe.MXFP8BlockScaling,
         "te_nvfp4": recipe.NVFP4BlockScaling,  # pytype: disable=module-attr
+        "te_nvfp4_no_rht": functools.partial(recipe.NVFP4BlockScaling, disable_rht=True),  # pytype: disable=module-attr
     }
     if recipe_name not in RECIPES:
       raise ValueError(f"Invalid TransformerEngine recipe: {recipe_name}")
