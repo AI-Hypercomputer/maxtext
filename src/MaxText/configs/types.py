@@ -207,6 +207,7 @@ type ModelName = Literal[
     "deepseek3-671b-2dfsdp",
     "deepseek3-test",
     "deepseek3-tiny",
+    "deepseek3.2-671b",
     "kimi-k2-1t",
     "gemma-7b",
     "gemma-2b",
@@ -499,6 +500,15 @@ class MlaAttention(BaseModel):
   qk_nope_head_dim: NonNegativeInt = Field(128, description="Dimension for non-RoPE part of QK heads in MLA.")
   qk_rope_head_dim: NonNegativeInt = Field(64, description="Dimension for RoPE part of QK heads in MLA.")
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
+
+
+class AttentionIndexer(BaseModel):
+  """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
+
+  use_sparse_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA attention.")
+  index_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
+  index_n_heads: NonNegativeInt = Field(64, description="Number of head for indexer query.")
+  index_topk: NonNegativeInt = Field(2048, description="The number of top-k tokens to select in indexer.")
 
 
 class Llama4Attention(BaseModel):
@@ -1660,6 +1670,7 @@ class MaxTextConfig(
     Attention,
     MlaAttention,
     MoBa,
+    AttentionIndexer,
     Llama4Attention,
     SplashAttention,
     PagedAttention,

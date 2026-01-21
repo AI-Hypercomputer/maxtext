@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-Tests for Attention & MLP in GPT OSS.
+Tests for GPT OSS: Attention, MLP, RoPE
 
 GPT OSS PyTorch implementation at:
 https://github.com/huggingface/transformers/blob/31ab7168ff7e07f61c90134e5238c4d97606aa70/src/transformers/models/gpt_oss/modular_gpt_oss.py
