@@ -1032,3 +1032,14 @@ def transformer_engine_context():
       yield
   except (ImportError, AttributeError):
     yield
+
+
+def print_mesh_axes_info(mesh: jax.sharding.Mesh):
+  """Prints all mesh axes and their sizes in a single comma-separated line."""
+  if not mesh.shape:
+    max_logging.info("Mesh Axes: (Empty Mesh)")
+    return
+
+  axis_info = [f"{axis_name}: {axis_size}" for axis_name, axis_size in mesh.shape.items()]
+  info_str = "Mesh Axes: (" + ", ".join(axis_info) + ")"
+  max_logging.info(info_str)

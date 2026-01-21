@@ -100,7 +100,7 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
+  abstract_state, state_logical_annotations, state_mesh_shardings = maxtext_utils.get_abstract_state(
       model, tx, config, example_rng, topology_mesh
   )
 
@@ -109,7 +109,7 @@ def get_shaped_inputs(topology_mesh, config):
 
   shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}
-  return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model
+  return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, state_logical_annotations, model
 
 
 def jit_and_compile(
@@ -160,7 +160,13 @@ def is_oom(argv: Sequence[str]) -> bool:
   max_utils.print_system_information()
 
   # Get shaped inputs
-  shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
+  (
+      shaped_train_args,
+      shaped_train_kwargs,
+      state_mesh_shardings,
+      _,
+      model,
+  ) = get_shaped_inputs(topology_mesh, config)
 
   # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
@@ -216,7 +222,13 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
 
   # Get shaped inputs
-  shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
+  (
+      shaped_train_args,
+      shaped_train_kwargs,
+      state_mesh_shardings,
+      state_logical_annotations,
+      model,
+  ) = get_shaped_inputs(topology_mesh, config)
 
   # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
@@ -230,8 +242,14 @@ def main(argv: Sequence[str]) -> None:
 
   # print weights sharding info under debug sharding mode
   if config.debug_sharding:
-    max_utils.print_non_trivial_mesh_axis(topology_mesh)
-    maxtext_utils.print_shardings_params(shaped_train_args[0].params, state_mesh_shardings.params, topology_mesh)
+    max_utils.print_mesh_axes_info(topology_mesh)
+    maxtext_utils.print_shardings_params(
+        shaped_train_args[0].params,
+        state_mesh_shardings.params,
+        topology_mesh,
+        state_logical_annotations,
+        config.logical_axis_rules,
+    )
 
   # Compile
   print("Jitting and compiling train step...", flush=True)

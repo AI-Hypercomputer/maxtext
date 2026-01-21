@@ -19,6 +19,8 @@ import functools
 import pickle
 import os
 
+from collections import defaultdict
+
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
@@ -27,6 +29,7 @@ import numpy as np
 
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
+from jax.sharding import PartitionSpec as P
 
 import jax
 import jax.numpy as jnp
@@ -1227,11 +1230,52 @@ def create_learning_rate_schedule(config):
   return optax.join_schedules(pieces, boundaries)
 
 
-def print_shardings_params(params, params_sharding, mesh):
+def print_shardings_params(params, params_sharding, mesh, state_logical_annotations=None, logical_axis_rules=None):
   """Print state shardings."""
   leaves_params, _ = jax.tree_util.tree_flatten_with_path(params)
   leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(params_sharding)
-  for (path, leaf_val), (_, leaf_sharding) in zip(leaves_params, leaves_sharding):
+
+  leaves_rule_values = []
+  if state_logical_annotations and hasattr(state_logical_annotations, "params"):
+    leaves_rule_values, _ = jax.tree_util.tree_flatten_with_path(state_logical_annotations.params)
+  else:
+    leaves_rule_values = [(None, None)] * len(leaves_params)
+
+  if not len(leaves_params) == len(leaves_sharding) == len(leaves_rule_values):
+    max_logging.warning(
+        "Warning: Parameter tree structure mismatch between params, shardings," " and logical annotations."
+    )
+    return
+
+  # Build a reverse map
+  rule_value_to_semantic = defaultdict(list)
+  if logical_axis_rules:
+    rules_iter = logical_axis_rules.items() if isinstance(logical_axis_rules, dict) else logical_axis_rules
+    for name, potentials in rules_iter:
+      if isinstance(potentials, str):
+        key = (potentials,)
+      elif potentials is None:
+        key = (None,)
+      elif isinstance(potentials, list):
+        key = tuple(potentials)
+      elif isinstance(potentials, tuple):
+        key = potentials
+      else:
+        key = (potentials,)
+
+      key = tuple(p for p in key)
+      rule_value_to_semantic[key].append(name)
+
+  # Header for the entire block (
+  max_logging.info("Parameter Path")
+  max_logging.info("Shape")
+  max_logging.info("Logical Axes")
+  max_logging.info("Physical PartitionSpec")
+  max_logging.info("-" * 120)
+
+  for (path, leaf_val), (_, leaf_sharding), (_, leaf_rule_value) in zip(
+      leaves_params, leaves_sharding, leaves_rule_values
+  ):
     path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
     shape = jax.typeof(leaf_val)
     pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)

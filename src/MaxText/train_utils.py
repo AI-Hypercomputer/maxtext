@@ -206,7 +206,7 @@ def setup_train_loop(config, recorder, devices=None):
               eval_data_iterator,
           )
 
-    state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+    state, state_mesh_annotations, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
         model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
     )
 
@@ -218,7 +218,9 @@ def setup_train_loop(config, recorder, devices=None):
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
       max_utils.print_non_trivial_mesh_axis(model.mesh)
-      maxtext_utils.print_shardings_params(state.params, state_mesh_shardings.params, model.mesh)
+      maxtext_utils.print_shardings_params(
+          state.params, state_mesh_shardings.params, model.mesh, state_mesh_annotations, config.logical_axis_rules
+      )
 
     if config.use_dpo:
       abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)

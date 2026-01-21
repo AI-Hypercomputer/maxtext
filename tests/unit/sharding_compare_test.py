@@ -97,7 +97,7 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
   validate_config(config)
 
   topology_mesh = get_topology_mesh(config)
-  _, _, state_mesh_shardings, _ = get_shaped_inputs(topology_mesh, config)
+  _, _, state_mesh_shardings, _, _ = get_shaped_inputs(topology_mesh, config)
   actual_json = named_shardings_to_json(state_mesh_shardings)
   expected_json = load_named_sharding_json(json_path)
 
