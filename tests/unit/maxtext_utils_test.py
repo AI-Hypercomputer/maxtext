@@ -15,13 +15,15 @@
 """ Tests for the common MaxText utilities """
 
 import functools
-from typing import Any
+from typing import Any, Sequence
 from collections.abc import Callable
 import os.path
 import unittest
+from unittest.mock import patch
+from dataclasses import dataclass, field
 
 from jax import random, vmap
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -38,7 +40,7 @@ from MaxText import maxtext_utils
 from MaxText import sharding
 from MaxText import inference_utils
 from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_TRAIN
+from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -839,6 +841,67 @@ class TestLearningRateSchedules(unittest.TestCase):
       )
     self.assertIn("warmup_steps_fraction", str(cm.exception))
     self.assertIn("wsd_decay_steps_fraction", str(cm.exception))
+
+
+class TestMeshUtils(unittest.TestCase):
+  """Test suite for the mesh creation utility function."""
+
+  @dataclass
+  class MockConfig:
+    """Minimal mock for pyconfig.HyperParameters."""
+
+    init_weights_seed: int = 42
+    shard_mode: str = ShardMode.EXPLICIT
+    mesh_axes: Sequence[str] = field(default_factory=lambda: ["data", "model"])
+
+  def setUp(self):
+    # Setup a dummy device array for the mock to return
+    self.devices_array = np.array(jax.devices())
+
+  @patch("MaxText.maxtext_utils.create_device_mesh")
+  def test_get_mesh_explicit_mode(self, mock_create_device_mesh):
+    """Tests that ShardMode.EXPLICIT sets axis_types to MANUAL."""
+    # 1. Setup Mock
+    mock_create_device_mesh.return_value = self.devices_array[:1].reshape((1,))
+    config = self.MockConfig(shard_mode=ShardMode.EXPLICIT, mesh_axes=["data"])
+
+    # 2. Run function
+    mesh = maxtext_utils.get_mesh_from_config(config)
+
+    # 3. Assertions
+    # Check that the internal utility was called correctly
+    mock_create_device_mesh.assert_called_once_with(config, None)
+
+    # Verify Mesh properties
+    self.assertEqual(mesh.axis_names, ("data",))
+    # In JAX, AxisType.MANUAL is the equivalent for explicit control
+    self.assertEqual(mesh.axis_types, (AxisType.Explicit,))
+
+  @patch("MaxText.maxtext_utils.create_device_mesh")
+  def test_get_mesh_auto_mode(self, mock_create_device_mesh):
+    """Tests that ShardMode.AUTO sets axis_types to AUTO."""
+    # 1. Setup Mock
+    mock_create_device_mesh.return_value = self.devices_array[:2].reshape((2, 1))
+    config = self.MockConfig(shard_mode=ShardMode.AUTO, mesh_axes=["data", "model"])
+
+    # 2. Run function
+    mesh = maxtext_utils.get_mesh_from_config(config)
+
+    # 3. Assertions
+    self.assertEqual(len(mesh.axis_types), 2)
+    self.assertTrue(all(t == AxisType.Auto for t in mesh.axis_types))
+
+  @patch("MaxText.maxtext_utils.create_device_mesh")
+  def test_get_mesh_with_provided_devices(self, mock_create_device_mesh):
+    """Tests that provided devices are passed through to the mesh creator."""
+    config = self.MockConfig()
+    specific_devices = self.devices_array[:2].reshape((1, 2))
+    mock_create_device_mesh.return_value = specific_devices
+
+    _ = maxtext_utils.get_mesh_from_config(config, devices=specific_devices)
+
+    # Verify the second argument to create_device_mesh was our device list
+    mock_create_device_mesh.assert_called_once_with(config, specific_devices)
 
 
 if __name__ == "__main__":

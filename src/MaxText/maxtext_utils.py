@@ -18,6 +18,7 @@
 import functools
 import pickle
 import os
+from typing import Sequence
 
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
@@ -27,6 +28,7 @@ import numpy as np
 
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
+from jax.sharding import AxisType, Mesh
 
 import jax
 import jax.numpy as jnp
@@ -39,10 +41,11 @@ import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as 
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import multimodal_utils
+from MaxText import pyconfig
 from MaxText import sharding
 from MaxText.configs import types
 from MaxText.utils import gcs_utils
-from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, ShardMode
 from MaxText.inference.page_manager import PageState
 from maxtext.common import checkpointing
 
@@ -1260,3 +1263,27 @@ def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
         delete_local_after=config.dump_jaxpr_delete_local_after,  # Keeping local for debugging
         all_host_upload=False,  # Only upload from lead host (Host 0)
     )
+
+
+def get_mesh_from_config(
+    config: pyconfig.HyperParameters,
+    devices: Sequence[jax.Device] | None = None,
+) -> Mesh:
+  """
+  Geh mesh from the configuration.
+
+  Args:
+    config: the configuration
+    devices: the devices
+
+  Returns:
+    the device mesh
+  """
+  devices_array = create_device_mesh(config, devices)
+
+  if config.shard_mode == ShardMode.EXPLICIT:
+    axis_types = tuple([AxisType.Explicit] * len(config.mesh_axes))
+  else:
+    axis_types = tuple([AxisType.Auto] * len(config.mesh_axes))
+
+  return Mesh(devices_array, config.mesh_axes, axis_types=axis_types)

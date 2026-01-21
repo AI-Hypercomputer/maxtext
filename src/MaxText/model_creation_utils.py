@@ -17,20 +17,21 @@
 
 from collections.abc import Sequence
 from typing import overload
+from functools import partial
+from etils import epath
 
 from flax import nnx
 import flax.linen as nn
 import jax
-from jax.sharding import Mesh, AxisType
+from jax.sharding import Mesh
+from orbax import checkpoint as ocp
+
 from MaxText import maxtext_utils
 from MaxText import max_utils
+from MaxText import maxtext_utils_nnx
 from MaxText import pyconfig
-from MaxText.layers import quantizations
-from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
-from MaxText.layers import models
-from orbax import checkpoint as ocp
-from functools import partial
-from etils import epath
+from MaxText.layers import quantizations, models
+from MaxText.common_types import MODEL_MODE_TRAIN
 
 
 @overload
@@ -40,6 +41,7 @@ def from_config(
     mesh: Mesh | None = None,
     *,
     model_mode: str = MODEL_MODE_TRAIN,
+    rngs: None = None,
 ) -> nn.Module:
   ...
 
@@ -80,15 +82,7 @@ def from_config(
       model = from_config(config)
   """
   if mesh is None:
-    devices_array = maxtext_utils.create_device_mesh(config, devices)
-
-    if config.shard_mode == ShardMode.EXPLICIT:
-      axis_types = tuple([AxisType.Explicit] * len(config.mesh_axes))
-    else:
-      axis_types = tuple([AxisType.Auto] * len(config.mesh_axes))
-
-    mesh = Mesh(devices_array, config.mesh_axes, axis_types=axis_types)
-
+    mesh = maxtext_utils.get_mesh_from_config(config, devices)
   model = create_model(config, mesh, model_mode=model_mode, rngs=rngs)
 
   # Return only the model
@@ -114,16 +108,10 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
 
 def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
+  is_training = model_mode == MODEL_MODE_TRAIN
 
   def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
-    if rng_key is None:
-      rng_key = jax.random.PRNGKey(config.init_weights_seed)
-
-    if model_mode == MODEL_MODE_TRAIN:
-      rngs = nnx.Rngs(params=rng_key, dropout=1)
-    else:
-      rngs = nnx.Rngs(params=rng_key)  # disable dropout RNG for inference
-
+    rngs = maxtext_utils_nnx.create_nnx_rngs(config, is_training=is_training, rng_key=rng_key)
     return from_config(config, devices, mesh, rngs=rngs, model_mode=model_mode)
 
   _create_model_partial = partial(_create_model, mesh=mesh, model_mode=model_mode, rng_key=rng_key)
@@ -135,6 +123,17 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
 
   if mesh is None:
     mesh = abstract_model.mesh
+
+  # Note for pure_nnx:
+  # Currently, the NNX model returned has a linen decoder wrapped to NNX. So it is not a pure NNX model and
+  # we still need to use nn.logical_axis_rules(config.logical_axis_rules) to get the out sharding from the linen
+  # LogicallyPartitioned structure.
+  # In the future if the pure NNX model is used, with pure NNX's eager sharding, there will be no LogicallyPartitioned
+  # structure in the abstract state and we can get the sharded state with the following code:
+  #     graphdef, state = nnx.get_abstract_model(_create_model_partial, mesh)
+  #     abstract_model = nnx.merge(graphdef, state)
+  #     model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model_partial, mesh=mesh)
+  #     sharded_state = nnx.state(model)
 
   # JIT a function that creates the model state with proper sharding from the start.
   # By providing out_shardings, we instruct JAX to produce sharded output directly,
