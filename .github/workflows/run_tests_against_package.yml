@@ -122,6 +122,7 @@ jobs:
             --durations=0 \
             --deselect "tests/unit/tokenizer_test.py::TokenizerTest::test_detokenize" \
             --cov=MaxText \
+            --cov=maxtext \
             --cov-report=xml \
             --cov-report=term \
             $SPLIT_ARGS

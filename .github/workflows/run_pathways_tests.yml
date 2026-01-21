@@ -97,7 +97,8 @@ jobs:
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # TODO(b/454659463): Enable test_default_hlo_match after volume mount is supported.
           .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0
-    
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src"
     services:
       resource_manager:
         image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
