@@ -389,52 +389,43 @@ def eval_step(model, config, state, data, dropout_rng):
 
 def train_loop(config, recorder, state=None):
   """Main Training loop."""
-  (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      data_loader,
-      rampup_manager,
-      eval_data_iterator,
-      state,
-  ) = train_utils.setup_train_loop(config, recorder)
+  ctx = train_utils.setup_train_loop(config, recorder)
+  state = ctx.state
 
   if config.use_dpo:
     if "reference_params" not in state.params:
       reference_params = jax.tree.map(jnp.copy, state.params["params"])
       state = _merge_dpo_state(state, reference_params)
-    state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
+    state_mesh_shardings = _merge_dpo_state(ctx.state_mesh_shardings, ctx.state_mesh_shardings.params["params"])
+  else:
+    state_mesh_shardings = ctx.state_mesh_shardings
 
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config,
-      model,
-      mesh,
+      ctx.model,
+      ctx.mesh,
       state,
       state_mesh_shardings,
       train_step,
       eval_step,
-      eval_data_iterator,
+      ctx.eval_data_iterator,
       params_shardings,
   )
 
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(ctx.mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data:
       state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
     if config.compiled_trainstep_file == "":  # compile only when there is no pre-compiled file loaded
-      compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
+      compiled = p_train_step.lower(state, shaped_batch, ctx.init_rng).compile()
       compiled_stats = compiled.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_stats)
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-  metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
+  metric_logger = MetricLogger(config=config, learning_rate_schedule=ctx.learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
   metric_logger.write_setup_info_to_tensorboard(state.params)
@@ -445,11 +436,11 @@ def train_loop(config, recorder, state=None):
       prof.maybe_activate_profiler(step, state)
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+        example_batch = ctx.data_loader.load_next_batch(rampup_manager=ctx.rampup_manager)
         # pylint: disable=not-callable
-        nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+        nextrng = jax.jit(jax.random.fold_in)(ctx.init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+          with jax.set_mesh(ctx.mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             if config.shard_optimizer_over_data:
               state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
             state, metrics = p_train_step(state, example_batch, nextrng)
@@ -458,7 +449,7 @@ def train_loop(config, recorder, state=None):
       last_step_completion = datetime.datetime.now()
 
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+      checkpointing.maybe_save_checkpoint(ctx.checkpoint_manager, state_to_save, config, ctx.data_iterator, step)
 
       if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
         jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -471,17 +462,17 @@ def train_loop(config, recorder, state=None):
         )
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
-        assert eval_data_iterator
+        assert ctx.eval_data_iterator
         # Explicitly reset the eval iterator and counters before starting the eval loop
-        eval_data_iterator.reset()
+        ctx.eval_data_iterator.reset()
         metric_logger.reset_eval_metrics()
 
         eval_step_count = 0
         # pylint: disable=not-callable
-        for eval_batch in eval_data_iterator:
+        for eval_batch in ctx.eval_data_iterator:
           if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
             break
-          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+          with jax.set_mesh(ctx.mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             eval_metrics = p_eval_step(state, eval_batch, nextrng)
           metric_logger.record_eval_metrics(step, metrics=eval_metrics)
           max_logging.log(f"Completed eval step {eval_step_count}")
@@ -500,10 +491,10 @@ def train_loop(config, recorder, state=None):
 
     if config.save_checkpoint_on_completion:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
-    if checkpoint_manager is not None:
+      checkpointing.maybe_save_checkpoint(ctx.checkpoint_manager, state_to_save, config, ctx.data_iterator)
+    if ctx.checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
-      checkpoint_manager.wait_until_finished()
+      ctx.checkpoint_manager.wait_until_finished()
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:

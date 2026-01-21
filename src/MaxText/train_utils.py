@@ -16,20 +16,54 @@
 """ Utils that are only interesting for training in MaxText. """
 
 import os
+from typing import Any, Iterator
+
 import jax
+
+import optax
+
+from pydantic import BaseModel, Field, ConfigDict
+
 from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
-from MaxText import sharding
+from MaxText import model_creation_utils
 from MaxText import optimizers
+from MaxText import sharding
+from MaxText.data_loader import create_dataloader, DataLoader
 from MaxText.dpo_utils import _merge_dpo_state
-from MaxText.data_loader import create_dataloader
-from MaxText.rampup_batch import create_rampup_manager
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from MaxText.rampup_batch import create_rampup_manager, RampupBatchManager
 from MaxText.utils.goodput_utils import GoodputEvent
 from MaxText.utils.goodput_utils import maybe_record_goodput
-from MaxText import model_creation_utils
+
+# Fix for Pydantic resolving TrainState annotations
+ArrayTree = Any
+
+
+class TrainContext(BaseModel):
+  """Training context."""
+
+  model_config = ConfigDict(arbitrary_types_allowed=True)
+
+  init_rng: jax.Array = Field(description="PRNG key initialized for the training loop.")
+  checkpoint_manager: checkpointing.CheckpointManager | None = Field(
+      description="Orbax CheckpointManager for saving/restoring checkpoints."
+  )
+  state_mesh_shardings: Any = Field(description="TrainState containing sharding specifications for the model state.")
+  model: Any = Field(description="The initialized Flax (Linen or NNX) model instance.")
+  mesh: jax.sharding.Mesh = Field(description="JAX Mesh object defining the device topology.")
+  learning_rate_schedule: optax.Schedule | None = Field(description="Optax schedule function for learning rate.")
+  data_iterator: Iterator[Any] = Field(description="Iterator for training data.")
+  data_loader: DataLoader = Field(description="DataLoader instance handling sharding and batching.")
+  rampup_manager: RampupBatchManager | None = Field(description="Manager class for handling batch size rampup.")
+  eval_data_iterator: Iterator[Any] | None = Field(description="Iterator for evaluation data.")
+  state: Any = Field(description="Current TrainState containing parameters and optimizer state.")
+
+
+# Explicitly rebuild the model to resolve possible ForwardRefs
+TrainContext.model_rebuild()
 
 
 def create_training_tools(config, model, mesh):
@@ -157,25 +191,19 @@ def jit_train_and_eval_step(
   return p_train_step, p_eval_step
 
 
-def setup_train_loop(config, recorder, devices=None):
-  """Set up prerequisites for the training loop -
+def setup_train_loop(config, recorder, devices=None) -> TrainContext:
+  """Sets up prerequisites for the training loop.
 
-      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
-      Set up data iterator and tokenizer, initialize the model.
+  Sets up checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
+  Sets up data iterator and tokenizer, initializes the model.
 
-  Args: config recorder
+  Args:
+    config: pyconfig.HyperParameters
+    recorder: GoodputRecorder
+    devices: List of devices to use.
 
   Returns:
-    init_rng:
-    checkpoint_manager: Orbax checkpointer
-    state_mesh_annotations: the mesh annotations for the train state
-    model:
-    mesh:
-    learning_rate_schedule:
-    data_iterator:
-    data_loader:
-    rampup_manager: the class managing rampup batch sizes
-    state: the initialized train state
+      TrainContext: A dataclass containing the training context.
   """
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
@@ -252,18 +280,18 @@ def setup_train_loop(config, recorder, devices=None):
             "Could not restore reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
         )
 
-  return (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      data_loader,
-      rampup_manager,
-      eval_data_iterator,
-      state,
+  return TrainContext(
+      init_rng=init_rng,
+      checkpoint_manager=checkpoint_manager,
+      state_mesh_shardings=state_mesh_shardings,
+      model=model,
+      mesh=mesh,
+      learning_rate_schedule=learning_rate_schedule,
+      data_iterator=data_iterator,
+      data_loader=data_loader,
+      rampup_manager=rampup_manager,
+      eval_data_iterator=eval_data_iterator,
+      state=state,
   )
 
 
