@@ -288,3 +288,6 @@ def TokenizeOp(tokenizer, features: Features, data_keys: Iterable[str] = ("input
     elif isinstance(tokenizer, SentencePieceTokenizer):
       features[k] = tokenizer.encode(features[k])
   return features
+
+
+type TokenizerType = TikTokenTokenizer | HFTokenizer | SentencePieceTokenizer
