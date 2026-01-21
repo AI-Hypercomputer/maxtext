@@ -21,7 +21,7 @@ may fail on different versions like v5p-8, v6e-8.
 
 Usage:
 
-  pytest tests/integration_tests/sft_trainer_correctness_test.py
+  pytest tests/integration/sft_trainer_correctness_test.py
 """
 
 import os.path

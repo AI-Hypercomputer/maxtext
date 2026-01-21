@@ -42,7 +42,7 @@ from MaxText.layers.attentions import Attention
 import numpy as np
 import pytest
 
-from . import attention_test_util
+from tests.utils import attention_test_util
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
