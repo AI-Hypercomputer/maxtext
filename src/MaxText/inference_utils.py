@@ -14,6 +14,9 @@
 
 """Common utilities for MaxText inference, including sampling and log probability calculations."""
 
+import abc
+from typing import List, Optional
+
 import jax
 import jax.numpy as jnp
 
@@ -54,10 +57,21 @@ def prompt_logprobs_from_packed_prefill(
     decoder_segment_ids: jax.Array,  # [B, S] which prompt each token belongs to
     true_lengths: jax.Array,  # [num_prompts] true lengths per prompt
 ) -> jax.Array:
-  """
+  """Computes log probabilities for packed prefill.
+
   Returns [B, S] where out[b, t] = log P(token[t] | tokens[:t] of its prompt).
   - First token of each segment = NaN (no prediction).
   - Tokens at or beyond the true length of their segment = NaN.
+
+  Args:
+    logits: [B, S, V] predicts token t+1 at position t.
+    input_tokens: [B, S] input token IDs.
+    decoder_positions: [B, S] position within its own prompt.
+    decoder_segment_ids: [B, S] which prompt each token belongs to.
+    true_lengths: [num_prompts] true lengths per prompt.
+
+  Returns:
+    jax.Array: The log probabilities [B, S].
   """
   B, _, _ = logits.shape  # B, S, V
 
@@ -85,7 +99,13 @@ def prompt_logprobs_from_prefill(
     input_tokens: jax.Array,  # [B, S]
     true_length,  # int or jax.Array with shape [] or [B]
 ) -> jax.Array:
-  """
+  """Computes log probabilities for prefill.
+
+  Args:
+    logits: [B, S, V] predicts token t+1 at position t.
+    input_tokens: [B, S] input token IDs.
+    true_length: int or jax.Array with shape [] or [B].
+
   Returns [B, S] where out[:, t] = log P(token[t] | tokens[:t]).
   - Position 0 is NaN (To match OpenAI format).
   - Positions >= true_length are masked to NaN.
@@ -112,132 +132,235 @@ def prompt_logprobs_from_prefill(
 
 
 @jax.jit
-def log_prob_of_chosen_token(logits, chosen_index):
-  """
-  logits: unnormalized logits, shape [batch, seq, vocab]
-  chosen_index: index of the chosen token, shape [batch, seq]
+def log_prob_of_chosen_token(logits: jax.Array, chosen_index: jax.Array) -> jax.Array:
+  """Calculates the log probability of chosen tokens.
+
+  Args:
+    logits: unnormalized logits, shape [batch, seq, vocab].
+    chosen_index: index of the chosen token, shape [batch, seq].
+
+  Returns:
+    jax.Array: The log probability of the chosen tokens [batch, seq].
   """
   logps = jax.nn.log_softmax(logits, axis=-1)  # [batch, seq, vocab]
   chosen_prob = jnp.take_along_axis(logps, chosen_index[..., None], axis=-1)  # [batch, seq, 1]
   return chosen_prob[..., 0]  # [batch, seq]
 
 
-def sampling(logits, rng, algorithm, topk=0, nucleus_topp=0, temperature=1.0):
+# --- Chain of Responsibility for Logits Processing ---
+
+
+class LogitsProcessor(abc.ABC):
+  """Abstract base class for all LogitsProcessors that modify the distribution."""
+
+  @abc.abstractmethod
+  def __call__(self, logits: jax.Array) -> jax.Array:
+    """Process logits and return new logits.
+
+    Args:
+      logits: The input logits tensor [batch_size, vocab_size].
+
+    Returns:
+      jax.Array: The processed logits.
+    """
+    raise NotImplementedError
+
+
+class TemperatureLogitsWarper(LogitsProcessor):
+  """Logits processor that divides logits by a temperature value."""
+
+  def __init__(self, temperature: float):
+    """Initializes the TemperatureLogitsWarper.
+
+    Args:
+      temperature: The value to divide the logits by. Must be > 0.
+    """
+    self.temperature = temperature
+
+  def __call__(self, logits: jax.Array) -> jax.Array:
+    # Ensure temperature is not zero to avoid division by zero
+    temp = jnp.maximum(self.temperature, 1e-7)
+    return logits / temp
+
+
+class TopKLogitsWarper(LogitsProcessor):
+  """Logits processor that performs top-k filtering."""
+
+  def __init__(self, top_k: int, filter_value: float = NEG_INF):
+    """Initializes the TopKLogitsWarper.
+
+    Args:
+      top_k: The number of highest probability vocabulary tokens to keep.
+      filter_value: The value to set for filtered tokens (default: -1.0e7).
+    """
+    self.top_k = top_k
+    self.filter_value = filter_value
+
+  def __call__(self, logits: jax.Array) -> jax.Array:
+    # Safety check for top_k > 0
+    k = jnp.maximum(self.top_k, 1)
+    # Get the value of the k-th largest logit
+    top_k_values = jax.lax.top_k(logits, k)[0][..., -1, None]
+    # Mask logits smaller than the k-th value
+    return jnp.where(logits < top_k_values, self.filter_value, logits)
+
+
+class TopPLogitsWarper(LogitsProcessor):
+  """Logits processor that performs nucleus (top-p) filtering.
+
+  It keeps the top tokens with cumulative probability >= top_p.
   """
-  logits: unnormalized logits to sample, shaped [YOUR_LEADING_DIMS, Vocab], before logit
-  rng: rng key to use
-  algorithm: string representing supported algorithms
-  topk: restricting to topk logits before sampling
-  nucleus_topp: restricting to p probability mass before sampling
-  temperature: temperature parameter for scaling probability
+
+  def __init__(self, top_p: float, filter_value: float = NEG_INF, min_tokens_to_keep: int = 1):
+    """Initializes the TopPLogitsWarper.
+
+    Args:
+      top_p: The cumulative probability threshold (0 < top_p <= 1).
+      filter_value: The value to set for filtered tokens.
+      min_tokens_to_keep: Minimum number of tokens to keep regardless of p.
+    """
+    self.top_p = top_p
+    self.filter_value = filter_value
+    self.min_tokens_to_keep = min_tokens_to_keep
+
+  def __call__(self, logits: jax.Array) -> jax.Array:
+    # Sort logits in descending order
+    sorted_logits = jnp.sort(logits, axis=-1)[..., ::-1]
+    cumulative_probs = jnp.cumsum(jax.nn.softmax(sorted_logits, axis=-1), axis=-1)
+
+    # Find the cutoff index where cumulative probability exceeds top_p
+    # sum(cumulative_probs < top_p) gives the count of items to *keep* strictly < p.
+    # We want to include the first item that crosses the threshold, so we don't -1 here.
+    # We enforce keeping at least 'min_tokens_to_keep'.
+    cutoff_index = jnp.sum(cumulative_probs < self.top_p, axis=-1, keepdims=True)
+    cutoff_index = jnp.maximum(cutoff_index, self.min_tokens_to_keep - 1)
+
+    # Get the logit value corresponding to the cutoff index
+    cutoff_logit = jnp.take_along_axis(sorted_logits, cutoff_index, axis=-1)
+
+    # Mask logits smaller than the cutoff logit
+    return jnp.where(logits < cutoff_logit, self.filter_value, logits)
+
+
+class MinPLogitsWarper(LogitsProcessor):
+  """Logits processor that performs Min-P filtering.
+
+  It masks tokens with probability < min_p * max_probability.
+  This is implemented using logs as: logit < max_logit + log(min_p).
   """
-  if algorithm == "greedy":
-    return jnp.argmax(logits, axis=-1)
-  elif algorithm == "weighted":
-    return jax.random.categorical(rng, logits / temperature)
-  elif algorithm == "nucleus":
-    return sample_nucleus_topp_logits(logits, nucleus_topp, temperature, rng)
-  elif algorithm == "topk":
-    return sample_topk_logits(logits, topk, temperature, rng)
-  elif algorithm == "composite":
-    return sample_topk_topp_weighted(logits, topk, nucleus_topp, temperature, rng)
-  else:
-    raise ValueError(f"Sampling {algorithm=} not supported!")
+
+  def __init__(self, min_p: float, filter_value: float = NEG_INF):
+    """Initializes the MinPLogitsWarper.
+
+    Args:
+      min_p: The scaling factor for the minimum probability threshold (0 <= min_p <= 1).
+      filter_value: The value to set for filtered tokens.
+    """
+    self.min_p = min_p
+    self.filter_value = filter_value
+
+  def __call__(self, logits: jax.Array) -> jax.Array:
+    # Calculate max logit (which corresponds to max probability)
+    top_logit = jnp.max(logits, axis=-1, keepdims=True)
+    # Threshold in log space: log(p_threshold) = log(p_max * min_p) = log(p_max) + log(min_p)
+    # Since log(p_max) = max_logit - log(Z), and log(p_item) = logit - log(Z),
+    # The comparison log(p_item) < log(p_threshold) simplifies to logit < max_logit + log(min_p).
+    logit_threshold = top_logit + jnp.log(self.min_p)
+    return jnp.where(logits < logit_threshold, self.filter_value, logits)
 
 
-def sample_nucleus_topp_logits(logits, nucleus_topp, temperature, rng):
-  """Restrict sampling to the top logits with cumulative probability >= nucleus_topp.
+class LogitsProcessorList(LogitsProcessor):
+  """A container to apply a list of LogitsProcessors sequentially."""
 
-  The nucleus sampling method is proposed in the paper `The Curious Case of
-  Neural Text Degeneration (https://arxiv.org/pdf/1904.09751.pdf)`
+  def __init__(self, processors: Optional[List[LogitsProcessor]] = None):
+    """Initializes the LogitsProcessorList.
 
-  """
-  if nucleus_topp < 0:
-    raise ValueError("Can't apply nucleus with parameter {nucleus_topp=} less zero")
-  logits_sorted = jnp.sort(logits, axis=-1)[..., ::-1]  # sort descending
-  sorted_cum_probs = jnp.cumsum(jax.nn.softmax(logits_sorted, axis=-1), axis=-1)  # get cumsum probs
-  cutoff_index = jnp.sum(sorted_cum_probs < nucleus_topp, axis=-1, keepdims=True)  # find cutoff index
-  cutoff_logit = jnp.take_along_axis(logits_sorted, cutoff_index, axis=-1)
-  logits = jnp.where(logits < cutoff_logit, jnp.full_like(logits, NEG_INF), logits)
-  return jax.random.categorical(rng, logits / temperature)
+    Args:
+      processors: A list of LogitsProcessor instances.
+    """
+    self.processors = processors if processors is not None else []
 
+  def append(self, processor: LogitsProcessor):
+    """Appends a processor to the list."""
+    self.processors.append(processor)
 
-def sample_topk_logits(logits, topk, temperature, rng):
-  """Restricting sampling to the best k logits."""
-  if topk <= 0:
-    raise ValueError("Can't apply algorithm topk with parameter {topk=} less than or equal to zero")
-  topk_logits, topk_idxs = jax.lax.top_k(logits, topk)
-  topk_token = jnp.expand_dims(jax.random.categorical(rng, topk_logits / temperature).astype(jnp.int32), axis=-1)
-  sampled_tokens = jnp.squeeze(jnp.take_along_axis(topk_idxs, topk_token, axis=-1), axis=-1).astype(jnp.int32)
-  return sampled_tokens
+  def __call__(self, logits: jax.Array) -> jax.Array:
+    """Applies all processors in order."""
+    for processor in self.processors:
+      logits = processor(logits)
+    return logits
 
 
-def sample_topk_topp_weighted(logits, topk, nucleus_topp, temperature, rng):
-  """Applies top-k, top-p, and temperature sampling to logits.
+class Sampler:
+  """Base sampler class to perform the final random selection."""
 
-  This function combines three common sampling techniques to control the
-  randomness and diversity of the generated text. The operations are applied
-  sequentially:
+  def __call__(self, logits: jax.Array, rng: jax.Array) -> jax.Array:
+    """Samples from the logits using categorical distribution.
 
-  1.  **Top-k filtering**: The vocabulary is restricted to the `topk` most
-      likely tokens.
-  2.  **Top-p (nucleus) filtering**: From the `topk` tokens, the smallest
-      set of tokens whose cumulative probability exceeds `nucleus_topp` is
-      selected.
-  3.  **Temperature scaling**: The logits of the filtered tokens are scaled
-      by the `temperature`. Higher temperatures result in a flatter
-      distribution (more randomness), while lower temperatures make the
-      distribution sharper (less randomness).
-  4.  **Sampling**: A token is sampled from the final probability
-      distribution using composite sampling.
+    Args:
+      logits: The processed logits tensor.
+      rng: The JAX random key.
+
+    Returns:
+      jax.Array: The sampled token ID (int32).
+    """
+    return jax.random.categorical(rng, logits, axis=-1).astype(jnp.int32)
+
+
+def sampling(
+    logits: jax.Array,
+    rng: jax.Array,
+    algorithm: str,
+    topk: int = 0,
+    nucleus_topp: float = 0.0,
+    temperature: float = 1.0,
+    min_p: float = 0.0,
+) -> jax.Array:
+  """Performs sampling on logits using the specified algorithm and parameters.
+
+  This function constructs a `LogitsProcessorList` based on the provided arguments
+  to warp the distribution, and then samples a token.
 
   Args:
-    logits: The unnormalized log probabilities of the vocabulary tokens,
-      with shape `[batch, sequence, vocab_size]`.
-    topk: The number of most likely tokens to consider. Must be positive.
-    nucleus_topp: The cumulative probability threshold for nucleus sampling.
-      Must be in the range (0, 1].
-    temperature: The temperature for scaling the logits.
+    logits: The unnormalized log probabilities [batch, ..., vocab].
     rng: The JAX random number generator key.
+    algorithm: The sampling strategy ('greedy', 'topk', 'nucleus', 'min_p', 'composite', 'weighted').
+    topk: The K value for top-k sampling (used if algorithm is 'topk' or 'composite').
+    nucleus_topp: The P value for nucleus sampling (used if algorithm is 'nucleus' or 'composite').
+    temperature: The temperature value (used for all stochastic sampling).
+    min_p: The P value for min-p sampling (used if algorithm is 'min_p' or 'composite').
 
   Returns:
-    The sampled token indices, with shape `[batch, sequence]`.
+    jax.Array: The sampled token IDs.
+
+  Raises:
+    ValueError: If an unsupported algorithm is provided.
   """
-  if topk <= 0:
-    raise ValueError(f"topk must be positive, got {topk=}")
-  if not 0.0 < nucleus_topp <= 1.0:
-    raise ValueError(f"nucleus_topp must be in (0, 1], got {nucleus_topp=}")
+  if algorithm == "greedy":
+    return jnp.argmax(logits, axis=-1).astype(jnp.int32)
 
-  # 1. Top-K filtering
-  topk_logits, topk_idxs = jax.lax.top_k(logits, topk)
+  # Construct the processor chain
+  processors = LogitsProcessorList()
 
-  # 2. Top-P filtering on the top-k results
-  sorted_cum_probs = jnp.cumsum(jax.nn.softmax(topk_logits, axis=-1), axis=-1)
+  # 1. Temperature (Apply first to affect probability distribution for P/Min-P logic)
+  if temperature != 1.0 and temperature > 0:
+    processors.append(TemperatureLogitsWarper(temperature))
 
-  # Find the number of elements to keep. We keep all elements until the cumulative
-  # probability exceeds nucleus_topp. This is equivalent to finding the index of
-  # the first element that is >= nucleus_topp and keeping all elements up to that index.
-  # `jnp.sum(sorted_cum_probs < nucleus_topp)` gives the index of the last element
-  # strictly within the nucleus. We need to include the next element that crosses the threshold.
-  cutoff_index = jnp.sum(sorted_cum_probs < nucleus_topp, axis=-1, keepdims=True)
+  # 2. Min P
+  if algorithm == "min_p" or (algorithm == "composite" and min_p > 0.0):
+    processors.append(MinPLogitsWarper(min_p))
 
-  # Create a mask that is True for indices we want to keep.
-  # We keep all indices up to and including the cutoff_index.
-  indices = jnp.arange(topk_logits.shape[-1])
-  mask = indices <= cutoff_index
+  # 3. Top K (Prune hard tail)
+  if algorithm == "topk" or (algorithm == "composite" and topk > 0):
+    processors.append(TopKLogitsWarper(topk))
 
-  # Apply the mask to filter the logits.
-  filtered_topk_logits = jnp.where(mask, topk_logits, jnp.full_like(topk_logits, NEG_INF))
+  # 4. Top P (Prune stochastic tail)
+  if algorithm == "nucleus" or (algorithm == "composite" and 0.0 < nucleus_topp < 1.0):
+    processors.append(TopPLogitsWarper(nucleus_topp))
 
-  # 3. Apply temperature
-  scaled_logits = filtered_topk_logits / jnp.maximum(temperature, 1e-6)  # add epsilon for stability
+  # Apply processors
+  logits = processors(logits)
 
-  # 4. Sample
-  sampled_topk_index = jax.random.categorical(rng, scaled_logits).astype(jnp.int32)
-
-  # Map the index back to the original vocabulary
-  sampled_token = jnp.squeeze(
-      jnp.take_along_axis(topk_idxs, jnp.expand_dims(sampled_topk_index, axis=-1), axis=-1), axis=-1
-  ).astype(jnp.int32)
-
-  return sampled_token
+  # Sample
+  sampler = Sampler()
+  return sampler(logits, rng)
