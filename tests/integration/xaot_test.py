@@ -123,6 +123,7 @@ class CompileThenLoadTest(unittest.TestCase):
 
     print(f"Successfully compiled and loaded for test {test_name}!")
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_default_compile_load(self):
     self.run_compile_then_load("default_run")

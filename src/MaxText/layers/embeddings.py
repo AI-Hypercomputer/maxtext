@@ -930,17 +930,14 @@ def positional_embedding_as_linen(*, embedding_dims: int, max_wavelength: int = 
 
 @dataclasses.dataclass(repr=False)
 class PositionalEmbedding(nnx.Module):
-  """A layer that adds sinusoidal positional embeddings to the input.
+  """A layer that adds sinusoidal positional embeddings to the input."""
 
-  Attributes:
-    embedding_dims: The dimension of the embeddings.
-    max_wavelength: The maximum wavelength for the sinusoidal positional embeddings.
-    rngs: RNG state passed in by nnx.bridge.to_linen, not used in this module.
-  """
-
+  #: The dimension of the embeddings.
   embedding_dims: int
+  #: The maximum wavelength for the sinusoidal positional embeddings.
   max_wavelength: int = _MAX_WAVELENGTH
 
+  #: RNG state passed in by nnx.bridge.to_linen, not used in this module.
   rngs: nnx.Rngs = None  # Not used in PositionalEmbedding but passed in by nnx.bridge.to_linen
 
   def __call__(
@@ -1007,30 +1004,25 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
   https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama4/modeling_llama4.py
   This implementation follows the Llama4 vision encoder's rotary embedding approach,
   which uses 2D coordinates (x, y) to generate rotary position embeddings.
-
-  Attributes:
-    image_size: int size of the input image
-    patch_size: int size of the image patches
-    hidden_size: int size of the hidden dimension
-    num_attention_heads: int number of attention heads
-    rope_theta: float = 10000.0 base theta value for the frequency computation
-    cast_as_fprop_dtype: bool = True whether to cast the output to the fprop dtype
-    fprop_dtype: DType = jnp.bfloat16 the dtype of the output
-    rngs: RNG state passed in by nnx.bridge.to_linen, not used in this module.
-  Returns:
-    jax.Array of shape [batch_size_times_tiles, num_patches_incl_cls, num_heads, head_dim]
-    where vision rotary position embeddings are applied.
   """
 
+  #: size of the input image
   image_size: int
+  #: size of the image patches
   patch_size: int
+  #: size of the hidden dimension
   hidden_size: int
+  #: number of attention heads
   num_attention_heads: int
+  #: base theta value for the frequency computation
   rope_theta: float = 10000.0
+  #: whether to cast the output to the fprop dtype
   cast_as_fprop_dtype: bool = True
+  #: the dtype of the output
   fprop_dtype: DType = jnp.bfloat16
   # Not used in LlamaVisionRotaryEmbedding but passed in by nnx.bridge.to_linen.
   # TODO: Remove when bridge no longer needed
+  #: RNG state passed in by nnx.bridge.to_linen, not used in this module
   rngs: nnx.Rngs = None
 
   @property

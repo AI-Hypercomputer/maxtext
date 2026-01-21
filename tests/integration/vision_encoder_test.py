@@ -35,6 +35,8 @@ from MaxText.layers import models
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT, MAXTEXT_ASSETS_ROOT
 from MaxText import maxengine
 
+pytestmark = pytest.mark.integration_test
+
 
 # 4b with vit
 DEFAULT_LOAD_PARAMETERS_PATH = (

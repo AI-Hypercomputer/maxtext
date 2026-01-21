@@ -228,7 +228,7 @@ def main(argv: Sequence[str]) -> None:
   # print weights sharding info under debug sharding mode
   if config.debug_sharding:
     max_utils.print_non_trivial_mesh_axis(topology_mesh)
-    maxtext_utils.print_state_mesh_shardings_params(shaped_train_args[0], state_mesh_shardings, topology_mesh)
+    maxtext_utils.print_shardings_params(shaped_train_args[0].params, state_mesh_shardings.params, topology_mesh)
 
   # Compile
   print("Jitting and compiling train step...", flush=True)

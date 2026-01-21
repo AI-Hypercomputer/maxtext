@@ -1,5 +1,4 @@
-<!--
- # Copyright 2023–2025 Google LLC
+# Copyright 2023-2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,36 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
- -->
-
-# MaxText
-
-```{raw} html
-:file: index.html
-```
-
-:link: reference/api
-
-<div class="doc-body">
-<section class="latest-news">
-
-```{include} ../README.md
-:start-after: <!-- NEWS START -->
-:end-before: <!-- NEWS END -->
-```
-
-</section>
-</div>
-
-```{toctree}
-:maxdepth: 2
-:hidden:
-
-install_maxtext
-tutorials
-run_maxtext
-guides
-reference
-development
-release_notes
-```

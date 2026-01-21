@@ -120,8 +120,9 @@ jobs:
             -v \
             -m "${FINAL_PYTEST_MARKER}" \
             --durations=0 \
-            --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize" \
+            --deselect "tests/unit/tokenizer_test.py::TokenizerTest::test_detokenize" \
             --cov=MaxText \
+            --cov=maxtext \
             --cov-report=xml \
             --cov-report=term \
             $SPLIT_ARGS

@@ -24,7 +24,7 @@ import optax
 from absl.testing import absltest
 
 # Import the module under test
-from MaxText.distillation import train_distill
+from maxtext.trainers.post_train.distillation import train_distill
 from MaxText import pyconfig
 
 

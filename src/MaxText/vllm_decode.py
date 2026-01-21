@@ -65,6 +65,8 @@ FLAGS = flags.FLAGS
 flags.DEFINE_integer("ici_data_parallelism", 1, "Size of the data parallelism dimension.")
 flags.DEFINE_integer("ici_tensor_parallelism", 1, "Size of the non-expert tensor parallelism dimension.")
 flags.DEFINE_integer("ici_expert_parallelism", 1, "Size of the MoE expert parallelism dimension.")
+flags.DEFINE_bool("enable_dp_attention", False, "Enable attention DP parallelism")
+flags.DEFINE_bool("debug_sharding", False, "Debug Shardings")
 
 # Model
 flags.DEFINE_string("model_name", "qwen3-30b-a3b", "Model name for MaxText.")
@@ -97,6 +99,7 @@ def decode_with_vllm(
     ici_data_parallelism: int,
     ici_tensor_parallelism: int,
     ici_expert_parallelism: int,
+    enable_dp_attention: bool,
     max_prefill_length: int,
     max_target_length: int,
     gpu_memory_utilization: float,
@@ -105,6 +108,7 @@ def decode_with_vllm(
     decode_sampling_temperature: float,
     decode_sampling_nucleus_p: float,
     decode_sampling_top_k: float,
+    debug_sharding: bool,
 ) -> None:
   """Decode using vLLM with a MaxText model implementation.
 
@@ -115,7 +119,8 @@ def decode_with_vllm(
     load_parameters_path: Path to load model parameters from.
     ici_data_parallelism: Size of the data parallelism dimension.
     ici_tensor_parallelism: Size of the non-expert tensor parallelism dimension.
-    ici_expert_parallelism: Size of the MoE expert parallelism dimension.
+    ici_expert_parallelism: Size of the MoE expert parallelism dimension
+    enable_dp_attention: Enable DP attention
     max_prefill_length: Maximum prefill length.
     max_target_length: Maximum total context length (MCL).
     gpu_memory_utilization: Fraction of GPU memory to be used for the model executor.
@@ -145,18 +150,20 @@ def decode_with_vllm(
       "max_target_length": max_target_length,
       "weight_dtype": "bfloat16",
       "allow_split_physical_axes": True,
+      "debug_sharding": debug_sharding,
   }
   if load_parameters_path is not None:
     vllm_args["additional_config"]["maxtext_config"]["load_parameters_path"] = load_parameters_path
   else:
     vllm_args["load_format"] = "dummy"
 
+  sharding_strategy = {
+      "enable_dp_attention": enable_dp_attention,
+  }
+  if enable_expert_parallel:
+    sharding_strategy["expert_parallelism"] = ici_expert_parallelism
   vllm_args["additional_config"]["sharding"] = {
-      "sharding_strategy": {
-          "tensor_parallelism": ici_tensor_parallelism,
-          "expert_parallelism": ici_expert_parallelism,
-          "data_parallelism": ici_data_parallelism,
-      },
+      "sharding_strategy": sharding_strategy,
   }
 
   if enable_expert_parallel:
@@ -278,6 +285,7 @@ def main(argv: Sequence[str]) -> None:
         ici_data_parallelism=FLAGS.ici_data_parallelism,
         ici_tensor_parallelism=FLAGS.ici_tensor_parallelism,
         ici_expert_parallelism=FLAGS.ici_expert_parallelism,
+        enable_dp_attention=FLAGS.enable_dp_attention,
         max_target_length=FLAGS.max_target_length,
         max_prefill_length=FLAGS.max_prefill_length,
         gpu_memory_utilization=FLAGS.gpu_memory_utilization,
@@ -286,6 +294,7 @@ def main(argv: Sequence[str]) -> None:
         decode_sampling_temperature=FLAGS.decode_sampling_temperature,
         decode_sampling_nucleus_p=FLAGS.decode_sampling_nucleus_p,
         decode_sampling_top_k=FLAGS.decode_sampling_top_k,
+        debug_sharding=FLAGS.debug_sharding,
     )
 
 

@@ -31,7 +31,7 @@ import os
 import pytest
 from MaxText.train import main as train_main
 from MaxText.globals import MAXTEXT_REPO_ROOT
-from tests.integration_tests.checkpointing_test import get_checkpointing_command
+from tests.integration.checkpointing_test import get_checkpointing_command
 
 
 def check_start_step(metrics_file, start_step_target):

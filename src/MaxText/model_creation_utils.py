@@ -23,6 +23,7 @@ import flax.linen as nn
 import jax
 from jax.sharding import Mesh, AxisType
 from MaxText import maxtext_utils
+from MaxText import max_utils
 from MaxText import pyconfig
 from MaxText.layers import quantizations
 from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
@@ -153,7 +154,10 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
     with nn.logical_axis_rules(config.logical_axis_rules):
       sharded_state = create_sharded_state()
     model = nnx.merge(graphdef, sharded_state)
-
+    # print weights sharding info under debug sharding mode
+    if config.debug_sharding:
+      max_utils.print_non_trivial_mesh_axis(model.mesh)
+      maxtext_utils.print_shardings_params(sharded_state, out_shardings, model.mesh)
     if config.load_parameters_path:
       try:
         ckptr = ocp.Checkpointer(

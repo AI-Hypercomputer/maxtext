@@ -28,7 +28,7 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 
 class OfflineEngineTest(unittest.TestCase):
   """Tests for JetStream Offline Engine.
-  Command: pytest tests/offline_engine_test.py
+  Command: pytest tests/unit/offline_engine_test.py
   """
 
   def setUp(self):

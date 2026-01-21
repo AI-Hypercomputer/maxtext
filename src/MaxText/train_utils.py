@@ -26,7 +26,6 @@ from MaxText import optimizers
 from MaxText.dpo_utils import _merge_dpo_state
 from MaxText.data_loader import create_dataloader
 from MaxText.rampup_batch import create_rampup_manager
-from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.utils.goodput_utils import GoodputEvent
 from MaxText.utils.goodput_utils import maybe_record_goodput
 from MaxText import model_creation_utils
@@ -177,6 +176,8 @@ def setup_train_loop(config, recorder, devices=None):
     rampup_manager: the class managing rampup batch sizes
     state: the initialized train state
   """
+  # pylint: disable=import-outside-toplevel
+  from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     model = model_creation_utils.from_config(config, devices)
@@ -218,7 +219,7 @@ def setup_train_loop(config, recorder, devices=None):
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
       max_utils.print_non_trivial_mesh_axis(model.mesh)
-      maxtext_utils.print_state_mesh_shardings_params(state, state_mesh_shardings, model.mesh)
+      maxtext_utils.print_shardings_params(state.params, state_mesh_shardings.params, model.mesh)
 
     if config.use_dpo:
       abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
