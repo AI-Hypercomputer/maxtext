@@ -383,6 +383,26 @@ class TrainTests(unittest.TestCase):
     ]
     train_main(parameter_offload)
 
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_compute_offload(self):
+    os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
+    compute_offload = [  # tests base config on GPU with compute offload
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        "base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_test",
+        "dataset_path=gs://maxtext-dataset",
+        "steps=10",
+        "attention=dot_product",
+        "optimizer_compute_host_offload=True",  # enable compute offload
+        "dataset_type=synthetic",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+    ]
+    train_main(compute_offload)
+
   @pytest.mark.gpu_only
   def test_gpu_cudnn_flash_jax(self):
     cudnn_flash_jax = [  # tests base config on GPU with flash attention

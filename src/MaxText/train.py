@@ -72,6 +72,10 @@ from MaxText.train_utils import validate_train_config
 from MaxText.metric_logger import record_activation_metrics
 # pylint: disable=too-many-positional-arguments
 
+from jax.experimental.compute_on import compute_on
+from jax._src.compute_on import compute_on2
+import jax.memory
+import optax
 
 def get_first_step(state):
   return int(state.step)
@@ -315,7 +319,26 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
         )
     )
-  new_state = state.apply_gradients(grads=grads)
+  # Apply gradients with host compute offloading if enabled
+  if config.optimizer_compute_host_offload:
+    # Wrap apply_gradients to run on host compute
+    @compute_on2(
+        compute_type='device_host',
+        out_memory_spaces=(jax.memory.Space.Device, jax.memory.Space.Host)
+    )
+    def optimizer_update_on_host(params, opt_state, grads):
+      """Explicit optimizer update on host."""
+      # Call the optimizer's update function directly
+      updates, new_opt_state = state.tx.update(grads, opt_state, params)
+      new_params = optax.apply_updates(params, updates)
+      return new_params, new_opt_state
+
+    new_params, new_opt_state = optimizer_update_on_host(
+        state.params, state.opt_state, grads
+    )
+    new_state = state.replace(params=new_params, opt_state=new_opt_state)
+  else:
+    new_state = state.apply_gradients(grads=grads)
 
   # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
   if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
