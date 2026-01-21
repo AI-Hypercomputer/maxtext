@@ -717,12 +717,9 @@ class Decoder(nn.Module):
         model_mode,
     )
     if cfg.using_pipeline_parallelism:
-      if cfg.pipeline_fsdp_ag_once:
-        logical_partition_spec = self.pipeline_module.get_weight_sharding(
-            y, decoder_segment_ids, decoder_positions, deterministic, model_mode
-        )
-      else:
-        logical_partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
+      logical_partition_spec = self.pipeline_module.get_weight_sharding(
+          y, decoder_segment_ids, decoder_positions, deterministic, model_mode
+      )
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
         assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
         dense_layer = RemattedBlockLayers[0]
