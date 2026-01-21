@@ -31,7 +31,7 @@ import numpy as np
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import max_logging
 from MaxText import pyconfig
-from MaxText.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
+from MaxText.inference.offline_engine import OfflineEngineBuilder, InputData, CompletionOutput
 
 
 def get_metrics(results: list[CompletionOutput], start_time, end_time):
@@ -97,13 +97,13 @@ def run(
     profile_path="",
 ):
   """Run offline engine"""
-  inference_engine = OfflineEngine(
-      config,
-      params=None,
-      enable_batch_prefill=False,
-      rng=jax.random.PRNGKey(0),
-      eos_ids=[1002],
-      debug=False,
+  inference_engine = (
+      OfflineEngineBuilder(config)
+      .set_params(None)
+      .set_rng(jax.random.PRNGKey(0))
+      .set_eos_ids([1002])
+      .set_debug(False)
+      .build()
   )
   max_logging.log("Starting Warmup")
   _ = [inference_engine.batch_inference(input_data) for _ in range(4)]
