@@ -133,15 +133,16 @@ SIMULATED_CPU_DEVICES_COUNT = 64
 
 def convert(base_model_path, maxtext_model_path, model_size):
   """
+  Convert model to maxtext.
+
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and save at maxtext_model_path
 
-  Attributes:
-  base_model_path: checkpoint path
-  maxtext_model_path: Path to save the MaxText checkpoint to
-  model_size: llama3-8b to 405b.
+  Args:
+    base_model_path: checkpoint path
+    maxtext_model_path: Path to save the MaxText checkpoint to
+    model_size: llama3-8b to 405b.
   """
-  """Convert model to maxtext."""
   model_params = MODEL_PARAMS_DICT[model_size]
   base_num_decoder_layers = model_params["num_layers"]
   base_num_query_heads = model_params["num_heads"]

@@ -149,11 +149,9 @@ class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disab
   This mask class inherits from splash_attention_mask._ComputableMask and is designed to be used with Splash Attention.
   It allows the mask logic to be computed on-the-fly or fused into the attention kernel, avoiding the memory cost of
   materializing the full (sequence_length, sequence_length) boolean mask array, which can be prohibitive for long sequences.
-
-  Attributes:
-    chunk_size: The size of each attention chunk.
   """
 
+  #: The size of each attention chunk.
   chunk_size: int
 
   def __init__(

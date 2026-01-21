@@ -66,14 +66,11 @@ PRNGKeyType = Any
 # TODO(yuyanpeng): Should import ExistingPrefix from jetstream.engine.engine_api
 @struct.dataclass
 class ExistingPrefix:
-  """Represents a prefix that has already been processed.
+  """Represents a prefix that has already been processed."""
 
-  Attributes:
-    cache: The kv-cache for the prefix get from model params cache.
-    common_prefix_tokens: The tokens that have already been processed without padding.
-  """
-
+  #: The kv-cache for the prefix get from model params cache.
   cache: Any
+  #: The tokens that have already been processed without padding.
   common_prefix_tokens: jax.Array
 
 

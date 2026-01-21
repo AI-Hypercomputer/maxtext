@@ -43,6 +43,7 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
 
 """
 
+from __future__ import annotations
 from typing import Sequence
 
 import collections

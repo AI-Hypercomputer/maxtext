@@ -25,11 +25,9 @@ Key Parameters (to be set in the config file or as command-line overrides):
                          Defaults to "./mt_output/".
   scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
                This must match the training configuration of the checkpoint.
-  --lazy_load_tensors: (bool) If True, uses an on-demand loading strategy to minimize RAM
+  lazy_load: (bool) If True, uses an on-demand loading strategy to minimize RAM
              usage during conversion. Recommended if, 2 * model_size (GB) >= system RAM
              Defaults to False.
-  --hf_model_path: (Optional) Specify a local HF path, rather than the default repo `HF_IDS[model_name]`. 
-              Useful for locally dequantized HF model like GPT-OSS or DeepSeek.
 
 Environment Variables:
   HF_AUTH_TOKEN: (Required) HuggingFace authentication token, needed to

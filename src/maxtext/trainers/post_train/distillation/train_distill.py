@@ -156,16 +156,13 @@ def create_forward_fn(config: pyconfig.HyperParameters):
 
 @flax.struct.dataclass(frozen=True)
 class MaxTextTrainingInput(distillation_trainer.TrainingInput):
-  """Extended TrainingInput dataclass to carry MaxText-specific fields.
+  """Extended TrainingInput dataclass to carry MaxText-specific fields."""
 
-  Attributes:
-    positions: Position indices for the tokens (for RoPE).
-    decoder_segment_ids: Segment IDs for packed sequences (0=padding, 1+=examples).
-    targets: Ground truth target tokens (used for loss calculation and logging).
-  """
-
+  #: Position indices for the tokens (for RoPE).
   positions: Any = None
+  #: Segment IDs for packed sequences (0=padding, 1+=examples).
   decoder_segment_ids: Any = None
+  #: Ground truth target tokens (used for loss calculation and logging).
   targets: Any = None
 
 

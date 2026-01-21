@@ -223,18 +223,15 @@ class _Fp8EinsumWrapper(nn.Module):
 
 
 class Fp8Einsum(nn.Module):
-  """An fp8 einsum op.
+  """An fp8 einsum op."""
 
-  Attributes:
-    amax_history_length: size of the amax history.
-    e4m3_dtype: e4m3 variants, e.g., e4m3fn, e4m3fnuz.
-    e5m2_dtype: e5m2 variants, e.g., e5m2, e5m2fnuz.
-    dtype: computation dtype.
-  """
-
+  #: size of the amax history.
   amax_history_length: int = 1024
+  #: e4m3 variants, e.g., e4m3fn, e4m3fnuz.
   e4m3_dtype: DType = jnp.float8_e4m3fn
+  #: e5m2 variants, e.g., e5m2, e5m2fnuz.
   e5m2_dtype: DType = jnp.float8_e5m2
+  #: computation dtype.
   dtype: DType = jnp.float32
 
   def setup(self) -> None:

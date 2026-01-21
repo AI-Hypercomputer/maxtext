@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,9 +25,23 @@ https://www.sphinx-doc.org/en/master/usage/configuration.html
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
+import os
+import os.path
+import sys
+import warnings
+
+# Prevent JAX/Torch/TF from trying to access TPU/GPU during doc build
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+MAXTEXT_REPO_ROOT = os.environ.get("MAXTEXT_REPO_ROOT", os.path.join(os.path.dirname(os.path.dirname(__file__))))
+sys.path.insert(0, os.path.abspath(os.path.join(MAXTEXT_REPO_ROOT, "test")))
+sys.path.insert(0, os.path.abspath(os.path.join(MAXTEXT_REPO_ROOT, "src")))
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="keras.src.export.tf2onnx_lib")
+
 project = "MaxText"
 # pylint: disable=redefined-builtin
-copyright = "2025, Google LLC"
+copyright = "2023–2026, Google LLC"
 author = "MaxText developers"
 
 # -- General configuration ---------------------------------------------------
@@ -37,10 +51,26 @@ extensions = [
     "myst_nb",
     "sphinx_design",
     "sphinx_copybutton",
+    "sphinx.ext.napoleon",
+    # This needs to be before autodoc^
+    "sphinx.ext.autodoc",
+    "sphinx.ext.autosummary",
+    "sphinx.ext.viewcode",
 ]
 
 templates_path = ["_templates"]
 source_suffix = [".rst", ".ipynb", ".md"]
+
+# Suppress specific warnings
+suppress_warnings = [
+    "app.add_node",
+    "ref.python",
+    "myst.xref_ambiguous",
+    "docutils",
+    "autodoc",
+    "autodoc.duplicate_object_description",
+    "toc.not_included",
+]
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
@@ -60,6 +90,24 @@ myst_enable_extensions = [
 ]
 myst_linkify_fuzzy_links = False
 
+# -- Options for autodoc ----------------------------------------------------
+autodoc_member_order = "bysource"
+autodoc_typehints = "description"
+autodoc_mock_imports = [
+    "cloud_tpu_diagnostics",
+    "google_cloud_mldiagnostics",
+    "jetstream",
+    "ml_goodput_measurement",
+    "pathwaysutils",
+    "safetensors",
+    "tensorflow_datasets",
+    "torch",
+    "tpu_inference",
+    "transformer_engine",
+    "vllm",
+]
+autosummary_generate = True
+
 # Theme-specific options
 # https://sphinx-book-theme.readthedocs.io/en/stable/reference.html
 html_theme_options = {
@@ -77,7 +125,72 @@ html_theme_options = {
 
 # Remove specific documents from ToC
 exclude_patterns = [
-    "run_maxtext/run_maxtext_via_multihost_job.md",
-    "run_maxtext/run_maxtext_via_multihost_runner.md",
-    "reference/core_concepts/llm_calculator.ipynb",
+    os.path.join("guides", "run_maxtext", "run_maxtext_via_multihost_job.md"),
+    os.path.join("guides", "run_maxtext", "run_maxtext_via_multihost_runner.md"),
+    os.path.join("explanations", "llm_calculator.ipynb"),
+    os.path.join("reference", "api.rst"),
+    os.path.join("run_maxtext", "run_maxtext_via_multihost_job.md"),
+    os.path.join("run_maxtext", "run_maxtext_via_multihost_runner.md"),
+    os.path.join("reference", "core_concepts", "llm_calculator.ipynb"),
 ]
+
+
+# -- Autogenerate API documentation ------------------------------------------
+def run_apidoc(_):
+  """Runs sphinx-apidoc to generate API documentation.
+
+  This function is connected to the Sphinx build process and is triggered to
+  automatically generate the reStructuredText (RST) files for the API
+  documentation from the docstrings in the MaxText source code.
+
+  Args:
+    _: The Sphinx application object. Not used.
+  """
+  # directly within the Sphinx process, especially on macOS, as it avoids
+  # potential multiprocessing/forking issues like the "mutex lock failed" error.
+  # pylint: disable=import-outside-toplevel
+  import subprocess
+
+  os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "1"
+
+  assert os.path.isfile(os.path.join(MAXTEXT_REPO_ROOT, "pyproject.toml"))
+
+  # The path where the generated RST files will be stored
+  output_path = os.path.join(MAXTEXT_REPO_ROOT, "docs", "reference", "api_generated")
+
+  # Command to run sphinx-apidoc
+  # Note: We use `sys.executable -m sphinx.ext.apidoc` to ensure we're using
+  # the apidoc from the same Python environment as Sphinx.
+  command = [
+      sys.executable,
+      "-m",
+      "sphinx.ext.apidoc",
+      "--module-first",
+      "--force",
+      "--separate",
+      "--output-dir",
+      output_path,
+      os.path.join(MAXTEXT_REPO_ROOT, "src"),
+      # Paths to exclude
+      os.path.join(MAXTEXT_REPO_ROOT, "tests"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "experimental"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_mlperf"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "scratch_code"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "utils", "ckpt_conversion"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "rl"),
+  ]
+
+  # Run the command and check for errors
+  try:
+    print("Running sphinx-apidoc...")
+    subprocess.check_call(command, env={**os.environ, **{"OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "1"}})
+  except subprocess.CalledProcessError as e:
+    print(f"sphinx-apidoc failed with error: {e}", file=sys.stderr)
+    sys.exit(1)
+
+
+# Connect the apidoc generation to the Sphinx build process
+def setup(app):
+  run_apidoc(None)
+  print("running:", app)
+  # app.connect("builder-inited", run_apidoc)

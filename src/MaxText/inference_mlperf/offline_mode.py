@@ -13,6 +13,7 @@
 # limitations under the License.
 """ inference mlperf offline_mode module """
 
+import argparse
 import array
 import contextlib
 import copy
@@ -23,8 +24,6 @@ import math
 import os
 import time
 import warnings
-
-from absl import app, flags
 
 import numpy as np
 
@@ -47,145 +46,72 @@ _MLPERF_ID = "llama2-70b"
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("LOGLEVEL", "INFO"))
 
-FLAGS = flags.FLAGS
-
-flags.DEFINE_string(
-    "mlperf_test_mode",
-    "performance",
-    "performance, accuracy, submission",
-)
-flags.DEFINE_string("api_url", None, "published model path.", required=False)
-flags.DEFINE_string("dataset_path", None, "", required=False)
-flags.DEFINE_bool("is_stream", False, "", required=False)
-flags.DEFINE_string(
-    "input_mode",
-    "tokenized",
-    "Input mode",
-)
-flags.DEFINE_string(
-    "output_mode",
-    "tokenized",
-    "Output mode",
-)
-
-flags.DEFINE_string(
-    "audit_conf",
-    "audit.conf",
-    "audit config for LoadGen settings during compliance runs",
-    required=False,
-)
-flags.DEFINE_string(
-    "mlperf_conf",
-    "mlperf.conf",
-    "mlperf rules config",
-    required=False,
-)
-flags.DEFINE_string(
-    "user_conf",
-    "user.conf",
-    "user config for user LoadGen settings such as target QPS",
-    required=False,
-)
-flags.DEFINE_integer(
-    "total_sample_count",
-    24576,
-    "Number of samples to use in benchmark.",
-    required=False,
-)
-flags.DEFINE_integer(
-    "perf_count_override",
-    None,
-    "Overwrite number of samples to use in benchmark.",
-    required=False,
-)
-flags.DEFINE_string(
-    "output_log_dir",
-    "output-logs",
-    "Where logs are saved.",
-    required=False,
-)
-flags.DEFINE_bool(
-    "enable_log_trace",
-    False,
-    "Enable log tracing. This file can become quite large",
-    required=False,
-)
-flags.DEFINE_string(
-    "prefill_lengths_and_per_device_batch_sizes",
-    "256,80|512,40|1024,20",
-    "list of prefill lengths and batch sizes to use for each engine. Format len_1,bs_1|len_2,bs_2|..",
-    required=False,
-)
-
-flags.DEFINE_string(
-    "maxengine_args",
-    "",
-    "Additional arguments to maxtext engine, space separated <name>=<value> pairs",
-    required=False,
-)
-
-flags.DEFINE_integer(
-    "jax_profiler_port",
-    9999,
-    "If set, the jax.profiler port to use.",
-    required=False,
-)
-
-flags.DEFINE_bool(
-    "enable_profile",
-    False,
-    "If set, enable jax profiling.",
-    required=False,
-)
-
-flags.DEFINE_bool(
-    "enable_batch_prefill",
-    False,
-    "If set, enable batch prefilling.",
-    required=False,
-)
-
-flags.DEFINE_bool(
-    "skip_warmup",
-    False,
-    "Skip warmup",
-    required=False,
-)
-
-flags.DEFINE_float(
-    "tok_outlen_multiplier",
-    3.0,
-    "Multiplier for estimating max predicted output len",
-    required=False,
-)
-
-flags.DEFINE_bool(
-    "allow_skipping_queries",
-    False,
-    "Allow skipping queries which have target len greater than 2x configured max prefill len",
-    required=False,
-)
-
-flags.DEFINE_string(
-    "rename_dataset_cols",
-    "",
-    "Rename some of the dataset columns to what's expected by code. For example, "
-    "mixtral dataset uses ref_token_length instead of ref_token_len. Format is a string dict "
-    'eg. {"tok_input_len": "tok_input_length"}',
-    required=False,
-)
-
-flags.DEFINE_string(
-    "maxengine_config_filepath",
-    None,
-    "Base config filepath for initializing MaxEngine.",
-    required=False,
-)
-
 scenario_map = {
     "offline": lg.TestScenario.Offline,
     "server": lg.TestScenario.Server,
 }
+
+
+def parse_args():
+  """Parse command-line arguments."""
+  parser = argparse.ArgumentParser(description="Run MLPerf offline inference.")
+  parser.add_argument("--mlperf_test_mode", type=str, default="performance", help="performance, accuracy, submission")
+  parser.add_argument("--api_url", type=str, default=None, help="published model path.")
+  parser.add_argument("--dataset_path", type=str, default=None, help="")
+  parser.add_argument("--is_stream", action="store_true", help="")
+  parser.add_argument("--input_mode", type=str, default="tokenized", help="Input mode")
+  parser.add_argument("--output_mode", type=str, default="tokenized", help="Output mode")
+  parser.add_argument(
+      "--audit_conf", type=str, default="audit.conf", help="audit config for LoadGen settings during compliance runs"
+  )
+  parser.add_argument("--mlperf_conf", type=str, default="mlperf.conf", help="mlperf rules config")
+  parser.add_argument(
+      "--user_conf", type=str, default="user.conf", help="user config for user LoadGen settings such as target QPS"
+  )
+  parser.add_argument("--total_sample_count", type=int, default=24576, help="Number of samples to use in benchmark.")
+  parser.add_argument(
+      "--perf_count_override", type=int, default=None, help="Overwrite number of samples to use in benchmark."
+  )
+  parser.add_argument("--output_log_dir", type=str, default="output-logs", help="Where logs are saved.")
+  parser.add_argument(
+      "--enable_log_trace", action="store_true", help="Enable log tracing. This file can become quite large"
+  )
+  parser.add_argument(
+      "--prefill_lengths_and_per_device_batch_sizes",
+      type=str,
+      default="256,80|512,40|1024,20",
+      help="list of prefill lengths and batch sizes to use for each engine. Format len_1,bs_1|len_2,bs_2|..",
+  )
+  parser.add_argument(
+      "--maxengine_args",
+      type=str,
+      default="",
+      help="Additional arguments to maxtext engine, space separated <name>=<value> pairs",
+  )
+  parser.add_argument("--jax_profiler_port", type=int, default=9999, help="If set, the jax.profiler port to use.")
+  parser.add_argument("--enable_profile", action="store_true", help="If set, enable jax profiling.")
+  parser.add_argument("--enable_batch_prefill", action="store_true", help="If set, enable batch prefilling.")
+  parser.add_argument("--skip_warmup", action="store_true", help="Skip warmup")
+  parser.add_argument(
+      "--tok_outlen_multiplier", type=float, default=3.0, help="Multiplier for estimating max predicted output len"
+  )
+  parser.add_argument(
+      "--allow_skipping_queries",
+      action="store_true",
+      help="Allow skipping queries which have target len greater than 2x configured max prefill len",
+  )
+  parser.add_argument(
+      "--rename_dataset_cols",
+      type=str,
+      default="",
+      help="Rename some of the dataset columns to what is expected by code. For example, "
+      "mixtral dataset uses ref_token_length instead of ref_token_len. Format is a string dict "
+      'eg. \'{"tok_input_len": "tok_input_length"}\'',
+  )
+  parser.add_argument(
+      "--maxengine_config_filepath", type=str, default=None, help="Base config filepath for initializing MaxEngine."
+  )
+  return parser.parse_args()
 
 
 def pad_tokens(tokens):
@@ -195,9 +121,9 @@ def pad_tokens(tokens):
   return padded, true_length
 
 
-def _init_query_batches():
+def _init_query_batches(args):
   query_batches = {}
-  len_batch_str = FLAGS.prefill_lengths_and_per_device_batch_sizes.split("|")
+  len_batch_str = args.prefill_lengths_and_per_device_batch_sizes.split("|")
   for lb in len_batch_str:
     l, b = lb.split(",")
     query_batches[(int(l), int(b))] = []
@@ -213,11 +139,11 @@ def timed(msg):
   log.info("%s done: %d", msg, end - start)
 
 
-def _classify_query(dataset_rows, index, query_batches):
+def _classify_query(dataset_rows, index, query_batches, args):
   """classify query"""
   sample = dataset_rows[index][1]
   input_len = sample.tok_input_length
-  total_len = int(sample.tok_input_length + FLAGS.tok_outlen_multiplier * sample.tok_output_length)
+  total_len = int(sample.tok_input_length + args.tok_outlen_multiplier * sample.tok_output_length)
   query_batch_keys = list(query_batches.keys())
   query_batch_keys.sort()
   target_inputs = [lb[0] for lb in query_batch_keys]
@@ -230,7 +156,7 @@ def _classify_query(dataset_rows, index, query_batches):
   if input_len <= target_inputs[-1]:
     log.debug("Added sample of input length %d total_len %d for %s", input_len, total_len, query_batch_keys[-1])
     return query_batch_keys[-1]
-  if not FLAGS.allow_skipping_queries:
+  if not args.allow_skipping_queries:
     assert False, f"Invalid query input_len {input_len} > max prefill_len configured {query_batch_keys[-1]}."
   return -1
 
@@ -243,9 +169,9 @@ def _pick_batch_size(num_samples, max_batch, dataset_size, sample_size):
   return math.ceil(num_samples / mult * (sample_size / dataset_size))
 
 
-def get_warmup_samples(dataset):
+def get_warmup_samples(dataset, args):
   """get warmup samples"""
-  query_batches = _init_query_batches()
+  query_batches = _init_query_batches(args)
   pandas_rows = tuple(dataset.iterrows())
   input_data = {}
   for sample_id, panda_row in enumerate(pandas_rows):
@@ -257,7 +183,7 @@ def get_warmup_samples(dataset):
     jax.block_until_ready(data.tokens)
   sample_id_to_input = input_data
   for sample_id in range(len(input_data)):
-    group_idx = _classify_query(pandas_rows, sample_id, query_batches)
+    group_idx = _classify_query(pandas_rows, sample_id, query_batches, args)
     if group_idx == -1:
       continue
     input_ = copy.copy(sample_id_to_input[sample_id])
@@ -274,7 +200,7 @@ def get_warmup_samples(dataset):
       512,
       1024,
   ]
-  warmup_samples = _init_query_batches()
+  warmup_samples = _init_query_batches(args)
 
   for group_idx, group_val in query_batches.items():
     prefill_len = group_idx[0]
@@ -299,7 +225,7 @@ def get_warmup_samples(dataset):
 class SUT:
   """System Under Test (SUT) class"""
 
-  def __init__(self, data, offline_inf_instances):
+  def __init__(self, data, offline_inf_instances, args):
     # dict of int (cache length) -> offline_inf_instances
     self.offline_inf_instances = offline_inf_instances
 
@@ -313,7 +239,8 @@ class SUT:
     self._processed_data = None
 
     self._sample_id_to_input = None
-    self._query_batches = _init_query_batches()
+    self._query_batches = _init_query_batches(args)
+    self.args = args
 
   def issue_queries(self, queries):
     """issue queries"""
@@ -326,9 +253,9 @@ class SUT:
     num_skipped_queries = 0
     num_grouped_queries = list(map(len, self._query_batches.values()))
     log.info("Before Issue %d queries - classified queries %s", num_queries, str(num_grouped_queries))
-    self._query_batches = _init_query_batches()
+    self._query_batches = _init_query_batches(self.args)
     for q in queries:
-      group_idx = _classify_query(self.pandas_rows, q.index, self._query_batches)
+      group_idx = _classify_query(self.pandas_rows, q.index, self._query_batches, self.args)
       if group_idx == -1:
         num_skipped_queries += 1
         log.debug("Filtering out query of input len larger than acceptable configuration")
@@ -409,15 +336,15 @@ def make_response(id_, response_token_ids):
   return query_sample_response
 
 
-def _estimated_counts_by_bucket(dataset):
+def _estimated_counts_by_bucket(dataset, args):
   """estimated counts by bucket"""
   total_len = dataset.tok_input_length + dataset.tok_output_length
-  query_batches = _init_query_batches()
+  query_batches = _init_query_batches(args)
   prefix_lens = [l for l, b in list(query_batches.keys())]
   prefix_lens.sort()
 
   # with 5 percent extra
-  mult = FLAGS.total_sample_count / len(dataset) * 1.05
+  mult = args.total_sample_count / len(dataset) * 1.05
   prev_len = 0
   total_count = 0
   estimates = {}
@@ -431,43 +358,43 @@ def _estimated_counts_by_bucket(dataset):
   return estimates
 
 
-def main(argv):
-  del argv
+def main():
+  args = parse_args()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # jax.config.update("jax_explain_cache_misses", True)
 
-  if FLAGS.enable_profile:
-    jax.profiler.start_server(FLAGS.jax_profiler_port)
+  if args.enable_profile:
+    jax.profiler.start_server(args.jax_profiler_port)
 
   settings = lg.TestSettings()
   settings.scenario = lg.TestScenario.Offline
-  user_conf = FLAGS.user_conf
+  user_conf = args.user_conf
 
-  settings.FromConfig(FLAGS.mlperf_conf, _MLPERF_ID, "Offline")
+  settings.FromConfig(args.mlperf_conf, _MLPERF_ID, "Offline")
   settings.FromConfig(user_conf, _MLPERF_ID, "Offline")
-  log.info("Mlperf config: %s", FLAGS.mlperf_conf)
+  log.info("Mlperf config: %s", args.mlperf_conf)
   log.info("User config: %s", user_conf)
 
-  log.info("dataset path: %s", FLAGS.dataset_path)
-  dataset = pd.read_pickle(FLAGS.dataset_path)
-  if FLAGS.rename_dataset_cols:
-    rename_dict = json.loads(FLAGS.rename_dataset_cols)
+  log.info("dataset path: %s", args.dataset_path)
+  dataset = pd.read_pickle(args.dataset_path)
+  if args.rename_dataset_cols:
+    rename_dict = json.loads(args.rename_dataset_cols)
     dataset.rename(columns=rename_dict, inplace=True)
     log.info("Renaming columns of dataset with mapping: %s", rename_dict)
 
-  if FLAGS.total_sample_count < len(dataset):
-    dataset = dataset.sample(n=FLAGS.total_sample_count)
-  estimated_counts_by_bucket = _estimated_counts_by_bucket(dataset)
+  if args.total_sample_count < len(dataset):
+    dataset = dataset.sample(n=args.total_sample_count)
+  estimated_counts_by_bucket = _estimated_counts_by_bucket(dataset, args)
   log.info("Dataset len %d, estimated counts by bucket %s", len(dataset), estimated_counts_by_bucket)
 
-  len_batch_str = FLAGS.prefill_lengths_and_per_device_batch_sizes
+  len_batch_str = args.prefill_lengths_and_per_device_batch_sizes
   log.info("Prefill lengths and Batch sizes: %s", len_batch_str)
-  log.info("Maxengine args: %s", FLAGS.maxengine_args)
+  log.info("Maxengine args: %s", args.maxengine_args)
 
   log.info("Get warmup samples")
-  warmup_samples = get_warmup_samples(dataset)
+  warmup_samples = get_warmup_samples(dataset, args)
   offline_inf_instances = {}
-  query_batches = _init_query_batches()
+  query_batches = _init_query_batches(args)
   params = None
   base_engine = None
   # Create an engine and corresponding offline_inf_instance per batch of queries
@@ -476,19 +403,19 @@ def main(argv):
     target_length = 2 * length
     log.info("Using batch size: %d and length: %d", batch, length)
     engine = create_engine_from_config_flags(
-        maxengine_config_filepath=FLAGS.maxengine_config_filepath,
+        maxengine_config_filepath=args.maxengine_config_filepath,
         batch_size=batch,
         max_prefill_predict_length=length,
         max_target_length=target_length,
-        args_str=FLAGS.maxengine_args,
+        args_str=args.maxengine_args,
     )
-    offline_inf = offline_inference.OfflineInference(engine, params, base_engine, FLAGS.enable_batch_prefill)
+    offline_inf = offline_inference.OfflineInference(engine, params, base_engine, args.enable_batch_prefill)
     if params is None and offline_inf.params is not None:
       base_engine = engine
     params = offline_inf.params
     offline_inf_instances[group_idx] = offline_inf
 
-  if not FLAGS.skip_warmup:
+  if not args.skip_warmup:
     with timed("warmup"):
       for group_idx in offline_inf_instances:  # pylint: disable=consider-using-dict-items
         length, batch = group_idx
@@ -497,12 +424,12 @@ def main(argv):
         offline_inf_instances[group_idx].decode_state = None  # drop state
         gc.collect()
 
-  sut = SUT(dataset, offline_inf_instances)
+  sut = SUT(dataset, offline_inf_instances, args)
 
-  if FLAGS.mlperf_test_mode == "accuracy":
+  if args.mlperf_test_mode == "accuracy":
     settings.mode = lg.TestMode.AccuracyOnly
     log.warning("Accuracy run will generate the accuracy logs, but the evaluation of the log is not completed yet")
-  elif FLAGS.mlperf_test_mode == "submission":
+  elif args.mlperf_test_mode == "submission":
     settings.mode = lg.TestMode.Submission
     settings.print_timestamps = True
   else:
@@ -511,24 +438,24 @@ def main(argv):
 
   settings.use_token_latencies = True
 
-  os.makedirs(FLAGS.output_log_dir, exist_ok=True)
-  log.info("Logging to %s", FLAGS.output_log_dir)
+  os.makedirs(args.output_log_dir, exist_ok=True)
+  log.info("Logging to %s", args.output_log_dir)
   log_output_settings = lg.LogOutputSettings()
-  log_output_settings.outdir = FLAGS.output_log_dir
+  log_output_settings.outdir = args.output_log_dir
   log_output_settings.copy_summary_to_stdout = True
   log_settings = lg.LogSettings()
   log_settings.log_output = log_output_settings
-  log_settings.enable_trace = FLAGS.enable_log_trace
+  log_settings.enable_trace = args.enable_log_trace
 
   lgSUT = lg.ConstructSUT(sut.issue_queries, sut.flush_queries)
   qsl = lg.ConstructQSL(
       len(dataset),
-      FLAGS.total_sample_count,
+      args.total_sample_count,
       sut.LoadSamplesToRam,
       sut.UnloadSamplesFromRam,
   )
   log.info("Starting Benchmark run")
-  lg.StartTestWithLogSettings(lgSUT, qsl, settings, log_settings, FLAGS.audit_conf)
+  lg.StartTestWithLogSettings(lgSUT, qsl, settings, log_settings, args.audit_conf)
   # pylint: disable=protected-access
   log.info("query counts %s", str(list(map(len, sut._query_batches.values()))))
   log.info("Run Completed!")
@@ -538,11 +465,11 @@ def main(argv):
   log.info("Destroying QSL...")
   lg.DestroyQSL(qsl)
 
-  if FLAGS.enable_profile:
+  if args.enable_profile:
     jax.profiler.stop_server()
 
 
 if __name__ == "__main__":
   # Disable garbage collection to avoid stalls when running tests.
   gc.disable()
-  app.run(main)
+  main()

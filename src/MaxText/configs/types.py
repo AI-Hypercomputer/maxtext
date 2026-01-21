@@ -187,7 +187,7 @@ class ProfilerType(str, Enum):
 # Pydantic models for configuration
 # ----------------------------------------------------------------------------
 
-type ModelName = Literal[
+ModelName = Literal[
     "default",
     "llama2-7b",
     "llama2-13b",

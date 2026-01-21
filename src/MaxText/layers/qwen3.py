@@ -304,13 +304,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
   Step D: Final Output Stage
   1. y = RMSNorm(core_attn_out) * silu(z)
   2. output = Linear_out(y)
-
-  Attributes:
-    config: MaxText configuration object.
-    dtype: The datatype of the computation.
   """
 
   def __init__(self, config: Config, dtype: DType = jnp.float32, *, rngs: nnx.Rngs):
+    """
+    Args:
+      config: MaxText configuration object.
+      dtype: The datatype of the computation.
+      rngs: The random number generators for initialization, passed by the nnx.to_linen wrapper.
+    """
     self.config = config
     self.dtype = dtype
     cfg = self.config
