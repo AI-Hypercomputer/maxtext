@@ -313,11 +313,35 @@ def calculate_llama4_attention_tflops(config):
   return attention_tflops
 
 
+def calculate_indexer_tflops_per_device(config):
+  """Calculates TFLOPs for the DeepSeek Lightning Indexer (handles causal reduction)."""
+  batch_len = config.per_device_batch_size * config.max_target_length
+
+  # Query: [batch, seq, q_lora_rank] @ [q_lora_rank, index_n_heads, index_head_dim]
+  q_flops = 2 * batch_len * config.q_lora_rank * config.index_n_heads * config.index_head_dim
+  # Key: [batch, seq, emb_dim] @ [emb_dim, index_head_dim] 
+  # and [batch, seq, emb_dim] @ [emb_dim, index_n_heads]
+  k_flops = 2 * batch_len * (config.emb_dim * config.index_head_dim + config.emb_dim * config.index_n_heads)
+  qk_flops = q_flops + k_flops
+
+  # QK product [batch, seq, index_n_heads, index_head_dim] @ [batch, seq, index_head_dim]
+  # --> [batch, seq, seq, index_n_heads]
+  qk_product_flops = 2 * batch_len * config.max_target_length * config.index_n_heads * config.index_head_dim
+  # Apply causal mask (theoretical needed)
+  qk_product_flops = qk_product_flops / 2
+
+  # Weight sum over heads [batch, seq, seq, index_n_heads] @ [batch, seq, index_n_heads]
+  weighted_sum_flops = batch_len * config.max_target_length * config.index_n_heads
+  scoring_flops = qk_product_flops + weighted_sum_flops
+  return qk_flops, scoring_flops
+
+
 def calculate_mla_tflops_per_device(config):
-  """Calculate Multi-Head Latent Attention TFLOP"""
+  """Calculate Multi-Head Latent Attention TFLOP (handles causal reduction)"""
   batch_len = config.per_device_batch_size * config.max_target_length
   qk_head_dim_sum = config.qk_nope_head_dim + config.qk_rope_head_dim
-  # calculate mla query projection
+
+  # 1. calculate mla query projection
   if config.q_lora_rank == 0:
     q_flops = 2 * batch_len * config.emb_dim * config.num_query_heads * qk_head_dim_sum
   else:
@@ -327,7 +351,8 @@ def calculate_mla_tflops_per_device(config):
         * batch_len
         * (config.emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
     )
-  # calculate mla kv projection with down and up flops
+
+  # 2. calculate mla kv projection
   kv_flops = (
       2
       * batch_len
@@ -338,9 +363,28 @@ def calculate_mla_tflops_per_device(config):
   )
   qkv_flops = q_flops + kv_flops
 
-  attention_flops = (
-      2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
-  )
+  # 3. calculate attention (sparse indexer and standard MLA)
+  if config.use_sparse_indexer:
+    # get indexer flops
+    indexer_qk_flops, indexer_scoring_flops = calculate_indexer_tflops_per_device(config)
+    qkv_flops += indexer_qk_flops
+
+    # determine if seq_len is smaller than top_k
+    is_causal_sparse = config.max_target_length > config.index_topk
+    effective_seq = config.index_topk if is_causal_sparse else config.max_target_length
+
+    # core attention flops
+    attention_flops = (
+        2 * batch_len * effective_seq * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
+    )
+    attention_flops = attention_flops if is_causal_sparse else (attention_flops / 2)
+    attention_flops += indexer_scoring_flops
+  else:
+    # Standard MLA Path
+    attention_flops = (
+        2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
+    )
+    attention_flops = attention_flops / 2
   projection_flops = 2 * batch_len * config.emb_dim * config.num_query_heads * config.v_head_dim
   return qkv_flops, attention_flops, projection_flops
 
@@ -540,7 +584,7 @@ def calculate_tflops_training_per_device(config, log=True):
 
   # Attention flops
   if config.attention_type == "mla":
-    qkv_flops, noncausal_attention_flops, projection_flops = calculate_mla_tflops_per_device(config)
+    qkv_flops, causal_attention_flops, projection_flops = calculate_mla_tflops_per_device(config)
   else:
     qkv_flops = (
         2
@@ -562,11 +606,11 @@ def calculate_tflops_training_per_device(config, log=True):
         * config.head_dim
     )
 
-  # Divide attention flops by 2 due to causal mask
-  # References:
-  # NVIDIA/Megatron-LM (2025 March): https://github.com/NVIDIA/Megatron-LM/blob/250b79415dcc4b660521273c87f15334c804eeae/megatron/training/training.py#L361-L362
-  # NVIDIA/NeMo (2025 April): https://github.com/NVIDIA/NeMo/blob/ba4d6d116463de512ff0cfc14641aa6cf4577a42/nemo/utils/flops_formulas.py#L259-L272
-  causal_attention_flops = noncausal_attention_flops / 2
+    # Divide attention flops by 2 due to causal mask
+    # References:
+    # NVIDIA/Megatron-LM (2025 March): https://github.com/NVIDIA/Megatron-LM/blob/250b79415dcc4b660521273c87f15334c804eeae/megatron/training/training.py#L361-L362
+    # NVIDIA/NeMo (2025 April): https://github.com/NVIDIA/NeMo/blob/ba4d6d116463de512ff0cfc14641aa6cf4577a42/nemo/utils/flops_formulas.py#L259-L272
+    causal_attention_flops = noncausal_attention_flops / 2
 
   # Embedding flops
   embedding_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.vocab_size
