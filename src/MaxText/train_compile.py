@@ -214,6 +214,7 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.initialize(argv)
   validate_config(config)
 
+  sharding.set_global_logical_rules(config.logical_axis_rules)
   # Create target mesh
   topology_mesh = get_topology_mesh(config)
 

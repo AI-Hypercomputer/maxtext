@@ -61,6 +61,85 @@ def maybe_shard_with_name(inputs, named_sharding, shard_mode, debug_sharding=Fal
     return jax.lax.with_sharding_constraint(inputs, named_sharding)
 
 
+def _get_caller_info(stack, frame_idx):
+  """Helper function to extract caller information to reduce nesting."""
+  try:
+    if len(stack) <= frame_idx:
+      return "Unknown"
+
+    frame_basic = stack[frame_idx]
+    filename = frame_basic.filename.split("/")[-1]
+    lineno = frame_basic.lineno
+    caller_name = f"{filename}:{lineno}"
+
+    # Search up to 10 frames for better caller context
+    for i in range(frame_idx, min(frame_idx + 10, len(stack))):
+      frame = stack[i].frame
+
+      # Check for Class Name
+      if "self" in frame.f_locals:
+        obj = frame.f_locals["self"]
+        if hasattr(obj, "__class__"):
+          cls_name = obj.__class__.__name__
+          if cls_name not in ["Module", "object", "PjitFunction"]:
+            return cls_name
+
+      # Check for Function Name
+      func_name = stack[i].function
+      ignored_funcs = ["<module>", "__call__", "setup", "apply", "wrapper", "maybe_shard_with_logical"]
+      if func_name not in ignored_funcs:
+        # If we only have file:line, prefer the function name
+        if ":" in caller_name:
+          caller_name = func_name
+
+    return caller_name
+
+  except (AttributeError, KeyError, IndexError):
+    return "Unknown(Error)"
+
+
+def _format_rule_info(active_rules, logical_axes):
+  """Helper to format rule string to avoid broad exception catch."""
+  if active_rules is None:
+    return "Implicit/Global Rules (Not Found)"
+
+  try:
+    rules_dict = active_rules if isinstance(active_rules, dict) else dict(active_rules)
+  except (ValueError, TypeError):
+    return "Rules Format Error"
+
+  if not logical_axes:
+    return "No Logical Axes"
+
+  mapping_parts = []
+  for axis in logical_axes:
+    target = rules_dict.get(axis, "NoRule")
+    mapping_parts.append(f"{axis}={target}")
+
+  return ", ".join(mapping_parts)
+
+
+def _format_phys_spec_info(named_sharding, logical_axes):
+  """Helper to format physical spec string."""
+  phys_spec = getattr(named_sharding, "spec", None)
+
+  if phys_spec is None:
+    return f"Axes={logical_axes} -> Spec=None"
+
+  if logical_axes is None:
+    return f"Axes=None -> Spec={phys_spec}"
+
+  if len(logical_axes) != len(phys_spec):
+    return f"Axes={logical_axes} -> Spec={phys_spec}"
+
+  pairs = []
+  for logic_name, phys_axis in zip(logical_axes, phys_spec):
+    axis_str = str(phys_axis) if phys_axis else "None"
+    pairs.append(f"{logic_name}={axis_str}")
+
+  return ", ".join(pairs)
+
+
 def maybe_shard_with_logical(
     inputs, logical_axes, mesh, shard_mode, rules=None, debug_sharding=False, extra_stack_level=0
 ):
@@ -75,76 +154,19 @@ def maybe_shard_with_logical(
 
   active_rules = rules if rules is not None else _GLOBAL_LOGICAL_RULES
   named_sharding = create_sharding(mesh, logical_axes, rules=active_rules)
+
   if debug_sharding and hasattr(inputs, "shape"):
     max_logging.info("=" * 120)
     max_logging.info("    Tracing logical axes for activations during JIT compilation.")
     max_logging.info("=" * 120)
-    caller_info = "Unknown"
-    # ----(Caller Detection) ---
-    try:
-      stack = inspect.stack()
-      frame_idx = 2 + extra_stack_level
-      if len(stack) > frame_idx:
-        frame_basic = stack[frame_idx]
-        filename = frame_basic.filename.split("/")[-1]
-        lineno = frame_basic.lineno
-        caller_info = f"{filename}:{lineno}"
 
-        # search up to 10 frames for better caller context
-        for i in range(frame_idx, min(frame_idx + 10, len(stack))):
-          frame = stack[i].frame
-          if "self" in frame.f_locals:
-            obj = frame.f_locals["self"]
-            if hasattr(obj, "__class__"):
-              cls_name = obj.__class__.__name__
-              if cls_name not in ["Module", "object", "PjitFunction"]:
-                caller_info = cls_name
-                break
-
-          func_name = stack[i].function
-          if func_name not in ["<module>", "__call__", "setup", "apply", "wrapper", "maybe_shard_with_logical"]:
-            if ":" in caller_info:
-              caller_info = func_name
-    except Exception as e:
-      caller_info = f"Err:{str(e)}"
-
-    # ---(Unresolved Rules) ---
-    unresolved_str = ""
-    if active_rules is None:
-      unresolved_str = "Implicit/Global Rules (Not Found)"
-    else:
-      try:
-        rules_dict = active_rules if isinstance(active_rules, dict) else dict(active_rules)
-
-        mapping_parts = []
-        if logical_axes:
-          for axis in logical_axes:
-            target = rules_dict.get(axis, "NoRule")
-            mapping_parts.append(f"{axis}={target}")
-          unresolved_str = ", ".join(mapping_parts)
-        else:
-          unresolved_str = "No Logical Axes"
-      except:
-        unresolved_str = "Rules Format Error"
-
-    # ---  (Physical Spec) ---
-    phys_spec = getattr(named_sharding, "spec", None)
-    resolved_str = ""
-    try:
-      if phys_spec is not None and logical_axes is not None and len(logical_axes) == len(phys_spec):
-        pairs = []
-        for logic_name, phys_axis in zip(logical_axes, phys_spec):
-          axis_str = str(phys_axis) if phys_axis else "None"
-          pairs.append(f"{logic_name}={axis_str}")
-        resolved_str = ", ".join(pairs)
-      else:
-        resolved_str = f"Axes={logical_axes} -> Spec={phys_spec}"
-    except:
-      resolved_str = f"Axes={logical_axes} -> Spec={phys_spec}"
-
+    stack = inspect.stack()
+    caller_info = _get_caller_info(stack, 2 + extra_stack_level)
+    unresolved_str = _format_rule_info(active_rules, logical_axes)
+    resolved_str = _format_phys_spec_info(named_sharding, logical_axes)
     shape_str = str(jax.typeof(inputs))
+
     # format: Caller [RULES] -> [FINAL] Shape
-    # max_logging.info(f"{caller_info:<20} [RULES: {unresolved_str}] -> [FINAL: {resolved_str}] shape={shape_str}")
     max_logging.info(f"{caller_info}")
     max_logging.info(f"[RULES: {unresolved_str}]")
     max_logging.info(f"[FINAL: {resolved_str}] shape={shape_str}")

@@ -157,11 +157,11 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
       max_utils.print_non_trivial_mesh_axis(model.mesh)
-      maxtext_utils.print_state_mesh_shardings_params(
-          state=sharded_state,
-          state_sharding=out_shardings,
-          state_logical_annotations=specs,
+      maxtext_utils.print_shardings_params(
+          params=sharded_state,
+          params_sharding=out_shardings,
           mesh=model.mesh,
+          state_logical_annotations=specs,
           logical_axis_rules=config.logical_axis_rules,
       )
     if config.load_parameters_path:
