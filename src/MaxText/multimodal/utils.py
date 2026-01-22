@@ -25,7 +25,7 @@ from PIL import Image
 
 @dataclass
 class PreprocessorOutput:
-  """Holds the output of an image preprocessor.
+  """Holds the output of a multimodal preprocessor.
 
   Attributes:
     pixel_values: A JAX array containing the processed image pixel data.
@@ -38,12 +38,18 @@ class PreprocessorOutput:
                    the aspect ratio [ratio_h, ratio_w] of the processed image(s).
                    This is particularly relevant for models like Llama4 that handle
                    images by tiling.
+    num_images: Number of images in the output.
+    audio_values: An optional array containing processed audio features.
+    audio_mask: An optional array indicating valid audio segments.
   """
 
   pixel_values: None | np.ndarray = None
   pixel_mask: None | np.ndarray = None
   aspect_ratios: None | np.ndarray = None
   num_images: int = 0
+  # Audio attributes.
+  audio_values: None | np.ndarray = None
+  audio_mask: None | np.ndarray = None
 
 
 def load_image_from_path(image_path):
