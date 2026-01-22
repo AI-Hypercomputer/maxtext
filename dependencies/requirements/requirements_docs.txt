@@ -1,5 +1,5 @@
 # Sphinx-related requirements.
-sphinx
+sphinx<9
 myst-nb
 myst-parser[linkify]
 sphinx-book-theme
