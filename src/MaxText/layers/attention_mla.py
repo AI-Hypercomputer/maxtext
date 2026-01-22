@@ -135,7 +135,7 @@ class Indexer(nnx.Module):
         rngs=self.rngs,
     )
 
-    # Key Normalization with bias
+    # Key Normalization with Bias
     self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=True, dtype=self.weight_dtype, rngs=rngs)
 
     # Projection: Input -> Importance Weights for Heads (with high precision)

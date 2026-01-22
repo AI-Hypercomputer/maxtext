@@ -13,7 +13,6 @@
 # limitations under the License.
 
 
-from types import SimpleNamespace
 import os.path
 import unittest
 import math
@@ -36,7 +35,6 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
 from MaxText import maxtext_utils
 from MaxText.layers import embeddings, attention_mla
-from MaxText.layers.initializers import nd_dense_init
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 
 
@@ -55,7 +53,7 @@ We adapt the reference implementation to run on CPU:
 
 To run the test
   python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-  python3 -m pytest -v --pyargs tests.check_deepseek32_vs_reference -rP -s
+  python3 -m pytest -v --pyargs tests.unit.deepseek32_vs_reference -rP -s
 """
 
 
@@ -68,14 +66,12 @@ world_size = 1
 rank = 0
 block_size = 128
 
+SEQ_LEN = 8
+
 
 @dataclass
-class ModelArgs:
-  pass
-
-
 class Config:
-  """A configuration class for holding hyperparameters for the tests."""
+  """MaxText config"""
 
   # mla
   base_emb_dim = 71
@@ -106,83 +102,40 @@ class Config:
   index_topk = 4
 
 
-SEQ_LEN = 8
+class ModelArgs:
+  """
+  Arguments for the PyTorch Reference Model.
+  Maps MaxText Config keys to the specific variable names expected by the reference implementation.
+  """
 
-config = Config()
-
-# 1. Setup PyTorch Config & Model
-pt_args = {
-    "max_batch_size": 8,  # TODO(shuningjin): what does this do?
-    "scale_fmt": None,
-    "max_seq_len": config.max_position_embeddings,
-    "dim": config.base_emb_dim,
+  def __init__(self, config: Config, max_batch_size: int = 8):
+    self.max_batch_size = max_batch_size
+    self.scale_fmt = None
+    self.max_seq_len = config.max_position_embeddings
+    self.dim = config.base_emb_dim
     # mla
-    "n_heads": config.base_num_query_heads,
-    "q_lora_rank": config.q_lora_rank,
-    "kv_lora_rank": config.kv_lora_rank,
-    "qk_nope_head_dim": config.qk_nope_head_dim,
-    "qk_rope_head_dim": config.qk_rope_head_dim,
-    "v_head_dim": config.v_head_dim,
+    self.n_heads = config.base_num_query_heads
+    self.q_lora_rank = config.q_lora_rank
+    self.kv_lora_rank = config.kv_lora_rank
+    self.qk_nope_head_dim = config.qk_nope_head_dim
+    self.qk_rope_head_dim = config.qk_rope_head_dim
+    self.v_head_dim = config.v_head_dim
     # yarn
-    "original_seq_len": config.original_max_position_embeddings,
-    "rope_theta": float(config.rope_max_timescale),
-    "rope_factor": float(config.rope_factor),
-    "beta_fast": config.beta_fast,
-    "beta_slow": config.beta_slow,
-    "mscale": config.mscale,
+    self.original_seq_len = config.original_max_position_embeddings
+    self.rope_theta = float(config.rope_max_timescale)
+    self.rope_factor = float(config.rope_factor)
+    self.beta_fast = config.beta_fast
+    self.beta_slow = config.beta_slow
+    self.mscale = config.mscale
     # indexer
-    "index_n_heads": config.index_n_heads,
-    "index_head_dim": config.index_head_dim,
-    "index_topk": config.index_topk,
-}
+    self.index_n_heads = config.index_n_heads
+    self.index_head_dim = config.index_head_dim
+    self.index_topk = config.index_topk
 
 
 # -----------------------------------------------------------------------------
 # Reference Implementation
 # -----------------------------------------------------------------------------
-
-
-class ParallelEmbedding(nn.Module):
-  """
-  Embedding layer with parallelism support across distributed processes.
-
-  Args:
-      vocab_size (int): Vocabulary size.
-      dim (int): Embedding dimension.
-  """
-
-  def __init__(self, vocab_size: int, dim: int):
-    super().__init__()
-    self.vocab_size = vocab_size
-    self.dim = dim
-    assert vocab_size % world_size == 0, f"Vocabulary size must be divisible by world size (world_size={world_size})"
-    self.part_vocab_size = vocab_size // world_size
-    self.vocab_start_idx = rank * self.part_vocab_size
-    self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
-    self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
-
-  def forward(self, x: torch.Tensor) -> torch.Tensor:
-    """
-    Forward pass for parallel embedding layer.
-
-    Args:
-        x (torch.Tensor): Input tensor containing token indices.
-
-    Returns:
-        torch.Tensor: Embedded representations.
-
-    Raises:
-        ValueError: If `world_size` is not defined.
-    """
-    if world_size > 1:
-      mask = (x < self.vocab_start_idx) | (x >= self.vocab_end_idx)
-      x = x - self.vocab_start_idx
-      x[mask] = 0
-    y = F.embedding(x, self.weight)
-    if world_size > 1:
-      y[mask] = 0
-      dist.all_reduce(y)
-    return y
 
 
 def linear(
@@ -753,6 +706,90 @@ def init_torch_weights(module, std=1):
       torch.nn.init.normal_(param, mean=0.0, std=std)
 
 
+def get_jax_indexer_weights(pt_indexer):
+  """Extracts weights for the Indexer module."""
+  return {
+      "wq_b": {"kernel": to_jax(pt_indexer.wq_b.weight.T)},
+      "wk": {"kernel": to_jax(pt_indexer.wk.weight.T)},
+      "weights_proj": {"kernel": to_jax(pt_indexer.weights_proj.weight.T)},
+      "k_norm": {
+          "scale": to_jax(pt_indexer.k_norm.weight),
+          "bias": to_jax(pt_indexer.k_norm.bias),
+      },
+  }
+
+
+def get_jax_mla_weights(pt_mla, cfg):
+  """Extracts weights for the MLA module based on jax config (cfg)."""
+  return {
+      "wq_a": {"kernel": to_jax(pt_mla.wq_a.weight.T)},
+      "q_norm": {"scale": to_jax(pt_mla.q_norm.weight)},
+      "wq_b": {
+          "kernel": to_jax(pt_mla.wq_b.weight.T).reshape(
+              [cfg.q_lora_rank, cfg.base_num_query_heads, (cfg.qk_nope_head_dim + cfg.qk_rope_head_dim)]
+          )
+      },
+      "wkv_a": {"kernel": to_jax(pt_mla.wkv_a.weight.T)},
+      "kv_norm": {"scale": to_jax(pt_mla.kv_norm.weight)},
+      "wkv_b": {
+          "kernel": to_jax(pt_mla.wkv_b.weight.T).reshape(
+              [cfg.kv_lora_rank, cfg.base_num_query_heads, (cfg.qk_nope_head_dim + cfg.v_head_dim)]
+          )
+      },
+      "out": {"kernel": to_jax(pt_mla.wo.weight.T).reshape([cfg.base_num_query_heads, cfg.v_head_dim, cfg.base_emb_dim])},
+      # Reuse the helper function
+      "indexer": get_jax_indexer_weights(pt_mla.indexer),
+  }
+
+
+def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len):
+  cfg = pyconfig.initialize(
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      run_name=run_name,
+      enable_checkpointing=False,
+      model_name="default",
+      dtype=dtype,
+      weight_dtype="float32",  # precision
+      matmul_precision="highest",  # precision
+      float32_qk_product=True,  # computes logits in float32 for stability.
+      float32_logits=True,  # cast logits in float32 for stability.
+      per_device_batch_size=batch_size,
+      max_target_length=seq_len,
+      max_prefill_predict_length=seq_len,
+      attention="dot_product",
+      # attention
+      base_emb_dim=config.base_emb_dim,
+      base_num_query_heads=config.base_num_query_heads,
+      base_num_kv_heads=config.base_num_kv_heads,
+      # mla
+      attention_type=config.attention_type,
+      q_lora_rank=config.q_lora_rank,
+      kv_lora_rank=config.kv_lora_rank,
+      qk_nope_head_dim=config.qk_nope_head_dim,
+      qk_rope_head_dim=config.qk_rope_head_dim,
+      v_head_dim=config.v_head_dim,
+      # RoPE
+      rope_type=config.rope_type,
+      original_max_position_embeddings=config.original_max_position_embeddings,
+      rope_max_timescale=config.rope_max_timescale,
+      max_position_embeddings=config.max_position_embeddings,
+      rope_factor=config.rope_factor,
+      beta_fast=config.beta_fast,
+      mscale=config.mscale,
+      rope_interleave=config.rope_interleave,
+      rope_truncate=config.rope_truncate,
+      rope_attention_scaling=config.rope_attention_scaling,
+      # Indexer
+      use_sparse_indexer=config.use_sparse_indexer,
+      index_n_heads=config.index_n_heads,
+      index_head_dim=config.index_head_dim,
+      index_topk=config.index_topk,
+  )
+  devices_array = maxtext_utils.create_device_mesh(cfg)
+  mesh = Mesh(devices_array, cfg.mesh_axes)
+  return cfg, mesh
+
+
 class DeepseekV32IndexerTest(unittest.TestCase):
   """Tests for the Sparse Indexer."""
 
@@ -763,22 +800,19 @@ class DeepseekV32IndexerTest(unittest.TestCase):
 
     # jax config
     self.config = Config()
-    # data, test long context
+    # data
     self.dtype = "float32"  # precision
     self.batch_size = 2
     self.seq_len = SEQ_LEN
+    self.start_pos = 0
 
     # pt args
-    self.pt_args = SimpleNamespace(**pt_args)
-    self.pt_args.max_batch_size = self.batch_size
+    self.pt_args = ModelArgs(self.config, self.batch_size)
 
     # Indexer
     self.pt_indexer = Indexer(self.pt_args)
-    self.pt_indexer = self.pt_indexer.float()
-    self.pt_indexer.eval()
-
-    # Using normal distribution (standard for linear layers)
     init_torch_weights(self.pt_indexer)
+    self.pt_indexer.eval()
 
     # 4. Input Data
     self.x = torch.randn(self.batch_size, self.seq_len, self.pt_args.dim)
@@ -795,7 +829,6 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     pt_mask = causal_mask_bias
 
     # C. Run PyTorch Reference
-    self.start_pos = 0
     self.freqs_cis_slice = self.freqs_cis[self.start_pos : self.start_pos + self.seq_len]
     with torch.no_grad():
       # Returns indices [B, K]
@@ -809,48 +842,14 @@ class DeepseekV32IndexerTest(unittest.TestCase):
         pt_index_mask += pt_mask
 
     # 3. Setup Mesh
-    cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+    cfg, mesh = get_cfg_and_mesh(
+        config=self.config,
         run_name="deepseek_indexer_test",
-        enable_checkpointing=False,
-        model_name="default",
         dtype=self.dtype,
-        weight_dtype="float32",  # precision
-        matmul_precision="highest",  # precision
-        per_device_batch_size=self.batch_size,
-        max_target_length=self.seq_len,
-        max_prefill_predict_length=self.seq_len,
-        attention="dot_product",
-        # attention
-        base_emb_dim=self.config.base_emb_dim,
-        base_num_query_heads=self.config.base_num_query_heads,
-        base_num_kv_heads=self.config.base_num_kv_heads,
-        # mla
-        attention_type=self.config.attention_type,
-        q_lora_rank=self.config.q_lora_rank,
-        kv_lora_rank=self.config.kv_lora_rank,
-        qk_nope_head_dim=self.config.qk_nope_head_dim,
-        qk_rope_head_dim=self.config.qk_rope_head_dim,
-        v_head_dim=self.config.v_head_dim,
-        # RoPE
-        rope_type=self.config.rope_type,
-        original_max_position_embeddings=self.config.original_max_position_embeddings,
-        rope_max_timescale=self.config.rope_max_timescale,
-        max_position_embeddings=self.config.max_position_embeddings,
-        rope_factor=self.config.rope_factor,
-        beta_fast=self.config.beta_fast,
-        mscale=self.config.mscale,
-        rope_interleave=self.config.rope_interleave,
-        rope_truncate=self.config.rope_truncate,
-        rope_attention_scaling=self.config.rope_attention_scaling,
-        # Indexer
-        use_sparse_indexer=self.config.use_sparse_indexer,
-        index_n_heads=self.config.index_n_heads,
-        index_head_dim=self.config.index_head_dim,
-        index_topk=self.config.index_topk,
+        batch_size=self.batch_size,
+        seq_len=self.seq_len,
     )
-    devices_array = maxtext_utils.create_device_mesh(cfg)
-    self.mesh = Mesh(devices_array, cfg.mesh_axes)
+    self.mesh = mesh
 
     # indexer apply rope with `interleave=False`
     # different from mla rope with self.config.rope_interleave
@@ -878,15 +877,7 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     )
 
     # B. Copy Weights (PyTorch -> JAX)
-    indexer_state = {
-        "wq_b": {"kernel": to_jax(self.pt_indexer.wq_b.weight.T)},
-        "wk": {"kernel": to_jax(self.pt_indexer.wk.weight.T)},
-        "weights_proj": {"kernel": to_jax(self.pt_indexer.weights_proj.weight.T)},
-        "k_norm": {
-            "scale": to_jax(self.pt_indexer.k_norm.weight),
-            "bias": to_jax(self.pt_indexer.k_norm.bias),
-        },
-    }
+    indexer_state = get_jax_indexer_weights(self.pt_indexer)
     nnx.update(jax_indexer, indexer_state)
 
     # D. Run JAX Forward
@@ -923,19 +914,18 @@ class DeepseekV32MLATest(unittest.TestCase):
 
     # jax config
     self.config = Config()
-    # data, test long context
+    # data
     self.dtype = "float32"
     self.batch_size = 2
     self.seq_len = SEQ_LEN
     self.start_pos = 0
 
     # pt args
-    self.pt_args = SimpleNamespace(**pt_args)
-    self.pt_args.max_batch_size = self.batch_size
+    self.pt_args = ModelArgs(self.config, self.batch_size)
     # pt MLA
     self.pt_mla = MLA(self.pt_args)
-    self.pt_mla.eval()
     init_torch_weights(self.pt_mla)
+    self.pt_mla.eval()
     # pt input
     self.x = torch.randn(self.batch_size, self.seq_len, self.pt_args.dim)
 
@@ -944,7 +934,7 @@ class DeepseekV32MLATest(unittest.TestCase):
 
     # PyTorch: mask is needed for MHA mode in reference code
     # Shape [B, S, S], causal mask
-    start_pos = 0
+    start_pos = self.start_pos
     causal_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
     causal_mask_bias = torch.where(causal_mask == 1, 0.0, float("-inf"))
     # RoPE
@@ -953,50 +943,14 @@ class DeepseekV32MLATest(unittest.TestCase):
     with torch.no_grad():
       pt_out = self.pt_mla(self.x, start_pos=start_pos, freqs_cis=self.freqs_cis_slice, mask=causal_mask_bias)
 
-    cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+    cfg, mesh = get_cfg_and_mesh(
+        config=self.config,
         run_name="deepseek_mla_test",
-        enable_checkpointing=False,
-        model_name="default",
         dtype=self.dtype,
-        weight_dtype="float32",  # precision
-        matmul_precision="highest",  # precision
-        float32_qk_product=True,  # computes logits in float32 for stability.
-        float32_logits=True,  # cast logits in float32 for stability.
-        per_device_batch_size=self.batch_size,
-        max_target_length=self.seq_len,
-        max_prefill_predict_length=self.seq_len,
-        attention="dot_product",
-        # attention
-        base_emb_dim=self.config.base_emb_dim,
-        base_num_query_heads=self.config.base_num_query_heads,
-        base_num_kv_heads=self.config.base_num_kv_heads,
-        # mla
-        attention_type=self.config.attention_type,
-        q_lora_rank=self.config.q_lora_rank,
-        kv_lora_rank=self.config.kv_lora_rank,
-        qk_nope_head_dim=self.config.qk_nope_head_dim,
-        qk_rope_head_dim=self.config.qk_rope_head_dim,
-        v_head_dim=self.config.v_head_dim,
-        # RoPE
-        rope_type=self.config.rope_type,
-        original_max_position_embeddings=self.config.original_max_position_embeddings,
-        rope_max_timescale=self.config.rope_max_timescale,
-        max_position_embeddings=self.config.max_position_embeddings,
-        rope_factor=self.config.rope_factor,
-        beta_fast=self.config.beta_fast,
-        mscale=self.config.mscale,
-        rope_interleave=self.config.rope_interleave,
-        rope_truncate=self.config.rope_truncate,
-        rope_attention_scaling=self.config.rope_attention_scaling,
-        # Indexer
-        use_sparse_indexer=self.config.use_sparse_indexer,
-        index_n_heads=self.config.index_n_heads,
-        index_head_dim=self.config.index_head_dim,
-        index_topk=self.config.index_topk,
+        batch_size=self.batch_size,
+        seq_len=self.seq_len,
     )
-    devices_array = maxtext_utils.create_device_mesh(cfg)
-    self.mesh = Mesh(devices_array, cfg.mesh_axes)
+    self.mesh = mesh
 
     # A. JAX Init
     jax_mla = attention_mla.MLA(
@@ -1028,44 +982,7 @@ class DeepseekV32MLATest(unittest.TestCase):
     )
 
     # B. Copy Weights
-    # reshape to match maxtext
-    base_emb_dim = self.config.base_emb_dim
-    base_num_query_heads = self.config.base_num_query_heads
-    q_lora_rank = self.config.q_lora_rank
-    kv_lora_rank = self.config.kv_lora_rank
-    qk_nope_head_dim = self.config.qk_nope_head_dim
-    qk_rope_head_dim = self.config.qk_rope_head_dim
-    v_head_dim = self.config.v_head_dim
-
-    mla_state = {
-        # Main MLA Weights
-        "wq_a": {"kernel": to_jax(self.pt_mla.wq_a.weight.T)},
-        "q_norm": {"scale": to_jax(self.pt_mla.q_norm.weight)},
-        "wq_b": {
-            "kernel": to_jax(self.pt_mla.wq_b.weight.T).reshape(
-                [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)]
-            )
-        },
-        "wkv_a": {"kernel": to_jax(self.pt_mla.wkv_a.weight.T)},
-        "kv_norm": {"scale": to_jax(self.pt_mla.kv_norm.weight)},
-        "wkv_b": {
-            "kernel": to_jax(self.pt_mla.wkv_b.weight.T).reshape(
-                [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)]
-            )
-        },
-        "out": {"kernel": to_jax(self.pt_mla.wo.weight.T).reshape([base_num_query_heads, v_head_dim, base_emb_dim])},
-        # Indexer Weights
-        "indexer": {
-            "wq_b": {"kernel": to_jax(self.pt_mla.indexer.wq_b.weight.T)},
-            "wk": {"kernel": to_jax(self.pt_mla.indexer.wk.weight.T)},
-            "weights_proj": {"kernel": to_jax(self.pt_mla.indexer.weights_proj.weight.T)},
-            "k_norm": {
-                "scale": to_jax(self.pt_mla.indexer.k_norm.weight),
-                "bias": to_jax(self.pt_mla.indexer.k_norm.bias),
-            },
-        },
-    }
-    # Apply the update
+    mla_state = get_jax_mla_weights(self.pt_mla, self.config)
     nnx.update(jax_mla, mla_state)
 
     # C. Run Forward, JAX
