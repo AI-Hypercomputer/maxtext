@@ -202,7 +202,7 @@ llama2_70b_v5p_128 = _add_to_model_dictionary(
         model_type="llama2-70b",
         tuning_params={
             "ici_fsdp_parallelism": -1,
-            "per_device_batch_size": 4,
+            "per_device_batch_size": 2,
             "remat_policy": "save_dot_except_mlpwi",
             "max_target_length": 4096,
             "use_iota_embed": True,
