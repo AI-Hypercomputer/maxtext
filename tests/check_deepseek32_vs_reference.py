@@ -939,8 +939,8 @@ class DeepseekV32MLATest(unittest.TestCase):
     # pt input
     self.x = torch.randn(self.batch_size, self.seq_len, self.pt_args.dim)
 
-  def test_mla_match(self):
-    """Verifies MLA output (train mode) matches PyTorch (MHA mode) with indexer."""
+  def assert_mla_parity(self, attention):
+    """Helper function to verifies MLA output (train mode) matches PyTorch (MHA mode) with indexer."""
 
     # PyTorch: mask is needed for MHA mode in reference code
     # Shape [B, S, S], causal mask
@@ -966,7 +966,7 @@ class DeepseekV32MLATest(unittest.TestCase):
         per_device_batch_size=self.batch_size,
         max_target_length=self.seq_len,
         max_prefill_predict_length=self.seq_len,
-        attention="dot_product",
+        attention=attention,
         # attention
         base_emb_dim=self.config.base_emb_dim,
         base_num_query_heads=self.config.base_num_query_heads,
@@ -1021,7 +1021,7 @@ class DeepseekV32MLATest(unittest.TestCase):
         rope_factor=self.config.rope_factor,
         max_target_length=self.seq_len,
         mesh=self.mesh,
-        attention_kernel="dot_product",
+        attention_kernel=attention,
         inputs_q_shape=(self.batch_size, self.seq_len, cfg.emb_dim),
         inputs_kv_shape=(self.batch_size, self.seq_len, cfg.emb_dim),
         rngs=nnx.Rngs(0),
@@ -1086,6 +1086,12 @@ class DeepseekV32MLATest(unittest.TestCase):
     print("jax out", jax_out)
     # np.testing.assert_allclose(to_jax(pt_out / pt_out.sum()), jax_out / jax_out.sum(), rtol=1e-3, atol=1e-2)
     np.testing.assert_allclose(to_jax(pt_out), jax_out, rtol=1e-2, atol=1e-2)
+
+  def test_mla_dot_product_match(self):
+    self.assert_mla_parity("dot_product")
+
+  def test_mla_flash_match(self):
+    self.assert_mla_parity("flash")
 
 
 if __name__ == "__main__":

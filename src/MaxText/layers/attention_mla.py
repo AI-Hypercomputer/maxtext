@@ -280,6 +280,7 @@ class Indexer(nnx.Module):
 
     # Re-apply attention mask after TopK: in case number of unmasked tokens < TopK
     if attention_mask is not None:
+      print(f"attention_mask: {attention_mask.shape}")
       index_mask += attention_mask
 
     return index_mask, topk_indices, index_score
@@ -989,6 +990,8 @@ class MLA(Attention):
 
     # Indexer Logic
     index_mask = None
+    print(f"self.use_sparse_indexer: {self.use_sparse_indexer}")
+    print(f"initial index_mask: {index_mask}")
     if self.use_sparse_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
@@ -1006,8 +1009,8 @@ class MLA(Attention):
           inputs_positions=inputs_positions,
           attention_mask=attention_mask,
       )
-      if index_mask is not None:
-        index_mask = index_mask[:, None, None, :, :]  # [b, 1, 1, q_len, kv_len]
+
+      print(f"index_mask.shape: {index_mask.shape}")
 
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
@@ -1017,6 +1020,7 @@ class MLA(Attention):
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
       # Pass the index_mask to the Attention Op
+      jax.debug.print("pass to self.attention_op: {x}", x=index_mask)
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, index_mask=index_mask)
 
     if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:

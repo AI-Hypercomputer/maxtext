@@ -15,13 +15,13 @@
 # model config for DeepSeek V3.2 - 671B
 # Identical to deepseek3-671b config, except adding indexer config.
 
-base_emb_dim: 7168
+base_emb_dim: 1024 #7168
 base_num_query_heads: 128
 base_num_kv_heads: 128
-base_mlp_dim: 18432
-base_moe_mlp_dim: 2048
-base_num_decoder_layers: 61
-first_num_dense_layers: 3
+base_mlp_dim: 4096 #18432
+base_moe_mlp_dim: 512 #2048
+base_num_decoder_layers: 5 #61
+first_num_dense_layers: 1 #3
 mlp_activations: ["silu","linear"]
 vocab_size: 129280
 enable_dropout: False
@@ -56,4 +56,4 @@ rope_attention_scaling: False
 use_sparse_indexer: True
 index_n_heads: 64
 index_head_dim: 128
-index_topk: 2048
+index_topk: 64 #2048

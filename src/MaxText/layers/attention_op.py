@@ -836,9 +836,6 @@ class AttentionOp(nnx.Module):
     length = query.shape[-3]
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
 
-    if index_mask is not None and self.attention_kernel != "dot_product":
-      raise NotImplementedError("index mask currently only supports dot product attention.")
-
     if use_ragged_attention and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       if lengths is None:
         lengths = jnp.sum(decoder_segment_ids, axis=-1)
@@ -886,7 +883,7 @@ class AttentionOp(nnx.Module):
                               Use `dot_product` instead."""
           )
         return (
-            self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, sinks),
+            self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, sinks, index_mask),
             None,
             None,
         )
@@ -1043,6 +1040,7 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids: Array | None,
       attn_logits_soft_cap: float | None = None,
       sinks: Array | None = None,
+      index_mask: Array | None = None,
   ) -> Array:
     """TPU Flash Attention."""
 
@@ -1056,6 +1054,7 @@ class AttentionOp(nnx.Module):
     segment_axis_names_q = None
     segment_axis_names_kv = None
     sink_axis_names = self._logical_to_mesh_axes((HEAD,))
+    index_mask_axis_names = self._logical_to_mesh_axes((BATCH,))
     if decoder_segment_ids is not None:
       if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
         segment_axis_names_q = self._logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH))
@@ -1095,6 +1094,19 @@ class AttentionOp(nnx.Module):
         " axis"
         f" got {query.shape[0]=}/{devices_in_data_fsdp=}"
     )
+
+    def _maybe_shard_with_pspec(inputs, pspec: jax.sharding.PartitionSpec | None):
+      # decoder_segment_ids can be None
+      if pspec is None:
+        return None
+      sharding = NamedSharding(self.mesh, pspec)
+      return maybe_shard_with_name(
+          inputs,
+          sharding,
+          shard_mode=self.config.shard_mode,
+          debug_sharding=self.config.debug_sharding,
+          extra_stack_level=1,
+      )
 
     # create_splash_attention config
     def create_sa_config(config, query, key, attn_logits_soft_cap):
@@ -1156,6 +1168,26 @@ class AttentionOp(nnx.Module):
     # Create LoadBalancedCausalMask if cp and load_balancing
     if cp_size > 1 and load_balanced_context_parallel:
       mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
+
+    def debug_sharding(array, prefix=""):
+      global_shape = array.shape
+      jax.debug.inspect_array_sharding(
+          array,
+          callback=lambda sharding_obj: print(
+              prefix + f"\tGlobal Shape: {global_shape}\n"
+              f"\tLocal Shape: {sharding_obj.shard_shape(global_shape)}\n"
+              f"\tSharding Object: {sharding_obj}\n"
+          ),
+      )
+
+    if self.config.use_sparse_indexer:
+      index_mask = _maybe_shard_with_pspec(index_mask, index_mask_axis_names)
+      print(f"mask.shape: {mask.shape}")
+      print(f"mask: {mask}")
+      print(f"index_mask.shape: {index_mask.shape}")
+      print(f"index_mask: {index_mask}")
+      debug_sharding(index_mask, "index_mask")
+      mask &= index_mask
 
     # TODO: figure out local_sliding attention + load_balancing, default is global
     # Apply local masking if local sliding attention is enabled.
@@ -1322,18 +1354,6 @@ class AttentionOp(nnx.Module):
         )
       return attention_output
 
-    def _maybe_shard_with_pspec(inputs, pspec: jax.sharding.PartitionSpec | None):
-      # decoder_segment_ids can be None
-      if pspec is None:
-        return None
-      sharding = NamedSharding(self.mesh, pspec)
-      return maybe_shard_with_name(
-          inputs,
-          sharding,
-          shard_mode=self.config.shard_mode,
-          debug_sharding=self.config.debug_sharding,
-          extra_stack_level=1,
-      )
 
     query = _maybe_shard_with_pspec(query, axis_names_q)
     key = _maybe_shard_with_pspec(key, axis_names_kv)
@@ -1643,8 +1663,9 @@ class AttentionOp(nnx.Module):
     # Apply index mask, deepseek sparse attention
     # index mask contains 0.0 for kept tokens and large negative for masked tokens.
     if index_mask is not None:
+      # index_mask: from [b, q_len, kv_len] to [b, 1, 1, q_len, kv_len]
+      index_mask = index_mask[:, None, None, :, :]
       # attn_weights: [b, n_kv, n_q // n_kv, q_len, kv_len]
-      # index_mask: [b, 1, 1, q_len, kv_len]
       attn_weights = apply_mask_to_logits(attn_weights, index_mask)
 
     if self.is_partition_in_decode(q_seq_len):
@@ -1806,6 +1827,7 @@ class AttentionOp(nnx.Module):
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
 
+    jax.debug.print("attention_op call: {x}", x=index_mask)
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=key,
