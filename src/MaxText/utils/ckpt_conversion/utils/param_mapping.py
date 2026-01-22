@@ -918,9 +918,6 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   """
   Transformation hooks for parameters using hyphenated 'params-' MaxText keys.
   """
-  if not scan_layers:
-    raise NotImplementedError("Currently Qwen3-Next only supports scan_layers=True.")
-
   def transpose(input_tensor, target_shape=None):
     return input_tensor.T
 
