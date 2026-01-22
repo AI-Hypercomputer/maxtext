@@ -696,7 +696,7 @@ profile_periodically_period: -1 # If set to a positive integer, profile every pr
 managed_mldiagnostics: False # Whether to enable the managed diagnostics
 managed_mldiagnostics_run_group: ""  # Optional. Used to group multiple runs.
 
-# Dump HLO options
+# Dump HLO and jaxpr options
 dump_hlo: False
 dump_step: -1 # Dump modules at the given step if set to a positive integer.
 dump_hlo_local_dir: "/tmp/xla_dump/"
@@ -708,6 +708,10 @@ dump_hlo_xla_flags: "" # Defaults to "--xla_dump_to={dump_hlo_local_dir} --xla_d
 dump_hlo_upload_all: False # If true all hosts dump HLO, false only jax.process_index()==0
 # All hosts should have identical HLO for SPMD programs, however we have encountered some bugs
 # where this is not the case and it is helpful to compare HLO across hosts.
+dump_jaxpr: False
+dump_jaxpr_local_dir: "/tmp/jaxpr_dump/"
+dump_jaxpr_delete_local_after: True
+dump_jaxpr_gcs_dir: "" # Defaults to {base_output_directory}/{run_name}/jaxpr_dump
 
 # When dropout is false the model is a deterministic function of the
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)

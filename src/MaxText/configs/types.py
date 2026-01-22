@@ -1289,6 +1289,13 @@ class HloDump(BaseModel):
   dump_hlo_local_module_name: str = Field("jit_train_step", description="Filter modules to save locally by this name.")
   dump_hlo_xla_flags: str = Field("", description="Pass custom XLA flags for HLO dumping.")
   dump_hlo_upload_all: bool = Field(False, description="Upload HLO from all hosts.")
+  dump_jaxpr: bool = Field(False, description="Enable jaxpr dumping.")
+  dump_jaxpr_local_dir: PathStr = Field(
+      os.path.join(gettempdir(), "jaxpr_dump", ""),
+      description="Local directory to dump jaxpr.",
+  )
+  dump_jaxpr_delete_local_after: bool = Field(True, description="Delete local jaxpr dump after uploading to GCS.")
+  dump_jaxpr_gcs_dir: PathStr = Field("", description="GCS directory to upload jaxpr dumps.")
 
 
 class StackTrace(BaseModel):
@@ -1837,6 +1844,10 @@ class MaxTextConfig(
         self.dump_hlo_gcs_dir = os.path.join(self.base_output_directory, self.run_name, "xla_dump")
       else:
         self.dump_hlo_gcs_dir = gcs_utils.add_trailing_slash(self.dump_hlo_gcs_dir)
+      if not self.dump_jaxpr_gcs_dir:
+        self.dump_jaxpr_gcs_dir = os.path.join(self.base_output_directory, self.run_name, "jaxpr_dump")
+      else:
+        self.dump_jaxpr_gcs_dir = gcs_utils.add_trailing_slash(self.dump_jaxpr_gcs_dir)
       if not os.environ.get("XLA_FLAGS"):
         os.environ["XLA_FLAGS"] = self.dump_hlo_xla_flags
 
