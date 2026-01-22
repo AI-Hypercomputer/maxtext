@@ -15,7 +15,7 @@
 """Implementation of Engine API for MaxText."""
 
 from collections import defaultdict
-from typing import Any, Callable
+from typing import Any, Callable, Union
 import functools
 import os.path
 import uuid
@@ -102,7 +102,7 @@ class MaxEngine(engine_api.Engine):
   JetStream efficient serving infrastructure.
   """
 
-  def __init__(self, config: Any, devices: config_lib.Devices | None = None):
+  def __init__(self, config: Any, devices: Union[config_lib.Devices, None] = None):
     self.config = config
 
     # Mesh definition

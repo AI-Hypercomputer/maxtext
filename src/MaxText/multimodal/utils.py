@@ -27,7 +27,7 @@ from PIL import Image
 class PreprocessorOutput:
   """Holds the output of an image preprocessor.
 
-  Attributes:
+  Args:
     pixel_values: A JAX array containing the processed image pixel data.
                   The shape and format depend on the specific model and
                   preprocessing steps (e.g., [H, W, C] for Gemma3 or
