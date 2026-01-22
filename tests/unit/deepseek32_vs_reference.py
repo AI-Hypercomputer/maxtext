@@ -16,7 +16,7 @@
 import os.path
 import unittest
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Optional
 import numpy as np
 import scipy
@@ -35,7 +35,7 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
 from MaxText import maxtext_utils
 from MaxText.layers import embeddings, attention_mla
-from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
+from MaxText.common_types import MODEL_MODE_TRAIN
 
 
 """
@@ -73,33 +73,34 @@ SEQ_LEN = 8
 class Config:
   """MaxText config"""
 
+  # attention
+  base_emb_dim: int = 71
+  base_num_query_heads: int = 128
+  base_num_kv_heads: int = 128
   # mla
-  base_emb_dim = 71
-  base_num_query_heads = 128
-  base_num_kv_heads = 128
-  attention_type = "mla"
-  q_lora_rank = 1536
-  kv_lora_rank = 512
-  qk_nope_head_dim = 128
-  qk_rope_head_dim = 64
-  v_head_dim = 128
+  attention_type: str = "mla"
+  q_lora_rank: int = 1536
+  kv_lora_rank: int = 512
+  qk_nope_head_dim: int = 128
+  qk_rope_head_dim: int = 64
+  v_head_dim: int = 128
   # yarn
-  rope_type = "yarn"
-  original_max_position_embeddings = 4096
-  rope_max_timescale = 10_000
-  max_position_embeddings = 163840
-  rope_factor = 40
-  beta_fast = 32
-  beta_slow = 1
-  mscale = 1.0
-  rope_interleave = True
-  rope_truncate = True
-  rope_attention_scaling = False
+  rope_type: str = "yarn"
+  original_max_position_embeddings: int = 4096
+  rope_max_timescale: int = 10_000
+  max_position_embeddings: int = 163840
+  rope_factor: int = 40
+  beta_fast: int = 32
+  beta_slow: int = 1
+  mscale: float = 1.0
+  rope_interleave: bool = True
+  rope_truncate: bool = True
+  rope_attention_scaling: bool = False
   # indexer
-  use_sparse_indexer = True
-  index_n_heads = 64
-  index_head_dim = 128  # > qk_rope_head_dim
-  index_topk = 4
+  use_sparse_indexer: bool = True
+  index_n_heads: int = 64
+  index_head_dim: int = 128  # > qk_rope_head_dim
+  index_topk: int = 4
 
 
 class ModelArgs:
@@ -749,98 +750,101 @@ def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len):
       enable_checkpointing=False,
       model_name="default",
       dtype=dtype,
-      weight_dtype="float32",  # precision
-      matmul_precision="highest",  # precision
-      float32_qk_product=True,  # computes logits in float32 for stability.
-      float32_logits=True,  # cast logits in float32 for stability.
+      # high precision
+      weight_dtype="float32",
+      matmul_precision="highest",
+      float32_qk_product=True,
+      float32_logits=True,
       per_device_batch_size=batch_size,
       max_target_length=seq_len,
       max_prefill_predict_length=seq_len,
       attention="dot_product",
-      # attention
-      base_emb_dim=config.base_emb_dim,
-      base_num_query_heads=config.base_num_query_heads,
-      base_num_kv_heads=config.base_num_kv_heads,
-      # mla
-      attention_type=config.attention_type,
-      q_lora_rank=config.q_lora_rank,
-      kv_lora_rank=config.kv_lora_rank,
-      qk_nope_head_dim=config.qk_nope_head_dim,
-      qk_rope_head_dim=config.qk_rope_head_dim,
-      v_head_dim=config.v_head_dim,
-      # RoPE
-      rope_type=config.rope_type,
-      original_max_position_embeddings=config.original_max_position_embeddings,
-      rope_max_timescale=config.rope_max_timescale,
-      max_position_embeddings=config.max_position_embeddings,
-      rope_factor=config.rope_factor,
-      beta_fast=config.beta_fast,
-      mscale=config.mscale,
-      rope_interleave=config.rope_interleave,
-      rope_truncate=config.rope_truncate,
-      rope_attention_scaling=config.rope_attention_scaling,
-      # Indexer
-      use_sparse_indexer=config.use_sparse_indexer,
-      index_n_heads=config.index_n_heads,
-      index_head_dim=config.index_head_dim,
-      index_topk=config.index_topk,
+      **asdict(config),
   )
   devices_array = maxtext_utils.create_device_mesh(cfg)
   mesh = Mesh(devices_array, cfg.mesh_axes)
   return cfg, mesh
 
 
-class DeepseekV32IndexerTest(unittest.TestCase):
-  """Tests for the Sparse Indexer."""
+class DeepseekTestBase(unittest.TestCase):
+  """Base class handling common setup for DeepSeek V3.2"""
 
   def setUp(self):
     super().setUp()
-    torch.set_default_dtype(torch.float32)  # precision
+    torch.set_default_dtype(torch.float32)
     torch.manual_seed(42)
-    # data
-    self.dtype = "float32"  # precision
-    self.batch_size = 2
-    self.seq_len = SEQ_LEN
-    self.start_pos = 0
+    np.random.seed(42)
 
+    self.dtype = "float32"
+    self.batch_size = 2
+    self.start_pos = 0
+    self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
     # jax config
     self.config = Config()
-    self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
-
-    # pt args
+    # torch config
     self.pt_args = ModelArgs(self.config, self.batch_size)
 
-    # pt indexer
-    self.pt_indexer = Indexer(self.pt_args)
-    init_torch_weights(self.pt_indexer)
-    self.pt_indexer.eval()
+  def get_data(self, seq_len):
+    """Initializes and returns synchronized data/masks for Torch and JAX."""
+    self.seq_len = seq_len
 
-    # pt input
-    self.x = torch.randn(self.batch_size, self.seq_len, self.pt_args.dim)
-    self.qr = torch.randn(self.batch_size, self.seq_len, self.pt_args.q_lora_rank)
-    self.freqs_cis = precompute_freqs_cis(self.pt_args).to(self.x.device)  # RoPE freqs
+    # --- PyTorch Inputs ---
+    x = torch.randn(self.batch_size, seq_len, self.pt_args.dim)
+    qr = torch.randn(self.batch_size, seq_len, self.pt_args.q_lora_rank)
+    # RoPE
+    freqs_cis = precompute_freqs_cis(self.pt_args).to(x.device)
+    freqs_cis_slice = freqs_cis[self.start_pos : self.start_pos + seq_len]
+    # Mask
+    causal_mask = torch.tril(torch.ones(seq_len, seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
+    pt_mask = torch.where(causal_mask == 1, 0.0, float("-inf"))
 
-  def test_indexer_forward_pass(self):
-    """Verifies Indexer output mask matches PyTorch Top-K selection."""
-    # causal_mask
-    pt_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
-    pt_mask = torch.where(pt_mask == 1, 0.0, float("-inf"))
-    self.freqs_cis_slice = self.freqs_cis[self.start_pos : self.start_pos + self.seq_len]
+    torch_inputs = {"x": x, "qr": qr, "freqs_cis_slice": freqs_cis_slice, "mask": pt_mask}
 
-    # 1 Run torch
+    # --- JAX Inputs ---
+    decoder_positions = jnp.broadcast_to(
+        jnp.arange(self.start_pos, self.start_pos + seq_len, dtype=jnp.int32), (self.batch_size, seq_len)
+    )
+    decoder_segment_ids = jnp.ones((self.batch_size, seq_len), dtype=jnp.int32)
+
+    jax_inputs = {
+        "x": to_jax(x),
+        "qr": to_jax(qr),
+        "positions": decoder_positions,
+        "segment_ids": decoder_segment_ids,
+        "mask": to_jax(pt_mask),
+    }
+
+    return torch_inputs, jax_inputs
+
+
+class DeepseekV32IndexerTest(DeepseekTestBase):
+  """Tests for the Sparse Indexer (Top-K Selection)."""
+
+  def test_indexer_match(self):
+    """Verifies Indexer output matches PyTorch output."""
+    torch_inputs, jax_inputs = self.get_data(SEQ_LEN)
+    pt_mask = torch_inputs["mask"]
+
+    # 1. PyTorch Run
+    pt_indexer = Indexer(self.pt_args)
+    init_torch_weights(pt_indexer)
+    pt_indexer.eval()
+
     with torch.no_grad():
-      # Returns indices [B, K]
-      pt_indices, pt_index_score = self.pt_indexer(
-          self.x, self.qr, self.start_pos, self.freqs_cis_slice, mask=pt_mask, debug=True
+      pt_indices, pt_index_score = pt_indexer(
+          torch_inputs["x"],
+          torch_inputs["qr"],
+          self.start_pos,
+          torch_inputs["freqs_cis_slice"],
+          mask=pt_mask,
+          debug=True,
       )
-      pt_index_mask = torch.full(
-          (self.batch_size, self.seq_len, self.seq_len), float("-inf"), device=self.x.device
-      ).scatter_(-1, pt_indices, 0)
+      # Reconstruct Mask
+      pt_index_mask = torch.full((self.batch_size, self.seq_len, self.seq_len), float("-inf")).scatter_(-1, pt_indices, 0)
       if pt_mask is not None:
         pt_index_mask += pt_mask
 
-    # 2 Run jax
-    # Setup Mesh
+    # 2. JAX Run
     cfg, mesh = get_cfg_and_mesh(
         config=self.config,
         run_name="deepseek_indexer_test",
@@ -848,50 +852,38 @@ class DeepseekV32IndexerTest(unittest.TestCase):
         batch_size=self.batch_size,
         seq_len=self.seq_len,
     )
-    self.mesh = mesh
 
-    # indexer apply rope with `interleave=False`
-    # different from mla rope with self.config.rope_interleave
+    # Indexer specific RoPE (interleave=False)
     yarn_rope = embeddings.YarnRotaryEmbedding(
-        max_position_embeddings=self.config.max_position_embeddings,
-        mesh=self.mesh,
-        original_max_position_embeddings=self.config.original_max_position_embeddings,
-        beta_fast=self.config.beta_fast,
-        beta_slow=self.config.beta_slow,
-        rope_theta=self.config.rope_max_timescale,
-        rope_factor=self.config.rope_factor,
-        embedding_dims=self.config.qk_rope_head_dim,
+        max_position_embeddings=cfg.max_position_embeddings,
+        mesh=mesh,
+        original_max_position_embeddings=cfg.original_max_position_embeddings,
+        beta_fast=cfg.beta_fast,
+        beta_slow=cfg.beta_slow,
+        rope_theta=cfg.rope_max_timescale,
+        rope_factor=cfg.rope_factor,
+        embedding_dims=cfg.qk_rope_head_dim,
         fprop_dtype=self.dtype,
         interleave=False,
-        truncate=self.config.rope_truncate,
-        attention_scaling=self.config.rope_attention_scaling,
+        truncate=cfg.rope_truncate,
+        attention_scaling=cfg.rope_attention_scaling,
         rngs=self.nnx_rng,
     )
 
     jax_indexer = attention_mla.Indexer(config=cfg, rngs=self.nnx_rng, rotary_embedding=yarn_rope)
 
-    # B. Copy Weights (PyTorch -> JAX)
-    indexer_state = get_jax_indexer_weights(self.pt_indexer)
-    nnx.update(jax_indexer, indexer_state)
+    # Copy Weights
+    nnx.update(jax_indexer, get_jax_indexer_weights(pt_indexer))
 
-    # C. Input
-    # jax position, Shape: [B, S]
-    start_pos = self.start_pos
-    end_pos = self.start_pos + self.seq_len
-    positions = jnp.arange(start_pos, end_pos, dtype=jnp.int32)[None, :]
-    positions = jnp.broadcast_to(positions, (self.batch_size, self.seq_len))
-
-    # D. Run JAX Forward
-    # Returns bias mask [B, S, T]
     jax_index_mask, jax_indices, jax_index_score = jax_indexer(
-        inputs_q=to_jax(self.x),
-        low_rank_q=to_jax(self.qr),
-        inputs_kv=to_jax(self.x),
-        inputs_positions=positions,
-        attention_mask=to_jax(pt_mask) if pt_mask is not None else None,
+        inputs_q=jax_inputs["x"],
+        low_rank_q=jax_inputs["qr"],
+        inputs_kv=jax_inputs["x"],
+        inputs_positions=jax_inputs["positions"],
+        attention_mask=jax_inputs["mask"],
     )
 
-    # 3 Compare torch and jax
+    # 3 Compare
     print("torch index score", pt_index_score)
     print("jax index score", jax_index_score)
     # check index score is close
@@ -901,49 +893,29 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     np.testing.assert_array_equal(jax_index_mask == 0, to_jax(pt_index_mask == 0))
 
 
-class DeepseekV32MLATest(unittest.TestCase):
+class DeepseekV32MLATest(DeepseekTestBase):
   """Tests for MLA Attention with Sparse Indexing."""
-
-  def setUp(self):
-    super().setUp()
-    torch.set_default_dtype(torch.float32)
-    torch.manual_seed(42)
-    # data
-    self.dtype = "float32"
-    self.batch_size = 2
-    self.seq_len = SEQ_LEN
-    self.start_pos = 0
-
-    # jax config
-    self.config = Config()
-    self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
-
-    # pt args
-    self.pt_args = ModelArgs(self.config, self.batch_size)
-
-    # pt MLA
-    self.pt_mla = MLA(self.pt_args)
-    init_torch_weights(self.pt_mla)
-    self.pt_mla.eval()
-    # pt input
-    self.x = torch.randn(self.batch_size, self.seq_len, self.pt_args.dim)
 
   def test_mla_match(self):
     """Verifies MLA output (train mode) matches PyTorch (MHA mode) with indexer."""
 
-    # 1 Run torch
-    # mask is needed for MHA mode in reference code
-    # Shape [B, S, S], causal mask
-    start_pos = self.start_pos
-    pt_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
-    pt_mask = torch.where(pt_mask == 1, 0.0, float("-inf"))
-    # RoPE
-    self.freqs_cis = precompute_freqs_cis(self.pt_args).to(self.x.device)
-    self.freqs_cis_slice = self.freqs_cis[start_pos : start_pos + self.seq_len]
-    with torch.no_grad():
-      pt_out = self.pt_mla(self.x, start_pos=start_pos, freqs_cis=self.freqs_cis_slice, mask=pt_mask)
+    torch_inputs, jax_inputs = self.get_data(SEQ_LEN)
 
-    # 2 Run jax
+    # 1. PyTorch Run
+    pt_mla = MLA(self.pt_args)
+    init_torch_weights(pt_mla)
+    pt_mla.eval()
+
+    with torch.no_grad():
+      # MHA mode is activated by mask
+      pt_out = pt_mla(
+          torch_inputs["x"],
+          start_pos=self.start_pos,
+          freqs_cis=torch_inputs["freqs_cis_slice"],
+          mask=torch_inputs["mask"],
+      )
+
+    # 2. JAX Run
     cfg, mesh = get_cfg_and_mesh(
         config=self.config,
         run_name="deepseek_mla_test",
@@ -951,8 +923,7 @@ class DeepseekV32MLATest(unittest.TestCase):
         batch_size=self.batch_size,
         seq_len=self.seq_len,
     )
-    self.mesh = mesh
-    # A. JAX Init
+
     jax_mla = attention_mla.MLA(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
@@ -962,45 +933,36 @@ class DeepseekV32MLATest(unittest.TestCase):
         weight_dtype=cfg.weight_dtype,
         float32_qk_product=cfg.float32_qk_product,
         float32_logits=cfg.float32_logits,
-        # mla
         attention_type="mla",
-        q_lora_rank=self.config.q_lora_rank,
-        kv_lora_rank=self.config.kv_lora_rank,
-        qk_nope_head_dim=self.config.qk_nope_head_dim,
-        qk_rope_head_dim=self.config.qk_rope_head_dim,
-        v_head_dim=self.config.v_head_dim,
-        max_position_embeddings=self.config.max_position_embeddings,
-        original_max_position_embeddings=self.config.original_max_position_embeddings,
-        mscale=self.config.mscale,
-        rope_factor=self.config.rope_factor,
+        q_lora_rank=cfg.q_lora_rank,
+        kv_lora_rank=cfg.kv_lora_rank,
+        qk_nope_head_dim=cfg.qk_nope_head_dim,
+        qk_rope_head_dim=cfg.qk_rope_head_dim,
+        v_head_dim=cfg.v_head_dim,
+        max_position_embeddings=cfg.max_position_embeddings,
+        original_max_position_embeddings=cfg.original_max_position_embeddings,
+        mscale=cfg.mscale,
+        rope_factor=cfg.rope_factor,
         max_target_length=self.seq_len,
-        mesh=self.mesh,
+        mesh=mesh,
         attention_kernel="dot_product",
         inputs_q_shape=(self.batch_size, self.seq_len, cfg.emb_dim),
         inputs_kv_shape=(self.batch_size, self.seq_len, cfg.emb_dim),
         rngs=self.nnx_rng,
     )
 
-    # B. Copy Weights
-    mla_state = get_jax_mla_weights(self.pt_mla, self.config)
-    nnx.update(jax_mla, mla_state)
+    # Copy Weights
+    nnx.update(jax_mla, get_jax_mla_weights(pt_mla, self.config))
 
-    # C. Input
-    decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
-    decoder_positions = jnp.broadcast_to(
-        jnp.arange(start_pos, start_pos + self.seq_len, dtype=jnp.int32), (self.batch_size, self.seq_len)
-    )
-    lnx = to_jax(self.x)
-    # D. Run Forward
     jax_out, _ = jax_mla(
-        inputs_q=lnx,
-        inputs_kv=lnx,
-        inputs_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
+        inputs_q=jax_inputs["x"],
+        inputs_kv=jax_inputs["x"],
+        inputs_positions=jax_inputs["positions"],
+        decoder_segment_ids=jax_inputs["segment_ids"],
         model_mode=MODEL_MODE_TRAIN,
     )
 
-    # 3 Compare torch and jax
+    # 3 Compare
     print("torch out", pt_out)
     print("jax out", jax_out)
     # np.testing.assert_allclose(to_jax(pt_out / pt_out.sum()), jax_out / jax_out.sum(), rtol=1e-3, atol=1e-2)
