@@ -97,6 +97,7 @@ autodoc_mock_imports = [
     "cloud_tpu_diagnostics",
     "google_cloud_mldiagnostics",
     "jetstream",
+    "librosa",
     "ml_goodput_measurement",
     "pathwaysutils",
     "safetensors",
@@ -178,6 +179,7 @@ def run_apidoc(_):
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "scratch_code"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "utils", "ckpt_conversion"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "rl"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "multimodal_utils.py"),
   ]
 
   # Run the command and check for errors
