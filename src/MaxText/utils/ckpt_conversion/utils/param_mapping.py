@@ -797,9 +797,6 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
   Returns mapping from MaxText to HuggingFace Qwen3-Next weight paths.
   All MaxText keys start with 'params-' and use '-' separators for scanned layers.
   """
-  if not scan_layers:
-    raise NotImplementedError("This conversion only supports scanned MaxText models.")
-
   num_main_layers = config["num_hidden_layers"]
   num_experts = config["num_experts"]
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
@@ -811,59 +808,109 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
       "params-decoder-logits_dense-kernel": "lm_head.weight",
   }
 
-  # 2. Scan over block cycles
-  for block_idx in range(layer_cycle_interval):
-    hf_indices = list(range(block_idx, num_main_layers, layer_cycle_interval))
-    prefix = f"params-decoder-layers-layer_{block_idx}"
+  if scan_layers:
+    # 2. Scan over block cycles
+    for block_idx in range(layer_cycle_interval):
+      hf_indices = list(range(block_idx, num_main_layers, layer_cycle_interval))
+      prefix = f"params-decoder-layers-layer_{block_idx}"
 
-    # Layer norms
-    mapping[f"{prefix}-input_layernorm-scale"] = [
-      f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
-    ]
-    mapping[f"{prefix}-post_attention_layernorm-scale"] = [
-      f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
-    ]
+      # Layer norms
+      mapping[f"{prefix}-input_layernorm-scale"] = [
+        f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
+      ]
+      mapping[f"{prefix}-post_attention_layernorm-scale"] = [
+        f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
+      ]
 
-    # Handle Interleaved Attention (Linear vs Full)
-    is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
+      # Handle Interleaved Attention (Linear vs Full)
+      is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
 
-    if is_full_attention_layer:
+      if is_full_attention_layer:
+          mapping.update({
+              f"{prefix}-attention-attention-query-kernel": [f"model.layers.{i}.self_attn.q_proj.weight" for i in hf_indices],
+              f"{prefix}-attention-attention-key-kernel":   [f"model.layers.{i}.self_attn.k_proj.weight" for i in hf_indices],
+              f"{prefix}-attention-attention-value-kernel": [f"model.layers.{i}.self_attn.v_proj.weight" for i in hf_indices],
+              f"{prefix}-attention-attention-out-kernel":   [f"model.layers.{i}.self_attn.o_proj.weight" for i in hf_indices],
+              f"{prefix}-attention-attention-query_norm-scale": [f"model.layers.{i}.self_attn.q_norm.weight" for i in hf_indices],
+              f"{prefix}-attention-attention-key_norm-scale":   [f"model.layers.{i}.self_attn.k_norm.weight" for i in hf_indices],
+          })
+      else:
+          # Linear/Hybrid Attention Block
+          mapping.update({
+              f"{prefix}-attention-in_proj_qkvz-kernel": [f"model.layers.{i}.linear_attn.in_proj_qkvz.weight" for i in hf_indices],
+              f"{prefix}-attention-in_proj_ba-kernel": [f"model.layers.{i}.linear_attn.in_proj_ba.weight" for i in hf_indices],
+              f"{prefix}-attention-conv1d-kernel": [f"model.layers.{i}.linear_attn.conv1d.weight" for i in hf_indices],
+              f"{prefix}-attention-A_log": [f"model.layers.{i}.linear_attn.A_log" for i in hf_indices],
+              f"{prefix}-attention-dt_bias": [f"model.layers.{i}.linear_attn.dt_bias" for i in hf_indices],
+              f"{prefix}-attention-norm-rms_norm-scale": [f"model.layers.{i}.linear_attn.norm.weight" for i in hf_indices],
+              f"{prefix}-attention-out_proj-kernel": [f"model.layers.{i}.linear_attn.out_proj.weight" for i in hf_indices],
+          })
+
+      # 3. Handle MLP: Gates and Shared Experts
+      mapping.update({
+          f"{prefix}-mlp-routed_experts-gate-kernel":     [f"model.layers.{i}.mlp.gate.weight" for i in hf_indices],
+          f"{prefix}-mlp-shared_expert-wi_0-kernel":      [f"model.layers.{i}.mlp.shared_expert.gate_proj.weight" for i in hf_indices],
+          f"{prefix}-mlp-shared_expert-wi_1-kernel":      [f"model.layers.{i}.mlp.shared_expert.up_proj.weight" for i in hf_indices],
+          f"{prefix}-mlp-shared_expert-wo-kernel":        [f"model.layers.{i}.mlp.shared_expert.down_proj.weight" for i in hf_indices],
+          f"{prefix}-mlp-shared_expert_gate-kernel":      [f"model.layers.{i}.mlp.shared_expert_gate.weight" for i in hf_indices],
+      })
+
+      # 4. Handle MoE Routed Experts
+      mapping.update({
+        f"{prefix}-mlp-routed_experts-wi_0": [[f"model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for i in hf_indices] for e in range(num_experts)],
+        f"{prefix}-mlp-routed_experts-wi_1": [[f"model.layers.{i}.mlp.experts.{e}.up_proj.weight" for i in hf_indices] for e in range(num_experts)],
+        f"{prefix}-mlp-routed_experts-wo":   [[f"model.layers.{i}.mlp.experts.{e}.down_proj.weight" for i in hf_indices] for e in range(num_experts)],
+      })
+  else:
+    # Unscanned layer mapping
+    for i in range(num_main_layers):
+      prefix = f"params-decoder-layers_{i}"
+      
+      # Layer Norms
+      mapping[f"{prefix}-input_layernorm-scale"] = f"model.layers.{i}.input_layernorm.weight"
+      mapping[f"{prefix}-post_attention_layernorm-scale"] = f"model.layers.{i}.post_attention_layernorm.weight"
+
+      # Determine layer type based on cycle interval
+      # Assuming block logic: layer i corresponds to block_idx = i % interval
+      block_idx = i % layer_cycle_interval
+      is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
+
+      if is_full_attention_layer:
         mapping.update({
-            f"{prefix}-attention-attention-query-kernel": [f"model.layers.{i}.self_attn.q_proj.weight" for i in hf_indices],
-            f"{prefix}-attention-attention-key-kernel":   [f"model.layers.{i}.self_attn.k_proj.weight" for i in hf_indices],
-            f"{prefix}-attention-attention-value-kernel": [f"model.layers.{i}.self_attn.v_proj.weight" for i in hf_indices],
-            f"{prefix}-attention-attention-out-kernel":   [f"model.layers.{i}.self_attn.o_proj.weight" for i in hf_indices],
-            f"{prefix}-attention-attention-query_norm-scale": [f"model.layers.{i}.self_attn.q_norm.weight" for i in hf_indices],
-            f"{prefix}-attention-attention-key_norm-scale":   [f"model.layers.{i}.self_attn.k_norm.weight" for i in hf_indices],
+          f"{prefix}-attention-attention-query-kernel": f"model.layers.{i}.self_attn.q_proj.weight",
+          f"{prefix}-attention-attention-key-kernel":   f"model.layers.{i}.self_attn.k_proj.weight",
+          f"{prefix}-attention-attention-value-kernel": f"model.layers.{i}.self_attn.v_proj.weight",
+          f"{prefix}-attention-attention-out-kernel":   f"model.layers.{i}.self_attn.o_proj.weight",
+          f"{prefix}-attention-attention-query_norm-scale": f"model.layers.{i}.self_attn.q_norm.weight",
+          f"{prefix}-attention-attention-key_norm-scale":   f"model.layers.{i}.self_attn.k_norm.weight",
         })
-    else:
+      else:
         # Linear/Hybrid Attention Block
         mapping.update({
-            f"{prefix}-attention-in_proj_qkvz-kernel": [f"model.layers.{i}.linear_attn.in_proj_qkvz.weight" for i in hf_indices],
-            f"{prefix}-attention-in_proj_ba-kernel": [f"model.layers.{i}.linear_attn.in_proj_ba.weight" for i in hf_indices],
-            f"{prefix}-attention-conv1d-kernel": [f"model.layers.{i}.linear_attn.conv1d.weight" for i in hf_indices],
-            f"{prefix}-attention-A_log": [f"model.layers.{i}.linear_attn.A_log" for i in hf_indices],
-            f"{prefix}-attention-dt_bias": [f"model.layers.{i}.linear_attn.dt_bias" for i in hf_indices],
-            f"{prefix}-attention-norm-rms_norm-scale": [f"model.layers.{i}.linear_attn.norm.weight" for i in hf_indices],
-            f"{prefix}-attention-out_proj-kernel": [f"model.layers.{i}.linear_attn.out_proj.weight" for i in hf_indices],
+          f"{prefix}-attention-in_proj_qkvz-kernel": f"model.layers.{i}.linear_attn.in_proj_qkvz.weight",
+          f"{prefix}-attention-in_proj_ba-kernel":   f"model.layers.{i}.linear_attn.in_proj_ba.weight",
+          f"{prefix}-attention-conv1d-kernel":        f"model.layers.{i}.linear_attn.conv1d.weight",
+          f"{prefix}-attention-A_log":                f"model.layers.{i}.linear_attn.A_log",
+          f"{prefix}-attention-dt_bias":              f"model.layers.{i}.linear_attn.dt_bias",
+          f"{prefix}-attention-norm-rms_norm-scale":  f"model.layers.{i}.linear_attn.norm.weight",
+          f"{prefix}-attention-out_proj-kernel":      f"model.layers.{i}.linear_attn.out_proj.weight",
         })
 
-    # 3. Handle MLP: Gates and Shared Experts
-    mapping.update({
-        f"{prefix}-mlp-routed_experts-gate-kernel":     [f"model.layers.{i}.mlp.gate.weight" for i in hf_indices],
-        f"{prefix}-mlp-shared_expert-wi_0-kernel":      [f"model.layers.{i}.mlp.shared_expert.gate_proj.weight" for i in hf_indices],
-        f"{prefix}-mlp-shared_expert-wi_1-kernel":      [f"model.layers.{i}.mlp.shared_expert.up_proj.weight" for i in hf_indices],
-        f"{prefix}-mlp-shared_expert-wo-kernel":        [f"model.layers.{i}.mlp.shared_expert.down_proj.weight" for i in hf_indices],
-        f"{prefix}-mlp-shared_expert_gate-kernel":      [f"model.layers.{i}.mlp.shared_expert_gate.weight" for i in hf_indices],
-    })
+      # MLP: Gates and Shared Experts
+      mapping.update({
+        f"{prefix}-mlp-routed_experts-gate-kernel": f"model.layers.{i}.mlp.gate.weight",
+        f"{prefix}-mlp-shared_expert-wi_0-kernel":  f"model.layers.{i}.mlp.shared_expert.gate_proj.weight",
+        f"{prefix}-mlp-shared_expert-wi_1-kernel":  f"model.layers.{i}.mlp.shared_expert.up_proj.weight",
+        f"{prefix}-mlp-shared_expert-wo-kernel":    f"model.layers.{i}.mlp.shared_expert.down_proj.weight",
+        f"{prefix}-mlp-shared_expert_gate-kernel":  f"model.layers.{i}.mlp.shared_expert_gate.weight",
+      })
 
-    # 4. Handle MoE Routed Experts
-    mapping.update({
-      f"{prefix}-mlp-routed_experts-wi_0": [[f"model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for i in hf_indices] for e in range(num_experts)],
-      f"{prefix}-mlp-routed_experts-wi_1": [[f"model.layers.{i}.mlp.experts.{e}.up_proj.weight" for i in hf_indices] for e in range(num_experts)],
-      f"{prefix}-mlp-routed_experts-wo":   [[f"model.layers.{i}.mlp.experts.{e}.down_proj.weight" for i in hf_indices] for e in range(num_experts)],
-    })
-
+      # MoE Routed Experts (List of expert weights for this specific layer)
+      mapping.update({
+        f"{prefix}-mlp-routed_experts-wi_0": [f"model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for e in range(num_experts)],
+        f"{prefix}-mlp-routed_experts-wi_1": [f"model.layers.{i}.mlp.experts.{e}.up_proj.weight" for e in range(num_experts)],
+        f"{prefix}-mlp-routed_experts-wo":   [f"model.layers.{i}.mlp.experts.{e}.down_proj.weight" for e in range(num_experts)],
+      })
   return mapping
 
 
@@ -901,21 +948,26 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
 
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
   num_experts = config["num_experts"]
+  num_main_layers = config["base_num_decoder_layers"]
+  loop_indices = range(layer_cycle_interval) if scan_layers else range(num_main_layers)
 
-  for block_idx in range(layer_cycle_interval):
-    prefix = f"params-decoder-layers-layer_{block_idx}"
+  for i in loop_indices:
+    if scan_layers:
+        prefix = f"params-decoder-layers-layer_{i}"
+        block_idx = i
+    else:
+        prefix = f"params-decoder-layers_{i}"
+        block_idx = i % layer_cycle_interval
     is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
 
     if is_full_attention_layer:
       for key in ["query", "key", "value", "out"]:
         hooks[f"{prefix}-attention-attention-{key}-kernel"] = reshape_and_transpose_attn
     else:
-      # Linear Attention Hooks
       hooks[f"{prefix}-attention-in_proj_qkvz-kernel"] = transpose
       hooks[f"{prefix}-attention-in_proj_ba-kernel"] = transpose
       hooks[f"{prefix}-attention-out_proj-kernel"] = transpose
       hooks[f"{prefix}-attention-conv1d-kernel"] = permute_conv
-      # Parameters that don't need transformation but must be present in hooks
       hooks[f"{prefix}-attention-A_log"] = identity
       hooks[f"{prefix}-attention-dt_bias"] = identity
 
