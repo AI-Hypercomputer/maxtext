@@ -24,9 +24,9 @@ each policy, it performs a binary search to find the largest possible batch
 size that does not cause an out-of-memory (OOM) error.
 
 The key functions in this script are:
-- `is_oom`: Checks if a given configuration results in an OOM error.
-- `largest_batch_size`: Finds the largest batch size for a given policy.
-- `search`: The main algorithm that iterates through policies and batch sizes.
+- ``is_oom``: Checks if a given configuration results in an OOM error.
+- ``largest_batch_size``: Finds the largest batch size for a given policy.
+- ``search``: The main algorithm that iterates through policies and batch sizes.
 
 By automating this search, the script helps to efficiently find the most
 performant and memory-efficient training configurations.
@@ -141,8 +141,8 @@ def next_policy(policy: dict) -> dict[str, str] | None:
   Generates the next rematerialization policy in the sequence.
 
   This function iterates through the policy and changes the first tensor it
-  finds with a 'device' value to 'offload', or the first 'offload' to 'remat'.
-  If all tensors are already set to 'remat', it returns None.
+  finds with a ``device`` value to ``offload``, or the first ``offload`` to
+  ``remat``. If all tensors are already set to ``remat``, it returns None.
 
   Args:
     policy: The current policy dictionary.
@@ -166,18 +166,20 @@ def next_policy(policy: dict) -> dict[str, str] | None:
 
 def largest_batch_size(base_argv, policy, min_pdb, max_pdb=64) -> int:
   """
-  Finds the largest possible per_device_batch_size (pdb) that does not cause an OOM error.
+  Finds the largest possible ``per_device_batch_size`` (pdb) that does not cause
+  an OOM error.
 
   This function uses a binary search algorithm within the provided min and max
   range to efficiently find the optimal batch size.
 
   Args:
     policy: The rematerialization policy dictionary.
-    min_pdb: The minimum per_device_batch_size to test.
-    max_pdb: The maximum per_device_batch_size to test.
+    min_pdb: The minimum ``per_device_batch_size`` to test.
+    max_pdb: The maximum ``per_device_batch_size`` to test.
 
   Returns:
-    The largest per_device_batch_size within the range that does not result in an OOM error.
+    The largest ``per_device_batch_size`` within the range that does not result
+    in an OOM error.
   """
   print(f"Starting binary search for the largest batch size between {min_pdb} and {max_pdb}.")
 
@@ -263,7 +265,7 @@ def search_policy_only(
     base_argv: The base command-line arguments.
     pdb: The fixed per-device batch size to test against.
     init_policy: The policy to start searching from. If None, defaults to
-                  'full_device_policy' (no remat).
+      ``full_device_policy`` (no remat).
 
   Returns:
     The first rematerialization policy that did *not* OOM.
@@ -300,7 +302,7 @@ def search(
 
   Args:
     config: The model configuration.
-    max_pdb: The maximum per_device_batch_size to test.
+    max_pdb: The maximum ``per_device_batch_size`` to test.
 
   Returns:
     A list of tuples, where each tuple contains a batch size and its
@@ -341,12 +343,13 @@ def get_parameter_value(config_tuple, prefix):
 
   Args:
     config_tuple: A tuple of strings to search.
-    prefix: The prefix string to look for (e.g., 'key=').
+    prefix: The prefix string to look for (e.g., ``key=``).
 
   Returns:
     A tuple of (bool, str or None).
-    - (True, value) if the prefix is found.
-    - (False, None) if the prefix is not found.
+
+    * ``(True, value)`` if the prefix is found.
+    * ``(False, None)`` if the prefix is not found.
   """
   for item in config_tuple:
     if item.startswith(prefix):
@@ -361,15 +364,16 @@ def get_parameter_value(config_tuple, prefix):
 
 def find_batch_size(base_argv):
   """
-  Parses the base arguments to find the 'per_device_batch_size'.
+  Parses the base arguments to find the ``per_device_batch_size``.
 
   Args:
-      base_argv: The tuple of command-line arguments.
+    base_argv: The tuple of command-line arguments.
 
   Returns:
-      A tuple of (bool, int or None):
-      - (True, batch_size) if 'per_device_batch_size=...' was found.
-      - (False, None) if it was not found.
+    A tuple of (bool, int or None)
+
+    * ``(True, batch_size)`` if ``per_device_batch_size=...`` was found.
+    * ``(False, None)`` if it was not found.
   """
   pdb_provided, pdb_str = get_parameter_value(base_argv, prefix="per_device_batch_size=")
 
@@ -384,10 +388,10 @@ def find_remat_policy_tensor_names(base_argv):
   to be considered for rematerialization.
 
   Args:
-      base_argv: The tuple of command-line arguments.
+    base_argv: The tuple of command-line arguments.
 
   Returns:
-      A list of tensor names that were passed as flags.
+    A list of tensor names that were passed as flags.
   """
   full_tensor_list = [
       "context",
