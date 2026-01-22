@@ -16,7 +16,7 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Optional
+from typing import Optional, Any
 
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
@@ -154,6 +154,8 @@ class DeepSeekGenericLayer(nnx.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
     """Executes the attention layer."""
     attention_result, _ = self.self_attention(
@@ -167,6 +169,8 @@ class DeepSeekGenericLayer(nnx.Module):
         previous_chunk=previous_chunk,
         page_state=page_state,
         slot=slot,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
     return self.with_logical_constraint(attention_result)
 
@@ -229,6 +233,8 @@ class DeepSeekGenericLayer(nnx.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
     """self-attention with normalization"""
     lnx = self.pre_attention_norm_op(inputs)
@@ -241,6 +247,8 @@ class DeepSeekGenericLayer(nnx.Module):
         previous_chunk,
         page_state,
         slot,
+        kv_cache,
+        attention_metadata,
     )
     intermediate_inputs = inputs + attention_lnx
     # Normalization
@@ -306,6 +314,8 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         previous_chunk,
         page_state,
         slot,
+        kv_cache,
+        attention_metadata,
     )
 
     mlp_lnx = self.mlp_op(hidden_states, deterministic)
@@ -377,6 +387,8 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         previous_chunk,
         page_state,
         slot,
+        kv_cache,
+        attention_metadata,
     )
 
     mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(hidden_states, deterministic)
