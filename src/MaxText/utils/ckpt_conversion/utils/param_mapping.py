@@ -945,7 +945,7 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
 
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
   num_experts = config["num_experts"]
-  num_main_layers = config["base_num_decoder_layers"]
+  num_main_layers = config["num_hidden_layers"]
   loop_indices = range(layer_cycle_interval) if scan_layers else range(num_main_layers)
 
   for i in loop_indices:
