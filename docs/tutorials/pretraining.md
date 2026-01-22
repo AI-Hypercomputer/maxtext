@@ -87,7 +87,7 @@ eval metrics after step: 9, loss=9.420, total_weights=75264.0
 
 Grain is a library for reading data for training and evaluating JAX models. It is the recommended input pipeline for determinism and resilience! It supports data formats like ArrayRecord and Parquet. You can check [Grain pipeline](../guides/data_input_pipeline/data_input_grain.md) for more details.
 
-**Data preparation**: You need to download data to a Cloud Storage bucket, and read data via Cloud Storage Fuse with [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/tools/setup/setup_gcsfuse.sh).
+**Data preparation**: You need to download data to a Cloud Storage bucket, and read data via Cloud Storage Fuse with [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/dependencies/scripts/setup_gcsfuse.sh).
 
 - For example, we can mount the bucket `gs://maxtext-dataset` on the local path `/tmp/gcsfuse` before training
   ```bash
