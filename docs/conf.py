@@ -191,6 +191,6 @@ def run_apidoc(_):
 
 # Connect the apidoc generation to the Sphinx build process
 def setup(app):
-  run_apidoc(None)
+  # run_apidoc(None)
   print("running:", app)
   # app.connect("builder-inited", run_apidoc)
