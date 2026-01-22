@@ -83,18 +83,14 @@ myst_linkify_fuzzy_links = False
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"
 autodoc_mock_imports = [
-    "cloud_tpu_diagnostics",
-    "google_cloud_mldiagnostics",
-    "jetstream",
-    "librosa",
-    "ml_goodput_measurement",
-    "pathwaysutils",
     "safetensors",
     "tensorflow_datasets",
     "torch",
     "tpu_inference",
-    "transformer_engine",
     "vllm",
+    "grain",
+    "librosa",
+    "sentencepiece",
 ]
 autosummary_generate = True
 
@@ -154,6 +150,7 @@ def run_apidoc(_):
   # Note: We use `sys.executable -m sphinx.ext.apidoc` to ensure we're using
   # the apidoc from the same Python environment as Sphinx.
   command = [
+<<<<<<< HEAD
       sys.executable,
       "-m",
       "sphinx.ext.apidoc",
@@ -171,6 +168,21 @@ def run_apidoc(_):
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "utils", "ckpt_conversion"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "rl"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "multimodal_utils.py"),
+=======
+    sys.executable,
+    "-m",
+    "sphinx.ext.apidoc",
+    "--module-first",
+    "--force",
+    "--separate",
+    "--output-dir",
+    output_path,
+    os.path.join(MAXTEXT_REPO_ROOT, "src"),
+    # Paths to exclude
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "experimental"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_mlperf"),
+    os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "scratch_code"),
+>>>>>>> 1f2bbd7c7 (Fix mock imports)
   ]
 
   # Run the command and check for errors
