@@ -120,9 +120,10 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
       rng_key = jax.random.PRNGKey(config.init_weights_seed)
 
     if model_mode == MODEL_MODE_TRAIN:
-      rngs = nnx.Rngs(params=rng_key, dropout=1)
+      params_rng, dropout_rng = jax.random.split(rng_key)
+      rngs = nnx.Rngs(params=params_rng, dropout=dropout_rng)
     else:
-      rngs = nnx.Rngs(params=rng_key)  # disable dropout RNG for inference
+      rngs = nnx.Rngs(params=rng_key)
 
     return from_config(config, devices, mesh, rngs=rngs, model_mode=model_mode)
 
@@ -160,6 +161,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
       maxtext_utils.print_shardings_params(sharded_state, out_shardings, model.mesh)
     if config.load_parameters_path:
       try:
+        print(f"  - Loading checkpoint from: {config.load_parameters_path}")
         ckptr = ocp.Checkpointer(
             ocp.PyTreeCheckpointHandler(
                 restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
@@ -184,6 +186,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
         ):
           # structure of linen checkpoint: {'params': {'params': {'decoder': ...}}}
           is_nnx_checkpoint = False
+          print("  - Detected Linen checkpoint format")
           target_for_restore = jax.tree.map(
               lambda v: v.value,
               sharded_state,
@@ -194,6 +197,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
           restore_args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(target_for_restore)}}
         else:
           # structure of nnx checkpoint: {'decoder': {'value': ...}}
+          print("  - Detected NNX checkpoint format")
           target_for_restore = jax.tree.map(
               lambda v: {"value": v.value},
               sharded_state,
@@ -220,8 +224,13 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
 
         if checkpoint:
           nnx.update(model, checkpoint)
+          num_params = len(jax.tree.leaves(checkpoint))
+          print(f"  - ✅ Successfully loaded {num_params} parameter arrays from checkpoint")
+        else:
+          print("  - Warning: Checkpoint was empty, using random initialization")
 
       except Exception as e:
+        print(f"  - ❌ Checkpoint loading failed: {e}")
         raise ValueError(f"Checkpoint loading failed: {e}") from e
 
     return model, mesh
