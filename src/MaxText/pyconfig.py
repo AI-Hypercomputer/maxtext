@@ -201,12 +201,6 @@ def initialize(argv: list[str], **kwargs) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
   pydantic_config = initialize_pydantic(argv, **kwargs)
   config = HyperParameters(pydantic_config)
-
-  if config.log_config:
-    for k, v in sorted(config.get_keys().items()):
-      if k != "hf_access_token":
-        logger.info("Config param %s: %s", k, v)
-
   return config
 
 
