@@ -676,7 +676,7 @@ class MLA(Attention):
 
     key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
     cached_values = [None, None]
-    if self.config.attention != "paged" and model_mode != MODEL_MODE_TRAIN:
+    if self.config.attention != "paged" and self.config.attention != "vllm_rpa" and model_mode != MODEL_MODE_TRAIN:
       if self.config.mla_naive_kvcache:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       else:
@@ -684,7 +684,77 @@ class MLA(Attention):
             low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk
         )
 
-    return key, value, cached_values
+    return key, value, cached_values, low_rank_main, key_rope
+
+  def mla_rpa_vllm(self, q_nope, q_rope, k_latent, k_rope, mla_kv_cache, mla_metadata):
+    """Forward function for vLLM serving with MLA attention.
+
+    Args:
+        q_nope: Query nope part [T, N, qk_nope_head_dim]
+        q_rope: Query rope part [T, N, qk_rope_head_dim]
+        k_latent: Latent KV representation [S, kv_lora_rank] (NOT expanded k_nope)
+        k_rope: Key rope part [S, qk_rope_head_dim] (NO head dimension)
+        mla_kv_cache: The KV cache
+        mla_metadata: Attention metadata
+    """
+    md = mla_metadata
+    try:
+      # pylint: disable=import-outside-toplevel
+      # pytype: disable=import-error
+      from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
+      from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import get_tuned_block_sizes
+    except ImportError as e:
+      raise ImportError(
+          "vLLM RPA attention ops require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
+      ) from e
+
+    if mla_kv_cache is None or mla_metadata is None:
+      raise ValueError("kv_cache and attention_metadata must be provided when using vLLM.")
+
+    wkv_b_kernel = self.wkv_b.kernel.value
+    wk_b_kernel = wkv_b_kernel[..., : self.qk_nope_head_dim]
+    wv_b_kernel = wkv_b_kernel[..., self.qk_nope_head_dim :]
+    q_absorbed = jnp.einsum("TNH,ANH->TNA", q_nope, wk_b_kernel)
+
+    def _initialize_block_sizes():
+      # Set reasonable starting estimates for block sizes. (TODO(gpolovets): update this to use tuned sizes)
+      max_num_tokens = q_absorbed.shape[0]
+      max_num_seqs = md.seq_lens.shape[0]
+      num_page_indices = md.block_tables.shape[0]
+      assert num_page_indices % max_num_seqs == 0
+      pages_per_seq = num_page_indices // max_num_seqs
+      # num_kv_pages_per_block = min(pages_per_seq, 16)
+      bkv_p, bq_sz = get_tuned_block_sizes(
+          q_nope.dtype,
+          q_nope.dtype,  # changed to q_nope dtype from mla_kv_cache.dtype
+          self.num_query_heads,
+          1,  # num_kv_heads for MLA kernel
+          self.qk_nope_head_dim,
+          q_nope.shape[1],  # page size ?? kv_cache.shape[1]
+          max_num_tokens,
+          pages_per_seq,
+      )
+      num_kv_pages_per_block = min(pages_per_seq, bkv_p, 4)
+      num_queries_per_block = min(max_num_tokens, bq_sz, 4)  # OOMS at 8
+      return num_kv_pages_per_block, num_queries_per_block
+
+    num_kv_pages_per_block, num_queries_per_block = _initialize_block_sizes()
+    output, kv_cache = mla_ragged_paged_attention(
+        q_absorbed,
+        q_rope,
+        k_latent,
+        k_rope,
+        mla_kv_cache,
+        md.seq_lens,
+        md.block_tables,
+        md.query_start_loc,
+        md.request_distribution,
+        sm_scale=1.0,
+        num_kv_pages_per_block=num_kv_pages_per_block,
+        num_queries_per_block=num_queries_per_block,
+    )
+    output = jnp.einsum("TNA,ANH->TNH", output, wv_b_kernel)
+    return kv_cache, output
 
   def __call__(
       self,
@@ -738,7 +808,7 @@ class MLA(Attention):
       out_logical_name = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
 
     query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
-    key, value, cached_values = self.mla_kv_projection(
+    key, value, cached_values, low_rank_main, key_rope = self.mla_kv_projection(
         inputs_kv, inputs_positions, decoder_segment_ids, model_mode, previous_chunk
     )
 
@@ -752,6 +822,19 @@ class MLA(Attention):
       )
       unnormalized_out = unnormalized_out[..., : self.v_head_dim]
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
+    elif self.config.attention == "vllm_rpa" and model_mode != MODEL_MODE_TRAIN:
+      batch, seq_len, num_heads, head_dim = query.shape
+      query = query.reshape(-1, query.shape[2], query.shape[3])
+      q_nope, q_rope = jnp.split(query, [self.qk_nope_head_dim], axis=-1)
+
+      k_latent = low_rank_main.reshape(-1, self.kv_lora_rank)
+      k_rope_squeezed = key_rope.reshape(-1, self.qk_rope_head_dim)
+
+      updated_kv, attn_out = self.mla_rpa_vllm(
+          q_nope, q_rope, k_latent, k_rope_squeezed, mla_kv_cache=kv_cache, mla_metadata=attention_metadata
+      )
+      out = attn_out.reshape(batch, seq_len, num_heads, head_dim)
+      kv_cache = updated_kv
     else:
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
 
