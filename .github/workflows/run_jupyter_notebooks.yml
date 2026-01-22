@@ -87,10 +87,11 @@ jobs:
       - name: Run Post-Training Notebooks
         shell: bash
         env:
+          PYTHONPATH: "${{ github.workspace }}/src"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           MAXTEXT_REPO_ROOT=$(pwd)
-          MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/MaxText/examples"
+          MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
             filename=$(basename "$notebook")

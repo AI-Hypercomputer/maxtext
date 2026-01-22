@@ -34,7 +34,7 @@ fixes:
 ignore:
   - "src/maxtext/assets"
   - "src/MaxText/configs"
-  - "src/MaxText/examples"
+  - "src/maxtext/examples"
   - "src/MaxText/experimental"
   - "src/MaxText/inference"
   - "src/MaxText/inference_mlperf"
