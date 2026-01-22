@@ -121,9 +121,9 @@ exclude_patterns = [
     os.path.join("run_maxtext", "run_maxtext_via_multihost_job.md"),
     os.path.join("run_maxtext", "run_maxtext_via_multihost_runner.md"),
     os.path.join("reference", "core_concepts", "llm_calculator.ipynb"),
-    "reference/api_generated/modules.rst",
-    "reference/api_generated/install_maxtext_extra_deps.rst",
-    "reference/api_generated/install_maxtext_extra_deps.install_github_deps.rst",
+    os.path.join("reference", "api_generated", "modules.rst"),
+    os.path.join("reference", "api_generated", "install_maxtext_extra_deps.rst"),
+    os.path.join("reference", "api_generated", "install_maxtext_extra_deps.install_github_deps.rst"),
 ]
 
 
@@ -197,7 +197,7 @@ class FilterSphinxWarnings(logging.Filter):
 
   def filter(self, record: logging.LogRecord) -> bool:
     msg = record.getMessage()
-    filter_out = ("descrição duplicada de objeto",)
+    filter_out = ("duplicate object description",)
     return not msg.strip().startswith(filter_out)
 
 
