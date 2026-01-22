@@ -29,8 +29,10 @@ from MaxText import max_utils
 from MaxText import max_logging
 from MaxText.common_types import ShardMode
 
+import inspect
 
 _LOGGED_ACTIVATION_SHARDINGS = set()
+_GLOBAL_LOGICAL_RULES = None
 
 
 def get_input_data_sharding(config, mesh):
@@ -64,13 +66,91 @@ def maybe_shard_with_logical(
 ):
   """
   A wrapper of maybe_shard_with_name when logical axes are inputs
+  Features:
+  - Auto-fetches global rules if not provided.
+  - Prints "Logical Rules -> Physical Spec" mapping logs.
   """
   if inputs is None:
     return None
-  named_sharding = create_sharding(mesh, logical_axes, rules=rules)
-  return maybe_shard_with_name(
-      inputs, named_sharding, shard_mode, debug_sharding=debug_sharding, extra_stack_level=extra_stack_level + 1
-  )
+
+  active_rules = rules if rules is not None else _GLOBAL_LOGICAL_RULES
+  named_sharding = create_sharding(mesh, logical_axes, rules=active_rules)
+  if debug_sharding and hasattr(inputs, "shape"):
+    max_logging.info("=" * 120)
+    max_logging.info("    Tracing logical axes for activations during JIT compilation.")
+    max_logging.info("=" * 120)
+    caller_info = "Unknown"
+    # ----(Caller Detection) ---
+    try:
+      stack = inspect.stack()
+      frame_idx = 2 + extra_stack_level
+      if len(stack) > frame_idx:
+        frame_basic = stack[frame_idx]
+        filename = frame_basic.filename.split("/")[-1]
+        lineno = frame_basic.lineno
+        caller_info = f"{filename}:{lineno}"
+
+        # search up to 10 frames for better caller context
+        for i in range(frame_idx, min(frame_idx + 10, len(stack))):
+          frame = stack[i].frame
+          if "self" in frame.f_locals:
+            obj = frame.f_locals["self"]
+            if hasattr(obj, "__class__"):
+              cls_name = obj.__class__.__name__
+              if cls_name not in ["Module", "object", "PjitFunction"]:
+                caller_info = cls_name
+                break
+
+          func_name = stack[i].function
+          if func_name not in ["<module>", "__call__", "setup", "apply", "wrapper", "maybe_shard_with_logical"]:
+            if ":" in caller_info:
+              caller_info = func_name
+    except Exception as e:
+      caller_info = f"Err:{str(e)}"
+
+    # ---(Unresolved Rules) ---
+    unresolved_str = ""
+    if active_rules is None:
+      unresolved_str = "Implicit/Global Rules (Not Found)"
+    else:
+      try:
+        rules_dict = active_rules if isinstance(active_rules, dict) else dict(active_rules)
+
+        mapping_parts = []
+        if logical_axes:
+          for axis in logical_axes:
+            target = rules_dict.get(axis, "NoRule")
+            mapping_parts.append(f"{axis}={target}")
+          unresolved_str = ", ".join(mapping_parts)
+        else:
+          unresolved_str = "No Logical Axes"
+      except:
+        unresolved_str = "Rules Format Error"
+
+    # ---  (Physical Spec) ---
+    phys_spec = getattr(named_sharding, "spec", None)
+    resolved_str = ""
+    try:
+      if phys_spec is not None and logical_axes is not None and len(logical_axes) == len(phys_spec):
+        pairs = []
+        for logic_name, phys_axis in zip(logical_axes, phys_spec):
+          axis_str = str(phys_axis) if phys_axis else "None"
+          pairs.append(f"{logic_name}={axis_str}")
+        resolved_str = ", ".join(pairs)
+      else:
+        resolved_str = f"Axes={logical_axes} -> Spec={phys_spec}"
+    except:
+      resolved_str = f"Axes={logical_axes} -> Spec={phys_spec}"
+
+    shape_str = str(jax.typeof(inputs))
+    # format: Caller [RULES] -> [FINAL] Shape
+    # max_logging.info(f"{caller_info:<20} [RULES: {unresolved_str}] -> [FINAL: {resolved_str}] shape={shape_str}")
+    max_logging.info(f"{caller_info}")
+    max_logging.info(f"[RULES: {unresolved_str}]")
+    max_logging.info(f"[FINAL: {resolved_str}] shape={shape_str}")
+    max_logging.info("=" * 120)
+
+  return maybe_shard_with_name(inputs, named_sharding, shard_mode, extra_stack_level=extra_stack_level + 1)
 
 
 def remove_size_one_mesh_axis(spec, mesh):
@@ -586,3 +666,9 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return maybe_shard_with_name(variables, physical_constraint_no_fsdp, shard_mode=shard_mode)
+
+
+def set_global_logical_rules(rules):
+  """Allows external modules (like train_compile) to inject logical rules."""
+  global _GLOBAL_LOGICAL_RULES
+  _GLOBAL_LOGICAL_RULES = rules
