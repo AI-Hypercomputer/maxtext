@@ -797,39 +797,37 @@ class DeepseekV32IndexerTest(unittest.TestCase):
     super().setUp()
     torch.set_default_dtype(torch.float32)  # precision
     torch.manual_seed(42)
-
-    # jax config
-    self.config = Config()
     # data
     self.dtype = "float32"  # precision
     self.batch_size = 2
     self.seq_len = SEQ_LEN
     self.start_pos = 0
 
+    # jax config
+    self.config = Config()
+    self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
+
     # pt args
     self.pt_args = ModelArgs(self.config, self.batch_size)
 
-    # Indexer
+    # pt indexer
     self.pt_indexer = Indexer(self.pt_args)
     init_torch_weights(self.pt_indexer)
     self.pt_indexer.eval()
 
-    # 4. Input Data
+    # pt input
     self.x = torch.randn(self.batch_size, self.seq_len, self.pt_args.dim)
     self.qr = torch.randn(self.batch_size, self.seq_len, self.pt_args.q_lora_rank)
-
-    # RoPE freqs for PyTorch
-    self.freqs_cis = precompute_freqs_cis(self.pt_args).to(self.x.device)
+    self.freqs_cis = precompute_freqs_cis(self.pt_args).to(self.x.device)  # RoPE freqs
 
   def test_indexer_forward_pass(self):
     """Verifies Indexer output mask matches PyTorch Top-K selection."""
-
-    causal_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
-    causal_mask_bias = torch.where(causal_mask == 1, 0.0, float("-inf"))
-    pt_mask = causal_mask_bias
-
-    # C. Run PyTorch Reference
+    # causal_mask
+    pt_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
+    pt_mask = torch.where(pt_mask == 1, 0.0, float("-inf"))
     self.freqs_cis_slice = self.freqs_cis[self.start_pos : self.start_pos + self.seq_len]
+
+    # 1 Run torch
     with torch.no_grad():
       # Returns indices [B, K]
       pt_indices, pt_index_score = self.pt_indexer(
@@ -841,7 +839,8 @@ class DeepseekV32IndexerTest(unittest.TestCase):
       if pt_mask is not None:
         pt_index_mask += pt_mask
 
-    # 3. Setup Mesh
+    # 2 Run jax
+    # Setup Mesh
     cfg, mesh = get_cfg_and_mesh(
         config=self.config,
         run_name="deepseek_indexer_test",
@@ -866,26 +865,23 @@ class DeepseekV32IndexerTest(unittest.TestCase):
         interleave=False,
         truncate=self.config.rope_truncate,
         attention_scaling=self.config.rope_attention_scaling,
-        # shard_mode=self.config.shard_mode,
-        # rngs=self.rngs,
+        rngs=self.nnx_rng,
     )
 
-    jax_indexer = attention_mla.Indexer(
-        config=cfg,
-        rngs=nnx.Rngs(0),
-        rotary_embedding=yarn_rope,
-    )
+    jax_indexer = attention_mla.Indexer(config=cfg, rngs=self.nnx_rng, rotary_embedding=yarn_rope)
 
     # B. Copy Weights (PyTorch -> JAX)
     indexer_state = get_jax_indexer_weights(self.pt_indexer)
     nnx.update(jax_indexer, indexer_state)
 
-    # D. Run JAX Forward
+    # C. Input
     # jax position, Shape: [B, S]
     start_pos = self.start_pos
     end_pos = self.start_pos + self.seq_len
     positions = jnp.arange(start_pos, end_pos, dtype=jnp.int32)[None, :]
     positions = jnp.broadcast_to(positions, (self.batch_size, self.seq_len))
+
+    # D. Run JAX Forward
     # Returns bias mask [B, S, T]
     jax_index_mask, jax_indices, jax_index_score = jax_indexer(
         inputs_q=to_jax(self.x),
@@ -895,6 +891,7 @@ class DeepseekV32IndexerTest(unittest.TestCase):
         attention_mask=to_jax(pt_mask) if pt_mask is not None else None,
     )
 
+    # 3 Compare torch and jax
     print("torch index score", pt_index_score)
     print("jax index score", jax_index_score)
     # check index score is close
@@ -911,17 +908,19 @@ class DeepseekV32MLATest(unittest.TestCase):
     super().setUp()
     torch.set_default_dtype(torch.float32)
     torch.manual_seed(42)
-
-    # jax config
-    self.config = Config()
     # data
     self.dtype = "float32"
     self.batch_size = 2
     self.seq_len = SEQ_LEN
     self.start_pos = 0
 
+    # jax config
+    self.config = Config()
+    self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
+
     # pt args
     self.pt_args = ModelArgs(self.config, self.batch_size)
+
     # pt MLA
     self.pt_mla = MLA(self.pt_args)
     init_torch_weights(self.pt_mla)
@@ -932,17 +931,19 @@ class DeepseekV32MLATest(unittest.TestCase):
   def test_mla_match(self):
     """Verifies MLA output (train mode) matches PyTorch (MHA mode) with indexer."""
 
-    # PyTorch: mask is needed for MHA mode in reference code
+    # 1 Run torch
+    # mask is needed for MHA mode in reference code
     # Shape [B, S, S], causal mask
     start_pos = self.start_pos
-    causal_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
-    causal_mask_bias = torch.where(causal_mask == 1, 0.0, float("-inf"))
+    pt_mask = torch.tril(torch.ones(self.seq_len, self.seq_len)).unsqueeze(0).expand(self.batch_size, -1, -1)
+    pt_mask = torch.where(pt_mask == 1, 0.0, float("-inf"))
     # RoPE
     self.freqs_cis = precompute_freqs_cis(self.pt_args).to(self.x.device)
     self.freqs_cis_slice = self.freqs_cis[start_pos : start_pos + self.seq_len]
     with torch.no_grad():
-      pt_out = self.pt_mla(self.x, start_pos=start_pos, freqs_cis=self.freqs_cis_slice, mask=causal_mask_bias)
+      pt_out = self.pt_mla(self.x, start_pos=start_pos, freqs_cis=self.freqs_cis_slice, mask=pt_mask)
 
+    # 2 Run jax
     cfg, mesh = get_cfg_and_mesh(
         config=self.config,
         run_name="deepseek_mla_test",
@@ -951,7 +952,6 @@ class DeepseekV32MLATest(unittest.TestCase):
         seq_len=self.seq_len,
     )
     self.mesh = mesh
-
     # A. JAX Init
     jax_mla = attention_mla.MLA(
         config=cfg,
@@ -978,27 +978,29 @@ class DeepseekV32MLATest(unittest.TestCase):
         attention_kernel="dot_product",
         inputs_q_shape=(self.batch_size, self.seq_len, cfg.emb_dim),
         inputs_kv_shape=(self.batch_size, self.seq_len, cfg.emb_dim),
-        rngs=nnx.Rngs(0),
+        rngs=self.nnx_rng,
     )
 
     # B. Copy Weights
     mla_state = get_jax_mla_weights(self.pt_mla, self.config)
     nnx.update(jax_mla, mla_state)
 
-    # C. Run Forward, JAX
+    # C. Input
     decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
     decoder_positions = jnp.broadcast_to(
         jnp.arange(start_pos, start_pos + self.seq_len, dtype=jnp.int32), (self.batch_size, self.seq_len)
     )
-
+    lnx = to_jax(self.x)
+    # D. Run Forward
     jax_out, _ = jax_mla(
-        inputs_q=to_jax(self.x),
-        inputs_kv=to_jax(self.x),
+        inputs_q=lnx,
+        inputs_kv=lnx,
         inputs_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         model_mode=MODEL_MODE_TRAIN,
     )
 
+    # 3 Compare torch and jax
     print("torch out", pt_out)
     print("jax out", jax_out)
     # np.testing.assert_allclose(to_jax(pt_out / pt_out.sum()), jax_out / jax_out.sum(), rtol=1e-3, atol=1e-2)
