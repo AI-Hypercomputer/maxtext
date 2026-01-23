@@ -1030,7 +1030,7 @@ class TestQwen3Next(unittest.TestCase):
       expected_output = pt_model(hidden_states_pt)
 
     # 2. Setup JAX model and map weights
-    jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, dtype=jnp.float32, rngs=self.nnx_rngs)
+    jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, rngs=self.nnx_rngs)
 
     conv1d_weight_pt = pt_model.conv1d.weight.detach().numpy()
     # Transpose PT (out, in/groups, kw) -> JAX (kw, in/groups, out)

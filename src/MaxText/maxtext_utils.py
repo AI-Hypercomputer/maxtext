@@ -140,6 +140,11 @@ def get_shaped_batch(config):
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
     shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32)
+  if config.use_audio:
+    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
+        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
+    )
+    shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32)
   return shaped_batch
 
 
@@ -765,6 +770,9 @@ def init_initial_state(model, tx, config, is_training, key):
   image_shape = multimodal_utils.get_dummy_image_shape_for_init(
       config.model_name, batch_size=config.micro_batch_size_to_train_on
   )
+  audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
+      config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
+  )
   # Split the master key into independent keys for each RNG collection
   # Reference: https://flax-linen.readthedocs.io/en/latest/guides/flax_fundamentals/rng_guide.html
   params_key, dropout_key, aqt_key = jax.random.split(key, 3)
@@ -774,6 +782,7 @@ def init_initial_state(model, tx, config, is_training, key):
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
       encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+      encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
       # nnx_method="no_op",
   )
   if is_training:
@@ -789,13 +798,17 @@ def get_abstract_param(model, config):
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
-    abstract_vars = jax.eval_shape(
-        model.init,
-        {"params": key, "dropout": key, "aqt": key},
-        jnp.ones(input_shape, dtype=jnp.int32),
-        jnp.ones(input_shape, dtype=jnp.int32),
-        encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
+        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
     )
+  abstract_vars = jax.eval_shape(
+      model.init,
+      {"params": key, "dropout": key, "aqt": key},
+      jnp.ones(input_shape, dtype=jnp.int32),
+      jnp.ones(input_shape, dtype=jnp.int32),
+      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+      encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
+  )
   return abstract_vars
 
 
@@ -985,12 +998,16 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
+    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
+        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
+    )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
+        encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
         model_mode=MODEL_MODE_PREFILL,
         slot=0,
         page_state=page_state,
@@ -1014,12 +1031,16 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
+    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
+        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
+    )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
+        encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
         model_mode=MODEL_MODE_AUTOREGRESSIVE,
         slot=0,
         page_state=page_state,

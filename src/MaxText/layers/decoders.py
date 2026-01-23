@@ -563,6 +563,8 @@ class Decoder(nn.Module):
       image_embeddings=None,
       bidirectional_mask=None,
       image_masks=None,
+      audio_embeddings=None,
+      audio_masks=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
@@ -581,19 +583,30 @@ class Decoder(nn.Module):
       ]:
         y = multimodal_utils.merge_mm_embeddings(
             text_embeddings=y,
-            vision_embeddings=image_embeddings,
+            multimodal_embeddings=image_embeddings,
             mask=bidirectional_mask,
-            image_masks=image_masks,
+            token_masks=image_masks,
         )
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       else:
         raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
+    if audio_embeddings is not None and cfg.use_audio:
+      if cfg.model_name in ["qwen3-omni-30b-a3b"]:
+        y = multimodal_utils.merge_mm_embeddings(
+            text_embeddings=y,
+            multimodal_embeddings=audio_embeddings,
+            mask=audio_masks,
+            token_masks=None,
+        )
+      else:
+        raise ValueError(f"Unsupported model_name for audio: {cfg.model_name}")
+
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
     if cfg.use_untrainable_positional_embedding:
-      y = positional_embedding_as_linen(embedding_dims=cfg.base_emb_dim)(y, decoder_positions)
+      y += positional_embedding_as_linen(embedding_dims=cfg.base_emb_dim)(y.shape[1], decoder_positions)
 
     if cfg.trainable_position_size > 0:
       y += embed_as_linen(
@@ -673,6 +686,7 @@ class Decoder(nn.Module):
 
     return logits
 
+  # TODO(aireenmei, Hengtaoguo): consolidate all multimodal inputs into a class as input to the encoder
   @nn.compact
   def __call__(
       self,
@@ -690,6 +704,8 @@ class Decoder(nn.Module):
       image_masks: None | jnp.ndarray = None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
+      audio_embeddings: None | jnp.ndarray = None,
+      audio_masks: None | jnp.ndarray = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -705,6 +721,8 @@ class Decoder(nn.Module):
         image_embeddings,
         bidirectional_mask,
         image_masks,
+        audio_embeddings,
+        audio_masks,
     )
 
     policy = self.get_remat_policy()

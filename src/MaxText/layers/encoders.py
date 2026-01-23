@@ -76,6 +76,43 @@ class VisionEncoder(nnx.Module):
     return embeddings
 
 
+class AudioEncoder(nnx.Module):
+  """Audio encoder to encode audio features into soft tokens."""
+
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    self.rngs = rngs
+    self.encoder_name, self.projector_name = self._setup_audio_encoder_layers()
+
+  def _setup_audio_encoder_layers(self):
+    """Setup audio encoder layers specific to the model, instantiate NNX modules."""
+    if self.config.model_name in ["qwen3-omni-30b-a3b"]:
+      from MaxText.layers import qwen3  # pylint: disable=import-outside-toplevel
+
+      encoder_name = "Qwen3OmniAudioEncoder_0"
+      projector_name = "Qwen3OmniAudioProjector_0"
+      setattr(self, encoder_name, qwen3.Qwen3OmniAudioEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs))
+      setattr(self, projector_name, qwen3.Qwen3OmniAudioProjector(config=self.config, rngs=self.rngs))
+      return encoder_name, projector_name
+    else:
+      raise ValueError(f"No AudioEncoder implemented for {self.config.model_name} yet")
+
+  def __call__(self, input_audio, deterministic=False):
+    # audio encoder output (includes convs + encoder, outputs before projector)
+    encoder = getattr(self, self.encoder_name)
+    embeddings = encoder(input_audio, deterministic=deterministic)
+
+    if self.config.freeze_audio_encoder_params:
+      embeddings = jax.lax.stop_gradient(embeddings)
+
+    # audio projector layer
+    projector = getattr(self, self.projector_name)
+    embeddings = projector(embeddings)
+
+    return embeddings
+
+
 def vision_encoder_as_linen(
     config: Config,
     mesh: Mesh,
@@ -86,6 +123,22 @@ def vision_encoder_as_linen(
       config=config,
       mesh=mesh,
       name="vision_encoder",
+      abstract_init=False,
+      metadata_fn=initializers.variable_to_logically_partitioned,
+  )
+  return module
+
+
+def audio_encoder_as_linen(
+    config: Config,
+    mesh: Mesh,
+):
+  """Creates an AudioEncoder module."""
+  module = nnx_wrappers.to_linen(
+      AudioEncoder,
+      config=config,
+      mesh=mesh,
+      name="audio_encoder",
       abstract_init=False,
       metadata_fn=initializers.variable_to_logically_partitioned,
   )

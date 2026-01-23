@@ -63,16 +63,18 @@ LLAMA4_TILE_Y_SEPARATOR_TOKEN = 200085  # <|tile_y_separator|>
 LLAMA4_PIXEL_SHUFFLE_RATIO = 0.5  # TODO(hengtaoguo): We should reuse config.pixel_shuffle_ratio_for_vit
 
 # Qwen3OmniMoe-specific processing
-QWEN3_OMNI_IMAGE_TOKEN = 151655
-QWEN3_OMNI_VIDEO_TOKEN = 151656
-QWEN3_OMNI_AUDIO_TOKEN = 151675
+QWEN3_OMNI_VISION_START_TOKEN = 151652  # <|vision_start|>
+QWEN3_OMNI_IMAGE_TOKEN = 151655  # <|image_pad|>
+QWEN3_OMNI_VIDEO_TOKEN = 151656  # <|video_pad|>
+QWEN3_OMNI_AUDIO_START_TOKEN = 151669  # <|audio_start|>
+QWEN3_OMNI_AUDIO_TOKEN = 151675  # <|audio_pad|>
 QWEN3_TEMPORAL_PATCH_SIZE = 2
 QWEN3_OMNI_IMAGE_SIZE = 768
 
 
 @dataclass
 class PreprocessorOutput:
-  """Holds the output of an image preprocessor."""
+  """Holds the output of a multimodal preprocessor."""
 
   #: A JAX array containing the processed image pixel data. The shape and format depend on the specific model
   #: and preprocessing steps (e.g., [H, W, C] for Gemma3 or [NUM_TILES, C, TILE_SIZE, TILE_SIZE] for Llama4).
@@ -83,6 +85,10 @@ class PreprocessorOutput:
   #: image(s). This is particularly relevant for models like Llama4 that handle images by tiling.
   aspect_ratios: None | np.ndarray = None
   num_images: int = 0
+  #: An optional array containing processed audio features.
+  audio_values: None | np.ndarray = None
+  #: An optional array indicating valid audio segments.
+  audio_mask: None | np.ndarray = None
 
 
 def convert_to_RGB(image):
@@ -564,6 +570,29 @@ def get_dummy_image_shape_for_init(
   return image_shape
 
 
+def get_dummy_audio_shape_for_init(model_name, config, batch_size=1):
+  """Return the shape of the dummy audio for specific model's initialization.
+
+  Args:
+    model_name: Name of the model
+    config: Model configuration containing audio parameters
+    batch_size: Batch size for the dummy audio
+
+  Returns:
+    Tuple representing audio shape: (batch, num_mel_bins, audio_length)
+    Returns empty tuple if audio is not configured for the model
+  """
+  audio_shape = ()
+  if model_name.startswith("qwen3-omni"):
+    # Audio shape: (batch, num_mel_bins, audio_length)
+    # audio_length must be divisible by n_window * 2
+    chunk_size = config.n_window_for_audio * 2
+    audio_length = chunk_size * 4  # 4 chunks
+    audio_shape = (batch_size, config.num_mel_bins_for_audio, audio_length)
+
+  return audio_shape
+
+
 def prepare_text_for_image_fusion(texts, model_name, processor_output=None):
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     num_images = processor_output.pixel_values.shape[0] if processor_output else 1
@@ -855,101 +884,486 @@ def _get_new_text_positions(
 
 def merge_mm_embeddings(
     text_embeddings: np.ndarray | jnp.ndarray,
-    vision_embeddings: np.ndarray | jnp.ndarray,
+    multimodal_embeddings: np.ndarray | jnp.ndarray,
     mask,
-    image_masks: np.ndarray | jnp.ndarray | None = None,
+    token_masks: np.ndarray | jnp.ndarray | None = None,
 ) -> np.ndarray | jnp.ndarray:
-  """Merges text and vision embeddings based on a mask.
+  """Merges text and multimodal (vision/audio) embeddings based on a mask.
 
-  This function handles two primary formats for vision embeddings:
-  1. Tiled Format (e.g., Llama4): Vision embeddings are provided as a batch of
+  This function handles two primary formats for multimodal embeddings:
+  1. Tiled Format (e.g., Llama4 vision): Embeddings are provided as a batch of
      images and their tiles, with shape (B * N, T, K, D). These are flattened
-     into a single sequence of vision tokens per batch item.
-  2. Simple Format (e.g., Gemma3): Vision embeddings are provided as
-     (B, N, K, D) and are flattened into a sequence of vision tokens.
+     into a single sequence of tokens per batch item.
+  2. Simple Format (e.g., Gemma3 vision, Qwen3-Omni audio): Embeddings are provided as
+     (B, N, K, D) and are flattened into a sequence of tokens.
 
   Args:
     text_embeddings: (B, S, D) array of text embeddings.
-    vision_embeddings: Vision embeddings in one of two formats:
+    multimodal_embeddings: Multimodal embeddings (vision/audio) in one of two formats:
       - (B * N, T, K, D) for tiled inputs.
       - (B, N, K, D) for simple inputs.
-      (B=batch_size, S=seq_len, D=embedding_dim, N=num_images,
-       T=num_tiles, K=toks_per_image)
+      (B=batch_size, S=seq_len, D=embedding_dim, N=num_images/audio_chunks,
+       T=num_tiles, K=toks_per_image/audio_chunk)
     mask: (B, S) boolean or integer array where non-zero positions
-      indicate where vision embeddings should be placed.
-    image_masks: (Optional) A mask for the vision tokens.
+      indicate where multimodal embeddings should be placed.
+    token_masks: (Optional) A mask for the multimodal tokens.
       - (B * N, T) for tiled inputs, indicating valid tiles.
-      - If None, all vision embeddings are assumed to be valid.
+      - If None, all multimodal embeddings are assumed to be valid.
 
   Returns:
     A (B, S, D) array of merged embeddings.
   """
   # Input Validation and Shape Unpacking
   batch_size, _, d_model = text_embeddings.shape
-  # The number of tokens per image/tile is the second to last dimension.
-  num_toks_per_image = vision_embeddings.shape[-2]
+  # The number of tokens per image/tile/audio_chunk is the second to last dimension.
+  num_toks_per_token = multimodal_embeddings.shape[-2]
 
-  if d_model != vision_embeddings.shape[-1]:
+  if d_model != multimodal_embeddings.shape[-1]:
     raise ValueError(
-        "Embedding dimension mismatch between text and vision embeddings:" f" {d_model} vs {vision_embeddings.shape[-1]}"
+        "Embedding dimension mismatch between text and multimodal embeddings:"
+        f" {d_model} vs {multimodal_embeddings.shape[-1]}"
     )
 
-  # Reshape Vision Embeddings to a unified (B, S_vision, D) format
+  # Reshape Multimodal Embeddings to a unified (B, S_mm, D) format
   # This single reshape robustly handles both documented cases:
   # Case 1: (B * N, T, K, D) -> (B, N*T*K, D)
   # Case 2: (B, N, K, D) -> (B, N*K, D)
-  flat_vision_embeddings = vision_embeddings.reshape(batch_size, -1, d_model)
+  flat_multimodal_embeddings = multimodal_embeddings.reshape(batch_size, -1, d_model)
 
-  # Process Optional Image Masks
-  flat_image_token_masks = None
-  if image_masks is not None:
-    # Handle the tiled case where image_masks batch dimension is (B * N)
-    if image_masks.shape[0] != batch_size:
-      if image_masks.shape[0] % batch_size != 0:
+  # Process Optional Token Masks
+  flat_token_masks_processed = None
+  if token_masks is not None:
+    # Handle the tiled case where token_masks batch dimension is (B * N)
+    if token_masks.shape[0] != batch_size:
+      if token_masks.shape[0] % batch_size != 0:
         raise ValueError(
-            "Batch dimension of image_masks must be a multiple of the text"
-            f" batch size. Got {image_masks.shape[0]} and {batch_size}."
+            "Batch dimension of token_masks must be a multiple of the text"
+            f" batch size. Got {token_masks.shape[0]} and {batch_size}."
         )
       # Reshape from (B * N, T) to (B, N * T)
-      flat_image_tile_masks = image_masks.reshape(batch_size, -1)
+      flat_tile_masks = token_masks.reshape(batch_size, -1)
     else:
-      # This handles cases where image_masks is already (B, ...)
-      flat_image_tile_masks = image_masks.reshape(batch_size, -1)
+      # This handles cases where token_masks is already (B, ...)
+      flat_tile_masks = token_masks.reshape(batch_size, -1)
 
     # Expand the tile-level mask to a token-level mask to match the embeddings.
     # A mask of shape (B, N*T) becomes (B, N*T*K) by repeating each element K times.
-    flat_image_token_masks = jnp.repeat(flat_image_tile_masks, repeats=num_toks_per_image, axis=1)
+    flat_token_masks_processed = jnp.repeat(flat_tile_masks, repeats=num_toks_per_token, axis=1)
 
   # Vmap the inner merge function over the batch dimension
   return jax.vmap(
       _merge_mm_embeddings_inner,  # Assumes this function is defined elsewhere
-      in_axes=(0, 0, 0, None if flat_image_token_masks is None else 0),
-  )(text_embeddings, flat_vision_embeddings, mask, flat_image_token_masks)
+      in_axes=(0, 0, 0, None if flat_token_masks_processed is None else 0),
+  )(text_embeddings, flat_multimodal_embeddings, mask, flat_token_masks_processed)
 
 
 def _merge_mm_embeddings_inner(
-    text_embeddings: jnp.ndarray, vision_embeddings: jnp.ndarray, mask: jnp.ndarray, token_mask: jnp.ndarray | None = None
+    text_embeddings: jnp.ndarray,
+    multimodal_embeddings: jnp.ndarray,
+    mask: jnp.ndarray | None = None,
+    token_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
   """`merge_mm_embeddings` without batch dimension."""
 
   if token_mask is not None:
-    # This logic packs valid vision tokens to the front of the array.
-    # It correctly handles cases where some vision tokens are just padding.
+    # This logic packs valid multimodal tokens to the front of the array.
+    # It correctly handles cases where some multimodal tokens are just padding.
     sort_indices = jnp.argsort(-token_mask)  # Sorts descending, putting 1s first
-    vision_embeddings = vision_embeddings[sort_indices]
+    multimodal_embeddings = multimodal_embeddings[sort_indices]
 
-  # Find positions in the text sequence to place the vision embeddings.
+  # Find positions in the text sequence to place the multimodal embeddings.
   # The `size` argument ensures a fixed shape for JIT compilation.
-  target_pos = jnp.nonzero(mask, size=vision_embeddings.shape[0])
+  target_pos = jnp.nonzero(mask, size=multimodal_embeddings.shape[0])
   target_pos = target_pos[0]  # jnp.nonzero returns a tuple of arrays
 
   # Save the embedding at the first position.
   first_pos_embedding = text_embeddings[0]
 
   # Perform the insertion.
-  merged = text_embeddings.at[target_pos, :].set(vision_embeddings)
+  merged = text_embeddings.at[target_pos, :].set(multimodal_embeddings)
 
   # Restore the first position's embedding, in case it was overwritten.
   merged = merged.at[0].set(first_pos_embedding)
 
   return merged
+
+
+# ==============================================================================
+# Qwen3-Omni Multimodal Position ID Utilities
+# ==============================================================================
+def _get_feat_extract_output_lengths(input_lengths: jax.Array) -> jax.Array:
+  """Computes the output length of the audio encoder convolutional layers.
+
+  The audio encoder processes audio in chunks of 100 samples, applying
+  multiple convolutional layers with stride 2. Each full 100-sample chunk
+  produces 13 output tokens, and remaining samples are processed separately.
+
+  Args:
+    input_lengths: Input audio sequence lengths. Shape: (batch,) or scalar.
+
+  Returns:
+    Output sequence lengths after audio encoding. Same shape as input.
+  """
+  input_lengths_leave = input_lengths % 100
+  feat_lengths = (input_lengths_leave - 1) // 2 + 1
+  output_lengths = ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
+  return output_lengths
+
+
+def get_llm_pos_ids_for_vision(
+    start_idx: int | jax.Array,
+    vision_idx: int,
+    spatial_merge_size: int,
+    t_index: jax.Array,
+    grid_hs: jax.Array,
+    grid_ws: jax.Array,
+) -> jax.Array:
+  """Computes 3D position IDs (temporal, height, width) for vision tokens.
+
+  Creates position embeddings for a grid of vision tokens representing an
+  image or video. For each temporal frame, generates a spatial grid of
+  (height, width) positions.
+
+  Args:
+    start_idx: Starting position ID value to add as offset.
+    vision_idx: Index of the current image/video being processed.
+    spatial_merge_size: Number of patches merged spatially (e.g., 2 means 2x2 patches → 1 token).
+    t_index: Temporal position for each frame. Shape: (num_frames,).
+    grid_hs: Height dimensions for all images/videos. Shape: (num_images,).
+    grid_ws: Width dimensions for all images/videos. Shape: (num_images,).
+
+  Returns:
+    3D position IDs with shape (3, num_vision_tokens) where:
+      - dim 0: temporal positions
+      - dim 1: height positions
+      - dim 2: width positions
+
+  Example:
+    If spatial_merge_size=2, grid_h=4, grid_w=4, num_frames=2:
+      - After merge: 2x2 grid per frame
+      - Total tokens: 2 frames x 2 x 2 = 8 tokens
+      - Output shape: (3, 8)
+      - t_index: [0, 0, 0, 0, 50, 50, 50, 50]
+      - h_index: [0, 0, 1, 1, 0, 0, 1, 1]
+      - w_index: [0, 1, 0, 1, 0, 1, 0, 1]
+  """
+  # Calculate effective spatial dimensions after merging patches
+  llm_grid_h = grid_hs[vision_idx] // spatial_merge_size
+  llm_grid_w = grid_ws[vision_idx] // spatial_merge_size
+
+  # Create height indices: [0, 0, ..., 0 (W times), 1, 1, ..., 1 (W times), ...]
+  # Shape: (num_frames, llm_grid_h, 1) -> expand -> (num_frames, llm_grid_h, llm_grid_w) -> flatten
+  h_index = jnp.arange(llm_grid_h).reshape(1, -1, 1).repeat(len(t_index), axis=0).repeat(llm_grid_w, axis=2).flatten()
+
+  # Create width indices: [0, 1, 2, ..., W-1, 0, 1, 2, ..., W-1, ...]
+  # Shape: (num_frames, 1, llm_grid_w) -> expand -> (num_frames, llm_grid_h, llm_grid_w) -> flatten
+  w_index = jnp.arange(llm_grid_w).reshape(1, 1, -1).repeat(len(t_index), axis=0).repeat(llm_grid_h, axis=1).flatten()
+
+  # Create temporal indices: [t0, t0, ..., t0 (HxW times), t1, t1, ..., t1 (HxW times), ...]
+  # Shape: (num_frames, 1) -> expand -> (num_frames, llm_grid_h * llm_grid_w) -> flatten
+  t_index_expanded = t_index.reshape(-1, 1).repeat(llm_grid_h * llm_grid_w, axis=1).flatten()
+
+  # Stack all three dimensions and add starting offset
+  _llm_pos_ids = jnp.stack([t_index_expanded, h_index, w_index])
+  llm_pos_ids = _llm_pos_ids + start_idx
+
+  return llm_pos_ids
+
+
+def get_chunked_index(token_indices: jax.Array, tokens_per_chunk: int, remove_index: int) -> list[tuple[int, int]]:
+  """Splits token index list into chunks based on token value ranges.
+
+  Given a list of monotonically increasing token indices, returns a list of
+  (start, end) index tuples representing slices where token values fall within
+  successive ranges of `tokens_per_chunk`.
+
+  Args:
+    token_indices: Monotonically increasing array of token index values. Shape: (seq_len,).
+    tokens_per_chunk: Chunk size threshold (e.g., 100 means first chunk has values < 100).
+    remove_index: Offset to subtract from token_indices before chunking.
+
+  Returns:
+    List of (start_idx, end_idx) tuples, each representing a chunk.
+
+  Example:
+    token_indices = [5, 10, 52, 105, 150, 250]
+    tokens_per_chunk = 100
+    remove_index = 0
+
+    Result: [(0, 3), (3, 5), (5, 6)]
+      - Chunk 0: indices 0-3 (values 5, 10, 52 are < 100)
+      - Chunk 1: indices 3-5 (values 105, 150 are >= 100 and < 200)
+      - Chunk 2: indices 5-6 (value 250 is >= 200)
+  """
+  chunks = []
+  i = 0
+  start_idx = 0
+  current_chunk = 1
+
+  while i < len(token_indices):
+    if token_indices[i] - remove_index >= current_chunk * tokens_per_chunk:
+      chunks.append((start_idx, i))
+      start_idx = i
+      current_chunk += 1
+    i += 1
+
+  # Append final chunk
+  chunks.append((start_idx, len(token_indices)))
+
+  return chunks
+
+
+def get_rope_index(
+    input_ids: jax.Array,
+    image_grid_thw: jax.Array | None = None,
+    video_grid_thw: jax.Array | None = None,
+    attention_mask: jax.Array | None = None,
+    use_audio_in_video: bool = False,
+    audio_lengths: jax.Array | None = None,
+    second_per_grids: jax.Array | None = None,
+    spatial_merge_size: int = 2,
+    position_id_per_seconds: int = 25,
+) -> tuple[jax.Array, jax.Array]:
+  """Calculate 3D RoPE position indices for multimodal sequences.
+
+  This function computes position IDs that encode both sequential (text) and
+  spatial-temporal (vision/audio) structure for Qwen3-Omni multimodal inputs.
+
+  For pure text sequences:
+    - All 3 dimensions receive the same sequential positions: [0, 1, 2, 3, 4]
+
+  For multimodal sequences with vision:
+    - Vision tokens get 3D positions (temporal, height, width)
+    - Text tokens continue sequentially from max(vision_pos) + 1
+    - Example with video (3 temporal patches, 2x2 spatial):
+        Vision temporal: [0, 0, 0, 0, 50, 50, 50, 50, 100, 100, 100, 100]
+        Vision height:   [0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1]
+        Vision width:    [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+        Text positions:  [101, 102, 103, 104, 105]
+
+  Args:
+    input_ids: Input token IDs. Shape: (batch, seq_len).
+    image_grid_thw: Image dimensions (temporal, height, width). Shape: (num_images, 3).
+    video_grid_thw: Video dimensions (temporal, height, width). Shape: (num_videos, 3).
+    attention_mask: Padding mask (1 = real token, 0 = padding). Shape: (batch, seq_len).
+    use_audio_in_video: If True, audio tokens are interleaved with video tokens.
+    audio_lengths: Audio sequence lengths. Shape: (num_audios,).
+    second_per_grids: Time interval per temporal grid (for videos). Shape: (num_videos,).
+    spatial_merge_size: Number of patches merged spatially (e.g., 2 for 2x2→1).
+    position_id_per_seconds: Temporal granularity (tokens per second, typically 25).
+
+  Returns:
+    A tuple of:
+      - position_ids: 3D position IDs. Shape: (3, batch, seq_len).
+      - mrope_position_deltas: Position offset for each sequence. Shape: (batch, 1).
+
+  Raises:
+    ValueError: If multimodal tokens are present but grid info is missing.
+  """
+  batch_size, seq_len = input_ids.shape
+
+  # Handle text-only case (no multimodal content)
+  if image_grid_thw is None and video_grid_thw is None:
+    if attention_mask is None:
+      attention_mask = jnp.ones_like(input_ids)
+
+    # Create sequential 1D positions
+    position_ids = jnp.cumsum(attention_mask.astype(jnp.float32), axis=-1) - 1
+    position_ids = jnp.where(attention_mask == 0, 1.0, position_ids)
+
+    # Expand to 3D (same value in all dimensions for text-only)
+    position_ids = jnp.broadcast_to(position_ids[jnp.newaxis, :, :], (3, batch_size, seq_len))
+
+    # Calculate deltas for each sequence
+    max_position_ids = jnp.max(position_ids, axis=(0, 2), keepdims=True).transpose(1, 0, 2)  # (batch, 1, 1)
+    mrope_position_deltas = max_position_ids.squeeze(-1) + 1 - jnp.sum(attention_mask, axis=-1, keepdims=True)
+
+    return position_ids, mrope_position_deltas
+
+  # Multimodal case: process each sequence in batch
+  if attention_mask is None:
+    attention_mask = jnp.ones_like(input_ids)
+
+  attention_mask_bool = attention_mask == 1
+  position_ids = jnp.zeros((3, batch_size, seq_len), dtype=jnp.float32)
+  mrope_position_deltas = []
+
+  # Process each sequence in the batch
+  for i in range(batch_size):
+    # Get valid tokens (non-padding)
+    valid_input_ids = input_ids[i][attention_mask_bool[i]]
+
+    # Count multimodal elements in this sequence
+    vision_start_indices = jnp.where(valid_input_ids == QWEN3_OMNI_VISION_START_TOKEN)[0]
+    vision_tokens = valid_input_ids[vision_start_indices + 1] if len(vision_start_indices) > 0 else jnp.array([])
+
+    audio_nums = jnp.sum(valid_input_ids == QWEN3_OMNI_AUDIO_START_TOKEN).item()
+    image_nums = jnp.sum(vision_tokens == QWEN3_OMNI_IMAGE_TOKEN).item() if len(vision_tokens) > 0 else 0
+    video_nums = (
+        (
+            jnp.sum(vision_tokens == QWEN3_OMNI_AUDIO_START_TOKEN).item()
+            if use_audio_in_video
+            else jnp.sum(vision_tokens == QWEN3_OMNI_VIDEO_TOKEN).item()
+        )
+        if len(vision_tokens) > 0
+        else 0
+    )
+
+    input_tokens = valid_input_ids.tolist()
+    llm_pos_ids_list = []
+    st = 0
+    remain_images = image_nums
+    remain_videos = video_nums
+    remain_audios = audio_nums
+    image_idx = 0
+    video_idx = 0
+    audio_idx = 0
+
+    multimodal_nums = image_nums + audio_nums if use_audio_in_video else image_nums + video_nums + audio_nums
+
+    # Process each multimodal element
+    for _ in range(multimodal_nums):
+      st_idx = llm_pos_ids_list[-1].max().item() + 1 if len(llm_pos_ids_list) > 0 else 0
+
+      # Find next vision or audio start token
+      if (QWEN3_OMNI_IMAGE_TOKEN in input_tokens or QWEN3_OMNI_VIDEO_TOKEN in input_tokens) and (
+          remain_videos > 0 or remain_images > 0
+      ):
+        try:
+          ed_vision_start = input_tokens.index(QWEN3_OMNI_VISION_START_TOKEN, st)
+        except ValueError:
+          ed_vision_start = len(input_tokens) + 1
+      else:
+        ed_vision_start = len(input_tokens) + 1
+
+      if QWEN3_OMNI_AUDIO_TOKEN in input_tokens and remain_audios > 0:
+        try:
+          ed_audio_start = input_tokens.index(QWEN3_OMNI_AUDIO_START_TOKEN, st)
+        except ValueError:
+          ed_audio_start = len(input_tokens) + 1
+      else:
+        ed_audio_start = len(input_tokens) + 1
+
+      min_ed = min(ed_vision_start, ed_audio_start)
+
+      # Add text tokens before multimodal element
+      text_len = min_ed - st
+      if text_len > 0:
+        text_pos = jnp.arange(text_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+        llm_pos_ids_list.append(text_pos)
+        st_idx += text_len
+
+      # Determine BOS/EOS token lengths
+      if min_ed == ed_vision_start and ed_vision_start + 1 == ed_audio_start:
+        bos_len, eos_len = 2, 2  # Audio in video
+      else:
+        bos_len, eos_len = 1, 1
+
+      # Add BOS token(s)
+      bos_pos = jnp.arange(bos_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+      llm_pos_ids_list.append(bos_pos)
+      st_idx += bos_len
+
+      # Process modality-specific content
+      # Audio Only
+      if min_ed == ed_audio_start:
+        audio_len = _get_feat_extract_output_lengths(audio_lengths[audio_idx]).item()
+        audio_pos = jnp.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+        llm_pos_ids_list.append(audio_pos)
+
+        st += int(text_len + bos_len + audio_len + eos_len)
+        audio_idx += 1
+        remain_audios -= 1
+
+      # Image Only
+      elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == QWEN3_OMNI_IMAGE_TOKEN:
+        grid_t = image_grid_thw[image_idx, 0].item()
+        grid_hs = image_grid_thw[:, 1]
+        grid_ws = image_grid_thw[:, 2]
+        t_index = jnp.arange(grid_t, dtype=jnp.float32) * 1 * position_id_per_seconds
+
+        image_pos = get_llm_pos_ids_for_vision(st_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
+        llm_pos_ids_list.append(image_pos)
+
+        image_len = int(jnp.prod(image_grid_thw[image_idx]).item() // (spatial_merge_size**2))
+        st += int(text_len + bos_len + image_len + eos_len)
+        image_idx += 1
+        remain_images -= 1
+
+      # Video Only
+      elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == QWEN3_OMNI_VIDEO_TOKEN:
+        grid_t = video_grid_thw[video_idx, 0].item()
+        grid_hs = video_grid_thw[:, 1]
+        grid_ws = video_grid_thw[:, 2]
+        t_index = jnp.arange(grid_t, dtype=jnp.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+
+        video_pos = get_llm_pos_ids_for_vision(st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
+        llm_pos_ids_list.append(video_pos)
+
+        video_len = int(jnp.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))
+        st += int(text_len + bos_len + video_len + eos_len)
+        video_idx += 1
+        remain_videos -= 1
+
+      # Audio in Video (interleaved)
+      elif min_ed == ed_vision_start and ed_vision_start + 1 == ed_audio_start:
+        audio_len = _get_feat_extract_output_lengths(audio_lengths[audio_idx]).item()
+        audio_llm_pos_ids = jnp.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+
+        grid_t = video_grid_thw[video_idx, 0].item()
+        grid_hs = video_grid_thw[:, 1]
+        grid_ws = video_grid_thw[:, 2]
+        t_index = jnp.arange(grid_t, dtype=jnp.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+
+        video_llm_pos_ids = get_llm_pos_ids_for_vision(st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
+
+        # Interleave audio and video based on temporal ordering
+        video_data_index = 0
+        audio_data_index = 0
+        while video_data_index < video_llm_pos_ids.shape[1] and audio_data_index < audio_llm_pos_ids.shape[1]:
+          if video_llm_pos_ids[0, video_data_index] <= audio_llm_pos_ids[0, audio_data_index]:
+            llm_pos_ids_list.append(video_llm_pos_ids[:, video_data_index : video_data_index + 1])
+            video_data_index += 1
+          else:
+            llm_pos_ids_list.append(audio_llm_pos_ids[:, audio_data_index : audio_data_index + 1])
+            audio_data_index += 1
+
+        # Append remaining tokens
+        if video_data_index < video_llm_pos_ids.shape[1]:
+          llm_pos_ids_list.append(video_llm_pos_ids[:, video_data_index:])
+        if audio_data_index < audio_llm_pos_ids.shape[1]:
+          llm_pos_ids_list.append(audio_llm_pos_ids[:, audio_data_index:])
+
+        video_len = int(jnp.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))
+        st += int(text_len + bos_len + audio_len + video_len + eos_len)
+
+        audio_idx += 1
+        video_idx += 1
+        remain_videos -= 1
+        remain_audios -= 1
+
+      # Add EOS token(s)
+      st_idx = llm_pos_ids_list[-1].max().item() + 1 if len(llm_pos_ids_list) > 0 else 0
+      eos_pos = jnp.arange(eos_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+      llm_pos_ids_list.append(eos_pos)
+
+    # Add any remaining text tokens
+    if st < len(input_tokens):
+      st_idx = llm_pos_ids_list[-1].max().item() + 1 if len(llm_pos_ids_list) > 0 else 0
+      text_len = len(input_tokens) - st
+      remaining_text_pos = jnp.arange(text_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+      llm_pos_ids_list.append(remaining_text_pos)
+
+    # Concatenate all position IDs for this sequence
+    llm_positions = jnp.concatenate(llm_pos_ids_list, axis=1)
+
+    # Place into position_ids tensor at valid positions
+    valid_positions = jnp.where(attention_mask_bool[i])[0]
+    position_ids = position_ids.at[:, i, valid_positions].set(llm_positions)
+
+    # Calculate delta for this sequence
+    mrope_position_deltas.append(llm_positions.max().item() + 1 - len(valid_input_ids))
+
+  mrope_position_deltas = jnp.array(mrope_position_deltas).reshape(batch_size, 1)
+
+  return position_ids, mrope_position_deltas
