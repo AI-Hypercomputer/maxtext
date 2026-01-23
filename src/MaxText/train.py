@@ -42,35 +42,34 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
-from MaxText import checkpointing
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import train_utils
-from MaxText import profiler
 from MaxText import pyconfig
 from MaxText import sharding
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.common_types import ShardMode
 from MaxText.globals import EPS
-from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
-from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    create_goodput_recorder,
-    maybe_monitor_goodput,
-    maybe_record_goodput,
-)
-from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
 from MaxText.gradient_accumulation import gradient_accumulation_loss_and_grad
 from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
 from MaxText.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
 from MaxText.train_utils import validate_train_config
-from MaxText.metric_logger import record_activation_metrics
 # pylint: disable=too-many-positional-arguments
+
+from maxtext.common import checkpointing, profiler
+from maxtext.common.goodput import (
+    GoodputEvent,
+    create_goodput_recorder,
+    maybe_monitor_goodput,
+    maybe_record_goodput,
+)
+from maxtext.common.metric_logger import MetricLogger, record_activation_metrics
+from maxtext.common.vertex_tensorboard import VertexTensorboardManager
 
 
 def get_first_step(state):

@@ -32,7 +32,6 @@ import jax
 from jax.sharding import Mesh
 from jax import random
 
-from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
@@ -42,6 +41,7 @@ from MaxText.common_types import DecoderBlockType, MODEL_MODE_TRAIN
 from MaxText.layers import models, quantizations
 from MaxText.utils import gcs_utils
 from MaxText.utils import lora_utils
+from maxtext.common import checkpointing
 
 Transformer = models.transformer_as_linen
 

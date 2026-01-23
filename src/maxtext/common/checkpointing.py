@@ -220,16 +220,10 @@ def create_orbax_checkpoint_manager(
   p.mkdir(exist_ok=True, parents=True)
   if enable_continuous_checkpointing:
     save_decision_policy = save_decision_policy_lib.ContinuousCheckpointingPolicy()
-    preservation_policy = preservation_policy_lib.LatestN(
-        max_num_checkpoints_to_keep
-    )
+    preservation_policy = preservation_policy_lib.LatestN(max_num_checkpoints_to_keep)
   else:
-    save_decision_policy = save_decision_policy_lib.FixedIntervalPolicy(
-        interval=save_interval_steps
-    )
-    preservation_policy = preservation_policy_lib.LatestN(
-        max_num_checkpoints_to_keep
-    )
+    save_decision_policy = save_decision_policy_lib.FixedIntervalPolicy(interval=save_interval_steps)
+    preservation_policy = preservation_policy_lib.LatestN(max_num_checkpoints_to_keep)
   manager = CheckpointManager(
       p,
       item_names=item_names,
@@ -239,7 +233,7 @@ def create_orbax_checkpoint_manager(
           enable_async_checkpointing=use_async,
           save_decision_policy=save_decision_policy,
           preservation_policy=preservation_policy,
-          ),
+      ),
       logger=orbax_logger,
   )
 
@@ -276,12 +270,8 @@ def create_orbax_emergency_checkpoint_manager(
       global_mesh=global_mesh,
       abstract_state=abstract_state,
       options=emergency_checkpoint_manager.CheckpointManagerOptions(
-          local=LocalCheckpointOptions(
-              save_interval_steps=local_save_interval_steps
-          ),
-          persistent=PersistentCheckpointOptions(
-              save_interval_steps=persistent_save_interval_steps
-          ),
+          local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
+          persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
       ),
       logger=orbax_logger,
   )

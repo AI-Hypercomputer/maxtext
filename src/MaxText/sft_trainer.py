@@ -27,17 +27,13 @@ import jax
 
 from flax.linen import partitioning as nn_partitioning
 
-from MaxText import checkpointing
 from MaxText import exceptions
 from MaxText import max_utils
 from MaxText import max_logging
 from MaxText import maxtext_utils
-from MaxText import profiler
 from MaxText import pyconfig
 from MaxText import train_utils
 from MaxText import sharding
-from MaxText.data_loader import DataLoader
-from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     eval_step,
     get_first_step,
@@ -45,12 +41,15 @@ from MaxText.train import (
 )
 from MaxText.train_utils import setup_train_loop, validate_train_config
 from MaxText.utils import gcs_utils
-from MaxText.utils.goodput_utils import (
+from maxtext.common import checkpointing, profiler
+from maxtext.common.data_loader import DataLoader
+from maxtext.common.goodput import (
     GoodputEvent,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
+from maxtext.common.metric_logger import MetricLogger
 
 
 def train_loop(config, recorder, state=None):

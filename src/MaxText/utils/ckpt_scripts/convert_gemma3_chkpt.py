@@ -28,8 +28,8 @@ from flax.training import train_state
 
 import orbax
 
-from MaxText import checkpointing
 from MaxText import max_logging
+from maxtext.common import checkpointing
 
 jax.config.update("jax_platform_name", "cpu")
 
