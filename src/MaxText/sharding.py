@@ -29,10 +29,8 @@ from MaxText import max_utils
 from MaxText import max_logging
 from MaxText.common_types import ShardMode
 
-import inspect
 
 _LOGGED_ACTIVATION_SHARDINGS = set()
-_GLOBAL_LOGICAL_RULES = None
 
 
 def get_input_data_sharding(config, mesh):
@@ -40,20 +38,28 @@ def get_input_data_sharding(config, mesh):
   return create_sharding(mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules)
 
 
-def maybe_shard_with_name(inputs, named_sharding, shard_mode, debug_sharding=False, extra_stack_level=0):
+def maybe_shard_with_name(
+    inputs, named_sharding, shard_mode, debug_sharding=False, extra_stack_level=0, logical_axes=None
+):
   """
   In auto shardmode, this function hints inputs follow given named_sharding.
   In explicit shardmode, this function enforces inputs following named_sharding.
   """
   if inputs is None:
     return None
-  if (
-      debug_sharding and isinstance(inputs, Tracer) and isinstance(named_sharding, NamedSharding)
-  ):  # only print pspec for JitTracer
+  if debug_sharding and isinstance(inputs, Tracer) and isinstance(named_sharding, NamedSharding):
     pspec = remove_size_one_mesh_axis(getattr(named_sharding, "spec"), getattr(named_sharding, "mesh"))
-    log_key = (str(jax.typeof(inputs)), tuple(pspec), extra_stack_level)
+    if logical_axes is not None:
+      logical_str = str(logical_axes)
+    else:
+      logical_str = "None"
+    shape_str = str(jax.typeof(inputs))
+    log_key = (shape_str, tuple(pspec), extra_stack_level, logical_str)
+
     if log_key not in _LOGGED_ACTIVATION_SHARDINGS:
-      max_logging.info(f"{log_key[0]:.<80} {log_key[1]}.", stacklevel=3 + extra_stack_level)
+      max_logging.info(
+          f"Activation: {logical_str:<40} -> {str(tuple(pspec)):<30} {shape_str}", stacklevel=3 + extra_stack_level
+      )
       _LOGGED_ACTIVATION_SHARDINGS.add(log_key)
   if shard_mode == ShardMode.EXPLICIT:
     return reshard(inputs, named_sharding)
@@ -61,118 +67,23 @@ def maybe_shard_with_name(inputs, named_sharding, shard_mode, debug_sharding=Fal
     return jax.lax.with_sharding_constraint(inputs, named_sharding)
 
 
-def _get_caller_info(stack, frame_idx):
-  """Helper function to extract caller information to reduce nesting."""
-  try:
-    if len(stack) <= frame_idx:
-      return "Unknown"
-
-    frame_basic = stack[frame_idx]
-    filename = frame_basic.filename.split("/")[-1]
-    lineno = frame_basic.lineno
-    caller_name = f"{filename}:{lineno}"
-
-    # Search up to 10 frames for better caller context
-    for i in range(frame_idx, min(frame_idx + 10, len(stack))):
-      frame = stack[i].frame
-
-      # Check for Class Name
-      if "self" in frame.f_locals:
-        obj = frame.f_locals["self"]
-        if hasattr(obj, "__class__"):
-          cls_name = obj.__class__.__name__
-          if cls_name not in ["Module", "object", "PjitFunction"]:
-            return cls_name
-
-      # Check for Function Name
-      func_name = stack[i].function
-      ignored_funcs = ["<module>", "__call__", "setup", "apply", "wrapper", "maybe_shard_with_logical"]
-      if func_name not in ignored_funcs:
-        # If we only have file:line, prefer the function name
-        if ":" in caller_name:
-          caller_name = func_name
-
-    return caller_name
-
-  except (AttributeError, KeyError, IndexError):
-    return "Unknown(Error)"
-
-
-def _format_rule_info(active_rules, logical_axes):
-  """Helper to format rule string to avoid broad exception catch."""
-  if active_rules is None:
-    return "Implicit/Global Rules (Not Found)"
-
-  try:
-    rules_dict = active_rules if isinstance(active_rules, dict) else dict(active_rules)
-  except (ValueError, TypeError):
-    return "Rules Format Error"
-
-  if not logical_axes:
-    return "No Logical Axes"
-
-  mapping_parts = []
-  for axis in logical_axes:
-    target = rules_dict.get(axis, "NoRule")
-    mapping_parts.append(f"{axis}={target}")
-
-  return ", ".join(mapping_parts)
-
-
-def _format_phys_spec_info(named_sharding, logical_axes):
-  """Helper to format physical spec string."""
-  phys_spec = getattr(named_sharding, "spec", None)
-
-  if phys_spec is None:
-    return f"Axes={logical_axes} -> Spec=None"
-
-  if logical_axes is None:
-    return f"Axes=None -> Spec={phys_spec}"
-
-  if len(logical_axes) != len(phys_spec):
-    return f"Axes={logical_axes} -> Spec={phys_spec}"
-
-  pairs = []
-  for logic_name, phys_axis in zip(logical_axes, phys_spec):
-    axis_str = str(phys_axis) if phys_axis else "None"
-    pairs.append(f"{logic_name}={axis_str}")
-
-  return ", ".join(pairs)
-
-
 def maybe_shard_with_logical(
     inputs, logical_axes, mesh, shard_mode, rules=None, debug_sharding=False, extra_stack_level=0
 ):
   """
   A wrapper of maybe_shard_with_name when logical axes are inputs
-  Features:
-  - Auto-fetches global rules if not provided.
-  - Prints "Logical Rules -> Physical Spec" mapping logs.
   """
   if inputs is None:
     return None
-
-  active_rules = rules if rules is not None else _GLOBAL_LOGICAL_RULES
-  named_sharding = create_sharding(mesh, logical_axes, rules=active_rules)
-
-  if debug_sharding and hasattr(inputs, "shape"):
-    max_logging.info("=" * 120)
-    max_logging.info("    Tracing logical axes for activations during JIT compilation.")
-    max_logging.info("=" * 120)
-
-    stack = inspect.stack()
-    caller_info = _get_caller_info(stack, 2 + extra_stack_level)
-    unresolved_str = _format_rule_info(active_rules, logical_axes)
-    resolved_str = _format_phys_spec_info(named_sharding, logical_axes)
-    shape_str = str(jax.typeof(inputs))
-
-    # format: Caller [RULES] -> [FINAL] Shape
-    max_logging.info(f"{caller_info}")
-    max_logging.info(f"[RULES: {unresolved_str}]")
-    max_logging.info(f"[FINAL: {resolved_str}] shape={shape_str}")
-    max_logging.info("=" * 120)
-
-  return maybe_shard_with_name(inputs, named_sharding, shard_mode, extra_stack_level=extra_stack_level + 1)
+  named_sharding = create_sharding(mesh, logical_axes, rules=rules)
+  return maybe_shard_with_name(
+      inputs,
+      named_sharding,
+      shard_mode,
+      debug_sharding=debug_sharding,
+      extra_stack_level=extra_stack_level + 1,
+      logical_axes=logical_axes,
+  )
 
 
 def remove_size_one_mesh_axis(spec, mesh):
@@ -688,9 +599,3 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return maybe_shard_with_name(variables, physical_constraint_no_fsdp, shard_mode=shard_mode)
-
-
-def set_global_logical_rules(rules):
-  """Allows external modules (like train_compile) to inject logical rules."""
-  global _GLOBAL_LOGICAL_RULES
-  _GLOBAL_LOGICAL_RULES = rules

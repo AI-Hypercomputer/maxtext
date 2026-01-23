@@ -19,8 +19,6 @@ import functools
 import pickle
 import os
 
-from collections import defaultdict
-
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
@@ -29,7 +27,6 @@ import numpy as np
 
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
-from jax.sharding import PartitionSpec as P
 
 import jax
 import jax.numpy as jnp
@@ -947,6 +944,16 @@ def setup_initial_state(
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
+def get_logical_annotations(model, tx, config, rng, mesh, is_training=True):
+  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    abstract_state = jax.eval_shape(init_state_partial)
+
+  logical_annotations = nn.get_partition_spec(abstract_state)
+  return logical_annotations
+
+
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
   init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
@@ -1230,48 +1237,45 @@ def create_learning_rate_schedule(config):
   return optax.join_schedules(pieces, boundaries)
 
 
-def print_shardings_params(params, params_sharding, mesh, state_logical_annotations=None, logical_axis_rules=None):
-  """Print state shardings."""
+def print_shardings_params(params, params_sharding, mesh, logical_annotations=None):
+  """
+  Print state shardings comparing Logical Definition vs Physical Result.
+  Simplified version: Directly prints logical annotations without reverse mapping.
+  """
+  if not hasattr(params, "params"):
+    params = {"params": params}
+  if not hasattr(params_sharding, "params"):
+    params_sharding = {"params": params_sharding}
+
   leaves_params, _ = jax.tree_util.tree_flatten_with_path(params)
   leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(params_sharding)
 
-  leaves_rule_values = []
-  if state_logical_annotations and hasattr(state_logical_annotations, "params"):
-    leaves_rule_values, _ = jax.tree_util.tree_flatten_with_path(state_logical_annotations.params)
-  else:
-    leaves_rule_values = [(None, None)] * len(leaves_params)
+  leaves_logical = []
+  has_logical = False
+  if logical_annotations and hasattr(logical_annotations, "params"):
+    try:
+      leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations.params)
+      if len(leaves_params) == len(leaves_logical):
+        has_logical = True
+      else:
+        max_logging.warning("Warning: Logical annotations tree structure mismatch. Skipping logical info.")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      max_logging.warning(f"Warning: Failed to process logical annotations: {e}. Skipping logical info.")
 
-  if not len(leaves_params) == len(leaves_sharding) == len(leaves_rule_values):
-    max_logging.warning(
-        "Warning: Parameter tree structure mismatch between params, shardings," " and logical annotations."
-    )
+  if not has_logical:
+    leaves_logical = [(None, None)] * len(leaves_params)
+
+  if len(leaves_params) != len(leaves_sharding):
+    max_logging.warning("Warning: Params and Sharding tree mismatch.")
     return
 
-  # Build a reverse map
-  rule_value_to_semantic = defaultdict(list)
-  if logical_axis_rules:
-    rules_iter = logical_axis_rules.items() if isinstance(logical_axis_rules, dict) else logical_axis_rules
-    for name, potentials in rules_iter:
-      if isinstance(potentials, str):
-        key = (potentials,)
-      elif potentials is None:
-        key = (None,)
-      elif isinstance(potentials, list):
-        key = tuple(potentials)
-      elif isinstance(potentials, tuple):
-        key = potentials
-      else:
-        key = (potentials,)
+  for i, (path, leaf_val) in enumerate(leaves_params):
+    _, leaf_sharding = leaves_sharding[i]
+    leaf_logical_val = leaves_logical[i][1] if has_logical else None
 
-      key = tuple(p for p in key)
-      rule_value_to_semantic[key].append(name)
+    path_str = "/".join(str(p.key if hasattr(p, "key") else getattr(p, "name", "?")) for p in path)
 
-  # Header for the entire block (
-  max_logging.info("Parameter Path")
-  max_logging.info("Shape")
-  max_logging.info("Logical Axes")
-  max_logging.info("Physical PartitionSpec")
-  max_logging.info("-" * 120)
+    shape = str(jax.typeof(leaf_val))
 
   for (path, leaf_val), (_, leaf_sharding), (_, leaf_rule_value) in zip(
       leaves_params, leaves_sharding, leaves_rule_values

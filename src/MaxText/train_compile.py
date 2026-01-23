@@ -100,16 +100,19 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, state_logical_annotations, state_mesh_shardings = maxtext_utils.get_abstract_state(
+  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
       model, tx, config, example_rng, topology_mesh
   )
+
+  # unsharded logical annotations
+  logical_annotations = maxtext_utils.get_logical_annotations(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
   shaped_batch = maxtext_utils.get_shaped_batch(config)
 
   shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}
-  return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, state_logical_annotations, model
+  return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, logical_annotations, model
 
 
 def jit_and_compile(
@@ -214,7 +217,6 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.initialize(argv)
   validate_config(config)
 
-  sharding.set_global_logical_rules(config.logical_axis_rules)
   # Create target mesh
   topology_mesh = get_topology_mesh(config)
 
@@ -227,7 +229,7 @@ def main(argv: Sequence[str]) -> None:
       shaped_train_args,
       shaped_train_kwargs,
       state_mesh_shardings,
-      state_logical_annotations,
+      logical_annotations,
       model,
   ) = get_shaped_inputs(topology_mesh, config)
 
@@ -248,8 +250,7 @@ def main(argv: Sequence[str]) -> None:
         shaped_train_args[0].params,
         state_mesh_shardings.params,
         topology_mesh,
-        state_logical_annotations,
-        config.logical_axis_rules,
+        logical_annotations,
     )
 
   # Compile
