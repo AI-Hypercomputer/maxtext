@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shim for Distillation Trainer in `src/MaxText/trainers/post_train/distillation`."""
+"""Shim for Distillation Trainer in `src/maxtext/trainers/post_train/distillation`."""
 
 import sys
 import importlib

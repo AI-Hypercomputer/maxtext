@@ -256,33 +256,48 @@ def copy_maxtext_encoder_layer_weights(torch_layer, maxtext_layer):
   copy_linear_weights(torch_layer.fc2, maxtext_layer.AudioMLP.wo)
 
 
-def copy_audio_model(torch_model, maxtext_model, config):
-  """Copy full AudioModel weights from PyTorch to MaxText.
+def copy_maxtext_audio_encoder_weights(torch_model, maxtext_encoder, config):
+  """Copy AudioEncoder weights from PyTorch to MaxText (encoder only, no projector).
 
   Args:
       torch_model: PyTorch TorchQwen3OmniMoeAudioEncoder
-      maxtext_model: MaxText AudioModel
-      config: MaxText config with encoder_layers
+      maxtext_encoder: MaxText Qwen3OmniAudioEncoder
+      config: MaxText config with encoder_layers_for_audio
+
+  Note:
+      Positional embeddings are not copied because MaxText's PositionalEmbedding
+      computes them deterministically on-the-fly, unlike PyTorch which stores them.
   """
-  copy_conv2d_weights(torch_model.conv2d1, maxtext_model.conv2d1)
-  copy_conv2d_weights(torch_model.conv2d2, maxtext_model.conv2d2)
-  copy_conv2d_weights(torch_model.conv2d3, maxtext_model.conv2d3)
-  copy_linear_weights(torch_model.conv_out, maxtext_model.conv_out)
+  # Copy convolutional layers
+  copy_conv2d_weights(torch_model.conv2d1, maxtext_encoder.conv2d1)
+  copy_conv2d_weights(torch_model.conv2d2, maxtext_encoder.conv2d2)
+  copy_conv2d_weights(torch_model.conv2d3, maxtext_encoder.conv2d3)
 
-  maxtext_model.positional_embedding.positional_embedding.value = jnp.array(
-      torch_model.positional_embedding.positional_embedding.detach().cpu().numpy()
-  )
+  # Copy conv output projection
+  copy_linear_weights(torch_model.conv_out, maxtext_encoder.conv_out)
 
-  copy_layernorm_weights(torch_model.ln_post, maxtext_model.layernorm_post)
+  # Note: Positional embeddings are not copied - MaxText computes them on-the-fly
 
+  # Copy layer norm
+  copy_layernorm_weights(torch_model.ln_post, maxtext_encoder.layernorm_post)
+
+  # Copy encoder layers
   for torch_layer, maxtext_layer in zip(
       torch_model.layers,
-      [getattr(maxtext_model.audio_encoder, f"layers_{i}") for i in range(config.encoder_layers_for_audio)],
+      [getattr(maxtext_encoder, f"layers_{i}") for i in range(config.encoder_layers_for_audio)],
   ):
     copy_maxtext_encoder_layer_weights(torch_layer, maxtext_layer)
 
-  copy_linear_weights(torch_model.proj1, maxtext_model.audio_projector.proj1)
-  copy_linear_weights(torch_model.proj2, maxtext_model.audio_projector.proj2)
+
+def copy_audio_projector_weights(torch_model, maxtext_projector):
+  """Copy AudioProjector weights from PyTorch to MaxText.
+
+  Args:
+      torch_model: PyTorch TorchQwen3OmniMoeAudioEncoder (contains proj1, proj2)
+      maxtext_projector: MaxText Qwen3OmniAudioProjector
+  """
+  copy_linear_weights(torch_model.proj1, maxtext_projector.proj1)
+  copy_linear_weights(torch_model.proj2, maxtext_projector.proj2)
 
 
 def copy_maxtext_encoder_weights(torch_encoder, maxtext_encoder):
@@ -338,7 +353,9 @@ def copy_vision_encoder_weights(torch_encoder, jax_encoder):
   jax_encoder.pos_embed_interpolate.pos_embed.value = jnp.array(torch_pos_embed)
 
   # Copy encoder blocks
-  for torch_block, jax_block in zip(torch_encoder.blocks, jax_encoder.blocks):
+  # JAX encoder stores blocks as blocks_0, blocks_1, etc. via setattr
+  for i, torch_block in enumerate(torch_encoder.blocks):
+    jax_block = getattr(jax_encoder, f"blocks_{i}")
     # Copy layer norms
     copy_layernorm_weights(torch_block.norm1, jax_block.ln1)
     copy_layernorm_weights(torch_block.norm2, jax_block.ln2)
@@ -351,7 +368,9 @@ def copy_vision_encoder_weights(torch_encoder, jax_encoder):
     copy_linear_weights(torch_block.mlp.linear_fc2, jax_block.mlp_out)
 
   # Copy merger weights (deep mergers only, final_merger is now in projector)
-  for torch_merger, jax_merger in zip(torch_encoder.merger_list, jax_encoder.merger_list):
+  # JAX encoder stores mergers as merger_0, merger_1, etc. via setattr
+  for i, torch_merger in enumerate(torch_encoder.merger_list):
+    jax_merger = getattr(jax_encoder, f"merger_{i}")
     copy_patch_merger_weights(torch_merger, jax_merger)
 
 

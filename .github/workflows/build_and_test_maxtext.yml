@@ -115,6 +115,7 @@ jobs:
       device_name: v6e-4
       image_type: ${{ matrix.image_type }}
       cloud_runner: linux-x86-ct6e-180-4tpu
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
@@ -139,6 +140,7 @@ jobs:
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       worker_group: ${{ matrix.worker_group }}
       total_workers: 2
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_tpu_unit_tests:
     needs: build_and_upload_maxtext_package
@@ -158,6 +160,7 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_tpu_integration_tests:
     needs: build_and_upload_maxtext_package
@@ -177,6 +180,7 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_unit_tests:
     needs: build_and_upload_maxtext_package
@@ -196,6 +200,7 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_integration_tests:
     needs: build_and_upload_maxtext_package
@@ -215,6 +220,7 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_gpu_unit_tests:
     needs: build_and_upload_maxtext_package
@@ -235,6 +241,7 @@ jobs:
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_gpu_integration_tests:
     needs: build_and_upload_maxtext_package
@@ -255,6 +262,7 @@ jobs:
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   all_tests_passed:
     name: All Required Tests Passed
