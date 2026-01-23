@@ -40,19 +40,44 @@ def log(message: str) -> None:
 
 
 def detect_format(state: dict) -> str:
-  """Detects checkpoint format from params structure ('linen' or 'nnx')."""
+  """Detects checkpoint format from params structure ('linen' or 'nnx').
+
+  Linen format:
+    - params: {'params': {'decoder': {..., array}}}
+    - opt_state: mu/nu have 'params' level, arrays are not wrapped
+
+  NNX format:
+    - params: {'decoder': {..., {'value': array}}}
+    - opt_state: mu/nu don't have 'params' level, arrays wrapped in {'value': ...}
+  """
   if "params" not in state:
     raise ValueError("Checkpoint does not contain 'params' key")
 
   params = state["params"]
+
+  # Check for Linen double 'params' nesting
   if isinstance(params, dict) and "params" in params:
     inner = params["params"]
     if isinstance(inner, dict) and ("decoder" in inner or "encoder" in inner):
       return "linen"
 
+  # Check for NNX format: params directly contains decoder/encoder
   if isinstance(params, dict) and ("decoder" in params or "encoder" in params):
+    # Further check: NNX params should have {'value': ...} wrappers
+    if _has_value_wrappers(params):
+      return "nnx"
+    # If no value wrappers in params, check opt_state for more clues
+    if "opt_state" in state:
+      opt_state = state["opt_state"]
+      if _has_value_wrappers(opt_state):
+        return "nnx"
+      if _has_params_in_opt_state(opt_state):
+        return "linen"
+    # Default to NNX if params structure matches but no value wrappers
+    # (could be legacy NNX format)
     return "nnx"
 
+  # Fallback: check opt_state structure
   if "opt_state" in state:
     opt_state = state["opt_state"]
     if _has_params_in_opt_state(opt_state):
@@ -85,8 +110,43 @@ def _has_value_wrappers(tree: Any) -> bool:
   return False
 
 
+def _wrap_arrays_with_value(tree: Any) -> Any:
+  """Wraps arrays in {'value': ...} for NNX format."""
+  if isinstance(tree, dict):
+    return {k: _wrap_arrays_with_value(v) for k, v in tree.items()}
+  elif isinstance(tree, (list, tuple)):
+    return type(tree)(_wrap_arrays_with_value(item) for item in tree)
+  elif hasattr(tree, "shape") or isinstance(tree, (np.ndarray, jnp.ndarray)):
+    return {"value": tree}
+  else:
+    return tree
+
+
+def _unwrap_value_wrappers(tree: Any) -> Any:
+  """Removes {'value': ...} wrappers from NNX format."""
+  if isinstance(tree, dict):
+    if set(tree.keys()) == {"value"}:
+      inner = tree["value"]
+      if hasattr(inner, "shape") or isinstance(inner, (np.ndarray, jnp.ndarray)):
+        return inner
+    return {k: _unwrap_value_wrappers(v) for k, v in tree.items()}
+  elif isinstance(tree, (list, tuple)):
+    return type(tree)(_unwrap_value_wrappers(item) for item in tree)
+  else:
+    return tree
+
+
 def convert_linen_to_nnx(state: dict) -> dict:
-  """Converts Linen checkpoint to NNX format."""
+  """Converts Linen checkpoint to NNX format.
+
+  Linen format:
+    - params: {'params': {'decoder': {'layer': {'kernel': array}}}}
+    - opt_state: {'mu': {'params': {'decoder': {...}}}, ...}
+
+  NNX format:
+    - params: {'decoder': {'layer': {'kernel': {'value': array}}}}
+    - opt_state: {'mu': {'decoder': {..., {'value': array}}}, ...}
+  """
   result = {}
 
   # Copy step
@@ -96,11 +156,13 @@ def convert_linen_to_nnx(state: dict) -> dict:
   if "params" in state:
     linen_params = state["params"]
     if isinstance(linen_params, dict) and "params" in linen_params:
-      result["params"] = linen_params["params"]
+      unwrapped_params = linen_params["params"]
       log("  params: Removed double 'params' nesting")
     else:
-      result["params"] = linen_params
-      log("  params: No double nesting found, copied as-is")
+      unwrapped_params = linen_params
+      log("  params: No double nesting found")
+    result["params"] = _wrap_arrays_with_value(unwrapped_params)
+    log("  params: Added 'value' wrappers to arrays")
 
   if "opt_state" in state:
     result["opt_state"] = _convert_opt_state_linen_to_nnx(state["opt_state"])
@@ -110,7 +172,16 @@ def convert_linen_to_nnx(state: dict) -> dict:
 
 
 def convert_nnx_to_linen(state: dict) -> dict:
-  """Converts NNX checkpoint to Linen format."""
+  """Converts NNX checkpoint to Linen format.
+
+  NNX format:
+    - params: {'decoder': {'layer': {'kernel': {'value': array}}}}
+    - opt_state: {'mu': {'decoder': {..., {'value': array}}}, ...}
+
+  Linen format:
+    - params: {'params': {'decoder': {'layer': {'kernel': array}}}}
+    - opt_state: {'mu': {'params': {'decoder': {...}}}, ...}
+  """
   result = {}
 
   # Copy step
@@ -119,11 +190,15 @@ def convert_nnx_to_linen(state: dict) -> dict:
 
   if "params" in state:
     nnx_params = state["params"]
-    if isinstance(nnx_params, dict) and "params" not in nnx_params:
-      result["params"] = {"params": nnx_params}
+    # First remove {'value': ...} wrappers from params
+    unwrapped_params = _unwrap_value_wrappers(nnx_params)
+    log("  params: Removed 'value' wrappers from arrays")
+    # Then add double 'params' nesting for Linen format
+    if isinstance(unwrapped_params, dict) and "params" not in unwrapped_params:
+      result["params"] = {"params": unwrapped_params}
       log("  params: Added double 'params' nesting")
     else:
-      result["params"] = nnx_params
+      result["params"] = unwrapped_params
       log("  params: Already has double nesting, copied as-is")
 
   if "opt_state" in state:

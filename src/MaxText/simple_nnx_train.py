@@ -196,20 +196,52 @@ def create_checkpoint_manager(checkpoint_dir: str, config):
 
 
 def save_checkpoint(checkpoint_manager, model, opt_state, step: int, config):
-  """Saves full training state (params, opt_state, step)."""
+  """Saves full training state (params, opt_state, step) in standard NNX format.
+
+  NNX checkpoint format:
+    - params: {'decoder': {'layer': {'kernel': {'value': array}}}}
+    - opt_state: {'mu': {'decoder': {..., {'value': array}}}, 'nu': {...}}
+    - step: scalar array
+
+  This format is compatible with MaxText's checkpoint conversion utilities.
+  """
   print(f"Saving checkpoint at step {step}...")
 
   params = nnx.state(model, nnx.Param)
 
-  params_dict = jax.tree.map(
-      lambda x: x.value if isinstance(x, nnx.Variable) else x,
-      params,
-      is_leaf=lambda x: isinstance(x, nnx.Variable),
-  )
+  def state_to_nnx_format(tree):
+    """Converts NNX State to standard NNX checkpoint format with {'value': ...} wrappers."""
+    if isinstance(tree, statelib.State):
+      result = {}
+      for key, value in tree.items():
+        result[key] = state_to_nnx_format(value)
+      return result
+    elif isinstance(tree, nnx.Variable):
+      return {"value": tree.value}
+    elif isinstance(tree, dict):
+      return {k: state_to_nnx_format(v) for k, v in tree.items()}
+    elif isinstance(tree, (list, tuple)):
+      return type(tree)(state_to_nnx_format(item) for item in tree)
+    else:
+      return tree
+
+  def wrap_arrays_with_value(tree):
+    """Wraps arrays in {'value': ...} for opt_state."""
+    if isinstance(tree, dict):
+      return {k: wrap_arrays_with_value(v) for k, v in tree.items()}
+    elif isinstance(tree, (list, tuple)):
+      return type(tree)(wrap_arrays_with_value(item) for item in tree)
+    elif hasattr(tree, "shape"):
+      return {"value": tree}
+    else:
+      return tree
+
+  params_nnx = state_to_nnx_format(params)
+  opt_state_nnx = wrap_arrays_with_value(opt_state)
 
   state_dict = {
-      "params": params_dict,
-      "opt_state": opt_state,
+      "params": params_nnx,
+      "opt_state": opt_state_nnx,
       "step": jnp.array(step, dtype=jnp.int32),
   }
 
@@ -311,7 +343,17 @@ def main(argv: list[str]):
       if "opt_state" in restored:
 
         def unwrap_value(tree):
-          """Unwraps {'value': x} dicts from NNX checkpoint format."""
+          """
+          Unwraps {'value': x} dicts from NNX checkpoint format.
+          Args:
+            tree: Nested structure from checkpoint.
+          Returns:
+            Unwrapped nested structure.
+          Example:
+            {"mu": {"layer1": {"kernel": {"value": array([...])}}}}
+            becomes
+            {"mu": {"layer1": {"kernel": array([...])}}}
+          """
           if isinstance(tree, dict) and set(tree.keys()) == {"value"}:
             return tree["value"]
           elif isinstance(tree, dict):
@@ -328,7 +370,19 @@ def main(argv: list[str]):
         dummy_opt_state = tx.init(params_values)
 
         def reconstruct_state(template, loaded):
-          """Reconstructs optax state objects from checkpoint dicts."""
+          """
+          Reconstructs optax state objects from checkpoint dicts.
+          Args:
+            template: Template object (optax NamedTuple or structure).
+            loaded: Loaded dict structure from checkpoint.
+          Returns:
+            Reconstructed optax state object.
+          Example:
+            template: OptState(count=Array(...), mu=..., nu=...)
+            loaded: {'count': array([...]), 'mu': {...}, 'nu': {...}}
+            becomes:
+            OptState(count=array([...]), mu=..., nu=...)
+          """
           if hasattr(template, "_fields"):
             if isinstance(loaded, dict):
               return type(template)(**{k: reconstruct_state(getattr(template, k), loaded[k]) for k in template._fields})
