@@ -12,7 +12,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""Shim for SFT Trainer in `src/MaxText/trainers/post_train/sft`."""
+"""Shim for SFT Trainer in `src/maxtext/trainers/post_train/sft`."""
 
 import sys
 import importlib
