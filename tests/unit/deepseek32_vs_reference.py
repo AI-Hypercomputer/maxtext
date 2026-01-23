@@ -14,12 +14,13 @@
 
 
 import os.path
-import unittest
 import math
 from dataclasses import dataclass, asdict
 from typing import Optional
 import numpy as np
 import scipy
+import unittest
+from absl.testing import parameterized
 
 import torch
 from torch import nn
@@ -65,9 +66,6 @@ To run the test
 world_size = 1
 rank = 0
 block_size = 128
-
-SEQ_LEN = 8
-
 
 @dataclass
 class Config:
@@ -766,7 +764,7 @@ def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len):
   return cfg, mesh
 
 
-class DeepseekTestBase(unittest.TestCase):
+class DeepseekTestBase(parameterized.TestCase):
   """Base class handling common setup for DeepSeek V3.2"""
 
   def setUp(self):
@@ -820,9 +818,10 @@ class DeepseekTestBase(unittest.TestCase):
 class DeepseekV32IndexerTest(DeepseekTestBase):
   """Tests for the Sparse Indexer (Top-K Selection)."""
 
-  def test_indexer_match(self):
+  # index_topk=4
+  def test_indexer_match(self, seq_len=8):
     """Verifies Indexer output matches PyTorch output."""
-    torch_inputs, jax_inputs = self.get_data(SEQ_LEN)
+    torch_inputs, jax_inputs = self.get_data(seq_len)
     pt_mask = torch_inputs["mask"]
 
     # 1. PyTorch Run
@@ -889,17 +888,21 @@ class DeepseekV32IndexerTest(DeepseekTestBase):
     # check index score is close
     np.testing.assert_allclose(jax_index_score, to_jax(pt_index_score), rtol=1e-3, atol=1e-3)
     # check index mask is equal
-    # np.testing.assert_array_equal(jax_indices, to_jax(pt_indices))
     np.testing.assert_array_equal(jax_index_mask == 0, to_jax(pt_index_mask == 0))
 
 
 class DeepseekV32MLATest(DeepseekTestBase):
   """Tests for MLA Attention with Sparse Indexing."""
 
-  def test_mla_match(self):
+  @parameterized.named_parameters(
+      {"testcase_name": "seq_len=2 (index_topk=4)", "seq_len": 2},
+      {"testcase_name": "seq_len=8 (index_topk=4)", "seq_len": 8},
+  )
+  # index_topk=4
+  def test_mla_match(self, seq_len=8):
     """Verifies MLA output (train mode) matches PyTorch (MHA mode) with indexer."""
 
-    torch_inputs, jax_inputs = self.get_data(SEQ_LEN)
+    torch_inputs, jax_inputs = self.get_data(seq_len)
 
     # 1. PyTorch Run
     pt_mla = MLA(self.pt_args)
@@ -965,7 +968,6 @@ class DeepseekV32MLATest(DeepseekTestBase):
     # 3 Compare
     print("torch out", pt_out)
     print("jax out", jax_out)
-    # np.testing.assert_allclose(to_jax(pt_out / pt_out.sum()), jax_out / jax_out.sum(), rtol=1e-3, atol=1e-2)
     np.testing.assert_allclose(to_jax(pt_out), jax_out, rtol=1e-2, atol=1e-2)
 
 

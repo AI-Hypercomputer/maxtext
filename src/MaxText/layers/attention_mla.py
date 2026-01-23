@@ -253,7 +253,6 @@ class Indexer(nnx.Module):
     bsz, seqlen = inputs_positions.shape  # s = t = seqlen
 
     # Query Processing: Project from Latent low_rank_q
-    # TODO(shuningjin): why the shape is [b, t, h * d] rather than [b, t, h, d]?
     q = self.wq_b(low_rank_q)  # [b, t, q_lora_rank] -> [b, t, h * d]
     q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)  # [b, t, h, d]
     q = self.apply_partial_rope(q, inputs_positions=inputs_positions)
