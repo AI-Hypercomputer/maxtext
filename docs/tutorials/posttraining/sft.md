@@ -109,7 +109,7 @@ export PRE_TRAINED_MODEL_CKPT_PATH=${PRE_TRAINED_MODEL_CKPT_DIRECTORY}/0/items
 Now you are ready to run SFT using the following command:
 
 ```sh
-python3 -m MaxText.sft.sft_trainer src/MaxText/configs/sft.yml \
+python3 -m maxtext.trainers.post_train.sft.train_sft src/MaxText/configs/sft.yml \
     run_name=${RUN_NAME} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     model_name=${PRE_TRAINED_MODEL} \

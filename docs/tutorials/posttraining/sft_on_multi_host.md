@@ -15,6 +15,7 @@
  -->
 
 # SFT on multi-host TPUs
+
 Supervised fine-tuning (SFT) is a process where a pre-trained large language model is fine-tuned on a labeled dataset to adapt the model to perform better on specific tasks.
 
 This tutorial demonstrates step-by-step instructions for setting up the multi-host TPU environment and then training the model on the Hugging Face dataset using SFT. In this tutorial we use a multi-host TPU such as `v6e-256`.
@@ -24,16 +25,20 @@ We use [Tunix](https://github.com/google/tunix), a JAX-based library designed fo
 Let's get started!
 
 ## 1. Build and upload MaxText Docker image
+
 This section guides you through cloning the MaxText repository, building MaxText Docker image with dependencies, and uploading the docker image to your project's Artifact Registry.
 
 ### 1.1. Clone the MaxText repository
+
 ```bash
 git clone https://github.com/google/maxtext.git
 cd maxtext
 ```
 
 ### 1.2. Build MaxText Docker image
+
 Before building the Docker image, authenticate to [Google Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/docker/authentication#gcloud-helper) for permission to push your images and other access.
+
 ```bash
 # Authenticate your user account for gcloud CLI access
 gcloud auth login
@@ -43,26 +48,34 @@ gcloud auth application-default login
 gcloud auth configure-docker
 docker run hello-world
 ```
+
 Then run the following command to create a local Docker image named `maxtext_base_image`. This build process takes approximately 10 to 15 minutes.
+
 ```bash
 bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
 ```
 
 ### 1.3. Upload the Docker image to Artifact Registry
+
 > **Note:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to your project's Artifact Registry and to allow the cluster to pull them during workload execution. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
+
 ```bash
 export DOCKER_IMAGE_NAME=<Docker Image Name>
 bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$DOCKER_IMAGE_NAME
 ```
+
 The `docker_upload_runner.sh` script uploads your Docker image to Artifact Registry.
 
 ## 2. Install XPK
-Install XPK by following the instructions in the [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md). 
+
+Install XPK by following the instructions in the [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md).
 
 ## 3. Create GKE cluster
+
 Use a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster).
 
 ## 4. Environment configuration
+
 ```bash
 # -- Google Cloud Configuration --
 export PROJECT=<Google Cloud Project ID>
@@ -91,19 +104,24 @@ export TRAIN_DATA_COLUMNS=<Data Columns to Train on> # e.g., ['messages']
 ```
 
 ## 5. Get MaxText model checkpoint
+
 This section explains how to prepare your model checkpoint for use with MaxText. You have two options: using an existing MaxText checkpoint or converting a Hugging Face checkpoint.
 
 ### Option 1: Using an existing MaxText checkpoint
+
 If you already have a MaxText-compatible model checkpoint, simply set the following environment variable and move on to the next section.
 
 ```bash
 export MODEL_CHECKPOINT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
+
 **Note:** Make sure that `MODEL_CHECKPOINT_PATH` has the checkpoints created using the correct storage flags:
-* **For SFT with McJAX:** `checkpoint_storage_use_zarr3=True` and `checkpoint_storage_use_ocdbt=True`.
-* **For SFT with Pathways:** `checkpoint_storage_use_zarr3=False` and `checkpoint_storage_use_ocdbt=False`.
+
+- **For SFT with McJAX:** `checkpoint_storage_use_zarr3=True` and `checkpoint_storage_use_ocdbt=True`.
+- **For SFT with Pathways:** `checkpoint_storage_use_zarr3=False` and `checkpoint_storage_use_ocdbt=False`.
 
 ### Option 2: Converting a Hugging Face checkpoint
+
 If your model checkpoint is from Hugging Face, you need to run a conversion script to make it MaxText-compatible.
 
 1. **Set the Output Path:** First, define where the converted MaxText checkpoint will be saved. For example:
@@ -137,9 +155,11 @@ export MODEL_CHECKPOINT_PATH=${MODEL_CHECKPOINT_DIRECTORY}/0/items
 ```
 
 ## 6. Submit workload on GKE cluster
+
 This section provides the command to run SFT on a GKE cluster.
 
 ### 6.1. SFT with Multi-Controller JAX (McJAX)
+
 ```bash
 xpk workload create \
 --cluster=${CLUSTER_NAME} \
@@ -149,11 +169,13 @@ xpk workload create \
 --workload=${WORKLOAD_NAME} \
 --tpu-type=${TPU_TYPE} \
 --num-slices=${TPU_SLICE} \
---command "python3 -m MaxText.sft.sft_trainer src/MaxText/configs/sft.yml run_name=$WORKLOAD_NAME base_output_directory=$OUTPUT_PATH model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH hf_access_token=$HF_TOKEN tokenizer_path=$TOKENIZER_PATH per_device_batch_size=1 steps=$STEPS profiler=xplane hf_path=$DATASET_NAME train_split=$TRAIN_SPLIT train_data_columns=$TRAIN_DATA_COLUMNS"
+--command "python3 -m maxtext.trainers.post_train.sft.train_sft src/MaxText/configs/sft.yml run_name=$WORKLOAD_NAME base_output_directory=$OUTPUT_PATH model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH hf_access_token=$HF_TOKEN tokenizer_path=$TOKENIZER_PATH per_device_batch_size=1 steps=$STEPS profiler=xplane hf_path=$DATASET_NAME train_split=$TRAIN_SPLIT train_data_columns=$TRAIN_DATA_COLUMNS"
 ```
+
 Once the fine-tuning is completed, you can access your model checkpoints at `$OUTPUT_PATH/$WORKLOAD_NAME/checkpoints`.
 
 ### 6.2. SFT with Pathways
+
 ```bash
 xpk workload create-pathways \
 --cluster=${CLUSTER_NAME} \
@@ -163,7 +185,7 @@ xpk workload create-pathways \
 --workload=${WORKLOAD_NAME} \
 --tpu-type=${TPU_TYPE} \
 --num-slices=${TPU_SLICE} \
---command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m MaxText.sft.sft_trainer src/MaxText/configs/sft.yml run_name=$WORKLOAD_NAME base_output_directory=$OUTPUT_PATH model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH hf_access_token=$HF_TOKEN tokenizer_path=$TOKENIZER_PATH per_device_batch_size=1 steps=$STEPS profiler=xplane checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False enable_single_controller=True"
+--command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft src/MaxText/configs/sft.yml run_name=$WORKLOAD_NAME base_output_directory=$OUTPUT_PATH model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH hf_access_token=$HF_TOKEN tokenizer_path=$TOKENIZER_PATH per_device_batch_size=1 steps=$STEPS profiler=xplane checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False enable_single_controller=True"
 ```
 
 Once the fine-tuning is completed, you can access your model checkpoints at `$OUTPUT_PATH/$WORKLOAD_NAME/checkpoints`.

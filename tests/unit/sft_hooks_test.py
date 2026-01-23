@@ -29,7 +29,7 @@ from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.maxtext_utils import create_device_mesh
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.sft import hooks
+from maxtext.trainers.post_train.sft import hooks
 
 
 class SFTHooksTest(unittest.TestCase):
@@ -37,7 +37,7 @@ class SFTHooksTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "sft.hooks"), os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+        ["", os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
         per_device_batch_size=1,
         run_name="test",
         base_output_directory="test",
@@ -59,7 +59,7 @@ class SFTHooksTest(unittest.TestCase):
 
     self.mock_train_ctx = MagicMock()
 
-  @patch("MaxText.sft.hooks.create_data_iterator")
+  @patch("maxtext.trainers.post_train.sft.hooks.create_data_iterator")
   def test_data_hooks_load_next_train_batch(self, mock_create_data_iterator):
     mock_create_data_iterator.return_value = self.mock_data_iterator, None
     data_hooks = hooks.SFTDataHooks(self.config, self.mesh, goodput_recorder=None)
@@ -69,7 +69,7 @@ class SFTHooksTest(unittest.TestCase):
     self.assertEqual(data_hooks.train_batch["inputs"].shape, self.expected_batch["inputs"].shape)
     self.assertTrue((data_hooks.train_batch["inputs"] == self.expected_batch["inputs"]).all())
 
-  @patch("MaxText.sft.hooks.create_data_iterator")
+  @patch("maxtext.trainers.post_train.sft.hooks.create_data_iterator")
   def test_data_hooks_load_next_eval_batch(self, mock_create_data_iterator):
     mock_create_data_iterator.return_value = None, self.mock_data_iterator
     data_hooks = hooks.SFTDataHooks(self.config, self.mesh, goodput_recorder=None)
