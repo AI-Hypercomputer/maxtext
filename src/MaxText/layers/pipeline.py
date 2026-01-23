@@ -550,24 +550,20 @@ class Pipeline(nn.Module):
 
     return jax.tree.map(find_fsdp, physical_partition_spec)
 
-  def bsw_all_gather_over_fsdp(self, weights, bsw, physical_partition_spec, loop_iteration):
-    """All gather bsw over fsdp mesh axis using shardmap."""
-    bsw_pps = self._generate_bsw_pps_from_pps(physical_partition_spec)
-    repeat_weights_pps = jax.tree.map(lambda p: P(*p[1:]), physical_partition_spec)
-    fsdp_idx = self.get_fsdp_index_pytree(physical_partition_spec)
-
-    _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration + 1)
+  def from_all_variables_to_repeat_weights(self, loop_iteration, physical_partition_spec):
+    """Generate one single repeat weight from all variables."""
+    _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
 
     def gather_weights_for_stages_in(w, spec):
       return self.vmap_parallel_gather(
           w, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1, physical_partition_spec=spec
       )
 
+    weights = self._remove_logically_partition(self.layers.variables)
     if physical_partition_spec is None:
       repeat_weights = jax.tree.map(gather_weights_for_stages_in, weights)
     else:
       repeat_weights = jax.tree.map(gather_weights_for_stages_in, weights, physical_partition_spec)
-
     circular_metadata_params = {
         nn.PARTITION_NAME: "circular_repeats",
         "sub_weight_split_dims_mapping": (None,),
@@ -576,25 +572,36 @@ class Pipeline(nn.Module):
         "optimizer_dims_mapping": None,
     }
     repeat_weights = meta.remove_axis(repeat_weights, 0, circular_metadata_params)
+    return repeat_weights
+
+  def from_all_variables_to_bsw(self, loop_iteration, physical_partition_spec):
+    """All gather one branch of bsw using shardmap."""
+    repeat_weights = self.from_all_variables_to_repeat_weights(loop_iteration, physical_partition_spec)
+    bsw_pps = self._generate_bsw_pps_from_pps(physical_partition_spec)
+    repeat_weights_pps = jax.tree.map(lambda p: P(*p[1:]), physical_partition_spec)
+    fsdp_idx = self.get_fsdp_index_pytree(physical_partition_spec)
 
     @jax.shard_map(
         mesh=self.mesh,
-        in_specs=(repeat_weights_pps, (bsw_pps, bsw_pps), None),
-        out_specs=(bsw_pps, bsw_pps),
+        in_specs=(repeat_weights_pps, None),
+        out_specs=bsw_pps,
         check_vma=True,
     )
-    def _all_gather_inner(sharded_weights, cur_bsw, fsdp_idx):
+    def _all_gather_inner(sharded_weights, fsdp_idx):
       def _all_gather_invariant(x, i):
         if i >= 0:
           return all_gather_invariant(x, axis_name="fsdp", axis=i - 1, tiled=True)
         return x
 
-      new_variables = jax.tree.map(_all_gather_invariant, sharded_weights, fsdp_idx)
-      new_variables = jax.ad_checkpoint.checkpoint_name(new_variables, "bsw_gathered_weights")
+      return jax.tree.map(_all_gather_invariant, sharded_weights, fsdp_idx)
 
-      return jax.ad_checkpoint.checkpoint_name((cur_bsw[1], new_variables), "bsw")
+    return _all_gather_inner(repeat_weights, fsdp_idx)
 
-    return _all_gather_inner(repeat_weights, bsw, fsdp_idx)
+  def bsw_all_gather_over_fsdp(self, physical_partition_spec, loop_iteration):
+    """All gather all bsw over fsdp mesh axis using shardmap."""
+    bsw_0 = self.from_all_variables_to_bsw(loop_iteration, physical_partition_spec)
+    bsw_1 = self.from_all_variables_to_bsw(loop_iteration + 1, physical_partition_spec)
+    return jax.ad_checkpoint.checkpoint_name((bsw_0, bsw_1), "bsw")
 
   def get_vmap_func_for_init(self):
     """This vmap func is used to initialize the weights only on init."""
@@ -985,15 +992,12 @@ class Pipeline(nn.Module):
     if self.config.set_remat_policy_on_pipeline_iterations:
       run_iteration_scannable = nn.remat(
           run_iteration_scannable,
-          prevent_cse=True,  # not self.config.scan_pipeline_iterations,
+          prevent_cse=not self.config.scan_pipeline_iterations,
           policy=self.get_pipeline_remat_policy(),
       )
 
     def run_one_repeat_scannable(model, loop_state):
-      weights = model._remove_logically_partition(model.layers.variables)  # pylint: disable=protected-access
-      loop_state["bsw"] = model.bsw_all_gather_over_fsdp(
-          weights, loop_state["bsw"], physical_partition_spec, loop_state["loop_iteration"]
-      )
+      loop_state["bsw"] = model.bsw_all_gather_over_fsdp(physical_partition_spec, loop_state["loop_iteration"])
 
       if model.config.scan_pipeline_iterations:
         run_one_repeat_scanned = nn.scan(
@@ -1018,7 +1022,7 @@ class Pipeline(nn.Module):
 
     run_one_repeat_scannable = nn.remat(
         run_one_repeat_scannable,
-        prevent_cse=True,
+        prevent_cse=not self.config.scan_pipeline_iterations,
         policy=self.get_pipeline_remat_policy(),
     )
 
@@ -1052,7 +1056,7 @@ class Pipeline(nn.Module):
             length=bubble_iterations,
         )
         loop_state, _ = run_repeats_scanned(model, loop_state)
-        loop_state["bsw"] = (loop_state["bsw"][1], jax.tree.map(jnp.zeros_like, loop_state["bsw"][1]))
+        loop_state["bsw"] = model.bsw_all_gather_over_fsdp(physical_partition_spec, loop_state["loop_iteration"])
         loop_state, _ = run_bubbles_scanned(model, loop_state)
       else:
         for _ in range(model.config.num_pipeline_repeats):  # remat and scan outer loop
