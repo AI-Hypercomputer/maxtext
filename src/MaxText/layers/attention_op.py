@@ -834,9 +834,6 @@ class AttentionOp(nnx.Module):
     length = query.shape[-3]
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
 
-    if index_mask is not None and self.attention_kernel != "dot_product":
-      raise NotImplementedError("index mask currently only supports dot product attention.")
-
     if use_ragged_attention and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       if lengths is None:
         lengths = jnp.sum(decoder_segment_ids, axis=-1)

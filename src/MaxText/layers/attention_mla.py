@@ -103,6 +103,7 @@ class Indexer(nnx.Module):
     self.emb_dim = config.emb_dim
     self.rope_head_dim = config.qk_rope_head_dim
     self.q_lora_rank = config.q_lora_rank
+    # scale head weights for numerical stability
     self.softmax_scale = self.head_dim**-0.5
 
     # Query Projection: Latent Query -> Indexer Query
@@ -138,17 +139,17 @@ class Indexer(nnx.Module):
     # Key Normalization with Bias
     self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=True, dtype=self.weight_dtype, rngs=rngs)
 
-    # Projection: Input -> Importance Weights for Heads (with high precision)
+    # Projection: Input -> Importance Weights for Heads
+    # deepseek3.2 enforces FP32 and does not quantize, for precision and stability.
     self.weights_proj = DenseGeneral(
         in_features_shape=self.emb_dim,
         out_features_shape=self.n_heads,
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed", "q_heads"),
-        # Enforce FP32 as requested for stability in importance scoring
         dtype=jnp.float32,
         weight_dtype=jnp.float32,
-        quant=None,  # Typically we don't quantize the importance selector head
+        quant=None,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
         rngs=self.rngs,
@@ -216,9 +217,10 @@ class Indexer(nnx.Module):
     Steps:
       1. Q = RoPE(Wq @ q_lora)
       2. K = RoPE(Norm(Wk @ X))
-      3. Logits = ReLU(Q @ K.T)                 # Pairwise similarity
-      4. Head_Weights = (W_proj @ X) * scale    # Dynamic head importance
-      5. Score = Sum(Logits * Head_Weights)     # Aggregate heads
+      3. Logits = ReLU(Q @ K.T)                      # Pairwise similarity
+      4. Head_Weights = (W_proj @ X) * scale         # Dynamic head importance, scale for stability
+      5. Score = Sum_head(Logits * Head_Weights)     # Aggregate heads
+      6. Indices = ArgTopk(Score)
 
     Args:
       inputs_q: Input of shape [b, t, embed_dim].
@@ -264,13 +266,16 @@ class Indexer(nnx.Module):
     k = k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
 
     # Compute Index Scores
-    # qk product: relu(q @ k.T), [b, t, s, h]
-    # similar to MQA, each key is shared by h query head
+    # QK product: relu(q @ k.T), [b, t, s, h]
+    # Similar to MQA, each key is shared by h query head
     logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
     logits = jax.nn.relu(logits)
-    # compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
-    weights = self.weights_proj(inputs_q.astype(jnp.float32)) * (self.n_heads**-0.5) * self.softmax_scale
-    # weighted sum over head: sum_h(logits * weights)
+    # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
+    weights = self.weights_proj(inputs_q)
+    # Weights scaling affect index_score, but does not affect topk_indices. Keep scaling for numerical stability.
+    # https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py#L478-L480
+    weights = weights * (self.n_heads**-0.5) * self.softmax_scale
+    # Weighted sum over head: sum_h(logits * weights)
     index_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision) # [b, t, s]
 
     # Apply attention mask before TopK
@@ -995,8 +1000,6 @@ class MLA(Attention):
     # Indexer Logic
     index_mask = None
     if self.use_sparse_indexer:
-      if self.q_lora_rank == 0:
-        raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
       if model_mode != MODEL_MODE_TRAIN:
         raise NotImplementedError("Sparse indexer has not implemented for inference yet.")
       # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
