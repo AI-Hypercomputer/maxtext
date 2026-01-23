@@ -110,12 +110,22 @@ class MultiTokenPredictionLayer(nnx.Module):
         rngs=rngs,
     )
     # Use MODEL_MODE_TRAIN for initialization; runtime model_mode is passed dynamically.
-    mtp_transformer_layer = transformer_layer_module(
-        config=cfg,
-        mesh=mesh,
-        model_mode=MODEL_MODE_TRAIN,
-        name=f"mtp_{k}_transformer_layer",
-    )
+    if cfg.pure_nnx_decoder:
+      mtp_transformer_layer = transformer_layer_module(
+          config=cfg,
+          mesh=mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          name=f"mtp_{k}_transformer_layer",
+          rngs=rngs,
+      )
+    else:
+      mtp_transformer_layer = transformer_layer_module(
+          config=cfg,
+          mesh=mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          name=f"mtp_{k}_transformer_layer",
+      )
+
     self.transformer_layer = nnx_wrappers.ToNNX(mtp_transformer_layer, rngs=rngs)
 
     # ToNNX requires explicit initialization with sample inputs for proper parameter setup.
