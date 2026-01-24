@@ -13,6 +13,25 @@
 # limitations under the License.
 
 
+"""
+Tests for DeepSeek V3.2: Indexer, MLA
+
+DeepSeek 3.2 PyTorch implementation at: 
+https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py
+
+We adapt the reference implementation to run on CPU:
+- Original code is GPU-specific, due to quantization and fp8 kernel
+- Remove quantization logic. Use float32 for dtype and weight_dytpe
+- Replace fp8 kernel with naive dot product
+- Replace fast_hadamard_transform.hadamard_transform with F.linear
+- Changes other than dtype are marked with `# [CHANGE]`, primarily in Indexer and MLA
+
+To run the test
+  python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+  python3 -m pytest -v --pyargs tests.unit.deepseek32_vs_reference -rP -s
+"""
+
+
 import os.path
 import math
 from dataclasses import dataclass, asdict
@@ -39,25 +58,6 @@ from MaxText.layers import embeddings, attention_mla
 from MaxText.common_types import MODEL_MODE_TRAIN
 
 
-"""
-Tests for DeepSeek V3.2: Indexer, MLA
-
-DeepSeek 3.2 PyTorch implementation at: 
-https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py
-
-We adapt the reference implementation to run on CPU:
-- Original code is GPU-specific, due to quantization and fp8 kernel
-- Remove quantization logic. Use float32 for dtype and weight_dytpe
-- Replace fp8 kernel with naive dot product
-- Replace fast_hadamard_transform.hadamard_transform with F.linear
-- Changes other than dtype are marked with `# [CHANGE]`, primarily in Indexer and MLA
-
-To run the test
-  python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-  python3 -m pytest -v --pyargs tests.unit.deepseek32_vs_reference -rP -s
-"""
-
-
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
@@ -66,6 +66,7 @@ To run the test
 world_size = 1
 rank = 0
 block_size = 128
+
 
 @dataclass
 class Config:
@@ -137,7 +138,7 @@ class ModelArgs:
 # -----------------------------------------------------------------------------
 
 
-def linear(
+def linear(  # pylint: disable=inconsistent-return-statements
     x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None, scale_fmt: Optional[str] = None
 ) -> torch.Tensor:
   """
@@ -386,7 +387,7 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
     high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
     return max(low, 0), min(high, dim - 1)
 
-  def linear_ramp_factor(min, max, dim):
+  def linear_ramp_factor(min, max, dim):  # pylint: disable=redefined-builtin
     """
     Computes a linear ramp function used to smooth values between a minimum and maximum range.
 
@@ -455,7 +456,7 @@ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
   return F.linear(x, torch.tensor(scipy.linalg.hadamard(hidden_size), dtype=x.dtype, device=x.device)) * hidden_size**-0.5
 
 
-class Indexer(torch.nn.Module):
+class Indexer(torch.nn.Module):  # pylint: disable=missing-class-docstring
 
   def __init__(self, args: ModelArgs):
     super().__init__()
@@ -481,7 +482,11 @@ class Indexer(torch.nn.Module):
     #     torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.float8_e4m3fn),
     #     persistent=False,
     # )
-    # self.register_buffer("k_scale_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim // block_size, dtype=torch.float32), persistent=False)
+    # self.register_buffer(
+    #     "k_scale_cache",
+    #     torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim // block_size, dtype=torch.float32),
+    #     persistent=False,
+    # )
     # NEW
     self.register_buffer(
         "k_cache",
@@ -489,7 +494,7 @@ class Indexer(torch.nn.Module):
         persistent=False,
     )
 
-  def forward(
+  def forward(  # pylint: disable=missing-function-docstring
       self,
       x: torch.Tensor,
       qr: torch.Tensor,
@@ -533,10 +538,15 @@ class Indexer(torch.nn.Module):
     weights = weights * self.softmax_scale
 
     # [CHANGE]
-    # fp8_index is defined by: https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/kernel.py#L254
+    # fp8_index is defined by: https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/kernel.py#L254 # pylint: disable=line-too-long
     # Replace fp8_index with standard PyTorch: Sum_h( ReLU(Q @ K.T) * Weights
     # OLD
-    # index_score = fp8_index(q_fp8.contiguous(), weights, self.k_cache[:bsz, :end_pos].contiguous(), self.k_scale_cache[:bsz, :end_pos].contiguous())
+    # index_score = fp8_index(
+    #     q_fp8.contiguous(),
+    #     weights,
+    #     self.k_cache[:bsz, :end_pos].contiguous(),
+    #     self.k_scale_cache[:bsz, :end_pos].contiguous(),
+    # )
     # NEW
     logits = torch.einsum("bthd, bsd -> btsh", q, self.k_cache[:bsz, :end_pos])
     logits = F.relu(logits)
@@ -742,6 +752,7 @@ def get_jax_mla_weights(pt_mla, cfg):
 
 
 def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len):
+  """Returns MaxText configuration and mesh."""
   cfg = pyconfig.initialize(
       [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
       run_name=run_name,
@@ -768,6 +779,7 @@ class DeepseekTestBase(parameterized.TestCase):
   """Base class handling common setup for DeepSeek V3.2"""
 
   def setUp(self):
+    """Initializes the configuration for each test"""
     super().setUp()
     torch.set_default_dtype(torch.float32)
     torch.manual_seed(42)
@@ -874,7 +886,7 @@ class DeepseekV32IndexerTest(DeepseekTestBase):
     # Copy Weights
     nnx.update(jax_indexer, get_jax_indexer_weights(pt_indexer))
 
-    jax_index_mask, jax_indices, jax_index_score = jax_indexer(
+    jax_index_mask, _, jax_index_score = jax_indexer(
         inputs_q=jax_inputs["x"],
         low_rank_q=jax_inputs["qr"],
         inputs_kv=jax_inputs["x"],
