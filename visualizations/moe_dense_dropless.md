@@ -299,6 +299,21 @@ This path is simpler but less efficient for large S or E.
 
 ---
 
+## Differences between EP and no-EP
+
+When Expert Parallelism (EP) is enabled (`expert_parallelism > 1`), the kernel weights are sharded across the expert axis. The key difference in this path:
+
+**This path (dropless) relies on the compiler** to handle communication. The kernel sharding is determined by the config-dependent `wi_kernel_axes` and `wo_kernel_axes` (see Kernel Sharding Axes table above). The compiler (XLA/GSPMD) inserts the necessary all-gather or reduce-scatter collectives based on the sharding constraints.
+
+**No explicit kernel all-gather** is performed in the code path. The compiler determines the optimal communication pattern from:
+- Kernel sharding: e.g. `("exp", "embed_no_exp", "mlp")` shards the `E` dimension across devices
+- Einsum pattern: `BSM, EMH -> BSEH` requires full kernel on each device
+- Activation sharding constraints
+
+This is in contrast to the token-dropping path (`capacity_factor > 0`), which explicitly calls `maybe_all_gather_kernel_weight_in_expert_parallelism()` to all-gather the sharded kernels before computation.
+
+---
+
 ## Formal Specification (Machine-Readable)
 
 This section provides a precise specification of the weight-sum mechanism for automated processing.

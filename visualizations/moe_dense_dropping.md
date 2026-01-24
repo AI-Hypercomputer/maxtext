@@ -101,21 +101,21 @@ When `capacity_factor > 0` and `model_call_mode != "inference"`, the MoE layer u
 │          ├─────────────────────────────────────────────────┐                     │
 │          │                                                 │                     │
 │          ▼                                                 ▼                     │
-│  ┌──────────────────────────────┐                 ┌─────────────────────────┐    │
-│  │ reshape_and_update_weights   │                 │    generate_masks       │    │
-│  │                              │                 │                         │    │
-│  │ IN:  top_k_weights [B,S,K]   │                 │ IN: top_k_indices [B,S,K│    │
-│  │      top_k_indices [B,S,K]   │                 │     routing_weights     │    │
-│  │              ↓               │                 │              ↓          │    │
-│  │ OUT: routing_weights [B,S,E] │                 │ dispatch_mask: [B,S,E,C]│    │
-│  │                              │                 │ combine_mask:  [B,S,E,C]│    │
-│  │ (scatter K routing weights   │────────────────►│                         │    │
-│  │  into dense E-dim tensor)    │                 │ (C=expert_capacity)     │    │
-│  │                              │                 │                         │    │
-│  │ NOTE: routing_weights is an  │                 │ combine_mask contains   │    │
-│  │ activation, not a model      │                 │ routing weights for     │    │
-│  │ weight matrix                │                 │ non-dropped assignments │    │
-│  └──────────────────────────────┘                 └─────────────────────────┘    │
+│  ┌──────────────────────────────┐                 ┌─────────────────────────-┐   │
+│  │ reshape_and_update_weights   │                 │    generate_masks        │   │
+│  │                              │                 │                          │   │
+│  │ IN:  top_k_weights [B,S,K]   │                 │ IN: top_k_indices [B,S,K]│   │
+│  │      top_k_indices [B,S,K]   │                 │     routing_weights      │   │
+│  │              ↓               │                 │              ↓           │   │
+│  │ OUT: routing_weights [B,S,E] │                 │ dispatch_mask: [B,S,E,C] │   │
+│  │                              │                 │ combine_mask:  [B,S,E,C] │   │
+│  │ (scatter K routing weights   │────────────────►│                          │   │
+│  │  into dense E-dim tensor)    │                 │ (C=expert_capacity)      │   │
+│  │                              │                 │                          │   │
+│  │ NOTE: routing_weights is an  │                 │ combine_mask contains    │   │
+│  │ activation, not a model      │                 │ routing weights for      │   │
+│  │ weight matrix                │                 │ non-dropped assignments  │   │
+│  └──────────────────────────────┘                 └─────────────────────────-┘   │
 │                                                            │                     │
 │  ╔════════════════════════════════════════════════════════════════════════╗      │
 │  ║  mask sharding                                                         ║      │
@@ -168,9 +168,9 @@ When `capacity_factor > 0` and `model_call_mode != "inference"`, the MoE layer u
 │  layer_w0: [E, B, C, H]            layer_w1: [E, B, C, H]                    │   │
 │          │                                  │                                │   │
 │          ▼                                  │                                │   │
-│  ┌─────────────────────────┐               │                                 │   │
-│  │  activation (e.g. silu) │               │                                 │   │
-│  └─────────────────────────┘               │                                 │   │
+│  ┌─────────────────────────┐                │                                │   │
+│  │  activation (e.g. silu) │                │                                │   │
+│  └─────────────────────────┘                │                                │   │
 │          │                                  │                                │   │
 │          └──────────────┬───────────────────┘                                │   │
 │                         ▼                                                    │   │
@@ -389,6 +389,22 @@ output[T3] = 0.8 × Expert2_output[slot1] + 0.2 × Expert3_output[slot1]
 ### Key Insight
 
 The capacity mechanism ensures bounded compute per expert, but tokens that exceed capacity get degraded routing (fewer experts contribute to their output). Higher `capacity_factor` reduces dropping but increases memory/compute.
+
+---
+
+## Differences between EP and no-EP
+
+When Expert Parallelism (EP) is enabled (`expert_parallelism > 1`), the kernel weights are sharded across the expert axis. The key difference in this path:
+
+**This path (token dropping) explicitly all-gathers kernels** via `maybe_all_gather_kernel_weight_in_expert_parallelism()` when EP > 1. Before the MLP computation, each sharded kernel is gathered so that every device has the full `[E, M, H]` or `[E, H, M]` tensor.
+
+**Hardcoded kernel sharding axes** are used in this path regardless of the config:
+- `wi_0, wi_1`: `("exp", None, "mlp")`
+- `wo`: `("exp", "mlp", None)`
+
+After the all-gather, the computation proceeds identically to the no-EP case.
+
+This is in contrast to the dropless path (`capacity_factor <= 0`), which does not explicitly all-gather kernels and instead relies on the compiler (XLA/GSPMD) to insert communication based on the config-dependent `wi_kernel_axes` / `wo_kernel_axes` sharding.
 
 ---
 
