@@ -27,20 +27,20 @@ TODO: capture the transition from the MoE mesh
 [B=2/DP=2, S=2/CP=2, M=2/TP=2]
 ```
 ```
-B/DP=0
-├── S/CP=0
-│   ├── M/TP=0: a0
-│   └── M/TP=1: a1
-└── S/CP=1
-    ├── M/TP=0: b0
-    └── M/TP=1: b1
-B/DP=1
-├── S/CP=0
-│   ├── M/TP=0: A0
-│   └── M/TP=1: A1
-└── S/CP=1
-    ├── M/TP=0: B0
-    └── M/TP=1: B1
+├── B/DP=0
+│   ├── S/CP=0
+│   │   ├── M/TP=0: a0
+│   │   └── M/TP=1: a1
+│   └── S/CP=1
+│       ├── M/TP=0: b0
+│       └── M/TP=1: b1
+└── B/DP=1
+    ├── S/CP=0
+    │   ├── M/TP=0: A0
+    │   └── M/TP=1: A1
+    └── S/CP=1
+        ├── M/TP=0: B0
+        └── M/TP=1: B1
 ```
 
 ### Attention outputs
@@ -100,17 +100,18 @@ With device mappings:
 
 So, expanding the table above and including device IDs:
 ```
-E=0
-├── B/DP=0
-│   ├── M=0: a'0  [Device 0, 2]
-│   └── M=1: a'1  [Device 1, 3]
-└── B/DP=1
-    ├── M=0: —    [Device 4, 6]
-    └── M=1: —    [Device 5, 7]
-E=1
-├── B/DP=0
-│   ├── M=0: a'0  [Device 0, 2]
-│   └── M=1: a'1  [Device 1, 3]
+├── E=0
+│   ├── B/DP=0
+│   │   ├── M=0: a'0  [Device 0, 2]
+│   │   └── M=1: a'1  [Device 1, 3]
+│   └── B/DP=1
+│       ├── M=0: —    [Device 4, 6]
+│       └── M=1: —    [Device 5, 7]
+├── E=1
+│   ├── B/DP=0
+│   │   ├── M=0: a'0  [Device 0, 2]
+│   │   └── M=1: a'1  [Device 1, 3]
+│   └── ...
 └── ...
 ```
 
@@ -125,16 +126,17 @@ Now we reshard to get to:
 
 So:
 ```
-E/EP=0
-├── B=0
-│   ├── M=0: a'0  [Device 0]
-│   └── M=1: a'1  [Device 0]
-└── B=1
-    ├── M=0: —    [Device 0]
-    └── M=1: —    [Device 0]
-E/EP=1
-├── B=0
-│   ├── M=0: a'0  [Device 1]
-│   └── M=1: a'1  [Device 1]
+├── E/EP=0
+│   ├── B=0
+│   │   ├── M=0: a'0  [Device 0]
+│   │   └── M=1: a'1  [Device 0]
+│   └── B=1
+│       ├── M=0: —    [Device 0]
+│       └── M=1: —    [Device 0]
+├── E/EP=1
+│   ├── B=0
+│   │   ├── M=0: a'0  [Device 1]
+│   │   └── M=1: a'1  [Device 1]
+│   └── ...
 └── ...
 ```
