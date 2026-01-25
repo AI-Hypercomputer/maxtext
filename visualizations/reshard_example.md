@@ -7,7 +7,16 @@ Assume we have a batch of two sequences of tokens:
 
 Where e.g. a is the value across the whole model dimension, such that if M=2, a = a0|a1
 
-We will decorate these values to indicate then transformations from attention (e.g. a') and MLP (e.g. a" and a^)
+We will decorate these values to indicate the transformations from attention (e.g. a') and MLP (e.g. a" and a^)
+
+## Meshes
+
+Both the attention mesh and MoE mesh use the same 8 physical devices, just with different logical axis mappings:
+- Attention mesh: `Mesh(devices, ('dp', 'cp', 'tp'))` — 2×2×2
+- MoE mesh: `Mesh(devices, ('ep',))` — 8
+
+We will highlight the mesh in use at a given time in the following format:
+<span style="color:yellow">▶ (Name) mesh [(Axes)] ◀</span>
 
 ## Indexing and sharding
 
@@ -20,12 +29,6 @@ B/DP means B[atch] sharded on DP.
 B=0/DP=0 means batch element 0 on DP shard 0.
 
 B/DP=0 is shorthand for the above.
-
-## Meshes
-
-Both the attention mesh and MoE mesh use the same 8 physical devices, just with different logical axis mappings:
-- Attention mesh: `Mesh(devices, ('dp', 'cp', 'tp'))` — 2×2×2
-- MoE mesh: `Mesh(devices, ('ep',))` — 8
 
 # Flow
 
@@ -144,7 +147,7 @@ Then b' will not go to E0 because of capacity factor:
 ### Dispatch
 
 ```
-[B=2/DP=2, S=2/CP=2, M=2/TP=2] @ [B=2/DP, S=2/CP, E=8, C=1] -> [E, B/DP=2, C=1, M/TP=2]
+[B/DP=2, S/CP=2, M/TP=2] @ [B/DP, S/CP, E=8, C=1] -> [E, B/DP=2, C=1, M/TP=2]
 ```
 
 Now we have:
@@ -171,7 +174,7 @@ Expanding with device IDs (see device mappings of attention mesh, above):
 └── ...
 ```
 
-<span style="color:yellow">▶ **MoE mesh [EP=8]** ◀</span>
+<span style="color:yellow">▶ MoE mesh [EP=8] ◀</span>
 
 Now we reshard to get to:
 
@@ -245,7 +248,7 @@ So:
 └── ...
 ```
 
-<span style="color:yellow">▶ **Attention mesh [DP=2, CP=2, TP=2]** ◀</span>
+<span style="color:yellow">▶ Attention mesh [DP=2, CP=2, TP=2] ◀</span>
 
 ### Combine
 
@@ -286,7 +289,7 @@ Expanding with device IDs we now have (see device mappings above):
 Now we execute the combine as follows:
 
 ```
-[E=8, B/DP=2, C=1, M/TP=2] @ [B/DP=2, S, E, C=1] -> [B/DP=2, S/CP=2, M/TP=2]
+[E=8, B/DP=2, C=1, M/TP=2] @ [B/DP=2, S=2, E=8, C=1] -> [B/DP=2, S/CP=2, M/TP=2]
 ```
 
 We add sharding on CP with another sharding constraint as follows:
