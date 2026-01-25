@@ -16,7 +16,9 @@
 """
 To run the test
   python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-  python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s
+  # python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s
+
+  python3 -m tests.unit.engram_vs_reference_test
 
 reference: https://github.com/deepseek-ai/Engram/blob/main/engram_demo_v1.py
 """
@@ -48,37 +50,49 @@ from tokenizers import normalizers, Regex
 
 from MaxText.layers.engram import Engram as Engram_Flax
 
+
+# -----------------------------------------------------------------------------
+# Config
+# -----------------------------------------------------------------------------
+
 @dataclass
 class EngramConfig:
-    tokenizer_name_or_path: str = "deepseek-ai/DeepSeek-V3"
-    engram_vocab_size: List[int] = field(default_factory=lambda: [129280*5, 129280*5])
-    max_ngram_size: int = 3
-    n_embed_per_ngram: int = 512
-    n_head_per_ngram: int = 8
-    layer_ids: List[int] = field(default_factory=lambda: [1, 15])
-    pad_id: int = 2
-    seed: int = 0
-    kernel_size: int = 4
-    
+  tokenizer_name_or_path: str = "deepseek-ai/DeepSeek-V3"
+  engram_vocab_size: List[int] = field(default_factory=lambda: [129280 * 5, 129280 * 5])
+  max_ngram_size: int = 3
+  n_embed_per_ngram: int = 512
+  n_head_per_ngram: int = 8
+  layer_ids: List[int] = field(default_factory=lambda: [1, 15])
+  pad_id: int = 2
+  seed: int = 0
+  kernel_size: int = 4
+
 @dataclass
 class BackBoneConfig:
-    hidden_size: int = 1024
-    hc_mult: int = 4
-    vocab_size: int = 129280
-    num_layers: int = 30
-    
+  hidden_size: int = 1024
+  hc_mult: int = 4
+  vocab_size: int = 129280
+  num_layers: int = 30
+
 engram_cfg = EngramConfig()
 backbone_config = BackBoneConfig()
 
+
+# -----------------------------------------------------------------------------
+# Reference Implementation
+# -----------------------------------------------------------------------------
+
 class CompressedTokenizer:
-    def __init__(
-        self,
-        tokenizer_name_or_path,
-    ):
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
-        
-        SENTINEL = "\uE000"
-        self.normalizer = normalizers.Sequence([
+
+  def __init__(
+      self,
+      tokenizer_name_or_path,
+  ):
+    self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
+
+    SENTINEL = "\uE000"
+    self.normalizer = normalizers.Sequence(
+        [
             normalizers.NFKC(),
             normalizers.NFD(),
             normalizers.StripAccents(),
@@ -87,110 +101,111 @@ class CompressedTokenizer:
             normalizers.Replace(Regex(r"^ $"), SENTINEL),
             normalizers.Strip(),
             normalizers.Replace(SENTINEL, " "),
-        ])
-        
-        self.lookup_table, self.num_new_token = self._build_lookup_table()
-    
-    def __len__(self):
-        return self.num_new_token
-    
-    def _build_lookup_table(self):
-        old2new = {}
-        key2new = {}          
-        new_tokens = []
+        ]
+    )
 
-        vocab_size = len(self.tokenizer)
-        for tid in range(vocab_size):
-            text = self.tokenizer.decode([tid], skip_special_tokens=False)
-            
-            if "�" in text:
-                key = self.tokenizer.convert_ids_to_tokens(tid)
-            else:
-                norm = self.normalizer.normalize_str(text)
-                key = norm if norm else text
+    self.lookup_table, self.num_new_token = self._build_lookup_table()
 
-            nid = key2new.get(key)
-            if nid is None:
-                nid = len(new_tokens)
-                key2new[key] = nid
-                new_tokens.append(key)
-            old2new[tid] = nid
-        
-        lookup = np.empty(vocab_size, dtype=np.int64)
-        for tid in range(vocab_size):
-            lookup[tid] = old2new[tid]
+  def __len__(self):
+    return self.num_new_token
 
-        return lookup, len(new_tokens)
-    
-    def _compress(self, input_ids):
-        arr = np.asarray(input_ids, dtype=np.int64)
-        pos_mask = arr >= 0
-        out = arr.copy()
-        valid_ids = arr[pos_mask]
-        out[pos_mask] = self.lookup_table[valid_ids]
-        return out   
-    
-    def __call__(self, input_ids):
-        return self._compress(input_ids)
-            
+  def _build_lookup_table(self):
+    old2new = {}
+    key2new = {}
+    new_tokens = []
+
+    vocab_size = len(self.tokenizer)
+    for tid in range(vocab_size):
+      text = self.tokenizer.decode([tid], skip_special_tokens=False)
+
+      if "�" in text:
+        key = self.tokenizer.convert_ids_to_tokens(tid)
+      else:
+        norm = self.normalizer.normalize_str(text)
+        key = norm if norm else text
+
+      nid = key2new.get(key)
+      if nid is None:
+        nid = len(new_tokens)
+        key2new[key] = nid
+        new_tokens.append(key)
+      old2new[tid] = nid
+
+    lookup = np.empty(vocab_size, dtype=np.int64)
+    for tid in range(vocab_size):
+      lookup[tid] = old2new[tid]
+
+    return lookup, len(new_tokens)
+
+  def _compress(self, input_ids):
+    arr = np.asarray(input_ids, dtype=np.int64)
+    pos_mask = arr >= 0
+    out = arr.copy()
+    valid_ids = arr[pos_mask]
+    out[pos_mask] = self.lookup_table[valid_ids]
+    return out
+
+  def __call__(self, input_ids):
+    return self._compress(input_ids)
+
+
 class ShortConv(nn.Module):
-    def __init__(
-        self, 
-        hidden_size: int, 
-        kernel_size: int = 4, 
-        dilation: int = 1, 
-        norm_eps: float = 1e-5,
-        hc_mult: int = 4,
-        activation: bool = True,
-    ):
-        super().__init__()
-        self.hc_mult = hc_mult
-        self.activation = activation
-        
-        total_channels = hidden_size * hc_mult
-        self.conv = nn.Conv1d(
-            in_channels=total_channels,
-            out_channels=total_channels,
-            kernel_size=kernel_size,
-            groups=total_channels,
-            bias=False,
-            padding=(kernel_size - 1) * dilation,
-            dilation=dilation,
-        )
 
-        self.norms = nn.ModuleList([
-            nn.RMSNorm(hidden_size, eps=norm_eps) 
-            for _ in range(hc_mult)
-        ])
-        
-        if self.activation:
-            self.act_fn = nn.SiLU()
+  def __init__(
+      self,
+      hidden_size: int,
+      kernel_size: int = 4,
+      dilation: int = 1,
+      norm_eps: float = 1e-5,
+      hc_mult: int = 4,
+      activation: bool = True,
+  ):
+    super().__init__()
+    self.hc_mult = hc_mult
+    self.activation = activation
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Input:  (B,L,HC_MULT,D)
-        Output: (B,L,HC_MULT,D)
-        """
-        B, T, G, C = x.shape
-        
-        assert G == self.hc_mult, f"Input groups {G} != hc_mult {self.hc_mult}"
+    total_channels = hidden_size * hc_mult
+    self.conv = nn.Conv1d(
+        in_channels=total_channels,
+        out_channels=total_channels,
+        kernel_size=kernel_size,
+        groups=total_channels,
+        bias=False,
+        padding=(kernel_size - 1) * dilation,
+        dilation=dilation,
+    )
 
-        normed_chunks = []
-        for i in range(G):
-            chunk = x[:, :, i, :]
-            normed_chunks.append(self.norms[i](chunk))
-        
-        x_norm = torch.cat(normed_chunks, dim=-1)
-        x_bct = x_norm.transpose(1, 2)
-        y_bct = self.conv(x_bct)
-        y_bct = y_bct[..., :T]
+    self.norms = nn.ModuleList([nn.RMSNorm(hidden_size, eps=norm_eps) for _ in range(hc_mult)])
 
-        if self.activation:
-            y_bct = self.act_fn(y_bct)
-        y = y_bct.transpose(1, 2).view(B, T, G, C).contiguous()
-        
-        return y
-    
+    if self.activation:
+      self.act_fn = nn.SiLU()
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    """
+    Input:  (B,L,HC_MULT,D)
+    Output: (B,L,HC_MULT,D)
+    """
+    B, T, G, C = x.shape
+
+    assert G == self.hc_mult, f"Input groups {G} != hc_mult {self.hc_mult}"
+
+    normed_chunks = []
+    for i in range(G):
+      chunk = x[:, :, i, :]
+      normed_chunks.append(self.norms[i](chunk))
+
+    x_norm = torch.cat(normed_chunks, dim=-1)
+    x_bct = x_norm.transpose(1, 2)
+    y_bct = self.conv(x_bct)
+    y_bct = y_bct[..., :T]
+
+    if self.activation:
+      y_bct = self.act_fn(y_bct)
+    y = y_bct.transpose(1, 2).view(B, T, G, C).contiguous()
+
+    return y
+
+
 def find_next_prime(start, seen_primes):
     candidate = start + 1
     while True:
@@ -316,26 +331,28 @@ class NgramHashMapping:
         return hash_ids_for_all_layers
 
 class MultiHeadEmbedding(nn.Module):
-    def __init__(self, list_of_N: List[int], D: int):
-        super().__init__()
-        self.num_heads = len(list_of_N)
-        self.embedding_dim = D
-        
-        offsets = [0]
-        for n in list_of_N[:-1]:
-            offsets.append(offsets[-1] + n)
-        
-        self.register_buffer("offsets", torch.tensor(offsets, dtype=torch.long))
-        
-        total_N = sum(list_of_N)
-        self.embedding = nn.Embedding(num_embeddings=total_N, embedding_dim=D)
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        shifted_input_ids = input_ids + self.offsets
-        output = self.embedding(shifted_input_ids)
-        
-        return output
-    
+  def __init__(self, list_of_N: List[int], D: int):
+    super().__init__()
+    self.num_heads = len(list_of_N)
+    self.embedding_dim = D
+
+    offsets = [0]
+    for n in list_of_N[:-1]:
+      offsets.append(offsets[-1] + n)
+
+    self.register_buffer("offsets", torch.tensor(offsets, dtype=torch.long))
+
+    total_N = sum(list_of_N)
+    self.embedding = nn.Embedding(num_embeddings=total_N, embedding_dim=D)
+
+  def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    shifted_input_ids = input_ids + self.offsets
+    output = self.embedding(shifted_input_ids)
+
+    return output
+
+
 class Engram(nn.Module):
     def __init__(self, layer_id):
         super().__init__()
@@ -391,98 +408,99 @@ class Engram(nn.Module):
         return output 
 
 class TransformerBlock(nn.Module):
-    def __init__(self,layer_id):
-        super().__init__()
-        self.attn = lambda x:x
-        self.moe  = lambda x:x
-        self.engram = None
-        if layer_id in engram_cfg.layer_ids:
-            self.engram = Engram(layer_id=layer_id)
-    
-    def forward(self,input_ids,hidden_states):
-        if self.engram is not None:
-            hidden_states = self.engram(hidden_states=hidden_states,input_ids=input_ids) + hidden_states
-        hidden_states = self.attn(hidden_states) + hidden_states
-        hidden_states = self.moe(hidden_states) + hidden_states
-        return hidden_states
+
+  def __init__(self, layer_id):
+    super().__init__()
+    self.attn = lambda x: x
+    self.moe = lambda x: x
+    self.engram = None
+    if layer_id in engram_cfg.layer_ids:
+      self.engram = Engram(layer_id=layer_id)
+
+  def forward(self, input_ids, hidden_states):
+    if self.engram is not None:
+      hidden_states = self.engram(hidden_states=hidden_states, input_ids=input_ids) + hidden_states
+    hidden_states = self.attn(hidden_states) + hidden_states
+    hidden_states = self.moe(hidden_states) + hidden_states
+    return hidden_states
 
 
-"""
-test
-"""
-
+# -----------------------------------------------------------------------------
+# Test JAX Module
+# -----------------------------------------------------------------------------
 
 
 def test_engram_equivalence():
-    # 1. Setup Configs
-    e_cfg = EngramConfig(layer_ids=[1])
-    b_cfg = BackBoneConfig()
-    
-    # Use a real tokenizer to ensure CompressedTokenizer works
-    tokenizer = AutoTokenizer.from_pretrained(e_cfg.tokenizer_name_or_path)
-    
-    # 2. Test Data
-    text = "The quick brown fox jumps over the lazy dog."
-    input_ids_pt = tokenizer(text, return_tensors="pt").input_ids
-    input_ids_np = input_ids_pt.numpy()
-    
-    B, L = input_ids_pt.shape
-    G = b_cfg.hc_mult
-    D = b_cfg.hidden_size
-    
-    # Mock hidden states: (Batch, Length, Groups, Dimension)
-    hidden_pt = torch.randn(B, L, G, D)
-    hidden_jax = jnp.array(hidden_pt.numpy())
+  # 1. Setup Configs
+  e_cfg = EngramConfig(layer_ids=[1])
+  b_cfg = BackBoneConfig()
 
-    print(f"Testing with Shape: {B=}, {L=}, {G=}, {D=}")
+  # Use a real tokenizer to ensure CompressedTokenizer works
+  tokenizer = AutoTokenizer.from_pretrained(e_cfg.tokenizer_name_or_path)
 
-    # 3. Test Hashing Logic (Crucial for Engram)
-    # Both implementations use the CPU/NumPy version of NgramHashMapping
-    hash_mapper = NgramHashMapping(
-        engram_vocab_size=e_cfg.engram_vocab_size,
-        max_ngram_size=e_cfg.max_ngram_size,
-        n_embed_per_ngram=e_cfg.n_embed_per_ngram,
-        n_head_per_ngram=e_cfg.n_head_per_ngram,
-        layer_ids=e_cfg.layer_ids,
-        tokenizer=tokenizer,
-        pad_id=e_cfg.pad_id,
-        seed=e_cfg.seed,
-    )
-    
-    hashes = hash_mapper.hash(input_ids_np)
-    layer_1_hash = hashes[1]
-    
-    assert layer_1_hash.shape == (B, L, (e_cfg.max_ngram_size - 1) * e_cfg.n_head_per_ngram)
-    print("✅ Hashing Logic: Shape match.")
+  # 2. Test Data
+  text = "The quick brown fox jumps over the lazy dog."
+  input_ids_pt = tokenizer(text, return_tensors="pt").input_ids
+  input_ids_np = input_ids_pt.numpy()
 
-    # 4. Initialize Models
-    # PyTorch
-    torch.manual_seed(42)
-    engram_pt = Engram(layer_id=1)
-    
-    # Flax NNX
-    rngs = nnx.Rngs(params=42, default=42)
-    engram_jax = Engram_Flax(layer_id=1, config=e_cfg, backbone_cfg=b_cfg, rngs=rngs)
+  B, L = input_ids_pt.shape
+  G = b_cfg.hc_mult
+  D = b_cfg.hidden_size
 
-    # 5. Forward Passes
-    with torch.no_grad():
-        out_pt = engram_pt(hidden_pt, input_ids_pt)
-        
-    out_jax = engram_jax(hidden_jax, jnp.array(layer_1_hash))
+  # Mock hidden states: (Batch, Length, Groups, Dimension)
+  hidden_pt = torch.randn(B, L, G, D)
+  hidden_jax = jnp.array(hidden_pt.numpy())
 
-    # 6. Verification
-    print(f"PyTorch Output Shape: {out_pt.shape}")
-    print(f"JAX Output Shape:     {out_jax.shape}")
+  print(f"Testing with Shape: {B=}, {L=}, {G=}, {D=}")
 
-    assert out_pt.shape == (B, L, G, D), "PT Shape Mismatch"
-    assert out_jax.shape == (B, L, G, D), "JAX Shape Mismatch"
-    
-    # Note: Values won't be identical because weights were initialized randomly 
-    # and separately, but we check if they are finite.
-    assert torch.isfinite(out_pt).all(), "PT contains NaNs/Infs"
-    assert jnp.all(jnp.isfinite(out_jax)), "JAX contains NaNs/Infs"
+  # 3. Test Hashing Logic (Crucial for Engram)
+  # Both implementations use the CPU/NumPy version of NgramHashMapping
+  hash_mapper = NgramHashMapping(
+      engram_vocab_size=e_cfg.engram_vocab_size,
+      max_ngram_size=e_cfg.max_ngram_size,
+      n_embed_per_ngram=e_cfg.n_embed_per_ngram,
+      n_head_per_ngram=e_cfg.n_head_per_ngram,
+      layer_ids=e_cfg.layer_ids,
+      tokenizer_name_or_path=e_cfg.tokenizer_name_or_path,
+      pad_id=e_cfg.pad_id,
+      seed=e_cfg.seed,
+  )
 
-    print("✅ Forward Pass: Complete and finite.")
+  hashes = hash_mapper.hash(input_ids_np)
+  layer_1_hash = hashes[1]
+
+  assert layer_1_hash.shape == (B, L, (e_cfg.max_ngram_size - 1) * e_cfg.n_head_per_ngram)
+  print("✅ Hashing Logic: Shape match.")
+
+  # 4. Initialize Models
+  # PyTorch
+  torch.manual_seed(42)
+  engram_pt = Engram(layer_id=1)
+
+  # Flax NNX
+  rngs = nnx.Rngs(params=42, default=42)
+  engram_jax = Engram_Flax(layer_id=1, config=e_cfg, backbone_cfg=b_cfg, rngs=rngs)
+
+  # 5. torch Forward Passes
+  with torch.no_grad():
+    out_pt = engram_pt(hidden_pt, input_ids_pt)
+
+  # jax forward pass
+  out_jax = engram_jax(hidden_jax, jnp.array(layer_1_hash))
+
+  # 6. Verification
+  print(f"PyTorch Output Shape: {out_pt.shape}")
+  print(f"JAX Output Shape:     {out_jax.shape}")
+
+  assert out_pt.shape == (B, L, G, D), "PT Shape Mismatch"
+  assert out_jax.shape == (B, L, G, D), "JAX Shape Mismatch"
+
+  # Note: Values won't be identical because weights were initialized randomly
+  # and separately, but we check if they are finite.
+  assert torch.isfinite(out_pt).all(), "PT contains NaNs/Infs"
+  assert jnp.all(jnp.isfinite(out_jax)), "JAX contains NaNs/Infs"
+
+  print("✅ Forward Pass: Complete and finite.")
 
 if __name__ == "__main__":
     test_engram_equivalence()
