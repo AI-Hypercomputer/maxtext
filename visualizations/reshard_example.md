@@ -21,13 +21,19 @@ B=0/DP=0 means batch element 0 on DP shard 0.
 
 B/DP=0 is shorthand for the above.
 
+## Meshes
+
+Both the attention mesh and MoE mesh use the same 8 physical devices, just with different logical axis mappings:
+- Attention mesh: `Mesh(devices, ('dp', 'cp', 'tp'))` — 2×2×2
+- MoE mesh: `Mesh(devices, ('ep',))` — 8
+
 # Flow
 
 ## Inputs
 
 <span style="color:yellow">▶ Attention mesh [DP=2, CP=2, TP=2] ◀</span>
 
-Token embeddings enter the model as `[B/DP=2, S/CP=2, M/TP=2]`.
+Token embeddings enter the model as `[B/DP=2, S/CP=2, M/TP=2]`. One way to achieve such sharding / device placement is as follows:
 
 ```python
 attention_mesh = Mesh(devices, axis_names=('dp', 'cp', 'tp'))
@@ -320,3 +326,7 @@ After combine, we have `[B/DP=2, S/CP=2, M/TP=2]`, ready for the next attention 
         ├── M/TP=0: B^0  [Device 6]
         └── M/TP=1: B^1  [Device 7]
 ```
+
+## Next layer
+
+The output `[B/DP=2, S/CP=2, M/TP=2]` with values a^, b^, A^, B^ is now the input to the next attention layer, and the cycle repeats.
