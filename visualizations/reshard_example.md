@@ -13,15 +13,21 @@ B/DP means B[atch] sharded on DP. B/DP=0 is shorthand for batch element 0 on DP 
 
 We will, for convenience, in general make array dimensions the same length as the sharding (e.g. 2 sequences often sharded on DP=2, 8 experts, often sharded on EP=8)
 
-# Attention
+# Flow
 
-## MoE mesh
+## Inputs
 
-TODO: capture the transition from the MoE mesh
+<span style="color:yellow">▶▶▶▶ **Attention mesh [DP=2, CP=2, TP=2]** ◀◀◀◀</span>
 
-## Attention mesh [DP=2, CP=2, TP=2]
+Token embeddings enter the model as `[B=2/DP, S=2/CP, M=2/TP]`.
+
+## Attention
+
+<span style="color:yellow">▶▶▶▶ **Attention mesh [DP=2, CP=2, TP=2]** ◀◀◀◀</span>
 
 ### Attention inputs
+
+Receives `[B=2/DP, S=2/CP, M=2/TP]` from inputs (first layer) or MoE combine (subsequent layers).
 
 ```
 [B=2/DP=2, S=2/CP=2, M=2/TP=2]
@@ -48,11 +54,13 @@ We apply attention such that
 - a0->a'0
 - B1->B'1
 
-# MoE
+## MoE
 Total experts=8, TopK=2, C=1, EP=8
 (i.e. each expert is on its own shard)
 
-## Attention mesh
+<span style="color:yellow">▶▶▶▶ **Attention mesh** ◀◀◀◀</span>
+
+### Expert selection
 
 Assume tokens routed as follows:
 
@@ -115,7 +123,7 @@ So, expanding the table above and including device IDs:
 └── ...
 ```
 
-## MoE mesh [EP=8]
+<span style="color:yellow">▶▶▶▶ **MoE mesh [EP=8]** ◀◀◀◀</span>
 
 Now we reshard to get to:
 
@@ -140,3 +148,52 @@ So:
 │   └── ...
 └── ...
 ```
+
+### Expert processing
+
+Each expert processes its assigned tokens. Using a", b", A", B" to denote post-expert values:
+
+| | E/EP=0 | E/EP=1 | E/EP=2 | E/EP=3 | E/EP=4 | E/EP=5 | E/EP=6 | E/EP=7 |
+|---|---|---|---|---|---|---|---|---|
+| B=0 | a"0\|a"1 | a"0\|a"1 | b"0\|b"1 | — | — | — | — | — |
+| B=1 | — | — | A"0\|A"1 | A"0\|A"1 | B"0\|B"1 | B"0\|B"1 | — | — |
+
+So:
+```
+├── E/EP=0
+│   ├── B=0
+│   │   ├── M=0: a"0  [Device 0]
+│   │   └── M=1: a"1  [Device 0]
+│   └── B=1
+│       ├── M=0: —     [Device 0]
+│       └── M=1: —     [Device 0]
+├── E/EP=1
+│   ├── B=0
+│   │   ├── M=0: a"0  [Device 1]
+│   │   └── M=1: a"1  [Device 1]
+│   └── ...
+└── ...
+```
+
+<span style="color:yellow">▶▶▶▶ **Attention mesh [DP=2, CP=2, TP=2]** ◀◀◀◀</span>
+
+Now we reshard to get to `[E, B/DP, C, M/TP]`:
+
+| | E0 | E1 | E2 | E3 | E4 | E5 | E6 | E7 |
+|---|---|---|---|---|---|---|---|---|
+| B/DP=0 | a"0\|a"1 | a"0\|a"1 | b"0\|b"1 | — | — | — | — | — |
+| B/DP=1 | — | — | A"0\|A"1 | A"0\|A"1 | B"0\|B"1 | B"0\|B"1 | — | — |
+
+### Combine
+
+```
+[E, B/DP, C=1, M/TP] @ [B/DP, S, E, C=1] -> [B/DP, S, M/TP]
+```
+
+The combine mask contains routing weights (softmax of gate logits for selected experts). For token a routed to E0 and E1 with weights w0=0.6 and w1=0.4:
+
+```
+output_a = 0.6 · a"(from E0) + 0.4 · a"(from E1)
+```
+
+After combine, we have `[B=2/DP, S=2/CP, M=2/TP]`, ready for the next attention layer.
