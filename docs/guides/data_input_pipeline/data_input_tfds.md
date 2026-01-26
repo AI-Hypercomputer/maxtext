@@ -16,5 +16,5 @@ eval_interval: 10000
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
 # TFDS input pipeline only supports tokenizer in spm format
-tokenizer_path: 'src/MaxText/assets/tokenizer.llama2'
+tokenizer_path: 'src/maxtext/assets/tokenizers/tokenizer.llama2'
 ```

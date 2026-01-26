@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for tokenizer
-"""
+"""Tests for tokenizer"""
 
 import numpy as np
 from MaxText import train_tokenizer
@@ -40,7 +39,10 @@ class TokenizerTest(unittest.TestCase):
     vocab_model_name = "test_tokenizer"
     cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"), "sentencepiece", add_bos=False, add_eos=False
+        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
+        "sentencepiece",
+        add_bos=False,
+        add_eos=False,
     )
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
@@ -81,7 +83,7 @@ class TikTokenTest(unittest.TestCase):
     dataset_name = "c4/en:3.0.1"
     dataset_path = "gs://maxtext-dataset"
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
+        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer_llama3.tiktoken"),
         "tiktoken",
         add_bos=False,
         add_eos=False,
@@ -112,16 +114,16 @@ class HFTokenizerTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     source = "gs://maxtext-gemma/huggingface/gemma2-2b"
-    destination = os.path.join(MAXTEXT_ASSETS_ROOT, "")
+    destination = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers")
     subprocess.run(
         ["gcloud", "storage", "cp", "-R", source, destination],
         check=True,
     )
     cls.hf_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(MAXTEXT_ASSETS_ROOT, "gemma2-2b"), "huggingface", add_bos=False, add_eos=False
+        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "gemma2-2b"), "huggingface", add_bos=False, add_eos=False
     )
     cls.sp_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
+        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
     )
 
   @pytest.mark.tpu_only

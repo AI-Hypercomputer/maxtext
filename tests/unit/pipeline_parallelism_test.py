@@ -303,7 +303,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "ici_pipeline_parallelism=4",
             "num_layers_per_pipeline_stage=2",
             "num_pipeline_microbatches=8",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
@@ -353,7 +353,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "ici_pipeline_parallelism=4",
             "num_layers_per_pipeline_stage=8",
             "num_pipeline_microbatches=8",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
@@ -387,7 +387,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_pipeline_repeats=2",
             "pipeline_parallel_layers=8",
             "num_pipeline_microbatches=8",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
@@ -417,7 +417,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "enable_checkpointing=False",
             "enable_goodput_recording=False",
             "ici_pipeline_parallelism=4",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "quantization=fp8",
             "scan_layers_per_stage=False",
             "attention=dot_product",
@@ -449,7 +449,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "enable_checkpointing=False",
             "enable_goodput_recording=False",
             "ici_pipeline_parallelism=4",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "quantization=nanoo_fp8",
             "scan_layers_per_stage=False",
             "attention=dot_product",
