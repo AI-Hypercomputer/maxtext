@@ -1246,21 +1246,18 @@ def print_shardings_params(params, params_sharding, mesh, logical_annotations=No
     params = {"params": params}
   if not hasattr(params_sharding, "params"):
     params_sharding = {"params": params_sharding}
+  if logical_annotations and not hasattr(logical_annotations, "params"):
+    logical_annotations = {"params": logical_annotations}
 
   leaves_params, _ = jax.tree_util.tree_flatten_with_path(params)
   leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(params_sharding)
+  leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations.params)
 
-  leaves_logical = []
-  has_logical = False
-  if logical_annotations and hasattr(logical_annotations, "params"):
-    try:
-      leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations.params)
-      if len(leaves_params) == len(leaves_logical):
-        has_logical = True
-      else:
-        max_logging.warning("Warning: Logical annotations tree structure mismatch. Skipping logical info.")
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      max_logging.warning(f"Warning: Failed to process logical annotations: {e}. Skipping logical info.")
+  for i, ((path, leaf_val), (_, leaf_sharding)) in enumerate(zip(leaves_params, leaves_sharding)):
+    path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
+    shape = jax.typeof(leaf_val)
+    pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
+    pspec_str = str(tuple(pspec))
 
   if not has_logical:
     leaves_logical = [(None, None)] * len(leaves_params)

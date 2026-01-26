@@ -160,8 +160,8 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
       maxtext_utils.print_shardings_params(
           params=sharded_state,
           params_sharding=out_shardings,
-          logical_annotations=specs,
           mesh=model.mesh,
+          logical_annotations=specs,
       )
     if config.load_parameters_path:
       try:
