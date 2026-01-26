@@ -14,12 +14,17 @@
 
 
 """
-To run the test
-  # pip install torch numpy transformers sympy
-  python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-  python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s
+Tests for Engram: MultiHeadEmbedding, ShortConv, Engram
 
 reference: https://github.com/deepseek-ai/Engram/blob/fb7f84a21f91223715394a33a1dc24bbfb7f788e/engram_demo_v1.py
+s
+To run the test
+  pip install torch numpy transformers sympy
+  python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+  python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s
+  python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "MultiHeadEmbeddingTest"
+  python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "ShortConvTest"
+  python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "EngramTest"
 """
 
 
@@ -41,52 +46,73 @@ from torch import nn
 from flax import nnx
 import jax
 import jax.numpy as jnp
-
-from MaxText.layers.engram import Engram as EngramJAX
-from MaxText.layers.engram import ShortConv as ShortConvJAX
-from MaxText.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX
+from jax.sharding import Mesh
 
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
 from MaxText import maxtext_utils
-from jax.sharding import Mesh
+from MaxText.layers.engram import Engram as EngramJAX
+from MaxText.layers.engram import ShortConv as ShortConvJAX
+from MaxText.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX
 
 
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
 
-V = 129280
-# V = 1000
-hc_mult = 1
-max_ngram_size = 2  # >= 2
 
 @dataclass
+class Config:
+  """MaxText config"""
+
+  base_emb_dim: int = 1024
+  tokenizer_path: str = "deepseek-ai/DeepSeek-V3"
+  # mhc: new
+  hc_mult: int = 2
+  # engram: new
+  engram_max_ngram_size: int = 3  # max_ngram_size, use 2...N
+  # independent hash table sizes for each n-gram order (e.g., bigrams, trigrams, 4-grams, etc.)
+  # n-th gram uses vocab size engram_vocab_size[n-2]
+  engram_vocab_size: List[int] = field(default_factory=lambda: [129280 * 5, 129280 * 5])
+  engram_layer_ids: List[int] = field(default_factory=lambda: [1, 15])
+  engram_kernel_size: int = 4  # kernel_size
+  engram_embed_dim_per_ngram: int = 512  # n_embed_per_ngram
+  engram_heads_per_ngram: int = 8  # n_head_per_ngram
+  # hashing: new
+  engram_pad_id: int = 2  # not the same as tokenizer.pad_id
+  engram_seed: int = 0
+
+
 class EngramConfig:
-  tokenizer_name_or_path: str = "deepseek-ai/DeepSeek-V3"
-  engram_vocab_size: List[int] = field(default_factory=lambda: [V * 5, V * 5])
-  max_ngram_size: int = max_ngram_size
-  n_embed_per_ngram: int = 512
-  n_head_per_ngram: int = 8
-  layer_ids: List[int] = field(default_factory=lambda: [1, 15])
-  pad_id: int = 2
-  seed: int = 0
-  kernel_size: int = 4
+  """Torch Engram Config"""
 
-@dataclass
+  def __init__(self, config):
+    self.tokenizer_name_or_path = config.tokenizer_path
+    self.engram_vocab_size = config.engram_vocab_size
+    self.max_ngram_size = config.engram_max_ngram_size
+    self.n_embed_per_ngram = config.engram_embed_dim_per_ngram
+    self.n_head_per_ngram = config.engram_heads_per_ngram
+    self.layer_ids = config.engram_layer_ids
+    self.pad_id = config.engram_pad_id
+    self.seed = config.engram_seed
+    self.kernel_size = config.engram_kernel_size
+
+
 class BackBoneConfig:
-  hidden_size: int = 1024
-  hc_mult: int = hc_mult
-  vocab_size: int = V
-  num_layers: int = 30
+  """Torch Backbone Config"""
 
-engram_cfg = EngramConfig()
-backbone_config = BackBoneConfig()
+  def __init__(self, config):
+
+    self.hidden_size = config.base_emb_dim
+    self.hc_mult = config.hc_mult
+    # self.vocab_size = config.vocab_size
 
 
 # -----------------------------------------------------------------------------
 # Torch Reference Implementation
+# https://github.com/deepseek-ai/Engram/blob/fb7f84a21f91223715394a33a1dc24bbfb7f788e/engram_demo_v1.py
 # -----------------------------------------------------------------------------
+
 
 class CompressedTokenizer:
 
@@ -213,128 +239,121 @@ class ShortConv(nn.Module):
 
 
 def find_next_prime(start, seen_primes):
-    candidate = start + 1
-    while True:
-        if isprime(candidate) and candidate not in seen_primes:
-            return candidate
-        candidate += 1
+  candidate = start + 1
+  while True:
+    if isprime(candidate) and candidate not in seen_primes:
+      return candidate
+    candidate += 1
+
 
 class NgramHashMapping:
-    def __init__(
-        self, 
-        engram_vocab_size,
-        max_ngram_size,
-        n_embed_per_ngram,
-        n_head_per_ngram,
-        layer_ids,
-        tokenizer_name_or_path,
-        pad_id,
-        seed,  
-    ):
-        self.vocab_size_per_ngram = engram_vocab_size
-        self.max_ngram_size = max_ngram_size
-        self.n_embed_per_ngram = n_embed_per_ngram
-        self.n_head_per_ngram = n_head_per_ngram
-        self.pad_id = pad_id
-        self.layer_ids = layer_ids
 
-        self.compressed_tokenizer = CompressedTokenizer(
-            tokenizer_name_or_path=tokenizer_name_or_path
-        )            
-        self.tokenizer_vocab_size = len(self.compressed_tokenizer)
-        if self.pad_id is not None:
-            self.pad_id = int(self.compressed_tokenizer.lookup_table[self.pad_id])
+  def __init__(
+      self,
+      engram_vocab_size,
+      max_ngram_size,
+      n_embed_per_ngram,
+      n_head_per_ngram,
+      layer_ids,
+      tokenizer_name_or_path,
+      pad_id,
+      seed,
+  ):
+    self.vocab_size_per_ngram = engram_vocab_size
+    self.max_ngram_size = max_ngram_size
+    self.n_embed_per_ngram = n_embed_per_ngram
+    self.n_head_per_ngram = n_head_per_ngram
+    self.pad_id = pad_id
+    self.layer_ids = layer_ids
 
-        max_long = np.iinfo(np.int64).max
-        M_max = int(max_long // self.tokenizer_vocab_size)
-        half_bound = max(1, M_max // 2)
-        PRIME_1 = 10007
-        
-        self.layer_multipliers = {}
+    self.compressed_tokenizer = CompressedTokenizer(tokenizer_name_or_path=tokenizer_name_or_path)
+    self.tokenizer_vocab_size = len(self.compressed_tokenizer)
+    if self.pad_id is not None:
+      self.pad_id = int(self.compressed_tokenizer.lookup_table[self.pad_id])
 
-        for layer_id in self.layer_ids:
-            base_seed = int(seed + PRIME_1 * int(layer_id))
-            g = np.random.default_rng(base_seed)
-            r = g.integers(
-                low=0,
-                high=half_bound,
-                size=(self.max_ngram_size,),
-                dtype=np.int64
-            )
-            multipliers = r * 2 + 1
-            self.layer_multipliers[layer_id] = multipliers
+    max_long = np.iinfo(np.int64).max
+    M_max = int(max_long // self.tokenizer_vocab_size)
+    half_bound = max(1, M_max // 2)
+    PRIME_1 = 10007
 
-        self.vocab_size_across_layers = self.calculate_vocab_size_across_layers()
+    self.layer_multipliers = {}
 
-    def calculate_vocab_size_across_layers(self):
-        seen_primes = set()
-        vocab_size_across_layers = {}
-        
-        for layer_id in self.layer_ids:
-            all_ngram_vocab_sizes = []
-            for ngram in range(2, self.max_ngram_size + 1):
-                current_ngram_heads_sizes = []
-                
-                vocab_size = self.vocab_size_per_ngram[ngram - 2]
-                num_head = self.n_head_per_ngram
-                current_prime_search_start = vocab_size - 1
-                
-                for _ in range(num_head):
-                    found_prime = find_next_prime(
-                        current_prime_search_start, 
-                        seen_primes
-                    )
-                    seen_primes.add(found_prime)
-                    current_ngram_heads_sizes.append(found_prime)
-                    current_prime_search_start = found_prime
-                
-                all_ngram_vocab_sizes.append(current_ngram_heads_sizes)
-            vocab_size_across_layers[layer_id] = all_ngram_vocab_sizes
-            
-        return vocab_size_across_layers
+    for layer_id in self.layer_ids:
+      base_seed = int(seed + PRIME_1 * int(layer_id))
+      g = np.random.default_rng(base_seed)
+      r = g.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
+      multipliers = r * 2 + 1
+      self.layer_multipliers[layer_id] = multipliers
 
-    def _get_ngram_hashes(
-        self,
-        input_ids: np.ndarray,
-        layer_id: int,
-    ) -> np.ndarray:
-        x = np.asarray(input_ids, dtype=np.int64)
-        B, T = x.shape
+    self.vocab_size_across_layers = self.calculate_vocab_size_across_layers()
 
-        multipliers = self.layer_multipliers[layer_id]
+  def calculate_vocab_size_across_layers(self):
+    seen_primes = set()
+    vocab_size_across_layers = {}
 
-        def shift_k(k: int) -> np.ndarray:
-            if k == 0: return x
-            shifted = np.pad(x, ((0, 0), (k, 0)),
-                                mode='constant', constant_values=self.pad_id)[:, :T]
-            return shifted
+    for layer_id in self.layer_ids:
+      all_ngram_vocab_sizes = []
+      for ngram in range(2, self.max_ngram_size + 1):
+        current_ngram_heads_sizes = []
 
-        base_shifts = [shift_k(k) for k in range(self.max_ngram_size)]
+        vocab_size = self.vocab_size_per_ngram[ngram - 2]
+        num_head = self.n_head_per_ngram
+        current_prime_search_start = vocab_size - 1
 
-        all_hashes = []
-        
-        for n in range(2, self.max_ngram_size + 1):
-            n_gram_index = n - 2
-            tokens = base_shifts[:n]
-            mix = (tokens[0] * multipliers[0])
-            for k in range(1, n):
-                mix = np.bitwise_xor(mix, tokens[k] * multipliers[k])
-            num_heads_for_this_ngram = self.n_head_per_ngram
-            head_vocab_sizes = self.vocab_size_across_layers[layer_id][n_gram_index]
-            
-            for j in range(num_heads_for_this_ngram):
-                mod = int(head_vocab_sizes[j])
-                head_hash = mix % mod
-                all_hashes.append(head_hash.astype(np.int64, copy=False))
-        
-        return np.stack(all_hashes, axis=2)
+        for _ in range(num_head):
+          found_prime = find_next_prime(current_prime_search_start, seen_primes)
+          seen_primes.add(found_prime)
+          current_ngram_heads_sizes.append(found_prime)
+          current_prime_search_start = found_prime
 
-    def hash(self, input_ids):
-        input_ids = self.compressed_tokenizer(input_ids)
-        hash_ids_for_all_layers = {}
-        for layer_id in self.layer_ids:
-            hash_ids_for_all_layers[layer_id] = self._get_ngram_hashes(input_ids, layer_id=layer_id)
-        return hash_ids_for_all_layers
+        all_ngram_vocab_sizes.append(current_ngram_heads_sizes)
+      vocab_size_across_layers[layer_id] = all_ngram_vocab_sizes
+
+    return vocab_size_across_layers
+
+  def _get_ngram_hashes(
+      self,
+      input_ids: np.ndarray,
+      layer_id: int,
+  ) -> np.ndarray:
+    x = np.asarray(input_ids, dtype=np.int64)
+    B, T = x.shape
+
+    multipliers = self.layer_multipliers[layer_id]
+
+    def shift_k(k: int) -> np.ndarray:
+      if k == 0:
+        return x
+      shifted = np.pad(x, ((0, 0), (k, 0)), mode="constant", constant_values=self.pad_id)[:, :T]
+      return shifted
+
+    base_shifts = [shift_k(k) for k in range(self.max_ngram_size)]
+
+    all_hashes = []
+
+    for n in range(2, self.max_ngram_size + 1):
+      n_gram_index = n - 2
+      tokens = base_shifts[:n]
+      mix = tokens[0] * multipliers[0]
+      for k in range(1, n):
+        mix = np.bitwise_xor(mix, tokens[k] * multipliers[k])
+      num_heads_for_this_ngram = self.n_head_per_ngram
+      head_vocab_sizes = self.vocab_size_across_layers[layer_id][n_gram_index]
+
+      for j in range(num_heads_for_this_ngram):
+        mod = int(head_vocab_sizes[j])
+        head_hash = mix % mod
+        all_hashes.append(head_hash.astype(np.int64, copy=False))
+
+    return np.stack(all_hashes, axis=2)
+
+  def hash(self, input_ids):
+    input_ids = self.compressed_tokenizer(input_ids)
+    hash_ids_for_all_layers = {}
+    for layer_id in self.layer_ids:
+      hash_ids_for_all_layers[layer_id] = self._get_ngram_hashes(input_ids, layer_id=layer_id)
+    return hash_ids_for_all_layers
+
 
 class MultiHeadEmbedding(nn.Module):
 
@@ -361,7 +380,8 @@ class MultiHeadEmbedding(nn.Module):
 
 class Engram(nn.Module):
 
-  def __init__(self, layer_id):
+  # added argument: engram_cfg, backbone_config
+  def __init__(self, layer_id, backbone_config, engram_cfg):
     super().__init__()
     self.layer_id = layer_id
     self.hash_mapping = NgramHashMapping(
@@ -399,7 +419,8 @@ class Engram(nn.Module):
         [nn.RMSNorm(backbone_config.hidden_size, eps=1e-6) for _ in range(backbone_config.hc_mult)]
     )
 
-  def forward(self, hidden_states, input_ids):
+  # added argument: backbone_config
+  def forward(self, hidden_states, input_ids, backbone_config):
     """
     hidden_states: [B, L, HC_MULT, D]
     input_ids: [B, L]
@@ -429,22 +450,22 @@ class Engram(nn.Module):
     return output
 
 
-class TransformerBlock(nn.Module):
+# class TransformerBlock(nn.Module):
 
-  def __init__(self, layer_id):
-    super().__init__()
-    self.attn = lambda x: x
-    self.moe = lambda x: x
-    self.engram = None
-    if layer_id in engram_cfg.layer_ids:
-      self.engram = Engram(layer_id=layer_id)
+#   def __init__(self, layer_id):
+#     super().__init__()
+#     self.attn = lambda x: x
+#     self.moe = lambda x: x
+#     self.engram = None
+#     if layer_id in engram_cfg.layer_ids:
+#       self.engram = Engram(layer_id=layer_id)
 
-  def forward(self, input_ids, hidden_states):
-    if self.engram is not None:
-      hidden_states = self.engram(hidden_states=hidden_states, input_ids=input_ids) + hidden_states
-    hidden_states = self.attn(hidden_states) + hidden_states
-    hidden_states = self.moe(hidden_states) + hidden_states
-    return hidden_states
+#   def forward(self, input_ids, hidden_states):
+#     if self.engram is not None:
+#       hidden_states = self.engram(hidden_states=hidden_states, input_ids=input_ids) + hidden_states
+#     hidden_states = self.attn(hidden_states) + hidden_states
+#     hidden_states = self.moe(hidden_states) + hidden_states
+#     return hidden_states
 
 
 # -----------------------------------------------------------------------------
@@ -471,11 +492,11 @@ def init_torch_weights(module, std=1):
       torch.nn.init.normal_(param, mean=0.0, std=std)
 
 
-def get_cfg_and_mesh():  # config, run_name, dtype, batch_size, seq_len
+def get_cfg_and_mesh(config):  # config, run_name, dtype, batch_size, seq_len
   """Returns MaxText configuration and mesh."""
   cfg = pyconfig.initialize(
       [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-      run_name="hi",
+      run_name="",
       # enable_checkpointing=False,
       # model_name="default",
       dtype="float32",
@@ -484,6 +505,7 @@ def get_cfg_and_mesh():  # config, run_name, dtype, batch_size, seq_len
       matmul_precision="highest",
       float32_qk_product=True,
       float32_logits=True,
+      base_emb_dim=config.base_emb_dim,
       # per_device_batch_size=batch_size,
       # max_target_length=seq_len,
       # max_prefill_predict_length=seq_len,
@@ -504,14 +526,7 @@ def get_mhe_weights(pt_layer):
   """
   Extracts weights from PyTorch MultiHeadEmbedding.
   """
-  return {
-      "embedding": {"embedding": to_jax(pt_layer.embedding.weight)}
-      # Note: 'offsets' is a Variable/Buffer, not a Param,
-      # so we generally don't load it via update() unless we explicitly sync states.
-      # In this specific module, offsets are derived deterministically from list_of_N
-      # at __init__, so loading weights isn't strictly necessary for offsets
-      # as long as list_of_N is the same.
-  }
+  return {"embedding": {"embedding": to_jax(pt_layer.embedding.weight)}}
 
 
 class MultiHeadEmbeddingTest(parameterized.TestCase):
@@ -525,7 +540,7 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
       {"testcase_name": "basic", "vocab_sizes": [100, 200, 150], "dim": 32, "batch": 2, "seq_len": 10},
       {"testcase_name": "single_head", "vocab_sizes": [500], "dim": 64, "batch": 1, "seq_len": 5},
   )
-  def test_mhe_equivalence(self, vocab_sizes, dim, batch, seq_len):
+  def test_mhe_match(self, vocab_sizes, dim, batch, seq_len):
     num_heads = len(vocab_sizes)
 
     # 1. Init PyTorch
@@ -538,7 +553,8 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
     rngs = nnx.Rngs(params=0)
     # jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, rngs)
 
-    cfg, mesh = get_cfg_and_mesh()
+    config = Config()
+    cfg, mesh = get_cfg_and_mesh(config)
     jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, cfg, mesh, rngs)
     print(jax_model)
 
@@ -564,7 +580,7 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
 
     # 6. Debug / Verify Offsets
     # Check if JAX offsets match PT offsets
-    jax_offsets = jax_model.offsets.value
+    jax_offsets = jax_model.offsets
     pt_offsets = pt_model.offsets.cpu().numpy()
     np.testing.assert_array_equal(jax_offsets, pt_offsets, err_msg="Offsets mismatch")
 
@@ -583,23 +599,6 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
 # -----------------------------------------------------------------------------
 # Test JAX Module: ShortConv
 # -----------------------------------------------------------------------------
-
-
-# def get_shortconv_weights(pt_layer):
-#   """
-#   Extracts weights from PyTorch ShortConv and formats them for JAX ShortConv.
-#   """
-#   # 1. Conv Weights
-#   # PyTorch Conv1d (Depthwise): (Out, 1, K) where groups=Out
-#   # JAX Conv (General): (K, In, Out) -> For depthwise: (K, 1, Out)
-#   # We permute (2, 1, 0): (Out, 1, K) -> (K, 1, Out)
-#   conv_w = pt_layer.conv.weight.permute(2, 1, 0)
-
-#   # 2. Norm Weights
-#   # wrong: Norms are in a ModuleList, JAX expects a collection indexed by string "0", "1", etc.
-#   norm_weights = {i: {"scale": to_jax(n.weight)} for i, n in enumerate(pt_layer.norms)}
-
-#   return {"conv": {"kernel": to_jax(conv_w)}, "norms": norm_weights}
 
 
 # nnx.List expects integer indices in the State dictionary.
@@ -626,7 +625,7 @@ class ShortConvTest(parameterized.TestCase):
       {"testcase_name": "dilated", "hidden_size": 16, "hc_mult": 2, "kernel_size": 3, "dilation": 2},
       {"testcase_name": "no_activation", "hidden_size": 32, "hc_mult": 4, "kernel_size": 4, "dilation": 1},
   )
-  def test_shortconv_equivalence(self, hidden_size, hc_mult, kernel_size, dilation):
+  def test_shortconv_match(self, hidden_size, hc_mult, kernel_size, dilation):
     batch_size = 2
     seq_len = 10
     activation = True
@@ -643,7 +642,8 @@ class ShortConvTest(parameterized.TestCase):
 
     # 2. Init JAX
     rngs = nnx.Rngs(params=0)
-    cfg, mesh = get_cfg_and_mesh()
+    config = Config()
+    cfg, mesh = get_cfg_and_mesh(config)
     jax_model = ShortConvJAX(cfg, hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation, rngs=rngs)
 
     # 3. Transfer Weights
@@ -716,9 +716,9 @@ class EngramTest(parameterized.TestCase):
     self.seq_len = 8
     self.layer_id = 1
 
-    # Mocking Configs
-    self.e_cfg = EngramConfig(layer_ids=[self.layer_id])
-    self.b_cfg = BackBoneConfig()
+    self.config = Config(engram_layer_ids=[self.layer_id])
+    self.engram_cfg = EngramConfig(self.config)
+    self.backbone_config = BackBoneConfig(self.config)
 
     self.nnx_rng = nnx.Rngs(params=0)
 
@@ -729,23 +729,31 @@ class EngramTest(parameterized.TestCase):
     # 1. Setup PyTorch Reference
 
     EngramPT = Engram
-    pt_layer = EngramPT(layer_id=self.layer_id)
+    pt_layer = EngramPT(layer_id=self.layer_id, backbone_config=self.backbone_config, engram_cfg=self.engram_cfg)
     init_torch_weights(pt_layer)
     pt_layer.eval()
 
     # "deepseek-ai/DeepSeek-V3"
-    tokenizer = AutoTokenizer.from_pretrained(engram_cfg.tokenizer_name_or_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
 
     # 2. Setup JAX NNX Implementation
-    cfg, mesh = get_cfg_and_mesh()
+    config = Config()
+    cfg, mesh = get_cfg_and_mesh(config)
     jax_layer = EngramJAX(
         layer_id=self.layer_id,
-        config=self.e_cfg,
-        backbone_cfg=self.b_cfg,
         rngs=self.nnx_rng,
-        cfg=cfg,
+        config=cfg,
         mesh=mesh,
         tokenizer=tokenizer,
+        hc_mult=self.config.hc_mult,
+        engram_heads_per_ngram=self.config.engram_heads_per_ngram,
+        engram_embed_dim_per_ngram=self.config.engram_embed_dim_per_ngram,
+        engram_max_ngram_size=self.config.engram_max_ngram_size,
+        engram_kernel_size=self.config.engram_kernel_size,
+        engram_vocab_size=self.config.engram_vocab_size,
+        layer_ids=self.config.engram_layer_ids,
+        pad_id=self.config.engram_pad_id,
+        seed=self.config.engram_seed,
     )
 
     print("torch_layer", pt_layer.state_dict())
@@ -760,13 +768,15 @@ class EngramTest(parameterized.TestCase):
     input_ids_np = np.random.randint(0, 1000, (batch_size, seq_len))
 
     pt_input_ids = torch.from_numpy(input_ids_np)
-    pt_hidden_states = torch.randn(batch_size, seq_len, self.b_cfg.hc_mult, self.b_cfg.hidden_size, dtype=torch.float32)
+    pt_hidden_states = torch.randn(
+        batch_size, seq_len, self.backbone_config.hc_mult, self.backbone_config.hidden_size, dtype=torch.float32
+    )
 
     jax_hidden_states = to_jax(pt_hidden_states)
 
     # 5. Run Inference
     with torch.no_grad():
-      pt_out = pt_layer(pt_hidden_states, pt_input_ids)
+      pt_out = pt_layer(pt_hidden_states, pt_input_ids, self.backbone_config)
 
     jax_out = jax_layer(jax_hidden_states, to_jax(pt_input_ids))
 
@@ -778,7 +788,7 @@ class EngramTest(parameterized.TestCase):
     np.testing.assert_allclose(
         to_jax(pt_out), jax_out, rtol=1e-4, atol=1e-4, err_msg="Engram output mismatch between PT and JAX"
     )
-    print("✅ Engram Layer Equivalence: PASS")
+    print("✅ Engram Layer match: PASS")
 
 
 if __name__ == "__main__":

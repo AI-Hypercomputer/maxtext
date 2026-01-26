@@ -16,9 +16,10 @@
 from typing import List, Optional
 from dataclasses import dataclass, field
 import math
+from typing import List, Callable
 
-from sympy import isprime
 import numpy as np
+from sympy import isprime
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer
@@ -27,13 +28,8 @@ from tokenizers import normalizers, Regex
 import jax
 import jax.numpy as jnp
 from flax import nnx
-import numpy as np
-from typing import List, Callable
-
 
 from MaxText.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
-
-
 from MaxText.layers.embeddings import Embed
 from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
 from MaxText.layers.linears import DenseGeneral
@@ -56,9 +52,7 @@ class CompressedTokenizer:
   def __init__(
       self,
       tokenizer,  # hf tokenizer
-      # tokenizer_name_or_path,
   ):
-    # self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
     self.tokenizer = tokenizer
 
     SENTINEL = "\uE000"
@@ -132,7 +126,7 @@ class NgramHashMapping:
       n_embed_per_ngram,
       n_head_per_ngram,
       layer_ids,
-      tokenizer,
+      tokenizer,  # pass the global tokenizer to avoid re-loading
       pad_id,
       seed,
   ):
@@ -179,7 +173,9 @@ class NgramHashMapping:
       all_ngram_vocab_sizes = []
       for ngram in range(2, self.max_ngram_size + 1):
         current_ngram_heads_sizes = []
-
+        # Maps n-gram order to the list index
+        # If ngram=2 (Bigram), index is 0.
+        # If ngram=3 (Trigram), index is 1.
         vocab_size = self.vocab_size_per_ngram[ngram - 2]
         num_head = self.n_head_per_ngram
         current_prime_search_start = vocab_size - 1
@@ -237,6 +233,31 @@ class NgramHashMapping:
     for layer_id in self.layer_ids:
       hash_ids_for_all_layers[layer_id] = self._get_ngram_hashes(input_ids, layer_id=layer_id)
     return hash_ids_for_all_layers
+
+  def get_vocab_sizes(self, layer_id: int):
+    # 2. Extract the specific list of primes for THIS layer
+    # The structure is [[ngram2_head1, ngram2_head2...], [ngram3_head1...]]
+    # We flatten it into a single list of ints: [N1, N2, N3, ...]
+    return [x for y in self.vocab_size_across_layers[layer_id] for x in y]
+
+
+class MultiHeadEmbedding(nnx.Module):
+
+  def __init__(self, list_of_N: List[int], D: int, cfg, mesh, rngs: nnx.Rngs):
+    self.num_heads = len(list_of_N)
+
+    # Static offsets for hashing heads
+    offsets = np.cumsum([0] + list_of_N[:-1])
+    self.offsets = jnp.array(offsets, dtype=jnp.int32)
+
+    self.embedding = Embed(num_embeddings=sum(list_of_N), num_features=D, config=cfg, mesh=mesh, rngs=rngs)
+
+  def __call__(self, input_ids: jax.Array, model_mode: str = MODEL_MODE_TRAIN) -> jax.Array:
+    # input_ids: (Batch, Length, Num_Heads)
+    # Apply offsets to make indices unique across the concatenated table
+    shifted_ids = input_ids + self.offsets
+
+    return self.embedding(shifted_ids, model_mode=model_mode)
 
 
 class ShortConv(nnx.Module):
@@ -305,88 +326,74 @@ class ShortConv(nnx.Module):
     return y.reshape(B, L, G, C)
 
 
-class MultiHeadEmbedding(nnx.Module):
-
-  def __init__(self, list_of_N: List[int], D: int, cfg, mesh, rngs: nnx.Rngs):
-    self.num_heads = len(list_of_N)
-
-    # Static offsets for hashing heads
-    offsets = np.cumsum([0] + list_of_N[:-1])
-    # self.offsets = jnp.array(offsets, dtype=jnp.int32)
-    self.offsets = nnx.Variable(jnp.array(offsets, dtype=jnp.int32))
-
-    # Reuse MaxText's Embed for the actual heavy lifting
-    self.embedding = Embed(num_embeddings=sum(list_of_N), num_features=D, config=cfg, mesh=mesh, rngs=rngs)
-
-  def __call__(self, input_ids: jax.Array, model_mode: str = MODEL_MODE_TRAIN) -> jax.Array:
-    # input_ids: (Batch, Length, Num_Heads)
-    # Apply offsets to make indices unique across the concatenated table
-    shifted_ids = input_ids + self.offsets.value
-
-    # Let MaxText handle the sharding and retrieval
-    return self.embedding(shifted_ids, model_mode=model_mode)
-
-
 class Engram(nnx.Module):
 
   def __init__(
       self,
       layer_id: int,
-      config,
-      backbone_cfg,
       rngs: nnx.Rngs,
-      cfg,
+      config,
       mesh,
-      tokenizer,
+      tokenizer,  # pass the tokenizer to avoid re-loading
       quant: Optional[Quant] = None,
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+      *,
+      hc_mult,
+      engram_heads_per_ngram,
+      engram_embed_dim_per_ngram,
+      engram_max_ngram_size,
+      engram_kernel_size,
+      engram_vocab_size,
+      layer_ids,
+      pad_id,
+      seed,
   ):
-    self.cfg = cfg
+    self.config = config
     self.mesh = mesh
-    self.dtype = self.cfg.dtype
-    self.weight_dtype = self.cfg.dtype
+    self.dtype = self.config.dtype
+    self.weight_dtype = self.config.dtype
     self.kernel_init = kernel_init
     self.quant = quant
     self.rngs = rngs
     self.layer_id = layer_id
 
-    # Note: NgramHashMapping remains a CPU/NumPy helper for pre-processing
-    # or it can be ported to JAX if needed inside the graph.
-
-    # Placeholder for the same vocab logic from your PyTorch code
-    # vocab_sizes = [129280 * 5] * (config.max_ngram_size - 1) * config.n_head_per_ngram
+    self.engram_heads_per_ngram = engram_heads_per_ngram
+    self.engram_embed_dim_per_ngram = engram_embed_dim_per_ngram
+    self.engram_max_ngram_size = engram_max_ngram_size
+    self.engram_kernel_size = engram_kernel_size
+    self.engram_vocab_size = engram_vocab_size
+    self.layer_ids = layer_ids
+    self.pad_id = pad_id
+    self.seed = seed
 
     # -----------------------------------------------------------------------
-    # CRITICAL FIX: Replicate NgramHashMapping Logic
+    # Vocabulary Size Calculation (Global Prime Sequence)
     # -----------------------------------------------------------------------
-    # We must instantiate NgramHashMapping to get the EXACT prime numbers
-    # used by the PyTorch model for this specific layer.
+    # Engram uses unique prime numbers for the vocabulary size of every head
+    # in every layer to maximize hash collision independence.
 
-    # Note: In a real training run, you might want to calculate this once
-    # globally and pass it in, rather than recalculating per layer.
-    # For now, this ensures correctness.
+    # We instantiate NgramHashMapping here to replicate this deterministic
+    # sequence. Ideally, this mapping should be created once globally and
+    # the resulting vocab_sizes passed into this layer to improve startup time.
 
-    # 1. We need a tokenizer to initialize the mapper
-    # (In production, pass the tokenizer or the pre-calced list to avoid re-loading)
-    # tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name_or_path, trust_remote_code=True)
-
-    hash_mapping = NgramHashMapping(
-        engram_vocab_size=config.engram_vocab_size,
-        max_ngram_size=config.max_ngram_size,
-        n_embed_per_ngram=config.n_embed_per_ngram,
-        n_head_per_ngram=config.n_head_per_ngram,
-        layer_ids=config.layer_ids,  # Pass all layer IDs so the sequence of primes is correct
-        # tokenizer_name_or_path=config.tokenizer_name_or_path, # Adjusted to match your NgramHashMapping signature
+    self.hash_mapping = NgramHashMapping(
+        engram_vocab_size=engram_vocab_size,
+        max_ngram_size=engram_max_ngram_size,
+        n_embed_per_ngram=engram_embed_dim_per_ngram,
+        n_head_per_ngram=engram_heads_per_ngram,
+        # IMPORTANT: We must pass the FULL list of layer_ids, not just self.layer_id.
+        # The mapping finds primes sequentially across all layers; passing a partial
+        # list would reset the prime search and break alignment with the reference model.
+        layer_ids=layer_ids,
+        # Inject the pre-loaded tokenizer to avoid redundant disk I/O per layer.
         tokenizer=tokenizer,
-        pad_id=config.pad_id,
-        seed=config.seed,
+        pad_id=pad_id,
+        seed=seed,
     )
-    self.hash_mapping = hash_mapping
-
-    # 2. Extract the specific list of primes for THIS layer
+    # Extract the specific list of primes for THIS layer
     # The structure is [[ngram2_head1, ngram2_head2...], [ngram3_head1...]]
     # We flatten it into a single list of ints: [N1, N2, N3, ...]
-    vocab_sizes = [x for y in hash_mapping.vocab_size_across_layers[self.layer_id] for x in y]
+    vocab_sizes = self.hash_mapping.get_vocab_sizes(self.layer_id)
 
     # DEBUG PRINT (Uncomment if tests fail)
     # print(f"DEBUG JAX Layer {self.layer_id} Vocab Sizes: {vocab_sizes}")
@@ -395,26 +402,26 @@ class Engram(nnx.Module):
     # -----------------------------------------------------------------------
 
     # init module
-    self.mhe = MultiHeadEmbedding(vocab_sizes, config.n_embed_per_ngram // config.n_head_per_ngram, cfg, mesh, rngs)
+    self.mhe = MultiHeadEmbedding(
+        vocab_sizes, self.engram_embed_dim_per_ngram // self.engram_heads_per_ngram, config, mesh, rngs
+    )
     self.short_conv = ShortConv(
-        cfg, backbone_cfg.hidden_size, config.kernel_size, config.max_ngram_size, backbone_cfg.hc_mult, rngs=rngs
+        config, config.base_emb_dim, self.engram_kernel_size, self.engram_max_ngram_size, hc_mult, rngs=rngs
     )
 
-    engram_hidden_size = config.n_embed_per_ngram * (config.max_ngram_size - 1)
-
-    # self.value_proj = nnx.Linear(engram_hidden_size, backbone_cfg.hidden_size, use_bias=False, rngs=rngs)
+    engram_hidden_size = engram_embed_dim_per_ngram * (self.engram_max_ngram_size - 1)
 
     self.value_proj = DenseGeneral(
         in_features_shape=engram_hidden_size,
-        out_features_shape=backbone_cfg.hidden_size,
+        out_features_shape=config.base_emb_dim,
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("a", "b"),  # TODO(shuningjin)
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
-        matmul_precision=self.cfg.matmul_precision,
-        shard_mode=self.cfg.shard_mode,
+        matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
         rngs=self.rngs,
         use_bias=True,
     )
@@ -423,49 +430,48 @@ class Engram(nnx.Module):
         [
             DenseGeneral(
                 in_features_shape=engram_hidden_size,
-                out_features_shape=backbone_cfg.hidden_size,
+                out_features_shape=config.base_emb_dim,
                 axis=-1,
                 kernel_init=self.kernel_init,
                 kernel_axes=("a", "b"),  # TODO(shuningjin)
                 dtype=self.dtype,
                 weight_dtype=self.weight_dtype,
                 quant=self.quant,
-                matmul_precision=self.cfg.matmul_precision,
-                shard_mode=self.cfg.shard_mode,
+                matmul_precision=self.config.matmul_precision,
+                shard_mode=self.config.shard_mode,
                 rngs=self.rngs,
                 use_bias=True,
             )
-            for _ in range(backbone_cfg.hc_mult)
+            for _ in range(hc_mult)
         ]
     )
 
-    # torch.finfo(torch.float32).eps
     self.norm1 = nnx.List(
         [
             RMSNorm(
-                num_features=backbone_cfg.hidden_size,
-                dtype=cfg.dtype,
-                weight_dtype=cfg.weight_dtype,
+                num_features=config.base_emb_dim,
+                dtype=config.dtype,
+                weight_dtype=config.weight_dtype,
                 kernel_axes=("norm",),
-                # epsilon=cfg.normalization_layer_epsilon,
+                # epsilon=config.normalization_layer_epsilon,
                 epsilon=1e-6,  # Match PyTorch default
                 rngs=self.rngs,
             )
-            for _ in range(backbone_cfg.hc_mult)
+            for _ in range(hc_mult)
         ]
     )
     self.norm2 = nnx.List(
         [
             RMSNorm(
-                num_features=backbone_cfg.hidden_size,
-                dtype=cfg.dtype,
-                weight_dtype=cfg.weight_dtype,
+                num_features=config.base_emb_dim,
+                dtype=config.dtype,
+                weight_dtype=config.weight_dtype,
                 kernel_axes=("norm",),
-                # epsilon=cfg.normalization_layer_epsilon,
+                # epsilon=config.normalization_layer_epsilon,
                 epsilon=1e-6,  # Match PyTorch default
                 rngs=self.rngs,
             )
-            for _ in range(backbone_cfg.hc_mult)
+            for _ in range(hc_mult)
         ]
     )
 
