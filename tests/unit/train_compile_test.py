@@ -697,7 +697,7 @@ class TrainCompile(unittest.TestCase):
             "scan_layers=True",
             "sparse_matmul=True",
             "megablox=True",
-            "attention=dot_product",  # flash attention: need JAX version >= 0.7.2.dev20250824
+            "attention=flash",
         )
     )
 
@@ -719,7 +719,7 @@ class TrainCompile(unittest.TestCase):
             "scan_layers=True",
             "sparse_matmul=False",
             "capacity_factor=-1",
-            "attention=dot_product",  # flash attention: need JAX version >= 0.7.2.dev20250824
+            "attention=flash",
         )
     )
 
@@ -767,5 +767,32 @@ class TrainCompile(unittest.TestCase):
             "compile_topology_num_slices=1",
             "model_name=qwen3-next-80b-a3b",
             "per_device_batch_size=1",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_deepseek32(self):
+    # test deepseek3.2 with sparse attention
+    compiled_trainstep_file = "/tmp/test_deepseek32.pickle"
+    train_compile_main(
+        (
+            "",
+            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3.2-671b",
+            # megablox
+            "sparse_matmul=True",
+            "megablox=True",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "attention=dot_product",  # TODO: update to flash attention when it's available.
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            # without_device_limit
+            "n_routing_groups=-1",
+            "topk_routing_group=-1",
         )
     )
