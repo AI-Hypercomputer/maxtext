@@ -536,10 +536,11 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
 
     # 2. Init JAX
     rngs = nnx.Rngs(params=0)
-    jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, rngs)
+    # jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, rngs)
 
-    # cfg, mesh = get_cfg_and_mesh()
-    # jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, cfg, mesh, rngs)
+    cfg, mesh = get_cfg_and_mesh()
+    jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, cfg, mesh, rngs)
+    print(jax_model)
 
     # 3. Transfer Weights
     weights = get_mhe_weights(pt_model)
@@ -584,21 +585,33 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
 # -----------------------------------------------------------------------------
 
 
+# def get_shortconv_weights(pt_layer):
+#   """
+#   Extracts weights from PyTorch ShortConv and formats them for JAX ShortConv.
+#   """
+#   # 1. Conv Weights
+#   # PyTorch Conv1d (Depthwise): (Out, 1, K) where groups=Out
+#   # JAX Conv (General): (K, In, Out) -> For depthwise: (K, 1, Out)
+#   # We permute (2, 1, 0): (Out, 1, K) -> (K, 1, Out)
+#   conv_w = pt_layer.conv.weight.permute(2, 1, 0)
+
+#   # 2. Norm Weights
+#   # wrong: Norms are in a ModuleList, JAX expects a collection indexed by string "0", "1", etc.
+#   norm_weights = {i: {"scale": to_jax(n.weight)} for i, n in enumerate(pt_layer.norms)}
+
+#   return {"conv": {"kernel": to_jax(conv_w)}, "norms": norm_weights}
+
+
+# nnx.List expects integer indices in the State dictionary.
+# Use Integer keys (0, 1) instead of String keys ("0", "1")
+def to_nnx_list_dict(weight_list):
+  return {i: w for i, w in enumerate(weight_list)}
+
+
 def get_shortconv_weights(pt_layer):
-  """
-  Extracts weights from PyTorch ShortConv and formats them for JAX ShortConv.
-  """
-  # 1. Conv Weights
-  # PyTorch Conv1d (Depthwise): (Out, 1, K) where groups=Out
-  # JAX Conv (General): (K, In, Out) -> For depthwise: (K, 1, Out)
-  # We permute (2, 1, 0): (Out, 1, K) -> (K, 1, Out)
-  conv_w = pt_layer.conv.weight.permute(2, 1, 0)
-
-  # 2. Norm Weights
-  # wrong: Norms are in a ModuleList, JAX expects a collection indexed by string "0", "1", etc.
-  norm_weights = {i: {"scale": to_jax(n.weight)} for i, n in enumerate(pt_layer.norms)}
-
-  return {"conv": {"kernel": to_jax(conv_w)}, "norms": norm_weights}
+  conv_weight = pt_layer.conv.weight.permute(2, 1, 0)
+  short_conv_norms = [{"scale": to_jax(n.weight)} for n in pt_layer.norms]
+  return {"conv": {"kernel": to_jax(conv_weight)}, "norms": to_nnx_list_dict(short_conv_norms)}
 
 
 class ShortConvTest(parameterized.TestCase):
@@ -638,10 +651,6 @@ class ShortConvTest(parameterized.TestCase):
 
     # 4. Input Data
     # Shape: (B, L, G, C)
-    # x_np = np.random.randn(batch_size, seq_len, hc_mult, hidden_size).astype(np.float32)
-    # x_pt = torch.from_numpy(x_np)
-    # x_jax = jnp.array(x_np)
-
     x_pt = torch.randn(batch_size, seq_len, hc_mult, hidden_size)
     x_jax = to_jax(x_pt)
 
@@ -669,34 +678,27 @@ class ShortConvTest(parameterized.TestCase):
 # -----------------------------------------------------------------------------
 
 
+# Map Linear layers with Bias
+def map_linear(pt_linear):
+  d = {"kernel": to_jax(pt_linear.weight.T)}
+  if pt_linear.bias is not None:
+    d["bias"] = to_jax(pt_linear.bias)
+  return d
+
+
 def get_jax_engram_weights(pt_engram) -> dict:
-
-  # nnx.List expects integer indices in the State dictionary.
-  # Use Integer keys (0, 1) instead of String keys ("0", "1")
-  def to_nnx_list_dict(weight_list):
-    return {i: w for i, w in enumerate(weight_list)}
-
-  # Map Linear layers with Bias
-  def map_linear(pt_linear):
-    d = {"kernel": to_jax(pt_linear.weight.T)}
-    if pt_linear.bias is not None:
-      d["bias"] = to_jax(pt_linear.bias)
-    return d
 
   key_projs_weights = [map_linear(proj) for proj in pt_engram.key_projs]
   norm1_weights = [{"scale": to_jax(n.weight)} for n in pt_engram.norm1]
   norm2_weights = [{"scale": to_jax(n.weight)} for n in pt_engram.norm2]
 
-  conv_weight = pt_engram.short_conv.conv.weight.permute(2, 1, 0)
-  short_conv_norms = [{"scale": to_jax(n.weight)} for n in pt_engram.short_conv.norms]
-
   return {
-      "mhe": {"embedding": {"embedding": to_jax(pt_engram.multi_head_embedding.embedding.weight)}},
+      "mhe": get_mhe_weights(pt_engram.multi_head_embedding),
       "value_proj": map_linear(pt_engram.value_proj),
       "key_projs": to_nnx_list_dict(key_projs_weights),
       "norm1": to_nnx_list_dict(norm1_weights),
       "norm2": to_nnx_list_dict(norm2_weights),
-      "short_conv": {"conv": {"kernel": to_jax(conv_weight)}, "norms": to_nnx_list_dict(short_conv_norms)},
+      "short_conv": get_shortconv_weights(pt_engram.short_conv),
   }
 
 

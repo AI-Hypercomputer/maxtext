@@ -285,44 +285,46 @@ class ShortConv(nnx.Module):
     return y.reshape(B, L, G, C)
 
 
-class MultiHeadEmbedding(nnx.Module):
-
-  def __init__(self, list_of_N: List[int], D: int, rngs: nnx.Rngs):
-    self.num_heads = len(list_of_N)
-    self.embedding_dim = D
-
-    # Calculate offsets as a static buffer
-    offsets = np.cumsum([0] + list_of_N[:-1])
-    self.offsets = nnx.Variable(jnp.array(offsets, dtype=jnp.int32))
-
-    self.embedding = nnx.Embed(num_embeddings=sum(list_of_N), features=D, rngs=rngs)
-
-  def __call__(self, input_ids: jax.Array) -> jax.Array:
-    # input_ids: (B, L, H)
-    shifted_ids = input_ids + self.offsets.value
-    return self.embedding(shifted_ids)
-
-
+# # version1: nnx Embed
 # class MultiHeadEmbedding(nnx.Module):
 
-#   def __init__(self, list_of_N: List[int], D: int, cfg, mesh, rngs: nnx.Rngs):
+#   def __init__(self, list_of_N: List[int], D: int, rngs: nnx.Rngs):
 #     self.num_heads = len(list_of_N)
-#     total_N = sum(list_of_N)
+#     self.embedding_dim = D
 
-#     # Static offsets for hashing heads
+#     # Calculate offsets as a static buffer
 #     offsets = np.cumsum([0] + list_of_N[:-1])
-#     self.offsets = jnp.array(offsets, dtype=jnp.int32)
+#     self.offsets = nnx.Variable(jnp.array(offsets, dtype=jnp.int32))
 
-#     # Reuse MaxText's Embed for the actual heavy lifting
-#     self.embedding = Embed(num_embeddings=total_N, num_features=D, config=cfg, mesh=mesh, rngs=rngs)
+#     self.embedding = nnx.Embed(num_embeddings=sum(list_of_N), features=D, rngs=rngs)
 
-#   def __call__(self, input_ids: jax.Array, model_mode: str = MODEL_MODE_TRAIN) -> jax.Array:
-#     # input_ids: (Batch, Length, Num_Heads)
-#     # Apply offsets to make indices unique across the concatenated table
-#     shifted_ids = input_ids + self.offsets
+#   def __call__(self, input_ids: jax.Array) -> jax.Array:
+#     # input_ids: (B, L, H)
+#     shifted_ids = input_ids + self.offsets.value
+#     return self.embedding(shifted_ids)
 
-#     # Let MaxText handle the sharding and retrieval
-#     return self.embedding(shifted_ids, model_mode=model_mode)
+
+# version2: maxtext.Embed
+class MultiHeadEmbedding(nnx.Module):
+
+  def __init__(self, list_of_N: List[int], D: int, cfg, mesh, rngs: nnx.Rngs):
+    self.num_heads = len(list_of_N)
+
+    # Static offsets for hashing heads
+    offsets = np.cumsum([0] + list_of_N[:-1])
+    # self.offsets = jnp.array(offsets, dtype=jnp.int32)
+    self.offsets = nnx.Variable(jnp.array(offsets, dtype=jnp.int32))
+
+    # Reuse MaxText's Embed for the actual heavy lifting
+    self.embedding = Embed(num_embeddings=sum(list_of_N), num_features=D, config=cfg, mesh=mesh, rngs=rngs)
+
+  def __call__(self, input_ids: jax.Array, model_mode: str = MODEL_MODE_TRAIN) -> jax.Array:
+    # input_ids: (Batch, Length, Num_Heads)
+    # Apply offsets to make indices unique across the concatenated table
+    shifted_ids = input_ids + self.offsets.value
+
+    # Let MaxText handle the sharding and retrieval
+    return self.embedding(shifted_ids, model_mode=model_mode)
 
 
 class Engram(nnx.Module):
@@ -393,7 +395,7 @@ class Engram(nnx.Module):
     # -----------------------------------------------------------------------
 
     # init module
-    self.mhe = MultiHeadEmbedding(vocab_sizes, config.n_embed_per_ngram // config.n_head_per_ngram, rngs)
+    self.mhe = MultiHeadEmbedding(vocab_sizes, config.n_embed_per_ngram // config.n_head_per_ngram, cfg, mesh, rngs)
     self.short_conv = ShortConv(
         backbone_cfg.hidden_size, config.kernel_size, config.max_ngram_size, backbone_cfg.hc_mult, rngs=rngs
     )
