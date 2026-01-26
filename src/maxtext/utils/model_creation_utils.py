@@ -1,3 +1,17 @@
+#  Copyright 2023–2026 Google LLC
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
 # Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,25 +30,19 @@
 """ Utils that are only interesting for creating a model in MaxText. """
 
 from collections.abc import Sequence
+from typing import Callable, overload
 from functools import partial
-from typing import overload
-from functools import partial
-from etils import epath
-
 from etils import epath
 from flax import nnx
 import flax.linen as nn
 import jax
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
-from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.layers import quantizations
 from maxtext.models import models
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils, maxtext_utils_nnx, max_utils
+from maxtext.utils import max_utils, maxtext_utils, maxtext_utils_nnx
 from orbax import checkpoint as ocp
-from orbax import checkpoint as ocp
-
 
 
 @overload
@@ -109,15 +117,63 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   return model
 
 
-def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
-  """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
-  is_training = model_mode == MODEL_MODE_TRAIN
+def get_nnx_create_model_fn(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None) -> Callable:
+  """Creates the function for NNX model creation."""
 
-  def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
+  def _create_model():
+    is_training = model_mode == MODEL_MODE_TRAIN
     rngs = maxtext_utils_nnx.create_nnx_rngs(config, is_training=is_training, rng_key=rng_key)
     return from_config(config, devices, mesh, rngs=rngs, model_mode=model_mode)
 
-  _create_model_partial = partial(_create_model, mesh=mesh, model_mode=model_mode, rng_key=rng_key)
+  return _create_model
+
+
+def create_nnx_abstract_model(
+    config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None
+) -> tuple[Callable, nnx.Module]:
+  """Creates an abstract NNX model.
+
+  Returns:
+    A tuple containing (create_model_fn, abstract_model):
+      create_model_fn: A zero-argument callable that produces a new model instance.
+      abstract_model: The stateful NNX model instance in an abstract state.
+  """
+
+  with nn.logical_axis_rules(config.logical_axis_rules):
+    _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key)
+    if mesh is None:
+      _tmp = nnx.eval_shape(_create_model)
+      mesh = _tmp.mesh
+    # Use nnx.eval_shape + our scan-axis-aware sharding helper instead of
+    # nnx.get_abstract_model, which uses get_var_pspec internally and ignores
+    # param_scan_axis / nnx.PARTITION_NAME metadata set by _create_scanned_layers,
+    # causing the stacked layers axis to be missing from the PartitionSpec.
+    with jax.set_mesh(mesh):
+      abs_model = nnx.eval_shape(_create_model)
+    graphdef, abs_var_state = nnx.split(abs_model)
+    named_sharding_state = maxtext_utils.get_nnx_named_sharding_with_scan_axis(abs_var_state, mesh)
+    abstract_state = jax.tree.map(
+        lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
+        abs_var_state,
+        named_sharding_state,
+    )
+    return _create_model, nnx.merge(graphdef, abstract_state)
+
+
+def create_nnx_sharded_model_hybrid(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
+  """Creates a sharded model for hybrid NNX modules containing Linen sub-modules.
+
+  DEPRECATED: This function is a transitional utility for the Linen-to-NNX
+  migration. It should be removed once all model components are ported to
+  pure NNX modules.
+
+  This function specifically handles the complexity of "mixed" state initialization,
+  where logical sharding annotations must be resolved for both NNX native
+  Parameters and legacy Linen variables wrapped via the NNX-Linen bridge.
+  It ensures that both systems correctly respect the provided mesh and
+  logical axis rules during the abstraction/sharding planning phase.
+  """
+  _create_model_partial = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key)
 
   with nn.logical_axis_rules(config.logical_axis_rules):
     abstract_model = nnx.eval_shape(_create_model_partial)
@@ -126,17 +182,6 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
 
   if mesh is None:
     mesh = abstract_model.mesh
-
-  # Note for pure_nnx:
-  # Currently, the NNX model returned has a linen decoder wrapped to NNX. So it is not a pure NNX model and
-  # we still need to use nn.logical_axis_rules(config.logical_axis_rules) to get the out sharding from the linen
-  # LogicallyPartitioned structure.
-  # In the future if the pure NNX model is used, with pure NNX's eager sharding, there will be no LogicallyPartitioned
-  # structure in the abstract state and we can get the sharded state with the following code:
-  #     graphdef, state = nnx.get_abstract_model(_create_model_partial, mesh)
-  #     abstract_model = nnx.merge(graphdef, state)
-  #     model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model_partial, mesh=mesh)
-  #     sharded_state = nnx.state(model)
 
   # JIT a function that creates the model state with proper sharding from the start.
   # By providing out_shardings, we instruct JAX to produce sharded output directly,
@@ -165,6 +210,26 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
           mesh=model.mesh,
           logical_annotations=specs,
       )
+      maxtext_utils.print_shardings_params(sharded_state, out_shardings, model.mesh)
+    return model
+
+
+def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
+  """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
+
+  if config.pure_nnx:
+    _create_model, abstract_model = create_nnx_abstract_model(config, mesh, devices, model_mode, rng_key)
+    model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
+    # TODO: print debug_sharding info
+  else:
+    model = create_nnx_sharded_model_hybrid(config, mesh, devices, model_mode, rng_key)
+
+  sharded_state = nnx.state(model)
+
+  if mesh is None:
+    mesh = abstract_model.mesh
+
+  with mesh:
     if config.load_parameters_path:
       try:
         ckptr = ocp.Checkpointer(
