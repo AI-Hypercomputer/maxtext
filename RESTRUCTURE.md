@@ -85,7 +85,6 @@ comments, or questions by creating a new
 │   │   │       ├── recipes/
 │   │   │       │   ├── args_helper.py
 │   │   │       │   ├── mcjax_long_running_recipe.py
-│   │   │       │   └── py_elastic_training_recipe.py
 │   │   │       │   └── ...
 │   │   │       ├── llama2_v6e-256_benchmarks.py
 │   │   │       └── xla_flags_library.py
@@ -247,7 +246,6 @@ comments, or questions by creating a new
 │   │   │   │   └── sft/
 │   │   │   │       └── sft_train.py
 │   │   │   └── pretrain/
-│   │   │       ├── elastic_train.py
 │   │   │       ├── train.py
 │   │   │       ├── train_compile.py
 │   │   │       ├── train_tokenizer.py
