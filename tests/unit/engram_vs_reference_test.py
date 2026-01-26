@@ -15,51 +15,57 @@
 
 """
 To run the test
+  # pip install torch numpy transformers sympy
   python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-  # python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s
-
-  python3 -m tests.unit.engram_vs_reference_test
+  python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s
 
 reference: https://github.com/deepseek-ai/Engram/blob/main/engram_demo_v1.py
 """
 
 
-import torch
-import numpy as np
-import jax
-import jax.numpy as jnp
-from flax import nnx
-from transformers import AutoTokenizer
-
-# Import your classes here
-# from your_file import EngramConfig, BackBoneConfig, NgramHashMapping, Engram, flax_Engram
-
-## built-in
-from typing import List
+from typing import List, Dict, Any
 from dataclasses import dataclass, field
 import math
+import os
+import unittest
+from absl.testing import parameterized
 
-## third-party
-from sympy import isprime
 import numpy as np
-import torch
-import torch.nn as nn
+from sympy import isprime
+
+from tokenizers import normalizers, Regex
 from transformers import AutoTokenizer
-from tokenizers import normalizers, Regex 
+import torch
+from torch import nn
 
+from flax import nnx
+import jax
+import jax.numpy as jnp
 
-from MaxText.layers.engram import Engram as Engram_Flax
+from MaxText.layers.engram import Engram as EngramJAX
+from MaxText.layers.engram import ShortConv as ShortConvJAX
+from MaxText.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX
+
+from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText import pyconfig
+from MaxText import maxtext_utils
+from jax.sharding import Mesh
 
 
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
 
+V = 129280
+# V = 1000
+hc_mult = 1
+max_ngram_size = 2  # >= 2
+
 @dataclass
 class EngramConfig:
   tokenizer_name_or_path: str = "deepseek-ai/DeepSeek-V3"
-  engram_vocab_size: List[int] = field(default_factory=lambda: [129280 * 5, 129280 * 5])
-  max_ngram_size: int = 3
+  engram_vocab_size: List[int] = field(default_factory=lambda: [V * 5, V * 5])
+  max_ngram_size: int = max_ngram_size
   n_embed_per_ngram: int = 512
   n_head_per_ngram: int = 8
   layer_ids: List[int] = field(default_factory=lambda: [1, 15])
@@ -70,8 +76,8 @@ class EngramConfig:
 @dataclass
 class BackBoneConfig:
   hidden_size: int = 1024
-  hc_mult: int = 4
-  vocab_size: int = 129280
+  hc_mult: int = hc_mult
+  vocab_size: int = V
   num_layers: int = 30
 
 engram_cfg = EngramConfig()
@@ -79,7 +85,7 @@ backbone_config = BackBoneConfig()
 
 
 # -----------------------------------------------------------------------------
-# Reference Implementation
+# Torch Reference Implementation
 # -----------------------------------------------------------------------------
 
 class CompressedTokenizer:
@@ -354,58 +360,74 @@ class MultiHeadEmbedding(nn.Module):
 
 
 class Engram(nn.Module):
-    def __init__(self, layer_id):
-        super().__init__()
-        self.layer_id = layer_id
-        self.hash_mapping = NgramHashMapping(
-            engram_vocab_size=engram_cfg.engram_vocab_size,
-            max_ngram_size = engram_cfg.max_ngram_size,
-            n_embed_per_ngram = engram_cfg.n_embed_per_ngram,
-            n_head_per_ngram = engram_cfg.n_head_per_ngram,
-            layer_ids = engram_cfg.layer_ids,
-            tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
-            pad_id = engram_cfg.pad_id,
-            seed = engram_cfg.seed,
-        )
-        self.multi_head_embedding = MultiHeadEmbedding(
-            list_of_N = [x for y in self.hash_mapping.vocab_size_across_layers[self.layer_id] for x in y],
-            D = engram_cfg.n_embed_per_ngram // engram_cfg.n_head_per_ngram,
-        )
-        self.short_conv = ShortConv(
-            hidden_size = backbone_config.hidden_size,
-            kernel_size = engram_cfg.kernel_size,
-            dilation    = engram_cfg.max_ngram_size,
-            hc_mult     = backbone_config.hc_mult,
-        )
-        engram_hidden_size = (engram_cfg.max_ngram_size-1) * engram_cfg.n_embed_per_ngram
-        self.value_proj = nn.Linear(engram_hidden_size,backbone_config.hidden_size)
-        self.key_projs = nn.ModuleList(
-            [nn.Linear(engram_hidden_size,backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)]
-        )
-        self.norm1 = nn.ModuleList([nn.RMSNorm(backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)])
-        self.norm2 = nn.ModuleList([nn.RMSNorm(backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)])
-    
-    def forward(self,hidden_states,input_ids):
-        """
-        hidden_states: [B, L, HC_MULT, D]
-        input_ids: [B, L]
-        """
-        hash_input_ids = torch.from_numpy(self.hash_mapping.hash(input_ids)[self.layer_id])
-        embeddings = self.multi_head_embedding(hash_input_ids).flatten(start_dim=-2)
-        gates = []
-        for hc_idx in range(backbone_config.hc_mult):
-            key = self.key_projs[hc_idx](embeddings)
-            normed_key = self.norm1[hc_idx](key)
-            query = hidden_states[:,:,hc_idx,:]
-            normed_query = self.norm2[hc_idx](query)
-            gate = (normed_key * normed_query).sum(dim=-1) / math.sqrt(backbone_config.hidden_size)
-            gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
-            gate = gate.sigmoid().unsqueeze(-1)
-            gates.append(gate)
-        gates = torch.stack(gates,dim=2)
-        value = gates * self.value_proj(embeddings).unsqueeze(2)
-        output = value + self.short_conv(value)
-        return output 
+
+  def __init__(self, layer_id):
+    super().__init__()
+    self.layer_id = layer_id
+    self.hash_mapping = NgramHashMapping(
+        engram_vocab_size=engram_cfg.engram_vocab_size,
+        max_ngram_size=engram_cfg.max_ngram_size,
+        n_embed_per_ngram=engram_cfg.n_embed_per_ngram,
+        n_head_per_ngram=engram_cfg.n_head_per_ngram,
+        layer_ids=engram_cfg.layer_ids,
+        tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
+        pad_id=engram_cfg.pad_id,
+        seed=engram_cfg.seed,
+    )
+    print(
+        "DEBUG torch Layer Vocab Sizes", [x for y in self.hash_mapping.vocab_size_across_layers[self.layer_id] for x in y]
+    )
+    self.multi_head_embedding = MultiHeadEmbedding(
+        list_of_N=[x for y in self.hash_mapping.vocab_size_across_layers[self.layer_id] for x in y],
+        D=engram_cfg.n_embed_per_ngram // engram_cfg.n_head_per_ngram,
+    )
+    self.short_conv = ShortConv(
+        hidden_size=backbone_config.hidden_size,
+        kernel_size=engram_cfg.kernel_size,
+        dilation=engram_cfg.max_ngram_size,
+        hc_mult=backbone_config.hc_mult,
+    )
+    engram_hidden_size = (engram_cfg.max_ngram_size - 1) * engram_cfg.n_embed_per_ngram
+    self.value_proj = nn.Linear(engram_hidden_size, backbone_config.hidden_size)
+    self.key_projs = nn.ModuleList(
+        [nn.Linear(engram_hidden_size, backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)]
+    )
+    self.norm1 = nn.ModuleList(
+        [nn.RMSNorm(backbone_config.hidden_size, eps=1e-6) for _ in range(backbone_config.hc_mult)]
+    )
+    self.norm2 = nn.ModuleList(
+        [nn.RMSNorm(backbone_config.hidden_size, eps=1e-6) for _ in range(backbone_config.hc_mult)]
+    )
+
+  def forward(self, hidden_states, input_ids):
+    """
+    hidden_states: [B, L, HC_MULT, D]
+    input_ids: [B, L]
+    """
+    hash_input_ids = torch.from_numpy(self.hash_mapping.hash(input_ids)[self.layer_id])
+    print("pt1", hash_input_ids)
+    embeddings = self.multi_head_embedding(hash_input_ids).flatten(start_dim=-2)
+    print("pt2", embeddings)
+    gates = []
+    for hc_idx in range(backbone_config.hc_mult):
+      key = self.key_projs[hc_idx](embeddings)
+      normed_key = self.norm1[hc_idx](key)
+      print("pt3", normed_key)
+      query = hidden_states[:, :, hc_idx, :]
+      normed_query = self.norm2[hc_idx](query)
+      print("pt4", normed_query)
+      gate = (normed_key * normed_query).sum(dim=-1) / math.sqrt(backbone_config.hidden_size)
+      print("pt5", gate)
+      gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
+      print("pt6", gate)
+      gate = gate.sigmoid().unsqueeze(-1)
+      print("pt7", gate)
+      gates.append(gate)
+    gates = torch.stack(gates, dim=2)
+    value = gates * self.value_proj(embeddings).unsqueeze(2)
+    output = value + self.short_conv(value)
+    return output
+
 
 class TransformerBlock(nn.Module):
 
@@ -426,81 +448,335 @@ class TransformerBlock(nn.Module):
 
 
 # -----------------------------------------------------------------------------
-# Test JAX Module
+# Test JAX Module: Helper
 # -----------------------------------------------------------------------------
 
 
-def test_engram_equivalence():
-  # 1. Setup Configs
-  e_cfg = EngramConfig(layer_ids=[1])
-  b_cfg = BackBoneConfig()
+"""
+Tests for Engram: N-gram Hashing and Injection Layer
+"""
 
-  # Use a real tokenizer to ensure CompressedTokenizer works
-  tokenizer = AutoTokenizer.from_pretrained(e_cfg.tokenizer_name_or_path)
 
-  # 2. Test Data
-  text = "The quick brown fox jumps over the lazy dog."
-  input_ids_pt = tokenizer(text, return_tensors="pt").input_ids
-  input_ids_np = input_ids_pt.numpy()
+def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
+  return jnp.asarray(pt_tensor.detach().cpu().numpy())
 
-  B, L = input_ids_pt.shape
-  G = b_cfg.hc_mult
-  D = b_cfg.hidden_size
 
-  # Mock hidden states: (Batch, Length, Groups, Dimension)
-  hidden_pt = torch.randn(B, L, G, D)
-  hidden_jax = jnp.array(hidden_pt.numpy())
-
-  print(f"Testing with Shape: {B=}, {L=}, {G=}, {D=}")
-
-  # 3. Test Hashing Logic (Crucial for Engram)
-  # Both implementations use the CPU/NumPy version of NgramHashMapping
-  hash_mapper = NgramHashMapping(
-      engram_vocab_size=e_cfg.engram_vocab_size,
-      max_ngram_size=e_cfg.max_ngram_size,
-      n_embed_per_ngram=e_cfg.n_embed_per_ngram,
-      n_head_per_ngram=e_cfg.n_head_per_ngram,
-      layer_ids=e_cfg.layer_ids,
-      tokenizer_name_or_path=e_cfg.tokenizer_name_or_path,
-      pad_id=e_cfg.pad_id,
-      seed=e_cfg.seed,
-  )
-
-  hashes = hash_mapper.hash(input_ids_np)
-  layer_1_hash = hashes[1]
-
-  assert layer_1_hash.shape == (B, L, (e_cfg.max_ngram_size - 1) * e_cfg.n_head_per_ngram)
-  print("✅ Hashing Logic: Shape match.")
-
-  # 4. Initialize Models
-  # PyTorch
-  torch.manual_seed(42)
-  engram_pt = Engram(layer_id=1)
-
-  # Flax NNX
-  rngs = nnx.Rngs(params=42, default=42)
-  engram_jax = Engram_Flax(layer_id=1, config=e_cfg, backbone_cfg=b_cfg, rngs=rngs)
-
-  # 5. torch Forward Passes
+def init_torch_weights(module, std=1):
+  """
+  Initialize all parameters in the module with N(0,std).
+  This simple strategy is intended only for unit test.
+  """
   with torch.no_grad():
-    out_pt = engram_pt(hidden_pt, input_ids_pt)
+    for _, param in module.named_parameters():
+      torch.nn.init.normal_(param, mean=0.0, std=std)
 
-  # jax forward pass
-  out_jax = engram_jax(hidden_jax, jnp.array(layer_1_hash))
 
-  # 6. Verification
-  print(f"PyTorch Output Shape: {out_pt.shape}")
-  print(f"JAX Output Shape:     {out_jax.shape}")
+def get_cfg_and_mesh():  # config, run_name, dtype, batch_size, seq_len
+  """Returns MaxText configuration and mesh."""
+  cfg = pyconfig.initialize(
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      run_name="hi",
+      # enable_checkpointing=False,
+      # model_name="default",
+      dtype="float32",
+      # high precision
+      weight_dtype="float32",
+      matmul_precision="highest",
+      float32_qk_product=True,
+      float32_logits=True,
+      # per_device_batch_size=batch_size,
+      # max_target_length=seq_len,
+      # max_prefill_predict_length=seq_len,
+      # attention="dot_product",
+      # **asdict(config),
+  )
+  devices_array = maxtext_utils.create_device_mesh(cfg)
+  mesh = Mesh(devices_array, cfg.mesh_axes)
+  return cfg, mesh
 
-  assert out_pt.shape == (B, L, G, D), "PT Shape Mismatch"
-  assert out_jax.shape == (B, L, G, D), "JAX Shape Mismatch"
 
-  # Note: Values won't be identical because weights were initialized randomly
-  # and separately, but we check if they are finite.
-  assert torch.isfinite(out_pt).all(), "PT contains NaNs/Infs"
-  assert jnp.all(jnp.isfinite(out_jax)), "JAX contains NaNs/Infs"
+# -----------------------------------------------------------------------------
+# Test JAX Module: MultiHeadEmbedding
+# -----------------------------------------------------------------------------
 
-  print("✅ Forward Pass: Complete and finite.")
+
+def get_mhe_weights(pt_layer):
+  """
+  Extracts weights from PyTorch MultiHeadEmbedding.
+  """
+  return {
+      "embedding": {"embedding": to_jax(pt_layer.embedding.weight)}
+      # Note: 'offsets' is a Variable/Buffer, not a Param,
+      # so we generally don't load it via update() unless we explicitly sync states.
+      # In this specific module, offsets are derived deterministically from list_of_N
+      # at __init__, so loading weights isn't strictly necessary for offsets
+      # as long as list_of_N is the same.
+  }
+
+
+class MultiHeadEmbeddingTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+  @parameterized.named_parameters(
+      {"testcase_name": "basic", "vocab_sizes": [100, 200, 150], "dim": 32, "batch": 2, "seq_len": 10},
+      {"testcase_name": "single_head", "vocab_sizes": [500], "dim": 64, "batch": 1, "seq_len": 5},
+  )
+  def test_mhe_equivalence(self, vocab_sizes, dim, batch, seq_len):
+    num_heads = len(vocab_sizes)
+
+    # 1. Init PyTorch
+    MultiHeadEmbeddingPT = MultiHeadEmbedding
+    pt_model = MultiHeadEmbeddingPT(vocab_sizes, dim)
+    init_torch_weights(pt_model)
+    pt_model.eval()
+
+    # 2. Init JAX
+    rngs = nnx.Rngs(params=0)
+    jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, rngs)
+
+    # cfg, mesh = get_cfg_and_mesh()
+    # jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, cfg, mesh, rngs)
+
+    # 3. Transfer Weights
+    weights = get_mhe_weights(pt_model)
+    nnx.update(jax_model, weights)
+
+    # 4. Input Data
+    # Input indices must be within the range of each specific head's vocab.
+    # e.g., if vocab_sizes=[100, 200], input for head 0 must be < 100.
+    input_np = np.zeros((batch, seq_len, num_heads), dtype=np.int32)
+    for i, v_size in enumerate(vocab_sizes):
+      input_np[:, :, i] = np.random.randint(0, v_size, (batch, seq_len))
+
+    x_pt = torch.from_numpy(input_np).long()
+    x_jax = jnp.array(input_np)
+
+    # 5. Forward Pass
+    with torch.no_grad():
+      y_pt = pt_model(x_pt)
+
+    y_jax = jax_model(x_jax)
+
+    # 6. Debug / Verify Offsets
+    # Check if JAX offsets match PT offsets
+    jax_offsets = jax_model.offsets.value
+    pt_offsets = pt_model.offsets.cpu().numpy()
+    np.testing.assert_array_equal(jax_offsets, pt_offsets, err_msg="Offsets mismatch")
+
+    # 7. Verify Output
+    # Shape: (B, L, H, D)
+    self.assertEqual(y_jax.shape, (batch, seq_len, num_heads, dim))
+
+    diff = np.abs(y_jax - to_jax(y_pt)).max()
+    print(f"\nTest: {self._testMethodName} | Max Diff: {diff:.6f}")
+
+    np.testing.assert_allclose(
+        y_jax, to_jax(y_pt), rtol=1e-5, atol=1e-5, err_msg=f"MultiHeadEmbedding output mismatch. Max Diff: {diff}"
+    )
+
+
+# -----------------------------------------------------------------------------
+# Test JAX Module: ShortConv
+# -----------------------------------------------------------------------------
+
+
+def get_shortconv_weights(pt_layer):
+  """
+  Extracts weights from PyTorch ShortConv and formats them for JAX ShortConv.
+  """
+  # 1. Conv Weights
+  # PyTorch Conv1d (Depthwise): (Out, 1, K) where groups=Out
+  # JAX Conv (General): (K, In, Out) -> For depthwise: (K, 1, Out)
+  # We permute (2, 1, 0): (Out, 1, K) -> (K, 1, Out)
+  conv_w = pt_layer.conv.weight.permute(2, 1, 0)
+
+  # 2. Norm Weights
+  # wrong: Norms are in a ModuleList, JAX expects a collection indexed by string "0", "1", etc.
+  norm_weights = {i: {"scale": to_jax(n.weight)} for i, n in enumerate(pt_layer.norms)}
+
+  return {"conv": {"kernel": to_jax(conv_w)}, "norms": norm_weights}
+
+
+class ShortConvTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+  @parameterized.named_parameters(
+      {"testcase_name": "base", "hidden_size": 32, "hc_mult": 4, "kernel_size": 4, "dilation": 1},
+      {"testcase_name": "dilated", "hidden_size": 16, "hc_mult": 2, "kernel_size": 3, "dilation": 2},
+      {"testcase_name": "no_activation", "hidden_size": 32, "hc_mult": 4, "kernel_size": 4, "dilation": 1},
+  )
+  def test_shortconv_equivalence(self, hidden_size, hc_mult, kernel_size, dilation):
+    batch_size = 2
+    seq_len = 10
+    activation = True
+
+    # Handle the named parameter check for no_activation
+    if "no_activation" in self._testMethodName:
+      activation = False
+
+    # 1. Init PyTorch
+    ShortConvPT = ShortConv
+    pt_model = ShortConvPT(hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation)
+    init_torch_weights(pt_model)
+    pt_model.eval()
+
+    # 2. Init JAX
+    rngs = nnx.Rngs(params=0)
+    jax_model = ShortConvJAX(hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation, rngs=rngs)
+
+    # 3. Transfer Weights
+    weights = get_shortconv_weights(pt_model)
+    nnx.update(jax_model, weights)
+
+    # 4. Input Data
+    # Shape: (B, L, G, C)
+    # x_np = np.random.randn(batch_size, seq_len, hc_mult, hidden_size).astype(np.float32)
+    # x_pt = torch.from_numpy(x_np)
+    # x_jax = jnp.array(x_np)
+
+    x_pt = torch.randn(batch_size, seq_len, hc_mult, hidden_size)
+    x_jax = to_jax(x_pt)
+
+    # 5. Forward Pass
+    with torch.no_grad():
+      y_pt = pt_model(x_pt)
+
+    y_jax = jax_model(x_jax)
+
+    # 6. Verify
+    # # Check output shape
+    # self.assertEqual(y_jax.shape, (batch_size, seq_len, hc_mult, hidden_size))
+
+    # # Check values
+    # diff = np.abs(y_jax - to_jax(y_pt)).max()
+    # print(f"\nTest: {self._testMethodName} | Max Diff: {diff:.6f}")
+
+    # err_msg=f"ShortConv output mismatch. Max Diff: {diff}
+
+    np.testing.assert_allclose(y_jax, to_jax(y_pt), rtol=1e-5, atol=1e-5)
+
+
+# -----------------------------------------------------------------------------
+# Test JAX Module: Engram
+# -----------------------------------------------------------------------------
+
+
+def get_jax_engram_weights(pt_engram) -> dict:
+
+  # nnx.List expects integer indices in the State dictionary.
+  # Use Integer keys (0, 1) instead of String keys ("0", "1")
+  def to_nnx_list_dict(weight_list):
+    return {i: w for i, w in enumerate(weight_list)}
+
+  # Map Linear layers with Bias
+  def map_linear(pt_linear):
+    d = {"kernel": to_jax(pt_linear.weight.T)}
+    if pt_linear.bias is not None:
+      d["bias"] = to_jax(pt_linear.bias)
+    return d
+
+  key_projs_weights = [map_linear(proj) for proj in pt_engram.key_projs]
+  norm1_weights = [{"scale": to_jax(n.weight)} for n in pt_engram.norm1]
+  norm2_weights = [{"scale": to_jax(n.weight)} for n in pt_engram.norm2]
+
+  conv_weight = pt_engram.short_conv.conv.weight.permute(2, 1, 0)
+  short_conv_norms = [{"scale": to_jax(n.weight)} for n in pt_engram.short_conv.norms]
+
+  return {
+      "mhe": {"embedding": {"embedding": to_jax(pt_engram.multi_head_embedding.embedding.weight)}},
+      "value_proj": map_linear(pt_engram.value_proj),
+      "key_projs": to_nnx_list_dict(key_projs_weights),
+      "norm1": to_nnx_list_dict(norm1_weights),
+      "norm2": to_nnx_list_dict(norm2_weights),
+      "short_conv": {"conv": {"kernel": to_jax(conv_weight)}, "norms": to_nnx_list_dict(short_conv_norms)},
+  }
+
+
+class EngramTest(parameterized.TestCase):
+  """Verifies JAX Engram implementation matches PyTorch reference."""
+
+  def setUp(self):
+    super().setUp()
+    torch.set_default_dtype(torch.float32)
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    self.batch_size = 2
+    self.seq_len = 8
+    self.layer_id = 1
+
+    # Mocking Configs
+    self.e_cfg = EngramConfig(layer_ids=[self.layer_id])
+    self.b_cfg = BackBoneConfig()
+
+    self.nnx_rng = nnx.Rngs(params=0)
+
+  @parameterized.named_parameters(
+      {"testcase_name": "standard_run", "batch_size": 2, "seq_len": 16},
+  )
+  def test_engram_match(self, batch_size, seq_len):
+    # 1. Setup PyTorch Reference
+
+    EngramPT = Engram
+    pt_layer = EngramPT(layer_id=self.layer_id)
+    init_torch_weights(pt_layer)
+    pt_layer.eval()
+
+    # "deepseek-ai/DeepSeek-V3"
+    tokenizer = AutoTokenizer.from_pretrained(engram_cfg.tokenizer_name_or_path, trust_remote_code=True)
+
+    # 2. Setup JAX NNX Implementation
+    cfg, mesh = get_cfg_and_mesh()
+    jax_layer = EngramJAX(
+        layer_id=self.layer_id,
+        config=self.e_cfg,
+        backbone_cfg=self.b_cfg,
+        rngs=self.nnx_rng,
+        cfg=cfg,
+        mesh=mesh,
+        tokenizer=tokenizer,
+    )
+
+    print("torch_layer", pt_layer.state_dict())
+    print("jax_layer", jax_layer)
+
+    # 3. Synchronize Weights
+    jax_weights = get_jax_engram_weights(pt_layer)
+    nnx.update(jax_layer, jax_weights)
+
+    # 4. Prepare Inputs
+    # Create random input_ids and hidden_states
+    input_ids_np = np.random.randint(0, 1000, (batch_size, seq_len))
+
+    pt_input_ids = torch.from_numpy(input_ids_np)
+    pt_hidden_states = torch.randn(batch_size, seq_len, self.b_cfg.hc_mult, self.b_cfg.hidden_size, dtype=torch.float32)
+
+    jax_hidden_states = to_jax(pt_hidden_states)
+
+    # 5. Run Inference
+    with torch.no_grad():
+      pt_out = pt_layer(pt_hidden_states, pt_input_ids)
+
+    jax_out = jax_layer(jax_hidden_states, to_jax(pt_input_ids))
+
+    # 6. Numerical Comparison
+    print(f"\nPT Output Mean: {pt_out.mean().item():.6f}")
+    print(f"JAX Output Mean: {jax_out.mean():.6f}")
+
+    # We expect high similarity since we copied weights exactly
+    np.testing.assert_allclose(
+        to_jax(pt_out), jax_out, rtol=1e-4, atol=1e-4, err_msg="Engram output mismatch between PT and JAX"
+    )
+    print("✅ Engram Layer Equivalence: PASS")
+
 
 if __name__ == "__main__":
-    test_engram_equivalence()
+  unittest.main()
