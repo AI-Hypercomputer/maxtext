@@ -480,6 +480,7 @@ class Attention(BaseModel):
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for TE padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
   use_jax_splash: bool = Field(False, description="Whether to use jax splash attention.")
+  force_q_layout: bool = Field(False, description="Force the Q layout")
 
 
 class MoBa(BaseModel):
@@ -2256,6 +2257,10 @@ class MaxTextConfig(
       raise ValueError(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "
           f"`python3 -m MaxText.muon_utils {self.model_name} True`"
+      )
+    if self.force_q_layout and not self.use_jax_splash:
+      raise ValueError(
+          "`force_q_layout` can only be true if `use_jax_splash` is also true."
       )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS

@@ -107,14 +107,14 @@ def flash_attention_block_masked(
   # `l` is initialized to 0 since no blocks have been processed yet and the sum
   # is 0.
   l = jnp.zeros(
-      (batch_size, num_kv_heads, q_groups, q_seq_len), dtype=jnp.float32
+      (batch_size, num_kv_heads, q_groups, q_seq_len), dtype=data_type
   )
   # `m` is initialized to the mask_value so that the first block's maximum logit
   # correctly becomes the running maximum.
   m = jnp.full(
       (batch_size, num_kv_heads, q_groups, q_seq_len),
       mask_value,
-      dtype=jnp.float32,
+      dtype=data_type,
   )
 
   output = jnp.zeros(
@@ -138,11 +138,12 @@ def flash_attention_block_masked(
     def inner_loop_body(i, carried_inner):
       output, l, m = carried_inner
 
+      # let's get the slice of Q in N dimension
+      q_slice = jax.lax.dynamic_slice_in_dim(q, i * block_q, block_q, axis=-2)
+
       # Calculates the attention computation (Q@K.T)@V with online softmax for
       # the current query and key/value blocks.
       def compute_attention_block(output, l, m):
-        # let's get the slice of Q in N dimension
-        q_slice = jax.lax.dynamic_slice_in_dim(q, i * block_q, block_q, axis=-2)
         output_i_slice = jax.lax.dynamic_slice_in_dim(
             output, i * block_q, block_q, axis=-2
         )
@@ -156,7 +157,7 @@ def flash_attention_block_masked(
             "bxhqc,bxkc->bxhqk",
             q_slice,
             k_j_slice,
-            preferred_element_type=jnp.float32,
+            preferred_element_type=data_type,
         )
         full_mask_i_j_slice = jax.lax.dynamic_slice(
             mask_full,
@@ -193,7 +194,7 @@ def flash_attention_block_masked(
 
         output_i_slice_new = numerator / divider
         output = jax.lax.dynamic_update_index_in_dim(
-            output, output_i_slice_new.astype(data_type), i * block_q, axis=-2
+            output, output_i_slice_new, i * block_q, axis=-2
         )
         l = jax.lax.dynamic_update_index_in_dim(
             l, l_i_new, i * block_q, axis=-1

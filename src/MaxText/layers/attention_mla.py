@@ -16,10 +16,17 @@
 
 import math
 from typing import Any, Optional, Tuple
-
+import jax
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh, NamedSharding
+from jax.experimental import layout
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding
+
+Layout = layout.Format
+if jax.__version_info__ >= (0, 6, 3):
+  DLL = layout.Layout
+else:
+  DLL = layout.DeviceLocalLayout  # type: ignore
 
 from flax import nnx
 
@@ -738,6 +745,10 @@ class MLA(Attention):
       out_logical_name = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
 
     query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
+    if self.config.force_q_layout:
+      query = layout.with_layout_constraint(
+          query, DLL(major_to_minor=(0, 2, 3, 1))
+      )
     key, value, cached_values = self.mla_kv_projection(
         inputs_kv, inputs_positions, decoder_segment_ids, model_mode, previous_chunk
     )
