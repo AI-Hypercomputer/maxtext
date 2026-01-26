@@ -45,7 +45,7 @@ def main() -> None:
   """Main function to run the elastic training disruption test."""
   user_configs.USER_CONFIG.headless = False
   should_continue = helper.handle_cmd_args(
-      user_configs.USER_CONFIG.cluster_config, helper.DELETE, xpk_path=user_configs.USER_CONFIG.xpk_path
+      user_configs.USER_CONFIG.cluster_config, user_configs.USER_CONFIG.delete, user_configs.USER_CONFIG.user
   )
 
   if not should_continue:
