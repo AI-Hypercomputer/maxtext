@@ -16,11 +16,12 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Optional
+from typing import Optional, Sequence
 
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
+import jax
 
 from flax import nnx
 
@@ -29,6 +30,7 @@ from MaxText.common_types import Config
 from MaxText.common_types import MODEL_MODE_PREFILL
 from MaxText.inference import page_manager
 from MaxText.layers import attention_mla
+from MaxText.layers import deepseek_batchsplit
 from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import moe
@@ -350,6 +352,52 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         rngs=self.rngs,
     )
 
+  def fetch_weights(self, params, dtype):
+    params = nnx.to_pure_dict(params)
+    return jax.tree.map(
+        lambda x: jnp.asarray(x[...], dtype),
+        (
+            (
+                (
+                    params["pre_self_attention_layer_norm"]["scale"],
+                    params["post_self_attention_layer_norm"]["scale"],
+                ),
+                (
+                    params["self_attention"]["wq_a"]["kernel"],
+                    params["self_attention"]["wq_b"]["kernel"],
+                    params["self_attention"]["q_norm"]["scale"],
+                    params["self_attention"]["wkv_a"]["kernel"],
+                    params["self_attention"]["wkv_b"]["kernel"],
+                    params["self_attention"]["kv_norm"]["scale"],
+                    params["self_attention"]["out"]["kernel"],
+                ),
+            ),
+            (
+                (
+                    params["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"],
+                    params["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["bias"],
+                ),
+                (
+                    params["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"],
+                    params["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"],
+                    params["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"],
+                ),
+                (
+                    params["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"][
+                        "kernel"
+                    ],
+                    params["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"][
+                        "kernel"
+                    ],
+                    params["DeepSeekMoeBlock_0"]["shared_experts"]["wo"][
+                        "kernel"
+                    ],
+                ),
+            ),
+        ),
+        is_leaf=lambda x: not isinstance(x, Sequence),
+    )
+
   def __call__(
       self,
       inputs,
@@ -366,6 +414,41 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
+
+    # If using batch split schedule, call the batch split version of the layer.
+    if self.config.use_batch_split_schedule:
+      activation_pspec = jax.sharding.PartitionSpec(
+          ("data", "fsdp", "fsdp_transpose", "expert", "context"),
+          None,
+          None,
+      )
+      inputs = jax.shard_map(
+          deepseek_batchsplit.split,
+          mesh=self.mesh,
+          in_specs=activation_pspec,
+          out_specs=[activation_pspec, activation_pspec],
+      )(inputs)
+      dpos = deepseek_batchsplit.split(decoder_positions)
+      dseg = deepseek_batchsplit.split(decoder_segment_ids)
+      weights = self.fetch_weights(nnx.state(self, nnx.Param), self.config.dtype)
+      outputs = deepseek_batchsplit.batch_split_schedule(
+          inputs,
+          weights,
+          dpos,
+          dseg,
+          model_mode=model_mode,
+          mesh=self.mesh,
+          quant=self.quant,
+          cfg=self.config,
+      )
+      outputs = jax.shard_map(
+          deepseek_batchsplit.merge,
+          mesh=self.mesh,
+          in_specs=([activation_pspec, activation_pspec],),
+          out_specs=activation_pspec,
+      )(outputs)
+      return outputs, None
+
     x = self.with_logical_constraint(inputs)
     x = checkpoint_name(x, "decoder_layer_input")
 
