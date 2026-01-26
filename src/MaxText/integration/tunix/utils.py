@@ -17,8 +17,8 @@
 import re
 
 import MaxText.integration.tunix.weight_mapping as weight_mapping  # pylint: disable=consider-using-from-import
-from MaxText.utils.ckpt_conversion.utils.param_mapping import PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.param_mapping import VLLM_HOOK_FNS
+from MaxText.utils.ckpt_conversion.strategies.factory import ModelMapperFactory
+
 
 STANDALONE_VLLM_WEIGHT_MAPPING = weight_mapping.StandaloneVllmWeightMapping()
 
@@ -130,9 +130,8 @@ class VllmWeightMapping:
       return STANDALONE_VLLM_WEIGHT_MAPPING[self.model_name].to_hf_mapping()
 
     config = self.config
-    mapping = self.convert_hf_map_to_sharding_map(
-        PARAM_MAPPING[self.model_name](config, maxtext_config=None, scan_layers=True)
-    )
+    strategy = ModelMapperFactory.get_strategy(self.model_name)
+    mapping = self.convert_hf_map_to_sharding_map(strategy.get_mapping(config, maxtext_config=None, scan_layers=True))
     return mapping
 
   def to_hf_transpose_keys(self):
@@ -146,10 +145,10 @@ class VllmWeightMapping:
     if self.use_standalone_mappings:
       return STANDALONE_VLLM_WEIGHT_MAPPING[self.model_name].to_hf_hook_fns()
 
-    model_family = self.model_name.split("-")[0]
-    if model_family in VLLM_HOOK_FNS:
-      return VLLM_HOOK_FNS[model_family]()
-    else:
+    try:
+      strategy = ModelMapperFactory.get_strategy(self.model_name)
+      return strategy.get_vllm_hooks()
+    except ValueError:
       return {}
 
   def lora_to_hf_mappings(self):

@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -64,10 +64,7 @@ from absl import app
 from MaxText import max_utils
 from MaxText import pyconfig
 from MaxText import max_logging
-from MaxText.utils.ckpt_conversion.utils.param_mapping import (
-    HOOK_FNS,
-    PARAM_MAPPING,
-)
+from MaxText.utils.ckpt_conversion.strategies.factory import ModelMapperFactory
 from MaxText.utils.ckpt_conversion.utils.hf_shape import HF_SHAPE
 from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from MaxText.utils.ckpt_conversion.utils.utils import (
@@ -101,13 +98,19 @@ def _get_model_mappings(
   Raises:
     ValueError: If mappings for the specified `model_name` are not found.
   """
-  if model_name not in PARAM_MAPPING or model_name not in HF_SHAPE or model_name not in HOOK_FNS:
-    raise ValueError(f"Mappings not found for model: {model_name}. Available PARAM_MAPPING keys: {PARAM_MAPPING.keys()}")
+  try:
+    strategy = ModelMapperFactory.get_strategy(model_name)
+  except ValueError as e:
+    # Check old maps if factory fails (or relying on shim)
+    raise ValueError(f"Mappings not found for model: {model_name}") from e
+
+  if model_name not in HF_SHAPE:
+    raise ValueError(f"Shape mapping not found for {model_name}")
 
   return {
-      "param_mapping": PARAM_MAPPING[model_name](hf_config_dict, maxtext_config, scan_layers),
+      "param_mapping": strategy.get_mapping(hf_config_dict, maxtext_config, scan_layers),
       "shape_mapping": HF_SHAPE[model_name](hf_config_dict),
-      "hook_fn_mapping": HOOK_FNS[model_name](hf_config_dict, maxtext_config, scan_layers, saving_to_hf=True),
+      "hook_fn_mapping": strategy.get_hooks(hf_config_dict, maxtext_config, scan_layers, saving_to_hf=True),
   }
 
 

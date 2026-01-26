@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -83,7 +83,7 @@ from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.inference_utils import str2bool
 from MaxText.layers import models, quantizations
 from MaxText.checkpointing import save_checkpoint
-from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
+from MaxText.utils.ckpt_conversion.strategies.factory import ModelMapperFactory
 from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model, validate_and_filter_param_map_keys
 
 jax.config.update("jax_platform_name", "cpu")
@@ -648,11 +648,13 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
   #   f"model.layers.{global_layer_idx}.input_layernorm.weight",
   model_key = config.model_name
-  param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_obj.to_dict(), config, config.scan_layers)
+  strategy = ModelMapperFactory.get_strategy(model_key)
+
+  param_map_mt_to_hf = strategy.get_mapping(hf_config_obj.to_dict(), config, config.scan_layers)
 
   # Example of Hook FN mapping, to perform reshape:
   # f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": reshape_kernel,
-  hook_fn_map_mt = HOOK_FNS[model_key](hf_config_obj.to_dict(), config, config.scan_layers, saving_to_hf=False)
+  hook_fn_map_mt = strategy.get_hooks(hf_config_obj.to_dict(), config, config.scan_layers, saving_to_hf=False)
   max_logging.log("Parameter mappings and hooks obtained.")
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
