@@ -29,7 +29,6 @@ from MaxText.layers import embeddings
 """  
 DeepSeek v3 PyTorch implementation of yarn rotary positional embedding.
 Details https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L294
-
 """
 
 
