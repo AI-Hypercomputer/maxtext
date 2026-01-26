@@ -220,6 +220,9 @@ def save_checkpoint(checkpoint_manager, model, opt_state, step: int, config):
       return {"value": tree.value}
     elif isinstance(tree, dict):
       return {k: state_to_nnx_format(v) for k, v in tree.items()}
+    elif isinstance(tree, tuple) and hasattr(tree, "_fields"):
+      # Handle namedtuples (like ScaleByAdamState) using _make()
+      return type(tree)._make(state_to_nnx_format(item) for item in tree)
     elif isinstance(tree, (list, tuple)):
       return type(tree)(state_to_nnx_format(item) for item in tree)
     else:
@@ -229,6 +232,9 @@ def save_checkpoint(checkpoint_manager, model, opt_state, step: int, config):
     """Wraps arrays in {'value': ...} for opt_state."""
     if isinstance(tree, dict):
       return {k: wrap_arrays_with_value(v) for k, v in tree.items()}
+    elif isinstance(tree, tuple) and hasattr(tree, "_fields"):
+      # Handle namedtuples (like ScaleByAdamState) using _make()
+      return type(tree)._make(wrap_arrays_with_value(item) for item in tree)
     elif isinstance(tree, (list, tuple)):
       return type(tree)(wrap_arrays_with_value(item) for item in tree)
     elif hasattr(tree, "shape"):
