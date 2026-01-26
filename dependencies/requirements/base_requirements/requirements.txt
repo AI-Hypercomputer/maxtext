@@ -5,6 +5,7 @@ cloud-accelerator-diagnostics
 # TODO(b/477743392): Remove the pinned versions once the yanked version detection problem is resolved
 cloud-tpu-diagnostics==0.1.5
 datasets
+drjax
 flax
 gcsfs
 google-api-python-client

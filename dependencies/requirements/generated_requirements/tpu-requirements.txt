@@ -39,6 +39,7 @@ distlib>=0.4.0
 distro>=1.9.0
 dm-tree>=0.1.9
 docstring-parser>=0.17.0
+drjax>=0.1.4
 editdistance>=0.8.1
 einops>=0.8.1
 etils>=1.13.0
