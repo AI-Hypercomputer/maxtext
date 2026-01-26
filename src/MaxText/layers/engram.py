@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-## built-in
+
 from typing import List, Optional
 from dataclasses import dataclass, field
 import math
 
-## third-party
 from sympy import isprime
 import numpy as np
 import torch
@@ -40,6 +39,13 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+
+"""
+DeepSeek-AI, `Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models
+  <https://arxiv.org/pdf/2601.07372>`_, 2026
+  
+Implementation: https://github.com/deepseek-ai/Engram/blob/main/engram_demo_v1.py
+"""
 
 
 class CompressedTokenizer:
@@ -237,6 +243,7 @@ class ShortConv(nnx.Module):
 
   def __init__(
       self,
+      cfg,
       hidden_size: int,
       kernel_size: int = 4,
       dilation: int = 1,
@@ -247,6 +254,7 @@ class ShortConv(nnx.Module):
     self.hc_mult = hc_mult
     self.activation = activation
     total_channels = hidden_size * hc_mult
+    self.rngs = rngs
 
     # In NNX, we define the dimension layout.
     # MaxText typically expects (Batch, Length, Channels)
@@ -262,9 +270,21 @@ class ShortConv(nnx.Module):
     )
 
     # Vectorized RMSNorms for the groups
-    # self.norms = [nnx.RMSNorm(num_features=hidden_size, rngs=rngs) for _ in range(hc_mult)]
     # TODO(shuningjin): eps
-    self.norms = nnx.List([nnx.RMSNorm(num_features=hidden_size, epsilon=1e-5, rngs=rngs) for _ in range(hc_mult)])
+    self.norms = nnx.List(
+        [
+            RMSNorm(
+                num_features=hidden_size,
+                dtype=cfg.dtype,
+                weight_dtype=cfg.weight_dtype,
+                kernel_axes=("norm",),
+                # epsilon=cfg.normalization_layer_epsilon,
+                epsilon=1e-5,  # Match PyTorch default
+                rngs=self.rngs,
+            )
+            for _ in range(hc_mult)
+        ]
+    )
 
     self.act_fn = jax.nn.silu if activation else lambda x: x
 
@@ -285,26 +305,6 @@ class ShortConv(nnx.Module):
     return y.reshape(B, L, G, C)
 
 
-# # version1: nnx Embed
-# class MultiHeadEmbedding(nnx.Module):
-
-#   def __init__(self, list_of_N: List[int], D: int, rngs: nnx.Rngs):
-#     self.num_heads = len(list_of_N)
-#     self.embedding_dim = D
-
-#     # Calculate offsets as a static buffer
-#     offsets = np.cumsum([0] + list_of_N[:-1])
-#     self.offsets = nnx.Variable(jnp.array(offsets, dtype=jnp.int32))
-
-#     self.embedding = nnx.Embed(num_embeddings=sum(list_of_N), features=D, rngs=rngs)
-
-#   def __call__(self, input_ids: jax.Array) -> jax.Array:
-#     # input_ids: (B, L, H)
-#     shifted_ids = input_ids + self.offsets.value
-#     return self.embedding(shifted_ids)
-
-
-# version2: maxtext.Embed
 class MultiHeadEmbedding(nnx.Module):
 
   def __init__(self, list_of_N: List[int], D: int, cfg, mesh, rngs: nnx.Rngs):
@@ -397,7 +397,7 @@ class Engram(nnx.Module):
     # init module
     self.mhe = MultiHeadEmbedding(vocab_sizes, config.n_embed_per_ngram // config.n_head_per_ngram, cfg, mesh, rngs)
     self.short_conv = ShortConv(
-        backbone_cfg.hidden_size, config.kernel_size, config.max_ngram_size, backbone_cfg.hc_mult, rngs=rngs
+        cfg, backbone_cfg.hidden_size, config.kernel_size, config.max_ngram_size, backbone_cfg.hc_mult, rngs=rngs
     )
 
     engram_hidden_size = config.n_embed_per_ngram * (config.max_ngram_size - 1)
@@ -419,18 +419,8 @@ class Engram(nnx.Module):
         use_bias=True,
     )
 
-    # self.key_projs = [nnx.Linear(config.n_embed_per_ngram * (config.max_ngram_size-1), backbone_cfg.hidden_size, use_bias=False, rngs=rngs) for _ in range(backbone_cfg.hc_mult)]
-    # self.norm1 = [nnx.RMSNorm(backbone_cfg.hidden_size, rngs=rngs) for _ in range(backbone_cfg.hc_mult)]
-    # self.norm2 = [nnx.RMSNorm(backbone_cfg.hidden_size, rngs=rngs) for _ in range(backbone_cfg.hc_mult)]
-
     self.key_projs = nnx.List(
         [
-            # nnx.Linear(
-            #     engram_hidden_size,
-            #     backbone_cfg.hidden_size,
-            #     use_bias=False,
-            #     rngs=rngs,
-            # )
             DenseGeneral(
                 in_features_shape=engram_hidden_size,
                 out_features_shape=backbone_cfg.hidden_size,
@@ -451,10 +441,32 @@ class Engram(nnx.Module):
 
     # torch.finfo(torch.float32).eps
     self.norm1 = nnx.List(
-        [nnx.RMSNorm(backbone_cfg.hidden_size, rngs=rngs, epsilon=1e-6) for _ in range(backbone_cfg.hc_mult)]
+        [
+            RMSNorm(
+                num_features=backbone_cfg.hidden_size,
+                dtype=cfg.dtype,
+                weight_dtype=cfg.weight_dtype,
+                kernel_axes=("norm",),
+                # epsilon=cfg.normalization_layer_epsilon,
+                epsilon=1e-6,  # Match PyTorch default
+                rngs=self.rngs,
+            )
+            for _ in range(backbone_cfg.hc_mult)
+        ]
     )
     self.norm2 = nnx.List(
-        [nnx.RMSNorm(backbone_cfg.hidden_size, rngs=rngs, epsilon=1e-6) for _ in range(backbone_cfg.hc_mult)]
+        [
+            RMSNorm(
+                num_features=backbone_cfg.hidden_size,
+                dtype=cfg.dtype,
+                weight_dtype=cfg.weight_dtype,
+                kernel_axes=("norm",),
+                # epsilon=cfg.normalization_layer_epsilon,
+                epsilon=1e-6,  # Match PyTorch default
+                rngs=self.rngs,
+            )
+            for _ in range(backbone_cfg.hc_mult)
+        ]
     )
 
   def __call__(self, hidden_states: jax.Array, input_ids: jax.Array) -> jax.Array:

@@ -19,7 +19,7 @@ To run the test
   python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
   python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s
 
-reference: https://github.com/deepseek-ai/Engram/blob/main/engram_demo_v1.py
+reference: https://github.com/deepseek-ai/Engram/blob/fb7f84a21f91223715394a33a1dc24bbfb7f788e/engram_demo_v1.py
 """
 
 
@@ -643,7 +643,8 @@ class ShortConvTest(parameterized.TestCase):
 
     # 2. Init JAX
     rngs = nnx.Rngs(params=0)
-    jax_model = ShortConvJAX(hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation, rngs=rngs)
+    cfg, mesh = get_cfg_and_mesh()
+    jax_model = ShortConvJAX(cfg, hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation, rngs=rngs)
 
     # 3. Transfer Weights
     weights = get_shortconv_weights(pt_model)
