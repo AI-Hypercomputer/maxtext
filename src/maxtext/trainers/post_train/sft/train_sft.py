@@ -56,13 +56,13 @@ from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText import model_creation_utils
 from MaxText.train import loss_fn
-from MaxText.utils.goodput_utils import (
+from MaxText.common.goodput import (
     GoodputEvent,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
-from maxtext.trainers.post_train.sft import hooks
+from MaxText.trainers.post_train.sft import hooks
 
 
 def get_tunix_config(mt_config):

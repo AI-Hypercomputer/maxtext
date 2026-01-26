@@ -18,9 +18,9 @@ import unittest
 import pytest
 import os.path
 
-from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.common import profiler
 
 
 class ProfilerTest(unittest.TestCase):

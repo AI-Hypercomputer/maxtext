@@ -21,7 +21,7 @@ from jax.experimental import checkify
 
 from MaxText import exceptions
 from MaxText.sharding import get_input_data_sharding
-from MaxText.utils.goodput_utils import (
+from MaxText.common.goodput import (
     GoodputEvent,
     maybe_record_goodput,
 )

@@ -36,11 +36,11 @@ from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import sharding
-from MaxText.data_loader import DataLoader
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
-from MaxText.metric_logger import MetricLogger, MetadataKey
 from MaxText.utils import gcs_utils
-from MaxText.utils.goodput_utils import GoodputEvent, record_goodput
+from MaxText.common.data_loader import DataLoader
+from MaxText.common.goodput import GoodputEvent, record_goodput
+from MaxText.common.metric_logger import MetricLogger, MetadataKey
 
 
 class SFTTrainingHooks(TrainingHooks):

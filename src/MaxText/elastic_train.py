@@ -60,27 +60,26 @@ from pathwaysutils.debug import timing
 
 import tensorflow as tf
 
-from MaxText import checkpointing
 from MaxText import exceptions
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import max_logging
-from MaxText import profiler
 from MaxText import pyconfig
-from MaxText.data_loader import DataLoader
-from MaxText.metric_logger import MetricLogger
 from MaxText.train import get_first_step
 from MaxText.train_utils import setup_train_loop
 from MaxText.train import train_step
 from MaxText.train_utils import validate_train_config
-from MaxText.utils.goodput_utils import (
+from maxtext.common import checkpointing, profiler
+from MaxText.common.data_loader import DataLoader
+from MaxText.common.goodput import (
     GoodputEvent,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
-from MaxText.vertex_tensorboard import VertexTensorboardManager
+from MaxText.common.metric_logger import MetricLogger
+from MaxText.common.vertex_tensorboard import VertexTensorboardManager
 
 logging.basicConfig()
 logging.getLogger("pathwaysutils.elastic.manager").setLevel(logging.INFO)

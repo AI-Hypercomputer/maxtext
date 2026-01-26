@@ -67,33 +67,30 @@ import transformers
 from ml_goodput_measurement.src.goodput import GoodputRecorder
 
 import MaxText as mt
-from MaxText import checkpointing
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import sharding
 from MaxText import train_utils
-from MaxText import profiler
 from MaxText import pyconfig
-from MaxText.checkpointing import CheckpointManager
 from MaxText.utils import gcs_utils
 from MaxText.inference import offline_engine
-from MaxText.data_loader import DataLoader
 from MaxText.experimental.rl import grpo_input_pipeline
 from MaxText.experimental.rl import grpo_utils
 from MaxText.globals import EPS
-from MaxText.metric_logger import MetricLogger
 from MaxText.train import get_first_step
 from MaxText.train_utils import validate_train_config
-from MaxText.utils.goodput_utils import (
+from maxtext.common import checkpointing, profiler
+from MaxText.common.data_loader import DataLoader
+from MaxText.common.goodput import (
     GoodputEvent,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
-from MaxText.vertex_tensorboard import VertexTensorboardManager
-
+from MaxText.common.metric_logger import MetricLogger
+from MaxText.common.vertex_tensorboard import VertexTensorboardManager
 
 # pylint: disable=too-many-positional-arguments
 
@@ -505,7 +502,7 @@ def setup_train_loop(
     recorder: GoodputRecorder,
 ) -> tuple[
     jax.Array,
-    CheckpointManager,
+    checkpointing.CheckpointManager,
     TrainState,
     TrainState,
     mt.Transformer,

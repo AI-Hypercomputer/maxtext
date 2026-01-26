@@ -43,13 +43,13 @@ from aqt.jax.v2 import aqt_tensor
 from flax.linen import partitioning as nn_partitioning
 from flax import nnx
 
-from MaxText import checkpointing
 from MaxText import common_types
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.layers import models, quantizations, deepseek
+from maxtext.common import checkpointing
 import orbax.checkpoint as ocp
 
 IGNORE = ocp.PLACEHOLDER

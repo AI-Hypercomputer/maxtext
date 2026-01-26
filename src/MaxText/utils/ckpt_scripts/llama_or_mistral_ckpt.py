@@ -60,11 +60,11 @@ from jax import tree
 
 from flax.training import train_state
 
-from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.inference_utils import str2bool
 from MaxText.utils import gcs_utils
+from maxtext.common import checkpointing
 
 MODEL_PARAMS_DICT = {
     "llama2-70b": {
