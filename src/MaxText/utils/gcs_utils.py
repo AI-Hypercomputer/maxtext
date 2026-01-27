@@ -79,7 +79,7 @@ def upload_dump(local_dir, target_dir, module_name=None, delete_local_after=True
     hostname = socket.gethostname()  # Alternatively can use jax.process_id()
     prefix_name = os.path.join(prefix_name, hostname)
     target_dir = os.path.join(target_dir, hostname)
-  max_logging.log(f"Uploading HLO Dump to {target_dir}...")
+  max_logging.log(f"Uploading Dump to {target_dir}...")
   for root, _, files in os.walk(local_dir):
     for file in files:
       if module_name and module_name not in file:
@@ -91,7 +91,7 @@ def upload_dump(local_dir, target_dir, module_name=None, delete_local_after=True
       blob_name = os.path.join(prefix_name, relative_path)
       blob = bucket.blob(blob_name)
       blob.upload_from_filename(local_path)
-  max_logging.log(f"HLO Dump Uploaded to {target_dir}!")
+  max_logging.log(f"Dump Uploaded to {target_dir}!")
   if delete_local_after:
     shutil.rmtree(local_dir)
 

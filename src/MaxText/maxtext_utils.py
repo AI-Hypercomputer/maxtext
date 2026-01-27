@@ -17,6 +17,7 @@
 
 import functools
 import pickle
+import os
 
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
@@ -40,6 +41,7 @@ from MaxText import max_utils
 from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.configs import types
+from MaxText.utils import gcs_utils
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.inference.page_manager import PageState
 from maxtext.common import checkpointing
@@ -1234,3 +1236,33 @@ def print_shardings_params(params, params_sharding, mesh):
     shape = jax.typeof(leaf_val)
     pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
     max_logging.log(f"{path_str:.<80} {shape} {tuple(pspec)}")
+
+
+def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
+  """Dump jaxpr to local then upload to GCS."""
+  if not config.dump_jaxpr:
+    return
+  max_logging.log("Tracing train_step to jaxpr...")
+
+  # We use the p_train_step (the JIT-decorated function)
+  p_train_jaxpr = jax.make_jaxpr(p_train_step)(*train_step_inputs)
+
+  local_filename = "train_step.jaxpr"
+  local_path = os.path.join(config.dump_jaxpr_local_dir, local_filename)
+
+  os.makedirs(config.dump_jaxpr_local_dir, exist_ok=True)
+
+  # pylint: disable=unspecified-encoding
+  with open(local_path, "w") as f:
+    f.write(str(p_train_jaxpr))
+
+  max_logging.log(f"Jaxpr dumped locally to {local_path}")
+
+  if config.dump_jaxpr_gcs_dir:
+    gcs_utils.upload_dump(
+        config.dump_jaxpr_local_dir,
+        config.dump_jaxpr_gcs_dir,
+        module_name=local_filename,
+        delete_local_after=config.dump_jaxpr_delete_local_after,  # Keeping local for debugging
+        all_host_upload=False,  # Only upload from lead host (Host 0)
+    )

@@ -121,6 +121,7 @@ def jit_and_compile(
     out_shardings,
     static_argnums,
     donate_argnums,
+    config,
     logical_axis_rules,
 ):
   """Jit, lower, and compile func."""
@@ -132,6 +133,7 @@ def jit_and_compile(
         static_argnums=static_argnums,
         donate_argnums=donate_argnums,
     )
+    maxtext_utils.maybe_dump_jaxpr(config, jitted, func_input_args)
     lowered = jitted.lower(*func_input_args, **func_input_kwargs)
   compiled = lowered.compile()
   return compiled
@@ -180,6 +182,7 @@ def is_oom(argv: Sequence[str]) -> bool:
         out_shard,
         static_argnums,
         donate_argnums,
+        config,
         nn_partitioning.axis_rules(config.logical_axis_rules),
     )
     return False
@@ -241,6 +244,7 @@ def main(argv: Sequence[str]) -> None:
       out_shard,
       static_argnums,
       donate_argnums,
+      config,
       nn_partitioning.axis_rules(config.logical_axis_rules),
   )
   print("Jitting and compilation complete!", flush=True)
