@@ -1187,6 +1187,7 @@ class AttentionOp(nnx.Module):
             mask=single_head_mask,
             config=sa_config,
             q_seq_shards=cp_size,  # axis for sequence sharding,
+            save_residuals=(self.config.use_max_logit_estimate == -1),
         )
         return splash_kernel
 
@@ -1294,10 +1295,13 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_tuple = None
 
       if self.config.use_tokamax_splash:
-        kernel = partial(splash_kernel, max_logit_value=max_logit_value)
-        attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
+        out = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value), in_axes=(0, 0, 0, 0, None))(
             query, key, value, decoder_segment_ids_tuple, sinks
         )
+        # if self.config.use_max_logit_estimate == -1:
+        #   # When save_residuals=True, tokamax returns (output, stats)
+        #   return out[0]
+        return out
       elif self.config.use_jax_splash:
         materialized_mask = jnp.asarray(mask[:, :])
         attention_output = jax_flash_attention.flash_attention_block_masked(
