@@ -881,7 +881,9 @@ class AttentionOp(nnx.Module):
                               Use `dot_product` instead."""
           )
         return (
-            self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, sinks),
+            self.tpu_flash_attention(
+                query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, sinks, index_mask
+            ),
             None,
             None,
         )
@@ -1038,6 +1040,7 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids: Array | None,
       attn_logits_soft_cap: float | None = None,
       sinks: Array | None = None,
+      index_mask: Array | None = None,
   ) -> Array:
     """TPU Flash Attention."""
 
@@ -1051,6 +1054,7 @@ class AttentionOp(nnx.Module):
     segment_axis_names_q = None
     segment_axis_names_kv = None
     sink_axis_names = self._logical_to_mesh_axes((HEAD,))
+    index_mask_axis_names = self._logical_to_mesh_axes((BATCH,))
     if decoder_segment_ids is not None:
       if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
         segment_axis_names_q = self._logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH))
@@ -1195,7 +1199,15 @@ class AttentionOp(nnx.Module):
           [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
       )
       shard_head_size = np.prod(logical_axis_rules_head)
-      splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
+      if self.config.use_sparse_indexer and index_mask is not None:
+        print(f"single_head_mask.shape: {single_head_mask.shape}")
+        print(f"index_mask.shape: {index_mask.shape}")
+        # TODO: create tokamax mask class before &
+        single_head_mask = single_head_mask[None, :, :] & index_mask
+        splash_kernel = jax.vmap(splash_kernel, in_axes=(0, None))(single_head_mask, int(shard_head_size))
+      else:
+        splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
+
       if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
         segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
       else:
@@ -1256,6 +1268,7 @@ class AttentionOp(nnx.Module):
             None,  # no sharding for cp_size
             None,  # no sharding for load_balanced_context_parallel
             sink_axis_names,  # sharding align with query heads
+            index_mask_axis_names,
         ),
         out_specs=axis_names_q,
         check_vma=False,
@@ -1270,6 +1283,7 @@ class AttentionOp(nnx.Module):
         cp_size,
         load_balanced_context_parallel,
         sinks,
+        index_mask,
     ):
       # If load_balanced_context_parallel is enabled, reorder the key and value tensors
       # to ensure that they are contiguous in memory.
@@ -1296,9 +1310,9 @@ class AttentionOp(nnx.Module):
 
       if self.config.use_tokamax_splash:
         kernel = partial(splash_kernel, max_logit_value=max_logit_value)
-        attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
-            query, key, value, decoder_segment_ids_tuple, sinks
-        )
+        attention_output = jax.vmap(
+            lambda q, k, v, d, s, idx_mask: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None, 0)
+        )(query, key, value, decoder_segment_ids_tuple, sinks)
       elif self.config.use_jax_splash:
         materialized_mask = jnp.asarray(mask[:, :])
         attention_output = jax_flash_attention.flash_attention_block_masked(
@@ -1336,6 +1350,7 @@ class AttentionOp(nnx.Module):
     decoder_segment_ids_q = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
     decoder_segment_ids_kv = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
     sinks = _maybe_shard_with_pspec(sinks, sink_axis_names)
+    index_mask = _maybe_shard_with_pspec(index_mask, index_mask_axis_names)
 
     x = wrap_flash_attention(
         query,
@@ -1347,6 +1362,7 @@ class AttentionOp(nnx.Module):
         cp_size,
         load_balanced_context_parallel,
         sinks,
+        index_mask,
     )
 
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
@@ -1638,8 +1654,9 @@ class AttentionOp(nnx.Module):
     # Apply index mask, deepseek sparse attention
     # index mask contains 0.0 for kept tokens and large negative for masked tokens.
     if index_mask is not None:
+      # index_mask: from [b, q_len, kv_len] to [b, 1, 1, q_len, kv_len]
+      index_mask = index_mask[:, None, None, :, :]
       # attn_weights: [b, n_kv, n_q // n_kv, q_len, kv_len]
-      # index_mask: [b, 1, 1, q_len, kv_len]
       attn_weights = apply_mask_to_logits(attn_weights, index_mask)
 
     if self.is_partition_in_decode(q_seq_len):

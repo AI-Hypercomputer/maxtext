@@ -257,7 +257,17 @@ class Indexer(nnx.Module):
     if self.config.max_target_length <= self.index_topk:
       return None, None, None
 
+    # bsz = 1 # inside of vmap
     bsz, seqlen, _ = inputs_q.shape  # s = t = seqlen
+    # inputs_q = inputs_q[None, ...]
+    # low_rank_q = low_rank_q[None, ...]
+    # inputs_kv = inputs_kv[None, ...]
+    # inputs_positions = inputs_positions[None, ...]
+    # print("beginning")
+    # print(f"inputs_q: {inputs_q.shape}")
+    # print(f"low_rank_q: {low_rank_q.shape}")
+    # print(f"inputs_kv: {inputs_kv.shape}")
+    # print(f"inputs_positions: {inputs_positions.shape}")
 
     # Query Processing: Project from Latent low_rank_q
     q = self.wq_b(low_rank_q)  # [b, t, q_lora_rank] -> [b, t, h * d]
@@ -267,13 +277,15 @@ class Indexer(nnx.Module):
     # Key Processing: Project from Input
     k = self.wk(inputs_kv)  # [b, s, embed_dim] -> [b, s, d]
     k = self.k_norm(k)
-    k = k[:, :, None, :]  # [b, s, d] -> [b, s, 1, d]
+    k = k[:, :, None, :] # [b, s, d] -> [b, s, 1, d]
     k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
     k = k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
 
     # Compute Index Scores
     # QK product: relu(q @ k.T), [b, t, s, h]
     # Similar to MQA, each key is shared by h query head
+    print(f"q: {q.shape}")
+    print(f"k: {k.shape}")
     logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
     logits = jax.nn.relu(logits)
     # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
@@ -281,6 +293,8 @@ class Indexer(nnx.Module):
     # Weights scaling affect index_score, but does not affect topk_indices. Keep scaling for numerical stability.
     # https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py#L478-L480
     weights = weights * (self.n_heads**-0.5) * self.softmax_scale
+    print(f"weights: {weights.shape}")
+    print(f"logits: {logits.shape}")
     # Weighted sum over head: sum_h(logits * weights)
     index_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
 
@@ -1024,8 +1038,8 @@ class MLA(Attention):
           inputs_positions=inputs_positions,
           attention_mask=attention_mask,
       )
-      if index_mask is not None:
-        index_mask = index_mask[:, None, None, :, :]  # [b, 1, 1, q_len, kv_len]
+      # if index_mask is not None:
+      #   index_mask = index_mask[:, None, None, :, :]  # [b, 1, 1, q_len, kv_len]
 
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
@@ -1035,6 +1049,14 @@ class MLA(Attention):
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
       # Pass the index_mask to the Attention Op
+      # index_mask, _, _ = jax.vmap(self.indexer, in_axes=(0, 0, 0, 0, None))(
+      #     inputs_q,
+      #     low_rank_q,
+      #     inputs_kv,
+      #     inputs_positions,
+      #     attention_mask,
+      # )
+      # print("success here")
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, index_mask=index_mask)
 
     if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:

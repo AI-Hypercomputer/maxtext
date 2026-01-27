@@ -751,7 +751,7 @@ def get_jax_mla_weights(pt_mla, cfg):
   }
 
 
-def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len):
+def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len, attention):
   """Returns MaxText configuration and mesh."""
   cfg = pyconfig.initialize(
       [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
@@ -767,7 +767,7 @@ def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len):
       per_device_batch_size=batch_size,
       max_target_length=seq_len,
       max_prefill_predict_length=seq_len,
-      attention="dot_product",
+      attention=attention,
       **asdict(config),
   )
   devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -907,12 +907,13 @@ class DeepseekV32MLATest(DeepseekTestBase):
   """Tests for MLA Attention with Sparse Indexing."""
 
   @parameterized.named_parameters(
-      {"testcase_name": "seq_len=2 (index_topk=4)", "seq_len": 2},
-      {"testcase_name": "seq_len=8 (index_topk=4)", "seq_len": 8},
+      {"testcase_name": "seq_len=2 (index_topk=4) & dot_product", "attention": "dot_product", "seq_len": 2},
+      {"testcase_name": "seq_len=8 (index_topk=4) & dot_product", "attention": "dot_product", "seq_len": 8},
+      {"testcase_name": "seq_len=2 (index_topk=4) & flash", "attention": "flash", "seq_len": 2},
+      {"testcase_name": "seq_len=8 (index_topk=4) & flash", "attention": "flash", "seq_len": 8},
   )
-  # index_topk=4
-  def test_mla_match(self, seq_len=8):
-    """Verifies MLA output (train mode) matches PyTorch (MHA mode) with indexer."""
+  def assert_mla_parity(self, attention="dot_product", seq_len=8):
+    """Helper function to verifies MLA output (train mode) matches PyTorch (MHA mode) with indexer."""
 
     torch_inputs, jax_inputs = self.get_data(seq_len)
 
@@ -937,6 +938,7 @@ class DeepseekV32MLATest(DeepseekTestBase):
         dtype=self.dtype,
         batch_size=self.batch_size,
         seq_len=self.seq_len,
+        attention=attention,
     )
 
     jax_mla = attention_mla.MLA(
@@ -960,7 +962,7 @@ class DeepseekV32MLATest(DeepseekTestBase):
         rope_factor=cfg.rope_factor,
         max_target_length=self.seq_len,
         mesh=mesh,
-        attention_kernel="dot_product",
+        attention_kernel=attention,
         inputs_q_shape=(self.batch_size, self.seq_len, cfg.emb_dim),
         inputs_kv_shape=(self.batch_size, self.seq_len, cfg.emb_dim),
         rngs=self.nnx_rng,
