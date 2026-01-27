@@ -947,10 +947,9 @@ def setup_initial_state(
 def get_logical_annotations(model, tx, config, rng, mesh, is_training=True):
   init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
 
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)
-
-  logical_annotations = nn.get_partition_spec(abstract_state)
+    logical_annotations = nn.get_partition_spec(abstract_state)
   return logical_annotations
 
 
@@ -1240,7 +1239,6 @@ def create_learning_rate_schedule(config):
 def print_shardings_params(params, params_sharding, mesh, logical_annotations=None):
   """
   Print state shardings comparing Logical Definition vs Physical Result.
-  Simplified version: Directly prints logical annotations without reverse mapping.
   """
   if not hasattr(params, "params"):
     params = {"params": params}
