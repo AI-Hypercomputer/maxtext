@@ -34,6 +34,7 @@ from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONT
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText import max_logging
 from MaxText.sharding import create_sharding
+from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import initializers
 from MaxText.layers import quantizations
@@ -44,6 +45,8 @@ from MaxText.layers.attentions import Attention
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.embeddings import Embed, attend_on_embedding
 from MaxText.layers.quantizations import AqtQuantization as Quant
+
+# Import specific layer definitions (assuming these files exist)
 from MaxText.layers import (
     deepseek,
     deepseek_batchsplit,
