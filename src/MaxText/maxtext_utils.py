@@ -1253,34 +1253,17 @@ def print_shardings_params(params, params_sharding, mesh, logical_annotations=No
   leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(params_sharding)
   leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations.params)
 
-  for i, ((path, leaf_val), (_, leaf_sharding)) in enumerate(zip(leaves_params, leaves_sharding)):
+  for (path, leaf_val), (_, leaf_sharding), (_, leaf_logical_val) in zip(leaves_params, leaves_sharding, leaves_logical):
     path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
     shape = jax.typeof(leaf_val)
     pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
     pspec_str = str(tuple(pspec))
+    logical_str = str(leaf_logical_val)
 
-  if not has_logical:
-    leaves_logical = [(None, None)] * len(leaves_params)
+    message = f" {path_str}\n" f"    Shape:     {shape}\n" f"    Logical:   {logical_str}\n" f"    Physical:  {pspec_str}"
+    max_logging.info(message)
 
-  if len(leaves_params) != len(leaves_sharding):
-    max_logging.warning("Warning: Params and Sharding tree mismatch.")
-    return
-
-  for i, (path, leaf_val) in enumerate(leaves_params):
-    _, leaf_sharding = leaves_sharding[i]
-    leaf_logical_val = leaves_logical[i][1] if has_logical else None
-
-    path_str = "/".join(str(p.key if hasattr(p, "key") else getattr(p, "name", "?")) for p in path)
-
-    shape = str(jax.typeof(leaf_val))
-
-  for (path, leaf_val), (_, leaf_sharding), (_, leaf_rule_value) in zip(
-      leaves_params, leaves_sharding, leaves_rule_values
-  ):
-    path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
-    shape = jax.typeof(leaf_val)
-    pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
-    max_logging.log(f"{path_str:.<80} {shape} {tuple(pspec)}")
+  print(flush=True)
 
 
 def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
