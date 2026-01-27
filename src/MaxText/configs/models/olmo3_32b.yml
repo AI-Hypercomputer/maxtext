@@ -1,0 +1,51 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# AllenAI OLMo 3 32B Configuration
+# https://huggingface.co/allenai/Olmo-3.1-32B-Instruct/blob/main/config.json
+
+model_name: "olmo3_32b"
+decoder_block: "olmo3"
+
+# Model Dimensions
+base_emb_dim: 5120
+base_num_query_heads: 40
+base_num_kv_heads: 8
+base_mlp_dim: 27648
+base_num_decoder_layers: 64
+head_dim: 128
+
+# Activations & Normalization
+mlp_activations: ["silu", "linear"]
+normalization_layer_epsilon: 1.e-6
+use_qk_norm: True
+
+# Attention
+# Layers 0,1,2 use sliding window 4096. Layer 3 uses global. Repeats.
+sliding_window_size: 4096
+inhomogeneous_layer_cycle_interval: 4
+
+# RoPE (YaRN)
+rope_type: "yarn"
+rope_max_timescale: 500000 # rope_theta
+rope_factor: 8.0 # factor so 0.1 * ln(rope_factor) + 1.0 = 1.2079441541679836
+original_max_position_embeddings: 8192
+beta_fast: 32.0
+beta_slow: 1.0
+max_position_embeddings: 65536
+rope_attention_scaling: True
+
+# Embeddings
+vocab_size: 100278
+logits_via_embedding: False
