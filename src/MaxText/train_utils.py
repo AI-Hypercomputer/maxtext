@@ -17,18 +17,17 @@
 
 import os
 import jax
-from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import sharding
 from MaxText import optimizers
 from MaxText.dpo_utils import _merge_dpo_state
-from MaxText.data_loader import create_dataloader
 from MaxText.rampup_batch import create_rampup_manager
-from MaxText.utils.goodput_utils import GoodputEvent
-from MaxText.utils.goodput_utils import maybe_record_goodput
 from MaxText import model_creation_utils
+from maxtext.common import checkpointing
+from maxtext.common.data_loader import create_dataloader
+from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
 
 
 def create_training_tools(config, model, mesh):

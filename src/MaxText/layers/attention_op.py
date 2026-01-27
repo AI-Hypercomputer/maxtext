@@ -604,12 +604,14 @@ class AttentionOp(nnx.Module):
           logical OR.
 
     Returns:
-      An `Array` representing the attention mask, broadcastable to the shape
-      `[batch_size, num_heads, q_sequence_length, kv_sequence_length]`.
+      An `Array` representing the attention mask, with shape
+       `[batch_size, 1, 1, q_sequence_length, kv_sequence_length]`.
+      It is broadcastable to the shape
+       `[batch_size, num_kv_heads, group_size=n_q // n_kv, q_sequence_length, kv_sequence_length]`.
       Positions with `0.0` allow attention, while positions with
-      `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
+       `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
       Returns `None` if no masking is determined to be necessary based on
-      the inputs and configuration.
+       the inputs and configuration.
 
     References:
       [1] JAX Pallas MHA Flash Attention:
@@ -822,6 +824,7 @@ class AttentionOp(nnx.Module):
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
       sinks: Array | None = None,
+      index_mask: Array | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -861,6 +864,7 @@ class AttentionOp(nnx.Module):
           previous_chunk,
           bidirectional_mask=bidirectional_mask,
           sinks=sinks,
+          index_mask=index_mask,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -1559,6 +1563,7 @@ class AttentionOp(nnx.Module):
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
       sinks: Array | None = None,
+      index_mask: Array | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1612,6 +1617,7 @@ class AttentionOp(nnx.Module):
     attn_mask = self.generate_attention_mask(
         query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
     )
+
     if self.config.moba:
       kv_seq_len = key.shape[1]
       # This logic for `next_pos` is duplicated from `generate_attention_mask`.
@@ -1628,6 +1634,13 @@ class AttentionOp(nnx.Module):
       # is scale-invariant, we can use the scaled query directly.
       moba_mask = self._generate_moba_mask(query, key, q_positions)
       attn_weights += moba_mask
+
+    # Apply index mask, deepseek sparse attention
+    # index mask contains 0.0 for kept tokens and large negative for masked tokens.
+    if index_mask is not None:
+      # attn_weights: [b, n_kv, n_q // n_kv, q_len, kv_len]
+      # index_mask: [b, 1, 1, q_len, kv_len]
+      attn_weights = apply_mask_to_logits(attn_weights, index_mask)
 
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
@@ -1776,6 +1789,7 @@ class AttentionOp(nnx.Module):
       previous_chunk=None,
       bidirectional_mask=None,
       sinks=None,
+      index_mask: Optional[Array] = None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
@@ -1798,6 +1812,7 @@ class AttentionOp(nnx.Module):
         previous_chunk=previous_chunk,
         bidirectional_mask=bidirectional_mask,
         sinks=sinks,
+        index_mask=index_mask,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
     )

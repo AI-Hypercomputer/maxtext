@@ -16,10 +16,19 @@
 
 import math
 from typing import Any, Optional, Tuple
+import copy
 
+import jax
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh, NamedSharding
+from jax.experimental import layout
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding
+
+Layout = layout.Format
+if jax.__version_info__ >= (0, 6, 3):
+  DLL = layout.Layout
+else:
+  DLL = layout.DeviceLocalLayout  # type: ignore
 
 from flax import nnx
 
@@ -50,6 +59,7 @@ from MaxText.common_types import (
     PREFILL_KV_BATCH,
     PREFILL_LENGTH,
     AttentionType,
+    DEFAULT_MASK_VALUE,
 )
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
@@ -62,6 +72,233 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+
+
+class Indexer(nnx.Module):
+  """Indexer for DeepSeek Sparse Attention (DSA).
+
+  This module implements the sparse attention indexer introduced in DeepSeek V3.2.
+  It computes relevance scores to select the top-k most relevant tokens for attention.
+
+  References:
+    DeepSeek-AI, `DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models
+      <https://arxiv.org/pdf/2512.02556>`_, 2025
+    Implementation: https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/main/inference/model.py
+  """
+
+  def __init__(
+      self,
+      config: Any,
+      rotary_embedding,
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+      quant: Optional[Quant] = None,
+      model_mode: str = MODEL_MODE_TRAIN,
+      rngs: Optional[nnx.Rngs] = None,
+  ):
+    self.config = config
+    self.rotary_embedding = rotary_embedding
+    self.quant = quant
+    self.kernel_init = kernel_init
+    self.model_mode = model_mode
+    self.rngs = rngs
+    self.dtype = config.dtype
+    self.weight_dtype = config.weight_dtype
+
+    self.n_heads = config.index_n_heads
+    self.head_dim = config.index_head_dim
+    self.index_topk = config.index_topk
+    self.emb_dim = config.emb_dim
+    self.rope_head_dim = config.qk_rope_head_dim
+    self.q_lora_rank = config.q_lora_rank
+    # scale head weights for numerical stability
+    self.softmax_scale = self.head_dim**-0.5
+
+    # Query Projection: Latent Query -> Indexer Query
+    self.wq_b = DenseGeneral(
+        in_features_shape=self.q_lora_rank,
+        out_features_shape=(self.n_heads, self.head_dim),
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=("q_lora", "q_heads", "kv"),
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        quant=self.quant,
+        matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
+        rngs=self.rngs,
+    )
+
+    # Key Projection: Input -> Shared Indexer Key
+    self.wk = DenseGeneral(
+        in_features_shape=self.emb_dim,
+        out_features_shape=self.head_dim,
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=("embed", "kv"),
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        quant=self.quant,
+        matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
+        rngs=self.rngs,
+    )
+
+    # Key Normalization with Bias
+    self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=True, dtype=self.weight_dtype, rngs=rngs)
+
+    # Projection: Input -> Importance Weights for Heads
+    # deepseek3.2 enforces FP32 and does not quantize, for precision and stability.
+    self.weights_proj = DenseGeneral(
+        in_features_shape=self.emb_dim,
+        out_features_shape=self.n_heads,
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=("embed", "q_heads"),
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        quant=None,
+        matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
+        rngs=self.rngs,
+    )
+
+  def apply_partial_rope(
+      self,
+      inputs: Array,
+      inputs_positions: Optional[Array | None] = None,
+  ):
+    """Applies partial RoPE to the indexer query or key
+
+    The Indexer's RoPE implementation differs from MLA's in two key aspects:
+    1. Split Order: Indexer splits the head dimension into [rope, nope], whereas MLA uses [nope, rope].
+    2. Input Layout: Indexer uses concatenated layout (interleave=False), whereas MLA uses interleaved (interleave=True).
+
+    Args:
+      inputs: Input array of shape [batch, seqlen, index_n_heads, index_head_dim].
+      positions: Position array of shape [batch, seqlen].
+
+    Returns:
+      Array with partial RoPE applied, with shape [batch, seqlen, index_n_heads, index_head_dim]
+    """
+    # index_head_dim -> [rope_head_dim, index_head_dim - rope_head_dim]
+    x_pe, x_nope = jnp.split(inputs, [self.rope_head_dim], axis=-1)
+    # x_pe [B, S, H, rope_head_dim], positions [B, S]
+    x_pe = self.rotary_embedding(x_pe, position=inputs_positions)
+    x = jnp.concatenate([x_pe, x_nope], axis=-1)
+    return x
+
+  def generate_mask(self, topk_indices, s):
+    """
+    Creates a mask for top-k indices.
+
+    Args:
+        topk_indices: [b, t, k] int - The indices to keep.
+        s: int - The total size to select from.
+
+    Returns:
+        mask: [b, t, s] - `0.0` at topk_indices, `DEFAULT_MASK_VALUE` (large negative) elsewhere.
+    """
+    # 1. Create a range [0, 1, ..., s-1]
+    # 2. Broadcast compare against [b, t, k] to get [b, t, k, s]
+    # 3. Use .any() to see if a s-index is present in any of the k slots
+    is_topk = (jnp.arange(s) == topk_indices[..., None]).any(axis=-2)
+    # 4. Use where to select between 0.0 and the mask value
+    # cast values to dtype
+    val_true = jnp.array(0.0, dtype=self.dtype)
+    val_false = jnp.array(DEFAULT_MASK_VALUE, dtype=self.dtype)
+    return jnp.where(is_topk, val_true, val_false)
+
+  def __call__(
+      self,
+      inputs_q: Array,
+      low_rank_q: Array,
+      inputs_kv: Array,
+      inputs_positions: Optional[Array | None] = None,
+      attention_mask: Optional[Array | None] = None,
+  ):
+    """Computes the index score to determine the top-k relevant tokens.
+
+    This uses a ReLU-based similarity for QK with MQA-style broadcasting (shared K).
+    It uses weighted aggregation over heads to produce a single score per token pair.
+
+    Steps:
+      1. Q = RoPE(Wq @ q_lora)
+      2. K = RoPE(Norm(Wk @ X))
+      3. Logits = ReLU(Q @ K.T)                      # Pairwise similarity
+      4. Head_Weights = (W_proj @ X) * scale         # Dynamic head importance, scale for stability
+      5. Score = Sum_head(Logits * Head_Weights)     # Aggregate heads
+      6. Indices = ArgTopk(Score)
+
+    Args:
+      inputs_q: Input of shape [b, t, embed_dim].
+      low_rank_q: Low-rank latent query representations of shape [b, t, q_lora_rank].
+      inputs_kv: Input of shape [b, s, embed_dim], same as inputs_q
+      inputs_positions: Position indices of shape [b, s].
+      attention_mask: Optional attention mask of shape [b, t, s].
+        Positions with `0.0` allow attention, while positions with
+        `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
+        Returns `None` if no masking is determined to be necessary based on
+        the inputs and configuration.
+
+    Returns:
+      index_mask: A sparse mask [b, t, s] with 0.0 for top-k selected tokens
+        and large negative values otherwise.
+      topk_indices: Indices of the top-k selected tokens [b, t, k].
+      index_score: The computed relevance scores [b, t, s].
+
+    Notation:
+      b: Batch size
+      t: Query Sequence Length (Target), note t = s here
+      s: Key/Value Sequence Length (Source)
+      h: Number of Indexer Heads (index_n_heads)
+      d: Indexer Head Dimension (index_head_dim)
+    """
+    # NOTE: If sequence length <= topk, indexer always selects all tokens.
+    if self.config.max_target_length <= self.index_topk:
+      return None, None, None
+
+    bsz, seqlen, _ = inputs_q.shape  # s = t = seqlen
+
+    # Query Processing: Project from Latent low_rank_q
+    q = self.wq_b(low_rank_q)  # [b, t, q_lora_rank] -> [b, t, h * d]
+    q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)  # [b, t, h, d]
+    q = self.apply_partial_rope(q, inputs_positions=inputs_positions)
+
+    # Key Processing: Project from Input
+    k = self.wk(inputs_kv)  # [b, s, embed_dim] -> [b, s, d]
+    k = self.k_norm(k)
+    k = k[:, :, None, :]  # [b, s, d] -> [b, s, 1, d]
+    k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
+    k = k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
+
+    # Compute Index Scores
+    # QK product: relu(q @ k.T), [b, t, s, h]
+    # Similar to MQA, each key is shared by h query head
+    logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
+    logits = jax.nn.relu(logits)
+    # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
+    weights = self.weights_proj(inputs_q)
+    # Weights scaling affect index_score, but does not affect topk_indices. Keep scaling for numerical stability.
+    # https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py#L478-L480
+    weights = weights * (self.n_heads**-0.5) * self.softmax_scale
+    # Weighted sum over head: sum_h(logits * weights)
+    index_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
+
+    # Apply attention mask before TopK
+    if attention_mask is not None:
+      index_score += attention_mask
+
+    # TopK selection based on index score
+    _, topk_indices = jax.lax.top_k(index_score, k=self.index_topk)  # topk_indices [b, t, k]
+
+    # Create Sparse Index Mask: 0 and large negatives
+    index_mask = self.generate_mask(topk_indices, seqlen)  # [b, t, s]
+
+    # Re-apply attention mask after TopK: in case number of unmasked tokens < TopK
+    if attention_mask is not None:
+      index_mask += attention_mask
+
+    return index_mask, topk_indices, index_score
 
 
 def mla_as_linen(
@@ -363,6 +600,23 @@ class MLA(Attention):
         rngs=rngs,
     )
 
+    # Initialize Indexer
+    self.use_sparse_indexer = config.use_sparse_indexer
+    if self.use_sparse_indexer:
+      # Need two versions of rope.
+      # MLA applies yarn with interleave layout.
+      # Indexer applies yarn with concatenate layout.
+      indexer_rope = copy.copy(self.rotary_embedding)
+      indexer_rope.interleave = False
+      self.indexer = Indexer(
+          config,
+          rngs=rngs,
+          rotary_embedding=indexer_rope,
+          kernel_init=kernel_init,
+          quant=quant,
+          model_mode=model_mode,
+      )
+
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
 
@@ -503,7 +757,9 @@ class MLA(Attention):
           rngs=self.rngs,
       )
 
-  def mla_query_projection(self, inputs_q: Array, inputs_positions: Array, model_mode) -> Array:
+  def mla_query_projection(
+      self, inputs_q: Array, inputs_positions: Array, model_mode
+  ) -> tuple[jax.Array, Optional[jax.Array]]:
     """Query projection for MLA, e.g. includes LoRA if q_lora_rank > 0."""
     # specify query logical name
     if model_mode == MODEL_MODE_PREFILL:
@@ -524,6 +780,9 @@ class MLA(Attention):
       mscale = 0.1 * self.mscale * math.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
+    # Low-rank latent vector for queries. This is also accessed by indexer.
+    low_rank_q = None
+
     if self.q_lora_rank == 0:
       q = self.query(inputs_q, out_sharding=query_sharding)
     else:
@@ -531,9 +790,10 @@ class MLA(Attention):
       low_rank_q = self.wq_a(inputs_q, out_sharding=wqa_out_sharding)  # [B, L, q_lora_rank]
       low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
       low_rank_q = checkpoint_name(low_rank_q, "mla_q")
-      q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads * qk_head_dim]
+      q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads, qk_head_dim]
 
-    # Split into non-positional and rotary parts.
+    # Partial RoPE: Split into non-positional and rotary parts.
+    # last dimension: qk_nope_head_dim, qk_rope_head_dim
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
     q_nope = self._maybe_shard_with_logical(q_nope, query_logical_name)
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions)
@@ -542,7 +802,7 @@ class MLA(Attention):
     # DeepSeek v3 was doing it in attention score computation.
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
     query = self._maybe_shard_with_logical(query, query_logical_name)
-    return query
+    return query, low_rank_q
 
   def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
     """get (key,value) pair from mla"""
@@ -737,14 +997,35 @@ class MLA(Attention):
       inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.input_axis_names)
       out_logical_name = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
 
-    query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
+    query, low_rank_q = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
+    if self.config.force_q_layout:
+      query = layout.with_layout_constraint(query, DLL(major_to_minor=(0, 2, 3, 1)))
     key, value, cached_values = self.mla_kv_projection(
         inputs_kv, inputs_positions, decoder_segment_ids, model_mode, previous_chunk
     )
-
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
+
+    # Indexer Logic
+    index_mask = None
+    if self.use_sparse_indexer:
+      if model_mode != MODEL_MODE_TRAIN:
+        raise NotImplementedError("Sparse indexer has not implemented for inference yet.")
+      # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
+      attention_mask = self.attention_op.generate_attention_mask(
+          query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
+      ).squeeze(axis=(1, 2))
+      # apply indexer, index_mask [b, q_len, kv_len]
+      index_mask, _, _ = self.indexer(
+          inputs_q=inputs_q,
+          low_rank_q=low_rank_q,
+          inputs_kv=inputs_kv,
+          inputs_positions=inputs_positions,
+          attention_mask=attention_mask,
+      )
+      if index_mask is not None:
+        index_mask = index_mask[:, None, None, :, :]  # [b, 1, 1, q_len, kv_len]
 
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
@@ -753,7 +1034,8 @@ class MLA(Attention):
       unnormalized_out = unnormalized_out[..., : self.v_head_dim]
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
-      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
+      # Pass the index_mask to the Attention Op
+      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, index_mask=index_mask)
 
     if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)

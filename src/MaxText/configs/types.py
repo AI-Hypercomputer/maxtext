@@ -207,6 +207,7 @@ ModelName = Literal[
     "deepseek3-671b-2dfsdp",
     "deepseek3-test",
     "deepseek3-tiny",
+    "deepseek3.2-671b",
     "kimi-k2-1t",
     "gemma-7b",
     "gemma-2b",
@@ -235,6 +236,8 @@ ModelName = Literal[
     "gpt-oss-120b",
     "llama4-17b-16e",
     "llama4-17b-128e",
+    "olmo3_7b",
+    "olmo3_32b",
 ]
 
 
@@ -480,6 +483,7 @@ class Attention(BaseModel):
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for TE padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
   use_jax_splash: bool = Field(False, description="Whether to use jax splash attention.")
+  force_q_layout: bool = Field(False, description="Force the Q layout")
 
 
 class MoBa(BaseModel):
@@ -499,6 +503,15 @@ class MlaAttention(BaseModel):
   qk_nope_head_dim: NonNegativeInt = Field(128, description="Dimension for non-RoPE part of QK heads in MLA.")
   qk_rope_head_dim: NonNegativeInt = Field(64, description="Dimension for RoPE part of QK heads in MLA.")
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
+
+
+class AttentionIndexer(BaseModel):
+  """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
+
+  use_sparse_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
+  index_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
+  index_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
+  index_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
 
 
 class Llama4Attention(BaseModel):
@@ -1289,6 +1302,13 @@ class HloDump(BaseModel):
   dump_hlo_local_module_name: str = Field("jit_train_step", description="Filter modules to save locally by this name.")
   dump_hlo_xla_flags: str = Field("", description="Pass custom XLA flags for HLO dumping.")
   dump_hlo_upload_all: bool = Field(False, description="Upload HLO from all hosts.")
+  dump_jaxpr: bool = Field(False, description="Enable jaxpr dumping.")
+  dump_jaxpr_local_dir: PathStr = Field(
+      os.path.join(gettempdir(), "jaxpr_dump", ""),
+      description="Local directory to dump jaxpr.",
+  )
+  dump_jaxpr_delete_local_after: bool = Field(True, description="Delete local jaxpr dump after uploading to GCS.")
+  dump_jaxpr_gcs_dir: PathStr = Field("", description="GCS directory to upload jaxpr dumps.")
 
 
 class StackTrace(BaseModel):
@@ -1685,6 +1705,7 @@ class MaxTextConfig(
     Attention,
     MlaAttention,
     MoBa,
+    AttentionIndexer,
     Llama4Attention,
     SplashAttention,
     PagedAttention,
@@ -1863,6 +1884,10 @@ class MaxTextConfig(
         self.dump_hlo_gcs_dir = os.path.join(self.base_output_directory, self.run_name, "xla_dump")
       else:
         self.dump_hlo_gcs_dir = gcs_utils.add_trailing_slash(self.dump_hlo_gcs_dir)
+      if not self.dump_jaxpr_gcs_dir:
+        self.dump_jaxpr_gcs_dir = os.path.join(self.base_output_directory, self.run_name, "jaxpr_dump")
+      else:
+        self.dump_jaxpr_gcs_dir = gcs_utils.add_trailing_slash(self.dump_jaxpr_gcs_dir)
       if not os.environ.get("XLA_FLAGS"):
         os.environ["XLA_FLAGS"] = self.dump_hlo_xla_flags
 
@@ -2119,6 +2144,11 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
+    if self.use_sparse_indexer:
+      if self.q_lora_rank == 0:
+        raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
+      if self.attention not in ("dot_product"):
+        raise ValueError("Sparse indexer is only supported dot_product attention")
     if self.attention_type == AttentionType.CHUNK.value and (
         not isinstance(self.chunk_attn_window_size, int) or self.chunk_attn_window_size <= 0
     ):
@@ -2257,6 +2287,8 @@ class MaxTextConfig(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "
           f"`python3 -m MaxText.muon_utils {self.model_name} True`"
       )
+    if self.force_q_layout and not self.use_jax_splash:
+      raise ValueError("`force_q_layout` can only be true if `use_jax_splash` is also true.")
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.

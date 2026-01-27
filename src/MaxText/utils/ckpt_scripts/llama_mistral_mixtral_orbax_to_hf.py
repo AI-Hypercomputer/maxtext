@@ -47,13 +47,13 @@ from jax.sharding import Mesh
 
 from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
 
-from MaxText import checkpointing
 from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
 from MaxText import max_logging
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.generate_param_only_checkpoint import _read_train_checkpoint
 from MaxText.max_utils import unpermute_from_match_maxtext_rope
+from maxtext.common import checkpointing
 
 
 def reverse_scale(arr, scale):

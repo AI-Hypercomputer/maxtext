@@ -56,7 +56,7 @@ from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText import model_creation_utils
 from MaxText.train import loss_fn
-from MaxText.utils.goodput_utils import (
+from maxtext.common.goodput import (
     GoodputEvent,
     create_goodput_recorder,
     maybe_monitor_goodput,

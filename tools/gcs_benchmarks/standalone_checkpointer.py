@@ -32,7 +32,6 @@ from jax import numpy as jnp
 from flax.linen import partitioning as nn_partitioning
 
 import MaxText as mt
-from MaxText import checkpointing
 from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import max_logging
@@ -40,6 +39,7 @@ from MaxText import pyconfig
 from MaxText.train import get_first_step
 from MaxText.train_utils import validate_train_config
 from MaxText.layers import models
+from maxtext.common import checkpointing
 
 Transformer = models.transformer_as_linen
 
