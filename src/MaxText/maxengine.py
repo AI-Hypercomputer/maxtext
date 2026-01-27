@@ -43,7 +43,7 @@ from jetstream.engine import tokenizer_api
 from jetstream.engine.tokenizer_pb2 import TokenizerParameters
 from jetstream.engine.tokenizer_pb2 import TokenizerType
 
-from MaxText import inference_utils
+from maxtext import inference_utils
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
