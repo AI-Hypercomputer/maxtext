@@ -426,6 +426,9 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
           rollout_vllm_additional_config=rollout_additional_config,
           rollout_vllm_init_with_random_weights=True,
+          rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
+          rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
+          rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
           **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
       ),
   )

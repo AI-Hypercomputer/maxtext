@@ -144,6 +144,11 @@ swap_space_vllm_gb: 2
 decode_sampling_temperature: 0.9
 decode_sampling_top_k: 50
 decode_sampling_nucleus_p: 1.0
+# Optional sharding configuration for samplers
+enable_dp_attention: False
+# Performance tuning for samplers
+max_num_batched_tokens: null
+max_num_seqs: null
 
 # ====== Checkpoint Configuration ======
 enable_checkpointing: True
