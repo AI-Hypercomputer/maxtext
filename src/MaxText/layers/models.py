@@ -26,7 +26,7 @@ from flax import nnx
 from MaxText.layers import initializers
 
 from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
-from MaxText.inference import page_manager
+from maxtext.inference import page_manager
 from MaxText import multimodal_utils
 from MaxText import max_utils
 from MaxText.layers import nnx_wrappers

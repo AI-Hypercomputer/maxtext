@@ -64,7 +64,7 @@ cd ~
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
 bash setup.sh
-python3 -m pip install -r src/MaxText/inference_mlperf/requirements.txt
+python3 -m pip install -r src/maxtext/inference_mlperf/requirements.txt
 ```
 
 ### Generate quantized checkpoint
@@ -141,7 +141,7 @@ huggingface-cli login --token $HUGGING_FACE_TOKEN
 #### For trillium
 #### LLama2-70b:
 ```
-cd ~/maxtext/src/MaxText/inference_mlperf/trillium
+cd ~/maxtext/src/maxtext/inference_mlperf/trillium
 ```
 
 ##### Test Run

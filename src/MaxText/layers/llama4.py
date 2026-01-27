@@ -27,7 +27,7 @@ from flax import nnx
 
 from MaxText.common_types import Config, Array, MODEL_MODE_TRAIN, AttentionType
 from MaxText import max_utils
-from MaxText.inference import page_manager
+from maxtext.inference import page_manager
 from MaxText.layers import initializers
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import linears

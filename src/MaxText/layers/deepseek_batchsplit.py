@@ -23,7 +23,7 @@ from jax.sharding import Mesh
 from MaxText import common_types
 from MaxText import max_utils
 from MaxText.common_types import Config
-from MaxText.inference import page_manager
+from maxtext.inference import page_manager
 from MaxText.layers import attention_mla
 from MaxText.layers import initializers
 from MaxText.layers import linears

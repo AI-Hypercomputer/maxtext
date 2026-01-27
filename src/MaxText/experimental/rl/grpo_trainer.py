@@ -75,7 +75,7 @@ from MaxText import sharding
 from MaxText import train_utils
 from MaxText import pyconfig
 from MaxText.utils import gcs_utils
-from MaxText.inference import offline_engine
+from maxtext.inference import offline_engine
 from MaxText.experimental.rl import grpo_input_pipeline
 from MaxText.experimental.rl import grpo_utils
 from MaxText.globals import EPS

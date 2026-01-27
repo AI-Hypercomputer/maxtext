@@ -30,7 +30,7 @@ from MaxText import pyconfig_deprecated
 from MaxText.common_types import DecoderBlockType, ShardMode
 from MaxText.configs import types
 from MaxText.configs.types import MaxTextConfig
-from MaxText.inference_utils import str2bool
+from maxtext.inference_utils import str2bool
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.environ.get("LOGLEVEL", "INFO"))

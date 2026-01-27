@@ -103,7 +103,7 @@ progress_status_file_format = f"{status_folder}{{module_name}}_Status.json"
 # for converting PyTorch code to JAX
 block_for_rag = [
     "src/MaxText/layers",  # Neural network layers and building blocks
-    "src/MaxText/inference",  # Inference and prediction code
+    "src/maxtext/inference",  # Inference and prediction code
     "src/MaxText/common_types.py",  # Common data types and structures
     "src/MaxText/maxtext_utils.py",  # Utility functions and helpers
 ]

@@ -69,8 +69,8 @@ from MaxText.common_types import (
     Q_LENGTH,
     Q_LENGTH_NO_EXP,
 )
-from MaxText.inference import page_manager
-from MaxText.inference.kvcache import KVQuant, KVTensor
+from maxtext.inference import page_manager
+from maxtext.inference.kvcache import KVQuant, KVTensor
 from MaxText.kernels import jax_flash_attention
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha

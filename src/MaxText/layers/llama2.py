@@ -23,7 +23,7 @@ from jax.sharding import Mesh
 
 from flax import nnx
 
-from MaxText.inference import page_manager
+from maxtext.inference import page_manager
 from MaxText.common_types import Config
 from MaxText import max_utils
 from MaxText.sharding import maybe_shard_with_logical, create_sharding

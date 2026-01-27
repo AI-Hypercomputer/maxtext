@@ -61,10 +61,10 @@ from MaxText.common_types import (
     AttentionType,
     DEFAULT_MASK_VALUE,
 )
-from MaxText.inference import kvcache
-from MaxText.inference import page_manager
-from MaxText.inference import paged_attention
-from MaxText.inference.kvcache import KVQuant
+from maxtext.inference import kvcache
+from maxtext.inference import page_manager
+from maxtext.inference import paged_attention
+from maxtext.inference.kvcache import KVQuant
 from MaxText.sharding import create_sharding
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.attentions import Attention

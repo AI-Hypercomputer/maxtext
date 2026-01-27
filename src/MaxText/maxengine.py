@@ -50,7 +50,7 @@ from MaxText import multimodal_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.inference.page_manager import PageManager, PageState
+from maxtext.inference.page_manager import PageManager, PageState
 from MaxText.layers import models, quantizations
 from MaxText.utils import lora_utils
 

@@ -54,10 +54,10 @@ from MaxText.common_types import (
     AttentionType,
 )
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
-from MaxText.inference import kvcache
-from MaxText.inference import page_manager
-from MaxText.inference import paged_attention
-from MaxText.inference.kvcache import KVQuant
+from maxtext.inference import kvcache
+from maxtext.inference import page_manager
+from maxtext.inference import paged_attention
+from maxtext.inference.kvcache import KVQuant
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.attention_op import AttentionOp
 from MaxText.layers.embeddings import (

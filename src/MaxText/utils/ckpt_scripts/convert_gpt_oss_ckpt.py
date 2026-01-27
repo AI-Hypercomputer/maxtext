@@ -37,7 +37,7 @@ from safetensors import safe_open
 from tqdm import tqdm
 
 from MaxText import max_logging
-from MaxText.inference_utils import str2bool
+from maxtext.inference_utils import str2bool
 from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from MaxText.utils.ckpt_scripts.convert_gpt_oss_unscanned_ckpt import MODEL_PARAMS_DICT, _hf_to_maxtext_mapping, _pt_to_np
 

@@ -102,7 +102,7 @@ cd $(dirname $0)/../../../
 XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_command_buffer=FUSION --xla_disable_hlo_passes=rematerialization" \
 TF_FORCE_GPU_ALLOW_GROWTH=true \
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.94 \
-python3 -m MaxText.inference_microbenchmark $MAXENGINE_CONFIG_FILEPATH  \
+python3 -m maxtext.inference_microbenchmark $MAXENGINE_CONFIG_FILEPATH  \
     base_output_directory=$BASE_OUTPUT_DIRECTORY  \
     tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.llama2 \
     model_name='llama2-70b' \
@@ -125,4 +125,4 @@ python3 -m MaxText.inference_microbenchmark $MAXENGINE_CONFIG_FILEPATH  \
     kv_quant_dtype=$KV_QUANT_DTYPE \
     quantize_kvcache=$QUANTIZE_KVCACHE \
     quantization=$QUANTIZATION$PROFILER_STR \
-    gcs_metrics=$GCS_METRICS 
+    gcs_metrics=$GCS_METRICS

@@ -43,7 +43,7 @@ from MaxText import sharding
 from MaxText.configs import types
 from MaxText.utils import gcs_utils
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText.inference.page_manager import PageState
+from maxtext.inference.page_manager import PageState
 from maxtext.common import checkpointing
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"

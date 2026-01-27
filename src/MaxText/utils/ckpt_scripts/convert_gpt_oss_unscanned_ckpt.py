@@ -37,7 +37,7 @@ import torch
 from tqdm import tqdm
 
 from MaxText import max_logging
-from MaxText.inference_utils import str2bool
+from maxtext.inference_utils import str2bool
 from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log

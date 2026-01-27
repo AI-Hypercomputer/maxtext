@@ -1,5 +1,5 @@
-# llama2-7b 
-python3 -m MaxText.inference_microbenchmark \
+# llama2-7b
+python3 -m maxtext.inference_microbenchmark \
 "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/configs/base.yml \
 async_checkpointing=false \
 attention=autoselected \
