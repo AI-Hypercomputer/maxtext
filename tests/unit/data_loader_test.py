@@ -28,7 +28,7 @@ from MaxText.maxtext_utils import create_device_mesh
 from MaxText import exceptions
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.common.data_loader import DataLoader, RampUpDataLoader
+from maxtext.common.data_loader import DataLoader, RampUpDataLoader
 
 
 class DataLoaderTest(unittest.TestCase):

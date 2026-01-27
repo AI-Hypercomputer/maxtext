@@ -445,7 +445,7 @@ def workload_monitor():
     return _workload_monitor_stub()
 
   try:
-    from MaxText.common.gcp_workload_monitor import GCPWorkloadMonitor  # type: ignore  # pylint: disable=import-outside-toplevel
+    from maxtext.common.gcp_workload_monitor import GCPWorkloadMonitor  # type: ignore  # pylint: disable=import-outside-toplevel
 
     return GCPWorkloadMonitor, False
   except Exception:  # ModuleNotFoundError / ImportError  # pylint: disable=broad-exception-caught
@@ -484,7 +484,7 @@ def vertex_tensorboard_components():
     return _vertex_tb_stub()
 
   try:
-    from MaxText.common.vertex_tensorboard import VertexTensorboardManager  # type: ignore  # pylint: disable=import-outside-toplevel
+    from maxtext.common.vertex_tensorboard import VertexTensorboardManager  # type: ignore  # pylint: disable=import-outside-toplevel
 
     return VertexTensorboardManager, False
   except Exception:  # pylint: disable=broad-exception-caught

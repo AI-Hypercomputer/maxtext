@@ -33,7 +33,7 @@ from MaxText import maxtext_utils
 from MaxText.managed_mldiagnostics import ManagedMLDiagnostics
 from MaxText.utils import gcs_utils
 from MaxText.globals import EPS
-from MaxText.common.gcp_workload_monitor import GCPWorkloadMonitor
+from maxtext.common.gcp_workload_monitor import GCPWorkloadMonitor
 from collections import defaultdict
 
 # Mapping MaxText metrics to managed profiler metrics

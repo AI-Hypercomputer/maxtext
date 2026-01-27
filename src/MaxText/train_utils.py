@@ -26,8 +26,8 @@ from MaxText.dpo_utils import _merge_dpo_state
 from MaxText.rampup_batch import create_rampup_manager
 from MaxText import model_creation_utils
 from maxtext.common import checkpointing
-from MaxText.common.data_loader import create_dataloader
-from MaxText.common.goodput import GoodputEvent, maybe_record_goodput
+from maxtext.common.data_loader import create_dataloader
+from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
 
 
 def create_training_tools(config, model, mesh):

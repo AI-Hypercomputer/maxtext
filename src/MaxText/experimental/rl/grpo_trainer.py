@@ -82,15 +82,15 @@ from MaxText.globals import EPS
 from MaxText.train import get_first_step
 from MaxText.train_utils import validate_train_config
 from maxtext.common import checkpointing, profiler
-from MaxText.common.data_loader import DataLoader
-from MaxText.common.goodput import (
+from maxtext.common.data_loader import DataLoader
+from maxtext.common.goodput import (
     GoodputEvent,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
-from MaxText.common.metric_logger import MetricLogger
-from MaxText.common.vertex_tensorboard import VertexTensorboardManager
+from maxtext.common.metric_logger import MetricLogger
+from maxtext.common.vertex_tensorboard import VertexTensorboardManager
 
 # pylint: disable=too-many-positional-arguments
 

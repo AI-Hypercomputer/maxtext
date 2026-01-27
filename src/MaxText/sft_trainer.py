@@ -42,14 +42,14 @@ from MaxText.train import (
 from MaxText.train_utils import setup_train_loop, validate_train_config
 from MaxText.utils import gcs_utils
 from maxtext.common import checkpointing, profiler
-from MaxText.common.data_loader import DataLoader
-from MaxText.common.goodput import (
+from maxtext.common.data_loader import DataLoader
+from maxtext.common.goodput import (
     GoodputEvent,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
-from MaxText.common.metric_logger import MetricLogger
+from maxtext.common.metric_logger import MetricLogger
 
 
 def train_loop(config, recorder, state=None):

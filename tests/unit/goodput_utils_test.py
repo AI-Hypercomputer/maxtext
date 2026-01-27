@@ -19,7 +19,7 @@ import unittest
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
 from unittest import mock
-from MaxText.common.goodput import create_goodput_recorder, maybe_monitor_goodput, maybe_record_goodput, GoodputEvent
+from maxtext.common.goodput import create_goodput_recorder, maybe_monitor_goodput, maybe_record_goodput, GoodputEvent
 
 
 class GoodputUtilsTest(unittest.TestCase):
