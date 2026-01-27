@@ -15,7 +15,7 @@
 """Implementation of Engine API for MaxText."""
 
 from collections import defaultdict
-from typing import Any, Callable, Union
+from typing import Any, Callable
 import functools
 import os.path
 import uuid

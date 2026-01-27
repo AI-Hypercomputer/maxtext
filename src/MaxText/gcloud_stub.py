@@ -131,6 +131,7 @@ def cloud_diagnostics():
   If a dependency is missing and we are decoupled, return stubs. Otherwise
   re-raise the import error so callers fail fast.
   """
+
   def _import():
     from cloud_tpu_diagnostics import diagnostic  # type: ignore  # pylint: disable=import-outside-toplevel
     from cloud_tpu_diagnostics.configuration import (  # type: ignore  # pylint: disable=import-outside-toplevel
@@ -138,6 +139,7 @@ def cloud_diagnostics():
         diagnostic_configuration,
         stack_trace_configuration,
     )
+
     return diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration
 
   # Only stub on import failures if running decoupled; otherwise fail fast.
@@ -371,10 +373,12 @@ def _goodput_stubs():
 
 def goodput_modules():
   """Return real goodput modules or stubs when missing and decoupled."""
+
   def _import():
     from ml_goodput_measurement import goodput, monitoring  # type: ignore  # pylint: disable=import-outside-toplevel
 
     return goodput, monitoring, False
+
   return _import_or_stub(
       _import,
       _goodput_stubs,
@@ -450,12 +454,14 @@ def monitoring_modules():
   Stubs only if decoupled AND dependency missing; if not decoupled and missing ->
   re-raise.
   """
+
   def _import():  # Attempt real imports first
     from google.cloud import monitoring_v3  # type: ignore  # pylint: disable=import-outside-toplevel
     from google.api import metric_pb2, monitored_resource_pb2  # type: ignore  # pylint: disable=import-outside-toplevel
     from google.api_core.exceptions import GoogleAPIError  # type: ignore  # pylint: disable=import-outside-toplevel
 
     return monitoring_v3, metric_pb2, monitored_resource_pb2, GoogleAPIError, False
+
   return _import_or_stub(_import, _monitoring_stubs, label="monitoring", stub_if_decoupled=False)
 
 
@@ -487,6 +493,7 @@ def workload_monitor():
 
   If decoupled OR import fails, returns stub class; otherwise real class.
   """
+
   def _import():
     from maxtext.common.gcp_workload_monitor import GCPWorkloadMonitor  # type: ignore  # pylint: disable=import-outside-toplevel
 
@@ -527,10 +534,12 @@ def vertex_tensorboard_modules():
 
   Decoupled or missing dependency -> stub class with no-op configure method.
   """
+
   def _import():
     from maxtext.common.vertex_tensorboard import VertexTensorboardManager  # type: ignore  # pylint: disable=import-outside-toplevel
 
     return VertexTensorboardManager, False
+
   return _import_or_stub(
       _import,
       _vertex_tb_stub,
@@ -578,10 +587,12 @@ def mldiagnostics_modules():
 
   If decoupled OR import fails, returns stub object; otherwise real module.
   """
+
   def _import():
     import google_cloud_mldiagnostics as mldiag  # type: ignore  # pylint: disable=import-outside-toplevel
 
     return mldiag, False
+
   return _import_or_stub(
       _import,
       _mldiagnostics_stub,

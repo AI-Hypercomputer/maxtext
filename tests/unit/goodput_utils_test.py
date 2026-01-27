@@ -20,7 +20,6 @@ from unittest import mock
 import pytest
 
 from MaxText import pyconfig
-from unittest import mock
 from maxtext.common.goodput import create_goodput_recorder, maybe_monitor_goodput, maybe_record_goodput, GoodputEvent
 from tests.utils.test_utils import get_test_config_path, get_test_base_output_directory
 

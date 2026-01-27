@@ -17,7 +17,7 @@
 
 from typing import Sequence
 
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_REPO_ROOT
+from MaxText.globals import MAXTEXT_REPO_ROOT
 from tests.utils.sharding_dump import TEST_CASES
 from tests.utils.test_utils import get_test_config_path
 import os
