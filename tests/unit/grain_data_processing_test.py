@@ -54,7 +54,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
         grain_train_files=os.path.join(
             temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"
         ),
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
@@ -130,7 +130,7 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProc
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
         grain_train_files=grain_train_files,
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
@@ -168,7 +168,7 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessing
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
         grain_train_mixture_config_path=self.mixture_config_path,
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
@@ -203,7 +203,7 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
             temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"
         ),
         grain_worker_count=-1,  # Enable auto-tuning
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
@@ -250,7 +250,7 @@ class GrainArrayRecordBestFitPackingTest(GrainArrayRecordProcessingTest):
             temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"
         ),
         grain_packing_type="best_fit",  # Use best_fit packing
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
@@ -288,7 +288,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
         grain_train_files=os.path.join(temp_dir, "gcsfuse", "hf", "c4", "c4-train-00000-of-01637.parquet"),
         grain_worker_count=1,
         grain_per_worker_buffer_size=1,
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)

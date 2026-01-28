@@ -870,7 +870,7 @@ class Tokenizer(BaseModel):
 
   vocab_size: int = Field(32_000, description="The size of the vocabulary.")
   tokenizer_path: PathStr = Field(
-      os.path.join("assets", "tokenizer.llama2"),
+      os.path.join("assets", "tokenizers", "tokenizer.llama2"),
       description="Path to the tokenizer model file.",
   )
   tokenizer_type: TokenizerType = Field(TokenizerType.SENTENCEPIECE, description="The type of tokenizer.")
@@ -1831,8 +1831,8 @@ class MaxTextConfig(
           filter(
               os.path.exists,
               (
-                  os.path.join(MAXTEXT_ASSETS_ROOT, os.path.basename(tokenizer_path)),
-                  os.path.join(MAXTEXT_ASSETS_ROOT, tokenizer_path),
+                  os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", os.path.basename(tokenizer_path)),
+                  os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", tokenizer_path),
               ),
           ),
           tokenizer_path,

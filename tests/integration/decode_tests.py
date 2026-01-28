@@ -45,7 +45,7 @@ class DecodeTests(unittest.TestCase):
           "ici_tensor_parallelism=4",
           "max_target_length=128",
           "per_device_batch_size=1",
-          rf"tokenizer_path={os.path.join('src', MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ],
       "int8": [  # tests decode with int8 quantization
           None,
@@ -60,7 +60,7 @@ class DecodeTests(unittest.TestCase):
           "per_device_batch_size=1",
           "quantization=int8",
           "quantize_kvcache=True",
-          rf"tokenizer_path={os.path.join('src', MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ],
       "pdb_lt_1": [  # tests decode with per_device_batch_size < 1
           None,
@@ -73,7 +73,7 @@ class DecodeTests(unittest.TestCase):
           "ici_tensor_parallelism=4",
           "max_target_length=128",
           "per_device_batch_size=.25",
-          rf"tokenizer_path={os.path.join('src', MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ],
       "decode_sampling": [
           None,
@@ -88,7 +88,7 @@ class DecodeTests(unittest.TestCase):
           "steps=10",
           "async_checkpointing=False",
           "model_name=gemma-2b",
-          rf"tokenizer_path={os.path.join('src', MAXTEXT_ASSETS_ROOT, 'tokenizer.gemma')}",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.gemma')}",
           "attention=dot_product",
           "prompt=I love to",
           "skip_jax_distributed_system=True",

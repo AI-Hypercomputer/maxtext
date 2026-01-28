@@ -36,7 +36,7 @@ class Train(unittest.TestCase):
             "run_name=runner_test",
             r"dataset_path=gs://maxtext-dataset",
             "enable_checkpointing=False",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",

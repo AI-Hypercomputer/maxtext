@@ -11,7 +11,7 @@ MODEL_NAME="gemma2-2b"
 # HF model id as golden model for verification
 HF_MODEL_ID="google/gemma-2-2b-it"
 # Tokenizer path for decoding
-TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}/tokenizer.gemma"
+TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}/tokenizer.gemma"
 
 PER_DEVICE_BATCH_SIZE=1
 ASYNC_CHECKPOINTING=false

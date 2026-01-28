@@ -53,7 +53,7 @@ class GradientAccumulationTest(unittest.TestCase):
         "enable_goodput_recording=False",
         "base_emb_dim=256",
         "base_num_decoder_layers=4",
-        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
         "steps=20",
     ]
     # Run with gradient accumulation with accumulate_steps=10, per_device_batch=1 --> simulating per_device_batch=10
@@ -145,7 +145,7 @@ class GradientAccumulationTest(unittest.TestCase):
             "enable_goodput_recording=False",
             "base_emb_dim=256",
             "base_num_decoder_layers=4",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "steps=3",
             "gradient_accumulation_steps=2",
             "use_sft=True",

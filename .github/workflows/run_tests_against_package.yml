@@ -108,7 +108,7 @@ jobs:
           fi
           # TODO: Use package data for testing and remove the env vars
           export MAXTEXT_REPO_ROOT=$(pwd)
-          export MAXTEXT_ASSETS_ROOT=$(pwd)/src/MaxText/assets
+          export MAXTEXT_ASSETS_ROOT=$(pwd)/src/maxtext/assets
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # omit this libtpu init args for gpu tests
