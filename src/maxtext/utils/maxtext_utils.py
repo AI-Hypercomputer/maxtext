@@ -37,23 +37,21 @@ from typing import Sequence
 from flax import nnx, linen as nn
 from flax.core.spmd import composite_rules, from_sharding_rules, get_logical_axis_rules
 from flax.linen import partitioning as nn_partitioning
-from flax.training import train_state
+from flax.training.train_state import TrainState
 
 import numpy as np
 
-from jax.experimental import mesh_utils
-from jax.experimental.serialize_executable import deserialize_and_load
-from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
-
 import jax
 import jax.numpy as jnp
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
+from jax.experimental import mesh_utils
+from jax.experimental.serialize_executable import deserialize_and_load
 
 import optax
-
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, ShardMode
 from maxtext.configs import types
 from maxtext.inference.page_manager import PageState
@@ -63,6 +61,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import sharding
+from maxtext.utils import maxtext_utils_nnx
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -1009,15 +1008,15 @@ def update_state_param(state, target_path, value):
   return state.replace(params=new_params)
 
 
-def init_decode_state(apply_fn, params) -> train_state.TrainState:
+def init_decode_state(apply_fn, params) -> TrainState:
   """Init train state with null opt state for decode."""
-  state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
+  state = TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
   return state
 
 
 def init_training_state(apply_fn, params, tx):
   """Init train state with null opt state for decode."""
-  state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
+  state = TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
   return state
 
 
@@ -1139,7 +1138,7 @@ def setup_initial_state(
     is_training: True to initialize training state, False for decode state
 
   Returns:
-    state: the initialized train state
+    train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
     state_mesh_annotations: the mesh annotations for the train state
   """
 
@@ -1178,19 +1177,32 @@ def setup_initial_state(
       else:
         # The update of data_iterator state happens in place, no need to assign explicitly
         state = restored["items"]
+
+      # TODO: For NNX, convert the pure dict to nnx.State.
     else:
       init_state_partial = init_state_fn
       init_state_partial.__name__ = "initialize_state"
-      # pylint: disable=not-callable
-      state = jax.jit(
-          init_state_partial,
-          in_shardings=None,
-          out_shardings=state_mesh_shardings,
-      )()
+      if config.pure_nnx:
+        state = jax.jit(
+            lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
+            in_shardings=None,
+            out_shardings=state_mesh_shardings,
+        )()
+      else:
+        # pylint: disable=not-callable
+        state = jax.jit(
+            init_state_partial,
+            in_shardings=None,
+            out_shardings=state_mesh_shardings,
+        )()
       if raw_params:  # If we loaded a partial state, we need to merge it.
-        state = state.replace(params=raw_params)
-
-  state = max_utils.unbox_logicallypartioned(state)
+        if config.pure_nnx:
+          # raw_params should have the same sharding info as in the model
+          nnx.update(state.model, raw_params)
+        else:
+          state = state.replace(params=raw_params)
+  if not config.pure_nnx:
+    state = max_utils.unbox_logicallypartioned(state)
 
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
@@ -1206,6 +1218,9 @@ def get_logical_annotations(config, mesh, init_state_fn):
 
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
+  if config.pure_nnx:
+    return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
+
   init_state_partial = init_state_fn
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -1335,8 +1350,25 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
   assert nnx_init_trainstate_fn is not None, "get_abstract_state_nnx: init function must be given."
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    # Use nnx.get_abstract_model to get the abstract_state with NamedSharding info
-    _, abstract_state = nnx.get_abstract_model(nnx_init_trainstate_fn, mesh)
+    # Use nnx.eval_shape + nnx.split instead of nnx.get_abstract_model, so we can apply
+    # get_nnx_named_sharding_with_scan_axis which correctly inserts the stacked-layers
+    # axis into the partition spec. nnx.get_abstract_model uses get_var_pspec internally
+    # which ignores nnx.PARTITION_NAME / param_scan_axis metadata set by _create_scanned_layers,
+    # causing the 2D partition spec to be misapplied to the 3D stacked parameter tensor.
+    # Do NOT wrap nnx.eval_shape in jax.set_mesh: Flax 0.12.6's _to_variable calls
+    # var.shape for every variable when a global mesh is active, but masked optimizer
+    # state variables (e.g. from trainable_parameters_mask) have value=MaskedNode()
+    # which has no .shape and would raise AttributeError.  We handle sharding
+    # ourselves via get_nnx_named_sharding_with_scan_axis, so auto-assignment is not
+    # needed here.
+    abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
+    _, abs_var_state = nnx.split(abs_model)
+    named_sharding_state = get_nnx_named_sharding_with_scan_axis(abs_var_state, mesh)
+    abstract_state = jax.tree.map(
+        lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
+        abs_var_state,
+        named_sharding_state,
+    )
 
   state_mesh_shardings = maxtext_utils_nnx.get_named_sharding_nnx(abstract_state)
 
