@@ -63,7 +63,7 @@ from flax.training import train_state
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.utils import gcs_utils
-from maxtext.inference_utils import str2bool
+from maxtext.inference.inference_utils import str2bool
 from maxtext.common import checkpointing
 
 MODEL_PARAMS_DICT = {
