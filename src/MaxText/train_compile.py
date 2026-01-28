@@ -21,6 +21,7 @@ before having to use the target hardware - you will see the same OOM error messa
 as you would on the target hardware.
 """
 
+import functools
 from typing import Sequence
 import os
 import pickle
@@ -47,8 +48,6 @@ from MaxText.layers import quantizations
 from MaxText.utils import gcs_utils
 
 # pylint: disable=too-many-positional-arguments
-
-Transformer = models.transformer_as_linen
 
 
 def validate_config(config):
@@ -89,7 +88,10 @@ def get_shaped_inputs(topology_mesh, config):
   """Get shaped abstractions of inputs to train_step: state, batch and rng"""
   # Construct the model and optimizer to get shaped versions of the state
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  if config.pure_nnx:
+    raise NotImplementedError("Pure NNX support has not been implemented yet.")
+  else:
+    model = models.transformer_as_linen(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
@@ -99,10 +101,14 @@ def get_shaped_inputs(topology_mesh, config):
   _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
+  if config.pure_nnx:
+    # NNX has a different function to init the training state.
+    raise NotImplementedError("Pure NNX support has not been implemented yet.")
+  else:
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, example_rng)
+
   # Shaped state
-  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
-      model, tx, config, example_rng, topology_mesh
-  )
+  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(config, topology_mesh, init_state_fn, True)
 
   # Shaped batch
   shaped_batch = maxtext_utils.get_shaped_batch(config)

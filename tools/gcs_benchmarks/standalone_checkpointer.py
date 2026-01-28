@@ -19,6 +19,7 @@
 # See github.com/google/maxtext/issues/20 for more
 
 import datetime
+from functools import partial
 import os
 from typing import Sequence
 
@@ -53,11 +54,21 @@ def checkpoint_loop(config, state=None):
     ckpt_path:
   Returns:
   """
-  model = mt.from_config(config)
+  if config.pure_nnx:
+    raise NotImplementedError("Pure NNX support has not been implemented yet.")
+  else:
+    model = mt.from_config(config)
   mesh = model.mesh
-  init_rng, checkpoint_manager, _, tx = train_utils.create_training_tools(config, model, mesh)
+  init_rng = jax.random.PRNGKey(config.init_weights_seed)
+  _, tx = train_utils.create_training_optimizer(config, model)
+  if config.pure_nnx:
+    # NNX has a different function to init the training state.
+    raise NotImplementedError("Pure NNX support has not been implemented yet.")
+  else:
+    init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
+  checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
 
-  unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+  unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
   # A barrier to sync all hosts before starting to restore checkpoint
   jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
   checkpoint_load_start = datetime.datetime.now()
@@ -81,7 +92,7 @@ def checkpoint_loop(config, state=None):
     if jax.process_index() == 0:
       max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in : {checkpoint_load_end - checkpoint_load_start}")
   else:  # Checkpoint was unavailable, state needs to be initialized
-    state, _, _, _ = maxtext_utils.setup_training_state(model, None, tx, config, init_rng, mesh, checkpoint_manager)
+    state, _, _, _ = maxtext_utils.setup_training_state(None, config, mesh, checkpoint_manager, init_state_fn)
   state = add_entropy_to_checkpoint(state)
 
   start_step = get_first_step(state)  # this is the start_step for training
