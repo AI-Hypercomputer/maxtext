@@ -3,7 +3,7 @@
 # Define the arguments in an array
 args=(
   "-m"
-  "MaxText.decode"
+  "maxtext.decode"
   "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml"
   "tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.llama2"
   "model_name=llama2-7b"

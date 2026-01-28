@@ -22,7 +22,7 @@ import jsonlines
 
 import jax
 
-from MaxText import inference_microbenchmark
+from maxtext import inference_microbenchmark
 from MaxText import pyconfig
 
 try:

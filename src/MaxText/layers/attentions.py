@@ -54,10 +54,6 @@ from MaxText.common_types import (
     AttentionType,
 )
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
-from maxtext.inference import kvcache
-from maxtext.inference import page_manager
-from maxtext.inference import paged_attention
-from maxtext.inference.kvcache import KVQuant
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.attention_op import AttentionOp
 from MaxText.layers.embeddings import (
@@ -72,6 +68,8 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from MaxText.layers.normalizations import RMSNorm, Qwen3NextRMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext.inference import kvcache, page_manager, paged_attention
+from maxtext.inference.kvcache import KVQuant
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error

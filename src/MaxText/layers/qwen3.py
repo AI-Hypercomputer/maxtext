@@ -38,11 +38,12 @@ from MaxText.layers import quantizations
 from MaxText.layers.embeddings import Qwen3OmniMoeVisionPosEmbedInterpolate, PositionalEmbedding
 from MaxText.layers.normalizations import RMSNorm, l2norm, Qwen3NextRMSNorm, Qwen3NextRMSNormGated
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from maxtext.inference import page_manager
 from MaxText.layers.attentions import Attention
 from MaxText.layers.linears import DenseGeneral, MlpBlock
 from MaxText.layers.moe import RoutedMoE
 from MaxText.layers.initializers import nd_dense_init, variable_to_logically_partitioned
+from maxtext.inference import page_manager
+
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
 # -----------------------------------------

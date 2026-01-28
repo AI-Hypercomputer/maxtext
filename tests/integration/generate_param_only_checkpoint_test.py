@@ -22,8 +22,8 @@ import pytest
 
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
 from MaxText.train import main as train_main
-from MaxText.decode import main as decode_main
 from MaxText.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
+from maxtext.decode import main as decode_main
 from tests.integration.checkpointing_test import get_checkpointing_command
 
 

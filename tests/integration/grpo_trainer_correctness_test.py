@@ -47,12 +47,12 @@ from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state, setup_train_loop
 from MaxText.experimental.rl.grpo_utils import compute_log_probs
-from maxtext.inference import offline_engine
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from maxtext.inference.offline_engine import InputData
 from MaxText.experimental.rl import grpo_utils
+from maxtext.inference import offline_engine
+from maxtext.inference.offline_engine import InputData
 
 
 def get_golden_data(config):

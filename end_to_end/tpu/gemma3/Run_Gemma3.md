@@ -16,9 +16,9 @@
 
 # Gemma3
 
-[Gemma3](https://ai.google.dev/gemma) is an iteration of the Gemma family, designed for enhanced performance and efficiency which is capable of running on a single-accelerator ([Developer Blog](https://blog.google/technology/developers/gemma-3/)). 
+[Gemma3](https://ai.google.dev/gemma) is an iteration of the Gemma family, designed for enhanced performance and efficiency which is capable of running on a single-accelerator ([Developer Blog](https://blog.google/technology/developers/gemma-3/)).
 
-We provide examples for checkpoint conversion and decoding/training/finetuning Gemma3 in test scripts at [end_to_end/tpu/gemma3](https://github.com/AI-Hypercomputer/maxtext/tree/main/end_to_end/tpu/gemma3). 
+We provide examples for checkpoint conversion and decoding/training/finetuning Gemma3 in test scripts at [end_to_end/tpu/gemma3](https://github.com/AI-Hypercomputer/maxtext/tree/main/end_to_end/tpu/gemma3).
 
 
 ## Pre-training
@@ -42,5 +42,5 @@ python3 -m MaxText.train src/MaxText/configs/base.yml model_name=gemma3-4b base_
 One example to use a converted checkpoint to decode with prompt "I love to":
 
 ```
-python3 -m MaxText.decode src/MaxText/configs/base.yml model_name=gemma3-4b tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.gemma3 load_parameters_path=${CONVERTED_CHECKPOINT} per_device_batch_size=1 run_name=runner_decode_gemma3_4b max_prefill_predict_length=8 max_target_length=16 dataset_type=synthetic steps=10 async_checkpointing=false scan_layers=false prompt="I love to"
+python3 -m maxtext.decode src/MaxText/configs/base.yml model_name=gemma3-4b tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.gemma3 load_parameters_path=${CONVERTED_CHECKPOINT} per_device_batch_size=1 run_name=runner_decode_gemma3_4b max_prefill_predict_length=8 max_target_length=16 dataset_type=synthetic steps=10 async_checkpointing=false scan_layers=false prompt="I love to"
 ```
