@@ -290,16 +290,12 @@ class MultiHeadEmbedding(nnx.Module):
   def __init__(self, list_of_N: List[int], D: int, cfg, mesh, rngs: nnx.Rngs):
     """
     Args:
-      list_of_N: A list of prime-based vocab sizes,
-          each element is k-th head for n-gram
+      list_of_N: A list of prime-based vocab sizes, each element is k-th head for n-gram
           for example, 2-gram and 3-gram, each with 2 heads, the flattened list is
           e.g., m[n=2,k=0]=2, m[n=2,k=1]=3, m[n=3,k=0]=5, m[n=3,k=1]=7
-      D: The embedding dimension for a single head.
+      D: The embedding dimension (for a single head).
     """
     self.num_heads = len(list_of_N)
-    """       
-    
-    """
 
     # To implement the concatenation (||) efficiently, we store all E[n,k] for all k
     # in a single flattened table. Offsets act as the boundaries between
@@ -467,8 +463,6 @@ class Engram(nnx.Module):
     # We flatten it into a single list of ints: [N1, N2, N3, ...]
     vocab_sizes = self.hash_mapping.get_vocab_sizes(self.layer_id)
 
-    # DEBUG PRINT (Uncomment if tests fail)
-    # print(f"DEBUG JAX Layer {self.layer_id} Vocab Sizes: {vocab_sizes}")
     print(f"DEBUG JAX Layer, Vocab Sizes: {vocab_sizes}")
 
     # -----------------------------------------------------------------------
