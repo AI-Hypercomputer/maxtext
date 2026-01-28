@@ -741,7 +741,7 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
 @partial(jax.jit, static_argnames=("cp_size", "seq_dim", "to_contiguous"))
 def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool = False):
   """Reorders the sequence of the tensor.
-  
+
   For example, with ``cp_size=2``,
 
   ``[0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]``

@@ -25,8 +25,8 @@ Example Invocation::
 
   python get_components_in_hierarchical_order.py \
     --base-path "https://github.com/huggingface/transformers/blob/main/src/" \
-    --entry-file-path "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py" \
-    --entry-module "LlamaForCausalLM"
+    --entry-module "LlamaForCausalLM" \
+    --entry-file-path "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py" # pylint: disable=line-too-long
 """
 
 from collections import deque, defaultdict

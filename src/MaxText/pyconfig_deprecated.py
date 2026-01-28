@@ -1286,7 +1286,7 @@ def get_individual_scales(scale):
   """Choose appropriate scales for individual dimensions based on global scale
 
   We choose to rotate between doubling:
-  
+
   * ``num_head`` and ``mlp_dim``
   * ``embed_dim``
   * ``num_layers``

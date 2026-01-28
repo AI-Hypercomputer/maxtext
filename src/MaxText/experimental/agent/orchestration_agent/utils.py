@@ -270,7 +270,7 @@ def _process_node(
     removed_imports: list[ast.Import | ast.ImportFrom],
 ) -> int:
   """Process node in order to remove local imports.
-  
+
   Private, for use by ``remove_local_imports``.
   """
   # Detect multi-line import (parenthesis)

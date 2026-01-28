@@ -365,14 +365,16 @@ class Pipeline(nn.Module):
     """
     Update the various buffers given the output of the most recent iteration
 
-    * ``state_io``: rotates left/up by 1 (the whole created in the last slot is filled with the most recent pipeline output)
+    * ``state_io``: rotates left/up by 1 (the whole created in the last slot is filled with the most recent pipeline
+      output)
 
       * Pushing inputs up from top of ``state_io`` into first stage of shift
       * Pulling outputs up from last stage of shift into bottom of ``state_io``
 
     * ``shift``: rotate output (or ``prev_outputs`` if using delay) right/down by 1 - we imagine the pipeline moves to
       right/down
-    * ``circ_storage``: pushes ``circ_storage_mover`` (the output of the previous iteration) into rotating index of ``circ_storage``
+    * ``circ_storage``: pushes ``circ_storage_mover`` (the output of the previous iteration) into rotating index of
+      ``circ_storage``
     * ``circ_storage_mover``: assigned to rotated output and pushed into ``circ_storage`` on the next iteration
     * ``prev_outputs``: is set to the current output
     """
@@ -500,7 +502,7 @@ class Pipeline(nn.Module):
   def get_current_stage_weights(self, pipeline_weights, loop_iteration, physical_partition_spec=None):
     """
     Gets the current weights used for one iteration.
-    
+
     Outputs a pytree whose arrays have leading dimension of stages, e.g.
     ``{'mlp': 'wo': [stages, mlp, embed]}``. Stage 0 will use the 0th index of this pytree, Stage 1 the 1st index, etc.
     For non-circular pipelines, this simply returns all weights - every weight is used in every iteraiton. However

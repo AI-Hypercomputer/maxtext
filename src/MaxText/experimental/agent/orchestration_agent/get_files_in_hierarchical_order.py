@@ -23,14 +23,14 @@ Example Invocations:
 
      python get_files_in_hierarchical_order.py \
        --base-path "https://github.com/huggingface/transformers/blob/main/src/" \
-       --entry-file-path "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py"
+       --entry-file-path "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py" # pylint: disable=line-too-long
 
 2. Analyze a specific entry file, including all imports (even conditional ones)::
 
      python get_files_in_hierarchical_order.py \
        --base-path "https://github.com/huggingface/transformers/blob/main/src/" \
        --no-exclude-conditional-imports \
-       --entry-file-path "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py"
+       --entry-file-path "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py" # pylint: disable=line-too-long
 """
 import argparse
 import ast

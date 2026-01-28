@@ -187,26 +187,26 @@ def save_and_run_test_case(jax_code, test_code, jax_file, test_file_path):
 def code_debugging(args, python_file, jax_file, test_file_path, last_output, code_history, base_try):
   """Debugs JAX code using a language model based on test failures.
 
-    This function takes the failed test output and provides it to a language model
-    to generate a corrected JAX code or test case. It retries this process
-    multiple times until the tests pass or the retry limit is reached.
+  This function takes the failed test output and provides it to a language model
+  to generate a corrected JAX code or test case. It retries this process
+  multiple times until the tests pass or the retry limit is reached.
 
-    Args:
-      python_file: The path to the PyTorch reference code.
-      jax_file: The path to the JAX code file being debugged.
-      test_file_path: The path to the test case file.
-      last_output: The output from the last failed test run (stack trace).
-      code_history: A list of dictionaries containing previous code states and
-        test results.
-      base_try: The current attempt number for debugging.
+  Args:
+    python_file: The path to the PyTorch reference code.
+    jax_file: The path to the JAX code file being debugged.
+    test_file_path: The path to the test case file.
+    last_output: The output from the last failed test run (stack trace).
+    code_history: A list of dictionaries containing previous code states and
+      test results.
+    base_try: The current attempt number for debugging.
 
-    Returns:
-      A tuple containing
+  Returns:
+    A tuple containing
 
-      * An integer exit code (0 for success, 1 for failure).
-      * The number of passed tests from the final attempt.
-      * The number of failed tests from the final attempt.
-      * The updated code history list.
+    * An integer exit code (0 for success, 1 for failure).
+    * The number of passed tests from the final attempt.
+    * The number of failed tests from the final attempt.
+    * The updated code history list.
   """
   try:
     memory_list = []

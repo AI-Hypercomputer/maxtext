@@ -314,7 +314,8 @@ def split_to_tiles(images: np.ndarray, num_tiles_height: int, num_tiles_width: i
 
   Returns:
     The tiled image tensor with shape
-    ``(batch_size * num_tiles_height * num_tiles_width, num_channels, height // num_tiles_height, width // num_tiles_width)``.
+    ``(batch_size * num_tiles_height * num_tiles_width, num_channels, height // num_tiles_height,
+    width // num_tiles_width)``.
   """
   images = np.transpose(images, (2, 0, 1))  # Change to (num_channels, height, width)
   num_channels, height, width = images.shape

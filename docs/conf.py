@@ -57,9 +57,7 @@ templates_path = ["_templates"]
 source_suffix = [".rst", ".ipynb", ".md"]
 
 # Suppress specific warnings
-suppress_warnings = [
-    "autodoc.import_object"
-]
+suppress_warnings = ["autodoc.import_object"]
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
@@ -172,9 +170,7 @@ def run_apidoc(_):
   # Run the command and check for errors
   try:
     print("Running sphinx-apidoc...")
-    subprocess.check_call(
-      command, env={**os.environ, **{"OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "1"}}
-    )
+    subprocess.check_call(command, env={**os.environ, **{"OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "1"}})
   except subprocess.CalledProcessError as e:
     print(f"sphinx-apidoc failed with error: {e}", file=sys.stderr)
     sys.exit(1)
@@ -206,7 +202,5 @@ def setup(app):
 
   # Set up custom logging filters
   logger = logging.getLogger("sphinx")
-  warning_handler, *_ = [
-    h for h in logger.handlers if isinstance(h, sphinx_logging.WarningStreamHandler)
-  ]
+  warning_handler, *_ = [h for h in logger.handlers if isinstance(h, sphinx_logging.WarningStreamHandler)]
   warning_handler.filters.insert(0, FilterSphinxWarnings(app))
