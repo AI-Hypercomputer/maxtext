@@ -11,22 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# pylint: skip-file
+"""Megablox kernel"""
 
-"""Shim for Grouped matrix multiplication operations with custom VJPs."""
-
-import sys
-import importlib
-from MaxText import max_logging
-
-OLD_MODULE_PATH = "MaxText.kernels.megablox.ops"
-NEW_MODULE_PATH = "maxtext.kernels.megablox.ops"
-
-try:
-  _new_module = importlib.import_module(NEW_MODULE_PATH)
-  max_logging.warning(f"'{OLD_MODULE_PATH}' is deprecated; use '{NEW_MODULE_PATH}' instead.\n")
-  sys.modules[OLD_MODULE_PATH] = _new_module
-
-except ImportError as e:
-  max_logging.error(f"Shim could not find target module: '{NEW_MODULE_PATH}'\n")
-  raise e
+from maxtext.kernels.megablox.ops import gmm
