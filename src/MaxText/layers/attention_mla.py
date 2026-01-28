@@ -61,10 +61,7 @@ from MaxText.common_types import (
     AttentionType,
     DEFAULT_MASK_VALUE,
 )
-from MaxText.inference import kvcache
-from MaxText.inference import page_manager
-from MaxText.inference import paged_attention
-from MaxText.inference.kvcache import KVQuant
+
 from MaxText.sharding import create_sharding
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.attentions import Attention
@@ -72,6 +69,10 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext.inference import kvcache
+from maxtext.inference import page_manager
+from maxtext.inference import paged_attention
+from maxtext.inference.kvcache import KVQuant
 
 
 class Indexer(nnx.Module):

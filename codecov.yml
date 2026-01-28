@@ -24,7 +24,7 @@
 # During scheduled runs, the 'regular' flag is carried forward from the last PR.
 
 # Exclude non-source code, deprecated and experimental folders from coverage tracking
-codecov: 
+codecov:
  token: 35742a22-fb1f-4839-97ff-b54da5588689
 # By default file names in the coverage report will have their path in the file system, which in our
 # runners would be /__w/maxtext/maxtext/src/MaxText/* but Codecov expects src/MaxText/* so we need to fix the path

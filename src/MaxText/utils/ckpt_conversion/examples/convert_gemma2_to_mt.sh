@@ -27,14 +27,14 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext \
   per_device_batch_size="${PER_DEVICE_BATCH_SIZE}" \
   run_name="run_to_mt" \
   async_checkpointing="${ASYNC_CHECKPOINTING}" \
-  scan_layers="${SCAN_LAYERS}" 
+  scan_layers="${SCAN_LAYERS}"
 
 echo "--- Checkpoint Conversion Complete ---"
 
 # --- Step 2 (Optional): Decode using the Converted Checkpoint ---
 
 echo "--- Starting Decoding ---"
-python3 -m MaxText.decode \
+python3 -m maxtext.decode \
   ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}configs/base.yml \
   model_name="${MODEL_NAME}" \
   tokenizer_path="${TOKENIZER_PATH}" \

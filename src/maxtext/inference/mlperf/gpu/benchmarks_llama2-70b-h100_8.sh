@@ -99,7 +99,7 @@ echo
 echo $MAXENGINE_ARGS
 echo
 RUN_DESC=${run_name}_${PREFILL_LEN}_${BATCH_SIZE_PER_DEVICE}_quant_${QUANTIZATION}_${QUANT_MP}_kv_${KV_QUANT_DTYPE}_opt
-export BASEDIR=/opt/maxtext/Maxtext/inference_mlperf/
+export BASEDIR=/opt/maxtext/maxtext/inference/mlperf/
 
 # Run from repository root
 $cmd cd $(dirname $0)/../../../
@@ -108,14 +108,14 @@ run_benchmark() {
     local type=$1
     case "$type" in
         "performance")
-            $cmd bash ./MaxText/inference_mlperf/llama_offline_run.sh ${RUN_OPTIONS} -r -benchmarks_performance_${RUN_DESC}
+            $cmd bash ./maxtext/inference/mlperf/llama_offline_run.sh ${RUN_OPTIONS} -r -benchmarks_performance_${RUN_DESC}
             ;;
         "audit")
-            $cmd bash ./MaxText/inference_mlperf/llama_offline_run.sh ${RUN_OPTIONS} -r -benchmarks_audit_${RUN_DESC} -d
+            $cmd bash ./maxtext/inference/mlperf/llama_offline_run.sh ${RUN_OPTIONS} -r -benchmarks_audit_${RUN_DESC} -d
             ;;
         "accuracy")
             export HF_CKPT="meta-llama/Llama-2-70b-chat-hf"
-            $cmd bash ./MaxText/inference_mlperf/llama_offline_run.sh ${RUN_OPTIONS} -r benchmarks_accuracy_${RUN_DESC} -a
+            $cmd bash ./maxtext/inference/mlperf/llama_offline_run.sh ${RUN_OPTIONS} -r benchmarks_accuracy_${RUN_DESC} -a
             ;;
     esac
 }

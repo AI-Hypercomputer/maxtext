@@ -18,9 +18,9 @@
 
 DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The currently supported models are DeepSeek V3.1 (671B), DeepSeek V3 (671B), DeepSeek R1 (671B), and DeepSeek V2-Lite (16B).
 
-* DeepSeek-V3 features advanced techniques, including Multi-Head Latent Attention (MLA), finer-grained and shared experts, Multi-Token Prediction (MTP), and FP8 mixed precision designed for enhanced efficiency and performance. 
+* DeepSeek-V3 features advanced techniques, including Multi-Head Latent Attention (MLA), finer-grained and shared experts, Multi-Token Prediction (MTP), and FP8 mixed precision designed for enhanced efficiency and performance.
 
-* DeepSeek V3.1 shares the same architecture as V3, but features an improved checkpoint that supports hybrid thinking modes, improved performance in agentic tasks, and higher thinking efficiency. 
+* DeepSeek V3.1 shares the same architecture as V3, but features an improved checkpoint that supports hybrid thinking modes, improved performance in agentic tasks, and higher thinking efficiency.
 
 * DeepSeek R1 also uses V3 architecture. It utilizes cold-start data and large-scale reinforcement learning to incentivize chain-of-thought reasoning without relying solely on supervised fine-tuning.
 
@@ -63,7 +63,7 @@ To get started, follow the instructions at HuggingFace ([V3](https://huggingface
 
 ## Fine-tuning
 
-After you have a MaxText compatible checkpoint, you could fine-tune it with different datasets. 
+After you have a MaxText compatible checkpoint, you could fine-tune it with different datasets.
 
 One example command to run general finetuning with V3 on v5p-256.
 
@@ -140,7 +140,7 @@ python3 -m MaxText.sft_trainer src/MaxText/configs/sft.yml \
 One example command to run decoding with V3 on v5p-256 with unscanned checkpoint for fast decoding.
 
 ```sh
-python3 -m MaxText.decode src/MaxText/configs/base.yml \
+python3 -m maxtext.decode src/MaxText/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     load_parameters_path=${CONVERTED_CHECKPOINT} \
     run_name=decode \

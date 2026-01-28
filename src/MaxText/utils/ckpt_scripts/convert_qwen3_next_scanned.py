@@ -37,7 +37,7 @@ from tqdm import tqdm
 
 from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
 from MaxText import max_logging
-from MaxText.inference_utils import str2bool
+from maxtext.inference_utils import str2bool
 
 MODEL_PARAMS_DICT = {
     "qwen3-next-80b-a3b": {

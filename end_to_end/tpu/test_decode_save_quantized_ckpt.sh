@@ -50,7 +50,7 @@ export OUTFILE="${OUTDIR}/decode.txt"
 mkdir -p $OUTDIR
 echo
 # Run command
-${cmd} python3 -m MaxText.decode \
+${cmd} python3 -m maxtext.decode \
   "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/configs/base.yml \
   tokenizer_path=${TOKENIZER_PATH} \
   load_parameters_path=${LOAD_PARAMETERS_PATH} \

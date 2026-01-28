@@ -3,7 +3,7 @@
 # This file is documentation for how to get started with gpt-oss-20b on v5p-8.
 
 # The flow of this file is as follows:
-# 1. Convert the HuggingFace checkpoint (bf16) to MaxText-compatible checkpoint (bf16): 
+# 1. Convert the HuggingFace checkpoint (bf16) to MaxText-compatible checkpoint (bf16):
 #    Scanned format is better for training; unscanned format is better for decoding.
 # 2. Run logit check, pre-training, fine-tuning, and decoding.
 
@@ -29,7 +29,7 @@ echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Step 1: Checkpoint conversion
-# Assume HF checkpoints are uploaded to GCS bucket at CKPT_BUCKET 
+# Assume HF checkpoints are uploaded to GCS bucket at CKPT_BUCKET
 # Non-Googlers please remember to point `CKPT_BUCKET` to GCS buckets that you own
 # Copying the HF checkpoint into a local directory `/tmp` -- you are free to use a different directory
 if [ -z "${CKPT_DISK_LOCATION}" ]; then
@@ -38,13 +38,13 @@ if [ -z "${CKPT_DISK_LOCATION}" ]; then
   export CKPT_DISK_LOCATION=/tmp/hf-bf16
 fi
 
-# 1.1 Convert checkpoint to `scanned` format, more suitable for training 
+# 1.1 Convert checkpoint to `scanned` format, more suitable for training
 JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/scanned --model-size ${MODEL_NAME}
 
 # 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
 JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_unscanned_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/unscanned --model-size ${MODEL_NAME}
 
-# Step 2: 
+# Step 2:
 # We define the checkpoint paths. This way it is easier to use these paths in the `train.py` and `decode.py` commands
 export SCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/scanned/0/items
 export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/unscanned/0/items
@@ -68,4 +68,4 @@ python3 -m MaxText.sft_trainer "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/sr
 
 # Run decoding - megablox implementation
 # Note decode requires the access token for huggingface tokenizer even if the model is not gated
-python3 -m MaxText.decode "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=decode model_name=${MODEL_NAME} tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} hf_access_token=${HF_TOKEN} load_parameters_path=${UNSCANNED_CKPT_PATH} scan_layers=False attention=dot_product sparse_matmul=True megablox=True dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=1 max_prefill_predict_length=64 max_target_length=128 prompt="I love to" ici_fsdp_parallelism=1 ici_tensor_parallelism=4
+python3 -m maxtext.decode "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=decode model_name=${MODEL_NAME} tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} hf_access_token=${HF_TOKEN} load_parameters_path=${UNSCANNED_CKPT_PATH} scan_layers=False attention=dot_product sparse_matmul=True megablox=True dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=1 max_prefill_predict_length=64 max_target_length=128 prompt="I love to" ici_fsdp_parallelism=1 ici_tensor_parallelism=4

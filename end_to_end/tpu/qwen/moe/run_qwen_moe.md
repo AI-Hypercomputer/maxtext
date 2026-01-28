@@ -67,7 +67,7 @@ Decoding
 To generate text with a trained model, use the `decode` command. The command below is an example for decoding on a v5p-512 slice.
 
 ```
-python3 -m MaxText.decode src/MaxText/configs/base.yml\
+python3 -m maxtext.decode src/MaxText/configs/base.yml\
     load_parameters_path=gs://your-gcs-bucket/qwen3_maxtext_ckpt/0/items\
     tokenizer_type=huggingface\
     tokenizer_path=src/MaxText/assets/qwen3-tokenizer\
