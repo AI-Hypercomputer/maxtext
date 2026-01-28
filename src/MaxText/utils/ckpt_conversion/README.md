@@ -50,7 +50,7 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml
   * `hf_access_token`: Your Hugging Face token.
   * `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Googld Cloud Storage (GCS) or local. If not set, the default output directory is `Maxtext/tmp`.
   * `--lazy_load_tensors` (optional): If `true`, loads Hugging Face weights on-demand to minimize RAM usage.
-  * `--hf_model_path` (optional): Specifies a local directory containing the model weights. If unspecified, we use the [default Hugging Face repository ID](https://github.com/AI-Hypercomputer/maxtext/blob/2f77e7b5fcc4b580bc2d109525c362f3d9056ec9/src/MaxText/utils/ckpt_conversion/utils/utils.py#L54-L82) (e.g., openai/gpt-oss-20b). This is necessary for locally dequantized models like GPT-OSS or DeepSeek. 
+  * `--hf_model_path` (optional): Specifies a local or remote directory containing the model weights. If unspecified, we use the [default Hugging Face repository ID](https://github.com/AI-Hypercomputer/maxtext/blob/2f77e7b5fcc4b580bc2d109525c362f3d9056ec9/src/MaxText/utils/ckpt_conversion/utils/utils.py#L54-L82) (e.g., openai/gpt-oss-20b). This is necessary for locally dequantized models like GPT-OSS or DeepSeek. 
 
 
 ## MaxText to Hugging Face
