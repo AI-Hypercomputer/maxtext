@@ -98,6 +98,7 @@ importlib-metadata>=8.7.1
 importlib-resources>=6.5.2
 iniconfig>=2.3.0
 isort>=7.0.0
+jaraco-functools>=4.3.0
 jax>=0.8.1
 jaxlib>=0.8.1
 jaxtyping>=0.3.5
