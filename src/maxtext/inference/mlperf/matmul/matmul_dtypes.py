@@ -16,7 +16,7 @@
 
 import jax
 
-from MaxText.inference_mlperf.matmul import timing_util
+from maxtext.inference.mlperf.matmul import timing_util
 
 if __name__ == "__main__":
   _PROFILE = False

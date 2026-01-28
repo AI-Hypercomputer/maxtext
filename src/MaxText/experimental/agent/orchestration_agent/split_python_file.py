@@ -197,7 +197,7 @@ class DependencyAnalyzer:
     """Convert an absolute import line to a mapping of names to file anchors.
 
     Example:
-        "from MaxText.inference import page_manager, utils" ->
+        "from maxtext.inference import page_manager, utils" ->
         {"page_manager": "src/MaxText/inference.py#page_manager",
          "utils": "src/MaxText/inference.py#utils"}
 
@@ -215,7 +215,7 @@ class DependencyAnalyzer:
       # or a module 'pkg' corresponds to 'path_form/pkg.py'
       # The logic in get_absolute_imports should ideally resolve this ambiguity.
       # A heuristic could be used here (e.g., checking casing) but we stick to the current logic.
-      # The user's example `from MaxText.inference import page_manager` creates a path
+      # The user's example `from maxtext.inference import page_manager` creates a path
       # `src/MaxText/inference.py#page_manager`, which is what the new visitor expects to correct.
       import_dict[pkg.strip()] = path_form + ".py#" + pkg.strip()
     return import_dict

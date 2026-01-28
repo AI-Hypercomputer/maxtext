@@ -22,8 +22,8 @@ import jsonlines
 
 import jax
 
-from MaxText import inference_microbenchmark
 from MaxText import pyconfig
+from maxtext.inference import inference_microbenchmark
 
 try:
   JaxRuntimeError = jax.errors.JaxRuntimeError  # added in JAX 0.4.34

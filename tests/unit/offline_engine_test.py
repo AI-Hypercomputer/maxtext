@@ -21,7 +21,7 @@ import os.path
 import jax
 import jax.numpy as jnp
 import numpy as np
-from MaxText.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
+from maxtext.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
 

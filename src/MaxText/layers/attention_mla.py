@@ -61,10 +61,7 @@ from MaxText.common_types import (
     AttentionType,
     DEFAULT_MASK_VALUE,
 )
-from MaxText.inference import kvcache
-from MaxText.inference import page_manager
-from MaxText.inference import paged_attention
-from MaxText.inference.kvcache import KVQuant
+
 from MaxText.sharding import create_sharding
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.attentions import Attention
@@ -72,6 +69,10 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext.inference import kvcache
+from maxtext.inference import page_manager
+from maxtext.inference import paged_attention
+from maxtext.inference.kvcache import KVQuant
 
 
 class Indexer(nnx.Module):
@@ -226,7 +227,7 @@ class Indexer(nnx.Module):
       2. K = RoPE(Norm(Wk @ X))
       3. Logits = ReLU(Q @ K.T)                      # Pairwise similarity
       4. Head_Weights = (W_proj @ X) * scale         # Dynamic head importance, scale for stability
-      5. Score = Sum_head(Logits * Head_Weights)     # Aggregate heads
+      5. Score = Logits @ Head_Weights               # Aggregate heads
       6. Indices = ArgTopk(Score)
 
     Args:
@@ -281,7 +282,7 @@ class Indexer(nnx.Module):
     # Weights scaling affect index_score, but does not affect topk_indices. Keep scaling for numerical stability.
     # https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py#L478-L480
     weights = weights * (self.n_heads**-0.5) * self.softmax_scale
-    # Weighted sum over head: sum_h(logits * weights)
+    # Aggregate head-wise logits: logits @ weights
     index_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
 
     # Apply attention mask before TopK

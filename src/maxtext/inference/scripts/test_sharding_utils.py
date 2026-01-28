@@ -23,7 +23,7 @@ cost, and memory usage calculations.
 
 import unittest
 
-from MaxText.inference.scripts.sharding_utils import calculate_matmul_resources, latency_bound_comms
+from maxtext.inference.scripts.sharding_utils import calculate_matmul_resources, latency_bound_comms
 
 # Common test parameters
 M, K, F = 64, 128, 256

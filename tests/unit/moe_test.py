@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -460,6 +460,7 @@ class RoutedMoeTest(unittest.TestCase):
         megablox=True,
         sparse_matmul=True,
         per_device_batch_size=1,
+        max_target_length=128,
     )
 
     rng = jax.random.PRNGKey(1234)
@@ -488,6 +489,7 @@ class RoutedMoeTest(unittest.TestCase):
         megablox=False,
         sparse_matmul=True,
         per_device_batch_size=1,
+        max_target_length=128,
     )
 
     rng = jax.random.PRNGKey(1234)
@@ -516,6 +518,7 @@ class RoutedMoeTest(unittest.TestCase):
         megablox=False,
         sparse_matmul=False,
         per_device_batch_size=1,
+        max_target_length=128,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -545,6 +548,7 @@ class RoutedMoeTest(unittest.TestCase):
         sparse_matmul=True,
         per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
         ici_expert_parallelism=4,
+        max_target_length=128,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -577,6 +581,7 @@ class RoutedMoeTest(unittest.TestCase):
         ici_fsdp_parallelism=2,
         ici_fsdp_transpose_parallelism=2,
         moe_fsdp_use_two_stage_all_gather=True,
+        max_target_length=128,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -652,6 +657,7 @@ class RoutedMoeTest(unittest.TestCase):
         sparse_matmul=True,
         per_device_batch_size=1,
         ici_context_parallelism=4,
+        max_target_length=128,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -684,6 +690,7 @@ class RoutedMoeTest(unittest.TestCase):
         ici_context_parallelism=2,
         ici_expert_parallelism=2,
         packing=False,
+        max_target_length=128,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -715,6 +722,7 @@ class RoutedMoeTest(unittest.TestCase):
         per_device_batch_size=4,
         ici_tensor_parallelism=2,
         ici_expert_parallelism=2,
+        max_target_length=128,
     )
 
     rng = jax.random.PRNGKey(2345)

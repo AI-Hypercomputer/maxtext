@@ -104,7 +104,7 @@ fi
 echo
 echo "Run decode using the generated checkpoint"
 echo
-$cmd python3 -m MaxText.decode "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
+$cmd python3 -m maxtext.decode "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
 run_name=${run_id}-decode-steps-50 \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} \

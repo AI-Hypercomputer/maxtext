@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Test suite for validating MaxText YAML configurations against Pydantic models. 
+Test suite for validating MaxText YAML configurations against Pydantic models.
 
 This test suite uses explicit, hardcoded lists of configuration files grouped
 by model family (e.g., gemma, llama) to test them directly against the Pydantic
 `MaxTextConfig` model. It avoids programmatic file discovery and the complex
 `pyconfig.initialize` function to provide fast, targeted feedback on validation
-errors like "Extra inputs are not permitted." 
+errors like "Extra inputs are not permitted."
 """
 
 import os
@@ -272,7 +272,7 @@ INFERENCE_CONFIGS = [
     os.path.join(
         MAXTEXT_REPO_ROOT,
         "src",
-        "MaxText",
+        "maxtext",
         "inference",
         "configs",
         "multi_host",
@@ -280,13 +280,13 @@ INFERENCE_CONFIGS = [
         "llama3_405b_v6e-16-16.yml",
     ),
     os.path.join(
-        MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "configs", "multi_host", "interleaved", "llama2_70b_v5e-16.yml"
+        MAXTEXT_REPO_ROOT, "src", "maxtext", "inference", "configs", "multi_host", "interleaved", "llama2_70b_v5e-16.yml"
     ),
     os.path.join(
-        MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "configs", "multi_host", "interleaved", "llama3_70b_v5e-16.yml"
+        MAXTEXT_REPO_ROOT, "src", "maxtext", "inference", "configs", "multi_host", "interleaved", "llama3_70b_v5e-16.yml"
     ),
     os.path.join(
-        MAXTEXT_REPO_ROOT, "src", "MaxText", "inference", "configs", "multi_host", "interleaved", "llama3_405b_v5e-64.yml"
+        MAXTEXT_REPO_ROOT, "src", "maxtext", "inference", "configs", "multi_host", "interleaved", "llama3_405b_v5e-64.yml"
     ),
 ]
 

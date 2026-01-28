@@ -8,7 +8,7 @@ if [ -z "${BASE_OUTPUT_PATH}" ]; then
     echo "BASE_OUTPUT_PATH is not set, using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
 fi
 
-# `SCANNED_CHECKPOINT` refers to the checkpoint that used for both `train.py` and `decode.py` 
+# `SCANNED_CHECKPOINT` refers to the checkpoint that used for both `train.py` and `decode.py`
 if [ -z "${SCANNED_CHECKPOINT}" ]; then
     # Non-Googlers please remember to point SCANNED_CHECKPOINT to GCS buckets that you own
     export SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}/8x7/scanned_ckpt/0/items
@@ -49,7 +49,7 @@ echo "Finished fine-tuning"
 
 # # TODO(b/391864113): Add this once the bug is fixed
 # # Run decoding with converted ckpt - dropping implementation
-# python3 -m MaxText.decode "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/configs/base.yml model_name=mixtral-8x7b hardware=gpu \
+# python3 -m maxtext.decode "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/configs/base.yml model_name=mixtral-8x7b hardware=gpu \
 #     run_name=unscanned_decoding load_parameters_path=${UNSCANNED_CKPT_PATH} \
 #     async_checkpointing=false attention=dot_product capacity_factor=0.1 \
 #     ici_expert_parallelism=8 ici_fsdp_parallelism=1 max_prefill_predict_length=11 \

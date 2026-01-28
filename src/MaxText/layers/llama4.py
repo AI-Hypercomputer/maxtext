@@ -27,7 +27,6 @@ from flax import nnx
 
 from MaxText.common_types import Config, Array, MODEL_MODE_TRAIN, AttentionType
 from MaxText import max_utils
-from MaxText.inference import page_manager
 from MaxText.layers import initializers
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import linears
@@ -39,7 +38,7 @@ from MaxText.layers.linears import MlpBlock
 from MaxText.layers.linears import Dropout
 from MaxText.layers.moe import RoutedAndSharedMoE
 from MaxText.common_types import MODEL_MODE_PREFILL
-
+from maxtext.inference import page_manager
 
 #### Multi modal model implementation
 

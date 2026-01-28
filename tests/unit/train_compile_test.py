@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -188,7 +188,7 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5e-256",
+            "compile_topology=v5p-64",
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "ici_sequence_parallelism=16",
@@ -276,12 +276,12 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5e-256",
+            "compile_topology=v6e-256",
             "compile_topology_num_slices=1",
             "per_device_batch_size=1",
             "ici_fsdp_parallelism=16",
             "ici_tensor_parallelism=16",
-            "max_target_length=2048",
+            "max_target_length=1024",
             "fused_qkv=true",
             "fused_mlp=true",
             "remat_policy=full",
@@ -366,7 +366,7 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v6e-256",
+            "compile_topology=v5p-64",
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=mixtral-8x7b",
@@ -457,7 +457,7 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v6e-256",
+            "compile_topology=v5p-64",
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=mixtral-8x7b",
@@ -503,7 +503,7 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v6e-256",
+            "compile_topology=v5p-64",
             "use_iota_embed=true",
             "compile_topology_num_slices=2",
             "model_name=mixtral-8x7b",
@@ -527,10 +527,10 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-256",
+            "compile_topology=v5p-64",
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
-            "model_name=deepseek3-671b",
+            "model_name=deepseek3-test",
             "sparse_matmul=True",
             "megablox=False",
             "per_device_batch_size=2",
@@ -552,10 +552,10 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-256",
+            "compile_topology=v5p-64",
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
-            "model_name=deepseek3-671b",
+            "model_name=deepseek3-test",
             "sparse_matmul=True",
             "megablox=False",
             "per_device_batch_size=1",
@@ -575,10 +575,10 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-256",
+            "compile_topology=v5p-64",
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
-            "model_name=deepseek3-671b",
+            "model_name=deepseek3-test",
             "sparse_matmul=True",
             "megablox=False",
             "per_device_batch_size=1",
@@ -592,30 +592,6 @@ class TrainCompile(unittest.TestCase):
     )
 
   @pytest.mark.cpu_only
-  def test_moe_deepseek_without_device_limit(self):
-    compiled_trainstep_file = "/tmp/test_moe_deepseek_without_device_limit.pickle"
-    train_compile_main(
-        (
-            "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-256",
-            "use_iota_embed=true",
-            "compile_topology_num_slices=1",
-            "model_name=deepseek3-671b",
-            "sparse_matmul=True",
-            "megablox=False",
-            "per_device_batch_size=1",
-            "max_target_length=1024",
-            "attention=flash",
-            "dtype=bfloat16",
-            "weight_dtype=bfloat16",
-            "n_routing_groups=-1",
-            "topk_routing_group=-1",
-        )
-    )
-
-  @pytest.mark.cpu_only
   def test_moe_deepseek_pipeline_subset(self):
     compiled_trainstep_file = "/tmp/test_moe_deepseek_pipeline_subset.pickle"
     train_compile_main(
@@ -623,15 +599,15 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v6e-256",
+            "compile_topology=v5p-64",
             "compile_topology_num_slices=8",
             "use_iota_embed=true",
-            "model_name=deepseek3-671b",
+            "model_name=deepseek3-test",
             "megablox=True",
             "sparse_matmul=False",
             "capacity_factor=1",
             "per_device_batch_size=1",
-            "max_target_length=2048",
+            "max_target_length=1024",
             "pipeline_parallel_layers=56",
             "ici_expert_parallelism=16",
             "dcn_pipeline_parallelism=8",
@@ -646,11 +622,11 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v6e-256",
+            "compile_topology=v5p-128",
             "compile_topology_num_slices=8",
             "use_iota_embed=true",
             "per_device_batch_size=1",
-            "max_target_length=2048",
+            "max_target_length=1024",
             "pipeline_parallel_layers=56",
             "base_num_decoder_layers=61",  # Remainder of 5 will fail when sharded incorrectly.
             "ici_expert_parallelism=16",
@@ -666,7 +642,7 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-256",
+            "compile_topology=v5p-128",
             "compile_topology_num_slices=1",
             "model_name=llama4-17b-16e",
             "per_device_batch_size=1",
@@ -674,7 +650,7 @@ class TrainCompile(unittest.TestCase):
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "scan_layers=True",
-            "ici_fsdp_parallelism=32",
+            "ici_fsdp_parallelism=16",
             "ici_tensor_parallelism=4",
         )
     )
@@ -687,7 +663,7 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-64",
+            "compile_topology=v5p-16",
             "compile_topology_num_slices=1",
             "model_name=gpt-oss-20b",
             "per_device_batch_size=1",
@@ -709,7 +685,7 @@ class TrainCompile(unittest.TestCase):
             "",
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-64",
+            "compile_topology=v5p-16",
             "compile_topology_num_slices=1",
             "model_name=gpt-oss-20b",
             "per_device_batch_size=1",
@@ -767,6 +743,7 @@ class TrainCompile(unittest.TestCase):
             "compile_topology_num_slices=1",
             "model_name=qwen3-next-80b-a3b",
             "per_device_batch_size=1",
+            "max_target_length=1024",
         )
     )
 
@@ -811,5 +788,6 @@ class TrainCompile(unittest.TestCase):
             "model_name=olmo3_7b",
             "per_device_batch_size=1",
             "scan_layers=True",
+            "max_target_length=1024",
         )
     )

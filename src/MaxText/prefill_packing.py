@@ -265,7 +265,7 @@ class BatchedPrefillProcessor:
   ) -> tuple[list[tuple[engine_api.ResultTokens, int]], DecodeState]:
     """Process all items in a bucket."""
     # pylint: disable=import-outside-toplevel
-    from MaxText.inference.offline_engine import PrefillResult  # type: ignore
+    from maxtext.inference.offline_engine import PrefillResult  # type: ignore
 
     slots = bucket.slots
     lengths = [len(prompt) for prompt in bucket.token_ids]

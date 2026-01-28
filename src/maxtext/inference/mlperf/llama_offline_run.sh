@@ -142,7 +142,7 @@ run_loadgen() {
   echo "PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES: ${PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES}"
   echo "MAXENGINE_ARGS: ${MAXENGINE_ARGS}"
   echo
-  ${CMD} python3 -m MaxText.inference_mlperf.offline_mode \
+  ${CMD} python3 -m maxtext.inference.mlperf.offline_mode \
     --maxengine_config_filepath=${MAXENGINE_CONFIG_FILEPATH} \
     --mlperf_test_mode=${TEST_MODE} \
     --input_mode tokenized \
@@ -191,7 +191,7 @@ run_loadgen_accuracy () {
       EVAL_SCRIPT="evaluate-accuracy"
     fi
     echo
-    ${CMD} python3 -m MaxText.inference_mlperf.${EVAL_SCRIPT} \
+    ${CMD} python3 -m maxtext.inference.mlperf.${EVAL_SCRIPT} \
       --checkpoint-path ${HF_CKPT} \
       --mlperf-accuracy-file ${OUTPUT_ACCURACY_JSON_PATH} \
       --dataset-file ${DATASET_PATH} 2>&1 | tee ${OUTPUT_LOG_DIR}/evaluate_offline_accuracy_log.log

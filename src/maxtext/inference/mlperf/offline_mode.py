@@ -36,7 +36,7 @@ import mlperf_loadgen as lg  # pytype: disable=import-error
 # pylint: disable=no-name-in-module
 
 from MaxText.maxengine import create_engine_from_config_flags
-from MaxText.inference_mlperf import offline_inference
+from maxtext.inference.mlperf import offline_inference
 
 
 warnings.simplefilter("ignore", category=FutureWarning)

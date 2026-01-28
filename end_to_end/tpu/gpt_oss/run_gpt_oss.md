@@ -39,7 +39,7 @@ python3 -m MaxText.utils.ckpt_scripts.dequantize_mxfp4 --input-path=<local_mxfp4
 
 
 3. Once downloaded and converted to BF16:
-* run [convert_gpt_oss_ckpt.py](../../../src/MaxText/utils/ckpt_scripts/convert_gpt_oss_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) scanned format for training and fine-tuning. 
+* run [convert_gpt_oss_ckpt.py](../../../src/MaxText/utils/ckpt_scripts/convert_gpt_oss_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) scanned format for training and fine-tuning.
 
 ```
 python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_ckpt --base-model-path <local_bf16_path> \
@@ -79,7 +79,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
 
 ## Finetuning
 
-After you have a MaxText-compatible scanned checkpoint, you could finetune it with different datasets. 
+After you have a MaxText-compatible scanned checkpoint, you could finetune it with different datasets.
 
 One example command to run general finetuning with gpt-oss-20b on v5p-8.
 
@@ -137,7 +137,7 @@ python3 -m MaxText.sft_trainer src/MaxText/configs/sft.yml \
 One example command to run decoding with gpt-oss-20b on v5p-8 with unscanned checkpoint for fast decoding.
 
 ```sh
-python3 -m MaxText.decode src/MaxText/configs/base.yml \
+python3 -m maxtext.decode src/MaxText/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=decode \
     model_name=gpt-oss-20b \

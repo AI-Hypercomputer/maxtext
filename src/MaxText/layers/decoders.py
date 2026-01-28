@@ -33,7 +33,6 @@ from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MOD
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.sharding import create_sharding
-from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
@@ -61,6 +60,7 @@ from MaxText.layers import (
     simple_layer,
     olmo3,
 )
+from maxtext.inference import page_manager
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions

@@ -23,7 +23,7 @@ import jax.numpy as jnp
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.inference.page_manager import PageManager, PageState
+from maxtext.inference.page_manager import PageManager, PageState
 
 
 class TestPageManager(unittest.TestCase):
