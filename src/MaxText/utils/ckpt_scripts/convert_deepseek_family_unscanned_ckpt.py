@@ -61,7 +61,9 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
   qk_nope_head_dim = model_params["qk_nope_head_dim"]
   qk_rope_head_dim = model_params["qk_rope_head_dim"]
   v_head_dim = model_params["v_head_dim"]
+  use_sparse_indexer = model_params.get("use_sparse_indexer", False)
 
+  # load safetensor
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
   chkpt_vars = {}
   for i, ckpt_path in tqdm(enumerate(ckpt_paths), total=len(ckpt_paths)):
@@ -215,6 +217,26 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         self_attention["wq_b"]["kernel"] = wq_b
       else:
         self_attention["query"]["kernel"] = query
+
+      # TODO(shuningjin)
+      # BEGIN CHANGE
+      if use_sparse_indexer:
+        # init weight
+        self_attention["indexer"] = {
+            "wq_b": {"kernel": None},
+            "wk": {"kernel": None},
+            "weights_proj": {"kernel": None},
+            "k_norm": {"scale": None, "bias": None},
+        }
+        # read from huggingface ckpt
+        # transform weight
+        # assign
+        self_attention["indexer"]["wq_b"]["kernel"] = None
+        self_attention["indexer"]["wk"]["kernel"] = None
+        self_attention["indexer"]["weights_proj"]["kernel"] = None
+        self_attention["indexer"]["k_norm"]["scale"] = None
+        self_attention["indexer"]["k_norm"]["bias"] = None
+      # END CHANGE
 
       jax_weights["decoder"][layer_name]["self_attention"] = self_attention
       jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"] = pre_self_attention_layer_norm

@@ -87,6 +87,25 @@ MODEL_PARAMS_DICT = {
         "v_head_dim": 128,
         "has_mtp": False,
     },
+    "deepseek3.2-671b": {
+        # same as deepseek3-671b
+        "num_layers": 61,
+        "first_num_dense_layers": 3,
+        "base_num_query_heads": 128,
+        "base_emb_dim": 7168,
+        "num_experts": 256,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "has_mtp": True,
+        # indexer
+        "use_sparse_indexer": True,
+        "index_n_heads": 64,
+        "index_head_dim": 128,
+        "index_topk": 2048,
+    },
 }
 
 
