@@ -18,7 +18,7 @@ Begin your benchmarking efforts by performing an arithmetic intensity analysis. 
 
 Arithmetic intensity is calculated as the ratio of floating-point operations (FLOPs) to memory(bytes) or communication(bytes).
 
-*   **Arithmetic Intensity = FLOPs / Bytes**
+- **Arithmetic Intensity = FLOPs / Bytes**
 
 This metric helps determine whether a computation is MXU-bound (high arithmetic intensity) or memory-bound/communication-bound (low arithmetic intensity).
 
@@ -28,8 +28,8 @@ This metric helps determine whether a computation is MXU-bound (high arithmetic 
 
 For benchmarking purposes, we collect the step time for training. This step time is then used to calculate MFU and throughputs, which provide insights into the utilization achieved for each benchmark workload.
 
-*   **MFU = flops_train_step / step_time / peak HW FLOPS**
-*   **Throughput = global tokens / step_time / number of devices**
+- **MFU = flops_train_step / step_time / peak HW FLOPS**
+- **Throughput = global tokens / step_time / number of devices**
 
 More detailed are explained in [](performance-metrics).
 
@@ -98,19 +98,19 @@ There are two methods for asynchronous collective offloading:
 
 1. Offload Collectives to Sparse Core:
 
-    This method is recommended for v7x. To enable it, set the following flags from [[link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L70)]:
+   This method is recommended for v7x. To enable it, set the following flags from [link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L70):
 
-*   `ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR`
-*   `ENABLE_SPARSECORE_OFFLOADING_FOR_REDUCE_SCATTER`
-*   `ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER`
-*   `ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE`
+- `ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR`
+- `ENABLE_SPARSECORE_OFFLOADING_FOR_REDUCE_SCATTER`
+- `ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER`
+- `ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE`
 
- 2. Overlap Collective Using Continuation Fusion:**
+2. Overlap Collective Using Continuation Fusion:
 
-    This method is recommended for v5p and v6e. To enable it, set the following flags [[link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L39)]:
+   This method is recommended for v5p and v6e. To enable it, set the following flags ([link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L39)):
 
-*   `CF_FOR_ALL_GATHER`
-*   `CF_FOR_ALL_REDUCE`
+- `CF_FOR_ALL_GATHER`
+- `CF_FOR_ALL_REDUCE`
 
 Those XLA can be set via `LIBTPU_INIT_ARGS`
 
