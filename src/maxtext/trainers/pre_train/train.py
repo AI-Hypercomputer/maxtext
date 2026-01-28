@@ -34,8 +34,9 @@ import tensorflow as tf
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import NamedSharding
 
-from flax import linen as nn
+from flax import linen as nn, nnx
 from flax.linen import partitioning as nn_partitioning
 
 from maxtext.configs import pyconfig
@@ -64,6 +65,7 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import qk_clip_utils
 from maxtext.utils import sharding
+from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
 from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss
 
@@ -72,8 +74,10 @@ diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configura
 VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
 
-def get_first_step(state):
-  return int(state.step)
+def get_first_step(model, state):
+  if isinstance(model, nn.Module):
+    return int(state.step)
+  return int(state.optimizer.step.get_value())
 
 
 # -----------------------------------------------------------------------------
@@ -85,11 +89,11 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   """loss_fn for both train and eval.
 
   Args:
-    model: A nn.Module
+    model: A nn.Module (Linen) or nnx.Module (NNX).
     config: Config of parameters
     data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout
-    params: Model params
+    dropout_rng: A key to use to generate rng for dropout (Linen); unused for NNX.
+    params: Model params (Linen); unused for NNX (params are part of the model).
     is_train: True for train_step and False for eval_step
 
   Returns:
@@ -163,7 +167,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       total_loss = jnp.sum(xent)
       total_z_loss = jnp.sum(z_loss)
   else:
-    # Flax NNX model
+    # Flax NNX model:
     logits = model(
         decoder_input_tokens=data["inputs"],
         decoder_positions=data["inputs_position"],
@@ -174,7 +178,12 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
     )
-    intermediate_outputs = {}
+    # Capture NNX intermediates (MoE losses, hidden states, etc.)
+    intermediate_outputs = nnx.state(model, nnx.Intermediate).to_pure_dict()
+
+    if config.num_vocab_tiling > 1:
+      raise NotImplementedError("Vocab tiling for NNX modules has not been implemented.")
+
     one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
     xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
@@ -260,67 +269,92 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
-  """
+def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
+  """Training step for both Linen and NNX models.
 
   Args:
-    model: A nn.Module
-    state: A pytree of the current state of the model
-    data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout
+    model: A nn.Module (Linen) or nnx.GraphDef of the TrainStateNNX (NNX).
+    config: Hyperparameters.
+    state_mesh_shardings: PyTree of PartitionSpecs for the train state.
+    params_shardings: PyTree of PartitionSpecs for model parameters, used for gradient accumulation.
+    state: Linen TrainState or NNX pure State.
+    data: Training data batch.
+    dropout_rng: A key to use to generate rng for dropout (Linen); unused for NNX.
 
   Returns:
-    new_state: Same format as state.
+    new_state: Updated Linen TrainState or NNX pure State.
     metrics: Dictionary of model metrics such as loss, training rate, etc.
-    rng2: A new rng key that can be used in future calls.
-
   """
-  reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = (
-      [],
-      [],
-      [],
-      loss_fn,
-  )
-  if config.use_dpo:
-    state, reference_params = _split_dpo_state(state)
-    state_mesh_shardings, reference_params_sharding = _split_dpo_state(state_mesh_shardings)
-    extra_dpo_args = [reference_params]
-    _loss_fn = dpo_loss_fn
+  # --- Per-path initialization ---
+  if isinstance(model, nn.Module):
+    reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
+    if config.use_dpo:
+      state, reference_params = _split_dpo_state(state)
+      state_mesh_shardings, reference_params_sharding = _split_dpo_state(state_mesh_shardings)
+      extra_dpo_args = [reference_params]
+      _loss_fn = dpo_loss_fn
+    params = state.params
+    ga_fn, ga_model, ga_params, ga_rng, ga_dpo = _loss_fn, model, params, dropout_rng, extra_dpo_args
+  else:
+    if config.use_dpo:
+      raise NotImplementedError("DPO for NNX modules has not been implemented.")
+    state = nnx.merge(model, state)  # reconstruct TrainStateNNX
+    ga_fn, ga_model, ga_params, ga_rng, ga_dpo = loss_fn, state.model, None, None, []
 
-  params = state.params
-
+  # --- Gradient computation ---
   if config.gradient_accumulation_steps > 1:
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
-        _loss_fn,
+        ga_fn,
         config,
-        model,
-        params,
+        ga_model,
+        ga_params,
         params_shardings,
         data,
-        dropout_rng,
-        extra_dpo_args,
+        ga_rng,
+        ga_dpo,
     )
   else:
-    if config.optimizer_memory_host_offload:
-      if config.use_dpo:
+    if isinstance(model, nn.Module):
+      if config.optimizer_memory_host_offload and config.use_dpo:
         reference_params = jax.device_put(
             reference_params,
             max_utils.with_memory_kind(reference_params_sharding, "device"),
         )
         extra_dpo_args = [reference_params]
-    if config.shard_optimizer_over_data:
-      params = jax.tree.map(
-          functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
-          params,
-          params_shardings,
-      )
-    grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
+      if config.shard_optimizer_over_data:
+        params = jax.tree.map(
+            functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
+            params,
+            params_shardings,
+        )
+      grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
+      (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
+    else:
+      model_graphdef, curr_params, rest = nnx.split(state.model, nnx.Param, ...)
+      if config.shard_optimizer_over_data:
+        curr_params = jax.tree.map(
+            functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
+            curr_params,
+            params_shardings,
+        )
+        nnx.update(state.model, curr_params)
+
+      def diff_wrapper(param, rest, config, data):
+        local_model = nnx.merge(model_graphdef, param, rest)
+        loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
+        _, _, new_rest = nnx.split(local_model, nnx.Param, ...)
+        return loss, (aux, new_rest)
+
+      grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
+      (loss, (aux, new_rest)), raw_grads = grad_func(curr_params, rest, config, data)
+      nnx.update(state.model, new_rest)
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
       raw_grads,
   )
+
+  # Extract aux fields into locals
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
@@ -328,43 +362,72 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   moe_bias_updates = aux["moe_bias_updates"]
   mtp_loss = aux["mtp_loss"]
 
-  if config.gradient_clipping_threshold > 0:
-    grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
+  if isinstance(model, nn.Module):
+    if config.gradient_clipping_threshold > 0:
+      grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
+    else:
+      grads = raw_grads
+    if config.optimizer_memory_host_offload:
+      state = state.replace(
+          opt_state=jax.device_put(
+              state.opt_state,
+              jax.tree_util.tree_map(
+                  lambda x: x.with_memory_kind(kind="device"),
+                  state_mesh_shardings.opt_state,
+              ),
+          )
+      )
+    # Move all parameters to device before optimizer update
+    if config.parameter_memory_host_offload:
+      max_logging.log("\nMoving all parameters to device before optimizer update")
+
+      def move(path, value):
+        max_logging.log(f"train.py: Moving f{path} to device")
+        return value.with_memory_kind(kind="device")
+
+      state = state.replace(
+          params=jax.device_put(
+              state.params,
+              jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
+          )
+      )
+    new_state = state.apply_gradients(grads=grads)
+
+    # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
+    if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
+      target_path = ("params", "decoder", "moe_layers", "DeepSeekMoeBlock_0", "MoeBlock_0", "gate", "bias")
+      # Updates the shape to be aligned with state.
+      moe_bias_updates = jnp.array(moe_bias_updates[0]).transpose()
+      new_state = maxtext_utils.update_state_param(new_state, target_path, moe_bias_updates)
   else:
     grads = raw_grads
-  if config.optimizer_memory_host_offload:
-    state = state.replace(
-        opt_state=jax.device_put(
-            state.opt_state,
-            jax.tree_util.tree_map(
-                lambda x: x.with_memory_kind(kind="device"),
-                state_mesh_shardings.opt_state,
-            ),
-        )
-    )
-  # Move all parameters to device before optimizer update
-  if config.parameter_memory_host_offload:
-    max_logging.log("\nMoving all parameters to device before optimizer update")
+    if config.gradient_clipping_threshold > 0:
+      grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, config.gradient_clipping_threshold)
+    if config.optimizer_memory_host_offload:
+      state.optimizer = jax.device_put(
+          state.optimizer,
+          jax.tree_util.tree_map_with_path(
+              maxtext_utils_nnx.move_memory_to_device,
+              state_mesh_shardings.optimizer,
+              is_leaf=lambda x: isinstance(x, NamedSharding),
+          ),
+      )
+    if config.parameter_memory_host_offload:
+      _, state_params, _ = nnx.split(state_mesh_shardings, nnx.Param, ...)
+      state_params = jax.tree_util.tree_map_with_path(
+          maxtext_utils_nnx.move_memory_to_device,
+          state_params,
+          is_leaf=lambda x: isinstance(x, NamedSharding),
+      )
+      nnx.update(state_mesh_shardings, state_params)
+      state.model = jax.device_put(state.model, state_mesh_shardings.model)
+    state.apply_gradients(grads)
+    new_state = state
 
-    def move(path, value):
-      max_logging.log(f"train.py: Moving f{path} to device")
-      return value.with_memory_kind(kind="device")
-
-    state = state.replace(
-        params=jax.device_put(
-            state.params,
-            jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
-        )
-    )
-  new_state = state.apply_gradients(grads=grads)
-
-  # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
-  if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
-    target_path = ("params", "decoder", "moe_layers", "DeepSeekMoeBlock_0", "MoeBlock_0", "gate", "bias")
-    # Flax 'sow' returns a tuple, so we take the first element [0].
-    # Updates the shape to be aligned with state.
-    moe_bias_updates = jnp.array(moe_bias_updates[0]).transpose()
-    new_state = maxtext_utils.update_state_param(new_state, target_path, moe_bias_updates)
+    # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
+    if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
+      target_bias = new_state.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
+      target_bias.value = target_bias.value + jnp.array(moe_bias_updates[0]).transpose()
 
   scalar_metrics = {
       "learning/loss": loss,
@@ -385,34 +448,41 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   if not config.optimizer_memory_host_offload:
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
-    scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
+    if isinstance(model, nn.Module):
+      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
+    else:
+      _, model_params, _ = nnx.split(new_state.model, nnx.Param, ...)
+      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(model_params)
   if config.use_dpo:
     scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
   metrics = {
       "scalar": scalar_metrics,
       "scalars": {},
   }
-
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
-  if config.use_dpo:
-    new_state = _merge_dpo_state(new_state, reference_params)
+  if isinstance(model, nn.Module):
+    if config.use_dpo:
+      new_state = _merge_dpo_state(new_state, reference_params)
+    return new_state, metrics
+  return nnx.state(new_state), metrics
 
-  return new_state, metrics
 
-
-def eval_step(model, config, state, data, dropout_rng):
+def eval_step(model, config, state, data, dropout_rng=None):
   """eval_step no backprop and new state compared with train_step."""
+  if isinstance(model, nn.Module):
+    reference_params, extra_dpo_args, _loss_fn = [], [], loss_fn
+    if config.use_dpo:
+      state, reference_params = _split_dpo_state(state)
+      extra_dpo_args = [reference_params]
+      _loss_fn = dpo_loss_fn
 
-  reference_params, extra_dpo_args, _loss_fn = [], [], loss_fn
-  if config.use_dpo:
-    state, reference_params = _split_dpo_state(state)
-    extra_dpo_args = [reference_params]
-    _loss_fn = dpo_loss_fn
-
-  eval_loss_fn = functools.partial(_loss_fn, model, config, data, dropout_rng, is_train=False)
-  loss, aux = eval_loss_fn(state.params, *extra_dpo_args)
+    eval_loss_fn = functools.partial(_loss_fn, model, config, data, dropout_rng, is_train=False)
+    loss, aux = eval_loss_fn(state.params, *extra_dpo_args)
+  else:
+    state = nnx.merge(model, state)  # reconstruct TrainStateNNX
+    loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
 
   mtp_acceptance_rate = 0.0
   if config.mtp_eval_target_module > 0:
@@ -434,7 +504,7 @@ def eval_step(model, config, state, data, dropout_rng):
           "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
       },
   }
-  if config.use_dpo:
+  if isinstance(model, nn.Module) and config.use_dpo:
     metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux["reward_accuracy"]
 
   return metrics
@@ -456,17 +526,23 @@ def train_loop(config, recorder, state=None):
       state,
   ) = train_utils.setup_train_loop(config, recorder)
 
-  if config.use_dpo:
-    if "reference_params" not in state.params:
-      reference_params = jax.tree.map(jnp.copy, state.params["params"])
-      state = _merge_dpo_state(state, reference_params)
-    state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
+  if isinstance(model, nn.Module):
+    if config.use_dpo:
+      if "reference_params" not in state.params:
+        reference_params = jax.tree.map(jnp.copy, state.params["params"])
+        state = _merge_dpo_state(state, reference_params)
+      state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
+    jit_model = model
+  else:
+    if config.use_dpo:
+      raise NotImplementedError("DPO is not supported for NNX models.")
+    jit_model, state = nnx.split(state)
 
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config,
-      model,
+      jit_model,
       mesh,
       state,
       state_mesh_shardings,
@@ -480,18 +556,26 @@ def train_loop(config, recorder, state=None):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data:
       state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
-    maxtext_utils.maybe_dump_jaxpr(config, p_train_step, (state, shaped_batch, init_rng))
+    if isinstance(model, nn.Module):
+      lower_args = (state, shaped_batch, init_rng)
+    else:
+      lower_args = (state, shaped_batch)
+    maxtext_utils.maybe_dump_jaxpr(config, p_train_step, lower_args)
     if config.compiled_trainstep_file == "":  # compile only when there is no pre-compiled file loaded
-      compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
+      compiled = p_train_step.lower(*lower_args).compile()
       compiled_stats = compiled.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_stats)
 
-  start_step = get_first_step(state)  # this is the start_step for training
+  start_step = get_first_step(model, state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
-  metric_logger.write_setup_info_to_tensorboard(state.params)
+  if isinstance(model, nn.Module):
+    setup_params = state.params
+  else:
+    _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
+  metric_logger.write_setup_info_to_tensorboard(setup_params)
 
   try:
     last_step_completion = datetime.datetime.now()
@@ -500,64 +584,67 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
-        # pylint: disable=not-callable
-        nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+        if isinstance(model, nn.Module):
+          # pylint: disable=not-callable
+          step_rng_args = (jax.jit(jax.random.fold_in)(init_rng, step),)
+        else:
+          step_rng_args = ()
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             if config.shard_optimizer_over_data:
               state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
-            state, metrics = p_train_step(state, example_batch, nextrng)
+            state, metrics = p_train_step(state, example_batch, *step_rng_args)
 
-      step_time_delta = datetime.datetime.now() - last_step_completion
-      last_step_completion = datetime.datetime.now()
+        step_time_delta = datetime.datetime.now() - last_step_completion
+        last_step_completion = datetime.datetime.now()
 
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+        state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
-      if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
-        jax.block_until_ready(state)  # Ensure compilation has finished.
-        gcs_utils.upload_dump(
-            config.dump_hlo_local_dir,
-            config.dump_hlo_gcs_dir,
-            module_name=config.dump_hlo_module_name,
-            delete_local_after=config.dump_hlo_delete_local_after,
-            all_host_upload=config.dump_hlo_upload_all,
-        )
+        if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
+          jax.block_until_ready(state)  # Ensure compilation has finished.
+          gcs_utils.upload_dump(
+              config.dump_hlo_local_dir,
+              config.dump_hlo_gcs_dir,
+              module_name=config.dump_hlo_module_name,
+              delete_local_after=config.dump_hlo_delete_local_after,
+              all_host_upload=config.dump_hlo_upload_all,
+          )
 
-      if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
-        assert eval_data_iterator
-        # Explicitly reset the eval iterator and counters before starting the eval loop
-        eval_data_iterator.reset()
-        metric_logger.reset_eval_metrics()
+        if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
+          assert eval_data_iterator
+          # Explicitly reset the eval iterator and counters before starting the eval loop
+          eval_data_iterator.reset()
+          metric_logger.reset_eval_metrics()
 
-        eval_step_count = 0
-        # pylint: disable=not-callable
-        for eval_batch in eval_data_iterator:
-          if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
-            break
-          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-            eval_metrics = p_eval_step(state, eval_batch, nextrng)
-          metric_logger.record_eval_metrics(step, metrics=eval_metrics)
-          max_logging.log(f"Completed eval step {eval_step_count}")
-          eval_step_count += 1
-        metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
-        if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
-          prof.deactivate()
-          raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
+          eval_step_count = 0
+          # pylint: disable=not-callable
+          for eval_batch in eval_data_iterator:
+            if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
+              break
+            with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+              eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
+              metric_logger.record_eval_metrics(step, metrics=eval_metrics)
+              max_logging.log(f"Completed eval step {eval_step_count}")
+              eval_step_count += 1
+          metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
+          if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
+            prof.deactivate()
+            raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
 
-      prof.maybe_deactivate_profiler(step, state)
+        prof.maybe_deactivate_profiler(step, state)
 
-      if step == start_step:
-        max_utils.print_mem_stats("After params initialized")
+        if step == start_step:
+          max_utils.print_mem_stats("After params initialized")
 
-      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
+        metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
     if config.save_checkpoint_on_completion:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
-    if checkpoint_manager is not None:
-      # in case the last checkpoint_period checkpoint is still in progress
-      checkpoint_manager.wait_until_finished()
+      if checkpoint_manager is not None:
+        # in case the last checkpoint_period checkpoint is still in progress
+        checkpoint_manager.wait_until_finished()
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
