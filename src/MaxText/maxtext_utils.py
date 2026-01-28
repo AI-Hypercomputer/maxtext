@@ -19,25 +19,23 @@ import functools
 import pickle
 import os
 from typing import Sequence
-
-from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
-from flax.training import train_state
-
 import numpy as np
-
-from jax.experimental import mesh_utils
-from jax.experimental.serialize_executable import deserialize_and_load
-from jax.sharding import AxisType, Mesh
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import AxisType, Mesh, NamedSharding
+from jax.experimental import mesh_utils
+from jax.experimental.serialize_executable import deserialize_and_load
+
+from flax import nnx, linen as nn
+from flax.linen import partitioning as nn_partitioning
+from flax.training import train_state
 
 import optax
-
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
+from MaxText import maxtext_utils_nnx
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import multimodal_utils
@@ -943,6 +941,9 @@ def setup_initial_state(
 
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
+  if config.pure_nnx:
+    return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
+
   init_state_partial = init_state_fn
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -981,6 +982,73 @@ def get_abstract_state(config, mesh, init_state_fn, is_training=True):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return (
       unboxed_abstract_sharded_state,
+      state_mesh_annotations,
+      state_mesh_shardings,
+  )
+
+
+def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=True):
+  """Calculates the abstract sharded state and memory placement for an NNX TrainState.
+
+  This function performs an abstract trace of the NNX model and optimizer using
+  `nnx.get_abstract_model`. It resolves logical sharding annotations into physical
+  JAX shardings and applies memory placement optimizations such as optimizer
+  sharding and host memory offloading (pinning to CPU RAM).
+
+  Args:
+    config: Configuration object containing sharding and offloading hyperparameters
+      (e.g., shard_optimizer_over_data, optimizer_memory_host_offload).
+    mesh: JAX physical mesh used to resolve logical axis names to physical devices.
+    nnx_init_trainstate_fn: A zero-argument factory function that produces a
+      TrainStateNNX instance during the abstract trace.
+    is_training: Boolean indicating if the state is for training. If True,
+      optimizer state is processed and memory offloading strategies are applied.
+
+  Returns:
+    A tuple containing (abstract_sharded_state, None, state_mesh_shardings):
+      abstract_sharded_state: An nnx.State containing ShapeDtypeStructs with
+        fully resolved physical sharding and memory_kind metadata.
+      state_mesh_annotations: An nnx.State tree consisting of the raw PartitionSpec
+        objects corresponding to each parameter/variable.
+      state_mesh_shardings: An nnx.State tree consisting of the raw JAX
+        Sharding objects corresponding to each parameter/variable.
+  """
+  assert nnx_init_trainstate_fn is not None, "get_abstract_state_nnx: init function must be given."
+
+  # Use nnx.get_abstract_model to get the abstract_state with NamedSharding info
+  _, abstract_state = nnx.get_abstract_model(nnx_init_trainstate_fn, mesh)
+
+  state_mesh_shardings = maxtext_utils_nnx.get_named_sharding_nnx(abstract_state)
+
+  if is_training and config.shard_optimizer_over_data:
+    # Add data to sharding for optimizer state
+    optimizer_sharding = jax.tree_util.tree_map_with_path(
+        functools.partial(sharding.add_data_to_sharding, mesh),
+        abstract_state.optimizer,
+        state_mesh_shardings.optimizer,
+    )
+    state_mesh_shardings.optimizer = optimizer_sharding
+  if is_training and config.optimizer_memory_host_offload:
+    optimizer_sharding = jax.tree_util.tree_map_with_path(
+        maxtext_utils_nnx.move_memory_to_host,
+        state_mesh_shardings.optimizer,
+        is_leaf=lambda x: isinstance(x, NamedSharding),
+    )
+    state_mesh_shardings.optimizer = optimizer_sharding
+  if is_training and config.parameter_memory_host_offload:
+    assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
+    state_def, state_params, rest = nnx.split(state_mesh_shardings, nnx.Param, ...)
+    state_params = jax.tree_util.tree_map_with_path(
+        maxtext_utils_nnx.move_memory_to_host,
+        state_params,
+        is_leaf=lambda x: isinstance(x, NamedSharding),
+    )
+    state_mesh_shardings = nnx.merge(state_def, state_params, rest)
+
+  abstract_sharded_state = maxtext_utils_nnx.set_named_sharding_nnx(abstract_state, state_mesh_shardings)
+  state_mesh_annotations = maxtext_utils_nnx.get_partition_spec_nnx(state_mesh_shardings)
+  return (
+      abstract_sharded_state,
       state_mesh_annotations,
       state_mesh_shardings,
   )

@@ -18,6 +18,7 @@
 import os
 from functools import partial
 
+from flax import nnx
 import jax
 from MaxText import max_logging
 from MaxText import max_utils
@@ -25,6 +26,7 @@ from MaxText import maxtext_utils
 from MaxText import sharding
 from MaxText import optimizers
 from MaxText.dpo_utils import _merge_dpo_state
+from MaxText.layers import train_state_nnx
 from MaxText.rampup_batch import create_rampup_manager
 from MaxText import model_creation_utils
 from maxtext.common import checkpointing
@@ -188,16 +190,23 @@ def setup_train_loop(config, recorder, devices=None):
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     is_training = True
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
+    mesh = maxtext_utils.get_mesh_from_config(config, devices)
     if config.pure_nnx:
       # Create abstract NNX model.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+      _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
     else:
       model = model_creation_utils.from_config(config, devices)
-    mesh = model.mesh
     learning_rate_schedule, tx = create_training_optimizer(config, model)
+
     if config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+      # For NNX, the train state is wrapped in the TrainStateNNX module.
+      def create_train_state_fn():
+        with jax.set_mesh(mesh):
+          model = _create_model_partial()
+          optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+          return train_state_nnx.TrainStateNNX(model, optimizer)
+
+      init_state_fn = create_train_state_fn
     else:
       init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
     checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
@@ -265,6 +274,7 @@ def setup_train_loop(config, recorder, devices=None):
         step0_restored = None
       if step0_restored is not None:
         reference_params = step0_restored["items"].params["params"]
+        # TODO: For pure_nnx, the dpo state manipulation is different.
         state = _merge_dpo_state(state, reference_params)
       else:
         max_logging.log(
