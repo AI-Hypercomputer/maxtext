@@ -31,6 +31,7 @@ from MaxText.common_types import ShardMode
 
 
 _LOGGED_ACTIVATION_SHARDINGS = set()
+_LOGGED_LOGICAL_AXES = set()
 
 
 def get_input_data_sharding(config, mesh):
@@ -51,7 +52,7 @@ def maybe_shard_with_name(inputs, named_sharding, shard_mode, debug_sharding=Fal
     pspec = remove_size_one_mesh_axis(getattr(named_sharding, "spec"), getattr(named_sharding, "mesh"))
     log_key = (str(jax.typeof(inputs)), tuple(pspec), extra_stack_level)
     if log_key not in _LOGGED_ACTIVATION_SHARDINGS:
-      max_logging.info(f"{log_key[0]:.<80} {log_key[1]}.", stacklevel=3 + extra_stack_level)
+      max_logging.info(f"Physical: {log_key[0]:.<80} {log_key[1]}.", stacklevel=3 + extra_stack_level)
       _LOGGED_ACTIVATION_SHARDINGS.add(log_key)
   if shard_mode == ShardMode.EXPLICIT:
     return reshard(inputs, named_sharding)
@@ -67,9 +68,22 @@ def maybe_shard_with_logical(
   """
   if inputs is None:
     return None
+
   named_sharding = create_sharding(mesh, logical_axes, rules=rules)
+
+  if debug_sharding and isinstance(inputs, Tracer):
+    log_key = (str(jax.typeof(inputs)), logical_axes, extra_stack_level)
+
+    if log_key not in _LOGGED_LOGICAL_AXES:
+      max_logging.info(f"Logical:  {log_key[0]:.<60} {log_key[1]}", stacklevel=3 + extra_stack_level)
+      _LOGGED_LOGICAL_AXES.add(log_key)
+
   return maybe_shard_with_name(
-      inputs, named_sharding, shard_mode, debug_sharding=debug_sharding, extra_stack_level=extra_stack_level + 1
+      inputs,
+      named_sharding,
+      shard_mode,
+      debug_sharding=debug_sharding,
+      extra_stack_level=extra_stack_level + 1,
   )
 
 

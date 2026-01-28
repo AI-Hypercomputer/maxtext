@@ -157,7 +157,12 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
       max_utils.print_non_trivial_mesh_axis(model.mesh)
-      maxtext_utils.print_shardings_params(sharded_state, out_shardings, model.mesh)
+      maxtext_utils.print_shardings_params(
+          params=sharded_state,
+          params_sharding=out_shardings,
+          mesh=model.mesh,
+          logical_annotations=specs,
+      )
     if config.load_parameters_path:
       try:
         ckptr = ocp.Checkpointer(
