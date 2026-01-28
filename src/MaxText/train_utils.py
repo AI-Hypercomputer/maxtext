@@ -219,7 +219,7 @@ def setup_train_loop(config, recorder, devices=None):
     if config.debug_sharding:
       logical_annotations = maxtext_utils.get_logical_annotations(model, tx, config, init_rng, mesh, is_training=True)
       max_utils.print_non_trivial_mesh_axis(model.mesh)
-      maxtext_utils.print_shardings_params(state.params, state_mesh_shardings.params, model.mesh, logical_annotations)
+      maxtext_utils.print_shardings_params(state.params, state_mesh_shardings.params, model.mesh, logical_annotations.params)
 
     if config.use_dpo:
       abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)

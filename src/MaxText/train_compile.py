@@ -250,7 +250,7 @@ def main(argv: Sequence[str]) -> None:
         shaped_train_args[0].params,
         state_mesh_shardings.params,
         topology_mesh,
-        logical_annotations,
+        logical_annotations.params,
     )
 
   # Compile

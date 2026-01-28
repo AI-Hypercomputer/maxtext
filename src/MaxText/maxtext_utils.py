@@ -1249,7 +1249,7 @@ def print_shardings_params(params, params_sharding, mesh, logical_annotations=No
 
   leaves_params, _ = jax.tree_util.tree_flatten_with_path(params)
   leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(params_sharding)
-  leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations.params)
+  leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations)
 
   for (path, leaf_val), (_, leaf_sharding), (_, leaf_logical_val) in zip(leaves_params, leaves_sharding, leaves_logical):
     path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
