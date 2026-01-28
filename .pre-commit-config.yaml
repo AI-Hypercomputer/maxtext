@@ -59,3 +59,4 @@ repos:
       - id: mdformat
         additional_dependencies: [mdformat-myst, mdformat-ruff]
         files: (docs/.)
+        exclude: docs/guides/checkpointing_solutions.md

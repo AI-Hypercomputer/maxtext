@@ -142,41 +142,10 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 
 ### Option 2: Converting from a Hugging Face checkpoint
 
-Otherwise, you can convert a Hugging Face checkpoint to MaxText format using the
-`src/MaxText/utils/ckpt_conversion/to_maxtext.py` script. This is useful if you
-have a pre-trained model from Hugging Face that you want to use with MaxText.
-
-First, ensure you have the necessary dependencies installed. Then, run the
-conversion script on a CPU machine. For large models, it is recommended to use
-the `--lazy_load_tensors` flag to reduce memory usage during conversion. This
-command will download the Hugging Face model and convert it to the MaxText
-format, saving it to the specified GCS bucket.
+Refer the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml \
-    model_name=${HF_MODEL} \
-    hf_access_token=${HF_TOKEN} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME} \
-    scan_layers=True hardware=cpu skip_jax_distributed_system=true
-
-# Example of converting Llama3.1-70B using --lazy_load_tensor=true which uses around 86GB of RAM
-
-python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
-    model_name=llama3.1-70b \
-    hf_access_token=${HF_TOKEN} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME} \
-    scan_layers=True \
-    hardware=cpu skip_jax_distributed_system=true \
-    --lazy_load_tensors=true
-```
-
-The converted checkpoint will be saved at the following location. Set this
-environment variable to use it in the following GRPO/GSPO training sessions:
-
-```bash
-export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/0/items
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
 ## Run GRPO
