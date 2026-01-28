@@ -43,11 +43,12 @@ def flash_attention_block_masked(
   """Computes masked flash attention using block-sparse masking.
 
   Args:
-    q: Query tensor with shape (batch_size, num_kv_heads,
-      num_q_heads_per_kv_head, q_seq_len, head_dim).
-    k: Key tensor with shape (batch_size, num_kv_heads, kv_seq_len, head_dim).
-    v: Value tensor with shape (batch_size, num_kv_heads, kv_seq_len,
-      v_head_dim).
+    q: Query tensor with shape ``(batch_size, num_kv_heads,
+      num_q_heads_per_kv_head, q_seq_len, head_dim)``.
+    k: Key tensor with shape
+      ``(batch_size, num_kv_heads, kv_seq_len, head_dim)``.
+    v: Value tensor with shape
+      ``(batch_size, num_kv_heads, kv_seq_len, v_head_dim)``.
     segment_ids: SegmentIds are a mechanism to ensure that there is no
       cross-attention between segments (fraction of a sequence) that have been
       concatenated together into a sequence. Each array is a list of ids
@@ -55,21 +56,23 @@ def flash_attention_block_masked(
       other. It stores the segment ids of the query and key/value sequences.
     block_kv: Block size for the key/value sequence dimension.
     block_q: Block size for the query sequence dimension.
-    mask: The full attention mask with shape of (q_seq_len, kv_seq_len). This
-      mask will be used for all batches.
+    mask: The full attention mask with shape of ``(q_seq_len, kv_seq_len)``.
+      This mask will be used for all batches.
     mask_value: The value to use for masked-out attention scores.
     cap: Optional cap for attention logits. This helps to prevent extremely
-      large logits: capped_logits = jnp.tanh(logits / attn_logits_soft_cap) *
-      attn_logits_soft_cap
+      large logits: ``capped_logits = jnp.tanh(logits / attn_logits_soft_cap) *
+      attn_logits_soft_cap``
     save_residuals: Whether to save residuals. If True, returns a tuple of
-      (output, dict=(logsumexp, max_logits)). Both `logsumexp` and `max_logits`
-      are of shape (batch_size, num_kv_heads, num_q_heads // num_kv_heads,
-      q_seq_len).
+      ``(output, dict=(logsumexp, max_logits))``. Both ``logsumexp`` and
+      ``max_logits`` are of shape
+      ``(batch_size, num_kv_heads, num_q_heads // num_kv_heads, q_seq_len)``.
 
   Returns:
-    If save_residuals is True, returns a tuple containing:
-      - The output of the attention computation.
-      - A dict of (logsumexp, max_logits)
+    If ``save_residuals`` is True, returns a tuple containing
+
+    * The output of the attention computation.
+    * A dict of (logsumexp, max_logits)
+
     Otherwise, returns the output of the attention computation.
   """
   batch_size, num_q_heads, q_seq_len, qk_head_dim_size = q.shape
@@ -77,13 +80,15 @@ def flash_attention_block_masked(
   v_head_dim_size = v.shape[-1]
   data_type = q.dtype
   q_groups = num_q_heads // num_kv_heads
-  q = q.reshape((
-      batch_size,
-      num_kv_heads,
-      q_groups,
-      q_seq_len,
-      qk_head_dim_size,
-  ))
+  q = q.reshape(
+      (
+          batch_size,
+          num_kv_heads,
+          q_groups,
+          q_seq_len,
+          qk_head_dim_size,
+      )
+  )
 
   # Calculate the number of key/value and query blocks.
   num_kv_blocks = kv_seq_len // block_kv
@@ -91,24 +96,18 @@ def flash_attention_block_masked(
 
   # Before applying the segment mask, we need to broadcast the mask in batch
   # dimension since we have same logic for all batches.
-  mask_full = jnp.broadcast_to(
-      mask[None, :, :], (batch_size, q_seq_len, kv_seq_len)
-  )
+  mask_full = jnp.broadcast_to(mask[None, :, :], (batch_size, q_seq_len, kv_seq_len))
 
   if segment_ids is not None:
     segment_ids_q = segment_ids.q[:, :, None]
     segment_ids_kv = segment_ids.kv[:, None, :]
     mask_full = jnp.logical_and(mask_full, segment_ids_q == segment_ids_kv)
-  mask_blocked = jax.jit(mask_blocker, static_argnums=[1, 2])(
-      mask_full, block_q, block_kv
-  )
+  mask_blocked = jax.jit(mask_blocker, static_argnums=[1, 2])(mask_full, block_q, block_kv)
 
   # Initialize `l` (logsumexp) and `m` (max_logits) for the online softmax.
   # `l` is initialized to 0 since no blocks have been processed yet and the sum
   # is 0.
-  l = jnp.zeros(
-      (batch_size, num_kv_heads, q_groups, q_seq_len), dtype=data_type
-  )
+  l = jnp.zeros((batch_size, num_kv_heads, q_groups, q_seq_len), dtype=data_type)
   # `m` is initialized to the mask_value so that the first block's maximum logit
   # correctly becomes the running maximum.
   m = jnp.full(
@@ -144,15 +143,9 @@ def flash_attention_block_masked(
       # Calculates the attention computation (Q@K.T)@V with online softmax for
       # the current query and key/value blocks.
       def compute_attention_block(output, l, m):
-        output_i_slice = jax.lax.dynamic_slice_in_dim(
-            output, i * block_q, block_q, axis=-2
-        )
-        l_i_slice = jax.lax.dynamic_slice_in_dim(
-            l, i * block_q, block_q, axis=-1
-        )
-        m_i_slice = jax.lax.dynamic_slice_in_dim(
-            m, i * block_q, block_q, axis=-1
-        )
+        output_i_slice = jax.lax.dynamic_slice_in_dim(output, i * block_q, block_q, axis=-2)
+        l_i_slice = jax.lax.dynamic_slice_in_dim(l, i * block_q, block_q, axis=-1)
+        m_i_slice = jax.lax.dynamic_slice_in_dim(m, i * block_q, block_q, axis=-1)
         s_i_j = jnp.einsum(
             "bxhqc,bxkc->bxhqk",
             q_slice,
@@ -183,9 +176,9 @@ def flash_attention_block_masked(
         l_i_new = m_i_difference * l_i_slice + m_i_j_difference * l_i_j
 
         divider = l_i_new[..., None]
-        numerator = l_i_slice[..., None] * m_i_difference[
+        numerator = l_i_slice[..., None] * m_i_difference[..., None] * output_i_slice + m_i_j_difference[
             ..., None
-        ] * output_i_slice + m_i_j_difference[..., None] * jnp.einsum(
+        ] * jnp.einsum(
             "bxhqk,bxkc->bxhqc",
             p_i_j,
             v_j_slice,
@@ -193,15 +186,9 @@ def flash_attention_block_masked(
         )
 
         output_i_slice_new = numerator / divider
-        output = jax.lax.dynamic_update_index_in_dim(
-            output, output_i_slice_new, i * block_q, axis=-2
-        )
-        l = jax.lax.dynamic_update_index_in_dim(
-            l, l_i_new, i * block_q, axis=-1
-        )
-        m = jax.lax.dynamic_update_index_in_dim(
-            m, m_i_new, i * block_q, axis=-1
-        )
+        output = jax.lax.dynamic_update_index_in_dim(output, output_i_slice_new, i * block_q, axis=-2)
+        l = jax.lax.dynamic_update_index_in_dim(l, l_i_new, i * block_q, axis=-1)
+        m = jax.lax.dynamic_update_index_in_dim(m, m_i_new, i * block_q, axis=-1)
         return output, l, m
 
       def identity(output, l, m):
@@ -210,9 +197,7 @@ def flash_attention_block_masked(
         return output, l, m
 
       batch_size = mask_blocked.shape[0]
-      mask_i_j_slice = jax.lax.dynamic_slice(
-          mask_blocked, (0, i, j), (batch_size, 1, 1)
-      )
+      mask_i_j_slice = jax.lax.dynamic_slice(mask_blocked, (0, i, j), (batch_size, 1, 1))
       # The compute_attention_block should be executed if at least one element
       # in the slice is non-zero, meaning at least one batch requires work for
       # this block.
@@ -227,15 +212,11 @@ def flash_attention_block_masked(
 
       return output, l, m
 
-    output, l, m = jax.lax.fori_loop(
-        0, num_q_blocks, inner_loop_body, (output, l, m), unroll=True
-    )
+    output, l, m = jax.lax.fori_loop(0, num_q_blocks, inner_loop_body, (output, l, m), unroll=True)
 
     return (output, l, m)
 
-  output, l, m = jax.lax.fori_loop(
-      0, num_kv_blocks, outer_loop_body, (output, l, m), unroll=True
-  )
+  output, l, m = jax.lax.fori_loop(0, num_kv_blocks, outer_loop_body, (output, l, m), unroll=True)
 
   # Reshape the output to drop the size one dimension at index 2,
   # which corresponds to `num_q_heads // num_kv_heads` when
@@ -257,7 +238,8 @@ def mask_blocker(mask: jnp.ndarray, block_q: int, block_kv: int) -> jnp.ndarray:
   """Creates a blocked mask from a full mask.
 
   Args:
-    mask: The attention mask with shape of (batch_size, q_seq_len, kv_seq_len).
+    mask: The attention mask with shape of
+      ``(batch_size, q_seq_len, kv_seq_len)``.
     block_q: Block size for the query sequence dimension.
     block_kv: Block size for the key/value sequence dimension.
 
@@ -268,17 +250,11 @@ def mask_blocker(mask: jnp.ndarray, block_q: int, block_kv: int) -> jnp.ndarray:
   batch_size, q_seq_len, kv_seq_len = mask.shape
 
   if q_seq_len % block_q != 0:
-    raise ValueError(
-        f"q_seq_len {q_seq_len} must be divisible by block_q {block_q}"
-    )
+    raise ValueError(f"q_seq_len {q_seq_len} must be divisible by block_q {block_q}")
   if kv_seq_len % block_kv != 0:
-    raise ValueError(
-        f"kv_seq_len {kv_seq_len} must be divisible by block_kv {block_kv}"
-    )
+    raise ValueError(f"kv_seq_len {kv_seq_len} must be divisible by block_kv {block_kv}")
   q_blocks = q_seq_len // block_q
   kv_blocks = kv_seq_len // block_kv
 
-  blocked_mask = mask.reshape(
-      batch_size, q_blocks, block_q, kv_blocks, block_kv
-  )
+  blocked_mask = mask.reshape(batch_size, q_blocks, block_q, kv_blocks, block_kv)
   return jnp.count_nonzero(blocked_mask, axis=(2, 4)).astype(jnp.int32)

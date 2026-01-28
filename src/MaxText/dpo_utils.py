@@ -1,18 +1,16 @@
-"""
-Copyright 2025 Google LLC
+# Copyright 2025 Google LLC
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 
-     https://www.apache.org/licenses/LICENSE-2.0
+#      https://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """DPO (Direct Preference Optimization) utilities."""
 
@@ -39,11 +37,13 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
     dropout_rng: A key to use to generate rng for dropout
     params: Model params
     reference_params: Reference model params for DPO
-    is_train: True for train_step and False for eval_step
+    is_train: True for ``train_step`` and False for ``eval_step``
 
   Returns:
-    loss: average loss
-    aux: a dictionary including intermediate_outputs, total_loss, and total_weights
+    loss
+      average loss
+    aux
+      a dictionary including ``intermediate_outputs``, ``total_loss``, and ``total_weights``
   """
   # inputs, targets, segments, positions = apply_args
   rng1, aqt_rng = jax.random.split(dropout_rng)

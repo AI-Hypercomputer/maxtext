@@ -13,7 +13,10 @@
 # limitations under the License.
 
 """ Train tokenizer
-Example usage: python3 -m MaxText.train_tokenizer --dataset_path=gs://maxtext-dataset --dataset_name=c4/en:3.0.1
+
+Example usage::
+
+  python3 -m MaxText.train_tokenizer --dataset_path=gs://maxtext-dataset --dataset_name=c4/en:3.0.1
 """
 
 import os
@@ -43,10 +46,12 @@ _VOCAB_MODEL_NAME = flags.DEFINE_string("vocab_model_name", "tokenizer", "Name t
 
 def _dump_chars_to_textfile(dataset: tf.data.Dataset, maxchars: int = int(1e7), data_keys=("text",)) -> tuple[str, int]:
   """Write part of a TFDS sentence dataset to lines in a text file.
+
   Args:
     dataset: tf.dataset containing string-data.
     maxchars: int: approximate number of characters to save from dataset.
     data_keys: tuple[str]: what keys in dataset to dump from.
+
   Returns:
     name of temp file with dataset bytes, exact number of characters dumped.
   """
@@ -74,6 +79,7 @@ def _train_sentencepiece(
     data_keys=("text",),
 ):
   """Train SentencePiece tokenizer from subset of tf dataset.
+
   Args:
     dataset: tf.dataset
     vocab_size: int: size of vocab tokens to train.
@@ -84,6 +90,7 @@ def _train_sentencepiece(
       are 0.9995 for languages with rich character set like Japanese or Chinese
       and 1.0 for other languages with small character set.
     data_keys: tuple[str]: keys of dataset to use for training.
+
   Returns:
     path to the trained sentencepiece vocabulary model.
   """

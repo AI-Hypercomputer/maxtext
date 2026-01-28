@@ -14,15 +14,16 @@
 
 """
 This file defines functions for managing a SQLite database to store and retrieve
-code-related documents and their embeddings for a Retrieval-Augmented Generation (RAG)
-system. It includes functionalities for:
-- Initializing the database and creating a `documents` table.
-- Saving new documents along with their names, text content, descriptions,
+code-related documents and their embeddings for a Retrieval-Augmented Generation
+(RAG) system. It includes functionalities for:
+
+* Initializing the database and creating a ``documents`` table.
+* Saving new documents along with their names, text content, descriptions,
   file paths, and embedding vectors.
-- Loading all stored documents and their associated metadata and embeddings.
-- Building a FAISS (Facebook AI Similarity Search) index for efficient similarity
-  search over the document embeddings.
-- Performing similarity searches to find the most relevant documents based on a
+* Loading all stored documents and their associated metadata and embeddings.
+* Building a FAISS (Facebook AI Similarity Search) index for efficient
+  similarity search over the document embeddings.
+* Performing similarity searches to find the most relevant documents based on a
   given query embedding.
 """
 
@@ -38,10 +39,10 @@ from MaxText.experimental.agent.integrative_rag_agent.config import rag_db_file
 
 # -------- 1. Create DB --------
 def create_db():
-  """Create the SQLite database and `documents` table if they do not exist.
+  """Create the SQLite database and ``documents`` table if they do not exist.
 
-  Uses `rag_db_file` from `config` as the database path and ensures the
-  `documents` table is present with columns for metadata and an embedding blob.
+  Uses ``rag_db_file`` from ``config`` as the database path and ensures the
+  ``documents`` table is present with columns for metadata and an embedding blob.
   """
   conn = sqlite3.connect(rag_db_file)
   cur = conn.cursor()
@@ -69,15 +70,15 @@ def save_document(name, text, desc, file, embedding):
   """Insert a document and its embedding into the database.
 
   Args:
-      name (str): Logical name/identifier for the document.
-      text (str): Raw text content of the document.
-      desc (str): Short description or summary of the document.
-      file (str): File path or source identifier for the document.
-      embedding (numpy.ndarray): Dense vector representation of the document
-          with shape (dim,) and dtype convertible to float32.
+    name (str): Logical name/identifier for the document.
+    text (str): Raw text content of the document.
+    desc (str): Short description or summary of the document.
+    file (str): File path or source identifier for the document.
+    embedding (numpy.ndarray): Dense vector representation of the document
+      with shape (dim,) and dtype convertible to float32.
 
   Returns:
-      None
+    None
   """
   conn = sqlite3.connect(rag_db_file)
   cur = conn.cursor()
@@ -95,12 +96,18 @@ def load_all_documents():
   """Load all documents and embeddings from the database.
 
   Returns:
-      tuple[list[int], list[str], list[str], list[str], numpy.ndarray]:
-          - ids: Row IDs for each document.
-          - names: Names for each document.
-          - texts: Text content for each document.
-          - files: Source file paths/identifiers.
-          - embeddings: Array of shape (num_docs, dim) with dtype float32.
+    tuple[list[int], list[str], list[str], list[str], numpy.ndarray]:
+
+      ids
+        Row IDs for each document.
+      names
+        Names for each document.
+      texts
+        Text content for each document.
+      files
+        Source file paths/identifiers.
+      embeddings
+        Array of shape ``(num_docs, dim)`` with dtype float32.
   """
   conn = sqlite3.connect(rag_db_file)
   cur = conn.cursor()
@@ -123,10 +130,10 @@ def build_faiss_index(embeddings):
   """Build a FAISS IndexFlatL2 from document embeddings.
 
   Args:
-      embeddings (numpy.ndarray): Array of shape (num_docs, dim), dtype float32.
+    embeddings (numpy.ndarray): Array of shape (num_docs, dim), dtype float32.
 
   Returns:
-      faiss.IndexFlatL2 or None: L2 index with the provided vectors added, or
+    faiss.IndexFlatL2 or None: L2 index with the provided vectors added, or
       None if the embeddings array is empty or not 2-dimensional.
   """
   if embeddings.ndim != 2 or embeddings.shape[0] == 0:
@@ -141,14 +148,15 @@ def search_embedding(query_embedding, index, texts, top_k=3):
   """Search the index for nearest neighbors to a query embedding.
 
   Args:
-      query_embedding (array-like): Vector of shape (dim,) convertible to float32.
-      index (faiss.Index): A FAISS index built over document embeddings.
-      texts (list[str]): Texts aligned with vectors in the index.
-      top_k (int): Number of nearest neighbors to retrieve.
+    query_embedding (array-like): Vector of shape (dim,) convertible to float32.
+    index (faiss.Index): A FAISS index built over document embeddings.
+    texts (list[str]): Texts aligned with vectors in the index.
+    top_k (int): Number of nearest neighbors to retrieve.
 
   Returns:
-      list[tuple[str, float, int]]: For each neighbor, a tuple of (text, distance, index_in_corpus).
-        Distances are squared L2 (Euclidean) norms; smaller values indicate greater similarity.
+    list[tuple[str, float, int]]
+      For each neighbor, a tuple of (text, distance, index_in_corpus).
+      Distances are squared L2 (Euclidean) norms; smaller values indicate greater similarity.
   """
   if index is None:
     return []
@@ -163,8 +171,8 @@ def make_embedding_index():
   """Load all documents and build a FAISS index over their embeddings.
 
   Returns:
-      tuple[list[int], list[str], list[str], list[str], faiss.Index]:
-          (ids, names, texts, files, index)
+    tuple[list[int], list[str], list[str], list[str], faiss.Index]:
+      (ids, names, texts, files, index)
   """
   ids, names, texts, files, embeddings = load_all_documents()
   index = build_faiss_index(embeddings)

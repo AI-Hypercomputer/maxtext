@@ -50,7 +50,7 @@ def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
   """Performs a leftward roll on sequence axis and masks invalid positions.
 
   Args:
-    x: Input array of shape [batch, seq_len, ...].
+    x: Input array of shape ``[batch, seq_len, ...]``.
     shift: Number of positions to shift left.
 
   Returns:
@@ -64,7 +64,7 @@ def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
 class MultiTokenPredictionLayer(nnx.Module):
   """Multi-Token Prediction layer: normalize, concatenate, project, and transform.
 
-  Implements: h_next = TransformerLayer(W_p(concat(RMSNorm(h_prev), RMSNorm(e_target))))
+  Implements: ``h_next = TransformerLayer(W_p(concat(RMSNorm(h_prev), RMSNorm(e_target))))``
   """
 
   def __init__(
@@ -140,15 +140,15 @@ class MultiTokenPredictionLayer(nnx.Module):
     """Applies MTP combination, projection, and transformer processing.
 
     Args:
-        prev_hidden_state: Shape [batch, seq_len, hidden_size].
-        target_token_embedding: Embedding for token t+k. Shape [batch, seq_len, embed_dim].
-        position_ids: Shape [batch, seq_len].
-        decoder_segment_ids: Shape [batch, seq_len] or None.
-        deterministic: Whether to disable dropout.
-        model_mode: Operational mode (train, eval, decode).
+      prev_hidden_state: Shape ``[batch, seq_len, hidden_size]``.
+      target_token_embedding: Embedding for token t+k. Shape ``[batch, seq_len, embed_dim]``.
+      position_ids: Shape ``[batch, seq_len]``.
+      decoder_segment_ids: Shape ``[batch, seq_len]`` or None.
+      deterministic: Whether to disable dropout.
+      model_mode: Operational mode (train, eval, decode).
 
     Returns:
-        Processed hidden state. Shape [batch, seq_len, hidden_size].
+      Processed hidden state. Shape ``[batch, seq_len, hidden_size]``.
     """
     embedding_norm = self.embedding_norm(target_token_embedding)
     hidden_state_norm = self.hidden_state_norm(prev_hidden_state)
@@ -344,7 +344,7 @@ def multi_token_prediction_block_as_linen(
     rngs: nnx.Rngs,
     name: str | None = None,
 ) -> nn.Module:
-  """Initializes MultiTokenPredictionBlock as a Linen module.
+  """Initializes ``MultiTokenPredictionBlock`` as a Linen module.
 
   Args:
     config: Configuration object containing model hyperparameters.
@@ -355,7 +355,7 @@ def multi_token_prediction_block_as_linen(
     name: Optional name for the module.
 
   Returns:
-    An instance of MultiTokenPredictionBlock wrapped as a Linen module.
+    An instance of ``MultiTokenPredictionBlock`` wrapped as a Linen module.
   """
   return nnx.bridge.to_linen(
       MultiTokenPredictionBlock,

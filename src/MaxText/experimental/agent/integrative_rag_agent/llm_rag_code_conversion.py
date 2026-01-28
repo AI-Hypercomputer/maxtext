@@ -13,20 +13,21 @@
 # limitations under the License.
 
 """
-This file provides tools to convert Hugging Face Transformers modules into MaxText-style
-JAX modules using an LLM and RAG context.
+This file provides tools to convert Hugging Face Transformers modules into
+MaxText-style JAX modules using an LLM and RAG context.
 
 High-level flow:
-  1) Read source modules from the Transformers repository (local or GitHub).
-  2) Use prompts and prior examples to guide an LLM to generate JAX code.
-  3) Persist generated modules into the MaxText experimental agent directory.
+
+1. Read source modules from the Transformers repository (local or GitHub).
+2. Use prompts and prior examples to guide an LLM to generate JAX code.
+3. Persist generated modules into the MaxText experimental agent directory.
 
 Command-line entry points allow customizing which module to process and how many
 MaxText code blocks to include as guidance examples.
 
-Example Invocation:
+Example Invocation::
 
-python llm_rag_code_coversion.py --module-name "Qwen3ForCausalLM"
+  python llm_rag_code_conversion.py --module-name "Qwen3ForCausalLM"
 """
 from pathlib import Path
 import argparse
@@ -59,11 +60,12 @@ def arg_parser():
   """Create and return the CLI argument parser for code conversion.
 
   Returns:
-      argparse.Namespace: Parsed arguments containing:
-          - number_of_maxtext_blocks (int)
-          - module_name (str)
-          - destination_base_directory (str)
-          - destination_source_url (str)
+    argparse.Namespace: Parsed arguments containing
+
+      number_of_maxtext_blocks: int
+      module_name: str
+      destination_base_directory: str
+      destination_source_url: str
   """
   parser = argparse.ArgumentParser(description="LLM code conversion utility.")
   parser.add_argument("--number-of-maxtext-blocks", type=int, default=5, help="Number of maxtext blocks to process.")
@@ -95,12 +97,12 @@ destination_directory = os.path.join(args.destination_base_directory, destinatio
 def get_exisiting_jax_modules():
   """Load known MaxText JAX module descriptions keyed by module path.
 
-  Reads `maxtext_block_description` JSON and returns a dict where keys are
+  Reads ``maxtext_block_description`` JSON and returns a dict where keys are
   Python-qualified module names (e.g., "path.to.file#Object" normalized) and
   values are textual analyses used as LLM guidance.
 
   Returns:
-      dict[str, str]: Mapping of module key to analysis/description.
+    dict[str, str]: Mapping of module key to analysis/description.
   """
   with open(maxtext_block_description, "rt", encoding="utf-8") as f:
     module_list = json.load(f)
@@ -176,14 +178,16 @@ def convert_given_file(module, jax_modules) -> None | dict:
   returns a description for the generated module.
 
   Args:
-      module (dict): Component metadata with keys like "filepath",
-          "comp_name", and optional "JaxDependencies".
-      jax_modules (dict): Existing JAX module descriptions to provide context
-          to the LLM.
+    module (dict): Component metadata with keys like ``filepath``,
+      ``comp_name``, and optional ``JaxDependencies``.
+    jax_modules (dict): Existing JAX module descriptions to provide context
+      to the LLM.
 
   Returns:
-      dict | None: Mapping of fully-qualified package name to generated
-      description, or None if generation did not produce a detectable module.
+    dict | None
+      Mapping of fully-qualified package name to generated
+
+    description, or None if generation did not produce a detectable module.
   """
   maxtext_blocks_code = read_code_blocks(maxtext_code_block, args.number_of_maxtext_blocks)
   module_code, file_code = get_modules_from_file(destination_source_url + module["filepath"], module=module["comp_name"])
@@ -219,10 +223,10 @@ def convert_given_file(module, jax_modules) -> None | dict:
 def convert_all_modules():
   """Convert all components listed for the selected module into JAX code.
 
-  Reads the ordered component list for `module_name`, loads/merges existing
+  Reads the ordered component list for ``module_name``, loads/merges existing
   and newly generated JAX module descriptions, and iteratively converts each
-  remaining component by calling `convert_given_file`. Results and progress
-  are persisted to JSON files configured via `config`.
+  remaining component by calling ``convert_given_file``. Results and progress
+  are persisted to JSON files configured via ``config``.
   """
   with open(module_list_path, "rt", encoding="utf-8") as f:
     modules_List = json.load(f)

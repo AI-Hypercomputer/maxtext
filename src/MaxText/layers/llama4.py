@@ -119,7 +119,7 @@ def pixel_shuffle(input_tensor: Array, shuffle_ratio: float) -> Array:
 
 
 class Llama4VisionMLP(nnx.Module):
-  """MLP block for Llama4EncoderLayer.
+  """MLP block for ``Llama4EncoderLayer``.
 
   Attributes:
     config: Config containing model parameters
@@ -153,7 +153,7 @@ class Llama4VisionMLP(nnx.Module):
 
 
 class Llama4VisionMLP2(nnx.Module):
-  """MLP block for Llama4VisionPixelShuffleMLP.
+  """MLP block for ``Llama4VisionPixelShuffleMLP``.
 
   Attributes:
     config: Config containing model parameters
@@ -190,7 +190,7 @@ class Llama4VisionMLP2(nnx.Module):
 
 
 class Llama4VisionPixelShuffleMLP(nnx.Module):
-  """Implementation of Llama4VisionPixelShuffleMLP for Llama4 Multi modal model.
+  """Implementation of ``Llama4VisionPixelShuffleMLP`` for Llama4 Multi modal model.
 
   This module applies pixel shuffle operation and MLP to encoded patches.
 
@@ -215,7 +215,7 @@ class Llama4VisionPixelShuffleMLP(nnx.Module):
 
 
 class Llama4MultiModalProjector(nnx.Module):
-  """Implementation of Llama4MultiModalProjector for Llama4 Multi modal model.
+  """Implementation of ``Llama4MultiModalProjector`` for Llama4 Multi modal model.
 
   This module projects vision features to text hidden dimension.
 
@@ -240,10 +240,10 @@ class Llama4MultiModalProjector(nnx.Module):
     """Project image features to text hidden dimension.
 
     Args:
-      image_features: Input tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_output_dim]
+      image_features: Input tensor of shape ``[batch_size, num_patches, (pixel_shuffle_ratio**2), vision_output_dim]``
 
     Returns:
-      Tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_hidden_size]
+      Tensor of shape ``[batch_size, num_patches, (pixel_shuffle_ratio**2), vision_hidden_size]``
     """
     b, t, c, d = image_features.shape
 
@@ -268,7 +268,7 @@ def llama4multimodalprojector_as_linen(config: Config, mesh: Mesh):
 
 def determine_is_nope_layer(layer_id: int, nope_layer_interval: int) -> bool:
   """
-  Determines whether the given layer at `layer_id` should use RoPE or not (NoPE).
+  Determines whether the given layer at ``layer_id`` should use RoPE or not (NoPE).
 
   Args:
     layer_id: The index of the layer.
@@ -282,11 +282,12 @@ def determine_is_nope_layer(layer_id: int, nope_layer_interval: int) -> bool:
 
 def determine_is_moe_layer(layer_id: int, interleave_moe_layer_step: int) -> bool:
   """
-  Determines whether the given layer at `layer_id` is MoE layer.
+  Determines whether the given layer at ``layer_id`` is MoE layer.
 
   This function implements a striding pattern. For example:
-  - If moe_layer_stride is 1, all layers are MoE layers.
-  - If moe_layer_stride is 2, layers with index 1, 3, 5, ... are MoE layers.
+
+  * If moe_layer_stride is 1, all layers are MoE layers.
+  * If moe_layer_stride is 2, layers with index 1, 3, 5, ... are MoE layers.
 
   Args:
     layer_id: The 0-based index of the layer being checked.
@@ -325,8 +326,8 @@ class Llama4DecoderLayer(nnx.Module):
     Args:
       config: The main model configuration object.
       mesh: The device mesh used for sharding parameters and activations.
-      model_mode: One of MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, or MODEL_MODE_AUTOREGRESSIVE.
-      rngs: An `nnx.Rngs` object to provide random numbers.
+      model_mode: One of ``MODEL_MODE_TRAIN``, ``MODEL_MODE_PREFILL``, or ``MODEL_MODE_AUTOREGRESSIVE``.
+      rngs: An ``nnx.Rngs`` object to provide random numbers.
       quant: An optional configuration for quantization. Defaults to None.
       is_nope_layer: If True, this layer will be configured as No Position Embeddings layer. Defaults to False.
       is_moe_layer: If True, this layer will use a MoE block. Defaults to False as Dense.
@@ -519,7 +520,7 @@ Llama4DecoderLayerToLinen = nnx_wrappers.to_linen_class(
 
 
 class Llama4ScannableBlock(nnx.Module):
-  """A repeatable block given nope_layer_interval and interleave_moe_layer_step."""
+  """A repeatable block given ``nope_layer_interval`` and ``interleave_moe_layer_step``."""
 
   def __init__(
       self,
@@ -536,8 +537,8 @@ class Llama4ScannableBlock(nnx.Module):
     Args:
       config: The main model configuration object.
       mesh: The device mesh used for sharding parameters and activations.
-      model_mode: One of MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, or MODEL_MODE_AUTOREGRESSIVE.
-      rngs: An `nnx.Rngs` object to provide random numbers for initialization.
+      model_mode: One of ``MODEL_MODE_TRAIN``, ``MODEL_MODE_PREFILL``, or ``MODEL_MODE_AUTOREGRESSIVE``.
+      rngs: An ``nnx.Rngs`` object to provide random numbers for initialization.
       quant: An optional configuration for quantization. Defaults to None.
       nope_layer_interval: Specifies the interval for inserting a NoPE layer.
       interleave_moe_layer_step: Specifies the interval for inserting a MoE layer.
@@ -678,7 +679,7 @@ class Llama4VisionEncoderLayer(nnx.Module):
 
 
 class Llama4VisionEncoder(nnx.Module):
-  """Transformer encoder consisting of multiple Llama4VisionEncoderLayer layers.
+  """Transformer encoder consisting of multiple ``Llama4VisionEncoderLayer`` layers.
 
   This encoder is based on the PyTorch reference implementation and uses multiple
   encoder layers to process vision input.
@@ -713,7 +714,7 @@ class Llama4VisionModel(nnx.Module):
   """Llama4 vision model for processing image inputs.
 
   This model extracts patches from input image tiles and processes them
-  through Llama4VisionEncoder and other vision-specific layers.
+  through ``Llama4VisionEncoder`` and other vision-specific layers.
 
   Attributes:
     config: Config containing model parameters
@@ -763,12 +764,12 @@ class Llama4VisionModel(nnx.Module):
 
     Args:
       inputs: Input tensor of shape:
-              [batch_size * num_images, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
+        ``[batch_size * num_images, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]``
       deterministic: Whether to use deterministic mode (disables dropout)
 
     Returns:
-      Final hidden states from the vision encoder of shape:
-      [batch_size * num_images, num_tiles, num_patches, vision_output_dim_for_vit]
+      Final hidden states from the vision encoder of shape
+      ``[batch_size * num_images, num_tiles, num_patches, vision_output_dim_for_vit]``
     """
     # Reshape pixel values to combine batch and num_tiles dimensions
     b, t, c, h, w = pixel_values.shape

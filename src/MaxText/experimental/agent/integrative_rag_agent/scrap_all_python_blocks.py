@@ -22,8 +22,9 @@ first by file-level dependencies, and then by component-level dependencies withi
 script scrapes all python files from the MaxText repository, extracts top-level classes,
 functions, and try/if blocks, and saves them to a JSON file.
 
-Example Invocation:
-python scrap_all_python_blocks.py
+Example Invocation::
+
+  python scrap_all_python_blocks.py
 """
 import ast
 import base64
@@ -46,11 +47,11 @@ def scrape_python_blocks(source_code, file_path_for_logging):
   any blocks nested within functions.
 
   Args:
-      source_code (str): The Python source code as a string.
-      file_path_for_logging (str): The path of the file being scraped, for logging purposes.
+    source_code (str): The Python source code as a string.
+    file_path_for_logging (str): The path of the file being scraped, for logging purposes.
 
   Returns:
-      list: A list of strings, where each string is a source code block.
+    list: A list of strings, where each string is a source code block.
   """
   blocks = []
   try:
@@ -128,15 +129,16 @@ def find_and_scrape_from_github(owner, repo, paths, token=None):
   Finds Python files in GitHub paths and scrapes their blocks and full code.
 
   Args:
-      owner (str): The owner of the GitHub repository.
-      repo (str): The name of the GitHub repository.
-      paths (list): A list of file or directory paths within the repo.
-      token (str, optional): A GitHub Personal Access Token for authentication.
+    owner (str): The owner of the GitHub repository.
+    repo (str): The name of the GitHub repository.
+    paths (list): A list of file or directory paths within the repo.
+    token (str, optional): A GitHub Personal Access Token for authentication.
 
   Returns:
-      tuple: A tuple containing two dictionaries:
-             - A dictionary of scraped code blocks.
-             - A dictionary of the full source code for each file.
+    tuple: A tuple containing two dictionaries
+
+      * A dictionary of scraped code blocks.
+      * A dictionary of the full source code for each file.
   """
   all_scraped_blocks = {}
   all_full_codes = {}

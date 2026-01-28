@@ -1,5 +1,5 @@
 # Sphinx-related requirements.
-sphinx
+sphinx<9
 myst-nb
 myst-parser[linkify]
 sphinx-book-theme
@@ -8,10 +8,4 @@ sphinx-copybutton
 
 # for import docs
 -r base_requirements/requirements.txt
-google-tunix
-mlcommons-loadgen
-mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
-tf-keras
-torch==2.7.1
-trl==0.19.0
-vllm
+jax

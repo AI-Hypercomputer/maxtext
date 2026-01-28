@@ -365,7 +365,7 @@ def _replica_devices(device_array: np.ndarray, replica_axis_idx: int):
   Replicas are assumed to be restricted to the first axis.
 
   Args:
-    device_array: devices of the mesh that can be obtained by mesh.devices()
+    device_array: devices of the mesh that can be obtained by ``mesh.devices()``
     replica_axis_idx: axis dimension along which replica is taken
 
   Returns:
@@ -418,6 +418,7 @@ def _restore_grain_iterator(
 ) -> tuple[Any, None]:
   """
   Handles the complex logic for restoring a Grain data iterator checkpoint.
+
   This function dispatches to the correct restore strategy based on
   the number of stored checkpoint files vs. current JAX processes.
   """
@@ -487,11 +488,11 @@ def load_state_if_possible(
     source_checkpoint_layout="orbax",
     expansion_factor_real_data: int = -1,
 ):
-  """Loads TrainState as possible from the inputs.
+  """Loads ``TrainState`` as possible from the inputs.
 
   Args:
     checkpoint_manager: if the checkpoint_manager has a valid checkpoint, return
-      that TrainState. This enables a full reload of a run in progress.
+      that ``TrainState``. This enables a full reload of a run in progress.
     load_parameters_from_path: if there is no checkpoint in the checkpoint
       manager, load parameters from a parameter only checkpoint at this path.
     load_full_state_from_path: if there is no checkpoint in the checkpoint
@@ -504,13 +505,14 @@ def load_state_if_possible(
     enable_orbax_v1: bool flag for enabling Orbax v1.
     checkpoint_conversion_fn: function for converting checkpoint to Orbax v1.
     source_checkpoint_layout: Optional checkpoint context to use for loading,
-    provided in string format with the default being "orbax".
+      provided in string format with the default being "orbax".
 
   Returns:
-    A tuple of (train_state, train_state_params) where full_train_state captures
-     a full reload and train_state_params just the params for a partial reload.
-     At most one will be non-None. Both can be None if neither checkpoint is
-     set.
+    tuple:
+      A tuple of ``(train_state, train_state_params)``, where
+      ``full_train_state`` captures a full reload and ``train_state_params``
+      just the params for a partial reload. At most one will be non-None. Both
+      can be None if neither checkpoint is set.
   """
 
   if checkpoint_manager is not None:
@@ -605,8 +607,10 @@ def load_state_if_possible(
 
 def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-error
   """Setup checkpoint logger.
+
   Args:
     config
+
   Returns:
     CloudLogger
   """

@@ -35,32 +35,36 @@ def gradient_accumulation_loss_and_grad(
   """
   Calculates gradients using gradient accumulation.
 
-  This function computes the gradient of `_loss_fn` over multiple microbatches
+  This function computes the gradient of ``_loss_fn`` over multiple microbatches
   and accumulates them before returning a single, averaged gradient. It uses
-  `jax.lax.scan` for efficient accumulation on device.
+  ``jax.lax.scan`` for efficient accumulation on device.
 
-  It also supports a `shard_optimizer_over_data` mode (e.g., ZeRO-1) where
+  It also supports a ``shard_optimizer_over_data`` mode (e.g., ZeRO-1) where
   parameters are cast to bf16 and sharded *before* the accumulation loop
   to perform the all-gather in lower precision.
 
   Args:
-      _loss_fn: The loss function to differentiate. Its signature is expected
-          to be: `(model, config, data, dropout_rng, params, *extra_args, is_train=True)`.
-      config: Model and training configuration object. Must contain
-          `gradient_accumulation_steps` and `shard_optimizer_over_data`.
-      model: The model module.
-      params: The model parameters (PyTree).
-      params_shardings: The sharding constraints for the parameters (PyTree).
-      data: A PyTree of batched data. The leading dimension is assumed
-          to be the total batch size (microbatch_size * num_accumulations).
-      dropout_rng: JAX PRNGKey for dropout.
-      extra_dpo_args: A tuple of extra arguments to pass to the loss function.
+    _loss_fn: The loss function to differentiate. Its signature is expected
+      to be: ``(model, config, data, dropout_rng, params, *extra_args, is_train=True)``.
+    config: Model and training configuration object. Must contain
+      ``gradient_accumulation_steps`` and ``shard_optimizer_over_data``.
+    model: The model module.
+    params: The model parameters (PyTree).
+    params_shardings: The sharding constraints for the parameters (PyTree).
+    data: A PyTree of batched data. The leading dimension is assumed
+      to be the total batch size (microbatch_size * num_accumulations).
+    dropout_rng: JAX PRNGKey for dropout.
+    extra_dpo_args: A tuple of extra arguments to pass to the loss function.
 
   Returns:
-      A tuple containing:
-      - total_loss (Array): The mean loss, averaged over all microbatches.
-      - final_aux (PyTree): Auxiliary outputs, summed across microbatches.
-      - raw_grads (PyTree): The accumulated and averaged gradients.
+    A tuple containing
+
+    total_loss: Array
+      The mean loss, averaged over all microbatches.
+    final_aux: PyTree
+      Auxiliary outputs, summed across microbatches.
+    raw_grads: PyTree
+      The accumulated and averaged gradients.
   """
 
   def _maybe_shard_with_name(inputs, sharding_names):

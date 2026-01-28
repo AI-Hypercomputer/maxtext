@@ -77,7 +77,7 @@ class Gemma3DecoderLayer(nnx.Module):
     Args:
       config: The Config object with model hyperparameters.
       mesh: The device mesh for distributed training.
-      model_mode: One of MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, or MODEL_MODE_AUTOREGRESSIVE.
+      model_mode: One of ``MODEL_MODE_TRAIN``, ``MODEL_MODE_PREFILL``, or ``MODEL_MODE_AUTOREGRESSIVE``.
       rngs: The random number generators for initialization.
       quant: The quantization configuration.
       attention_type: The type of attention to use.
@@ -273,7 +273,7 @@ class Gemma3ScannableBlock(nnx.Module):
     Args:
       config: The Config object with model hyperparameters.
       mesh: The device mesh for distributed training.
-      model_mode: One of MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, or MODEL_MODE_AUTOREGRESSIVE.
+      model_mode: One of ``MODEL_MODE_TRAIN``, ``MODEL_MODE_PREFILL``, or ``MODEL_MODE_AUTOREGRESSIVE``.
       rngs: The random number generators for initialization.
       quant: The quantization configuration.
       num_of_layers: The number of layers in the model.
@@ -665,10 +665,12 @@ class Gemma3VisionEncoderLayer(nnx.Module):
 
   def __call__(self, inputs, deterministic, train=False):
     """ViT model that transforms image inputs to image embeddings.
+
     Args:
-      inputs: jnp.array shaped [B, N, H, W, C], e.g. [4, 1, 896, 896, 3]
+      inputs: ``jnp.array`` shaped ``[B, N, H, W, C]``, e.g. ``[4, 1, 896, 896, 3]``
+
     Returns:
-      jnp.array for image embeddings, shaped [B, N, P, D], e.g. [4, 1, 256, 1152]
+      ``jnp.array`` for image embeddings, shaped ``[B, N, P, D]``, e.g. ``[4, 1, 256, 1152]``
     """
     # currently only supports N=1, the inputs shape is [B, H, W, C]
     if len(inputs.shape) == 4:

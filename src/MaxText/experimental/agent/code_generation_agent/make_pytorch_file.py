@@ -22,19 +22,19 @@ PyTorch modules that can be converted to JAX using the Gemini model.
 This file provides functionality to analyze a Python file and extract
 standalone PyTorch modules (classes or functions) from it. It identifies
 modules that do not have internal dependencies on other components within the
-same file and are related to PyTorch (e.g., inherit from `nn.Module` or use
-`torch` in annotations/body).
+same file and are related to PyTorch (e.g., inherit from ``nn.Module`` or use
+``torch`` in annotations/body).
 
 The extracted modules are saved as individual Python files in a specified
 output directory.
 
-Example Invocation:
+Example Invocation::
 
-python make_pytorch_file.py \
-  --entry_file_path "transformers/models/llama/modeling_llama.py" \
-  --base_path "https://github.com/huggingface/transformers/blob/main/src" 
+  python make_pytorch_file.py \
+    --entry_file_path "transformers/models/llama/modeling_llama.py" \
+    --base_path "https://github.com/huggingface/transformers/blob/main/src"
 
-Make sure to set the `output_dir` variable to your desired output directory.
+Make sure to set the ``output_dir`` variable to your desired output directory.
 """
 import argparse
 import ast
@@ -55,16 +55,17 @@ def is_torch_function_or_class(node):
   Checks if an AST node represents a PyTorch-related function or class.
 
   This is determined by:
-  - A class inheriting from 'nn.Module'.
-  - A function having 'torch' in its annotations.
-  - A function body containing references to 'torch'.
+
+  * A class inheriting from ``nn.Module``.
+  * A function having ``torch`` in its annotations.
+  * A function body containing references to ``torch``.
 
   Args:
-      node: An AST node (ast.FunctionDef or ast.ClassDef).
+    node: An AST node (``ast.FunctionDef`` or ``ast.ClassDef``).
 
   Returns:
-      bool: True if the node is a PyTorch-related function or class,
-            False otherwise.
+    bool: True if the node is a PyTorch-related function or class,
+      False otherwise.
   """
   if isinstance(node, ast.FunctionDef):
     # Look for 'torch' in annotations or function body
@@ -90,13 +91,13 @@ def is_torch_function_or_class(node):
 
 def file_uses_torch(tree):
   """
-  Checks if a file's AST contains any top-level imports of the 'torch' module.
+  Checks if a file's AST contains any top-level imports of the ``torch`` module.
 
   Args:
-      tree: The AST of the entire file.
+    tree: The AST of the entire file.
 
   Returns:
-      bool: True if 'torch' is imported, False otherwise.
+    bool: True if ``torch`` is imported, False otherwise.
   """
   for node in ast.walk(tree):
     if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -118,16 +119,15 @@ def has_external_dependencies(code, removed_names=None, local_components=None):
   filtered out.
 
   Args:
-      code (str): The source code of the component to check.
-      removed_names (list, optional): A list of names (functions, classes)
-                                      that were removed by `remove_local_imports`.
-                                      Defaults to None.
-      local_components (list, optional): A list of names of other components
-                                         in the same file. Defaults to None.
+    code (str): The source code of the component to check.
+    removed_names (list, optional): A list of names (functions, classes)
+      that were removed by ``remove_local_imports``. Defaults to None.
+    local_components (list, optional): A list of names of other components
+      in the same file. Defaults to None.
 
   Returns:
-      bool: True if a dependency on a removed or local name is found,
-            False otherwise.
+    bool: True if a dependency on a removed or local name is found, False
+      otherwise.
   """
   if not removed_names and not local_components:
     return False
@@ -166,10 +166,10 @@ def extract_python_independent_modules(filepath, base_path):
   Analyzes a single Python file to extract and save standalone PyTorch modules.
 
   This function performs the following steps:
-  1. Gets the sorted components of the file using `get_modules_in_order`.
+  1. Gets the sorted components of the file using ``get_modules_in_order``.
   2. Filters out non-standalone components (those with dependencies).
   3. For the remaining standalone components, it checks if they are
-     PyTorch-related (e.g., a class inheriting from `nn.Module`).
+     PyTorch-related (e.g., a class inheriting from ``nn.Module``).
   4. It ensures the component doesn't depend on any local imports or other
      components from the same file.
   5. Saves the valid, standalone PyTorch modules to the output folder.
@@ -278,27 +278,28 @@ def _process_and_save_if_standalone_torch_module(
   This function acts as a filter and processor. It determines if a given code
   component (a function or class node from the AST) is related to PyTorch,
   is self-contained (has no local dependencies within its original file),
-  and comes from a file that imports `torch`.
+  and comes from a file that imports ``torch``.
 
   If all conditions are met, it saves the component as a new standalone
   Python file. It also logs the action to the console and updates the
-  `standalone_modules` list.
+  ``standalone_modules`` list.
 
   Args:
     all_global_imports (str): A string containing all non-local import
-        statements from the original file.
-    analysis_result (dict): The result from `get_modules_in_order`,
-        containing component details and warnings.
+      statements from the original file.
+    analysis_result (dict): The result from ``get_modules_in_order``,
+      containing component details and warnings.
     code (str): The source code of the component being checked.
     comp_name (str): The name of the component from the dependency analysis.
     file_name (str): The base name of the original source file.
-    node (ast.AST): The AST node (FunctionDef or ClassDef) of the component.
+    node (ast.AST): The AST node (``FunctionDef`` or ``ClassDef``) of the
+      component.
     other_local_components (list): A list of names of other components
-        defined in the same original file.
+      defined in the same original file.
     removed_imports (list): A list of names from local imports that were
-        stripped from the import block.
+      stripped from the import block.
     standalone_modules (list): A list to which the names of successfully
-        extracted modules will be appended (mutated by this function).
+      extracted modules will be appended (mutated by this function).
     tree (ast.AST): The full AST of the original source file.
   """
   if is_torch_function_or_class(node):

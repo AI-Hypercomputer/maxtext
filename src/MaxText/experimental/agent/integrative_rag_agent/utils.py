@@ -32,7 +32,7 @@ def read_code_blocks(file_path, number_of_blocks):
 
   Returns:
     str: A string containing the randomly selected code blocks, separated by
-         three newlines.
+      three newlines.
   """
   with open(file_path, "rt", encoding="utf-8") as f:
     all_blocks = json.load(f)

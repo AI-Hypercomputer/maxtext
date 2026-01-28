@@ -20,30 +20,29 @@ convert these descriptions into numerical vectors for use in a Retrieval-Augment
 Generation (RAG) system.
 
 It includes:
-- `_init_cache` and `_make_cache_key`: For managing a SQLite cache to store
+
+* ``_init_cache`` and ``_make_cache_key``: For managing a SQLite cache to store
   generated descriptions and embeddings, avoiding redundant LLM calls and
   embedding computations.
-- `get_code_embedding`: The primary function to retrieve or generate a code
+* ``get_code_embedding``: The primary function to retrieve or generate a code
   block's description and embedding, utilizing the cache.
-- `get_code_description_with_gemini`: Interacts with the Gemini LLM to generate
+* ``get_code_description_with_gemini``: Interacts with the Gemini LLM to generate
   a structured description of a given code block.
-- `save_analysis_blocks`: Persists the generated descriptions to a JSON file.
-- `description_generation`: Orchestrates the process of generating descriptions
+* ``save_analysis_blocks``: Persists the generated descriptions to a JSON file.
+* ``description_generation``: Orchestrates the process of generating descriptions
   for all scraped code blocks.
-- `embedding_generation`: Orchestrates the process of generating embeddings
+* ``embedding_generation``: Orchestrates the process of generating embeddings
   for the descriptions and saving them to a SQLite database.
 
 Example Invocations:
 
-To generate descriptions and embeddings, skipping existing records:
-```bash
-python llm_rag_embedding_generation.py
-```
+To generate descriptions and embeddings, skipping existing records::
 
-To regenerate all descriptions and embeddings, overriding existing records:
-```bash
-python llm_rag_embedding_generation.py --override-existing-records
-```
+  python llm_rag_embedding_generation.py
+
+To regenerate all descriptions and embeddings, overriding existing records::
+
+  python llm_rag_embedding_generation.py --override-existing-records
 """
 
 import argparse
@@ -112,7 +111,7 @@ def _make_cache_key(file_path, project_root, comp_name):
 def get_code_embedding(file_path, project_root, comp_name, db_path="dataset/embedding_cache.db"):
   """Return module code, its description, and an embedding vector.
 
-  Uses caching when `enable_cache` is True. If a cache hit exists, the
+  Uses caching when ``enable_cache`` is True. If a cache hit exists, the
   function returns cached values. Otherwise, it extracts the module code,
   generates a structured description via LLM, computes an embedding, and
   optionally stores all results in the cache.
@@ -124,9 +123,9 @@ def get_code_embedding(file_path, project_root, comp_name, db_path="dataset/embe
     db_path (str): SQLite database path for caching.
 
   Returns:
-    tuple[str|None, dict|None, list|numpy.ndarray|None]: A tuple of
-      (module_code, code_description, embedding). Values may be None when
-      extraction fails.
+    tuple[str|None, dict|None, list|numpy.ndarray|None]
+      A tuple of ``(module_code, code_description, embedding)``. Values may be
+      None when extraction fails.
   """
   if enable_cache:
     _init_cache(db_path)
@@ -173,11 +172,12 @@ def get_code_description_with_gemini(code_block, full_code_context, user_prompt=
   Analyzes a Python code block using the Gemini API to generate a structured description.
 
   Args:
-      code_block (str): The specific Python function or class to analyze.
-      full_code_context (str): The full source code of the file for context.
-      user_prompt (str): The prompt template for the user message.
+    code_block (str): The specific Python function or class to analyze.
+    full_code_context (str): The full source code of the file for context.
+    user_prompt (str): The prompt template for the user message.
+
   Returns:
-      None | dict: A dictionary containing the structured analysis, or an error message and return `None`.
+    None | dict: A dictionary containing the structured analysis, or an error message and return `None`.
   """
   llm_agent = GeminiAgent(system_instruction=Description_Prompt)
   resp = None
@@ -192,7 +192,7 @@ def get_code_description_with_gemini(code_block, full_code_context, user_prompt=
 
 
 def save_analysis_blocks(scraped_blocks):
-  """Persist analyzed code block data to `maxtext_block_description` JSON file.
+  """Persist analyzed code block data to ``maxtext_block_description`` JSON file.
 
   Args:
     scraped_blocks (list[dict]): List of analysis records to write.
@@ -204,10 +204,10 @@ def save_analysis_blocks(scraped_blocks):
 def description_generation(skip_existing_records):
   """Generate structured descriptions for scraped code blocks via LLM.
 
-  Reads block snippets and full file contexts from `maxtext_code_block`. For
-  each block, calls `get_code_description_with_gemini` to produce a structured
-  description JSON, deduplicating existing entries if `skip_existing_records`
-  is True. Writes progress incrementally to `maxtext_block_description`.
+  Reads block snippets and full file contexts from ``maxtext_code_block``. For
+  each block, calls ``get_code_description_with_gemini`` to produce a structured
+  description JSON, deduplicating existing entries if ``skip_existing_records``
+  is True. Writes progress incrementally to ``maxtext_block_description``.
 
   Args:
     skip_existing_records (bool): If True, do not re-analyze blocks already
@@ -255,9 +255,9 @@ def description_generation(skip_existing_records):
 def embedding_generation(skip_existing_records):
   """Compute and store embeddings for generated code block descriptions.
 
-  Loads analyses from `maxtext_block_description`, skips any blocks already in
+  Loads analyses from ``maxtext_block_description``, skips any blocks already in
   the RAG database (unless overrides are requested), and inserts new records
-  via `save_document`.
+  via ``save_document``.
 
   Args:
     skip_existing_records (bool): If True, skip blocks already present in

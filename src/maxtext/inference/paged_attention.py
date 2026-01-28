@@ -59,9 +59,9 @@ def paged_attention_op_as_linen(
 ):
   """A factory function to create a PagedAttentionOp as a Linen module.
 
-  This function serves as a bridge to use the NNX-based `PagedAttentionOp`
-  within a Linen model. It wraps the `PagedAttentionOp` module using
-  `nnx.bridge.to_linen`, making it compatible with the Linen API. This is
+  This function serves as a bridge to use the NNX-based ``PagedAttentionOp``
+  within a Linen model. It wraps the ``PagedAttentionOp`` module using
+  ``nnx.bridge.to_linen``, making it compatible with the Linen API. This is
   useful for gradual migration of a codebase from Linen to NNX.
 
   Args:
@@ -79,7 +79,7 @@ def paged_attention_op_as_linen(
     kv_pages_axis_names: The logical axis names for the KV cache pages.
 
   Returns:
-    A Linen module that wraps the NNX `PagedAttentionOp` module.
+    A Linen module that wraps the NNX ``PagedAttentionOp`` module.
   """
 
   return nnx.bridge.to_linen(
@@ -194,12 +194,12 @@ class PagedAttentionOp(nnx.Module):
   def get_kv_pages(self):
     """Retrieves the key and value page caches.
 
-    This method ensures the KV cache pages are materialized (if they are abstract
-    ShapeDtypeStructs, a temporary state during Linen bridge initialization) and
-    applies the necessary sharding constraints.
+    This method ensures the KV cache pages are materialized (if they are
+    abstract ``ShapeDtypeStructs``, a temporary state during Linen bridge
+    initialization) and applies the necessary sharding constraints.
 
     Returns:
-      A tuple containing the key pages and value pages caches (`nnx.Cache`).
+      A tuple containing the key pages and value pages caches (``nnx.Cache``).
     """
 
     # TODO: Remove once to_linen bridge is no longer needed
@@ -211,7 +211,7 @@ class PagedAttentionOp(nnx.Module):
     return self.key_pages, self.value_pages
 
   def pad_qkv(self, *qkv):
-    """Pad input to kv_head_dim_size"""
+    """Pad input to ``kv_head_dim_size``"""
 
     def pad_to_kv_head_dim_size(x):
       if x.shape[-1] != self.kv_head_dim_size:
@@ -391,12 +391,14 @@ class PagedAttentionOp(nnx.Module):
       page_state: The current state of the page manager.
 
     Returns:
-        A tuple (output, exponentials_max, exponentials_sum) containing:
-        - The attention output tensor.
-        - The max of the exponentials (for prefill mode with dot-product attention).
-        - The sum of the exponentials (for prefill mode with dot-product attention).
-        The latter two are None for autoregressive mode, as this is handled
-        internally by the paged attention kernel.
+      A tuple ``(output, exponentials_max, exponentials_sum)`` containing
+
+      * The attention output tensor.
+      * The max of the exponentials (for prefill mode with dot-product attention).
+      * The sum of the exponentials (for prefill mode with dot-product attention).
+
+      The latter two are None for autoregressive mode, as this is handled
+      internally by the paged attention kernel.
     """
 
     key_pages_cache, value_pages_cache = self.get_kv_pages()

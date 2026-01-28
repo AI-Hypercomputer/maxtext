@@ -16,15 +16,17 @@
 This file provides utilities to extract basic metadata about Hugging Face models
 without downloading their full weights. It's useful for quickly getting
 information like the main architecture class name, the expected file path within
-the `transformers` library, and the model type.
+the ``transformers`` library, and the model type.
 
 Example Invocations:
 
-1. Get info for a specific model:
-   python get_model_info.py --model-id "meta-llama/Llama-3-8B"
+1. Get info for a specific model::
 
-2. Get info for another model:
-   python get_model_info.py --model-id "Qwen/Qwen3-235B-A22B-Thinking-2507-FP8"
+     python get_model_info.py --model-id "meta-llama/Llama-3-8B"
+
+2. Get info for another model::
+
+     python get_model_info.py --model-id "Qwen/Qwen3-235B-A22B-Thinking-2507-FP8"
 """
 import argparse
 from transformers import AutoConfig
@@ -33,18 +35,22 @@ from transformers import AutoConfig
 def get_model_info(model_id: str):
   """Return basic model metadata from Hugging Face without loading weights.
 
-  Loads only the `AutoConfig` for the given `model_id` to infer the primary
+  Loads only the ``AutoConfig`` for the given ``model_id`` to infer the primary
   architecture class name, the expected modeling file path within the
-  `transformers` package, and the model type token.
+  ``transformers`` package, and the model type token.
 
   Args:
-      model_id (str): A Hugging Face model identifier (e.g., "meta-llama/Llama-3-8B").
+    model_id (str): A Hugging Face model identifier (e.g., "meta-llama/Llama-3-8B").
 
   Returns:
-      dict: A dictionary with keys:
-          - "class_name" (str | None): The architecture class name, if available.
-          - "file_path" (str): The canonical `transformers` path to the modeling file.
-          - "model_type" (str): The model type string from the config.
+    dict: A dictionary with keys
+
+      class_name: str | None)
+        The architecture class name, if available.
+      file_path: str
+        The canonical ``transformers`` path to the modeling file.
+      model_type: str
+        The model type string from the config.
   """
   # Load config only (very lightweight, no weights)
   config = AutoConfig.from_pretrained(model_id)
@@ -64,7 +70,7 @@ def parse_args():
   Parses command-line arguments for file or folder processing.
 
   Returns:
-      argparse.Namespace: The parsed command-line arguments.
+    argparse.Namespace: The parsed command-line arguments.
   """
   parser = argparse.ArgumentParser(description="Get model info from HuggingFace model id")
   parser.add_argument(

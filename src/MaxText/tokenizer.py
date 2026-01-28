@@ -44,7 +44,7 @@ class TikTokenTokenizer:
     Initializes the Tokenizer with a Tiktoken model.
 
     Args:
-        model_path (str): The path to the Tiktoken model file.
+      model_path (str): The path to the Tiktoken model file.
     """
 
     mergeable_ranks = load_tiktoken_bpe(model_path)
@@ -94,21 +94,22 @@ class TikTokenTokenizer:
     Encodes a string into a list of token IDs.
 
     Args:
-        s (str): The input string to be encoded.
-        bos (bool): Whether to prepend the beginning-of-sequence token.
-        eos (bool): Whether to append the end-of-sequence token.
-        allowed_tokens ("all"|set[str]): allowed special tokens in string
-        disallowed_tokens ("all"|set[str]): special tokens that raise an error when in string
+      s (str): The input string to be encoded.
+      bos (bool): Whether to prepend the beginning-of-sequence token.
+      eos (bool): Whether to append the end-of-sequence token.
+      allowed_tokens (``"all"|set[str]``): allowed special tokens in string
+      disallowed_tokens (``"all"|set[str]``): special tokens that raise an error when in string
 
     Returns:
-        list[int]: A list of token IDs.
+      list[int]: A list of token IDs.
 
     By default, setting disallowed_special=() encodes a string by ignoring
     special tokens. Specifically:
-    - Setting `disallowed_special` to () will cause all text corresponding
+
+    * Setting ``disallowed_special`` to ``()`` will cause all text corresponding
       to special tokens to be encoded as natural text (insteading of raising
       an error).
-    - Setting `allowed_special` to "all" will treat all text corresponding
+    * Setting ``allowed_special`` to ``"all"`` will treat all text corresponding
       to special tokens to be encoded as special tokens.
     """
     assert isinstance(s, str)
@@ -149,10 +150,10 @@ class TikTokenTokenizer:
     Decodes a list of token IDs into a string.
 
     Args:
-        t (list[int]): The list of token IDs to be decoded.
+      t (list[int]): The list of token IDs to be decoded.
 
     Returns:
-        str: The decoded string.
+      str: The decoded string.
     """
     # Typecast is safe here. Tiktoken doesn't do anything list-related with the sequence.
     return self.model.decode(t)
@@ -160,7 +161,7 @@ class TikTokenTokenizer:
   @staticmethod
   def _split_whitespaces_or_nonwhitespaces(s: str, max_consecutive_slice_len: int):
     """
-    Splits the string `s` so that each substring contains no more than `max_consecutive_slice_len`
+    Splits the string ``s`` so that each substring contains no more than ``max_consecutive_slice_len``
     consecutive whitespaces or consecutive non-whitespaces.
     """
     current_slice_len = 0
@@ -184,7 +185,7 @@ class TikTokenTokenizer:
 
 class SentencePieceTokenizer:
   """
-  Tokenizing and encoding/decoding text using the Sentencepiece tokenizer loaded with tensorflow_text
+  Tokenizing and encoding/decoding text using the Sentencepiece tokenizer loaded with ``tensorflow_text``
   """
 
   def __init__(self, model_path: str, add_bos: bool, add_eos: bool):
@@ -256,7 +257,7 @@ class HFTokenizer:
 
 
 def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type):
-  """Loads the tokenizer at `tokenizer_path`"""
+  """Loads the tokenizer at ``tokenizer_path``"""
   max_logging.log(f"Tokenizer path: {tokenizer_path}")
   if tokenizer_type == "tiktoken":
     assert "tiktoken" in tokenizer_path, f"Invalid tokenizer type: {tokenizer_type} chosen for {tokenizer_path}"

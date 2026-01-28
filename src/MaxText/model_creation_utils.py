@@ -69,15 +69,16 @@ def from_config(
   This function loads a model from a checkpoint.
 
   Args:
-      config: Config object.
-      devices: Sequence of devices to use for the model. If None, use all
-        available devices.
+    config: Config object.
+    devices: Sequence of devices to use for the model. If None, use all
+      available devices.
 
   Returns:
-      Transformer: The loaded model instance (only the model)
+    Transformer: The loaded model instance (only the model)
 
-  Example:
-      model = from_config(config)
+  Example::
+
+    model = from_config(config)
   """
   if mesh is None:
     devices_array = maxtext_utils.create_device_mesh(config, devices)

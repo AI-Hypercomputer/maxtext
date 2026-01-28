@@ -133,16 +133,17 @@ def combine_columns(example, columns, data_column):
 
 def is_conversational(features, data_columns):
   """Check if data is in a conversational format.
-  Examples:
 
-  features = {'prompt': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}],
-              'completion': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}]}
-  data_columns = ["prompt", "completion"]
-  is_conversational(features, data_columns) return True.
+  Examples::
 
-  features = {'prompt': [Value(dtype='string', id=None)], 'completion': [Value(dtype='string', id=None)]}
-  data_columns = ["prompt", "completion"]
-  is_conversational(features, data_columns) returns False.
+    features = {'prompt': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}],
+                'completion': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}]}
+    data_columns = ["prompt", "completion"]
+    is_conversational(features, data_columns) return True.
+
+    features = {'prompt': [Value(dtype='string', id=None)], 'completion': [Value(dtype='string', id=None)]}
+    data_columns = ["prompt", "completion"]
+    is_conversational(features, data_columns) returns False.
   """
   for column in data_columns:
     messages = features[column]
@@ -159,19 +160,20 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
 
   Args:
     example: A dictionary containing conversational data. It is expected to have a key
-      specified by `data_column_name` that holds a list of messages.
+      specified by ``data_column_name`` that holds a list of messages.
     tokenizer_model: The tokenizer instance associated with the language model,
       which contains the specific chat template.
-    data_column_name: The name of the column in the `example` dictionary
+    data_column_name: The name of the column in the ``example`` dictionary
       that contains the list of messages.
 
   Returns:
-    The modified `example` dictionary.
-      - The `data_column_name` column will be updated to a list of
-        messages, each formatted according to the tokenizer's chat template.
-      - A new column named "is_prompt" will be added, where `True`
-        indicates a user message (prompt) and `False` indicates an assistant
-        message (completion).
+    The modified ``example`` dictionary.
+
+    * The ``data_column_name`` column will be updated to a list of
+      messages, each formatted according to the tokenizer's chat template.
+    * A new column named "is_prompt" will be added, where ``True`` indicates a
+      user message (prompt) and ``False`` indicates an assistant message
+      (completion).
   """
   messages = []
   is_prompt = []
@@ -217,6 +219,7 @@ def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
 @dataclasses.dataclass
 class SFTPromptMasking(grain.MapTransform):
   """Construct inputs and targets for SFT training. Concat prompt and completion to generate inputs.
+
   For targets, if train on completion only, the prompt will be masked by unk_id. Otherwise the same as inputs.
   """
 
@@ -229,11 +232,12 @@ class SFTPromptMasking(grain.MapTransform):
   def map(self, element):
     """
     Maps a single dataset element to an SFT training instance.
-    It concatenates the prompt and completion to form the `inputs` sequence.
-    For the `targets` sequence:
-    - If `self.completion_only` is `True`, the prompt portion of the
-      concatenated sequence is masked using `self.unk_id`.
-    - If `self.completion_only` is `False`, the target sequence is
+    It concatenates the prompt and completion to form the ``inputs`` sequence.
+    For the ``targets`` sequence:
+
+    * If ``self.completion_only`` is ``True``, the prompt portion of the
+      concatenated sequence is masked using ``self.unk_id``.
+    * If ``self.completion_only`` is ``False``, the target sequence is
       identical to the input sequence.
     """
     inputs, targets = [], []
@@ -395,7 +399,7 @@ class KeepFeatures(grain.MapTransform):
   """Keep only specified features in the dataset element.
 
   This transform filters the input dictionary, retaining only the keys
-  that are present in `feature_names`.
+  that are present in ``feature_names``.
   """
 
   def __init__(self, feature_names: list[str]):
@@ -474,11 +478,12 @@ class PadOrTrimToMaxLength(grain.MapTransform):
   def _pad_image_and_mask(
       self, preprocessed_image: multimodal_utils.PreprocessorOutput
   ) -> multimodal_utils.PreprocessorOutput:
-    """Pads the input tensors (image and mask) of a PreprocessorOutput to a maximum number of items.
+    """Pads the input tensors (image and mask) of a ``PreprocessorOutput`` to a
+    maximum number of items.
 
-    This function unifies padding logic for image tensors (standard or tiled) and
-    mask tensors. It determines the tensor type based on its dimensions and applies
-    the appropriate padding along the first axis.
+    This function unifies padding logic for image tensors (standard or tiled)
+    and mask tensors. It determines the tensor type based on its dimensions and
+    applies the appropriate padding along the first axis.
 
     The maximum number of items is calculated based on model constraints or a
     user-defined limit, ensuring that sequence length limits are respected while
@@ -486,25 +491,28 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     items than this maximum, it is padded with zeros.
 
     Args:
-        preprocessed_image (multimodal_utils.PreprocessorOutput): The input numpy arrays to pad.
-            - For masks, the expected shape is (num_masks, num_tiles).
-            - For standard images, the shape is (num_images, H, W, C).
-            - For tiled images, the shape is (num_images, num_tiles, H, W, C).
+      preprocessed_image (multimodal_utils.PreprocessorOutput): The input numpy
+        arrays to pad.
+
+        * For masks, the expected shape is ``(num_masks, num_tiles)``.
+        * For standard images, the shape is ``(num_images, H, W, C)``.
+        * For tiled images, the shape is ``(num_images, num_tiles, H, W, C)``.
 
     Returns:
-        np.ndarray: The tensor, padded with zeros up to the maximum number of
+      np.ndarray: The tensor, padded with zeros up to the maximum number of
         items along the first axis.
 
     Raises:
-        ValueError: If the input tensor's dimension is not 2, 4, or 5.
-        ValueError: If the number of items in the input tensor exceeds the
+      ValueError: If the input tensor's dimension is not 2, 4, or 5.
+      ValueError: If the number of items in the input tensor exceeds the
         allowed maximum.
 
     Notes:
-      - The computation of maximum images ensures that space is reserved in the sequence
-        for at least one text token.
-      - The dummy images used for padding are based on the image shape for initialization
-        of this model (ignoring batch size).
+
+    * The computation of maximum images ensures that space is reserved in the
+      sequence for at least one text token.
+    * The dummy images used for padding are based on the image shape for
+      initialization of this model (ignoring batch size).
     """
     if not isinstance(preprocessed_image, multimodal_utils.PreprocessorOutput):
       raise TypeError(f"Input must be multimodal_utils.PreprocessorOutput, but got {type(preprocessed_image)}")
@@ -591,19 +599,19 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
 @dataclasses.dataclass
 class ExtractImagesAndMasks(grain.MapTransform):
-  """Extracts images and masks from a PreprocessorOutput object.
+  """Extracts images and masks from a ``PreprocessorOutput`` object.
 
   This transform is used in multi-modal data pipelines to extract the image
-  tensors and their corresponding masks from a PreprocessorOutput object.
+  tensors and their corresponding masks from a ``PreprocessorOutput`` object.
   The extracted images and masks are then added to the data element under
-  the keys 'images' and 'image_masks', respectively.
+  the keys ``images`` and ``image_masks``, respectively.
 
-  If the 'images' key is not present in the input element, the transform
+  If the ``images`` key is not present in the input element, the transform
   returns the element unchanged.
   """
 
   def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """Applies the extraction transformation to the 'images' field if present."""
+    """Applies the extraction transformation to the ``images`` field if present."""
     preprocessed_image = element.get("images")
     if preprocessed_image is None:
       return element
@@ -621,17 +629,18 @@ class ExtractImagesAndMasks(grain.MapTransform):
 
 @dataclasses.dataclass
 class FoldImagesIntoBatch(grain.MapTransform):
-  """Folds the 'image' dimension into the batch dimension.
+  """Folds the ``image`` dimension into the batch dimension.
 
   This transform is used in multi-modal data pipelines where each data example
   might have multiple associated images. For model processing, it's often
   efficient to treat each image as a separate item in a larger batch.
 
-  This operation reshapes the 'images' tensor from a shape like
-  (B, N, T, H, W, C) to (B * N, T, H, W, C), where B is the batch size, N is
-  the number of images per example, and T is the number of image tiles.
+  This operation reshapes the ``images`` tensor from a shape like
+  ``(B, N, T, H, W, C)`` to ``(B * N, T, H, W, C)``, where ``B`` is the batch
+  size, ``N`` is the number of images per example, and ``T`` is the number of
+  image tiles.
 
-  The transformation is triggered only if the input 'images' tensor has more
+  The transformation is triggered only if the input ``images`` tensor has more
   dimensions than the expected batched image tensor.
   """
 
@@ -642,7 +651,7 @@ class FoldImagesIntoBatch(grain.MapTransform):
     self.target_shape = multimodal_utils.get_dummy_image_shape_for_init(self.model_name)
 
   def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """Applies the folding transformation to the 'images' field if present."""
+    """Applies the folding transformation to the ``images`` field if present."""
     images = element.get("images")
     if images is None:
       return element

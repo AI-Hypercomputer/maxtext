@@ -14,24 +14,27 @@
 
 """Microbenchmark script for evaluating chunked prefill performance.
 
-This script benchmarks the `chunked_prefill.do_chunked_prefill` function
-from the JetStream engine, integrated with MaxText's `MaxEngine`.
+This script benchmarks the ``chunked_prefill.do_chunked_prefill`` function
+from the JetStream engine, integrated with MaxText's ``MaxEngine``.
 It measures the average time taken for chunked prefill over several iterations,
 both with and without prefix caching enabled.
 
 Key functionalities:
-1.  Initializes MaxEngine with chunked prefill enabled.
-2.  Loads model parameters and tokenizer.
-3.  Tokenizes a prompt and splits it into chunks based on `config.prefill_chunk_size`.
-4.  Benchmarks the standard chunked prefill operation (without caching).
-5.  Initializes and populates a `PrefixCache` instance.
-6.  Benchmarks chunked prefill with varying levels of prefix cache hits.
-7.  Benchmarks chunked prefill including the time taken to save the final result
-    to the prefix cache.
 
-Configuration options like `use_chunked_prefill`, `prefill_chunk_size`,
-`prefix_caching_hbm_byte`, `prefix_caching_dram_byte`, and
-`inference_microbenchmark_prefix_cache_entries_num` control the benchmark behavior.
+1. Initializes MaxEngine with chunked prefill enabled.
+2. Loads model parameters and tokenizer.
+3. Tokenizes a prompt and splits it into chunks based on
+   ``config.prefill_chunk_size``.
+4. Benchmarks the standard chunked prefill operation (without caching).
+5. Initializes and populates a ``PrefixCache`` instance.
+6. Benchmarks chunked prefill with varying levels of prefix cache hits.
+7. Benchmarks chunked prefill including the time taken to save the final result
+   to the prefix cache.
+
+Configuration options like ``use_chunked_prefill``, ``prefill_chunk_size``,
+``prefix_caching_hbm_byte``, ``prefix_caching_dram_byte``, and
+``inference_microbenchmark_prefix_cache_entries_num`` control the benchmark
+behavior.
 """
 
 
@@ -106,9 +109,9 @@ def benchmark_chunked_prefill(
   """Benchmarks chunked prefill without prefix caching.
 
   Args:
-    engine: The MaxEngine instance.
+    engine: The ``MaxEngine`` instance.
     params: The model parameters.
-    chunked_tokens_list: A list of ChunkedTokens objects representing the
+    chunked_tokens_list: A list of ``ChunkedTokens`` objects representing the
       input sequence split into chunks.
 
   Returns:
@@ -137,18 +140,18 @@ def fill_prefix_cache(
 ) -> None:
   """Fill prefix cache to a specified number of entries.
 
-  The cache will be filled with `cache_num` dummy entries, each using a
-  copy of the provided `prefix` but associated with a unique dummy token key.
-  Finally, an entry using `hit_tokens` as the key and the `prefix` as the
+  The cache will be filled with ``cache_num`` dummy entries, each using a
+  copy of the provided ``prefix`` but associated with a unique dummy token key.
+  Finally, an entry using ``hit_tokens`` as the key and the ``prefix`` as the
   value is added.
 
   Args:
-    prefix_cache_inst: The PrefixCache instance to fill.
-    prefix: The KVCache (value) to store in the cache entries.
+    prefix_cache_inst: The ``PrefixCache`` instance to fill.
+    prefix: The ``KVCache`` (value) to store in the cache entries.
     cache_num: The number of dummy entries to add before the target entry.
     hit_tokens: The token sequence (key) for the target cache entry.
     padded_length: The sequence length (including padding) that corresponds
-      to the provided `prefix` KVCache.
+      to the provided ``prefix`` ``KVCache``.
   """
   true_length = len(hit_tokens)
   key_to_hit = tuple(hit_tokens.tolist())
@@ -204,17 +207,17 @@ def create_prefix_cache(
   """Creates and populates a prefix cache.
 
   Args:
-    engine: The MaxEngine instance.
+    engine: The ``MaxEngine`` instance.
     params: The model parameters.
     tokens: The input token sequence.
-    chunked_tokens_list: A list of ChunkedTokens objects representing the
+    chunked_tokens_list: A list of ``ChunkedTokens`` objects representing the
       input sequence split into chunks.
     prefix_caching_hbm_byte: The size of the HBM layer in the prefix cache.
     prefix_caching_dram_byte: The size of the DRAM layer in the prefix cache.
     max_prefill_length: The maximum length of the prefill sequence.
 
   Returns:
-    A populated PrefixCache instance.
+    A populated ``PrefixCache`` instance.
   """
   print("\n--- Creating and Populating Prefix Cache ---")
 
@@ -258,14 +261,15 @@ def benchmark_prefix_cache_loop(
   cache hit rates, including the impact of saving new prefixes to the cache.
 
   Args:
-    engine: The MaxEngine instance.
+    engine: The ``MaxEngine`` instance.
     params: The model parameters.
     tokens: The input token sequence.
-    chunked_tokens_list: A list of ChunkedTokens objects representing the
+    chunked_tokens_list: A list of ``ChunkedTokens`` objects representing the
       input sequence split into chunks.
-    prefix_cache_inst: The PrefixCache instance to use.
+    prefix_cache_inst: The ``PrefixCache`` instance to use.
     chunk_size: The chunk size used for prefilling.
-    run_time: Length 1 int list (e.g. [1]) for pointer to counter. Use to prevent existing key collisions.
+    run_time: Length 1 int list (e.g. ``[1]``) for pointer to counter. Use to
+      prevent existing key collisions.
   """
 
   print("\n--- Starting Prefix Cache Benchmark ---")
@@ -330,10 +334,10 @@ def benchmark_prefix_cache(
   the impact of saving new prefixes to the cache.
 
   Args:
-    engine: The MaxEngine instance.
+    engine: The ``MaxEngine`` instance.
     params: The model parameters.
     tokens: The input token sequence.
-    chunked_tokens_list: A list of ChunkedTokens objects representing the
+    chunked_tokens_list: A list of ``ChunkedTokens`` objects representing the
       input sequence split into chunks.
     prefix_caching_hbm_byte: The size of the HBM layer in the prefix cache.
     prefix_caching_dram_byte: The size of the DRAM layer in the prefix cache.
@@ -358,21 +362,32 @@ def benchmark_prefix_cache(
 
 def prepare_setting(argv: Sequence[str]):
   """
-    Constructs the necessary components for benchmarking chunked prefill with prefix caching.
-  q
-    Args:
-      argv: The command-line arguments.
+  Constructs the necessary components for benchmarking chunked prefill with
+  prefix caching.
 
-    Returns:
-      engine (maxengine.MaxEngine): The MaxEngine instance.
-      params (Any): The model parameters.
-      tokens (jax.Array): The input token sequence.
-      chunked_tokens_list (list[chunked_prefill.ChunkedTokens]): A list of ChunkedTokens objects representing the
-        input sequence split into chunks.
-      prefix_caching_hbm_byte (int): The size of the HBM layer in the prefix cache.
-      prefix_caching_dram_byte (int): The size of the DRAM layer in the prefix cache.
-      chunk_size (int): The chunk size used for prefilling.
-      max_prefill_length (int): The maximum length of the prefill sequence.
+  Args:
+    argv: The command-line arguments.
+
+  Returns:
+      A tuple containing
+
+      engine: maxengine.MaxEngine
+        The MaxEngine instance.
+      params: Any
+        The model parameters.
+      tokens: jax.Array
+        The input token sequence.
+      chunked_tokens_list: list[chunked_prefill.ChunkedTokens]
+        A list of ``ChunkedTokens`` objects representing the input sequence
+        split into chunks.
+      prefix_caching_hbm_byte: int
+        The size of the HBM layer in the prefix cache.
+      prefix_caching_dram_byte: int
+        The size of the DRAM layer in the prefix cache.
+      chunk_size: int
+        The chunk size used for prefilling.
+      max_prefill_length: int
+        The maximum length of the prefill sequence.
   """
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"

@@ -162,9 +162,9 @@ def attention_as_linen(
     model_mode: str = MODEL_MODE_TRAIN,
     name: str | None = None,
 ):
-  """A factory function to create an Attention as a Linen module.
+  """A factory function to create an ``Attention`` as a Linen module.
 
-  This function serves as a bridge to use the NNX-based `Attention` within a
+  This function serves as a bridge to use the NNX-based ``Attention`` within a
   Linen model.
   """
   return nnx_wrappers.to_linen(
@@ -629,7 +629,7 @@ class Attention(nnx.Module):
       The projected key or value tensor.
 
     Raises:
-      ValueError: If `proj_name` is not one of the supported values
+      ValueError: If ``proj_name`` is not one of the supported values
         ("key", "value").
 
     """
@@ -882,9 +882,10 @@ class Attention(nnx.Module):
         chunked prefill.
 
     Returns:
-      A list containing two elements:
-      - The prefill key-value cache, or None.
-      - The autoregressive key-value cache, or None.
+      A list containing two elements
+
+      * The prefill key-value cache, or None.
+      * The autoregressive key-value cache, or None.
     """
     prefill_kv_cache, ar_kv_cache = self.KVCache_0(
         key=key,
@@ -974,18 +975,19 @@ class Attention(nnx.Module):
     applies dot-product attention, and project the results to an output vector.
 
     This method handles three modes:
-    1.  **Training**: The KV cache is ignored.
-    2.  **Prefill**: The KV cache is filled with the key-value pairs from the input sequence.
-    3.  **Autoregressive Decoding**: The KV cache is used to provide context from previous steps.
 
-    In the cache initialization call, `inputs_q` has a shape [batch, length,
-    q_features] and `inputs_kv`: [batch, length, kv_features]. During the
-    incremental decoding stage, query, key and value all have the shape [batch,
-    1, qkv_features] corresponding to a single step.
+    1. **Training**: The KV cache is ignored.
+    2. **Prefill**: The KV cache is filled with the key-value pairs from the input sequence.
+    3. **Autoregressive Decoding**: The KV cache is used to provide context from previous steps.
+
+    In the cache initialization call, ``inputs_q`` has a shape ``[batch, length,
+    q_features]`` and ``inputs_kv``: ``[batch, length, kv_features]``. During the
+    incremental decoding stage, query, key and value all have the shape ``[batch,
+    1, qkv_features]`` corresponding to a single step.
 
     Args:
-      inputs_q: Input queries of shape `[batch, q_length, q_features]`.
-      inputs_kv: Key/values of shape `[batch, kv_length, kv_features]`.
+      inputs_q: Input queries of shape ``[batch, q_length, q_features]``.
+      inputs_kv: Key/values of shape ``[batch, kv_length, kv_features]``.
       inputs_positions: Input positions for rotary embeddings.
       decoder_segment_ids: Segment IDs for masking.
       model_mode: The operational mode ('train', 'prefill', 'autoregressive').
@@ -998,7 +1000,7 @@ class Attention(nnx.Module):
       attention_metadata: Optional mapping to store attention metadata, used when invoking from vLLM.
 
     Returns:
-      output of shape `[batch, length, q_features]`.
+      output of shape ``[batch, length, q_features]``.
     """
     if model_mode == MODEL_MODE_PREFILL:
       input_axis_names = self.prefill_input_axis_names

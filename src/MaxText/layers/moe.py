@@ -54,23 +54,23 @@ def _sort_activations(
     sort_indices: jax.Array,
     use_custom_vjp: bool,
 ) -> jax.Array:
-  """Sort activations by `sort_indices`.
+  """Sort activations by ``sort_indices``.
 
-  If `use_custom_vjp=True`, then we use a custom backward pass that
+  If ``use_custom_vjp=True``, then we use a custom backward pass that
   reverses the sort order. Specifically, this unsort operation is simply a sort
-  with `jnp.argsort(sort_indices)` as the sort indices. This is only needed in
+  with ``jnp.argsort(sort_indices)`` as the sort indices. This is only needed in
   the case where the compiler generates a less efficient backward pass op.
 
-  Note that `use_custom_vjp=True` assumes that `sort_indices` is a permutation
-  of `jnp.arange(inputs.shape[0])`.
+  Note that ``use_custom_vjp=True`` assumes that ``sort_indices`` is a permutation
+  of ``jnp.arange(inputs.shape[0])``.
 
   Args:
-    inputs: `(tokens, ...)`-shaped array of input activations to sort.
-    sort_indices: `(tokens,)`-shaped array containing the sort order.
+    inputs: ``(tokens, ...)``-shaped array of input activations to sort.
+    sort_indices: ``(tokens,)``-shaped array containing the sort order.
     use_custom_vjp: Whether to use the explicit backward pass.
 
   Returns:
-    `(tokens, ...)`-shaped array of input activations sorted by `sort_indices`.
+    ``(tokens, ...)``-shaped array of input activations sorted by ``sort_indices``.
   """
   assert inputs.shape[0] == sort_indices.shape[0]
 
@@ -87,12 +87,12 @@ def _sort_activations_custom(inputs: jax.Array, sort_indices: jax.Array) -> jax.
 
 
 def _sort_activations_custom_fwd(inputs: jax.Array, sort_indices: jax.Array) -> tuple[jax.Array, jax.Array]:
-  """Forward pass of the custom vjp for `_sort_activations()`."""
+  """Forward pass of the custom vjp for ``_sort_activations()``."""
   return _sort_activations_custom(inputs, sort_indices), sort_indices
 
 
 def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tuple[jax.Array, None]:
-  """Backward pass of the custom vjp for `_sort_activations()`."""
+  """Backward pass of the custom vjp for ``_sort_activations()``."""
   sort_indices = residuals
   return _sort_activations_custom(grads, jnp.argsort(sort_indices)), None
 
@@ -105,19 +105,19 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
 
   Args:
     rng_key: A JAX PRNGKey for randomness.
-    gate_logits: A JAX array of shape (batch_size, sequence_length, num_experts)
+    gate_logits: A JAX array of shape ``(batch_size, sequence_length, num_experts)``
       representing the logits for each expert.
     num_experts_per_tok: The number of experts to select for each token.
 
   Returns:
-    A tuple containing:
-      - top_k_indices: JAX array of shape (batch_size, sequence_length,
-      num_experts_per_tok)
-                       representing the indices of the selected experts for each
-                       token.
-      - top_k_weights: JAX array of shape (batch_size, sequence_length,
-      num_experts_per_tok)
-                       representing the weights for the selected experts.
+    A tuple containing
+
+    top_k_indices
+      JAX array of shape ``(batch_size, sequence_length, num_experts_per_tok)``
+      representing the indices of the selected experts for each token.
+    top_k_weights
+      JAX array of shape ``(batch_size, sequence_length, num_experts_per_tok)``
+      representing the weights for the selected experts.
   """
   bs, seq_len, num_experts = gate_logits.shape
   selected_num = bs * seq_len * num_experts_per_tok
@@ -141,12 +141,12 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate):
   Implementation reference: https://arxiv.org/pdf/2408.15664.
 
   Args:
-      top_k_indices: Shape (batch, sequence, top_k).
-      num_experts: Total number of experts.
-      rate: The update rate.
+    top_k_indices: Shape ``(batch, sequence, top_k)``.
+    num_experts: Total number of experts.
+    rate: The update rate.
 
   Returns:
-      update: The value to add to the expert bias. Shape (num_experts,).
+    update: The value to add to the expert bias. Shape ``(num_experts,)``.
   """
   flat_indices = top_k_indices.ravel()
   expert_counts = jnp.bincount(flat_indices, length=num_experts)
@@ -185,7 +185,7 @@ class GateLogit(nnx.Module):
       in_features_shape: The shape of the input features.
       out_features_shape: The shape of the output features, typically the number of experts.
       model_name: The name of the model.
-      rngs: An `nnx.Rngs` object used for initializing parameters.
+      rngs: An ``nnx.Rngs`` object used for initializing parameters.
       axis: The axis or axes over transformation is applied.
       weight_dtype: The data type of the kernel weights.
       dtype: The data type for the computation.
@@ -324,7 +324,7 @@ class RoutedMoE(nnx.Module):
       mesh: Mesh, device mesh.
       kernel_init: The initializer function for the kernel weight matrix.
       kernel_axes: A tuple of logical axis names for partitioning the kernel.
-      rngs: An `nnx.Rngs` object used for initializing parameters.
+      rngs: An ``nnx.Rngs`` object used for initializing parameters.
       intermediate_dim: Intermediate dimension of MoE.
       weight_dtype: The data type of the kernel weights.
       dtype: The data type for the computation.
@@ -519,10 +519,10 @@ class RoutedMoE(nnx.Module):
     for each group.
 
     Args:
-      gate_logits: Array of shape `(batch, seq, num_experts)`.
+      gate_logits: Array of shape ``(batch, seq, num_experts)``.
 
     Returns:
-      Array of shape `(batch, seq, num_experts)` that is 1 for experts in the
+      Array of shape ``(batch, seq, num_experts)`` that is 1 for experts in the
       top-k groups and 0 elsewhere.
     """
     # Find top groups based on each group's top-2 expert scores, where
@@ -553,22 +553,26 @@ class RoutedMoE(nnx.Module):
   def deepseek_routing(self, gate_logits: jax.Array, pre_bias_logits: jax.Array) -> tuple[jax.Array, jax.Array]:
     """DeepSeek routing logit.
 
-    If the configuration does not specify routing groups (`n_routing_groups` is
-    -1), we use a standard top-k routing mechanism. Otherwise, we force all
+    If the configuration does not specify routing groups (``n_routing_groups``
+    is -1), we use a standard top-k routing mechanism. Otherwise, we force all
     selected experts to be from the a subset of the highest rated expert groups.
 
     The selection process uses post_bias logits, while the return weights use
     pre_bias logits.
 
     Args:
-      gate_logits: Array of shape `(batch, seq, num_experts)`.
-      pre_bias_logits: Array of shape `(batch, seq,num_experts)`.
+      gate_logits: Array of shape ``(batch, seq, num_experts)``.
+      pre_bias_logits: Array of shape ``(batch, seq,num_experts)``.
 
     Returns:
-      - top_k_weights: `(batch, seq, num_experts_per_tok)` array of weight values for
-        each selected expert.
-      - top_k_indices: `(batch, seq, num_experts_per_tok)` array of indices
-        identifying the selected experts for each token.
+      A tuple of
+
+      top_k_weights
+        ``(batch, seq, num_experts_per_tok)`` array of weight values for each
+        selected expert.
+      top_k_indices
+        ``(batch, seq, num_experts_per_tok)`` array of indices identifying the
+        selected experts for each token.
     """
     expert_mask = 1 if self.config.n_routing_groups == -1 else self.expert_group_mask(gate_logits)
     _, top_k_indices = jax.lax.top_k(
@@ -695,33 +699,35 @@ class RoutedMoE(nnx.Module):
     """Permutes tokens locally within an expert shard.
 
     This function prepares the input tokens for processing by the experts
-    located
-    on the current shard. It groups the tokens by their assigned local expert
-    index (0 to local_expert_size - 1).
+    located on the current shard. It groups the tokens by their assigned local
+    expert index (0 to ``local_expert_size - 1``).
 
     Args:
       inputs: The input data (tokens) assigned to the experts on this shard.
-        Shape `[tokens, emb_dim]`.
+        Shape ``[tokens, emb_dim]``.
       global_group_sizes: The count of tokens assignments for each global expert
-        across all the batch shards. Shape `[num_batch_shards, num_experts].
+        across all the batch shards. Shape ``[num_batch_shards, num_experts]``.
       local_expert_size: The number of experts handled by the current shard.
       shard_index: The index of the current expert shard (0 to
         num_expert_parallelism - 1).
-      is_offset: If True, assumes `inputs` are pre-sorted by global expert ID
+      is_offset: If True, assumes ``inputs`` are pre-sorted by global expert ID
         and selects the slice relevant to this shard's assigned experts. If
-        False, assumes that `inputs` corresponding to the shard's experts start
+        False, assumes that ``inputs`` corresponding to the shard's experts start
         from the beginning of the tensor but need to be permuted by expert ID.
-      global_sorted_experts: Global expert IDs for the `inputs` used when
-        `is_offset` is True. Shape `[total_tokens_for_this_shard]`.
+      global_sorted_experts: Global expert IDs for the ``inputs`` used when
+        ``is_offset`` is True. Shape ``[total_tokens_for_this_shard]``.
 
     Returns:
-      A tuple containing:
-        sorted_inputs: Input data permuted local expert ID.
-        sorted_indices: Indices used to permute the inputs.
-        local_group_size: Number of tokens assigned to each local expert on this
-          shard.
-        sorted_experts_ids: expert ID corresponding to each token of the permuted
-        inputs.
+      A tuple containing
+
+      sorted_inputs
+        Input data permuted local expert ID.
+      sorted_indices
+        Indices used to permute the inputs.
+      local_group_size
+        Number of tokens assigned to each local expert on this shard.
+      sorted_experts_ids
+        expert ID corresponding to each token of the permuted inputs.
     """
 
     # Slice the count of local expert IDs in each batch shard.
@@ -1994,7 +2000,7 @@ class RoutedAndSharedMoE(nnx.Module):
       mesh: Mesh, device mesh.
       kernel_init: The initializer function for the kernel weight matrix.
       kernel_axes: A tuple of logical axis names for partitioning the kernel.
-      rngs: An `nnx.Rngs` object used for initializing parameters.
+      rngs: An ``nnx.Rngs`` object used for initializing parameters.
       weight_dtype: The data type of the kernel weights.
       dtype: The data type for the computation.
       quant: The quantization configuration. If None, no quantization is applied.
@@ -2065,7 +2071,7 @@ def get_gate_logit(
     matmul_precision: str = "default",
     name: Optional[str] = None,
 ):
-  """Creates a GateLogit Linen module."""
+  """Creates a ``GateLogit`` Linen module."""
 
   axis = linears.canonicalize_tuple(axis)
   in_features_shape = tuple(inputs_shape[ax] for ax in linears.normalize_axes(axis, len(inputs_shape)))
@@ -2104,7 +2110,7 @@ def get_routed_moe(
     quant: Optional[quantizations.AqtQuantization] = None,
     name: Optional[str] = None,
 ):
-  """Creates a RoutedMoE Linen module."""
+  """Creates a ``RoutedMoE`` Linen module."""
 
   module = nnx_wrappers.to_linen(
       RoutedMoE,
@@ -2135,7 +2141,7 @@ def get_routed_and_shared_moe(
     quant: Optional[quantizations.AqtQuantization] = None,
     name: Optional[str] = None,
 ):
-  """Creates a RoutedAndSharedMoE Linen module."""
+  """Creates a ``RoutedAndSharedMoE`` Linen module."""
 
   module = nnx_wrappers.to_linen(
       RoutedAndSharedMoE,

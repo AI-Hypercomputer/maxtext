@@ -19,10 +19,10 @@ identifying internal dependencies between these components. It then provides
 a topologically sorted list of these components, grouping circular dependencies
 into single modules.
 
-Example Invocation:
+Example Invocation::
 
-python split_python_file.py \
-  "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py"
+  python split_python_file.py \
+    "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py"
 """
 
 from collections import defaultdict, deque
@@ -67,7 +67,8 @@ class ReferenceVisitor(ast.NodeVisitor):
   def get_attribute_chain(self, node):
     """
     Recursively builds the full attribute access chain (e.g., 'a.b.c')
-    starting from an ast.Attribute node.
+    starting from an ``ast.Attribute`` node.
+
     Returns the base name and the attribute chain as a string.
     """
     chain = []
@@ -121,9 +122,9 @@ class ReferenceVisitor(ast.NodeVisitor):
   def visit_Name(self, node):
     """Record standalone name usages that match known definitions.
 
-    Skips names that were already accounted for as part of a larger
-    attribute chain in `visit_Attribute`. Adds matching names to
-    `self.found_dependencies`.
+    Skips names that were already accounted for as part of a larger attribute
+    chain in ``visit_Attribute``. Adds matching names to
+    ``self.found_dependencies``.
     """
     # If this node was already part of an attribute chain we handled, skip it.
     if node in self._handled_nodes:
@@ -163,19 +164,19 @@ class DependencyAnalyzer:
     self.split_python_cache_file = split_python_cache_file
 
   def get_source_code(self):
-    """Return the source code for `self.file_path`.
+    """Return the source code for ``self.file_path``.
 
-    If the path is an HTTPS GitHub URL, fetches via `get_github_file_content`
-    and validates existence with `check_github_file_exists`. If the path is
+    If the path is an HTTPS GitHub URL, fetches via ``get_github_file_content``
+    and validates existence with ``check_github_file_exists``. If the path is
     a local file, reads from disk.
 
     Returns:
-        str: The file contents.
+      str: The file contents.
 
     Raises:
-        FileNotFoundError: When the remote file does not exist or a local
-            path is missing.
-        IOError: When a remote file exists but cannot be read.
+      FileNotFoundError: When the remote file does not exist or a local
+        path is missing.
+      IOError: When a remote file exists but cannot be read.
     """
     source_code = ""
     if self.file_path.startswith("https"):
@@ -196,16 +197,17 @@ class DependencyAnalyzer:
   def convert_package_to_path(self, path):
     """Convert an absolute import line to a mapping of names to file anchors.
 
-    Example:
-        "from maxtext.inference import page_manager, utils" ->
-        {"page_manager": "src/MaxText/inference.py#page_manager",
-         "utils": "src/MaxText/inference.py#utils"}
+    Example::
+
+      "from maxText.inference import page_manager, utils" ->
+      {"page_manager": "src/MaxText/inference.py#page_manager",
+        "utils": "src/MaxText/inference.py#utils"}
 
     Args:
-        path (str): A normalized absolute import string.
+      path (str): A normalized absolute import string.
 
     Returns:
-        dict[str, str]: Mapping of imported names to "file.py#name" anchors.
+      dict[str, str]: Mapping of imported names to "file.py#name" anchors.
     """
     path_form, path_imports = path.removeprefix("from ").replace(".", os.path.sep).split(" import ")
     import_dict = {}
@@ -334,13 +336,14 @@ class DependencyAnalyzer:
     return sccs
 
   def get_import_components(self):
-    """Collect import-related components and store them into `sorted_components`.
+    """Collect import-related components and store them into ``sorted_components``.
 
     Builds two special components:
-      - "imports": All top-level imports, optionally preceded by the module
-        docstring if present.
-      - "conditional_imports": Text for import statements nested under
-        top-level conditionals (e.g., if/try blocks).
+
+    * ``imports``: All top-level imports, optionally preceded by the module
+      docstring if present.
+    * ``conditional_imports``: Text for import statements nested under
+      top-level conditionals (e.g., if/try blocks).
     """
     # Component 0 is always imports
     lines = self.source_code.splitlines()
@@ -548,8 +551,8 @@ class DependencyAnalyzer:
     """Load cached analysis result if caching is enabled.
 
     Returns:
-        tuple[str|None, dict]: A `(cache_key, search_cache)` pair. When
-        caching is disabled, returns `(None, {})`.
+      tuple[str|None, dict]: A ``(cache_key, search_cache)`` pair. When
+        caching is disabled, returns ``(None, {})``.
     """
     search_cache = {}
     if enable_cache:
@@ -563,7 +566,7 @@ class DependencyAnalyzer:
     return None, search_cache
 
   def save_in_cache(self, cache_key, search_cache):
-    """Persist the current `sorted_structure` under `cache_key` if enabled."""
+    """Persist the current ``sorted_structure`` under ``cache_key`` if enabled."""
     if enable_cache:
       search_cache[cache_key] = self.sorted_structure
       with open(self.split_python_cache_file, "wt", encoding="utf-8") as f:
@@ -573,10 +576,14 @@ class DependencyAnalyzer:
     """Compute (or load) and return the full sorted structure for the file.
 
     Returns:
-        dict: A dictionary with keys:
-          - "sorted_modules": Mapping of component name to source code.
-          - "component_dependencies": Adjacency lists by component.
-          - "warning": Optional warning message about cycles.
+      dict: A dictionary with keys
+
+        sorted_modules
+          Mapping of component name to source code.
+        component_dependencies
+          Adjacency lists by component.
+        warning
+          Optional warning message about cycles.
     """
     cache_key, search_cache = self.load_cache()
     if cache_key is not None and cache_key in search_cache:
@@ -590,7 +597,7 @@ class DependencyAnalyzer:
     return self.sorted_structure
 
   def get_structure_for_module(self, module):
-    """Return a structure filtered to a single component `module`."""
+    """Return a structure filtered to a single component ``module``."""
     return {
         "sorted_modules": {module: self.sorted_structure["sorted_modules"][module]}
         if module in self.sorted_structure["sorted_modules"]
@@ -606,13 +613,13 @@ class DependencyAnalyzer:
     Returns the source code for a given module/component name.
 
     Parameters:
-        module_name (str): The name of the module/component to retrieve.
+      module_name (str): The name of the module/component to retrieve.
 
     Returns:
-        str: The source code of the requested module/component.
+      str: The source code of the requested module/component.
 
     Raises:
-        KeyError: If no component with the provided name exists.
+      KeyError: If no component with the provided name exists.
     """
     # Ensure analysis has been done
     if not hasattr(self, "sorted_components"):
@@ -625,10 +632,10 @@ class DependencyAnalyzer:
 
 
 def get_modules_from_file(file_path, module, project_root="transformers", add_external_dependencies=True):
-  """Return `(module_source, full_source)` from a Python file.
+  """Return ``(module_source, full_source)`` from a Python file.
 
-  On failure, logs the error and returns `(None, None)` when the analyzer
-  could not be created, otherwise `(None, full_source)`.
+  On failure, logs the error and returns ``(None, None)`` when the analyzer
+  could not be created, otherwise ``(None, full_source)``.
   """
   analyzer = None
   try:
@@ -644,9 +651,9 @@ def get_modules_from_file(file_path, module, project_root="transformers", add_ex
 
 
 def get_modules_in_order(file_path, module=None, project_root="transformers", add_external_dependencies=True):
-  """Return the dependency-sorted structure for `file_path`.
+  """Return the dependency-sorted structure for ``file_path``.
 
-  If `module` is provided, returns a structure filtered to that component.
+  If ``module`` is provided, returns a structure filtered to that component.
   """
   logger.info("\n--- Analyzing '%s' and creating structured output for module %s ---\n", file_path, module)
   analyzer = DependencyAnalyzer(file_path, project_root, add_external_dependencies=add_external_dependencies)
@@ -661,7 +668,7 @@ def parse_args():
   Parses command-line arguments for file or folder processing.
 
   Returns:
-      argparse.Namespace: The parsed command-line arguments.
+    argparse.Namespace: The parsed command-line arguments.
   """
   parser = argparse.ArgumentParser(description="Analyze Python file dependencies and split into components.")
   parser.add_argument(
@@ -686,7 +693,7 @@ def parse_args():
 
 
 def save_results_in_file(result: SortedStructure, filename, outFile="file_component.txt"):
-  """Write a summary of components and dependencies to `outFile`."""
+  """Write a summary of components and dependencies to ``outFile``."""
   standalone_modules = [mod for mod in result["sorted_modules"].keys() if mod not in result["component_dependencies"]]
   dependent_sorted_modules = {
       mod: result["component_dependencies"][mod]

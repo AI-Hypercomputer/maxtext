@@ -46,37 +46,40 @@ def calculate_matmul_resources(
   """
   Calculates estimated FLOPs, communication volume, and memory for a distributed matrix multiplication.
 
-  The multiplication is A @ W.
+  The multiplication is ``A @ W``.
   A (activations) has shape (M, K).
   W (weights) has shape (G, K, F).
 
   Sharding strategy assumed:
-  - Data Parallelism: `sD` shards the M dim of A.
-  - Embedding Parallelism: `sK` shards on the embedding dim of A.
-  - Tensor Parallelism for W dim: `sK` shards the W dimension of W.
-  - Tensor Parallelism for F dim: `sF` shards the second weight dim of W.
+
+  * Data Parallelism: ``sD`` shards the M dim of A.
+  * Embedding Parallelism: ``sK`` shards on the embedding dim of A.
+  * Tensor Parallelism for W dim: ``sK`` shards the W dimension of W.
+  * Tensor Parallelism for F dim: ``sF`` shards the second weight dim of W.
 
   Args:
-      activations_shape: Shape of the activations tensor (M, K).
-      weights_shape: Shape of the weights tensor (G, K, F).
-                     G is the number of groups if this is a GMM (e.g in MoE layer).
-      sD: Number of data parallel shards (sD). Must be >= 1.
-      sK: Sharding factor for the activation embedding dimension.
-      sW: Sharding factor for the first weight dimension.
-      sF: Sharding factor for the second weight dimension.
-      sE: Sharding factor to split up expert weights.
-      activation_size_bytes: Size of a single element in bytes for the activations.
-      weight_size_bytes: Size of a single element in bytes for the weights.
-      ici_latency: The latency overhead of communicating between TPUs.
-      all_gather_axes: Optional additional output axes that need to be all-gathered (e.g. "M", "F").
-      debug: Whether to print intermediate resource calculations.
+    activations_shape: Shape of the activations tensor (M, K).
+    weights_shape: Shape of the weights tensor (G, K, F).
+      G is the number of groups if this is a GMM (e.g in MoE layer).
+    sD: Number of data parallel shards (sD). Must be >= 1.
+    sK: Sharding factor for the activation embedding dimension.
+    sW: Sharding factor for the first weight dimension.
+    sF: Sharding factor for the second weight dimension.
+    sE: Sharding factor to split up expert weights.
+    activation_size_bytes: Size of a single element in bytes for the activations.
+    weight_size_bytes: Size of a single element in bytes for the weights.
+    ici_latency: The latency overhead of communicating between TPUs.
+    all_gather_axes: Optional additional output axes that need to be
+      all-gathered (e.g. "M", "F").
+    debug: Whether to print intermediate resource calculations.
 
   Returns:
-      A dictionary with keys:
-          "t_flops": Estimated FLOPs latency.
-          "t_comms": Estimated communication latency.
-          "memory": Estimated memory footprint per device for storing
-                                   local shards of activations, weights, and output (bytes).
+    A dictionary with keys
+
+    * ``t_flops``: Estimated FLOPs latency.
+    * ``t_comms``: Estimated communication latency.
+    * ``memory``: Estimated memory footprint per device for storing local shards
+      of activations, weights, and output (bytes).
   """
 
   M, K_act = activations_shape[0], activations_shape[-1]
@@ -240,27 +243,30 @@ def plot_sharding_scheme_comparison(
 ):
   """
   Generates plots comparing different sharding schemes:
+
   1. Communication latency vs. FLOPs latency
   2. Communication latency / memory per device
   3. Memory & Communication Latency
 
   Args:
-      activations_shape: Shape of the activations tensor (M, K).
-      weights_shape: Shape of the weights tensor (G, K, F).
-      sharding_schemes: A list of dictionaries. Each dictionary must contain:
-          - "label": A string label for the scheme (e.g., "DP=8").
-          - "shard_settings": A dictionary with sharding parameters used for calc_resource_func().
-          E.g:
-          [
-              {
-                  "label": "DP=8", # Pure Data Parallelism
-                  "shard_settings": {
-                      "sD": 8,
-                      "all_gather_axes": ("D",)
-                  }
-              },
-          ]
-      element_size_bytes: Size of a single element in bytes.
+    activations_shape: Shape of the activations tensor (M, K).
+    weights_shape: Shape of the weights tensor (G, K, F).
+    sharding_schemes: A list of dictionaries. Each dictionary must contain:
+
+      * ``label``: A string label for the scheme (e.g., "DP=8").
+      * ``shard_settings``: A dictionary with sharding parameters used for
+        ``calc_resource_func()``. E.g::
+
+        [
+            {
+                "label": "DP=8", # Pure Data Parallelism
+                "shard_settings": {
+                    "sD": 8,
+                    "all_gather_axes": ("D",)
+                }
+            },
+        ]
+    element_size_bytes: Size of a single element in bytes.
   """
   results = []
   valid_schemes_labels = []

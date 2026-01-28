@@ -1,18 +1,16 @@
-"""
-Copyright 2025 Google LLC
+# Copyright 2025 Google LLC
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 
-     https://www.apache.org/licenses/LICENSE-2.0
+#      https://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 This file implements an agent that evaluates the correctness of JAX code
@@ -27,29 +25,33 @@ The agent performs the following steps:
    of passed and failed tests.
 4. It logs the results and calculates overall accuracy metrics.
 
-Example Invocation:
-python code_evaluation_agent.py
+Example Invocation::
+
+  python code_evaluation_agent.py
 
 Ensure the paths to the PyTorch and JAX code directories are correctly set in
 the script. The script will create a directory for test cases if it doesn't
-exist and will overwrite existing test cases based on the `overwrite_existing_files`
-flag.
+exist and will overwrite existing test cases based on the
+``overwrite_existing_files`` flag.
 
 Overall Accuracy Metrics:
-- Test Case Accuracy: The percentage of individual test cases that passed across
+
+* Test Case Accuracy: The percentage of individual test cases that passed across
   all generated tests.
-- File Accuracy: The percentage of files for which all generated test cases passed.
+* File Accuracy: The percentage of files for which all generated test cases
+  passed.
 
 Relevant Files:
-- `prompt_code_evaluation.py`: Contains the prompts used by the language model
+
+* ``prompt_code_evaluation.py``: Contains the prompts used by the language model
   for generating test cases.
-- `utils.py`: Provides utility functions such as `get_last_defined_module`
-  (to extract the main module from a code string) and `run_pytest_capture_output`
-  (to execute pytest and capture its results).
-- `code_generation_agent/llm_agent.py`: Contains the `GeminiAgent` class used
-  to interact with the language model.
-- `orchestration_agent/utils.py`: Contains `parse_python_code` for extracting
-  code from LLM responses.
+* ``utils.py``: Provides utility functions such as ``get_last_defined_module``
+  (to extract the main module from a code string) and
+  ``run_pytest_capture_output`` (to execute pytest and capture its results).
+* ``code_generation_agent/llm_agent.py``: Contains the ``GeminiAgent`` class
+  used to interact with the language model.
+* ``orchestration_agent/utils.py``: Contains ``parse_python_code`` for
+  extracting code from LLM responses.
 """
 import argparse
 import logging
@@ -70,19 +72,21 @@ logger = logging.getLogger(__name__)
 
 
 def get_file_pairs(pytorch_path, jax_path):
-  """Generates lists of file paths for PyTorch and JAX files that have a common name.
+  """Generates lists of file paths for PyTorch and JAX files that have a common
+  name.
 
   This function finds files with the same name in the specified PyTorch and JAX
   directories, filtering out any files in the JAX directory that start with "__".
 
   Args:
-      pytorch_path: The path to the directory containing PyTorch files.
-      jax_path: The path to the directory containing JAX files.
+    pytorch_path: The path to the directory containing PyTorch files.
+    jax_path: The path to the directory containing JAX files.
 
   Returns:
-      A tuple containing two lists of strings:
-          - The first list contains the full paths to the common PyTorch files.
-          - The second list contains the full paths to the common JAX files.
+    A tuple containing two lists of strings
+
+    * The first list contains the full paths to the common PyTorch files.
+    * The second list contains the full paths to the common JAX files.
   """
   pytorch_files = os.listdir(pytorch_path)
   jax_files = list(filter(lambda x: not x.startswith("__"), os.listdir(jax_path)))
@@ -94,17 +98,17 @@ def make_test_case_and_run(args, python_file, jax_file):
   """Generates a test case and runs it for a given PyTorch and JAX file pair.
 
   This function uses a language model to generate a pytest-compatible test case
-  for a PyTorch and JAX code file pair. It then runs the test and captures the output.
-  If the files have inconsistent entry points or the test case cannot be generated,
-  a penalty is applied.
+  for a PyTorch and JAX code file pair. It then runs the test and captures the
+  output. If the files have inconsistent entry points or the test case cannot be
+  generated, a penalty is applied.
 
   Args:
-      args (argparse.Namespace): The command-line arguments.
-      python_file: The path to the PyTorch code file.
-      jax_file: The path to the JAX code file.
+    args (argparse.Namespace): The command-line arguments.
+    python_file: The path to the PyTorch code file.
+    jax_file: The path to the JAX code file.
 
   Returns:
-      A tuple containing the number of passed and failed test cases.
+    A tuple containing the number of passed and failed test cases.
   """
   response = None
   try:
@@ -200,7 +204,8 @@ def parse_args():
   Parses command-line arguments for file or folder processing.
 
   Returns:
-      argparse.Namespace: The parsed command-line arguments.
+    argparse.Namespace
+      The parsed command-line arguments.
   """
   parser = argparse.ArgumentParser(description="Code Evaluation Agent")
   parser.add_argument(

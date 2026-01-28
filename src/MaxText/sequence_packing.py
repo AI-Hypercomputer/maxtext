@@ -23,39 +23,49 @@ def pack_dataset(
     dataset: tf.data.Dataset, key2length: int | dict[str, int], pad_id: int, keys: None | list[str] = None
 ) -> tf.data.Dataset:
   """Creates a 'packed' version of a dataset on-the-fly.
+
   Adapted from the mesh-tf implementation.
   This is meant to replace the irritation of having to create a separate
   "packed" version of a dataset to train efficiently on TPU.
   Each example in the output dataset represents several examples in the
   input dataset.
   For each key in the input dataset, two additional keys are created:
-  <key>_segmentation: an int32 tensor identifying the parts
-     representing the original example.
-  <key>_position: an int32 tensor identifying the position within the original
-     example.
+
+  * ``<key>_segmentation``: an int32 tensor identifying the parts
+    representing the original example.
+  * ``<key>_position``: an int32 tensor identifying the position within the
+    original example.
+
   Example:
+
   Two input examples get combined to form an output example.
-  The input examples are:
-  {"inputs": [8, 7, 1, 0], "targets":[4, 1, 0]}
-  {"inputs": [2, 3, 4, 1], "targets":[5, 6, 1]}
-  The output example is:
-  {
-                 "inputs": [8, 7, 1, 2, 3, 4, 1, 0, 0, 0]
-    "inputs_segmentation": [1, 1, 1, 2, 2, 2, 2, 0, 0, 0]
-        "inputs_position": [0, 1, 2, 0, 1, 2, 3, 0, 0, 0]
-                "targets": [4, 1, 5, 6, 1, 0, 0, 0, 0, 0]
-   "targets_segmentation": [1, 1, 2, 2, 2, 0, 0, 0, 0, 0]
-       "targets_position": [0, 1, 0, 1, 2, 0, 0, 0, 0, 0]
-  }
+  The input examples are::
+
+    {"inputs": [8, 7, 1, 0], "targets":[4, 1, 0]}
+    {"inputs": [2, 3, 4, 1], "targets":[5, 6, 1]}
+
+  The output example is::
+
+    {
+                  "inputs": [8, 7, 1, 2, 3, 4, 1, 0, 0, 0]
+      "inputs_segmentation": [1, 1, 1, 2, 2, 2, 2, 0, 0, 0]
+          "inputs_position": [0, 1, 2, 0, 1, 2, 3, 0, 0, 0]
+                  "targets": [4, 1, 5, 6, 1, 0, 0, 0, 0, 0]
+    "targets_segmentation": [1, 1, 2, 2, 2, 0, 0, 0, 0, 0]
+        "targets_position": [0, 1, 0, 1, 2, 0, 0, 0, 0, 0]
+    }
+
   0 represents padding in both the inputs and the outputs.
   Sequences in the incoming examples are truncated to length "length", and the
   sequences in the output examples all have fixed (padded) length "length".
+
   Args:
-    dataset: a tf.data.Dataset
+    dataset: a ``tf.data.Dataset``
     key2length: an integer, or a dict from feature-key to integer
     keys: a list of strings (e.g. ["inputs", "targets"])
+
   Returns:
-    a tf.data.Dataset
+    a ``tf.data.Dataset``
   """
   shapes = tf.nest.map_structure(lambda spec: spec.shape, dataset.element_spec)
   if keys is None:
@@ -97,11 +107,14 @@ def _pack_with_tf_ops(
     dataset: tf.data.Dataset, keys: list[str], key2length: dict[str, int], pad_id: int
 ) -> tf.data.Dataset:
   """Helper-function for packing a dataset which has already been batched.
-  Helper for pack_dataset()  Uses tf.while_loop.
+
+  Helper for ``pack_dataset()``. Uses ``tf.while_loop``.
+
   Args:
     dataset: a dataset containing padded batches of examples.
     keys: a list of strings
     key2length: an dict from feature-key to integer
+
   Returns:
     a dataset.
   """
@@ -124,12 +137,15 @@ def _pack_with_tf_ops(
 
   def map_fn(x):
     """Internal function to flat_map over.
+
     Consumes a batch of input examples and produces a variable number of output
     examples.
+
     Args:
       x: a single example
+
     Returns:
-      a tf.data.Dataset
+      a ``tf.data.Dataset``
     """
     partial = empty_example.copy()
     i = tf.zeros([], dtype=tf.int32)
@@ -140,11 +156,13 @@ def _pack_with_tf_ops(
       outputs[k + "_position"] = tf.TensorArray(tf.int32, size=0, dynamic_size=True, element_shape=[key2length[k]])
 
     def body_fn(i, partial, outputs):
-      """Body function for while_loop.
+      """Body function for ``while_loop``.
+
       Args:
         i: integer scalar
         partial: dictionary of Tensor (partially-constructed example)
         outputs: dictionary of TensorArray
+
       Returns:
         A triple containing the new values of the inputs.
       """

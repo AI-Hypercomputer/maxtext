@@ -23,4 +23,4 @@ This section contains the complete API documentation for the ``MaxText`` library
    :caption: Package Modules
    :glob:
 
-   api_generated/modules
+   api_generated/MaxText
