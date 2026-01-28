@@ -18,9 +18,9 @@ import unittest
 import pytest
 import os
 
-from MaxText.maxtext_utils import calculate_tflops_training_per_device
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
+from maxtext.utils.maxtext_utils import calculate_tflops_training_per_device
 
 
 class FlopCalculation(unittest.TestCase):

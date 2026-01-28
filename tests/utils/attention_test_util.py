@@ -22,8 +22,8 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-from MaxText import max_utils
-from MaxText import maxtext_utils
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, EP_AS_CONTEXT, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
 from MaxText.globals import MAXTEXT_PKG_DIR

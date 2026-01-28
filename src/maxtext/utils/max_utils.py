@@ -38,8 +38,8 @@ from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import ini
 import psutil
 from tensorboardX import writer
 
-from MaxText import max_logging
 from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
+from maxtext.utils import max_logging
 
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"

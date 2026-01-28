@@ -21,8 +21,8 @@ to various logging platforms, including cloud logging and TensorBoard.
 
 import contextlib
 import jax
-from MaxText import max_logging
 from enum import Enum
+from maxtext.utils import max_logging
 from ml_goodput_measurement import goodput, monitoring
 
 

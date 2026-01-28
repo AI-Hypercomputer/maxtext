@@ -60,9 +60,7 @@ from transformers import AutoTokenizer, AutoProcessor
 
 from absl import app
 
-from MaxText import max_utils
 from MaxText import pyconfig
-from MaxText import max_logging
 from MaxText.utils.ckpt_conversion.utils.param_mapping import (
     HOOK_FNS,
     PARAM_MAPPING,
@@ -79,6 +77,8 @@ from MaxText.utils.ckpt_conversion.utils.utils import (
     MemoryMonitorTqdm,
     print_peak_memory,
 )
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 
 
 def _get_model_mappings(

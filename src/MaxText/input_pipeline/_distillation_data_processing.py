@@ -25,8 +25,8 @@ from dataclasses import dataclass, field
 
 import datasets
 
-from MaxText import max_logging
 from MaxText.input_pipeline import _input_pipeline_utils
+from maxtext.utils import max_logging
 
 
 @dataclass

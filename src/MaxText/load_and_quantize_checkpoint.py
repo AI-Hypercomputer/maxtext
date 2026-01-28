@@ -21,9 +21,9 @@ from absl import app
 
 import jax
 
-from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import pyconfig
+from maxtext.utils import max_utils
 
 
 def main(argv: Sequence[str]) -> None:

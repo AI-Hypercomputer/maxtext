@@ -33,7 +33,7 @@ import transformers
 
 from datasets import load_dataset
 
-from MaxText import maxtext_utils
+from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state
 from MaxText.experimental.rl.grpo_utils import compute_log_probs

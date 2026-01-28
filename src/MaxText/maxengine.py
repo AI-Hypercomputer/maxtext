@@ -43,16 +43,17 @@ from jetstream.engine import tokenizer_api
 from jetstream.engine.tokenizer_pb2 import TokenizerParameters
 from jetstream.engine.tokenizer_pb2 import TokenizerType
 
-from MaxText import max_utils
-from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models, quantizations
-from MaxText.utils import lora_utils
 from maxtext.inference import inference_utils
 from maxtext.inference.page_manager import PageManager, PageState
+from maxtext.utils import lora_utils
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
+
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any

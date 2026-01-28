@@ -44,7 +44,7 @@ import torch
 
 import psutil
 
-from MaxText import max_logging
+from maxtext.utils import max_logging
 from maxtext.common import checkpointing
 
 jax.config.update("jax_platform_name", "cpu")

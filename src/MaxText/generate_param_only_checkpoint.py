@@ -32,16 +32,16 @@ import jax
 from jax.sharding import Mesh
 from jax import random
 
-from MaxText import max_logging
-from MaxText import max_utils
-from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_TRAIN
 from MaxText.layers import models, quantizations
-from MaxText.utils import gcs_utils
-from MaxText.utils import lora_utils
 from maxtext.common import checkpointing
+from maxtext.utils import gcs_utils
+from maxtext.utils import lora_utils
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 
 Transformer = models.transformer_as_linen
 

@@ -32,7 +32,6 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ke
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
-from MaxText import max_utils
 from MaxText.common_types import (
     Array,
     AttentionType,
@@ -79,6 +78,7 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.sharding import logical_to_mesh_axes, maybe_shard_with_name
 from maxtext.inference import page_manager
 from maxtext.inference.kvcache import KVQuant, KVTensor
+from maxtext.utils import max_utils
 import numpy as np
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask

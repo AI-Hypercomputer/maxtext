@@ -19,7 +19,7 @@ limitations under the License.
 import jax
 import jax.numpy as jnp
 
-from MaxText import maxtext_utils
+from maxtext.utils import maxtext_utils
 
 
 def _split_dpo_state(state):
