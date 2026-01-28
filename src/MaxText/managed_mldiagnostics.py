@@ -72,5 +72,4 @@ class ManagedMLDiagnostics:
         gcs_path=config.managed_mldiagnostics_dir,
         # TODO: b/455623960 - Remove the following once multi-region and prod support are enabled.
         region="us-central1",
-        environment="autopush",  # Default would be "prod" for formal launch.
     )
