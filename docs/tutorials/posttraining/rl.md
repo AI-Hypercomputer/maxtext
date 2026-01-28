@@ -127,7 +127,15 @@ export HF_TOKEN=<Hugging Face access token>
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
 
 export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
+
+export CHIPS_PER_VM=<the number of chips per VM> # depends on hardware, for v5p this is 4, for v6e this is 8
 ```
+
+For the value of `CHIPS_PER_VM` on different TPU hardware, refer the official document
+
+- [TPU v5e](https://docs.cloud.google.com/tpu/docs/v5e) (single host, chips_per_vm=8)
+- [TPU v5p](https://docs.cloud.google.com/tpu/docs/v5p) (single host, chips_per_vm=4)
+- [TPU v6e](https://docs.cloud.google.com/tpu/docs/v6e) (single host, chips_per_vm=8)
 
 ## Get your model checkpoint
 
@@ -159,7 +167,8 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   load_parameters_path=${MAXTEXT_CKPT_PATH} \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  hf_access_token=${HF_TOKEN}
+  hf_access_token=${HF_TOKEN} \
+  chips_per_vm=${CHIPS_PER_VM}
 ```
 
 The overview of what this run will do is as follows:
@@ -183,7 +192,8 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   hf_access_token=${HF_TOKEN} \
-  loss_algo=gspo-token
+  loss_algo=gspo-token \
+  chips_per_vm=${CHIPS_PER_VM}
 ```
 
 The overview of what this run will do is as follows:
