@@ -64,11 +64,17 @@ class CompressedTokenizer:
 
   def __init__(self, tokenizer):
     self.tokenizer = tokenizer
+    self.normalizer = self._build_normalizer()
+    self.lookup_table, self.num_new_token = self._build_lookup_table()
 
+  def __len__(self):
+    return self.num_new_token
+
+  def _build_normalizer(self):
     # Private use Unicode character used to protect single spaces during stripping
     SENTINEL = "\uE000"
     # Text normalization pipeline: ensures "Café" and "cafe" produce the same ID
-    self.normalizer = normalizers.Sequence(
+    normalizer = normalizers.Sequence(
         [
             # Compatibility decomposition (e.g., ½ -> 1/2)
             normalizers.NFKC(),
@@ -88,11 +94,7 @@ class CompressedTokenizer:
             normalizers.Replace(SENTINEL, " "),
         ]
     )
-
-    self.lookup_table, self.num_new_token = self._build_lookup_table()
-
-  def __len__(self):
-    return self.num_new_token
+    return normalizer
 
   def _build_lookup_table(self):
     """
