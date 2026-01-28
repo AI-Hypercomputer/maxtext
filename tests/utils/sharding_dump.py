@@ -276,7 +276,7 @@ def main(argv: Sequence[str]) -> None:
 
   try:
     topology_mesh = get_topology_mesh(config)
-    _, _, state_mesh_shardings, _ = get_shaped_inputs(topology_mesh, config)
+    _, _, state_mesh_shardings, _, _ = get_shaped_inputs(topology_mesh, config)
   except:  # pylint: disable=bare-except
     state_mesh_shardings = {}
 

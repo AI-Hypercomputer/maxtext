@@ -944,6 +944,15 @@ def setup_initial_state(
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
+def get_logical_annotations(model, tx, config, rng, mesh, is_training=True):
+  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+    abstract_state = jax.eval_shape(init_state_partial)
+    logical_annotations = nn.get_partition_spec(abstract_state)
+  return logical_annotations
+
+
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
   init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
@@ -1227,15 +1236,32 @@ def create_learning_rate_schedule(config):
   return optax.join_schedules(pieces, boundaries)
 
 
-def print_shardings_params(params, params_sharding, mesh):
-  """Print state shardings."""
+def print_shardings_params(params, params_sharding, mesh, logical_annotations=None):
+  """
+  Print state shardings comparing Logical Definition vs Physical Result.
+  """
+  if not hasattr(params, "params"):
+    params = {"params": params}
+  if not hasattr(params_sharding, "params"):
+    params_sharding = {"params": params_sharding}
+  if logical_annotations and not hasattr(logical_annotations, "params"):
+    logical_annotations = {"params": logical_annotations}
+
   leaves_params, _ = jax.tree_util.tree_flatten_with_path(params)
   leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(params_sharding)
-  for (path, leaf_val), (_, leaf_sharding) in zip(leaves_params, leaves_sharding):
+  leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations)
+
+  for (path, leaf_val), (_, leaf_sharding), (_, leaf_logical_val) in zip(leaves_params, leaves_sharding, leaves_logical):
     path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
     shape = jax.typeof(leaf_val)
     pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
-    max_logging.log(f"{path_str:.<80} {shape} {tuple(pspec)}")
+    pspec_str = str(tuple(pspec))
+    logical_str = str(leaf_logical_val)
+
+    message = f" {path_str}\n" f"    Shape:     {shape}\n" f"    Logical:   {logical_str}\n" f"    Physical:  {pspec_str}"
+    max_logging.info(message)
+
+  print(flush=True)
 
 
 def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
