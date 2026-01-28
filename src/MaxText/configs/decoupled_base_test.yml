@@ -23,7 +23,7 @@ profile_periodically_period: 0
 profiler_steps: 0
 
 # Leave dataset-related keys to be overridden by individual tests.
-dataset_path: "local_datasets/c4_en_dataset_minimal/"
+dataset_path: "tests/assets/local_datasets/c4_en_dataset_minimal/"
 dataset_name: 'c4/en:3.1.0'
 eval_dataset_name: 'c4/en:3.1.0'
 

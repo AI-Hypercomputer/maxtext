@@ -48,7 +48,7 @@ class HfDataProcessingTest(unittest.TestCase):
         hf_path="parquet",
         hf_data_dir="",
         hf_train_files=(
-            os.path.join("local_datasets", "c4_en_dataset_minimal", "hf", "c4", "c4-train-00000-of-01637.parquet")
+            os.path.join("tests", "assets", "local_datasets", "c4_en_dataset_minimal", "hf", "c4", "c4-train-00000-of-01637.parquet")
             if decoupled
             else "gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet"
         ),

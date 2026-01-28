@@ -47,7 +47,7 @@ def get_test_dataset_path(cloud_path=None):
     the specified cloud path or default GCS maxtext-dataset bucket.
   """
   if is_decoupled():
-    return os.path.join("local_datasets", "c4_en_dataset_minimal")
+    return os.path.join("tests", "assets", "local_datasets", "c4_en_dataset_minimal")
   return cloud_path or "gs://maxtext-dataset"
 
 

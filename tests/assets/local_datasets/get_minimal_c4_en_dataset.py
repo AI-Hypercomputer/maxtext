@@ -50,7 +50,7 @@ BUCKET = os.environ.get("MINIO_C4_BUCKET", "datasets.dl")
 VERSIONS = ["3.0.1"]
 
 # Local output base
-LOCAL_BASE = "local_datasets/c4_en_dataset_minimal/c4/en"
+LOCAL_BASE = "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en"
 
 # Shard counts (simulate real behavior)
 NUM_SHARDS_TRAIN = 8

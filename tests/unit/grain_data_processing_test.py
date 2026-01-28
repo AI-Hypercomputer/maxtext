@@ -48,7 +48,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
     decoupled = is_decoupled()
 
     if decoupled:
-      dataset_root = os.path.join(MAXTEXT_PKG_DIR, "..", get_test_dataset_path())
+      dataset_root = get_test_dataset_path()
       grain_train_files = os.path.join(
           dataset_root,
           "c4",
@@ -145,7 +145,7 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProc
     decoupled = is_decoupled()
 
     if decoupled:
-      dataset_root = os.path.join(MAXTEXT_PKG_DIR, "..", get_test_dataset_path())
+      dataset_root = get_test_dataset_path()
       base_pattern = os.path.join(
           dataset_root,
           "c4",
@@ -205,7 +205,7 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessing
     decoupled = is_decoupled()
 
     if decoupled:
-      dataset_root = os.path.join(MAXTEXT_PKG_DIR, "..", get_test_dataset_path())
+      dataset_root = get_test_dataset_path()
       mixture_config = {
           "ds1": {
               "path": os.path.join(
@@ -278,7 +278,7 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
     decoupled = is_decoupled()
 
     if decoupled:
-      dataset_root = os.path.join(MAXTEXT_PKG_DIR, "..", get_test_dataset_path())
+      dataset_root = get_test_dataset_path()
       grain_train_files = os.path.join(
           dataset_root,
           "c4",
@@ -347,7 +347,7 @@ class GrainArrayRecordBestFitPackingTest(GrainArrayRecordProcessingTest):
     decoupled = is_decoupled()
 
     if decoupled:
-      dataset_root = os.path.join(MAXTEXT_PKG_DIR, "..", get_test_dataset_path())
+      dataset_root = get_test_dataset_path()
       grain_train_files = os.path.join(
           dataset_root,
           "c4",
@@ -411,7 +411,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
     decoupled = is_decoupled()
 
     if decoupled:
-      dataset_root = os.path.join(MAXTEXT_PKG_DIR, "..", get_test_dataset_path())
+      dataset_root = get_test_dataset_path()
       grain_train_file = os.path.join(
           dataset_root,
           "hf",
