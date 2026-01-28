@@ -183,7 +183,10 @@ def decode_with_vllm(
       f"and EP={ici_expert_parallelism if enable_expert_parallel else 0}..."
   )
 
-  vllm_config_path = os.path.join(MAXTEXT_PKG_DIR, "configs", "vllm.yml")
+  if model_name.startswith("deepseek"):
+    vllm_config_path = os.path.join(MAXTEXT_PKG_DIR, "configs", "vllm_deepseek.yml")
+  else:
+    vllm_config_path = os.path.join(MAXTEXT_PKG_DIR, "configs", "vllm.yml")
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
