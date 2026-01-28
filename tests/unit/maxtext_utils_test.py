@@ -21,12 +21,13 @@ import os.path
 import unittest
 from unittest.mock import patch
 from dataclasses import dataclass, field
+import numpy as np
 
 from jax import random, vmap
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 import jax
 import jax.numpy as jnp
-import numpy as np
+from jax.experimental import mesh_utils
 
 from flax import linen as nn
 from flax.core.scope import FrozenVariableDict
@@ -37,6 +38,7 @@ import optax
 
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import maxtext_utils_nnx
 from MaxText import sharding
 from MaxText import inference_utils
 from MaxText import pyconfig
@@ -902,6 +904,105 @@ class TestMeshUtils(unittest.TestCase):
 
     # Verify the second argument to create_device_mesh was our device list
     mock_create_device_mesh.assert_called_once_with(config, specific_devices)
+
+
+class TestNNXAbstractState(unittest.TestCase):
+  """Test the get_abstract_state_nnx func."""
+
+  @dataclass
+  class MockConfig:
+    init_weights_seed: int = 42
+    shard_optimizer_over_data: bool = False
+    optimizer_memory_host_offload: bool = False
+    parameter_memory_host_offload: bool = False
+    param_scan_axis: int = 0
+
+  class MockTrainState(nnx.Module):
+    """Simulates a TrainState with params and optimizer state."""
+
+    def __init__(self, rngs: nnx.Rngs):
+      # Model parameters
+      device_num = len(jax.local_devices())
+      self.params = nnx.Linear(
+          2, 4, kernel_init=nnx.with_partitioning(nnx.initializers.ones, sharding=("model",)), rngs=rngs
+      )
+      # Simulated optimizer state
+      self.optimizer = nnx.Variable(jnp.zeros((device_num,)), sharding=("model",))
+
+  def setUp(self):
+    # Create a real 1D mesh on local devices
+    devices = jax.local_devices()
+    self.mesh = Mesh(mesh_utils.create_device_mesh((len(devices), 1)), axis_names=("model", "data"))
+    self.config = self.MockConfig()
+
+  def nnx_init_trainstate_wrapper(self):
+    """Wrapper to initialize the mock NNX model."""
+    rngs = maxtext_utils_nnx.create_nnx_rngs(self.config)
+    return self.MockTrainState(rngs)
+
+  def test_basic_abstraction(self):
+    """Verifies the basic return structure and partition spec extraction."""
+    abstract_state, annotations, shardings = maxtext_utils.get_abstract_state_nnx(
+        self.config, self.mesh, self.nnx_init_trainstate_wrapper
+    )
+
+    # Check return types
+    self.assertIsInstance(abstract_state, nnx.State)
+    self.assertIsInstance(annotations, nnx.State)
+    self.assertIsInstance(shardings, nnx.State)
+
+    # Verify PartitionSpec was extracted correctly from the mock model's annotations
+    # Path: params -> kernel -> spec
+    self.assertEqual(
+        annotations.params.kernel.get_value(),
+        PartitionSpec(
+            "model",
+        ),
+    )
+
+  def test_shard_optimizer_over_data(self):
+    """Verifies that 'data' is added to optimizer sharding using the real utility."""
+    self.config.shard_optimizer_over_data = True
+
+    _, annotations, _ = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Original Pspec for optimizer was PartitionSpec(None).
+    # add_data_to_sharding should find that dim 0 is compatible with mesh 'data'
+    # and update it to PartitionSpec(('data',)).
+    opt_spec = annotations.optimizer.get_value()
+
+    # Verify 'data' is now in the spec
+    self.assertEqual(opt_spec, PartitionSpec(("data", "model")))
+
+  def test_optimizer_host_offload(self):
+    """Verifies that optimizer memory is moved to host when configured."""
+    self.config.optimizer_memory_host_offload = True
+
+    _, _, shardings = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Optimizer state should be pinned to host
+    opt_sharding = shardings.optimizer.get_value()
+    self.assertEqual(opt_sharding.memory_kind, "pinned_host")
+
+    # Params should still be on default memory (usually device)
+    param_sharding = shardings.params.kernel.get_value()
+    self.assertNotEqual(param_sharding.memory_kind, "pinned_host")
+
+  def test_parameter_host_offload(self):
+    """Verifies that parameter memory is moved to host when configured."""
+    self.config.parameter_memory_host_offload = True
+    self.config.param_scan_axis = 0
+
+    _, _, shardings = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Parameters should be pinned to host
+    param_sharding = shardings.params.kernel.get_value()
+    self.assertEqual(param_sharding.memory_kind, "pinned_host")
+
+  def test_invalid_init_fn(self):
+    """Ensures function raises error if no init function is provided."""
+    with self.assertRaises(AssertionError):
+      maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, None)
 
 
 if __name__ == "__main__":
