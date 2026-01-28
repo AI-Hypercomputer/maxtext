@@ -407,6 +407,7 @@ def train_loop(config, recorder, state=None):
   ) = train_utils.setup_train_loop(config, recorder)
 
   if config.use_dpo:
+    # TODO: for pure_nnx, the handling of reference_params would be different.
     if "reference_params" not in state.params:
       reference_params = jax.tree.map(jnp.copy, state.params["params"])
       state = _merge_dpo_state(state, reference_params)
