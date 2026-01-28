@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-r"""Convert weights from a DeepSeek style model to a MaxText one.
+r"""Convert weights from a DeepSeek style model to a MaxText one with unscanned format.
 
 Example cmd:
 
-python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_unscanned_ckpt --base_model_path <path/to/meta/ckpt> \
+python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_unscanned_ckpt --base_model_path <path/to/hf/ckpt> \
     --maxtext_model_path <GCS/path/to/save/new/maxtext/ckpt> --model_size deepseek2-16b
+
+optional flags: [--use-ocdbt True --use-zarr3 True]
 """
 
 # pylint: disable=line-too-long
@@ -30,17 +32,19 @@ import os
 import gc
 import logging
 import absl
-
-import numpy as np
-import torch
 import psutil
 from tqdm import tqdm
+import time
 
-from MaxText.utils.ckpt_scripts import convert_deepseek_family_ckpt as ds_ckpt
-from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
-from MaxText import max_logging
-from MaxText.inference_utils import str2bool
+import numpy as np
 from safetensors import safe_open
+import torch
+
+from MaxText import max_logging
+from MaxText.utils.ckpt_scripts import convert_deepseek_family_ckpt as ds_ckpt
+from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
+from MaxText.inference_utils import str2bool
+from MaxText.utils.ckpt_conversion.utils.utils import MemoryMonitorTqdm, print_peak_memory
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
@@ -60,7 +64,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
 
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
   chkpt_vars = {}
-  for i, ckpt_path in enumerate(ckpt_paths):
+  for i, ckpt_path in tqdm(enumerate(ckpt_paths), total=len(ckpt_paths)):
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
       for key in f.keys():
@@ -109,7 +113,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
   # self attention and normalization ###############################################
   max_logging.log("Processing self attention and normalization in dense layer")
   for layer_key, layer_value in layers.items():
-    for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
+    for layer_idx in MemoryMonitorTqdm(range(layer_value), desc=layer_key, leave=True):
       layer_name = f"{layer_key}_{layer_idx}"
       if layer_key == "dense_layers":
         jax_weights["decoder"].update(
@@ -216,10 +220,10 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
       jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"] = pre_self_attention_layer_norm
       jax_weights["decoder"][layer_name]["post_self_attention_layer_norm"] = post_self_attention_layer_norm
 
-  # layer weights ################################################
-  max_logging.log("Processing layer weights")
+  # layer weights: mlp ################################################
+  max_logging.log("Processing mlp weights")
   for layer_key, layer_value in layers.items():
-    for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
+    for layer_idx in MemoryMonitorTqdm(range(layer_value), desc=layer_key, leave=True):
       if layer_key == "dense_layers":
         layer_name = f"{layer_key}_{layer_idx}"
         mlp = jax_weights["decoder"][layer_name]["mlp"]
@@ -338,20 +342,31 @@ def main() -> None:
   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
   args = parser.parse_args()
 
+  overall_start = time.time()
+
   if args.model_size not in ds_ckpt.MODEL_PARAMS_DICT:
     raise NotImplementedError(f"Model '{args.model_size}' is not supported.")
 
   os.environ["JAX_PLATFORMS"] = "cpu"
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={args.simulated_cpu_devices_count}"
   mem_info = psutil.Process()
-  llama_or_mistral_ckpt.save_weights_to_checkpoint(
+
+  # transform
+  start = time.time()
+  weights = _convert_to_jax_weights(args.base_model_path, args.model_size, mem_info)
+  max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
+
+  # save
+  save_weights_to_checkpoint(
       args.maxtext_model_path,
-      _convert_to_jax_weights(args.base_model_path, args.model_size, mem_info),
+      weights,
       args.simulated_cpu_devices_count,
       args.use_ocdbt,
       args.use_zarr3,
   )
-
+  max_logging.log(f"Successfully saved base_weights to {args.maxtext_model_path}.")
+  max_logging.log(f"Overall Elapse: {(time.time() - overall_start) / 60:.2f} min")
+  print_peak_memory()
 
 if __name__ == "__main__":
   main()
