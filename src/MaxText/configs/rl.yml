@@ -92,7 +92,7 @@ enable_tunix_perf_metrics: False
 batch_size: 1
 # Increase `batch_size` and `MAX_STEPS` for better results.
 # num_batches: 3738
-num_batches: 4  # 200
+num_batches: 4
 # A batch can be split into multiple micro batches for memory management
 # and/or async sampling and training.
 micro_batch_size: -1
@@ -171,7 +171,8 @@ skip_jax_distributed_system: True
 
 # # TODO(@mazumdera): fix this
 # Dataset Configuration
-dataset_name: 'gsm8k'
+dataset_name: 'gsm8k' # huggingface:open-r1/DAPO-Math-17k-Processed
+eval_dataset_name: 'gsm8k' # huggingface:BytedTsinghua-SIA/AIME-2024
 train_split: 'train'
 eval_split: 'test'
 tokenizer_type: 'huggingface'
