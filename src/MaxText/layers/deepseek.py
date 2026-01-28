@@ -387,9 +387,10 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
 
   def mlp_op(self, x, deterministic, *args, **kwargs):
-    return self.with_logical_constraint(
-        self.DeepSeekMoeBlock_0(x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding)
+    mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(
+        x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
     )
+    return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates
 
 
 DeepSeekMoELayerToLinen = nnx_wrappers.to_linen_class(
