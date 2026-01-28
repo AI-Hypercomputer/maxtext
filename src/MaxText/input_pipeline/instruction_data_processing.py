@@ -19,7 +19,7 @@ import json
 import os
 import re
 
-from MaxText import max_logging
+from maxtext.utils import max_logging
 
 
 def load_template_from_file(template_path):

@@ -42,23 +42,16 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
-from MaxText import exceptions
-from MaxText import max_logging
-from MaxText import max_utils
-from MaxText import maxtext_utils
-from MaxText import train_utils
 from MaxText import pyconfig
 from MaxText import sharding
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.common_types import ShardMode
 from MaxText.globals import EPS
-from MaxText.utils import gcs_utils
 # Placeholder: internal
 
 from MaxText.gradient_accumulation import gradient_accumulation_loss_and_grad
 from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
 from MaxText.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
-from MaxText.train_utils import validate_train_config
 # pylint: disable=too-many-positional-arguments
 
 from maxtext.common import checkpointing, profiler
@@ -70,6 +63,12 @@ from maxtext.common.goodput import (
 )
 from maxtext.common.metric_logger import MetricLogger, record_activation_metrics
 from maxtext.common.vertex_tensorboard import VertexTensorboardManager
+from maxtext.utils import exceptions
+from maxtext.utils import gcs_utils
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
+from maxtext.utils import train_utils
 
 
 def get_first_step(state):
@@ -528,7 +527,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   # or fill in here
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
-  validate_train_config(config)
+  train_utils.validate_train_config(config)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   # update explicit sharding-supported config
   if config.shard_mode == ShardMode.EXPLICIT:

@@ -32,8 +32,6 @@ from flax import nnx
 
 import optax
 
-from MaxText import max_utils
-from MaxText import maxtext_utils
 from MaxText import sharding
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
@@ -42,6 +40,8 @@ from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 from maxtext.inference import inference_utils
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 
 Transformer = models.transformer_as_linen
 

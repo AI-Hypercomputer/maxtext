@@ -28,7 +28,7 @@ from jax.sharding import Mesh, PartitionSpec, NamedSharding
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText import maxtext_utils
+from maxtext.utils import maxtext_utils
 
 
 class ContextParallelismTest(unittest.TestCase):

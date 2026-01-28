@@ -47,9 +47,9 @@ from absl import logging
 from safetensors.torch import load as load_safetensors
 from safetensors import safe_open
 
-from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.utils.ckpt_conversion.utils.utils import HF_IDS, print_ram_usage, get_hf_model
+from maxtext.utils import max_logging
 
 
 jax.config.update("jax_platform_name", "cpu")

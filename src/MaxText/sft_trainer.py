@@ -27,20 +27,13 @@ import jax
 
 from flax.linen import partitioning as nn_partitioning
 
-from MaxText import exceptions
-from MaxText import max_utils
-from MaxText import max_logging
-from MaxText import maxtext_utils
 from MaxText import pyconfig
-from MaxText import train_utils
 from MaxText import sharding
 from MaxText.train import (
     eval_step,
     get_first_step,
     train_step,
 )
-from MaxText.train_utils import setup_train_loop, validate_train_config
-from MaxText.utils import gcs_utils
 from maxtext.common import checkpointing, profiler
 from maxtext.common.data_loader import DataLoader
 from maxtext.common.goodput import (
@@ -50,6 +43,12 @@ from maxtext.common.goodput import (
     maybe_record_goodput,
 )
 from maxtext.common.metric_logger import MetricLogger
+from maxtext.utils import exceptions
+from maxtext.utils import gcs_utils
+from maxtext.utils import max_utils
+from maxtext.utils import max_logging
+from maxtext.utils import maxtext_utils
+from maxtext.utils import train_utils
 
 
 def train_loop(config, recorder, state=None):
@@ -69,7 +68,7 @@ def train_loop(config, recorder, state=None):
       _,
       eval_data_iterator,
       state,
-  ) = setup_train_loop(config, recorder)
+  ) = train_utils.setup_train_loop(config, recorder)
 
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
@@ -169,7 +168,7 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.initialize(argv)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
-  validate_train_config(config)
+  train_utils.validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
 
   recorder = create_goodput_recorder(config)

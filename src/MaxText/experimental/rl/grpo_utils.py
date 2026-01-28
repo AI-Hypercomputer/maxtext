@@ -21,10 +21,10 @@ import jax.numpy as jnp
 import jaxtyping
 from typing import Any, Callable
 
-from MaxText import max_logging
-from MaxText import max_utils
 from MaxText.common_types import DecoderBlockType
 from maxtext.inference.offline_engine import InputData
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 
 from pathwaysutils.experimental import reshard as experimental_reshard
 from pathwaysutils.experimental import split_by_mesh_axis
