@@ -38,9 +38,66 @@ from typing import Sequence
 from absl import app
 import time
 import jax
+from enum import IntEnum
 
 from MaxText import pyconfig
 from MaxText import train_compile
+
+
+class Action(IntEnum):
+  REMAT = 0
+  OFFLOAD = 1
+  DEVICE = 2
+
+
+class RematPolicy:
+  """RematPolicy representing different remat policy combinations"""
+
+  def __init__(self, tensor_names: list[str], tensors: dict | None = None, initial_level: Action = Action.REMAT):
+    self.tensors = {name: initial_level for name in tensor_names} if tensors is None else tensors
+    self.tensor_order = tensor_names
+
+  @property
+  def to_dict(self) -> dict[str, str]:
+    """Convert internal action to strings for MaxText"""
+    mapping = {0: "remat", 1: "offload", 2: "device"}
+    return {k: mapping[v.value] if isinstance(v, Action) else mapping[v] for k, v in self.tensors.items()}
+
+  def next_policy(self):
+    """
+    Moves from Remat -> Offload -> Device.
+    Iterates through tensors in priority order to increase memory but reduce time usage
+    TODO: it is not necessary offload is strictly better than remat. We simplify the order
+    here. We need to update this logic for better time-memory modeling purpose.
+    """
+    new_policy = RematPolicy(tensor_names=self.tensor_order, tensors=self.tensors.copy())
+
+    # Search for the first tensor that can be moved to a more compute-efficient state
+    # reverse tensor order to on-device high AI later
+    for action_to_check in [Action.OFFLOAD, Action.DEVICE]:
+      for name in reversed(self.tensor_order):
+        if new_policy.tensors[name] < action_to_check:
+          new_policy.tensors[name] = action_to_check
+          return new_policy
+    return None
+
+  def previous_policy(self):
+    """
+    Moves from Device -> Offload -> Remat.
+    Iterates through tensors in priority order to reduce memory but increase time usage
+    """
+    new_policy = RematPolicy(tensor_names=self.tensor_order, tensors=self.tensors.copy())
+
+    # Search for the first tensor that can be moved to a more memory-efficient state
+    for action_to_check in [Action.OFFLOAD, Action.REMAT]:
+      for name in self.tensor_order:
+        if new_policy.tensors[name] > action_to_check:
+          new_policy.tensors[name] = action_to_check
+          return new_policy
+    return None
+
+  def __repr__(self):
+    return str(self.to_dict)
 
 
 def generate_priority_list(config, provided_tensor_names):
@@ -110,61 +167,34 @@ def tensor_score(tensor_name: str, config) -> tuple:
   return tensor_score_map[tensor_name]
 
 
-def build_full_device_policy(tensor_names) -> dict[str, str]:
-  """
-  Builds a minimal rematerialization policy with all tensors on device.
+def find_pdb_scalar(config):
+  """Calculates the scaling factor to normalize the Per-Device Batch (PDB) size.
+
+  In distributed training, the batch size is divided across various mesh axes.
+  When using non-batch-based sharding (like Tensor Parallelism), the raw
+  per-device batch size can become a fractional value.
+
+  This function identifies those non-batch axes (e.g., 'tensor') and calculates
+  a multiplier. This scalar represents the value by which a fractional per-device
+  batch size must be multiplied to result in an integer value, ensuring
+  compatibility with memory and compute estimation logic.
 
   Args:
-    config: The model configuration.
+    config: The configuration object containing 'mesh_axes' and the
+      corresponding 'ici_{axis}_parallelism' values.
 
   Returns:
-    The initial policy dictionary.
+    float: The aggregate parallelism degree of all non-data/non-FSDP axes,
+      serving as the integer-normalization constant for the PDB.
   """
-  return {key: "device" for key in tensor_names}
+  pdb_scalar = 1.0
+  for mesh_axis in config.mesh_axes:
+    if mesh_axis not in ("data", "fsdp", "fsdp_transpose", "expert", "stage"):
+      pdb_scalar *= getattr(config, f"ici_{mesh_axis}_parallelism")
+  return pdb_scalar
 
 
-def build_full_remat_policy(tensor_names) -> dict[str, str]:
-  """
-  Builds a full rematerialization policy with all tensors set to remat.
-
-  Args:
-    config: The model configuration.
-
-  Returns:
-    The full remat policy dictionary.
-  """
-  return {key: "remat" for key in tensor_names}
-
-
-def next_policy(policy: dict) -> dict[str, str] | None:
-  """
-  Generates the next rematerialization policy in the sequence.
-
-  This function iterates through the policy and changes the first tensor it
-  finds with a 'device' value to 'offload', or the first 'offload' to 'remat'.
-  If all tensors are already set to 'remat', it returns None.
-
-  Args:
-    policy: The current policy dictionary.
-
-  Returns:
-    The next policy dictionary, or None if the search is complete.
-  """
-  if "device" not in policy.values() and "offload" not in policy.values():
-    return None
-  tensor_in_device = "device" in policy.values()
-  new_policy = policy.copy()
-  for key, value in new_policy.items():
-    if tensor_in_device and value == "device":
-      new_policy[key] = "offload"
-      return new_policy
-    if not tensor_in_device and value == "offload":
-      new_policy[key] = "remat"
-      return new_policy
-  return None
-
-
-def largest_batch_size(base_argv, policy, min_pdb, max_pdb=64) -> int:
+def largest_batch_size(base_argv, policy, min_pdb=None, max_pdb=32.0, pdb_scalar=1.0) -> int:
   """
   Finds the largest possible per_device_batch_size (pdb) that does not cause an OOM error.
 
@@ -172,43 +202,54 @@ def largest_batch_size(base_argv, policy, min_pdb, max_pdb=64) -> int:
   range to efficiently find the optimal batch size.
 
   Args:
-    policy: The rematerialization policy dictionary.
+    policy: The rematerialization policy.
     min_pdb: The minimum per_device_batch_size to test.
     max_pdb: The maximum per_device_batch_size to test.
 
   Returns:
     The largest per_device_batch_size within the range that does not result in an OOM error.
   """
+  if pdb_scalar == 0.0:
+    raise ValueError("pdb_scalar cannot be value zero.")
+
+  if min_pdb <= 0.0 or max_pdb < min_pdb:
+    raise ValueError(f"Abnormal {min_pdb=} or {max_pdb=} values.")
+
+  min_pdb = 1.0 / pdb_scalar if min_pdb is None else min_pdb
   print(f"Starting binary search for the largest batch size between {min_pdb} and {max_pdb}.")
+
+  if min_pdb == max_pdb:
+    oom_res = is_oom(base_argv, policy, min_pdb)
+    return min_pdb if oom_res else min_pdb - 1 / pdb_scalar
 
   if is_oom(base_argv, policy, min_pdb):
     print(f"OOM at minimum batch size {min_pdb}.")
-    return min_pdb - 1
+    return min_pdb - 1 / pdb_scalar
   if not is_oom(base_argv, policy, max_pdb):
     print(f"No OOM at maximum batch size {max_pdb}.")
     return max_pdb
 
-  low, high, result = min_pdb, max_pdb, min_pdb
+  low, high, result = int(min_pdb * pdb_scalar), int(max_pdb * pdb_scalar), int(min_pdb * pdb_scalar)
   while low <= high:
     mid = (low + high) // 2
     if mid < min_pdb:
       low = mid + 1
       continue
 
-    if not is_oom(base_argv, policy, mid):
+    if not is_oom(base_argv, policy, mid / pdb_scalar):
       result = mid
       low = mid + 1
     else:
       high = mid - 1
-  return result
+  return result / pdb_scalar
 
 
-def is_oom(base_argv, policy: dict, pdb: int) -> bool:
+def is_oom(base_argv, policy: RematPolicy, pdb: int) -> bool:
   """
   Checks if the given policy and batch size cause an OOM error.
 
   Args:
-    policy: The rematerialization policy dictionary.
+    policy: The rematerialization policy.
     pdb: The per_device_batch_size.
 
   Returns:
@@ -272,18 +313,18 @@ def search_policy_only(
     ValueError: If even a full remat policy causes an OOM for the given batch size.
   """
   # Sanity check: If full remat OOMs, this batch size is impossible.
-  full_remat_policy = build_full_remat_policy(tensor_names)
+  full_remat_policy = RematPolicy(tensor_names=tensor_names, initial_level=Action.REMAT)
   if is_oom(base_argv, full_remat_policy, pdb):
     raise ValueError(f"Given batch size {pdb} leads to OOM even with full remat.")
 
   # Start with the lightest policy (e.g., no remat fully on device)
-  policy = build_full_device_policy(tensor_names) if init_policy is None else init_policy
+  policy = RematPolicy(tensor_names=tensor_names, initial_level=Action.DEVICE) if init_policy is None else init_policy
   pre_policy = None  # To track the last policy that *did not* OOM
 
   # Iteratively reduce memory usage until it fits
   while is_oom(base_argv, policy, pdb):
     pre_policy = policy
-    policy = next_policy(policy)
+    policy = policy.previous_policy()
 
   # Return the first policy that *fit* (did not OOM).
   return pre_policy
@@ -292,34 +333,44 @@ def search_policy_only(
 def search(
     tensor_names,
     base_argv,
-    init_policy: dict = None,
-    max_pdb: int = 256,
+    min_pdb: float | None = None,
+    max_pdb: float = 64.0,
+    init_policy: RematPolicy = None,
+    pdb_scalar: float = 1.0,
 ) -> list[tuple[int, dict]]:
   """
   Performs the core search algorithm to find the Pareto frontier points.
 
   Args:
-    config: The model configuration.
-    max_pdb: The maximum per_device_batch_size to test.
+    tensor_names: Priority list of tensors.
+    base_argv: base arguments for training.
+    min_pdb: minimal pdb value from full device policy.
+    max_pdb: maximal pdb value from full remat policy.
+    pdb_scalar: batch scalar enabling fractional batch size search.
 
   Returns:
     A list of tuples, where each tuple contains a batch size and its
-    corresponding rematerialization policy.
+    corresponding rematerialization policy dict.
   """
   output_lst = []
-  policy = build_full_device_policy(tensor_names) if init_policy is None else init_policy
-  pdb = 1
+  policy = RematPolicy(tensor_names=tensor_names, initial_level=Action.REMAT) if init_policy is None else init_policy
+  min_pdb = 1 / pdb_scalar if min_pdb is None else min_pdb
+  pdb = max_pdb
   while policy is not None:
-    pdb = largest_batch_size(base_argv, policy, min_pdb=pdb, max_pdb=max_pdb)
+    pdb = largest_batch_size(base_argv, policy, min_pdb=min_pdb, max_pdb=pdb, pdb_scalar=pdb_scalar)
     if pdb > 0:
-      output_lst.append((pdb, policy))
-    policy = next_policy(policy)
+      output_lst.append((pdb, policy.to_dict))
+
+    policy = policy.next_policy()
+    if pdb < min_pdb:
+      print(f"The value of {pdb=} hits {min_pdb=}. Stop iterating policies.")
+      break
   return output_lst
 
 
-def generate_remat_config(policy: dict) -> tuple:
+def generate_remat_config(policy: RematPolicy) -> tuple:
   """Generate remat-related configs"""
-  return ("remat_policy=custom",) + tuple(f"{key}={value}" for key, value in policy.items())
+  return ("remat_policy=custom",) + tuple(f"{key}={value}" for key, value in policy.to_dict.items())
 
 
 def generate_pdb_config(pdb: int):
@@ -327,10 +378,19 @@ def generate_pdb_config(pdb: int):
   return (f"per_device_batch_size={pdb}",)
 
 
-def build_argv(base_argv, remat_policy: dict, pdb: int) -> tuple[str, ...]:
+def build_argv(base_argv, remat_policy: RematPolicy, pdb: int) -> tuple[str, ...]:
   """Builds the argument vector for train_compile."""
   remat_args = generate_remat_config(remat_policy)
   pdb_args = generate_pdb_config(pdb)
+
+  # Check if decoder_layer_input is already specified in base_argv
+  has_layer_input_config = any(
+      "decoder_layer_input=device" in arg or "decoder_layer_input=offload" in arg for arg in base_argv
+  )
+
+  # If not specified, append the default offload setting to remat_args
+  if not has_layer_input_config:
+    remat_args += ("decoder_layer_input=device",)
   return base_argv + pdb_args + remat_args
 
 
@@ -373,7 +433,7 @@ def find_batch_size(base_argv):
   """
   pdb_provided, pdb_str = get_parameter_value(base_argv, prefix="per_device_batch_size=")
 
-  return pdb_provided, int(pdb_str) if pdb_provided else None
+  return pdb_provided, float(pdb_str) if pdb_provided else None
 
 
 def find_remat_policy_tensor_names(base_argv):
@@ -432,12 +492,13 @@ def main(argv_list: Sequence[str]) -> None:
     with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
       config = pyconfig.initialize(base_argv)
   train_compile.validate_config(config)
+  pdb_scalar = find_pdb_scalar(config)
 
   # Get the prioritized list of tensors to try rematerializing
   tensor_names = generate_priority_list(config, provided_tensor_names)
   # Define the two extremes: all remat vs. no remat
-  full_remat_policy = build_full_remat_policy(tensor_names)
-  full_device_policy = build_full_device_policy(tensor_names)
+  full_remat_policy = RematPolicy(tensor_names=tensor_names, initial_level=Action.REMAT)
+  full_device_policy = RematPolicy(tensor_names=tensor_names, initial_level=Action.DEVICE)
 
   start_time = time.time()
   suggested_list = []
@@ -451,24 +512,42 @@ def main(argv_list: Sequence[str]) -> None:
     # MODE 2: No batch size. Search for both batch size and policy.
     print("No batch size provided. Searching for max batch size and policies...")
     # First, find the absolute max batch size that fits *even with full remat*
-    max_pdb = largest_batch_size(base_argv, full_remat_policy, min_pdb=1)
+    max_pdb = largest_batch_size(base_argv, full_remat_policy, min_pdb=1.0 / pdb_scalar, pdb_scalar=pdb_scalar)
+    # suggested_list = [(max_pdb, full_remat_policy.to_dict())]
 
-    # Now, search for combinations, starting from no-remat up to max_pdb
-    suggested_list = search(tensor_names, base_argv, init_policy=full_device_policy, max_pdb=max_pdb)
+    # Now, search for combinations, starting from full-remat up to min_pdb
+    suggested_list.extend(
+        search(
+            tensor_names,
+            base_argv,
+            min_pdb=1.0 / pdb_scalar,
+            max_pdb=max_pdb,
+            init_policy=full_remat_policy,
+            pdb_scalar=pdb_scalar,
+        )
+    )
 
   end_time = time.time()
   print(f"\nSearch completed in {end_time - start_time:.2f} seconds.")
 
   output_filename = "remat_commands_from_estimator.txt"
-  print(f"Writing {len(suggested_list)} suggested command(s) to {output_filename}...")
 
-  with open(output_filename, "w", encoding="utf-8") as f:
+  # Only open the file and print the status if the config allows writing
+  if config.write_estimator_result:
+    print(f"Writing {len(suggested_list)} suggested command(s) to {output_filename}...")
+
+    with open(output_filename, "w", encoding="utf-8") as f:
+      for pdb_result, policy_result in suggested_list:
+        # Build the full, runnable command string
+        final_argv = build_argv(base_argv[1:], policy_result, pdb_result)
+        command = "python -m MaxText.train " + " ".join(final_argv)
+
+        f.write(command + "\n")
+        print(f"  - Found valid combo: pdb={pdb_result}, policy={policy_result}")
+
+    print("Done.")
+  else:
     for pdb_result, policy_result in suggested_list:
-      # Build the full, runnable command string
-      final_argv = build_argv(base_argv[1:], policy_result, pdb_result)
-      command = "python -m MaxText.train " + " ".join(final_argv)
-
-      f.write(command + "\n")
       print(f"  - Found valid combo: pdb={pdb_result}, policy={policy_result}")
 
   print("Done.")

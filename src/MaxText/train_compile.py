@@ -198,6 +198,7 @@ def is_oom(argv: Sequence[str]) -> bool:
   except Exception as e:
     # return true if OOM error happens
     # OOM error looks like
+    # Check failed: entries[i] <= std::numeric_limits<uint32_t>::max()
     # jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Allocation ...
     # jax.errors.JaxRuntimeError: INTERNAL: RET_CHECK failure ...
     message = str(e).lower()
