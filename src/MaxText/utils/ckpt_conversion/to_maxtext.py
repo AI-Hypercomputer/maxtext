@@ -87,7 +87,7 @@ from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models, quantizations
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model, validate_and_filter_param_map_keys
-from maxtext.inference_utils import str2bool
+from maxtext.inference.inference_utils import str2bool
 from maxtext.common import checkpointing
 
 jax.config.update("jax_platform_name", "cpu")
