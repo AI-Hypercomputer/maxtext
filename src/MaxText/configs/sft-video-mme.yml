@@ -24,10 +24,14 @@ packing: False  # packing is not supported yet
 freeze_vision_encoder_params: True
 learning_rate: 2.e-5
 
-# -------------- HF pipeline --------------
-# dataset_type: hf
-# hf_path: 'HuggingFaceM4/ChartQA'
+# -------------- Dataset config --------------
+dataset_type: grain
+grain_file_type: parquet
+grain_train_files: gs://aireenmei-us-central1/maxtext-dataset/hf/video_mme_videos/test-00000-of-00001.parquet
+# use GCSFUSE to mount the GCS bucket to a local path for video_path 
+video_path: /tmp/gcsfuse/maxtext-dataset/hf/video_mme_videos/data
 train_split: 'test'
-train_data_columns: ['question', 'options', 'answer']  # the first column is prompt, second column is completion
+# the last column is completion, other columns are concat as prompt
+train_data_columns: ['question', 'options', 'answer']  
 train_video_column: 'videoID'
 train_image_column: ''
