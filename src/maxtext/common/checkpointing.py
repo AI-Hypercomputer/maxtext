@@ -20,6 +20,7 @@ from typing import Any, Optional
 from absl import flags
 import datetime
 from etils import epath
+from flax import nnx
 from flax.training import train_state
 import jax
 from maxtext.utils.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
@@ -508,7 +509,7 @@ def load_state_if_possible(
     load_parameters_from_path: str,
     load_full_state_from_path: str,
     checkpoint_storage_concurrent_gb: int,
-    abstract_unboxed_pre_state: train_state.TrainState,
+    abstract_unboxed_pre_state: train_state.TrainState | nnx.State,
     enable_single_replica_ckpt_restoring: bool | None = False,
     dataset_type: str | None = "tfds",
     step: int = -1,  # -1 means latest
@@ -612,9 +613,14 @@ def load_state_if_possible(
           return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args)), None)
 
   if load_parameters_from_path != "":
+    if isinstance(abstract_unboxed_pre_state, nnx.State):
+      _, params, _ = nnx.split(abstract_unboxed_pre_state.model, nnx.Param, ...)
+    else:
+      params = abstract_unboxed_pre_state.params
+
     restored_params = load_params_from_path(
         load_parameters_from_path,
-        abstract_unboxed_pre_state.params,
+        params,
         checkpoint_storage_concurrent_gb,
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
