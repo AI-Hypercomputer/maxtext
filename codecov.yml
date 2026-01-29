@@ -32,7 +32,7 @@ fixes:
   # - ".*/maxtext/src/::src/"
   - "/github/workspace/::"
 ignore:
-  - "src/MaxText/assets"
+  - "src/maxtext/assets"
   - "src/MaxText/configs"
   - "src/MaxText/examples"
   - "src/MaxText/experimental"

@@ -47,7 +47,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
     max_target_length=8192 \
     ici_fsdp_parallelism=256 \
     tokenizer_type=huggingface \
-    tokenizer_path=src/MaxText/assets/qwen3-tokenizer
+    tokenizer_path=src/maxtext/assets/tokenizers/qwen3-tokenizer
 
 ```
 

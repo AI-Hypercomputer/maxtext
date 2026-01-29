@@ -7,7 +7,7 @@ export CHECKPOINT_ORIGINAL=/mnt/disks/persist/checkpoints/huggingface/DeepSeek-R
 huggingface-cli download deepseek-ai/DeepSeek-R1-Distill-Llama-8B --local-dir $CHECKPOINT_ORIGINAL
 
 export CHECKPOINT_TPU_SCANNED=$CHECKPOINT_ORIGINAL/scanned_chkpt
-export TOKENIZER="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer_llama3.tiktoken
+export TOKENIZER="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"/tokenizer_llama3.tiktoken
 export BASE_OUTPUT_PATH=$CHECKPOINT_ORIGINAL
 export RUN_NAME=unscanned_chkpt
 export CHECKPOINT_TPU_UNSCANNED=$BASE_OUTPUT_PATH/$RUN_NAME/checkpoints/0/items

@@ -104,7 +104,7 @@ TF_FORCE_GPU_ALLOW_GROWTH=true \
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.94 \
 python3 -m maxtext.inference.inference_microbenchmark $MAXENGINE_CONFIG_FILEPATH  \
     base_output_directory=$BASE_OUTPUT_DIRECTORY  \
-    tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.llama2 \
+    tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"/tokenizer.llama2 \
     model_name='llama2-70b' \
     max_prefill_predict_length=$max_prefill_predict_length  \
     max_target_length=2048  \

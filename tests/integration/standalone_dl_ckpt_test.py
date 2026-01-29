@@ -48,7 +48,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "steps=100",
             "enable_checkpointing=false",
             "enable_goodput_recording=False",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
         )
     )  # need to pass relative path to tokenizer
 

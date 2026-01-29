@@ -227,7 +227,7 @@ llama2_7b_v5p_128 = _add_to_model_dictionary(
             "remat_policy": "minimal",
             "max_target_length": 4096,
             "use_iota_embed": True,
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.llama2"),
+            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.llama2"),
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "synthetic",
             "reuse_example_batch": 1,

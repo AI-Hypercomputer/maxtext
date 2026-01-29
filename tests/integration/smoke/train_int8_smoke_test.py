@@ -47,7 +47,7 @@ class Train(unittest.TestCase):
             "steps=10",
             "enable_checkpointing=False",
             "quantization=int8",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
             "monitor_goodput=False",
             "enable_checkpoint_cloud_logger=False",

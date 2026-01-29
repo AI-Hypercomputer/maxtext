@@ -51,7 +51,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
           None,
           os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
           "model_name=gemma3-4b",
-          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.gemma3')}",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.gemma3')}",
           "use_multimodal=True",
           "run_name=runner_test",
           f"load_parameters_path={DEFAULT_LOAD_PARAMETERS_PATH}",
