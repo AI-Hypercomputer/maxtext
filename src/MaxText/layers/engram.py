@@ -411,7 +411,7 @@ class ShortConv(nnx.Module):
     # 1. Apply Group-wise Normalization
     # We iterate over the 'Groups' dimension (axis 2)
     normed_chunks = []
-    for i in range(G):
+    for i in range(self.hc_mult):
       # x[:, :, i, :] shape: (B, L, C)
       normed_chunks.append(self.norms[i](x[:, :, i, :]))
 
@@ -472,6 +472,7 @@ class Engram(nnx.Module):
     self.layer_ids = layer_ids
     self.pad_id = pad_id
     self.seed = seed
+    self.hc_mult = hc_mult
 
     # -----------------------------------------------------------------------
     # 2. Engram Dimensions & Hyperparameters
@@ -622,48 +623,76 @@ class Engram(nnx.Module):
     Args:
         hidden_states: Current transformer state (Query). Shape: (B, L, G, C)
         input_ids: Raw token IDs. Shape: (B, L)
+    Returns:
+        output: Engram-augmented residuals. Shape: (B, L, G, C)
     """
 
     # 1. Generate Hash Indices
     # Map raw text -> n-gram contexts -> hash indices z_{t,n,k}
+    # Shape: (B, L) -> (B, L, H_en)
+    # where H_en is the total count of heads across all n-gram orders.
     hash_input_ids = jnp.array(self.hash_mapping.hash(input_ids)[self.layer_id])
 
     # 2. Retrieve Memory
     # Fetch e_{t,n,k} from the embedding table.
+    # Shape: (B, L, H_en, D_head)
     embeddings = self.mhe(hash_input_ids)
 
-    # Concatenate all n-gram heads into one vector e_t
-    # (B, L, Num_Heads, D) -> (B, L, Num_Heads * D)
+    # Flatten all n-gram heads into one vector e_t
+    # (B, L, H_en, D_head) -> (B, L, D_en)
     embeddings = embeddings.reshape(embeddings.shape[0], embeddings.shape[1], -1)
 
     # 3. Gating Mechanism (Scaled Dot-Product)
     # Decide relevance of memory (Key) to current state (Query)
     gates = []
-    for i in range(len(self.key_projs)):
+
+    for i in range(self.hc_mult):
+      # Setup layers for this branch
+      norm1 = self.norm1[i]
+      norm2 = self.norm2[i]
+      key_proj = self.key_projs[i]
+
+      # Extract Query for this branch: (B, L, C)
+      query = hidden_states[:, :, i, :]
+
       # Key: Projection of retrieved n-gram memory
-      k = self.norm1[i](self.key_projs[i](embeddings))
+      # Generate Key from Engram Memory: (B, L, D_en) -> (B, L, C)
+      k = norm1(key_proj(embeddings))
 
       # Query: Current hidden state from the transformer
-      q = self.norm2[i](hidden_states[:, :, i, :])
+      # Normalize Query: (B, L, C)
+      q = norm2(query)
 
-      # Gate Score: (K * Q) / sqrt(d)
+      # Gate Score (Scalar per token): (K * Q) / sqrt(d)
+      # Sum over C dimension -> (B, L)
       gate = jnp.sum(k * q, axis=-1) / jnp.sqrt(k.shape[-1])
 
       # Stabilization trick: sign(x) * sqrt(|x|)
       gate = jnp.sqrt(jnp.maximum(jnp.abs(gate), 1e-6)) * jnp.sign(gate)
 
       # Sigmoid activation to get gating probability [0, 1]
+      # Sigmoid activation -> (B, L, 1)
       gate = jax.nn.sigmoid(gate)[..., None]
       gates.append(gate)
 
+    # Stack gates for all G branches
+    # Shape: (B, L, G, 1)
     gates_stack = jnp.stack(gates, axis=2)
 
     # 4. Apply Gate to Value Projection
     # v = Gate * Value_Proj(Memory)
-    v = gates_stack * self.value_proj(embeddings)[:, :, None, :]
+    # Project Engram Memory to Value: (B, L, D_en) -> (B, L, C)
+    val_proj = self.value_proj(embeddings)
+
+    # Broadcast Value across G branches and apply Gate
+    # (B, L, G, 1) * (B, L, 1, C) -> (B, L, G, C)
+    v = gates_stack * val_proj[:, :, None, :]
 
     # 5. Temporal Smoothing & Residual
+    # Apply Depthwise Conv (mixes L, keeps G and C independent)
+    # Shape: (B, L, G, C)
     # Output = v + DepthwiseConv(v)
     # Note: The 'hidden_states' (residual x) is usually added by the caller/block wrapper
     output = v + self.short_conv(v)
+
     return output
