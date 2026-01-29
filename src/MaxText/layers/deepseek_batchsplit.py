@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from MaxText import common_types
+from MaxText import max_utils
 from MaxText.common_types import Config
 from MaxText.layers import attention_mla
 from MaxText.layers import initializers
@@ -31,7 +32,6 @@ from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from maxtext.inference import page_manager
-from maxtext.utils import max_utils
 
 class DeepSeekBatchSplitGenericLayer(nnx.Module):
   """Generic DeepSeek layer with Multi-Head Latent Attention.

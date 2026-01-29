@@ -33,10 +33,9 @@ import flax.linen as nn
 import jax
 from optax.contrib._muon import MuonDimensionNumbers as mdn
 
-from MaxText import pyconfig
+from MaxText import maxtext_utils, pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models, quantizations
-from maxtext.utils import maxtext_utils
 
 
 Transformer = models.transformer_as_linen

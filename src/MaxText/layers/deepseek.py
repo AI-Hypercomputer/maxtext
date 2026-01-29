@@ -24,6 +24,7 @@ import jax.numpy as jnp
 
 from flax import nnx
 
+from MaxText import max_utils
 from MaxText.common_types import Config
 from MaxText.common_types import MODEL_MODE_PREFILL
 from MaxText.layers import attention_mla
@@ -36,7 +37,6 @@ from MaxText.layers.linears import Dropout
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from maxtext.inference import page_manager
-from maxtext.utils import max_utils
 
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3

@@ -30,14 +30,14 @@ from jax.sharding import NamedSharding, Mesh
 from jax.sharding import PartitionSpec as P
 import jax.numpy as jnp
 from MaxText import common_types as ctypes
+from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.common_types import ShardMode
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from MaxText.kernels import megablox as mblx
 from MaxText.sharding import logical_to_mesh_axes
 from MaxText.layers import attentions, linears, nnx_wrappers, quantizations
 from MaxText.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
 import numpy as np
 import qwix.pallas as qpl
 import tokamax

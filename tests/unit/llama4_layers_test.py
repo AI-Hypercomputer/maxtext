@@ -29,8 +29,8 @@ from jax.experimental import mesh_utils
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.common_types import MODEL_MODE_TRAIN, AttentionType
 from MaxText import pyconfig
+from MaxText import maxtext_utils
 from MaxText.layers import attentions, embeddings, llama4
-from maxtext.utils import maxtext_utils
 import numpy as np
 
 Attention = attentions.Attention

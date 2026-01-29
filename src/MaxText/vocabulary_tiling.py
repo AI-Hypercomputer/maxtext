@@ -20,13 +20,13 @@ from flax import linen as nn
 
 import jax
 import jax.numpy as jnp
+from MaxText import max_utils
 from MaxText.sharding import (
     maybe_shard_with_name,
     all_gather_over_fsdp,
     create_sharding,
 )
 from MaxText.common_types import ShardMode
-from maxtext.utils import max_utils
 
 
 def vocab_tiling_linen_loss(

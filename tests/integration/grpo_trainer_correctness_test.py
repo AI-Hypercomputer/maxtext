@@ -42,6 +42,7 @@ import transformers
 
 import MaxText as mt
 from MaxText import maxengine
+from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state, setup_train_loop
@@ -52,7 +53,6 @@ from MaxText.layers import quantizations
 from MaxText.experimental.rl import grpo_utils
 from maxtext.inference import offline_engine
 from maxtext.inference.offline_engine import InputData
-from maxtext.utils import maxtext_utils
 
 
 def get_golden_data(config):

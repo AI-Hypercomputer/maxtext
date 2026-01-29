@@ -33,11 +33,10 @@ from pydantic.functional_validators import model_validator, field_validator
 from pydantic.main import BaseModel
 from pydantic.types import PositiveInt, NonNegativeFloat, NonNegativeInt
 
-from MaxText import accelerator_to_spec_map
+from MaxText import accelerator_to_spec_map, max_utils
 from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
-from maxtext.utils import gcs_utils
-from maxtext.utils import max_utils
+from MaxText.utils import gcs_utils
 
 logger = logging.getLogger(__name__)
 

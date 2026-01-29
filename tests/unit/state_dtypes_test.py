@@ -25,8 +25,8 @@ from MaxText import optimizers
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models
 from MaxText.layers import quantizations
+from MaxText import maxtext_utils
 from MaxText.globals import MAXTEXT_PKG_DIR
-from maxtext.utils import maxtext_utils
 
 Transformer = models.transformer_as_linen
 

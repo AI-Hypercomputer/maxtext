@@ -18,7 +18,7 @@ from typing import Iterable, Literal, Sequence, Collection
 from pathlib import Path
 import tensorflow as tf
 import tensorflow_text as tftxt
-from maxtext.utils import max_logging
+from MaxText import max_logging
 import transformers
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe

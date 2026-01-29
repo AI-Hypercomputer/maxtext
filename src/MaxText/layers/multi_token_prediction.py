@@ -28,10 +28,11 @@ from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.decoders import DecoderLayer
 from MaxText.layers import nnx_wrappers
+from MaxText import max_utils
+from MaxText import maxtext_utils
+
 from MaxText.globals import EPS
 from MaxText.layers.initializers import variable_to_logically_partitioned
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
 
 
 # Custom Variable types for MTP intermediate outputs

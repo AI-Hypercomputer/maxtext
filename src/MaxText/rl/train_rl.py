@@ -72,13 +72,13 @@ from tunix.sft import metrics_logger, profiler
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
-from MaxText import pyconfig
+from MaxText import max_logging, max_utils, maxtext_utils, pyconfig
+from MaxText import model_creation_utils
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from MaxText.rl.evaluate_rl import evaluate
 from MaxText.rl import utils_rl
 from MaxText.input_pipeline.instruction_data_processing import load_template_from_file
-from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 
 
 def get_maxtext_model(config, devices=None):

@@ -58,9 +58,9 @@ import transformers
 from datasets import Dataset
 from huggingface_hub import create_repo, get_full_repo_name, repo_exists, upload_file
 
-from maxtext.utils import gcs_utils
-from maxtext.utils import max_logging
+from MaxText import max_logging
 from MaxText.input_pipeline import _distillation_data_processing
+from MaxText.utils import gcs_utils
 
 from jetstream.core.proto import jetstream_pb2
 from jetstream.core.proto import jetstream_pb2_grpc

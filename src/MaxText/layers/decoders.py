@@ -30,11 +30,14 @@ from flax.linen.partitioning import ScanIn
 
 from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONTEXT
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.sharding import create_sharding
 from MaxText.layers import linears
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
+from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.layers.attentions import attention_as_linen
@@ -58,9 +61,6 @@ from MaxText.layers import (
     olmo3,
 )
 from maxtext.inference import page_manager
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions

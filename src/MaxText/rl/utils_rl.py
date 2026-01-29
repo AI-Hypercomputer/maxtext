@@ -16,7 +16,7 @@
 """RL Utils Module."""
 import re
 import optax
-from maxtext.utils import max_logging
+from MaxText import max_logging
 
 
 # Constants for normalization

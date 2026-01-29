@@ -36,15 +36,15 @@ import optax
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
+from MaxText import max_logging
+from MaxText import max_utils
 from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.configs import types
+from MaxText.utils import gcs_utils
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.inference.page_manager import PageState
 from maxtext.common import checkpointing
-from maxtext.utils import gcs_utils
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 

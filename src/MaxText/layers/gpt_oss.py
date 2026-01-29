@@ -37,8 +37,8 @@ from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import RMSNorm
+from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
-from maxtext.utils import max_utils
 
 
 # -----------------------------------------

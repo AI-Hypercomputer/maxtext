@@ -35,7 +35,7 @@ from jax.sharding import Mesh
 from jax.experimental import colocated_python
 import jax.numpy as jnp
 
-from maxtext.utils import max_logging
+from MaxText import max_logging
 
 
 def _build_global_shape_and_sharding(

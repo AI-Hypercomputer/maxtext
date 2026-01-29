@@ -24,11 +24,11 @@ from unittest.mock import MagicMock
 from jax.sharding import Mesh
 
 from MaxText.rampup_batch import RampupBatchManager
+from MaxText.maxtext_utils import create_device_mesh
+from MaxText import exceptions
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.common.data_loader import DataLoader, RampUpDataLoader
-from maxtext.utils import exceptions
-from maxtext.utils.maxtext_utils import create_device_mesh
 
 
 class DataLoaderTest(unittest.TestCase):

@@ -27,11 +27,11 @@ import numpy as np
 
 import jax
 
+from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.train import get_first_step
+from MaxText.train_utils import validate_train_config, setup_train_loop
 from maxtext.common.data_loader import DataLoader
-from maxtext.utils import max_logging
-from maxtext.utils.train_utils import validate_train_config, setup_train_loop
 
 
 def data_load_loop(config, state=None):

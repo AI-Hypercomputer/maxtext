@@ -19,12 +19,12 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import checkify
 
+from MaxText import exceptions
 from MaxText.sharding import get_input_data_sharding
 from maxtext.common.goodput import (
     GoodputEvent,
     maybe_record_goodput,
 )
-from maxtext.utils import exceptions
 
 
 class DataLoader:

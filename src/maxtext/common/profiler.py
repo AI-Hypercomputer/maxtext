@@ -23,8 +23,8 @@ import jax
 
 import google_cloud_mldiagnostics as mldiag
 
+from MaxText import max_logging
 from MaxText.managed_mldiagnostics import ManagedMLDiagnostics
-from maxtext.utils import max_logging
 
 
 class Profiler:
