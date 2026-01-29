@@ -34,9 +34,9 @@ def preprocess_mm_data(config):
 
     processor_outputs = preprocess_mm_data_gemma3(config)
   elif config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
-
-    images = [multimodal_utils.load_image_from_path(p) for p in config.image_path.split(",")]
-    processor_outputs = multimodal_utils.pre_process_llama4_image(images)
+    from MaxText.multimodal.processor_llama4 import preprocess_mm_data_llama4  # pylint: disable=import-outside-toplevel
+    
+    processor_outputs = preprocess_mm_data_llama4(config)
   elif config.model_name in ["qwen3-omni-30b-a3b"]:
     from MaxText.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni  # pylint: disable=import-outside-toplevel
 
