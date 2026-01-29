@@ -21,7 +21,7 @@ import os
 import json
 import itertools
 from pathlib import Path
-from typing import List, Sequence, Union
+from typing import List, Sequence, Union, Any
 import jax
 from absl import app
 from jax.tree_util import tree_flatten_with_path
@@ -218,16 +218,20 @@ def _json_spec(spec: PartitionSpec) -> List[Union[List[str], str, None]]:
   return list(convert(e) for e in spec)
 
 
-def named_shardings_to_json(train_state) -> dict[str, dict]:
+def named_shardings_to_json(train_state, shape_tree) -> dict[str, dict]:
   """Extract NamedSharding instances from a trainstate and save to JSON file."""
 
   named_shardings = {}
   flat_items = tree_flatten_with_path(train_state)[0]
-  for path, leaf in flat_items:
-    if isinstance(leaf, NamedSharding):
-      name = "/".join(str(p) for p in path)
-      mesh = leaf.mesh
-      spec = leaf.spec
+  flat_shapes, _ = tree_flatten_with_path(shape_tree)
+
+  for (path_s, leaf_s), (_, leaf_sh) in zip(flat_items, flat_shapes):
+    if isinstance(leaf_s, NamedSharding):
+      name = "/".join(str(p) for p in path_s)
+      mesh = leaf_s.mesh
+      spec = leaf_s.spec
+      # Extract shape from the shape_tree leaf (likely a ShapeDtypeStruct)
+      shape = list(leaf_sh.shape) if hasattr(leaf_sh, "shape") else None
 
       named_shardings[name] = {
           "mesh": {
@@ -235,21 +239,43 @@ def named_shardings_to_json(train_state) -> dict[str, dict]:
               "shape": dict(mesh.shape),
           },
           "partition_spec": _json_spec(spec),
+          "shape": shape,
       }
 
   print(f"Got {len(named_shardings)} NamedSharding entries.")
   return named_shardings
 
 
-def save_named_sharding_dict(output_path: str | Path, sharding_dict: dict) -> None:
-  """Save the sharding dict directly to a JSON file."""
+def partition_specs_to_json(logical_tree, shape_tree) -> dict[str, Any]:
+  """
+  Extract PartitionSpecs (Logical) from the logical tree.
+  Leaf nodes are expected to be PartitionSpec (or None).
+  """
+  logical_dict = {}
+  flat_items = tree_flatten_with_path(logical_tree)[0]
+  flat_shapes, _ = tree_flatten_with_path(shape_tree)
+
+  for (path_l, leaf_l), (_, leaf_sh) in zip(flat_items, flat_shapes):
+    # leaf should be PartitionSpec or None
+    if isinstance(leaf_l, PartitionSpec) or leaf_l is None:
+      name = "/".join(str(p) for p in path_l)
+      # Extract shape
+      shape = list(leaf_sh.shape) if hasattr(leaf_sh, "shape") else None
+
+      logical_dict[name] = {"partition_spec": _json_spec(leaf_l), "shape": shape}
+  print(f"Got {len(logical_dict)} Logical entries.")
+  return logical_dict
+
+
+def save_json(output_path: str | Path, sharding_dict: dict) -> None:
+  """Save dict to a JSON file."""
   output_path = Path(output_path)
   output_path.parent.mkdir(parents=True, exist_ok=True)
   with open(output_path, "w", encoding="utf-8") as f:
     json.dump(sharding_dict, f, indent=2)
 
 
-def load_named_sharding_json(json_path: str | Path) -> dict:
+def load_json(json_path: str | Path) -> dict:
   """Loads the named_shardings.json file into a plain Python dict."""
   json_path = Path(json_path)
   with open(json_path, "r", encoding="utf-8") as f:
@@ -267,26 +293,38 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.initialize(argv)
   validate_config(config)
 
-  json_path = (
+  base_path = Path(
       f"{MAXTEXT_REPO_ROOT}/tests/utils/sharding_info/{config.model_name}/"
-      f"{config.compile_topology}/"
-      f"slice_{config.compile_topology_num_slices}/"
-      f"named_shardings.json"
+      f"{config.compile_topology}/slice_{config.compile_topology_num_slices}/"
   )
+  json_path_named = base_path / "named_shardings.json"
+  json_path_logical = base_path / "logical_shardings.json"
 
   try:
     topology_mesh = get_topology_mesh(config)
-    _, _, state_mesh_shardings, _, _ = get_shaped_inputs(topology_mesh, config)
-  except:  # pylint: disable=bare-except
-    state_mesh_shardings = {}
-
-  if state_mesh_shardings == {}:
+    shaped_train_args, _, state_mesh_shardings, logical_annotations, _ = get_shaped_inputs(topology_mesh, config)
+  except Exception as e:  # pylint: disable=broad-except
+    print(f"Error generating inputs: {e}")
     return
 
-  sharding_dict = named_shardings_to_json(state_mesh_shardings)
-  save_named_sharding_dict(json_path, sharding_dict)
-  load_named_sharding_json(json_path)
-  print(config.model_name, config.compile_topology)
+  if not state_mesh_shardings:
+    print("No shardings generated.")
+    return
+
+  # 1. Generate New Output
+  # Physical: Tree of NamedSharding
+  named_shardings = named_shardings_to_json(state_mesh_shardings, shaped_train_args[0])
+  # Logical: Tree of PartitionSpec (direct from get_shaped_inputs)
+  logical_shardings = partition_specs_to_json(logical_annotations, shaped_train_args[0])
+
+  print(f"Got {len(named_shardings)} Physical entries and {len(logical_shardings)} Logical entries.")
+
+  # 2. Save New Output (Overwrite)
+  print(f"\nSaving updated shardings to {base_path}...")
+  save_json(json_path_named, named_shardings)
+  save_json(json_path_logical, logical_shardings)
+
+  print(f"Finished: {config.model_name} {config.compile_topology}")
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@
 
 from typing import Sequence
 
-from MaxText.globals import MAXTEXT_REPO_ROOT
+from MaxText.globals import MAXTEXT_PKG_DIR
 from tests.utils.sharding_dump import TEST_CASES
 from tests.utils.test_helpers import get_test_config_path
 import os
@@ -43,21 +43,17 @@ def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
 
 
 def main(argv: Sequence[str]) -> None:
-  """Generate sharding json files for every combination of model, topology and slices."""
-  for model_name, topology, num_slice in TEST_CASES:
-    json_path = os.path.join(
-        MAXTEXT_REPO_ROOT,
-        "tests",
-        "utils",
-        "sharding_info",
-        model_name,
-        topology,
-        f"slice_{num_slice}",
-        "named_shardings.json",
-    )
-    if os.path.exists(json_path):
-      continue
-    run_single_dump(model_name, topology, str(num_slice))
+  """Generate json files for every combination of model, topology and slices."""
+  total = len(TEST_CASES)
+  for i, (model_name, topology, num_slice) in enumerate(TEST_CASES):
+    print(f"\n[{i+1}/{total}] Processing: {model_name} | {topology} | Slice {num_slice}")
+
+    try:
+      run_single_dump(model_name, topology, str(num_slice))
+    except subprocess.CalledProcessError:
+      print(f"!!! FAILED: {model_name} {topology} {num_slice}")
+    except Exception as e:  # pylint: disable=broad-except
+      print(f"!!! ERROR: {e}")
 
 
 if __name__ == "__main__":

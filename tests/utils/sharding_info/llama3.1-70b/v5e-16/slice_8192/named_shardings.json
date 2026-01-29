@@ -30,7 +30,8 @@
         "autoregressive": 1
       }
     },
-    "partition_spec": []
+    "partition_spec": [],
+    "shape": []
   },
   ".params/['params']/['decoder']/['decoder_norm']/['scale']": {
     "mesh": {
@@ -66,9 +67,11 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
-        "tensor_sequence"
+        "tensor_transpose"
       ]
+    ],
+    "shape": [
+      8192
     ]
   },
   ".params/['params']/['decoder']/['layers']/['mlp']/['wi_0']/['kernel']": {
@@ -117,6 +120,11 @@
         "tensor_sequence",
         "autoregressive"
       ]
+    ],
+    "shape": [
+      8192,
+      80,
+      28672
     ]
   },
   ".params/['params']/['decoder']/['layers']/['mlp']/['wi_1']/['kernel']": {
@@ -165,6 +173,11 @@
         "tensor_sequence",
         "autoregressive"
       ]
+    ],
+    "shape": [
+      8192,
+      80,
+      28672
     ]
   },
   ".params/['params']/['decoder']/['layers']/['mlp']/['wo']/['kernel']": {
@@ -213,6 +226,11 @@
         "context",
         "expert"
       ]
+    ],
+    "shape": [
+      28672,
+      80,
+      8192
     ]
   },
   ".params/['params']/['decoder']/['layers']/['post_self_attention_layer_norm']/['scale']": {
@@ -249,10 +267,13 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
-        "tensor_sequence"
+        "tensor_transpose"
       ],
       "stage"
+    ],
+    "shape": [
+      8192,
+      80
     ]
   },
   ".params/['params']/['decoder']/['layers']/['pre_self_attention_layer_norm']/['scale']": {
@@ -289,10 +310,13 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
-        "tensor_sequence"
+        "tensor_transpose"
       ],
       "stage"
+    ],
+    "shape": [
+      8192,
+      80
     ]
   },
   ".params/['params']/['decoder']/['layers']/['self_attention']/['key']/['kernel']": {
@@ -342,6 +366,12 @@
         "autoregressive"
       ],
       null
+    ],
+    "shape": [
+      8192,
+      80,
+      8,
+      128
     ]
   },
   ".params/['params']/['decoder']/['layers']/['self_attention']/['out']/['kernel']": {
@@ -391,6 +421,12 @@
         "context",
         "expert"
       ]
+    ],
+    "shape": [
+      64,
+      80,
+      128,
+      8192
     ]
   },
   ".params/['params']/['decoder']/['layers']/['self_attention']/['query']/['kernel']": {
@@ -440,6 +476,12 @@
         "autoregressive"
       ],
       null
+    ],
+    "shape": [
+      8192,
+      80,
+      64,
+      128
     ]
   },
   ".params/['params']/['decoder']/['layers']/['self_attention']/['value']/['kernel']": {
@@ -489,6 +531,12 @@
         "autoregressive"
       ],
       null
+    ],
+    "shape": [
+      8192,
+      80,
+      8,
+      128
     ]
   },
   ".params/['params']/['decoder']/['logits_dense']/['kernel']": {
@@ -536,6 +584,10 @@
         "tensor_sequence",
         "autoregressive"
       ]
+    ],
+    "shape": [
+      8192,
+      128256
     ]
   },
   ".params/['params']/['token_embedder']/['embedding']": {
@@ -583,6 +635,10 @@
         "context",
         "expert"
       ]
+    ],
+    "shape": [
+      128256,
+      8192
     ]
   },
   ".opt_state/[0]/.count": {
@@ -616,7 +672,8 @@
         "autoregressive": 1
       }
     },
-    "partition_spec": []
+    "partition_spec": [],
+    "shape": []
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['decoder_norm']/['scale']": {
     "mesh": {
@@ -652,9 +709,11 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
-        "tensor_sequence"
+        "tensor_transpose"
       ]
+    ],
+    "shape": [
+      8192
     ]
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['mlp']/['wi_0']/['kernel']": {
@@ -703,6 +762,11 @@
         "tensor_sequence",
         "autoregressive"
       ]
+    ],
+    "shape": [
+      8192,
+      80,
+      28672
     ]
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['mlp']/['wi_1']/['kernel']": {
@@ -751,6 +815,11 @@
         "tensor_sequence",
         "autoregressive"
       ]
+    ],
+    "shape": [
+      8192,
+      80,
+      28672
     ]
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['mlp']/['wo']/['kernel']": {
@@ -799,6 +868,11 @@
         "context",
         "expert"
       ]
+    ],
+    "shape": [
+      28672,
+      80,
+      8192
     ]
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['post_self_attention_layer_norm']/['scale']": {
@@ -835,10 +909,13 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
-        "tensor_sequence"
+        "tensor_transpose"
       ],
       "stage"
+    ],
+    "shape": [
+      8192,
+      80
     ]
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['pre_self_attention_layer_norm']/['scale']": {
@@ -875,10 +952,13 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
-        "tensor_sequence"
+        "tensor_transpose"
       ],
       "stage"
+    ],
+    "shape": [
+      8192,
+      80
     ]
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['key']/['kernel']": {
@@ -928,6 +1008,12 @@
         "autoregressive"
       ],
       null
+    ],
+    "shape": [
+      8192,
+      80,
+      8,
+      128
     ]
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['out']/['kernel']": {
@@ -977,6 +1063,12 @@
         "context",
         "expert"
       ]
+    ],
+    "shape": [
+      64,
+      80,
+      128,
+      8192
     ]
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['query']/['kernel']": {
@@ -1026,6 +1118,12 @@
         "autoregressive"
       ],
       null
+    ],
+    "shape": [
+      8192,
+      80,
+      64,
+      128
     ]
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['value']/['kernel']": {
@@ -1075,6 +1173,12 @@
         "autoregressive"
       ],
       null
+    ],
+    "shape": [
+      8192,
+      80,
+      8,
+      128
     ]
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['logits_dense']/['kernel']": {
@@ -1122,6 +1226,10 @@
         "tensor_sequence",
         "autoregressive"
       ]
+    ],
+    "shape": [
+      8192,
+      128256
     ]
   },
   ".opt_state/[0]/.mu/['params']/['token_embedder']/['embedding']": {
@@ -1169,6 +1277,10 @@
         "context",
         "expert"
       ]
+    ],
+    "shape": [
+      128256,
+      8192
     ]
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['decoder_norm']/['scale']": {
@@ -1205,9 +1317,11 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
-        "tensor_sequence"
+        "tensor_transpose"
       ]
+    ],
+    "shape": [
+      8192
     ]
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['mlp']/['wi_0']/['kernel']": {
@@ -1256,6 +1370,11 @@
         "tensor_sequence",
         "autoregressive"
       ]
+    ],
+    "shape": [
+      8192,
+      80,
+      28672
     ]
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['mlp']/['wi_1']/['kernel']": {
@@ -1304,6 +1423,11 @@
         "tensor_sequence",
         "autoregressive"
       ]
+    ],
+    "shape": [
+      8192,
+      80,
+      28672
     ]
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['mlp']/['wo']/['kernel']": {
@@ -1352,6 +1476,11 @@
         "context",
         "expert"
       ]
+    ],
+    "shape": [
+      28672,
+      80,
+      8192
     ]
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['post_self_attention_layer_norm']/['scale']": {
@@ -1388,10 +1517,13 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
-        "tensor_sequence"
+        "tensor_transpose"
       ],
       "stage"
+    ],
+    "shape": [
+      8192,
+      80
     ]
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['pre_self_attention_layer_norm']/['scale']": {
@@ -1428,10 +1560,13 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
-        "tensor_sequence"
+        "tensor_transpose"
       ],
       "stage"
+    ],
+    "shape": [
+      8192,
+      80
     ]
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['key']/['kernel']": {
@@ -1481,6 +1616,12 @@
         "autoregressive"
       ],
       null
+    ],
+    "shape": [
+      8192,
+      80,
+      8,
+      128
     ]
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['out']/['kernel']": {
@@ -1530,6 +1671,12 @@
         "context",
         "expert"
       ]
+    ],
+    "shape": [
+      64,
+      80,
+      128,
+      8192
     ]
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['query']/['kernel']": {
@@ -1579,6 +1726,12 @@
         "autoregressive"
       ],
       null
+    ],
+    "shape": [
+      8192,
+      80,
+      64,
+      128
     ]
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['value']/['kernel']": {
@@ -1628,6 +1781,12 @@
         "autoregressive"
       ],
       null
+    ],
+    "shape": [
+      8192,
+      80,
+      8,
+      128
     ]
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['logits_dense']/['kernel']": {
@@ -1675,6 +1834,10 @@
         "tensor_sequence",
         "autoregressive"
       ]
+    ],
+    "shape": [
+      8192,
+      128256
     ]
   },
   ".opt_state/[0]/.nu/['params']/['token_embedder']/['embedding']": {
@@ -1722,6 +1885,10 @@
         "context",
         "expert"
       ]
+    ],
+    "shape": [
+      128256,
+      8192
     ]
   },
   ".opt_state/[2]/.count": {
@@ -1755,6 +1922,7 @@
         "autoregressive": 1
       }
     },
-    "partition_spec": []
+    "partition_spec": [],
+    "shape": []
   }
 }
