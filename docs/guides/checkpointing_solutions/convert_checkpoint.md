@@ -16,6 +16,7 @@ The following models are supported:
 | **Mixtral**             | 8x7B, 8x22B            |           √            |            √             |           √            |            √             |
 | **GPT-OSS**             | 20B, 120B              |           √            |            √             |           √            |            √             |
 | **DeepSeek3**           | 671B                   |           -            |            -             |           √            |            -             |
+| **Qwen3 Next**          | 80B                    |           √            |            √             |           √            |            √             |
 
 ## Prerequisites
 
