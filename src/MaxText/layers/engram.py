@@ -325,6 +325,112 @@ class MultiHeadEmbedding(nnx.Module):
     return self.embedding(shifted_ids, model_mode=model_mode)
 
 
+# class ShortConv(nnx.Module):
+#   """
+#   Implements a Grouped Depthwise Causal Convolution block.
+
+#   This module applies local temporal mixing (smoothing) to the retrieved embeddings.
+#   - It uses independent RMSNorms for each branch
+#   - followed by a 1D convolution. Note it is depth-wise:
+#     mixes information across time steps [t-k, t] without mixing across channels.
+
+#   Shape Legend:
+#       B: Batch Size
+#       L: Sequence Length
+#       G: Number of Branches (hc_mult) - logical grouping of heads
+#       C: Embedding Dimension per Branch (hidden_size)
+
+#   Note on Convolution:
+#       Conv1D - (G * C) as the total number of input channels.
+#       Depthwise - It applies a separate filter to every single dimension in C, for every group G.
+#   """
+
+#   def __init__(
+#       self,
+#       config,
+#       hidden_size: int,
+#       kernel_size: int = 4,  # Temporal Window Size
+#       dilation: int = 1,
+#       hc_mult: int = 4,
+#       activation: bool = True,
+#       rngs: nnx.Rngs = None,
+#   ):
+#     self.hc_mult = hc_mult
+#     self.activation = activation
+#     total_channels = hidden_size * hc_mult
+#     self.rngs = rngs
+
+#     # Depthwise Convolution:
+#     # Setting feature_group_count = in_features ensures each channel is convolved
+#     # independently. This learns local temporal patterns per feature.
+#     # Padding="CAUSAL" ensures output[t] only depends on input[t-k : t].
+#     self.conv = nnx.Conv(
+#         in_features=total_channels,
+#         out_features=total_channels,
+#         kernel_size=(kernel_size,),
+#         feature_group_count=total_channels,  # Depthwise
+#         kernel_dilation=(dilation,),
+#         padding="CAUSAL",  # To match the slice [..., :T] logic
+#         use_bias=False,
+#         rngs=rngs,
+#     )
+
+#     # Independent RMSNorm for each branch.
+#     # TODO(shuningjin): eps, epsilon=config.normalization_layer_epsilon,
+#     #                   epsilon=1e-5,  # Match PyTorch default
+#     self.norms = nnx.List(
+#         [
+#             RMSNorm(
+#                 num_features=hidden_size,
+#                 dtype=config.dtype,
+#                 weight_dtype=config.weight_dtype,
+#                 kernel_axes=("norm",),
+#                 epsilon=1e-5,
+#                 rngs=self.rngs,
+#             )
+#             for _ in range(hc_mult)
+#         ]
+#     )
+
+#     self.act_fn = jax.nn.silu if activation else lambda x: x
+
+#   def __call__(self, x: jax.Array) -> jax.Array:
+#     """
+#     y = SiLU(Conv1D(RMSNorm(x)))
+
+#     Args:
+#         x: Input tensor of shape (B, L, G, C)
+#     Returns:
+#         Tensor of shape (B, L, G, C)
+
+#     Note: G = hc_mult
+#     """
+#     B, L, G, C = x.shape
+
+#     # 1. Apply Group-wise Normalization
+#     # We iterate over the 'Groups' dimension (axis 2)
+#     normed_chunks = []
+#     for i in range(G):
+#       norm = self.norms[i]
+#       # shape: (B, L, C)
+#       x_chunk = x[:, :, i, :]
+#       normed_chunks.append(norm(x_chunk))
+
+#     # 2. Flatten Groups for Convolution
+#     # (B, L, C) x G -> (B, L, G * C)
+#     x_flat = jnp.concatenate(normed_chunks, axis=-1)
+
+#     # 3. Apply Depthwise Causal Conv
+#     # Mixes temporal dimension L. Channels remain independent.
+#     # Shape stays: (B, L, G * C)
+#     y = self.conv(x_flat)
+#     y = self.act_fn(y)
+
+#     # 4. Reshape back to Branched Layout
+#     # (B, L, G * C) -> (B, L, G, C)
+#     return y.reshape(B, L, G, C)
+
+
 class ShortConv(nnx.Module):
   """
   Implements a Grouped Depthwise Causal Convolution block.
@@ -356,14 +462,10 @@ class ShortConv(nnx.Module):
       rngs: nnx.Rngs = None,
   ):
     self.hc_mult = hc_mult
-    self.activation = activation
     total_channels = hidden_size * hc_mult
-    self.rngs = rngs
 
-    # Depthwise Convolution:
-    # Setting feature_group_count = in_features ensures each channel is convolved
-    # independently. This learns local temporal patterns per feature.
-    # Padding="CAUSAL" ensures output[t] only depends on input[t-k : t].
+    # A: Single Shared Convolution
+    # Note: feature_group_count=total_channels makes this Depthwise (channels don't mix)
     self.conv = nnx.Conv(
         in_features=total_channels,
         out_features=total_channels,
@@ -375,22 +477,21 @@ class ShortConv(nnx.Module):
         rngs=rngs,
     )
 
-    # Independent RMSNorm for each branch.
-    # TODO(shuningjin): eps, epsilon=config.normalization_layer_epsilon,
-    #                   epsilon=1e-5,  # Match PyTorch default
-    self.norms = nnx.List(
-        [
-            RMSNorm(
-                num_features=hidden_size,
-                dtype=config.dtype,
-                weight_dtype=config.weight_dtype,
-                kernel_axes=("norm",),
-                epsilon=1e-5,
-                rngs=self.rngs,
-            )
-            for _ in range(hc_mult)
-        ]
-    )
+    # B: Vectorized Norms (One unique module per group)
+    @nnx.split_rngs(splits=hc_mult)
+    @nnx.vmap(in_axes=0, out_axes=0)
+    def create_norms(r):
+      return RMSNorm(
+          num_features=hidden_size,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("norm",),
+          epsilon=1e-5,
+          rngs=r,
+      )
+
+    # 'norms' now holds weights of shape (hc_mult, hidden_size)
+    self.norms = create_norms(rngs)
 
     self.act_fn = jax.nn.silu if activation else lambda x: x
 
@@ -407,27 +508,19 @@ class ShortConv(nnx.Module):
     """
     B, L, G, C = x.shape
 
-    # 1. Apply Group-wise Normalization
-    # We iterate over the 'Groups' dimension (axis 2)
-    normed_chunks = []
-    for i in range(G):
-      norm = self.norms[i]
-      # shape: (B, L, C)
-      x_chunk = x[:, :, i, :]
-      normed_chunks.append(norm(x_chunk))
+    # 1. Apply Norms (Vectorized over Group dim)
+    # in_axes=(0, 2):  norms is axis 0, x is axis 2
+    # out_axes=2:      put the group dim back at axis 2
+    x = nnx.vmap(lambda m, val: m(val), in_axes=(0, 2), out_axes=2)(self.norms, x)
 
-    # 2. Flatten Groups for Convolution
-    # (B, L, C) x G -> (B, L, G * C)
-    x_flat = jnp.concatenate(normed_chunks, axis=-1)
+    # 2. Flatten Groups for Conv
+    x_flat = x.reshape(B, L, G * C)
 
-    # 3. Apply Depthwise Causal Conv
-    # Mixes temporal dimension L. Channels remain independent.
-    # Shape stays: (B, L, G * C)
+    # 3. Apply Single Conv
     y = self.conv(x_flat)
     y = self.act_fn(y)
 
-    # 4. Reshape back to Branched Layout
-    # (B, L, G * C) -> (B, L, G, C)
+    # 4. Reshape back
     return y.reshape(B, L, G, C)
 
 
