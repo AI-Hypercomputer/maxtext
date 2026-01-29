@@ -44,12 +44,12 @@ from flax.linen import partitioning as nn_partitioning
 from flax import nnx
 
 from MaxText import common_types
-from MaxText import max_logging
-from MaxText import max_utils
-from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.layers import models, quantizations, deepseek
 from maxtext.common import checkpointing
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 import orbax.checkpoint as ocp
 
 IGNORE = ocp.PLACEHOLDER

@@ -27,13 +27,13 @@ import jax
 
 import google_cloud_mldiagnostics as mldiag
 
-from MaxText import max_logging
-from MaxText import max_utils
-from MaxText import maxtext_utils
 from MaxText.managed_mldiagnostics import ManagedMLDiagnostics
-from MaxText.utils import gcs_utils
 from MaxText.globals import EPS
 from maxtext.common.gcp_workload_monitor import GCPWorkloadMonitor
+from maxtext.utils import gcs_utils
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 from collections import defaultdict
 
 # Mapping MaxText metrics to managed profiler metrics

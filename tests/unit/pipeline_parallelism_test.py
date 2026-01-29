@@ -25,7 +25,7 @@ from flax.core import meta
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText import maxtext_utils
+from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR

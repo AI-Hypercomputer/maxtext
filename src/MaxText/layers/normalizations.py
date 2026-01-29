@@ -23,11 +23,11 @@ from jax import lax
 import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
-from MaxText import max_logging
-from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, variable_to_logically_partitioned
 from MaxText.common_types import Array, DType, ShardMode
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 
 
 class RMSNorm(nnx.Module):

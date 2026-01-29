@@ -27,10 +27,10 @@ from flax import linen as nn
 
 import optax
 
-from MaxText import max_utils
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.train_utils import setup_train_loop
+from maxtext.utils import max_utils
+from maxtext.utils.train_utils import setup_train_loop
 
 
 class MaxUtilsSummaryStats(unittest.TestCase):
