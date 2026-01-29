@@ -30,7 +30,7 @@ from google.cloud import monitoring_v3
 
 from urllib3.util.retry import Retry
 
-from maxtext.utils import max_logging
+from MaxText import max_logging
 
 
 _METADATA_SERVER_URL = "http://metadata.google.internal/computeMetadata/v1/"

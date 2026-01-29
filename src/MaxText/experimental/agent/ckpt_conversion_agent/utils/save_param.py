@@ -27,11 +27,11 @@ import argparse
 
 from transformers import AutoModelForCausalLM, AutoConfig
 
+from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import pyconfig
+from MaxText import max_logging
 from MaxText.globals import MAXTEXT_PKG_DIR
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
 
 
 def main(parsed_args: argparse.Namespace, unknown_pyconfig_args: List[str]) -> None:

@@ -26,7 +26,7 @@ import flax.linen as nn
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
-from maxtext.utils import maxtext_utils
+from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config, DType
 from MaxText.globals import MAXTEXT_PKG_DIR

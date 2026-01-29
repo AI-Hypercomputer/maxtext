@@ -20,7 +20,7 @@ import jax.numpy as jnp
 
 import optax
 from optax.contrib._muon import muon
-from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
+from MaxText.muon_utils import get_muon_weight_dimension_numbers
 
 
 def get_optimizer(config, learning_rate_schedule, model=None):

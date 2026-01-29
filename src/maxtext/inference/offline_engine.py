@@ -54,9 +54,9 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 from MaxText.maxengine import MaxEngine
+from MaxText import max_utils
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
+from MaxText import max_logging
 
 DecodeState = Any
 Params = Any

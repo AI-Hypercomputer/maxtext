@@ -57,9 +57,9 @@ from benchmarks.mmlu.mmlu_categories import subcategories
 from tqdm import tqdm
 
 from MaxText import pyconfig
+from MaxText import max_logging
+from MaxText import max_utils
 from MaxText import maxengine
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
 
 ASCII_UPPERCASE_A = ord("A")  # ASCII value for uppercase 'A'
 

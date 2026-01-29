@@ -34,8 +34,7 @@ import numpy as np
 
 from dataclasses import dataclass, field
 
-from MaxText import maxengine, pyconfig, multimodal_utils
-from maxtext.utils import max_logging, max_utils
+from MaxText import max_utils, maxengine, pyconfig, multimodal_utils, max_logging
 
 # Set TF log level to avoid verbose startup messages.
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"

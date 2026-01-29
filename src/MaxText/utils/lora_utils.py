@@ -22,11 +22,11 @@ import jax.numpy as jnp
 from flax.training import train_state
 from flax.linen import partitioning as nn_partitioning
 
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText import max_logging
+from MaxText.utils import gcs_utils
 from maxtext.common import checkpointing
-from maxtext.utils import gcs_utils
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
-from maxtext.utils import max_logging
 
 
 def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):

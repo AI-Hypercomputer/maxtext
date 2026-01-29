@@ -26,7 +26,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh
-from maxtext.utils import maxtext_utils
+from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import (
     AttentionType,

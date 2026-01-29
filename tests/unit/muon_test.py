@@ -23,7 +23,7 @@ for various models match their hardcoded reference values.
 import unittest
 from absl.testing import parameterized
 from optax.contrib import MuonDimensionNumbers as mdn
-from maxtext.utils.muon_utils import get_model_mdn
+from MaxText.muon_utils import get_model_mdn
 import pytest
 
 # deepseek2, specific: q_lora_rank=0

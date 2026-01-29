@@ -24,7 +24,7 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 import jax
 
-from maxtext.utils import maxtext_utils
+from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.common_types import MODEL_MODE_TRAIN

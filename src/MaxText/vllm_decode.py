@@ -44,7 +44,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import transformers
 
-from maxtext.utils import model_creation_utils
+from MaxText import model_creation_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config
 from MaxText.globals import MAXTEXT_PKG_DIR

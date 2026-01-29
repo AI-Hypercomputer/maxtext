@@ -38,7 +38,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
 
-from maxtext.utils import maxtext_utils
+from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT

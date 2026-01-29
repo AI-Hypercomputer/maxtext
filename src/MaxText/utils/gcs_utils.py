@@ -25,7 +25,7 @@ from google.cloud import storage
 
 import jax
 
-from maxtext.utils import max_logging
+from MaxText import max_logging
 
 
 def write_config_raw_keys_for_gcs(raw_keys):

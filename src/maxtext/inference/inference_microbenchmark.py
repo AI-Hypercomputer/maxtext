@@ -22,13 +22,13 @@ import sys
 from absl import app
 from collections.abc import MutableMapping
 
+from MaxText import max_utils
 from MaxText import maxengine
+from MaxText import maxtext_utils
 from MaxText import prefill_packing
 from MaxText import pyconfig
+from MaxText.utils import gcs_utils
 from maxtext.common import profiler
-from maxtext.utils import gcs_utils
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
 
 import warnings
 

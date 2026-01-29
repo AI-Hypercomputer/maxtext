@@ -25,9 +25,9 @@ from jax.sharding import PartitionSpec as P, NamedSharding, reshard
 
 import optax
 
+from MaxText import max_utils
+from MaxText import max_logging
 from MaxText.common_types import ShardMode
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
 
 
 _LOGGED_ACTIVATION_SHARDINGS = set()

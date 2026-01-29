@@ -49,8 +49,12 @@ from orbax import checkpoint as ocp
 
 from tunix.sft import metrics_logger, peft_trainer, profiler
 
+from MaxText import max_utils
+from MaxText import max_logging
+from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
+from MaxText import model_creation_utils
 from MaxText.train import loss_fn
 from maxtext.common.goodput import (
     GoodputEvent,
@@ -59,10 +63,6 @@ from maxtext.common.goodput import (
     maybe_record_goodput,
 )
 from maxtext.trainers.post_train.sft import hooks
-from maxtext.utils import max_utils
-from maxtext.utils import max_logging
-from maxtext.utils import maxtext_utils
-from maxtext.utils import model_creation_utils
 
 
 def get_tunix_config(mt_config):

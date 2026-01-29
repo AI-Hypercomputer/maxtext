@@ -21,11 +21,11 @@ from absl import flags
 from etils import epath
 from flax.training import train_state
 import jax
+from MaxText import exceptions
+from MaxText import max_logging
 from MaxText.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 from MaxText.multihost_dataloading import MultiHostDataLoadIterator, RemoteIterator
 from MaxText.input_pipeline.input_pipeline_interface import PlaceHolderDataIterator
-from maxtext.utils import exceptions
-from maxtext.utils import max_logging
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint import v1 as ocp_v1

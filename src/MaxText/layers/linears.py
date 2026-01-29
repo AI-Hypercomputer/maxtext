@@ -29,6 +29,8 @@ from jax.ad_checkpoint import checkpoint_name
 from flax import nnx
 import flax.linen as nn
 
+from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.sharding import maybe_shard_with_logical
 from MaxText.common_types import DecoderBlockType, ShardMode, DType, Array, Config
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, EP_AS_CONTEXT
@@ -36,8 +38,6 @@ from MaxText.layers import nnx_wrappers, quantizations
 from MaxText.layers import normalizations
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
 
 
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:

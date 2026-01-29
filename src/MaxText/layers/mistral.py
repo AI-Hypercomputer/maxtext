@@ -23,6 +23,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
+from MaxText import max_utils
 from MaxText.layers import nnx_wrappers, initializers
 from MaxText.layers.linears import Dropout, MlpBlock
 from MaxText.layers.models import Config
@@ -30,7 +31,6 @@ from MaxText.layers.attentions import Attention
 from MaxText.layers import quantizations
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import RMSNorm
-from maxtext.utils import max_utils
 
 
 # -----------------------------------------

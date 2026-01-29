@@ -29,9 +29,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText import max_logging
 from MaxText import pyconfig
 from maxtext.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
-from maxtext.utils import max_logging
 
 
 def get_metrics(results: list[CompletionOutput], start_time, end_time):

@@ -22,8 +22,7 @@ from absl import app
 
 import jax
 
-from MaxText import maxengine, pyconfig
-from maxtext.utils import max_utils
+from MaxText import max_utils, maxengine, pyconfig
 
 _NUM_STREAMS = 5
 # How many streams to prefill initially before starting generation.

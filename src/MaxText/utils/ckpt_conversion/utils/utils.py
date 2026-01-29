@@ -43,7 +43,7 @@ from huggingface_hub import HfApi, repo_exists
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 from transformers import AutoModelForCausalLM
 
-from maxtext.utils import max_logging
+from MaxText import max_logging
 import psutil
 
 from etils import epath

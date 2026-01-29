@@ -28,6 +28,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
+from MaxText import max_utils
 from MaxText.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED, MODEL_MODE_TRAIN
 from MaxText.layers import attentions
 from MaxText.layers import initializers as max_initializers
@@ -42,7 +43,6 @@ from MaxText.layers.linears import DenseGeneral, MlpBlock
 from MaxText.layers.moe import RoutedMoE
 from MaxText.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 from maxtext.inference import page_manager
-from maxtext.utils import max_utils
 
 # -----------------------------------------
 # Qwen3-Next Layer Implementations

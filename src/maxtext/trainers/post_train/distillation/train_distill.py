@@ -46,13 +46,13 @@ import optax
 from orbax import checkpoint
 
 # MaxText Imports
+from MaxText import max_logging
+from MaxText import maxtext_utils
+from MaxText import model_creation_utils
 from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText import tokenizer
-from maxtext.utils import max_logging
-from maxtext.utils import maxtext_utils
-from maxtext.utils import model_creation_utils
-from maxtext.utils import train_utils
+from MaxText import train_utils
 
 # Tunix Imports
 from tunix.distillation import distillation_trainer
