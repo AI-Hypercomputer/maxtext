@@ -23,7 +23,7 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
 from MaxText import pyconfig
 
-from tests.utils.sharding_dump import named_shardings_to_json, load_named_sharding_json, TEST_CASES
+from tests.utils.sharding_dump import load_json, TEST_CASES, named_shardings_to_json, partition_specs_to_json
 
 
 def compute_checksum(d: dict) -> str:
@@ -37,7 +37,7 @@ def compute_checksum(d: dict) -> str:
   return checksum
 
 
-def compare_named_sharding_jsons(json1: dict, model1_name: str, json2: dict, model2_name: str) -> bool:
+def compare_sharding_jsons(json1: dict, model1_name: str, json2: dict, model2_name: str) -> bool:
   """Compare two json files and print the differences if any."""
   keys1 = set(json1.keys())
   keys2 = set(json2.keys())
@@ -46,36 +46,59 @@ def compare_named_sharding_jsons(json1: dict, model1_name: str, json2: dict, mod
   only_in_2 = keys2 - keys1
   shared_keys = keys1 & keys2
 
+  has_diff = False
+
   if only_in_1:
     print(f"Keys only in {model1_name}:")
     for k in sorted(only_in_1):
       print(f"  {k}")
+    has_diff = True
 
   if only_in_2:
     print(f"Keys only in {model2_name}:")
     for k in sorted(only_in_2):
       print(f"  {k}")
+    has_diff = True
 
   for key in sorted(shared_keys):
     entry1 = json1[key]
     entry2 = json2[key]
 
-    mesh1 = entry1.get("mesh", {})
-    mesh2 = entry2.get("mesh", {})
-    spec1 = entry1.get("partition_spec", [])
-    spec2 = entry2.get("partition_spec", [])
+    if isinstance(entry1, dict) and isinstance(entry2, dict):
+      mesh1 = entry1.get("mesh", {})
+      mesh2 = entry2.get("mesh", {})
 
-    if mesh1 != mesh2:
-      print(f"\nMesh mismatch at '{key}':")
-      print(f"  mesh1: {mesh1}")
-      print(f"  mesh2: {mesh2}")
+      spec1 = entry1.get("partition_spec", [])
+      spec2 = entry2.get("partition_spec", [])
 
-    if spec1 != spec2:
-      print(f"\nPartitionSpec mismatch at '{key}':")
-      print(f"  spec1: {spec1}")
-      print(f"  spec2: {spec2}")
+      shape1 = entry1.get("shape")
+      shape2 = entry2.get("shape")
 
-  return not only_in_1 and not only_in_2 and all(json1[k] == json2[k] for k in shared_keys)
+      if mesh1 != mesh2:
+        print(f"\nMesh mismatch at '{key}':")
+        print(f"  {model1_name}: {mesh1}")
+        print(f"  {model2_name}: {mesh2}")
+        has_diff = True
+
+      if spec1 != spec2:
+        print(f"\nPartitionSpec mismatch at '{key}':")
+        print(f"  {model1_name}: {spec1}")
+        print(f"  {model2_name}: {spec2}")
+        has_diff = True
+
+      if shape1 != shape2:
+        print(f"\nShape mismatch at '{key}':")
+        print(f"  {model1_name}: {shape1}")
+        print(f"  {model2_name}: {shape2}")
+        has_diff = True
+
+    else:
+      print(f"\nFormat mismatch at '{key}':")
+      print(f"  {model1_name} type: {type(entry1)}")
+      print(f"  {model2_name} type: {type(entry2)}")
+      has_diff = True
+
+  return not has_diff
 
 
 @pytest.mark.parametrize("model_name, topology, num_slice", TEST_CASES)
@@ -89,23 +112,51 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
       f"model_name={model_name}",
   ]
 
-  json_path = f"sharding_info/" f"{model_name}/" f"{topology}/" f"slice_{num_slice}/named_shardings.json"
-  if not os.path.exists(json_path):
+  root_dir = "tests/utils/sharding_info"
+  base_path = os.path.join(root_dir, model_name, topology, f"slice_{num_slice}")
+
+  named_json_path = os.path.join(base_path, "named_shardings.json")
+  logical_json_path = os.path.join(base_path, "logical_shardings.json")
+
+  if not os.path.exists(named_json_path):
+    pytest.skip(f"Missing named_shardings.json for {model_name} {topology} slice {num_slice}")
+    return
+  if not os.path.exists(logical_json_path):
+    pytest.skip(f"Missing logical_shardings.json for {model_name} {topology} slice {num_slice}")
     return
 
   config = pyconfig.initialize(params)
   validate_config(config)
 
   topology_mesh = get_topology_mesh(config)
-  _, _, state_mesh_shardings, _, _ = get_shaped_inputs(topology_mesh, config)
-  actual_json = named_shardings_to_json(state_mesh_shardings)
-  expected_json = load_named_sharding_json(json_path)
+  shaped_train_args, _, state_mesh_shardings, logical_shardings, _ = get_shaped_inputs(topology_mesh, config)
 
-  actual_checksum = compute_checksum(actual_json)
-  expected_checksum2 = compute_checksum(expected_json)
-  result = actual_checksum == expected_checksum2
+  error_messages = []
 
-  if not result:
-    compare_named_sharding_jsons(expected_json, f"expected_{model_name}", actual_json, f"actual_{model_name}")
+  # 1. Compare Named Shardings
+  actual_named = named_shardings_to_json(state_mesh_shardings, shaped_train_args[0])
+  expected_named = load_json(named_json_path)
+  # calculate checksum
+  actual_named_sum = compute_checksum(actual_named)
+  expected_named_sum = compute_checksum(expected_named)
+  named_match = actual_named_sum == expected_named_sum
 
-  assert result is True
+  if not named_match:
+    print(f"\n[FAIL] Physical Sharding Mismatch: {model_name} {topology} slice {num_slice}", flush=True)
+    compare_sharding_jsons(expected_named, "Expected (Physical)", actual_named, "Actual (Physical)")
+    error_messages.append(f"Physical sharding mismatch for {model_name} on {topology} slice {num_slice}")
+
+  # 2. Compare Logical Shardings
+  actual_logical = partition_specs_to_json(logical_shardings, shaped_train_args[0])
+  expected_logical = load_json(logical_json_path)
+  # calculate checksum
+  actual_logical_sum = compute_checksum(actual_logical)
+  expected_logical_sum = compute_checksum(expected_logical)
+  logical_match = actual_logical_sum == expected_logical_sum
+
+  if not logical_match:
+    print(f"\n[FAIL] Logical Sharding Mismatch: {model_name} {topology} slice {num_slice}", flush=True)
+    compare_sharding_jsons(expected_logical, "Expected (Logical)", actual_logical, "Actual (Logical)")
+    error_messages.append(f"Logical sharding mismatch for {model_name} on {topology} slice {num_slice}")
+
+  assert not error_messages, "\n".join(error_messages)
