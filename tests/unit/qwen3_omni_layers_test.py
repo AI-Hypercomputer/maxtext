@@ -66,7 +66,7 @@ from MaxText.layers.qwen3 import (
     Qwen3OmniMoeVisionPatchMerger as JaxQwen3OmniMoeVisionPatchMerger,
     Qwen3OmniMoeVisionProjector as JaxQwen3OmniMoeVisionProjector,
 )
-from MaxText.multimodal import preprocessor
+from maxtext.multimodal import processor as mm_processor
 from tests.utils.multimodal_test_utils import (
     assert_all_close_jax_torch,
     copy_attention_weights_to_maxtext,
@@ -598,7 +598,7 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
 
   def test_preprocess_mm_data(self):
     # MaxText preprocessor
-    mt_processor_outputs = preprocessor.preprocess_mm_data(self.maxtext_config)
+    mt_processor_outputs = mm_processor.preprocess_mm_data(self.maxtext_config)
 
     # HuggingFace preprocessor
     from transformers import Qwen3OmniMoeProcessor  # pylint: disable=import-outside-toplevel
