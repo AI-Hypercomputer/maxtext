@@ -165,7 +165,7 @@ def main(argv: Sequence[str]) -> None:
     os.environ["LIBTPU_INIT_ARGS"] = (
         os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
-  config = pyconfig.initialize(argv)
+  config = pyconfig.initialize(argv, use_tunix_gradient_accumulation=False)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
   train_utils.validate_train_config(config)

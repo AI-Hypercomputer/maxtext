@@ -15,6 +15,7 @@
 base_config: "base.yml"
 
 use_sft: True
+use_tunix_gradient_accumulation: True
 use_multimodal: True
 # For vision, the prompt contains image, we only train on completion tokens
 sft_train_on_completion_only: True
