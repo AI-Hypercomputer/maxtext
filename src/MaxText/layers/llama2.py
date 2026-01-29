@@ -101,6 +101,7 @@ class LlamaDecoderLayer(nnx.Module):
         use_ragged_attention=config.use_ragged_attention,
         ragged_block_size=config.ragged_block_size,
         model_mode=model_mode,
+        attn_logits_soft_cap=config.attn_logits_soft_cap,
         rngs=rngs,
     )
 
