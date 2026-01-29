@@ -768,10 +768,11 @@ class EngramTest(parameterized.TestCase):
     input_ids_np = np.random.randint(0, 1000, (batch_size, seq_len))
 
     pt_input_ids = torch.from_numpy(input_ids_np)
+
+    # (B, L, G, D)
     pt_hidden_states = torch.randn(
         batch_size, seq_len, self.backbone_config.hc_mult, self.backbone_config.hidden_size, dtype=torch.float32
     )
-
     jax_hidden_states = to_jax(pt_hidden_states)
 
     # 5. Run Inference

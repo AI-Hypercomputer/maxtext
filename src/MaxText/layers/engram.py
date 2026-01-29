@@ -402,15 +402,19 @@ class ShortConv(nnx.Module):
         x: Input tensor of shape (B, L, G, C)
     Returns:
         Tensor of shape (B, L, G, C)
+
+    Note: G = hc_mult
     """
     B, L, G, C = x.shape
 
     # 1. Apply Group-wise Normalization
     # We iterate over the 'Groups' dimension (axis 2)
     normed_chunks = []
-    for i in range(self.hc_mult):
-      # x[:, :, i, :] shape: (B, L, C)
-      normed_chunks.append(self.norms[i](x[:, :, i, :]))
+    for i in range(G):
+      norm = self.norms[i]
+      # shape: (B, L, C)
+      x_chunk = x[:, :, i, :]
+      normed_chunks.append(norm(x_chunk))
 
     # 2. Flatten Groups for Convolution
     # (B, L, C) x G -> (B, L, G * C)
@@ -622,8 +626,11 @@ class Engram(nnx.Module):
         input_ids: Raw token IDs. Shape: (B, L)
     Returns:
         output: Engram-augmented residuals. Shape: (B, L, G, C)
+
+    Note: G = hc_mult
     """
 
+    B, L, G, C = hidden_states.shape
     # 1. Generate Hash Indices
     # Map raw text -> n-gram contexts -> hash indices z_{t,n,k}
     # Shape: (B, L) -> (B, L, H_en)
@@ -638,14 +645,14 @@ class Engram(nnx.Module):
 
     # Flatten all n-gram heads into one vector e_t
     # (B, L, H_en, D_head) -> (B, L, D_en)
-    embeddings = embeddings.reshape(embeddings.shape[0], embeddings.shape[1], -1)
+    embeddings = embeddings.reshape(B, L, -1)
     print("jax2", embeddings)
 
     # 3. Gating Mechanism (Scaled Dot-Product)
     # Decide relevance of memory (Key) to current state (Query)
     gates = []
 
-    for i in range(self.hc_mult):
+    for i in range(G):
       # Setup layers for this branch
       k_norm = self.k_norms[i]
       q_norm = self.q_norms[i]
@@ -665,38 +672,38 @@ class Engram(nnx.Module):
       print("jax4", q)
 
       # Gate Score (Scalar per token): (K * Q) / sqrt(d)
-      # Sum over C dimension -> (B, L)
       qk_product = jnp.einsum("blc,blc->bl", q, k, precision=self.config.matmul_precision)
-      gate = qk_product / jnp.sqrt(k.shape[-1])
       print("jax5", gate)
+      # (B, L)
+      gate = qk_product / jnp.sqrt(C)
 
       # TODO(shuningjin): why
       # Stabilization trick: sign(x) * sqrt(|x|)
       gate = jnp.sqrt(jnp.maximum(jnp.abs(gate), 1e-6)) * jnp.sign(gate)
 
       # Sigmoid activation to get gating probability [0, 1]
-      # Sigmoid activation -> (B, L, 1)
-      gate = jax.nn.sigmoid(gate)[..., None]
+      gate = jax.nn.sigmoid(gate)
       gates.append(gate)
 
     # Stack gates for all G branches
-    # Shape: (B, L, G, 1)
+    # Shape: (B, L, G)
     gates_stack = jnp.stack(gates, axis=2)
 
     # 4. Apply Gate to Value Projection
     # v = Gate * Value_Proj(Memory)
     # Project Engram Memory to Value: (B, L, D_en) -> (B, L, C)
-    val_proj = self.value_proj(embeddings)
+    value = self.value_proj(embeddings)
 
     # Broadcast Value across G branches and apply Gate
     # (B, L, G, 1) * (B, L, 1, C) -> (B, L, G, C)
-    v = gates_stack * val_proj[:, :, None, :]
+    v = gates_stack[:, :, :, None] * value[:, :, None, :]
 
     # 5. Temporal Smoothing & Residual
     # Apply Depthwise Conv (mixes L, keeps G and C independent)
-    # Shape: (B, L, G, C)
-    # Output = v + DepthwiseConv(v)
-    # Note: The 'hidden_states' (residual x) is usually added by the caller/block wrapper
-    output = v + self.short_conv(v)
+    # Shape remains, (B, L, G, C)
+    conv_out = self.short_conv(v)
+    # residual for conv component
+    output = v + conv_out
 
+    # Note: The 'hidden_states' (residual x) is usually added by the caller/block wrapper
     return output
