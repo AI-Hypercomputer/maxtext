@@ -207,6 +207,31 @@ def normalize_path(path: str, is_linen: bool = False) -> str:
   return path
 
 
+def transpose_nnx_shape_for_scanned_layers(path: str, nnx_shape: tuple) -> tuple:
+  """Transpose NNX shape for scanned layers to match Linen's axis ordering.
+
+  When scan_layers=True:
+  - NNX with nnx.vmap puts the layer dimension at axis 0
+  - Linen with nn.scan puts the layer dimension at axis 1
+
+  For paths containing 'layers' with 2+ dimensions, we swap axes 0 and 1.
+  Example: NNX (32, 4096) -> (4096, 32) to match Linen
+
+  Args:
+      path: The parameter path string
+      nnx_shape: The NNX parameter shape tuple
+
+  Returns:
+      Transposed shape if applicable, otherwise original shape
+  """
+  # Only transpose for layer parameters with 2+ dimensions
+  if "layers" in path and isinstance(nnx_shape, tuple) and len(nnx_shape) >= 2:
+    # Swap axes 0 and 1: (0, 1, 2, ...) -> (1, 0, 2, ...)
+    transposed = (nnx_shape[1], nnx_shape[0]) + nnx_shape[2:]
+    return transposed
+  return nnx_shape
+
+
 def create_linen_model_abstract(cfg, mesh):
   """Create a Linen model and get its abstract parameter structure."""
   quant = quantizations.configure_quantization(cfg)
@@ -296,7 +321,10 @@ def compare_tree_structures(linen_vars, nnx_state, hide_rngs: bool = True):
   for path in common:
     linen_shape = linen_normalized[path][1]
     nnx_shape = nnx_normalized[path][1]
-    if linen_shape != nnx_shape:
+    # Apply transpose for scanned layers (NNX vmap puts layer dim at axis 0,
+    # Linen scan puts it at axis 1)
+    nnx_shape_normalized = transpose_nnx_shape_for_scanned_layers(path, nnx_shape)
+    if linen_shape != nnx_shape_normalized:
       shape_mismatches.append((path, linen_shape, nnx_shape))
 
   return linen_only, nnx_only, shape_mismatches
