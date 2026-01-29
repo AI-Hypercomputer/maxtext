@@ -66,6 +66,7 @@ from MaxText import max_utils
 from MaxText.utils import gcs_utils
 from maxtext.inference.inference_utils import str2bool
 from maxtext.common import checkpointing
+from maxtext.inference.inference_utils import str2bool
 
 MODEL_PARAMS_DICT = {
     "llama2-70b": {
