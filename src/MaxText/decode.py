@@ -23,12 +23,12 @@ from absl import app
 
 from jetstream.engine import engine_api
 
-from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import pyconfig
 from MaxText import multimodal_utils
 from MaxText.multimodal import preprocessor
 from maxtext.common import profiler
+from maxtext.utils import max_utils
 # Placeholder: internal
 
 # Number of text sequences to process in a single batch.

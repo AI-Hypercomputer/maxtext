@@ -32,14 +32,13 @@ from jax import numpy as jnp
 from flax.linen import partitioning as nn_partitioning
 
 import MaxText as mt
-from MaxText import maxtext_utils
-from MaxText import train_utils
-from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.train import get_first_step
-from MaxText.train_utils import validate_train_config
 from MaxText.layers import models
 from maxtext.common import checkpointing
+from maxtext.utils import max_logging
+from maxtext.utils import maxtext_utils
+from maxtext.utils import train_utils
 
 Transformer = models.transformer_as_linen
 
@@ -119,7 +118,7 @@ def add_entropy_to_checkpoint(state):
 def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   config = pyconfig.initialize(argv)
-  validate_train_config(config)
+  train_utils.validate_train_config(config)
   print(f"Found {jax.device_count()} devices.")
   print(f"Found {jax.process_count()} processes.")
   print(f"Found {jax.devices()} devices.")

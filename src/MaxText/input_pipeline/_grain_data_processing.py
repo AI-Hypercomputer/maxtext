@@ -26,12 +26,12 @@ import jax
 from grain.experimental import BestFitPackIterDataset, pick_performance_config
 import grain.python as grain
 
-from MaxText.utils import gcs_utils
 from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.input_pipeline import _grain_tokenizer
 from MaxText import multihost_dataloading
-from MaxText import max_logging
 from MaxText import tokenizer
+from maxtext.utils import gcs_utils
+from maxtext.utils import max_logging
 
 
 def find_data_files(data_file_pattern):

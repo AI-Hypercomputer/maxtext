@@ -22,12 +22,12 @@ from flax import nnx
 import flax.linen as nn
 import jax
 from jax.sharding import Mesh, AxisType
-from MaxText import maxtext_utils
-from MaxText import max_utils
 from MaxText import pyconfig
 from MaxText.layers import quantizations
 from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
 from MaxText.layers import models
+from maxtext.utils import maxtext_utils
+from maxtext.utils import max_utils
 from orbax import checkpoint as ocp
 from functools import partial
 from etils import epath

@@ -26,8 +26,6 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from flax import linen as nn
 
-from MaxText import maxtext_utils
-from MaxText import max_utils
 from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
 from MaxText.common_types import Config
 from MaxText.globals import MAXTEXT_PKG_DIR
@@ -35,6 +33,8 @@ from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models
 from MaxText.layers import quantizations
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 
 
 def compute_loss_linen(intermediate_outputs, logits, data, config, model, params, is_train):

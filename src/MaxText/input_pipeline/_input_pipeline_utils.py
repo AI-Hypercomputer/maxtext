@@ -23,9 +23,9 @@ from datasets.distributed import split_dataset_by_node
 import grain.python as grain
 import numpy as np
 import tensorflow as tf
-from MaxText import max_logging
 from MaxText import tokenizer
 from MaxText import multimodal_utils
+from maxtext.utils import max_logging
 
 Features = dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
