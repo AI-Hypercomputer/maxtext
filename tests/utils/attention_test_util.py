@@ -30,7 +30,8 @@ from MaxText.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICAT
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers.attention_mla import MLA
 from MaxText.sharding import maybe_shard_with_name
-from maxtext.tests.utils.test_helpers import get_test_config_path
+
+from tests.utils.test_helpers import get_test_config_path
 
 
 class MLATestBase(parameterized.TestCase):

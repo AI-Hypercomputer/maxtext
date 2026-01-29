@@ -1057,6 +1057,10 @@ class Optimizer(BaseModel):
   gradient_accumulation_steps: PositiveInt = Field(
       1, description="Number of steps to accumulate gradients before updating."
   )
+  use_tunix: bool = Field(
+      False,
+      description="Whether to use the Tunix implementation for gradient accumulation.",
+  )
   gradient_clipping_threshold: NonNegativeFloat = Field(
       1.0, description="The threshold for gradient clipping. 0 disables clipping."
   )

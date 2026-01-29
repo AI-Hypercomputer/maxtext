@@ -54,7 +54,9 @@ def vision_sft_preprocessing_pipeline(
   """pipeline for multimodal SFT with HF dataset"""
 
   assert len(text_columns) == 2, f"Need two text_columns for query and response, received {text_columns=}"
-  batch_size = global_batch_size // jax.process_count()
+  # Tunix GA requires per-micro-batch slicing at the data level,
+  # whereas Native GA processes the full batch and splits it internally.
+  batch_size = global_batch_size // jax.process_count() // (config.gradient_accumulation_steps if config.use_tunix else 1)
   if config.enable_data_shuffling:
     dataset = dataset.shuffle(seed=config.data_shuffle_seed)
 
@@ -195,6 +197,8 @@ def preprocessing_pipeline(
     generate_padding_batch=False,
     use_dpo=None,
     use_sft=None,
+    use_tunix=False,
+    num_microbatches=1,
     sft_train_on_completion_only=True,
     grain_worker_count=1,  # only support 0 or 1
     max_segments_per_seq=None,
@@ -202,6 +206,9 @@ def preprocessing_pipeline(
   """pipeline for preprocessing HF dataset"""
 
   assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible by number of global devices."
+  # Tunix GA requires per-micro-batch slicing at the data level,
+  # whereas Native GA processes the full batch and splits it internally.
+  batch_size = global_batch_size // jax.process_count() // (num_microbatches if use_tunix else 1)
 
   if shuffle:
     dataset = dataset.shuffle(seed=data_shuffle_seed)
@@ -303,7 +310,7 @@ def preprocessing_pipeline(
       max_segments = None
     operations.append(
         grain.experimental.PackAndBatchOperation(
-            batch_size=global_batch_size // jax.process_count(),
+            batch_size=batch_size,
             length_struct=length_struct,
             max_sequences_per_bin=max_segments,
         )
@@ -311,7 +318,7 @@ def preprocessing_pipeline(
     operations.append(_input_pipeline_utils.ReformatPacking(data_column_names))
   else:
     operations.append(_input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id))
-    operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
+    operations.append(grain.Batch(batch_size=batch_size, drop_remainder=drop_remainder))
 
   if shift and not use_dpo:
     operations.append(_input_pipeline_utils.ShiftData(ignored_ids=[pad_id, tokenizer.bos_token_id], axis=1))
@@ -390,6 +397,8 @@ def make_hf_train_iterator(
         generate_padding_batch=config.generate_padding_batch_train,
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
+        use_tunix=config.use_tunix,
+        num_microbatches=config.gradient_accumulation_steps,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
         chat_template_path=config.chat_template_path,
         max_segments_per_seq=config.max_segments_per_seq,
@@ -443,6 +452,7 @@ def make_hf_eval_iterator(
         generate_padding_batch=config.generate_padding_batch_eval,
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
+        num_microbatches=config.gradient_accumulation_steps,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
         chat_template_path=config.chat_template_path,
         max_segments_per_seq=config.max_segments_per_seq,

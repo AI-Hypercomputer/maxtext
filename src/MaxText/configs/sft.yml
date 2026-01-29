@@ -15,6 +15,7 @@
 base_config: "base.yml"
 
 use_sft: True
+use_tunix: True
 # sft_train_on_completion_only=False trains on both prompt and completion tokens; trains only on completion tokens otherwise
 sft_train_on_completion_only: True
 packing: True

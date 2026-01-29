@@ -179,7 +179,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   # Zero1+GA to reduce communication overhead.
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
-  if config.gradient_accumulation_steps > 1:
+  if config.gradient_accumulation_steps > 1 and not config.use_tunix:
     loss = total_loss
   else:
     loss = total_loss / (total_weights + EPS)
