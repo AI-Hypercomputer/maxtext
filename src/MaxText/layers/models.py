@@ -25,8 +25,7 @@ from flax import linen as nn
 from flax import nnx
 from MaxText.layers import initializers
 
-from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
-from MaxText import multimodal_utils
+from MaxText.common_types import Config, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.decoders import Decoder
 from MaxText.layers.embeddings import Embed, embed_as_linen
@@ -34,6 +33,7 @@ from MaxText.layers.encoders import VisionEncoder, vision_encoder_as_linen, Audi
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.multi_token_prediction import multi_token_prediction_block_as_linen
 from maxtext.inference import page_manager
+from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import max_utils
 
 # ------------------------------------------------------------------------------
@@ -155,24 +155,15 @@ class TransformerLinenPure(nn.Module):
 
     if self.config.use_multimodal and encoder_images is not None:
       image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
+      bidirectional_mask = mm_processor.get_bidirectional_mask_vision(self.config, decoder_input_tokens)
 
-      if self.config.decoder_block == DecoderBlockType.GEMMA3:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
-      elif self.config.decoder_block == DecoderBlockType.LLAMA4:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
-      elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
-        # Create bidirectional_mask for vision/video token merging
-        bidirectional_mask = (decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN) | (
-            decoder_input_tokens == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN
-        )
-        # Create image/video mask for deepstack visual embedding injection
     if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
       audio_embeddings = self.audio_encoder(input_audio=encoder_audios, deterministic=not enable_dropout)
 
     # Create audio mask for placeholder tokens (qwen3-omni models)
     audio_masks = None
-    if audio_embeddings is not None and self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
-      audio_masks = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN
+    if audio_embeddings is not None:
+      audio_masks = mm_processor.get_bidirectional_mask_audio(self.config, decoder_input_tokens)
 
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.shared_embedding,
@@ -469,15 +460,7 @@ class Transformer(nnx.Module):
     image_embeddings = None
     if self.config.use_multimodal and encoder_images is not None:
       image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
-
-      if self.config.decoder_block == DecoderBlockType.GEMMA3:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
-      elif self.config.decoder_block == DecoderBlockType.LLAMA4:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
-      elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
-        bidirectional_mask = (decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN) | (
-            decoder_input_tokens == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN
-        )
+      bidirectional_mask = mm_processor.get_bidirectional_mask_vision(self.config, decoder_input_tokens)
 
     audio_embeddings = None
     if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
@@ -485,8 +468,8 @@ class Transformer(nnx.Module):
 
     # Create audio mask for placeholder tokens (qwen3-omni models)
     audio_masks = None
-    if audio_embeddings is not None and self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
-      audio_masks = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN
+    if audio_embeddings is not None:
+      audio_masks = mm_processor.get_bidirectional_mask_audio(self.config, decoder_input_tokens)
 
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,

@@ -24,7 +24,8 @@ import grain.python as grain
 import numpy as np
 import tensorflow as tf
 from MaxText import tokenizer
-from MaxText import multimodal_utils
+from maxtext.multimodal import processor as mm_processor
+from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging
 
 Features = dict[str, tf.Tensor]
@@ -73,13 +74,13 @@ def reformat_prompt(example, column, image_placeholder, model_name):
     num_images = len(example["images"])
   else:
     num_images = 1
-  example[column] = multimodal_utils.reformat_prompt(example[column], image_placeholder, model_name, num_images)
+  example[column] = mm_processor.reformat_prompt(example[column], image_placeholder, model_name, num_images)
   return example
 
 
 def reformat_response(example, column, model_name):
   """reformat response for multimodal SFT"""
-  example[column] = multimodal_utils.reformat_response(example[column][0], model_name)
+  example[column] = mm_processor.reformat_response(example[column][0], model_name)
   return example
 
 
@@ -101,11 +102,11 @@ def pre_process_image_sft(example, image_column, model_name):
 
   def _process_image_fn(image):
     if isinstance(image, list):
-      image = [np.array(multimodal_utils.convert_to_RGB(img)) for img in image]
+      image = [np.array(mm_utils.convert_to_RGB(img)) for img in image]
     else:
-      image = np.array(multimodal_utils.convert_to_RGB(image))
+      image = np.array(mm_utils.convert_to_RGB(image))
 
-    image = multimodal_utils.pre_process_image(image, model_name)
+    image = mm_processor.preprocess_image_for_training(image, model_name)
     return image
 
   example[image_column] = _process_image_fn(example[image_column])
@@ -114,7 +115,7 @@ def pre_process_image_sft(example, image_column, model_name):
 
 def prepare_text_for_image_fusion(example, column_name, model_name):
   """prepare text for image fusion for multimodal SFT"""
-  example[column_name] = multimodal_utils.prepare_text_for_image_fusion(
+  example[column_name] = mm_processor.prepare_text_for_image_fusion(
       example[column_name], model_name, processor_output=example["images"]
   )
   return example
@@ -478,9 +479,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
     return np.pad(x, pad_amount, constant_values=pad_id)[: self.max_length]
 
-  def _pad_image_and_mask(
-      self, preprocessed_image: multimodal_utils.PreprocessorOutput
-  ) -> multimodal_utils.PreprocessorOutput:
+  def _pad_image_and_mask(self, preprocessed_image: mm_utils.PreprocessorOutput) -> mm_utils.PreprocessorOutput:
     """Pads the input tensors (image and mask) of a PreprocessorOutput to a maximum number of items.
 
     This function unifies padding logic for image tensors (standard or tiled) and
@@ -513,14 +512,14 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       - The dummy images used for padding are based on the image shape for initialization
         of this model (ignoring batch size).
     """
-    if not isinstance(preprocessed_image, multimodal_utils.PreprocessorOutput):
+    if not isinstance(preprocessed_image, mm_utils.PreprocessorOutput):
       raise TypeError(f"Input must be multimodal_utils.PreprocessorOutput, but got {type(preprocessed_image)}")
 
     if preprocessed_image.pixel_values is None:
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
 
     # Determine the maximum number of images/masks allowed.
-    image_offsets = multimodal_utils.get_image_offsets(self.model_name, preprocessed_image)
+    image_offsets = mm_processor.get_image_offsets(self.model_name, preprocessed_image)
     single_image_offset = image_offsets // preprocessed_image.pixel_values.shape[0]
 
     # Reserve space for at least one text token.
@@ -569,13 +568,13 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     return preprocessed_image
 
   def map(
-      self, element: dict[str, np.ndarray | multimodal_utils.PreprocessorOutput]
-  ) -> dict[str, np.ndarray | multimodal_utils.PreprocessorOutput]:
+      self, element: dict[str, np.ndarray | mm_utils.PreprocessorOutput]
+  ) -> dict[str, np.ndarray | mm_utils.PreprocessorOutput]:
     """map to each element"""
     data_columns = list(element.keys())
     for data_column in data_columns:
       if data_column != "images":
-        if isinstance(element[data_column], multimodal_utils.PreprocessorOutput):
+        if isinstance(element[data_column], mm_utils.PreprocessorOutput):
           raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
 
         element[f"{data_column}_segmentation"] = element[data_column] != self.pad_id
@@ -615,7 +614,7 @@ class ExtractImagesAndMasks(grain.MapTransform):
     if preprocessed_image is None:
       return element
 
-    if not isinstance(preprocessed_image, multimodal_utils.PreprocessorOutput):
+    if not isinstance(preprocessed_image, mm_utils.PreprocessorOutput):
       raise TypeError(f"'images' must be of type PreprocessorOutput, but got {type(preprocessed_image)}")
 
     output = element.copy()
@@ -646,7 +645,7 @@ class FoldImagesIntoBatch(grain.MapTransform):
 
   def __post_init__(self):
     """Initializes the target shape after the dataclass is created."""
-    self.target_shape = multimodal_utils.get_dummy_image_shape_for_init(self.model_name)
+    self.target_shape = mm_processor.get_dummy_image_shape_for_init(self.model_name)
 
   def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Applies the folding transformation to the 'images' field if present."""
@@ -777,7 +776,10 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
     second_per_grids = element.get("second_per_grids")
 
     # Call the standalone get_rope_index function from multimodal_utils
-    position_ids, mrope_position_deltas = multimodal_utils.get_rope_index(
+    from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+    # TODO(jfacevedo/hengtaoguo): Now get_rope_index is Qwen3-Omni specific. We should generalize it for other models
+    position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
         input_ids=input_ids,
         image_grid_thw=image_grid_thw,
         video_grid_thw=video_grid_thw,

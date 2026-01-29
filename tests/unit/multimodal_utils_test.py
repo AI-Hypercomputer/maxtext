@@ -16,7 +16,10 @@
 import unittest
 import numpy as np
 
-from MaxText import multimodal_utils
+from maxtext.multimodal import processor as mm_processor
+from maxtext.multimodal import utils as mm_utils
+from maxtext.multimodal import processor_gemma3
+from maxtext.multimodal import processor_llama4
 
 
 class TestTextImageFusionGemma3(unittest.TestCase):
@@ -30,7 +33,7 @@ class TestTextImageFusionGemma3(unittest.TestCase):
   def test_add_zero_image(self):
     tokens = np.asarray([1, 2, 3, 4, 5, 6])
     num_images = 0
-    new_tokens = multimodal_utils.insert_sequence(
+    new_tokens = processor_gemma3.insert_sequence(
         at=self.BEGIN_IMAGE_TOKEN, sequence=self.mm_tokens, tokens=tokens, max_num_images=num_images
     )
     np.testing.assert_array_equal(new_tokens, tokens)
@@ -38,7 +41,7 @@ class TestTextImageFusionGemma3(unittest.TestCase):
   def test_add_single_image(self):
     tokens = np.asarray([1, 2, 3, self.BEGIN_IMAGE_TOKEN, 5, 6])
     num_images = 1
-    new_tokens = multimodal_utils.insert_sequence(
+    new_tokens = processor_gemma3.insert_sequence(
         at=self.BEGIN_IMAGE_TOKEN, sequence=self.mm_tokens, tokens=tokens, max_num_images=num_images
     )
     expected = np.asarray([1, 2, 3] + self.mm_tokens + [5, 6])
@@ -47,7 +50,7 @@ class TestTextImageFusionGemma3(unittest.TestCase):
   def test_add_two_images(self):
     tokens = np.asarray([1, self.BEGIN_IMAGE_TOKEN, 3, 4, self.BEGIN_IMAGE_TOKEN, 6])
     num_images = 2
-    new_tokens = multimodal_utils.insert_sequence(
+    new_tokens = processor_gemma3.insert_sequence(
         at=self.BEGIN_IMAGE_TOKEN, sequence=self.mm_tokens, tokens=tokens, max_num_images=num_images
     )
     expected = np.asarray([1] + self.mm_tokens + [3, 4] + self.mm_tokens + [6])
@@ -58,7 +61,7 @@ class TestTextImageFusionGemma3(unittest.TestCase):
         [[1, 2, 3, self.BEGIN_IMAGE_TOKEN, 5, 6], [1, self.BEGIN_IMAGE_TOKEN, 3, 4, self.BEGIN_IMAGE_TOKEN, 6]]
     )
     num_images = 2
-    new_tokens = multimodal_utils.insert_sequence(
+    new_tokens = processor_gemma3.insert_sequence(
         at=self.BEGIN_IMAGE_TOKEN, sequence=self.mm_tokens, tokens=tokens, max_num_images=num_images
     )
     expected = np.asarray(
@@ -83,16 +86,16 @@ class TestLlama4ImageProcessing(unittest.TestCase):
     image_1 = np.ones((224, 300, self.NUM_IMAGE_CHANNELS))
     image_2 = np.ones((536, 640, self.NUM_IMAGE_CHANNELS))
 
-    possible_resolutions = multimodal_utils.find_supported_resolutions(
+    possible_resolutions = processor_llama4.find_supported_resolutions(
         max_num_tiles=self.LLAMA4_TILES_NUM, tile_size=self.LLAMA4_TILE_SIZE
     )
-    best_resolution_1 = multimodal_utils.get_best_resolution(
+    best_resolution_1 = processor_llama4.get_best_resolution(
         img_height=image_1.shape[0],
         image_width=image_1.shape[1],
         possible_resolutions=possible_resolutions,
         resize_to_max_canvas=False,
     )
-    best_resolution_2 = multimodal_utils.get_best_resolution(
+    best_resolution_2 = processor_llama4.get_best_resolution(
         img_height=image_2.shape[0],
         image_width=image_2.shape[1],
         possible_resolutions=possible_resolutions,
@@ -104,7 +107,7 @@ class TestLlama4ImageProcessing(unittest.TestCase):
   def test_pad_to_best_fit_jax(self):
     image = np.zeros((536, 640, self.NUM_IMAGE_CHANNELS))
     best_resolution = (672, 672)
-    padded_image = multimodal_utils.pad_to_best_fit_jax(image, best_resolution)
+    padded_image = processor_llama4.pad_to_best_fit_jax(image, best_resolution)
     self.assertEqual(padded_image.shape, (672, 672, self.NUM_IMAGE_CHANNELS))
     self.assertTrue(np.all(padded_image == 0))
 
@@ -115,14 +118,14 @@ class TestLlama4ImageProcessing(unittest.TestCase):
         best_resolution[0] // self.LLAMA4_TILE_SIZE,
         best_resolution[1] // self.LLAMA4_TILE_SIZE,
     )
-    image_tiles = multimodal_utils.split_to_tiles(image, ratio_h, ratio_w)
+    image_tiles = processor_llama4.split_to_tiles(image, ratio_h, ratio_w)
     self.assertEqual(
         image_tiles.shape, (ratio_h * ratio_w, self.NUM_IMAGE_CHANNELS, self.LLAMA4_TILE_SIZE, self.LLAMA4_TILE_SIZE)
     )
 
   def test_pad_to_max_tiles(self):
     image = np.ones((5, self.NUM_IMAGE_CHANNELS, self.LLAMA4_TILE_SIZE, self.LLAMA4_TILE_SIZE))
-    padded_image, image_mask = multimodal_utils.pad_to_max_tiles(image, self.LLAMA4_TILES_NUM)
+    padded_image, image_mask = processor_llama4.pad_to_max_tiles(image, self.LLAMA4_TILES_NUM)
     self.assertEqual(
         padded_image.shape, (self.LLAMA4_TILES_NUM, self.NUM_IMAGE_CHANNELS, self.LLAMA4_TILE_SIZE, self.LLAMA4_TILE_SIZE)
     )
@@ -150,7 +153,7 @@ class TestLlama4PostProcessing(unittest.TestCase):
   def test_image_tokens_for_single_image(self):
     this_aspect_ratio = np.array([2, 2])
     num_patches_per_chunk = 4
-    image_tokens = multimodal_utils.get_tokens_for_this_image(this_aspect_ratio, num_patches_per_chunk)
+    image_tokens = processor_llama4.get_tokens_for_this_image(this_aspect_ratio, num_patches_per_chunk)
     expected_tokens = [
         self.LLAMA4_BEGIN_IMAGE_TOKEN,
         self.LLAMA4_PATCH_TOKEN,
@@ -184,17 +187,17 @@ class TestLlama4PostProcessing(unittest.TestCase):
 
   def test_post_process_image_tokens(self):
     dummy_pixel_values = np.ones(
-        (5, multimodal_utils.NUM_IMAGE_CHANNELS, multimodal_utils.LLAMA4_TILE_SIZE, multimodal_utils.LLAMA4_TILE_SIZE)
+        (5, mm_utils.NUM_IMAGE_CHANNELS, processor_llama4.LLAMA4_TILE_SIZE, processor_llama4.LLAMA4_TILE_SIZE)
     )
     dummy_aspect_ratios = np.array([[2, 2]])
     dummy_tokens = np.array([1, 2, self.LLAMA4_FAKE_IMAGE_TOKEN, 4, 5])
-    processor_output = multimodal_utils.PreprocessorOutput(
+    processor_output = processor_llama4.Llama4PreprocessorOutput(
         pixel_values=dummy_pixel_values,
         aspect_ratios=dummy_aspect_ratios,
     )
 
-    image_offsets = multimodal_utils.get_image_offsets(model_name=self.model_name, processor_output=processor_output)
-    post_processed_tokens = multimodal_utils.add_extra_tokens_for_images_llama4(dummy_tokens, processor_output)
+    image_offsets = mm_processor.get_image_offsets(model_name=self.model_name, processor_output=processor_output)
+    post_processed_tokens = processor_llama4.add_extra_tokens_for_images_llama4(dummy_tokens, processor_output)
     self.assertEqual(post_processed_tokens.shape[0], dummy_tokens.shape[0] + image_offsets)
 
   def test_merge_mm_embeddings(self):
@@ -234,10 +237,10 @@ class TestLlama4PostProcessing(unittest.TestCase):
     # Total valid tokens = 8 + 16 = 24. This matches the mask slots.
 
     # Case 1: Use the image_mask to filter for valid tiles.
-    merged = multimodal_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, image_masks)
+    merged = mm_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, image_masks)
 
     # Case 2: No image_mask, so all vision tokens are used in order.
-    merged_null = multimodal_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, None)
+    merged_null = mm_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, None)
 
     # The results should be different since one is masked and one is not.
     self.assertFalse(np.array_equal(merged, merged_null))

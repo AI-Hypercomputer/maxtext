@@ -36,12 +36,12 @@ import optax
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
-from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.configs import types
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.inference.page_manager import PageState
 from maxtext.common import checkpointing
+from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -137,15 +137,13 @@ def get_shaped_batch(config):
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   if config.use_multimodal:
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+    image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
     shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32)
   if config.use_audio:
-    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
-    )
+    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
     shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32)
   return shaped_batch
 
@@ -955,12 +953,10 @@ def init_initial_state(model, tx, config, is_training, key):
   Args: model, tx, config, is_training, key
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+  image_shape = mm_processor.get_dummy_image_shape_for_init(
       config.model_name, batch_size=config.micro_batch_size_to_train_on
   )
-  audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-      config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
-  )
+  audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
   # Split the master key into independent keys for each RNG collection
   # Reference: https://flax-linen.readthedocs.io/en/latest/guides/flax_fundamentals/rng_guide.html
   params_key, dropout_key, aqt_key = jax.random.split(key, 3)
@@ -983,12 +979,10 @@ def get_abstract_param(model, config):
   with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     key = jax.random.PRNGKey(0)
     input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+    image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
-    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
-    )
+    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
   abstract_vars = jax.eval_shape(
       model.init,
       {"params": key, "dropout": key, "aqt": key},
@@ -1192,12 +1186,10 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
         config.micro_batch_size_to_train_on,
         config.max_prefill_predict_length,
     )
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+    image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
-    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
-    )
+    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
@@ -1225,12 +1217,10 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
 
   def init_kv_cache(model, config):
     input_shape = (config.micro_batch_size_to_train_on, 1)
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+    image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
-    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
-    )
+    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
