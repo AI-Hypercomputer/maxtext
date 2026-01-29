@@ -52,14 +52,13 @@ class CompressedTokenizer:
   By applying aggressive normalization (lowercasing, accent stripping, and whitespace
   collapsing), this class maps multiple distinct tokens (e.g., 'Apple', ' apple',
   'APPLE') to a single unified ID. This many-to-one mapping effectively reduces
-  the sparsity of the combinatorial n-gram space, increasing the hit rate for
-  the Scalable Lookup/Engram memory mechanism.
+  the combinatorial n-gram space.
 
   Attributes:
       tokenizer: The base Hugging Face tokenizer.
       normalizer: A tokenizers.Normalizer sequence defining the canonicalization rules.
       lookup_table: A NumPy array where `lookup_table[original_id] = compressed_id`.
-      num_new_token: The size of the resulting collapsed vocabulary.
+      num_new_token: The size of the resulting compressed vocabulary.
   """
 
   def __init__(self, tokenizer):
@@ -139,17 +138,16 @@ class CompressedTokenizer:
 
   def _compress(self, input_ids):
     """
-    Replaces original token IDs with canonical IDs using the pre-computed table.
+    Maps original token IDs to canonical IDs using the pre-computed table.
     """
-    arr = np.asarray(input_ids, dtype=np.int64)
+    input_ids = np.asarray(input_ids, dtype=np.int64)
     # Ignore negative IDs (often used for padding/masks)
-    pos_mask = arr >= 0
-    out = arr.copy()
-    valid_ids = arr[pos_mask]
-
+    valid_mask = input_ids >= 0
+    valid_ids = input_ids[valid_mask]
+    output_ids = input_ids.copy()
     # Vectorized replacement: O(1) lookup per token
-    out[pos_mask] = self.lookup_table[valid_ids]
-    return out
+    output_ids[valid_mask] = self.lookup_table[valid_ids]
+    return output_ids
 
   def __call__(self, input_ids):
     return self._compress(input_ids)
@@ -202,10 +200,9 @@ class NgramHashMapping:
 
   def find_next_prime(self, start, seen_primes):
     candidate = start + 1
-    while True:
-      if isprime(candidate) and candidate not in seen_primes:
-        return candidate
+    while candidate in seen_primes or not isprime(candidate):
       candidate += 1
+    return candidate
 
   def calculate_vocab_size_across_layers(self):
     seen_primes = set()
@@ -219,9 +216,9 @@ class NgramHashMapping:
         # If ngram=2 (Bigram), index is 0.
         # If ngram=3 (Trigram), index is 1.
         vocab_size = self.vocab_size_per_ngram[ngram - 2]
-        num_head = self.n_head_per_ngram
         current_prime_search_start = vocab_size - 1
 
+        num_head = self.n_head_per_ngram
         for _ in range(num_head):
           found_prime = self.find_next_prime(current_prime_search_start, seen_primes)
           seen_primes.add(found_prime)
@@ -588,7 +585,7 @@ class Engram(nnx.Module):
     )
 
     # Normalization before Gating (Key)
-    self.norm1 = nnx.List(
+    self.k_norms = nnx.List(
         [
             RMSNorm(
                 num_features=config.base_emb_dim,
@@ -603,7 +600,7 @@ class Engram(nnx.Module):
         ]
     )
     # Normalization before Gating (Query)
-    self.norm2 = nnx.List(
+    self.q_norms = nnx.List(
         [
             RMSNorm(
                 num_features=config.base_emb_dim,
@@ -632,6 +629,7 @@ class Engram(nnx.Module):
     # Shape: (B, L) -> (B, L, H_en)
     # where H_en is the total count of heads across all n-gram orders.
     hash_input_ids = jnp.array(self.hash_mapping.hash(input_ids)[self.layer_id])
+    print("jax1", hash_input_ids)
 
     # 2. Retrieve Memory
     # Fetch e_{t,n,k} from the embedding table.
@@ -641,6 +639,7 @@ class Engram(nnx.Module):
     # Flatten all n-gram heads into one vector e_t
     # (B, L, H_en, D_head) -> (B, L, D_en)
     embeddings = embeddings.reshape(embeddings.shape[0], embeddings.shape[1], -1)
+    print("jax2", embeddings)
 
     # 3. Gating Mechanism (Scaled Dot-Product)
     # Decide relevance of memory (Key) to current state (Query)
@@ -648,8 +647,8 @@ class Engram(nnx.Module):
 
     for i in range(self.hc_mult):
       # Setup layers for this branch
-      norm1 = self.norm1[i]
-      norm2 = self.norm2[i]
+      k_norm = self.k_norms[i]
+      q_norm = self.q_norms[i]
       key_proj = self.key_projs[i]
 
       # Extract Query for this branch: (B, L, C)
@@ -657,16 +656,21 @@ class Engram(nnx.Module):
 
       # Key: Projection of retrieved n-gram memory
       # Generate Key from Engram Memory: (B, L, D_en) -> (B, L, C)
-      k = norm1(key_proj(embeddings))
+      k = k_norm(key_proj(embeddings))
+      print("jax3", k)
 
       # Query: Current hidden state from the transformer
       # Normalize Query: (B, L, C)
-      q = norm2(query)
+      q = q_norm(query)
+      print("jax4", q)
 
       # Gate Score (Scalar per token): (K * Q) / sqrt(d)
       # Sum over C dimension -> (B, L)
-      gate = jnp.sum(k * q, axis=-1) / jnp.sqrt(k.shape[-1])
+      qk_product = jnp.einsum("blc,blc->bl", q, k, precision=self.config.matmul_precision)
+      gate = qk_product / jnp.sqrt(k.shape[-1])
+      print("jax5", gate)
 
+      # TODO(shuningjin): why
       # Stabilization trick: sign(x) * sqrt(|x|)
       gate = jnp.sqrt(jnp.maximum(jnp.abs(gate), 1e-6)) * jnp.sign(gate)
 

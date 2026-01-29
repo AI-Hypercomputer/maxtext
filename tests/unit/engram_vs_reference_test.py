@@ -697,8 +697,8 @@ def get_jax_engram_weights(pt_engram) -> dict:
       "mhe": get_mhe_weights(pt_engram.multi_head_embedding),
       "value_proj": map_linear(pt_engram.value_proj),
       "key_projs": to_nnx_list_dict(key_projs_weights),
-      "norm1": to_nnx_list_dict(norm1_weights),
-      "norm2": to_nnx_list_dict(norm2_weights),
+      "k_norms": to_nnx_list_dict(norm1_weights),
+      "q_norms": to_nnx_list_dict(norm2_weights),
       "short_conv": get_shortconv_weights(pt_engram.short_conv),
   }
 
