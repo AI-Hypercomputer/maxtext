@@ -35,7 +35,7 @@ export TOKENIZER_PATH=meta-llama/Llama-3.1-8B-Instruct
 export MODEL_CHECKPOINT_PATH=<GCS path to model checkpoint>
 export HF_ACCESS_TOKEN=<Hugging Face access token>
 
-python3 -m MaxText.examples.sft_train_and_evaluate MaxText/configs/sft.yml \
+python3 -m maxtext.examples.sft_train_and_evaluate MaxText/configs/sft.yml \
   run_name=$RUN_NAME base_output_directory=$OUTPUT_PATH \
   model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH \
   hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH
@@ -67,7 +67,7 @@ xpk workload create \
 --workload=sft-${RUN_NAME} \
 --tpu-type ${TPU_TYPE} --num-slices=1 --zone=${ZONE} \
 --project=${PROJECT} \
---command "HF_TOKEN=$HF_ACCESS_TOKEN python3 -m MaxText.examples.sft_train_and_evaluate MaxText/configs/sft.yml \
+--command "HF_TOKEN=$HF_ACCESS_TOKEN python3 -m maxtext.examples.sft_train_and_evaluate MaxText/configs/sft.yml \
   run_name=$RUN_NAME base_output_directory=$OUTPUT_PATH \
     model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH \
       hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH"
@@ -125,7 +125,7 @@ MATCH_FORMAT = re.compile(
 )
 # Regex to extract the final numerical answer
 MATCH_ANSWER = re.compile(rf"{ANSWER_START}.*?([\d\.\,\$]{{1,}})", flags=re.MULTILINE | re.DOTALL)
-CHAT_TEMPLATE_PATH = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "examples", "chat_templates", "math_qa.json")
+CHAT_TEMPLATE_PATH = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "examples", "chat_templates", "math_qa.json")
 
 
 def get_test_dataset(config, tokenizer):
