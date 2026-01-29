@@ -100,6 +100,7 @@ class DecoderBlockType(enum.Enum):
   SIMPLE = "simple"
   SIMPLE_MLP = "simple_mlp"
   LLAMA4 = "llama4"
+  QWEN_IMAGE = "qwen_image"
 
 
 class AttentionType(enum.Enum):

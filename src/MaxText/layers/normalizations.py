@@ -44,6 +44,7 @@ class RMSNorm(nnx.Module):
       scale_init: Initializer = nn.initializers.ones,
       parameter_memory_host_offload: bool = False,
       scale_offset: float = 0.0,
+      use_scale: bool = True,
       *,
       rngs: nnx.Rngs,
   ):
@@ -56,28 +57,33 @@ class RMSNorm(nnx.Module):
     self.scale_init = scale_init
     self.parameter_memory_host_offload = parameter_memory_host_offload
     self.scale_offset = scale_offset
-    self.scale = nnx.Param(
-        scale_init(rngs.params(), (num_features,), weight_dtype),
-        sharding=kernel_axes,
-    )
+    self.use_scale = use_scale
+    if self.use_scale:
+      self.scale = nnx.Param(
+          scale_init(rngs.params(), (num_features,), weight_dtype),
+          sharding=kernel_axes,
+      )
 
   def __call__(self, x: jnp.ndarray, out_sharding: NamedSharding | None = None) -> jnp.ndarray:
     """Applies layer normalization on the input."""
     x = jnp.asarray(x, jnp.float32)
     mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
     y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
-    scale = self.scale.value
-    # Move scale to device if parameter offloading is enabled
-    if self.parameter_memory_host_offload:
-      max_logging.log("normalizations.py: Moving scale parameter to device")
-      scale = jax.device_put(scale, max_utils.device_space())
     # out_sharding must be None in auto shard mode
     if self.shard_mode != ShardMode.EXPLICIT:
       out_sharding = None
+    if self.use_scale:
+      scale = self.scale.value
+      # Move scale to device if parameter offloading is enabled
+      if self.parameter_memory_host_offload:
+        max_logging.log("normalizations.py: Moving scale parameter to device")
+        scale = jax.device_put(scale, max_utils.device_space())
 
-    scale = jnp.asarray(scale, self.dtype)
-    effective_scale = scale + self.scale_offset  # Apply offset
-    return jnp.einsum("i...k,...k->i...k", y, effective_scale, out_sharding=out_sharding)
+      scale = jnp.asarray(scale, self.dtype)
+      effective_scale = scale + self.scale_offset  # Apply offset
+      return jnp.einsum("i...k,...k->i...k", y, effective_scale, out_sharding=out_sharding)
+    else:
+      return jax.lax.with_sharding_contraint(y, shardings=out_sharding)
 
 
 def Qwen3NextRMSNorm(num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):

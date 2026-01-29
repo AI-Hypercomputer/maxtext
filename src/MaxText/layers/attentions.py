@@ -419,6 +419,7 @@ class Attention(nnx.Module):
     self.rngs = rngs
 
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
+    self.is_qwen_image = self.config.decoder_block == DecoderBlockType.QWEN_IMAGE
 
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
@@ -516,6 +517,39 @@ class Attention(nnx.Module):
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           rngs=self.rngs,
+      )
+    elif self.is_qwen_image:
+      self.img_query_norm = RMSNorm(
+        num_features=self.config.head_dim,
+        epsilon=self.config.normalization_layer_epsilon,
+        dtype=self.config.dtype,
+        weight_dtype=weight_dtype,
+        weight_dtype=self.config.weight_dtype,
+        rngs=self.rngs
+      )
+      self.img_key_norm = RMSNorm(
+        num_features=self.config.head_dim,
+        epsilon=self.config.normalization_layer_epsilon,
+        dtype=self.config.dtype,
+        weight_dtype=weight_dtype,
+        weight_dtype=self.config.weight_dtype,
+        rngs=self.rngs
+      )
+      self.txt_query_norm = RMSNorm(
+        num_features=self.config.head_dim,
+        epsilon=self.config.normalization_layer_epsilon,
+        dtype=self.config.dtype,
+        weight_dtype=weight_dtype,
+        weight_dtype=self.config.weight_dtype,
+        rngs=self.rngs
+      )
+      self.txt_key_norm = RMSNorm(
+        num_features=self.config.head_dim,
+        epsilon=self.config.normalization_layer_epsilon,
+        dtype=self.config.dtype,
+        weight_dtype=weight_dtype,
+        weight_dtype=self.config.weight_dtype,
+        rngs=self.rngs
       )
     else:
       self.query_norm = None
@@ -658,13 +692,16 @@ class Attention(nnx.Module):
         rngs=self.rngs,
     )
 
-  def qkv_projection(self, inputs: Array, proj_name: str, out_sharding: NamedSharding | None = None):
+  def unpack_qkv_projection(self, qkv_proj: Array, proj_name: str = "qkv_proj"):
+    qkv_proj = checkpoint_name(qkv_proj, proj_name)
+    query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
+    return query, key, value
+
+  def qkv_projection(self, inputs: Array, proj_name: str = "qkv_proj", out_sharding: NamedSharding | None = None):
     """Fused QKV projection"""
 
     qkv_proj = self.qkv_proj(inputs, out_sharding)
-    qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
-    query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
-    return query, key, value
+    return self.unpack_qkv_projection(qkv_proj, proj_name)
 
   def init_out_w(self, output_dim: int) -> nnx.Module:
     """out projection"""
@@ -1128,3 +1165,247 @@ class Attention(nnx.Module):
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache
+
+class QwenImageAttention(Attention):
+  """Qwen Image Attention Module.
+
+  Implements a Double Stream Joint Attention processor for Qwen Image architecture. 
+  This module maintains independent projection pathways for text and image streams before 
+  performing joint bidirectional self-attention. It integrates Multimodal Rotary Positional 
+  Embeddings (M-ROPE) for spatial-temporal grounding and utilizes QK-Normalization to stabilize 
+  training in large-scale diffusion transformer (DiT) tasks.
+
+  Attributes:
+    config: The model configuration.
+    num_query_heads: Number of query attention heads.
+    num_kv_heads: Number of key-value attention heads.
+    head_dim: The dimension of each attention head.
+    max_target_length: Maximum sequence length.
+    mesh: The device mesh.
+    attention_kernel: The attention kernel to use (e.g., 'dot_product', 'flash').
+    inputs_q_shape: Query inputs shape for initialization, required by NNX.
+    inputs_kv_shape: Key/value inputs shape for initialization, required by NNX.
+    dtype: The data type for computation.
+    weight_dtype: The data type for weights.
+    max_prefill_predict_length: Maximum length for prefill.
+    dropout_rate: The dropout rate.
+    kernel_init: Initializer for the kernel of the dense layers.
+    float32_qk_product: If True, compute query-key product in float32.
+    float32_logits: If True, cast logits to float32 before softmax.
+    quant: Quantization configuration.
+    kv_quant: KV cache quantization configuration.
+    attention_type: The type of attention (e.g., 'global', 'local_sliding').
+    attn_logits_soft_cap: Soft cap for attention logits.
+    ... and other configuration parameters.
+  """
+  def __init__(
+    self,
+    config: Config,
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    max_target_length: int,
+    mesh: Mesh,
+    attention_kernel: str,
+    inputs_q_shape: Tuple,
+    inputs_kv_shape: Tuple,
+    dtype: DType = jnp.float32,
+    weight_dtype: DType = jnp.float32,
+    max_prefill_predict_length: int = -1,
+    dropout_rate: float = 0.0,
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+    float32_qk_product: bool = False,  # computes logits in float32 for stability.
+    float32_logits: bool = False,  # cast logits in float32 for stability.
+    quant: Optional[Quant] = None,
+    kv_quant: Optional[KVQuant] = None,
+    attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+    attn_logits_soft_cap: float | None = None,
+    sliding_window_size: int | None = None,
+    use_ragged_attention: bool = False,
+    ragged_block_size: int = 256,
+    use_qk_norm: bool = False,
+    query_pre_attn_scalar: float | None = None,
+    use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
+    # Temperature tuning parameters used for Llama4
+    temperature_tuning: bool = False,
+    temperature_tuning_scale: float = 0.1,
+    temperature_tuning_floor_scale: float = 8192.0,
+    # Shard the query activation as the same as the key and value.
+    # TODO: Find a better sharding axis name.
+    # TODO: Further break down the Training and Inference axes for the q, k, v.
+    prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
+    prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
+    prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
+    query_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    key_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    value_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
+    ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
+    ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
+    input_axis_names: AxisNames = (BATCH, ATTN_LENGTH_NO_EXP, ATTN_EMBED),
+    ep_input_axis_names: AxisNames = (BATCH_NO_EXP, ATTN_LENGTH, ATTN_EMBED),
+    out_axis_names: AxisNames = (BATCH, ATTN_LENGTH_NO_EXP, HEAD, D_KV),
+    ep_out_axis_names: AxisNames = (BATCH_NO_EXP, ATTN_LENGTH, HEAD, D_KV),
+    prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, ATTN_EMBED),
+    decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, ATTN_EMBED),
+    prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
+    decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
+    prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
+    ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
+    compute_axis_order: AxisIdxes = (0, 1, 2, 3),
+    reshape_q: bool = False,
+    is_nope_layer: bool = False,
+    is_vision: bool = False,
+    model_mode: str = MODEL_MODE_TRAIN,
+    base_kv_cache: bool = True,
+    name: str | None = None,
+    rngs: Optional[nnx.Rngs] = None,
+  ):
+    super().__init__(
+        config=config,
+        num_query_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        max_target_length=max_target_length,
+        mesh=mesh,
+        attention_kernel=attention_kernel,
+        inputs_q_shape=inputs_q_shape,
+        inputs_kv_shape=inputs_kv_shape,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        max_prefill_predict_length=max_prefill_predict_length,
+        dropout_rate=dropout_rate,
+        kernel_init=kernel_init,
+        float32_qk_product=float32_qk_product,
+        float32_logits=float32_logits,
+        quant=quant,
+        kv_quant=kv_quant,
+        attention_type=attention_type,
+        attn_logits_soft_cap=attn_logits_soft_cap,
+        sliding_window_size=sliding_window_size,
+        use_ragged_attention=use_ragged_attention,
+        ragged_block_size=ragged_block_size,
+        use_qk_norm=use_qk_norm,
+        query_pre_attn_scalar=query_pre_attn_scalar,
+        use_bias_in_projections=use_bias_in_projections,
+        temperature_tuning=temperature_tuning,
+        temperature_tuning_scale=temperature_tuning_scale,
+        temperature_tuning_floor_scale=temperature_tuning_floor_scale,
+        prefill_query_axis_names=prefill_query_axis_names,
+        prefill_key_axis_names=prefill_key_axis_names,
+        prefill_value_axis_names=prefill_value_axis_names,
+        query_axis_names=query_axis_names,
+        key_axis_names=key_axis_names,
+        value_axis_names=value_axis_names,
+        ep_query_axis_names=ep_query_axis_names,
+        ep_key_axis_names=ep_key_axis_names,
+        ep_value_axis_names=ep_value_axis_names,
+        input_axis_names=input_axis_names,
+        ep_input_axis_names=ep_input_axis_names,
+        out_axis_names=out_axis_names,
+        ep_out_axis_names=ep_out_axis_names,
+        prefill_input_axis_names=prefill_input_axis_names,
+        decode_input_axis_names=decode_input_axis_names,
+        prefill_out_axis_names=prefill_out_axis_names,
+        decode_out_axis_names=decode_out_axis_names,
+        prefill_cache_axis_order=prefill_cache_axis_order,
+        ar_cache_axis_order=ar_cache_axis_order,
+        compute_axis_order=compute_axis_order,
+        reshape_q=reshape_q,
+        is_nope_layer=is_nope_layer,
+        is_vision=is_vision,
+        model_mode=model_mode,
+        base_kv_cache=base_kv_cache,
+        rngs=rngs,
+    )
+
+  def _init_projections(self, inputs_q_shape, inputs_kv_shape):
+    super()._init_projections(inputs_kv_shape, inputs_kv_shape)
+    
+    if self.config.fused_qkv:
+      self.img_qkv_proj = self.qkv_proj
+      del self.qkv_proj
+      self.txt_qkv_proj = self.init_qkv_w(inputs_shape=inputs_q_shape)
+    else:
+      self.img_query = self.query
+      self.img_key = self.key
+      self.img_value = self.value
+      del self.key
+      del self.key
+      del self.value
+      self.txt_query = self.init_query_w(inputs_q_shape=inputs_q_shape)
+      self.txt_key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
+      self.txt_value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
+    self.img_out = self.out
+    self.txt_out = self.init_out_w(output_dim=inputs_q_shape[-1])
+    del self.out
+  
+  def qkv_projection(self, inputs: Array, proj_name: str, out_sharding: NamedSharding | None = None):
+    if "img" in proj_name:
+      qkv_proj = self.img_qkv_proj(inputs, out_sharding)
+    elif "txt" in proj_name:
+      qkv_proj = self.txt_qkv_proj(inputs, out_sharding)
+    else:
+      raise ValueError(f"proj_name must contain 'img' or 'txt', but got {proj_name}")
+    
+    return self.unpack_qkv_projection(qkv_proj, proj_name)
+
+  def apply_rotary_embedding(self, inputs, inputs_positions = None, rope_kwargs = None):
+    return super().apply_rotary_embedding(inputs, inputs_positions, rope_kwargs)
+
+  def __call__(
+    self,
+    inputs_q: Array, # image stream
+    inputs_kv: Array, # text stream
+    image_rotary_embeddings: Array | None = None,
+    out_sharding: NamedSharding | None = None,
+    *,
+    model_mode: str = MODEL_MODE_TRAIN,
+    deterministic: bool = False,
+    bidirectional_mask: Any = None,
+    rope_kwargs: dict | None = None,
+  ):
+    """Applies Attention on the input data.
+    
+    Args:
+      inputs_q: Image stream of shape `[batch, q_length, q_features]`.
+      inputs_kv: Text stream of shape `[batch, kv_length, kv_features]`.
+      image_rotary_embeddings: Image rotary embeddings.
+      deterministic: If True, disables dropout.
+    """
+    if model_mode == MODEL_MODE_TRAIN:
+      input_axis_names = self.input_axis_names
+    else:
+      input_axis_names = self.decode_input_axis_names
+    
+    inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
+    inputs_kv = self._maybe_shard_with_logical(inputs_kv, input_axis_names)
+    qkv_sharding = create_sharding(self.mesh, input_axis_names)
+    # TODO (@jfacevedo) - use existing query, key, value layers or rename them
+    # to img_query, img_key, img_value 
+    if self.config.fused_qkv:
+      img_query, img_key, img_value = self.qkv_projection(inputs_q, proj_name="img_qkv_proj")
+      txt_query, txt_key, txt_value = self.qkv_projection(inputs_kv, proj_name="txt_qkv_proj")
+    else:
+      img_query = self.img_query(inputs_q, proj_name="img_query", out_sharding=qkv_sharding)
+      img_key = self.img_key(inputs_q, proj_name="img_key", out_sharding=qkv_sharding)
+      img_value = self.img_value(inputs_q, proj_name="img_value", out_sharding=qkv_sharding)
+      txt_query = self.txt_query(inputs_kv, proj_name="txt_query", out_sharding=qkv_sharding)
+      txt_key = self.txt_key(inputs_kv, proj_name="txt_key", out_sharding=qkv_sharding)
+      txt_value = self.txt_value(inputs_kv, proj_name="txt_value", out_sharding=qkv_sharding)
+
+    img_query = self.img_query_norm(img_query)
+    img_key = self.img_key_norm(img_key)
+    txt_query = self.txt_query_norm(txt_query)
+    txt_key = self.txt_key_norm(txt_key)
+
+    if image_rotary_embeddings is not None:
+      img_freqs, txt_freqs = image_rotary_embeddings
+      img_query = apply_rotary_emb_qwen(img_query, img_freqs, use_real=False)
+      img_key = apply_rotary_emb_qwen(img_key, img_freqs, use_real=False)
+      txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
+      txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
+    
+
+
+  
