@@ -170,30 +170,37 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
       - The `data_column_name` column will be updated to a list of
         messages, each formatted according to the tokenizer's chat template.
       - A new column named "is_prompt" will be added, where `True`
-        indicates a user message (prompt) and `False` indicates an assistant
+        indicates a system message or a user message (prompt) and `False` indicates an assistant
         message (completion).
   """
   messages = []
   is_prompt = []
-  prompt = None
+  round_msgs = []
   try:
-    for message in example[data_column_name]:
-      if message["role"] == "user":
-        prompt = message
+    for idx, message in enumerate(example[data_column_name]):
+      if message["role"] == "system":
+        if idx != 0:
+          raise ValueError(f"System message found at index {idx}. System messages must be at index 0.")
+        round_msgs.append(message)
+      elif message["role"] == "user":
+        round_msgs.append(message)
         prompt_in_chat_template = tokenizer_model.apply_chat_template(
-            [prompt], add_generation_prompt=False, tokenize=False
+            round_msgs, add_generation_prompt=False, tokenize=False
         )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
       elif message["role"] == "assistant":
+        round_msgs.append(message)
         prompt_completion_tokens = tokenizer_model.apply_chat_template(
-            [prompt, message], add_generation_prompt=False, tokenize=True
+            round_msgs, add_generation_prompt=False, tokenize=True
         )
-        prompt_tokens = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=True)
+        prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=False, tokenize=True)
         completion_tokens = prompt_completion_tokens[len(prompt_tokens) :]
         completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
         messages.append(completion_in_chat_template)
         is_prompt.append(False)
+        # Round ended, clearing the buffer.
+        round_msgs.clear()
   except ValueError as e:
     max_logging.log(f"Unable to apply chat template: {e}")
     raise e
@@ -688,6 +695,7 @@ def shift_left(x, pad_id, axis=1):
 def shift_and_refine(x, ignored_ids, axis=1):
   """Shift inputs, set segmentation to 0 when target element is in ignored_ids if provided"""
   x["targets"] = shift_left(x["targets"], ignored_ids[0], axis=axis)
+  x["targets_segmentation"] = shift_left(x["targets_segmentation"], 0, axis=axis)
   for ignore_id in ignored_ids:
     x["targets_segmentation"] = np.where(x["targets"] != ignore_id, x["targets_segmentation"], 0)
 
