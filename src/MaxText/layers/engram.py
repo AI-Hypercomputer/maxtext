@@ -673,9 +673,9 @@ class Engram(nnx.Module):
 
       # Gate Score (Scalar per token): (K * Q) / sqrt(d)
       qk_product = jnp.einsum("blc,blc->bl", q, k, precision=self.config.matmul_precision)
-      print("jax5", gate)
       # (B, L)
       gate = qk_product / jnp.sqrt(C)
+      print("jax5", gate)
 
       # TODO(shuningjin): why
       # Stabilization trick: sign(x) * sqrt(|x|)
