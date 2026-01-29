@@ -18,8 +18,10 @@ limitations under the License.
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 
 from MaxText import maxtext_utils
+from MaxText.layers.train_state_nnx import TrainStateNNX
 
 
 def _split_dpo_state(state):
@@ -27,6 +29,13 @@ def _split_dpo_state(state):
   reference_params = state.params["reference_params"]
   new_state = state.replace(params={k: v for k, v in state.params.items() if k != "reference_params"})
   return new_state, reference_params
+
+
+def _split_dpo_state_nnx(state: TrainStateNNX) -> tuple[TrainStateNNX, nnx.Module]:
+  """Split DPO state to separate reference model."""
+  reference_model = state.reference_model
+  state.reference_model = None
+  return state, reference_model
 
 
 def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
@@ -148,3 +157,9 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
 def _merge_dpo_state(state, reference_params):
   """Merge reference parameters back into DPO state."""
   return state.replace(params=dict(state.params, reference_params=reference_params))
+
+
+def _merge_dpo_state_nnx(state: TrainStateNNX, reference_model: nnx.Module) -> TrainStateNNX:
+  """Merge reference model back into DPO state."""
+  state.reference_model = reference_model
+  return state
