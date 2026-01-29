@@ -55,7 +55,6 @@ import jax
 import os
 from typing import Sequence
 import time
-from tqdm import tqdm
 
 from transformers import AutoTokenizer, AutoProcessor
 
@@ -77,10 +76,9 @@ from MaxText.utils.ckpt_conversion.utils.utils import (
     load_orbax_checkpoint,
     detect_and_extract_checkpoint,
     HF_IDS,
+    MemoryMonitorTqdm,
+    print_peak_memory,
 )
-
-os.environ["JAX_PLATFORMS"] = "cpu"
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
 
 
 def _get_model_mappings(
@@ -124,6 +122,9 @@ def main(argv: Sequence[str]) -> None:
   """
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+
+  jax.config.update("jax_platforms", "cpu")
+  os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
 
   # Initialize maxtext config
   config = pyconfig.initialize(argv)
@@ -179,7 +180,7 @@ def main(argv: Sequence[str]) -> None:
   start = time.time()
   processed_params_list = []
 
-  for key in tqdm(filtered_map_keys, total=len(filtered_map_keys)):
+  for key in MemoryMonitorTqdm(filtered_map_keys, total=len(filtered_map_keys), leave=True):
     if isinstance(key, tuple):
       # if key is tuple of param names, weight is list of param weights
       weight = [maxtext_state_dict[subkey] for subkey in key]
@@ -210,6 +211,7 @@ def main(argv: Sequence[str]) -> None:
   max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
   max_logging.log(f"Elapse for save: {(time.time() - start) / 60:.2f} min")
   max_logging.log(f"Overall Elapse: {(time.time() - overall_start) / 60:.2f} min")
+  print_peak_memory()
 
 
 if __name__ == "__main__":
