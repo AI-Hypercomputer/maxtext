@@ -524,23 +524,293 @@ class ShortConv(nnx.Module):
     return y.reshape(B, L, G, C)
 
 
-class Engram(nnx.Module):
-  """
-  Implements the Engram Memory Layer.
+# class Engram(nnx.Module):
+#   """
+#   Implements the Engram Memory Layer.
 
-  This layer augments the standard transformer hidden states with long-range
-  n-gram statistics. It follows a Retrieve-and-Gate architecture:
-  1. Retrieve: Fetch embeddings for current n-gram contexts using Multi-Head Hashing.
-  2. Gate: Decide how much of this retrieved memory to merge based on the current state.
-  3. Mix: Apply local temporal smoothing via ShortConv.
-  """
+#   This layer augments the standard transformer hidden states with long-range
+#   n-gram statistics. It follows a Retrieve-and-Gate architecture:
+#   1. Retrieve: Fetch embeddings for current n-gram contexts using Multi-Head Hashing.
+#   2. Gate: Decide how much of this retrieved memory to merge based on the current state.
+#   3. Mix: Apply local temporal smoothing via ShortConv.
+#   """
+#   def __init__(
+#       self,
+#       layer_id: int,
+#       rngs: nnx.Rngs,
+#       config,
+#       mesh,
+#       tokenizer,  # pass the tokenizer to avoid re-loading
+#       quant: Optional[Quant] = None,
+#       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+#       *,
+#       hc_mult,
+#       engram_heads_per_ngram,
+#       engram_embed_dim_per_ngram,
+#       engram_max_ngram_size,
+#       engram_kernel_size,
+#       engram_vocab_size,
+#       layer_ids,
+#       pad_id,
+#       seed,
+#   ):
+#     self.config = config
+#     self.mesh = mesh
+#     self.dtype = self.config.dtype
+#     self.weight_dtype = self.config.dtype
+#     self.kernel_init = kernel_init
+#     self.quant = quant
+#     self.rngs = rngs
+
+#     self.layer_id = layer_id
+#     self.layer_ids = layer_ids
+#     self.pad_id = pad_id
+#     self.seed = seed
+#     self.hc_mult = hc_mult
+
+#     # -----------------------------------------------------------------------
+#     # 2. Engram Dimensions & Hyperparameters
+#     # -----------------------------------------------------------------------
+
+#     # Hierarchy: Engram -> n-gram order (n) -> k-th head (k)
+#     # Raw Inputs
+#     self.max_ngram_size = engram_max_ngram_size  # e.g., 4 (tracks 2,3,4-grams)
+#     self.vocab_size = engram_vocab_size
+#     self.conv_kernel_size = engram_kernel_size
+
+#     # The Hierarchy (Paper Notation)
+#     # K: Number of heads per n-gram order
+#     self.num_heads = engram_heads_per_ngram
+
+#     # D_total: Total embedding dimension for ONE n-gram order (sum of all K heads)
+#     self.dim_per_ngram = engram_embed_dim_per_ngram
+
+#     # D_head: Dimension of a single head (The actual size stored in the table)
+#     # Logic: We split the total dimension D evenly across K heads.
+#     self.dim_per_head = self.dim_per_ngram // self.num_heads
+
+#     # Flattened Tensor Sizes
+#     # How many n-gram orders are we tracking? (e.g. 2, 3, 4 -> 3 orders)
+#     self.num_orders = self.max_ngram_size - 1
+
+#     # Final concatenated size: (Num Orders) * (Dim per Order)
+#     self.engram_dim = self.num_orders * self.dim_per_ngram
+
+#     # -----------------------------------------------------------------------
+#     # Vocabulary Size Calculation (Global Prime Sequence)
+#     # -----------------------------------------------------------------------
+#     # Engram uses unique prime numbers for the vocabulary size of every head
+#     # in every layer to maximize hash collision independence.
+
+#     # We instantiate NgramHashMapping here to replicate this deterministic
+#     # sequence. Ideally, this mapping should be created once globally and
+#     # the resulting vocab_sizes passed into this layer to improve startup time.
+
+#     self.hash_mapping = NgramHashMapping(
+#         engram_vocab_size=engram_vocab_size,
+#         max_ngram_size=engram_max_ngram_size,
+#         n_embed_per_ngram=engram_embed_dim_per_ngram,
+#         n_head_per_ngram=engram_heads_per_ngram,
+#         # IMPORTANT: We must pass the FULL list of layer_ids, not just self.layer_id.
+#         # The mapping finds primes sequentially across all layers; passing a partial
+#         # list would reset the prime search and break alignment with the reference model.
+#         layer_ids=layer_ids,
+#         # Inject the pre-loaded tokenizer to avoid redundant disk I/O per layer.
+#         tokenizer=tokenizer,
+#         pad_id=pad_id,
+#         seed=seed,
+#     )
+#     # Extract the specific list of primes [M_{n,k}] for THIS layer only.
+#     # The structure is [[ngram2_head1, ngram2_head2...], [ngram3_head1...]]
+#     # We flatten it into a single list of ints: [N1, N2, N3, ...]
+#     vocab_sizes = self.hash_mapping.get_vocab_sizes(self.layer_id)
+#     print(f"DEBUG JAX Layer, Vocab Sizes: {vocab_sizes}")
+
+#     # -----------------------------------------------------------------------
+
+#     # 1. Multi-Head Embedding (Memory Warehouse)
+#     # Stores the learnable vectors E_{n,k} for all n-gram heads in one flattened table.
+#     self.mhe = MultiHeadEmbedding(list_of_N=vocab_sizes, D=self.dim_per_head, config=config, mesh=mesh, rngs=rngs)
+
+#     # 2. Short Convolution (Temporal Smoothing)
+#     # Applies depthwise causal convolution to smooth the retrieved memory over time.
+#     self.short_conv = ShortConv(
+#         config=config,
+#         hidden_size=config.base_emb_dim,
+#         kernel_size=self.conv_kernel_size,
+#         dilation=self.max_ngram_size,
+#         hc_mult=hc_mult,
+#         rngs=rngs,
+#     )
+
+#     # 3. Projection Layers for Gating Mechanism
+#     # Project retrieved memory into Value space
+#     self.value_proj = DenseGeneral(
+#         in_features_shape=self.engram_dim,
+#         out_features_shape=config.base_emb_dim,
+#         axis=-1,
+#         kernel_init=self.kernel_init,
+#         kernel_axes=("a", "b"),  # TODO(shuningjin)
+#         dtype=self.dtype,
+#         weight_dtype=self.weight_dtype,
+#         quant=self.quant,
+#         matmul_precision=self.config.matmul_precision,
+#         shard_mode=self.config.shard_mode,
+#         rngs=self.rngs,
+#         use_bias=True,
+#     )
+
+#     # Project retrieved memory into Key space (one per branch)
+#     self.key_projs = nnx.List(
+#         [
+#             DenseGeneral(
+#                 in_features_shape=self.engram_dim,
+#                 out_features_shape=config.base_emb_dim,
+#                 axis=-1,
+#                 kernel_init=self.kernel_init,
+#                 kernel_axes=("a", "b"),  # TODO(shuningjin)
+#                 dtype=self.dtype,
+#                 weight_dtype=self.weight_dtype,
+#                 quant=self.quant,
+#                 matmul_precision=self.config.matmul_precision,
+#                 shard_mode=self.config.shard_mode,
+#                 rngs=self.rngs,
+#                 use_bias=True,
+#             )
+#             for _ in range(hc_mult)
+#         ]
+#     )
+
+#     # Normalization before Gating (Key)
+#     self.k_norms = nnx.List(
+#         [
+#             RMSNorm(
+#                 num_features=config.base_emb_dim,
+#                 dtype=config.dtype,
+#                 weight_dtype=config.weight_dtype,
+#                 kernel_axes=("norm",),
+#                 # epsilon=config.normalization_layer_epsilon,
+#                 epsilon=1e-6,  # Match PyTorch default
+#                 rngs=self.rngs,
+#             )
+#             for _ in range(hc_mult)
+#         ]
+#     )
+#     # Normalization before Gating (Query)
+#     self.q_norms = nnx.List(
+#         [
+#             RMSNorm(
+#                 num_features=config.base_emb_dim,
+#                 dtype=config.dtype,
+#                 weight_dtype=config.weight_dtype,
+#                 kernel_axes=("norm",),
+#                 # epsilon=config.normalization_layer_epsilon,
+#                 epsilon=1e-6,  # Match PyTorch default
+#                 rngs=self.rngs,
+#             )
+#             for _ in range(hc_mult)
+#         ]
+#     )
+
+#   def __call__(self, hidden_states: jax.Array, input_ids: jax.Array) -> jax.Array:
+#     """
+#     Args:
+#         hidden_states: Current transformer state (Query). Shape: (B, L, G, C)
+#         input_ids: Raw token IDs. Shape: (B, L)
+#     Returns:
+#         output: Engram-augmented residuals. Shape: (B, L, G, C)
+
+#     Note: G = hc_mult
+#     """
+
+#     B, L, G, C = hidden_states.shape
+#     # 1. Generate Hash Indices
+#     # Map raw text -> n-gram contexts -> hash indices z_{t,n,k}
+#     # Shape: (B, L) -> (B, L, H_en)
+#     # where H_en is the total count of heads across all n-gram orders.
+#     hash_input_ids = jnp.array(self.hash_mapping.hash(input_ids)[self.layer_id])
+#     print("jax1", hash_input_ids)
+
+#     # 2. Retrieve Memory
+#     # Fetch e_{t,n,k} from the embedding table.
+#     # Shape: (B, L, H_en, D_head)
+#     embeddings = self.mhe(hash_input_ids)
+
+#     # Flatten all n-gram heads into one vector e_t
+#     # (B, L, H_en, D_head) -> (B, L, D_en)
+#     embeddings = embeddings.reshape(B, L, -1)
+#     print("jax2", embeddings)
+
+#     # 3. Gating Mechanism (Scaled Dot-Product)
+#     # Decide relevance of memory (Key) to current state (Query)
+#     gates = []
+
+#     for i in range(G):
+#       # Setup layers for this branch
+#       k_norm = self.k_norms[i]
+#       q_norm = self.q_norms[i]
+#       key_proj = self.key_projs[i]
+
+#       # Extract Query for this branch: (B, L, C)
+#       query = hidden_states[:, :, i, :]
+
+#       # Key: Projection of retrieved n-gram memory
+#       # Generate Key from Engram Memory: (B, L, D_en) -> (B, L, C)
+#       k = k_norm(key_proj(embeddings))
+#       print("jax3", k)
+
+#       # Query: Current hidden state from the transformer
+#       # Normalize Query: (B, L, C)
+#       q = q_norm(query)
+#       print("jax4", q)
+
+#       # Gate Score (Scalar per token): (K * Q) / sqrt(d)
+#       qk_product = jnp.einsum("blc,blc->bl", q, k, precision=self.config.matmul_precision)
+#       # (B, L)
+#       gate = qk_product / jnp.sqrt(C)
+#       print("jax5", gate)
+
+#       # TODO(shuningjin): why
+#       # Stabilization trick: sign(x) * sqrt(|x|)
+#       gate = jnp.sqrt(jnp.maximum(jnp.abs(gate), 1e-6)) * jnp.sign(gate)
+
+#       # Sigmoid activation to get gating probability [0, 1]
+#       gate = jax.nn.sigmoid(gate)
+#       gates.append(gate)
+
+#     # Stack gates for all G branches
+#     # Shape: (B, L, G)
+#     gates_stack = jnp.stack(gates, axis=2)
+
+#     # 4. Apply Gate to Value Projection
+#     # v = Gate * Value_Proj(Memory)
+#     # Project Engram Memory to Value: (B, L, D_en) -> (B, L, C)
+#     value = self.value_proj(embeddings)
+
+#     # Broadcast Value across G branches and apply Gate
+#     # (B, L, G, 1) * (B, L, 1, C) -> (B, L, G, C)
+#     v = gates_stack[:, :, :, None] * value[:, :, None, :]
+
+#     # 5. Temporal Smoothing & Residual
+#     # Apply Depthwise Conv (mixes L, keeps G and C independent)
+#     # Shape remains, (B, L, G, C)
+#     conv_out = self.short_conv(v)
+#     # residual for conv component
+#     output = v + conv_out
+
+#     # Note: The 'hidden_states' (residual x) is usually added by the caller/block wrapper
+#     return output
+
+
+class Engram(nnx.Module):
+
   def __init__(
       self,
       layer_id: int,
       rngs: nnx.Rngs,
       config,
       mesh,
-      tokenizer,  # pass the tokenizer to avoid re-loading
+      tokenizer,
       quant: Optional[Quant] = None,
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       *,
@@ -568,72 +838,34 @@ class Engram(nnx.Module):
     self.seed = seed
     self.hc_mult = hc_mult
 
-    # -----------------------------------------------------------------------
-    # 2. Engram Dimensions & Hyperparameters
-    # -----------------------------------------------------------------------
-
-    # Hierarchy: Engram -> n-gram order (n) -> k-th head (k)
-    # Raw Inputs
-    self.max_ngram_size = engram_max_ngram_size  # e.g., 4 (tracks 2,3,4-grams)
+    # --- Dimensions ---
+    self.max_ngram_size = engram_max_ngram_size
     self.vocab_size = engram_vocab_size
     self.conv_kernel_size = engram_kernel_size
-
-    # The Hierarchy (Paper Notation)
-    # K: Number of heads per n-gram order
     self.num_heads = engram_heads_per_ngram
-
-    # D_total: Total embedding dimension for ONE n-gram order (sum of all K heads)
     self.dim_per_ngram = engram_embed_dim_per_ngram
-
-    # D_head: Dimension of a single head (The actual size stored in the table)
-    # Logic: We split the total dimension D evenly across K heads.
     self.dim_per_head = self.dim_per_ngram // self.num_heads
-
-    # Flattened Tensor Sizes
-    # How many n-gram orders are we tracking? (e.g. 2, 3, 4 -> 3 orders)
     self.num_orders = self.max_ngram_size - 1
-
-    # Final concatenated size: (Num Orders) * (Dim per Order)
     self.engram_dim = self.num_orders * self.dim_per_ngram
 
-    # -----------------------------------------------------------------------
-    # Vocabulary Size Calculation (Global Prime Sequence)
-    # -----------------------------------------------------------------------
-    # Engram uses unique prime numbers for the vocabulary size of every head
-    # in every layer to maximize hash collision independence.
-
-    # We instantiate NgramHashMapping here to replicate this deterministic
-    # sequence. Ideally, this mapping should be created once globally and
-    # the resulting vocab_sizes passed into this layer to improve startup time.
-
+    # --- Hash Mapping ---
     self.hash_mapping = NgramHashMapping(
         engram_vocab_size=engram_vocab_size,
         max_ngram_size=engram_max_ngram_size,
         n_embed_per_ngram=engram_embed_dim_per_ngram,
         n_head_per_ngram=engram_heads_per_ngram,
-        # IMPORTANT: We must pass the FULL list of layer_ids, not just self.layer_id.
-        # The mapping finds primes sequentially across all layers; passing a partial
-        # list would reset the prime search and break alignment with the reference model.
         layer_ids=layer_ids,
-        # Inject the pre-loaded tokenizer to avoid redundant disk I/O per layer.
         tokenizer=tokenizer,
         pad_id=pad_id,
         seed=seed,
     )
-    # Extract the specific list of primes [M_{n,k}] for THIS layer only.
-    # The structure is [[ngram2_head1, ngram2_head2...], [ngram3_head1...]]
-    # We flatten it into a single list of ints: [N1, N2, N3, ...]
     vocab_sizes = self.hash_mapping.get_vocab_sizes(self.layer_id)
     print(f"DEBUG JAX Layer, Vocab Sizes: {vocab_sizes}")
 
-    # -----------------------------------------------------------------------
-
-    # 1. Multi-Head Embedding (Memory Warehouse)
-    # Stores the learnable vectors E_{n,k} for all n-gram heads in one flattened table.
+    # --- 1. Multi-Head Embedding ---
     self.mhe = MultiHeadEmbedding(list_of_N=vocab_sizes, D=self.dim_per_head, config=config, mesh=mesh, rngs=rngs)
 
-    # 2. Short Convolution (Temporal Smoothing)
-    # Applies depthwise causal convolution to smooth the retrieved memory over time.
+    # --- 2. Short Convolution (Already Vectorized internally) ---
     self.short_conv = ShortConv(
         config=config,
         hidden_size=config.base_emb_dim,
@@ -643,8 +875,9 @@ class Engram(nnx.Module):
         rngs=rngs,
     )
 
-    # 3. Projection Layers for Gating Mechanism
-    # Project retrieved memory into Value space
+    # --- 3. Vectorized Gating Layers ---
+
+    # A. Value Projection (Shared input, Shared weights -> Standard Layer)
     self.value_proj = DenseGeneral(
         in_features_shape=self.engram_dim,
         out_features_shape=config.base_emb_dim,
@@ -660,57 +893,43 @@ class Engram(nnx.Module):
         use_bias=True,
     )
 
-    # Project retrieved memory into Key space (one per branch)
-    self.key_projs = nnx.List(
-        [
-            DenseGeneral(
-                in_features_shape=self.engram_dim,
-                out_features_shape=config.base_emb_dim,
-                axis=-1,
-                kernel_init=self.kernel_init,
-                kernel_axes=("a", "b"),  # TODO(shuningjin)
-                dtype=self.dtype,
-                weight_dtype=self.weight_dtype,
-                quant=self.quant,
-                matmul_precision=self.config.matmul_precision,
-                shard_mode=self.config.shard_mode,
-                rngs=self.rngs,
-                use_bias=True,
-            )
-            for _ in range(hc_mult)
-        ]
-    )
+    # B. Key Projections (Shared input, Independent weights per group)
+    # We create G copies of DenseGeneral
+    @nnx.split_rngs(splits=hc_mult)
+    @nnx.vmap(in_axes=0, out_axes=0)
+    def create_key_projs(r):
+      return DenseGeneral(
+          in_features_shape=self.engram_dim,
+          out_features_shape=config.base_emb_dim,
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=("a", "b"),  # TODO(shuningjin)
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
+          rngs=r,
+          use_bias=True,
+      )
 
-    # Normalization before Gating (Key)
-    self.k_norms = nnx.List(
-        [
-            RMSNorm(
-                num_features=config.base_emb_dim,
-                dtype=config.dtype,
-                weight_dtype=config.weight_dtype,
-                kernel_axes=("norm",),
-                # epsilon=config.normalization_layer_epsilon,
-                epsilon=1e-6,  # Match PyTorch default
-                rngs=self.rngs,
-            )
-            for _ in range(hc_mult)
-        ]
-    )
-    # Normalization before Gating (Query)
-    self.q_norms = nnx.List(
-        [
-            RMSNorm(
-                num_features=config.base_emb_dim,
-                dtype=config.dtype,
-                weight_dtype=config.weight_dtype,
-                kernel_axes=("norm",),
-                # epsilon=config.normalization_layer_epsilon,
-                epsilon=1e-6,  # Match PyTorch default
-                rngs=self.rngs,
-            )
-            for _ in range(hc_mult)
-        ]
-    )
+    self.key_projs = create_key_projs(rngs)
+
+    # C. Norms (Independent weights per group)
+    @nnx.split_rngs(splits=hc_mult)
+    @nnx.vmap(in_axes=0, out_axes=0)
+    def create_norms(r):
+      return RMSNorm(
+          num_features=config.base_emb_dim,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("norm",),
+          epsilon=1e-6,
+          rngs=r,
+      )
+
+    self.k_norms = create_norms(rngs)
+    self.q_norms = create_norms(rngs)  # Note: Creates separate parameters for Q norms
 
   def __call__(self, hidden_states: jax.Array, input_ids: jax.Array) -> jax.Array:
     """
@@ -722,81 +941,53 @@ class Engram(nnx.Module):
 
     Note: G = hc_mult
     """
-
     B, L, G, C = hidden_states.shape
-    # 1. Generate Hash Indices
-    # Map raw text -> n-gram contexts -> hash indices z_{t,n,k}
-    # Shape: (B, L) -> (B, L, H_en)
-    # where H_en is the total count of heads across all n-gram orders.
+
+    # 1. Retrieve Memory
+    # (B, L) -> (B, L, H_en)
     hash_input_ids = jnp.array(self.hash_mapping.hash(input_ids)[self.layer_id])
-    print("jax1", hash_input_ids)
 
-    # 2. Retrieve Memory
-    # Fetch e_{t,n,k} from the embedding table.
-    # Shape: (B, L, H_en, D_head)
-    embeddings = self.mhe(hash_input_ids)
-
-    # Flatten all n-gram heads into one vector e_t
     # (B, L, H_en, D_head) -> (B, L, D_en)
-    embeddings = embeddings.reshape(B, L, -1)
-    print("jax2", embeddings)
+    embeddings = self.mhe(hash_input_ids).reshape(B, L, -1)
 
-    # 3. Gating Mechanism (Scaled Dot-Product)
-    # Decide relevance of memory (Key) to current state (Query)
-    gates = []
+    # 2. Compute Keys (Vectorized Broadcast)
+    # We want to apply each of the G key_projs to the SAME embeddings.
+    # in_axes: (0, None) -> 0 splits the Dense layers, None broadcasts embeddings
+    # out_axes: 2        -> Stack the results at axis 2 to get (B, L, G, C)
+    keys_unnorm = nnx.vmap(lambda m, x: m(x), in_axes=(0, None), out_axes=2)(self.key_projs, embeddings)
 
-    for i in range(G):
-      # Setup layers for this branch
-      k_norm = self.k_norms[i]
-      q_norm = self.q_norms[i]
-      key_proj = self.key_projs[i]
+    # 3. Compute Norms (Vectorized Map)
+    # Map over the G dimension (Axis 2) for both weights and input
+    # K: (B, L, G, C) -> (B, L, G, C)
+    k = nnx.vmap(lambda m, x: m(x), in_axes=(0, 2), out_axes=2)(self.k_norms, keys_unnorm)
 
-      # Extract Query for this branch: (B, L, C)
-      query = hidden_states[:, :, i, :]
+    # Q: (B, L, G, C) -> (B, L, G, C)
+    q = nnx.vmap(lambda m, x: m(x), in_axes=(0, 2), out_axes=2)(self.q_norms, hidden_states)
 
-      # Key: Projection of retrieved n-gram memory
-      # Generate Key from Engram Memory: (B, L, D_en) -> (B, L, C)
-      k = k_norm(key_proj(embeddings))
-      print("jax3", k)
+    # 4. Gating (Vectorized)
+    # Dot product: (B, L, G, C) * (B, L, G, C) -> sum over C -> (B, L, G)
+    # Using einsum for clarity, or just standard multiplication + sum
+    qk_product = jnp.sum(q * k, axis=-1)
 
-      # Query: Current hidden state from the transformer
-      # Normalize Query: (B, L, C)
-      q = q_norm(query)
-      print("jax4", q)
+    # Scale and Stabilize
+    gate_logits = qk_product / jnp.sqrt(C)
+    gate_logits = jnp.sqrt(jnp.maximum(jnp.abs(gate_logits), 1e-6)) * jnp.sign(gate_logits)
 
-      # Gate Score (Scalar per token): (K * Q) / sqrt(d)
-      qk_product = jnp.einsum("blc,blc->bl", q, k, precision=self.config.matmul_precision)
-      # (B, L)
-      gate = qk_product / jnp.sqrt(C)
-      print("jax5", gate)
+    # Sigmoid -> (B, L, G)
+    gates = jax.nn.sigmoid(gate_logits)
 
-      # TODO(shuningjin): why
-      # Stabilization trick: sign(x) * sqrt(|x|)
-      gate = jnp.sqrt(jnp.maximum(jnp.abs(gate), 1e-6)) * jnp.sign(gate)
-
-      # Sigmoid activation to get gating probability [0, 1]
-      gate = jax.nn.sigmoid(gate)
-      gates.append(gate)
-
-    # Stack gates for all G branches
-    # Shape: (B, L, G)
-    gates_stack = jnp.stack(gates, axis=2)
-
-    # 4. Apply Gate to Value Projection
-    # v = Gate * Value_Proj(Memory)
-    # Project Engram Memory to Value: (B, L, D_en) -> (B, L, C)
+    # 5. Value Projection & Gating
+    # Project: (B, L, D_en) -> (B, L, C)
     value = self.value_proj(embeddings)
 
-    # Broadcast Value across G branches and apply Gate
-    # (B, L, G, 1) * (B, L, 1, C) -> (B, L, G, C)
-    v = gates_stack[:, :, :, None] * value[:, :, None, :]
+    # Broadcast Value: (B, L, 1, C)
+    # Multiply by Gates: (B, L, G, 1)
+    # Result: (B, L, G, C)
+    v = gates[:, :, :, None] * value[:, :, None, :]
 
-    # 5. Temporal Smoothing & Residual
-    # Apply Depthwise Conv (mixes L, keeps G and C independent)
-    # Shape remains, (B, L, G, C)
+    # 6. Temporal Smoothing (ShortConv)
+    # Input: (B, L, G, C) -> Output: (B, L, G, C)
     conv_out = self.short_conv(v)
-    # residual for conv component
-    output = v + conv_out
 
-    # Note: The 'hidden_states' (residual x) is usually added by the caller/block wrapper
-    return output
+    # 7. Residual (v + conv_out)
+    return v + conv_out

@@ -708,18 +708,55 @@ def map_linear(pt_linear):
   return d
 
 
+# def get_jax_engram_weights(pt_engram) -> dict:
+
+#   key_projs_weights = [map_linear(proj) for proj in pt_engram.key_projs]
+#   norm1_weights = [{"scale": to_jax(n.weight)} for n in pt_engram.norm1]
+#   norm2_weights = [{"scale": to_jax(n.weight)} for n in pt_engram.norm2]
+
+#   return {
+#       "mhe": get_mhe_weights(pt_engram.multi_head_embedding),
+#       "value_proj": map_linear(pt_engram.value_proj),
+#       "key_projs": to_nnx_list_dict(key_projs_weights),
+#       "k_norms": to_nnx_list_dict(norm1_weights),
+#       "q_norms": to_nnx_list_dict(norm2_weights),
+#       "short_conv": get_shortconv_weights(pt_engram.short_conv),
+#   }
+
+
 def get_jax_engram_weights(pt_engram) -> dict:
+  # --- Helper: Stack List of Linear Weights ---
+  # Turns a list of dicts [{'kernel': K1, 'bias': B1}, ...]
+  # into a single dict {'kernel': Stacked_K, 'bias': Stacked_B}
+  def stack_linears(pt_layers):
+    # 1. Convert each layer individually using your existing map_linear
+    #    map_linear handles the transpose (Out, In) -> (In, Out)
+    weights_list = [map_linear(l) for l in pt_layers]
 
-  key_projs_weights = [map_linear(proj) for proj in pt_engram.key_projs]
-  norm1_weights = [{"scale": to_jax(n.weight)} for n in pt_engram.norm1]
-  norm2_weights = [{"scale": to_jax(n.weight)} for n in pt_engram.norm2]
+    # 2. Stack them
+    return {
+        "kernel": jnp.stack([w["kernel"] for w in weights_list], axis=0),
+        "bias": jnp.stack([w["bias"] for w in weights_list], axis=0),
+    }
 
+  # --- Helper: Stack List of Norm Weights ---
+  def stack_norms(pt_layers):
+    scales = [to_jax(l.weight) for l in pt_layers]
+    return {"scale": jnp.stack(scales, axis=0)}
+
+  # --- Main Dictionary ---
   return {
       "mhe": get_mhe_weights(pt_engram.multi_head_embedding),
+      # Standard Single Layer (No Stacking needed)
       "value_proj": map_linear(pt_engram.value_proj),
-      "key_projs": to_nnx_list_dict(key_projs_weights),
-      "k_norms": to_nnx_list_dict(norm1_weights),
-      "q_norms": to_nnx_list_dict(norm2_weights),
+      # Vectorized Layers (Stacking needed)
+      # Result shapes: Kernel (G, In, Out), Bias (G, Out)
+      "key_projs": stack_linears(pt_engram.key_projs),
+      # Result shapes: Scale (G, C)
+      # Note: Mapping pt_engram.norm1 -> k_norms
+      "k_norms": stack_norms(pt_engram.norm1),
+      # Note: Mapping pt_engram.norm2 -> q_norms
+      "q_norms": stack_norms(pt_engram.norm2),
       "short_conv": get_shortconv_weights(pt_engram.short_conv),
   }
 
