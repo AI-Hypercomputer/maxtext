@@ -27,7 +27,7 @@ from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import pyconfig
 from MaxText import multimodal_utils
-from MaxText.multimodal import preprocessor
+from MaxText.multimodal import processor
 from maxtext.common import profiler
 # Placeholder: internal
 
@@ -101,7 +101,7 @@ def main(argv: Sequence[str]) -> None:
   prefill_length = config.max_prefill_predict_length
   processor_outputs = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
-    processor_outputs = preprocessor.preprocess_mm_data(config)
+    processor_outputs = processor.preprocess_mm_data(config)
     image_offsets = multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_outputs)
 
     prefill_length -= image_offsets
