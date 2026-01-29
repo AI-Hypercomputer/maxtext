@@ -1,0 +1,6065 @@
+{
+  ".step": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  },
+  ".params/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
+    ],
+    "shape": [
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['sinks']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['post_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['pre_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['sinks']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['post_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['pre_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['logits_dense']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      2880,
+      201088
+    ]
+  },
+  ".params/['params']/['token_embedder']/['embedding']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      201088,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.count": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
+    ],
+    "shape": [
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['sinks']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['post_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['pre_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['sinks']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['post_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['pre_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['logits_dense']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      2880,
+      201088
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['token_embedder']/['embedding']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      201088,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
+    ],
+    "shape": [
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['sinks']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['post_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['pre_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['sinks']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      null,
+      "stage"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "tensor_transpose",
+        "context"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo_bias']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['post_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['pre_self_attention_layer_norm']/['scale']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['logits_dense']/['kernel']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      2880,
+      201088
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['token_embedder']/['embedding']": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      201088,
+      2880
+    ]
+  },
+  ".opt_state/[2]/.count": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "context_autoregressive",
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "expert",
+        "autoregressive"
+      ],
+      "shape": {
+        "data": 4,
+        "stage": 1,
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "sequence": 1,
+        "context": 1,
+        "context_autoregressive": 1,
+        "tensor": 1,
+        "tensor_transpose": 1,
+        "tensor_sequence": 1,
+        "expert": 1,
+        "autoregressive": 1
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  }
+}
