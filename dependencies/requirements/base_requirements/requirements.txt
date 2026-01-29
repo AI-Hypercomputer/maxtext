@@ -2,8 +2,7 @@ absl-py
 aqtp
 array-record
 cloud-accelerator-diagnostics
-# TODO(b/477743392): Remove the pinned versions once the yanked version detection problem is resolved
-cloud-tpu-diagnostics==0.1.5
+cloud-tpu-diagnostics
 datasets
 flax
 gcsfs
@@ -13,7 +12,6 @@ google-cloud-mldiagnostics
 google-cloud-monitoring
 grain[parquet]
 huggingface_hub
-hf-xet==1.2.0
 jax
 jaxlib
 jaxtyping
@@ -40,7 +38,7 @@ tensorflow-datasets
 tensorflow-text
 tensorflow
 tiktoken
-tokamax==0.0.8
+tokamax
 transformers
 qwix
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip

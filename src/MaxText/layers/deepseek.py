@@ -27,7 +27,6 @@ from flax import nnx
 from MaxText import max_utils
 from MaxText.common_types import Config
 from MaxText.common_types import MODEL_MODE_PREFILL
-from MaxText.inference import page_manager
 from MaxText.layers import attention_mla
 from MaxText.layers import initializers
 from MaxText.layers import linears
@@ -37,6 +36,7 @@ from MaxText.layers import quantizations
 from MaxText.layers.linears import Dropout
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
+from maxtext.inference import page_manager
 
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
@@ -387,9 +387,10 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
 
   def mlp_op(self, x, deterministic, *args, **kwargs):
-    return self.with_logical_constraint(
-        self.DeepSeekMoeBlock_0(x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding)
+    mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(
+        x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
     )
+    return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates
 
 
 DeepSeekMoELayerToLinen = nnx_wrappers.to_linen_class(

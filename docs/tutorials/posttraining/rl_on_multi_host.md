@@ -98,29 +98,10 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 
 ### Option 2: Converting from a Hugging Face checkpoint
 
-You can convert a Hugging Face checkpoint to MaxText format using the
-`src/MaxText/utils/ckpt_conversion/to_maxtext.py` script. This is useful if you
-have a pre-trained model from Hugging Face that you want to use with MaxText.
-
-First, ensure you have the necessary dependencies installed (PyTorch for the
-conversion script). Then, run the conversion script on a CPU machine. For large
-models, use the `--lazy_load_tensors` flag to reduce memory usage during
-conversion.
-
-For example, converting a Llama3.1-70B model with `--lazy_load_tensors=true`
-uses around 200GB of RAM and completes in ~10 minutes. This command will
-download the Hugging Face model and convert it to the MaxText format, saving it
-to the specified GCS bucket.
+Refer the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
-    model_name=${HF_MODEL} \
-    hf_access_token=${HF_TOKEN} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/${WORKLOAD} \
-    scan_layers=true checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false \
-    skip_jax_distributed_system=true --lazy_load_tensors=true
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
 ## Build and upload MaxText Docker image with post-training dependencies

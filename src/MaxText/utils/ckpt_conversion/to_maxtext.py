@@ -28,6 +28,10 @@ Key Parameters (to be set in the config file or as command-line overrides):
   lazy_load: (bool) If True, uses an on-demand loading strategy to minimize RAM
              usage during conversion. Recommended if, 2 * model_size (GB) >= system RAM
              Defaults to False.
+  --hf_model_path: (Optional) Specifies a local or remote directory containing the model weights. 
+      If unspecified, we use the default Hugging Face repository ID 
+      (e.g., openai/gpt-oss-20b; see `HF_IDS[model_name]` in `utils/ckpt_conversion/utils`).
+      This is necessary for locally dequantized models like GPT-OSS or DeepSeek. 
 
 Environment Variables:
   HF_AUTH_TOKEN: (Required) HuggingFace authentication token, needed to
@@ -63,64 +67,36 @@ import threading
 from functools import partial
 from typing import Sequence, List, Any, Callable
 import numpy as np
-import jax
-import psutil
-from flax.training import train_state
-import flax.linen as nn
-from transformers import AutoConfig
-from tqdm import tqdm
-from huggingface_hub import hf_hub_download, list_repo_files
-from safetensors import safe_open
 import absl
 
+from transformers import AutoConfig
+from huggingface_hub import hf_hub_download, list_repo_files
+from safetensors import safe_open
+import jax
+import flax.linen as nn
 from orbax.checkpoint import type_handlers
+
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.inference_utils import str2bool
 from MaxText.layers import models, quantizations
+from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model, validate_and_filter_param_map_keys
-from maxtext.common import checkpointing
+from MaxText.utils.ckpt_conversion.utils.utils import (
+    apply_hook_fns,
+    HF_IDS,
+    get_hf_model,
+    validate_and_filter_param_map_keys,
+    MemoryMonitorTqdm,
+    print_ram_usage,
+    print_peak_memory,
+)
+from maxtext.inference.inference_utils import str2bool
 
-jax.config.update("jax_platform_name", "cpu")
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
-
-
-class MemoryMonitorTqdm(tqdm):
-  """Custom tqdm class that displays memory usage in the progress bar."""
-
-  def format_meter(
-      self,
-      n,
-      total,
-      elapsed,
-      postfix=None,
-      **extra_kwargs,
-  ):
-    """Override to add memory usage info to the postfix."""
-    # Get memory info
-    memory = psutil.virtual_memory()
-    used_gb = memory.used / (1024**3)
-    total_gb = memory.total / (1024**3)
-    memory_percent = memory.percent
-
-    # Create memory postfix
-    memory_info = f"RAM: {used_gb:.1f}/{total_gb:.1f}GB ({memory_percent:.1f}%)"
-
-    # Add memory info to postfix
-    if postfix:
-      if isinstance(postfix, dict):
-        postfix["memory"] = memory_info
-      else:
-        postfix = f"{postfix}, {memory_info}"
-    else:
-      postfix = memory_info
-
-    return super().format_meter(n=n, total=total, elapsed=elapsed, postfix=postfix, **extra_kwargs)
 
 
 class LazyHFLoader:
@@ -654,20 +630,12 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   hook_fn_map_mt = HOOK_FNS[model_key](hf_config_obj.to_dict(), config, config.scan_layers, saving_to_hf=False)
   max_logging.log("Parameter mappings and hooks obtained.")
 
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      output_directory,
-      enable_checkpointing=True,
-      use_async=False,  # Synchronous saving for simplicity in conversion script
-      save_interval_steps=1,  # Save at step 0
-      use_ocdbt=config.checkpoint_storage_use_ocdbt,
-      use_zarr3=config.checkpoint_storage_use_zarr3,
-  )
-
   maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(config)
 
   # Weight transformation
   max_logging.log("Starting weight transformation...")
   start = time.time()
+  # Stores MaxText weights: numpy.ndarray
   final_mt_weights = [None] * len(maxtext_abstract_dict)
 
   # Preprocess key
@@ -676,7 +644,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   for mt_param_key_or_keys in MemoryMonitorTqdm(
       filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
   ):
-    if not use_lazy_load and config.scan_layers:
+    if not use_lazy_load:
       max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
 
     hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
@@ -715,37 +683,34 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   jax_weights = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
   del final_mt_weights, abstract_params_treedef
 
-  # Create TrainState for saving.
-  final_params_for_state = {"params": jax_weights}
-  final_save_state = train_state.TrainState(step=0, apply_fn=None, params=final_params_for_state, tx=None, opt_state={})
-  del final_params_for_state
-
   print_ram_usage("Before saving")
-  start = time.time()
-  if checkpoint_manager is not None:
-    if use_lazy_load:
-      max_logging.log("Starting checkpoint save (loading weights just-in-time)...")
-    else:
-      max_logging.log("Starting checkpoint save...")
+  if use_lazy_load:
+    max_logging.log("Starting checkpoint save (loading weights just-in-time)...")
+  else:
+    max_logging.log("Starting checkpoint save...")
 
-    if checkpointing.save_checkpoint(checkpoint_manager, 0, final_save_state):
-      max_logging.log("saved a checkpoint at step 0")
-
-    # Upon preemption, exit when and only when all ongoing saves are complete.
-    if checkpoint_manager.reached_preemption(0):
-      checkpoint_manager.wait_until_finished()
-      sys.exit()
+  # Save the converted weights to a MaxText checkpoint.
+  # If simulated_cpu_devices_count > 1, weights are promoted from NumPy to JAX arrays
+  # and sharded across virtual devices.
+  save_weights_to_checkpoint(
+      output_directory,
+      jax_weights,
+      test_args.simulated_cpu_devices_count,
+      config.checkpoint_storage_use_ocdbt,
+      config.checkpoint_storage_use_zarr3,
+  )
 
   print_ram_usage("Program Ends")
   max_logging.log(f"Conversion complete. Checkpoint saved to {output_directory}")
-  max_logging.log(f"Elapse for save: {(time.time() - start) / 60:.2f} min")
   max_logging.log(f"Overall Elapse: {(time.time() - overall_start) / 60:.2f} min")
+  print_peak_memory()
 
 
 if __name__ == "__main__":
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"  # Suppress TensorFlow logging
 
+  # Define local parser
   parser = argparse.ArgumentParser()
   parser.add_argument(
       "--lazy_load_tensors",
@@ -754,13 +719,32 @@ if __name__ == "__main__":
       default=False,
       help="Whether to use lazy loading of HF tensors.",
   )
-  # if not specified, default to MaxText.utils.ckpt_conversion.utils.utils.HF_IDS[model_name]
+  # If not specified, default to MaxText.utils.ckpt_conversion.utils.utils.HF_IDS[model_name]
   parser.add_argument(
       "--hf_model_path", type=str, required=False, default="", help="local path to hf model, or custom remote hf repo"
   )
-  local_args, _ = parser.parse_known_args()
-  model_args = sys.argv
-  to_remove_args = ["--lazy_load_tensors", "--hf_model_path"]
-  for a in to_remove_args:
-    model_args = [s for s in model_args if not s.startswith(a)]
+  # Determines the logical sharding of the output checkpoint by partitioning
+  # weights across virtual XLA devices.
+  # - Even on a single CPU host, JAX can simulate multiple devices (e.g., 16)
+  # - If set to 1, sharding is skipped.
+  # - Sharding is preferred. For downstream loading on TPU pods, this helps prevent OOM and speedup.
+  #
+  # Example: Embedding Layer shape=(151936, 1024)
+  # Case 1: simulated_cpu_devices_count=16 (Sharded)
+  #   sharding: NamedShardingMetadata(shape=[16], ...)
+  #   storage:  chunk_shape=(9496, 1024)  <-- 1/16th of rows per chunk
+  # Case 2: simulated_cpu_devices_count=1 (Monolith)
+  #   sharding: None
+  #   storage:  chunk_shape=(151936, 1024) <-- Full layer in one chunk
+  parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
+
+  # Parse local arguments
+  # Parse known args returns the namespace AND the list of remaining arguments
+  local_args, remaining_args = parser.parse_known_args()
+  # Reconstruct model_args (script name + the args MaxText needs)
+  model_args = [sys.argv[0]] + remaining_args
+
+  # Set jax environment
+  jax.config.update("jax_platforms", "cpu")
+  os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={local_args.simulated_cpu_devices_count}"
   main(model_args, local_args)

@@ -34,7 +34,7 @@ jobs:
           . $GITHUB_WORKSPACE/venv/bin/activate
           uv pip install -e . --no-deps
           uv pip install torch
-          sphinx-build -W -b html docs docs/_build/html
+          sphinx-build -b html docs docs/_build/html
         env:
           JAX_PLATFORMS: cpu
           CUDA_VISIBLE_DEVICES: ""

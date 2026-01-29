@@ -39,6 +39,7 @@ source $VENV_NAME/bin/activate
 uv pip install -e .[tpu] --resolution=lowest
 install_maxtext_github_deps
 ```
+
 ## Setup environment variables
 
 ```sh
@@ -53,9 +54,11 @@ export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
 ```
 
 ## Hugging Face checkpoint to Maxtext checkpoint
+
 This section explains how to prepare your model checkpoint for use with MaxText. You have two options: using an existing MaxText checkpoint or converting a Hugging Face checkpoint.
 
 ### Option 1: Using an existing MaxText checkpoint
+
 If you already have a MaxText-compatible model checkpoint, simply set the following environment variable and move on to the next section.
 
 ```sh
@@ -63,30 +66,11 @@ export MODEL_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/
 ```
 
 ### Option 2: Converting a Hugging Face checkpoint
-If your model checkpoint is from Hugging Face, you need to run a conversion script to make it MaxText-compatible.
 
-1. **Set the Output Path:** First, define where the converted MaxText checkpoint will be saved. For example:
+Refer the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
-```sh
-export MODEL_CKPT_DIRECTORY=${BASE_OUTPUT_DIRECTORY}/maxtext-checkpoint
-```
-
-2. **Run the Conversion Script:** Execute the following command that downloads the specified Hugging Face model and converts its weights into the MaxText format. The conversion script only supports official versions of models from Hugging Face. To see the specific models and versions currently supported for conversion, please refer to the `HF_IDS` dictionary in the MaxText utility file [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/utils.py).
-
-```sh
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu  # Ensure torch is installed for the conversion script
-
-python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml \
-    model_name=${MODEL_NAME} \
-    hf_access_token=${HF_TOKEN} \
-    base_output_directory=${MODEL_CKPT_DIRECTORY} \
-    scan_layers=True skip_jax_distributed_system=True
-```
-
-3. **Use the Converted Checkpoint:** Set the following environment variable to use the converted checkpoint:
-
-```sh
-export MODEL_CKPT_PATH=${MODEL_CKPT_DIRECTORY}/0/items
+```bash
+export MODEL_CKPT_PATH=<gcs path for MaxText checkpoint> # gs://my-bucket/my-checkpoint-directory/0/items
 ```
 
 ## Dataset
@@ -98,7 +82,7 @@ MaxText provides examples to work with [Common Crawl](https://commoncrawl.org/).
 Run these steps once per project prior to any local development or cluster experiments.
 
 1. Create two gcs buckets in your project, one for downloading and retrieving the dataset and the other for storing the logs.
-2. Download the dataset in your gcs bucket.
+1. Download the dataset in your gcs bucket.
 
 MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them.
 
@@ -129,7 +113,7 @@ python3 -m MaxText.train \
   steps=10 per_device_batch_size=1
 ```
 
-You can find some [end to end scripts here](https://github.com/AI-Hypercomputer/maxtext/tree/main/end_to_end/tpu).
+You can find some [end to end scripts here](https://github.com/AI-Hypercomputer/maxtext/tree/main/tests/end_to_end/tpu).
 These scripts can provide a reference point for various scripts.
 
 ## Parameters to achieve high MFU

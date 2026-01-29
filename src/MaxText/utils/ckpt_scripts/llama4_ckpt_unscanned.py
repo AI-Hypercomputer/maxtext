@@ -54,8 +54,8 @@ import torch
 from tqdm import tqdm
 
 from MaxText import max_logging
-from MaxText.inference_utils import str2bool
 from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint, MODEL_PARAMS_DICT
+from maxtext.inference.inference_utils import str2bool
 
 SIMULATED_CPU_DEVICES_COUNT = 16
 

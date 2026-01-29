@@ -21,7 +21,7 @@ from absl.testing import absltest
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
-from MaxText.inference_microbenchmark import run_benchmarks
+from maxtext.inference.inference_microbenchmark import run_benchmarks
 
 
 class Inference_Microbenchmark(unittest.TestCase):

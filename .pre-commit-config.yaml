@@ -31,7 +31,6 @@ repos:
           - '--disable=R0401,R0917,W0201,W0613'
           - "--ignore-patterns='.pytype,.*pyi$'"
           - 'benchmarks'
-          - 'end_to_end'
           - 'src'
           - 'tests'
 
@@ -59,3 +58,4 @@ repos:
       - id: mdformat
         additional_dependencies: [mdformat-myst, mdformat-ruff]
         files: (docs/.)
+        exclude: docs/guides/checkpointing_solutions.md

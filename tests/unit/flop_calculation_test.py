@@ -292,3 +292,55 @@ class FlopCalculation(unittest.TestCase):
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
+
+  @pytest.mark.cpu_only
+  def test_deepseek32_671b_flops(self):
+    """Test DeepSeek3.2-671b FLops calculation"""
+    kwargs = {
+        # Model bases
+        "model_name": "deepseek3.2-671b",
+        "override_model_config": True,
+        # Core workload parameters
+        "per_device_batch_size": 4,
+        "max_target_length": 4096,
+        "num_experts": 256,
+        "num_experts_per_tok": 8,
+        "shared_experts": 1,
+        # Model dimensions
+        "base_emb_dim": 7168,
+        "base_num_query_heads": 128,
+        "base_num_kv_heads": 128,
+        "base_mlp_dim": 18432,
+        "base_moe_mlp_dim": 2048,
+        "base_num_decoder_layers": 61,
+        "first_num_dense_layers": 3,
+        "mlp_activations": ["silu", "linear"],
+        "vocab_size": 129280,
+        # MLA
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "skip_jax_distributed_system": True,
+        # Indexer for DeepSeek Sparse Attention
+        "use_sparse_indexer": True,
+        "index_n_heads": 64,
+        "index_head_dim": 128,
+        "index_topk": 2048,
+        # TODO(ranran): remove after flash attention is supported
+        "attention": "dot_product",
+    }
+    B = kwargs["per_device_batch_size"]
+    S = kwargs["max_target_length"]
+    attention_flops = self.compute_deepseek_attention_flops_per_device(kwargs)
+    # deepseek3-671b has ~37B active parameters
+    # https://arxiv.org/pdf/2412.19437
+    golden_param_size = 37e9
+    golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
+    cfg = pyconfig.initialize(
+        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        **kwargs,
+    )
+    calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
+    self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)

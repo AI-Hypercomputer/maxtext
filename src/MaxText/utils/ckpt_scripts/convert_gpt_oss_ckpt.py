@@ -27,6 +27,7 @@ import logging
 import os
 import pathlib
 import absl
+import time
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
@@ -37,9 +38,10 @@ from safetensors import safe_open
 from tqdm import tqdm
 
 from MaxText import max_logging
-from MaxText.inference_utils import str2bool
 from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from MaxText.utils.ckpt_scripts.convert_gpt_oss_unscanned_ckpt import MODEL_PARAMS_DICT, _hf_to_maxtext_mapping, _pt_to_np
+from MaxText.utils.ckpt_conversion.utils.utils import MemoryMonitorTqdm, print_peak_memory
+from maxtext.inference.inference_utils import str2bool
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
@@ -77,7 +79,7 @@ def _convert_huggingface_to_jax_weights(
   max_logging.log(f"Loading the base model from {base_model_path}")
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
   chkpt_vars = {}
-  for i, ckpt_path in enumerate(ckpt_paths):
+  for i, ckpt_path in tqdm(enumerate(ckpt_paths), total=len(ckpt_paths)):
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
 
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
@@ -141,9 +143,9 @@ def _convert_huggingface_to_jax_weights(
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  # self attention ###############################################
+  # layer weight: self attention ###############################################
   max_logging.log("Processing self attention")
-  for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
+  for layer_idx in MemoryMonitorTqdm(range(base_num_decoder_layers), desc="layers", leave=True):
     block_layer_idx, block_idx = divmod(layer_idx, layer_cycle_interval)
     stack_shape = (base_num_decoder_layers // layer_cycle_interval,)
     self_attention = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]["GptOssAttention"]
@@ -212,9 +214,9 @@ def _convert_huggingface_to_jax_weights(
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  # layer weight pre and post self attention norm ################
+  # layer weight: pre and post self attention norm ################
   max_logging.log("Processing pre and post self attention norms")
-  for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
+  for layer_idx in MemoryMonitorTqdm(range(base_num_decoder_layers), desc="layers", leave=True):
     block_layer_idx, block_idx = divmod(layer_idx, layer_cycle_interval)
     stack_shape = (base_num_decoder_layers // layer_cycle_interval,)
     layer_weight = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]
@@ -246,10 +248,10 @@ def _convert_huggingface_to_jax_weights(
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  # layer weights ################################################
-  max_logging.log("Processing layer weights")
+  # layer weight: mlp ################################################
+  max_logging.log("Processing mlp weights")
 
-  for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
+  for layer_idx in MemoryMonitorTqdm(range(base_num_decoder_layers), desc="layers", leave=True):
     block_layer_idx, block_idx = divmod(layer_idx, layer_cycle_interval)
     stack_shape = (base_num_decoder_layers // layer_cycle_interval,)
     mlp_weight = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]["GptOssMlp"]
@@ -337,17 +339,27 @@ if __name__ == "__main__":
   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
   args = parser.parse_args()
 
+  overall_start = time.time()
+
   if args.model_size not in MODEL_PARAMS_DICT:
     raise NotImplementedError(f"Model '{args.model_size}' is not supported.")
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={args.simulated_cpu_devices_count}"
   base_weights_path = args.maxtext_model_path
 
+  # transform
+  start = time.time()
+  weights = convert_to_jax_weights(args.base_model_path, args.model_size)
+  max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
+
+  # save
   save_weights_to_checkpoint(
       args.maxtext_model_path,
-      convert_to_jax_weights(args.base_model_path, args.model_size),
+      weights,
       args.simulated_cpu_devices_count,
       args.use_ocdbt,
       args.use_zarr3,
   )
   max_logging.log(f"Successfully saved base_weights to {base_weights_path}.")
+  max_logging.log(f"Overall Elapse: {(time.time() - overall_start) / 60:.2f} min")
+  print_peak_memory()

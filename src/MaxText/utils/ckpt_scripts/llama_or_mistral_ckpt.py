@@ -48,6 +48,7 @@ import ml_dtypes
 import psutil
 
 from tqdm import tqdm
+import time
 
 import numpy as np
 
@@ -62,8 +63,8 @@ from flax.training import train_state
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.inference_utils import str2bool
 from MaxText.utils import gcs_utils
+from maxtext.inference.inference_utils import str2bool
 from maxtext.common import checkpointing
 
 MODEL_PARAMS_DICT = {
@@ -1631,52 +1632,114 @@ def convert_to_jax_weights(base_model_path: str, model_size: str, huggingface_ck
   return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
 
 
-def save_weights_to_checkpoint(
-    maxtext_model_path: str, jax_weights: dict, device_count: int, use_ocdbt: bool, use_zarr3: bool
-):
-  """
-  Function to save jax_weights ready for MaxText to a parameters checkpoint.
+def shard_checkpoint(jax_weights, device_count, mem_info):
+  """Shards the checkpoint weights across the simulated devices.
 
   Args:
-      maxtext_model_path: Path to save the MaxText checkpoint.
-      jax_weights: The JAX model weights to be saved.
-      device_count: The number of simulated devices.
-      use_ocdbt: Whether to use Optimized Checkpoint Database with Transactions.
-      use_zarr3: Whether to use Zarr3 or not.
+    jax_weights: Pytree of model weights (numpy arrays).
+    device_count: The number of simulated devices.
+    mem_info: Process object to track memory usage.
+
+  Returns:
+    Pytree of sharded JAX arrays.
   """
-  mem_info = psutil.Process()
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-  gc.collect()
+  # Setup mesh & sharding specs
+  if len(jax.devices()) != device_count:
+    max_logging.log(
+        "WARNING: hardware/simulated device mismatch. "
+        f"Actual JAX devices: {len(jax.devices())}, Requested count: {device_count}."
+    )
+  max_logging.log(f"shard weights across {len(jax.devices())} devices")
+  # Pre-define sharding specs
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
-  s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
-  s2 = jax.sharding.NamedSharding(
-      mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis")
-  )  # shards second axis
-  s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
+  # Sharding along axis 0
+  s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))
+  # Sharding along axis 1
+  s2 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis"))
+  # No sharding (replicated)
+  s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
 
   def checkpoint_device_put(arr):
+    """Determines correct sharding spec based on shape and shards the input array.
+
+    Args:
+      arr: A numpy array (or jax array).
+
+    Returns:
+      A sharded jax array.
+    """
+    if not isinstance(arr, (np.ndarray, jax.Array)):
+      # materialize lazy tensor
+      arr = np.array(arr)
+
     if arr.shape[0] % device_count == 0:
-      max_logging.log("sharding first axis")
+      max_logging.log("sharding axis 0")
       return jax.device_put(arr, device=s1)
     elif len(arr.shape) > 1 and arr.shape[1] % device_count == 0:
-      max_logging.log("sharding second axis")
+      max_logging.log("sharding axis 1")
       return jax.device_put(arr, device=s2)
     else:
       max_logging.log("no sharding was possible, replicating")
       return jax.device_put(arr, device=s3)
 
+  # Weight sharding
+  start = time.time()
   # convert all weights to jax.numpy with sharding if applicable
   jax_weights_flat, jax_weights_struct = tree.flatten(jax_weights)
+  del jax_weights
+  gc.collect()
+
   jax_weights_new = []
-  while len(jax_weights_flat) > 0:
-    jax_weight = jax_weights_flat.pop(0)
+  jax_weights_flat.reverse()
+  num_weights = len(jax_weights_flat)
+  for _ in tqdm(range(num_weights)):
+    jax_weight = jax_weights_flat.pop()
     jax_weights_new.append(checkpoint_device_put(jax_weight))
     del jax_weight
     gc.collect()
     logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   jax_weights = tree.unflatten(jax_weights_struct, jax_weights_new)
+  max_logging.log(f"Elapse for checkpoint sharding: {(time.time() - start) / 60:.2f} min")
 
+  return jax_weights
+
+
+def save_weights_to_checkpoint(
+    maxtext_model_path: str,
+    jax_weights: dict,
+    device_count: int,
+    use_ocdbt: bool,
+    use_zarr3: bool,
+):
+  """Saves model weights to a MaxText-compatible checkpoint with optional sharding.
+
+  This function handles the conversion of NumPy weights into sharded JAX arrays
+  across a specified number of simulated devices. If the device count is 1,
+  the sharding and JAX conversion steps are skipped.
+
+  Args:
+      maxtext_model_path: The destination directory or URI for the MaxText checkpoint.
+      jax_weights: A dictionary mapping parameter names to weight arrays (typically NumPy).
+      device_count: The number of simulated devices to shard across. If 1, weights
+          are saved in their original format.
+      use_ocdbt: If True, enables the Optimized Checkpoint Database with Transactions
+          (OCDBT) format for improved metadata handling.
+      use_zarr3: If True, uses the Zarr3 storage format for the underlying array data.
+  """
+  mem_info = psutil.Process()
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  gc.collect()
+
+  # Weight sharding
+  if device_count > 1:
+    jax_weights = shard_checkpoint(jax_weights, device_count, mem_info)
+  else:
+    # If number of simulated devices is 1, SKIP sharding and SKIP jax conversion.
+    max_logging.log("Single device: Skip sharding")
+
+  # Save checkpoint
+  start = time.time()
   # dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
   enable_checkpointing = True
@@ -1702,6 +1765,8 @@ def save_weights_to_checkpoint(
       max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
     checkpoint_manager.wait_until_finished()
+
+  max_logging.log(f"Elapse for checkpoint save: {(time.time() - start) / 60:.2f} min")
 
 
 def list_folders_pathlib(directory: str):
