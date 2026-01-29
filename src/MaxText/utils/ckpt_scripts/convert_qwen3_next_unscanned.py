@@ -40,7 +40,7 @@ from typing import Any, Dict
 from MaxText import max_logging
 from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from MaxText.utils.ckpt_scripts.convert_qwen3_next_scanned import MODEL_PARAMS_DICT
-from maxtext.inference_utils import str2bool
+from maxtext.inference.inference_utils import str2bool
 
 
 # NOTE: numpy doesn't have native support for bfloat16, so

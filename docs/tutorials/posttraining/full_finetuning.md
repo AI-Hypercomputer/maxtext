@@ -113,7 +113,7 @@ python3 -m MaxText.train \
   steps=10 per_device_batch_size=1
 ```
 
-You can find some [end to end scripts here](https://github.com/AI-Hypercomputer/maxtext/tree/main/end_to_end/tpu).
+You can find some [end to end scripts here](https://github.com/AI-Hypercomputer/maxtext/tree/main/tests/end_to_end/tpu).
 These scripts can provide a reference point for various scripts.
 
 ## Parameters to achieve high MFU

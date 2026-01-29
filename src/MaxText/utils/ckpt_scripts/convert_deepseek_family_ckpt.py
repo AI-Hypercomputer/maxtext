@@ -42,7 +42,7 @@ from safetensors import safe_open
 
 from MaxText import max_logging
 from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
-from maxtext.inference_utils import str2bool
+from maxtext.inference.inference_utils import str2bool
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 

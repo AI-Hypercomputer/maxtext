@@ -34,7 +34,7 @@ from tqdm import tqdm
 
 from MaxText import max_logging
 from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
-from maxtext.inference_utils import str2bool
+from maxtext.inference.inference_utils import str2bool
 
 # Static model parameters dictionary
 MODEL_PARAMS_DICT = {

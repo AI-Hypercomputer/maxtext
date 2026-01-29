@@ -30,7 +30,7 @@ This directory contains code and documentation for **GRPO**, a reinforcement lea
 
 ## Running GRPO
 
-This repository includes a shell script, `end_to_end/tpu/test_grpo.sh`, that demonstrates how to run GRPO on a v5p-256 cluster.
+This repository includes a shell script, `tests/end_to_end/tpu/test_grpo.sh`, that demonstrates how to run GRPO on a v5p-256 cluster.
 
 **How it works:**
 
@@ -50,4 +50,4 @@ DEVICES_PER_SAMPLER=8 \
 TRAINING_PER_DEVICE_BATCH_SIZE=1 \
 INFERENCE_PER_DEVICE_BATCH_SIZE=8 \
 STEPS=20 \
-bash end_to_end/tpu/test_grpo.sh
+bash tests/end_to_end/tpu/test_grpo.sh
