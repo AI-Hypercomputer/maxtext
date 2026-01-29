@@ -93,6 +93,7 @@ class NNXDecoderLayer(nnx.Module):
     self.quant = quant
     self.model_mode = model_mode
 
+
     # Initialize Pre-Attention Norm
     self.pre_self_attention_norm = RMSNorm(
         num_features=self.config.emb_dim,
@@ -110,13 +111,13 @@ class NNXDecoderLayer(nnx.Module):
         num_kv_heads=self.config.num_kv_heads,
         head_dim=self.config.head_dim,
         max_target_length=self.config.max_target_length,
-        max_prefill_predict_length=self.config.max_prefill_predict_length,
+        mesh=mesh,
         attention_kernel=self.config.attention,
         inputs_q_shape=(1, 1, self.config.emb_dim),
         inputs_kv_shape=(1, 1, self.config.emb_dim),
-        mesh=mesh,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
+        max_prefill_predict_length=self.config.max_prefill_predict_length,
         dropout_rate=self.config.dropout_rate,
         float32_qk_product=self.config.float32_qk_product,
         float32_logits=self.config.float32_logits,
@@ -235,11 +236,8 @@ class NNXSequentialBlockDecoderLayers(nnx.Module):
     self.config = config
     self.num_decoder_layers = num_decoder_layers
 
-    layers_list = []
-
-    for _ in range(num_decoder_layers):
-      layers_list.append(decoder_layer(config=config, mesh=mesh, model_mode=model_mode, rngs=rngs, quant=quant, **kwargs))
-    self.layers = nnx.List(layers_list)
+    for i in range(num_decoder_layers):
+      setattr(self, f"layers_{i}", decoder_layer(config=config, mesh=mesh, model_mode=model_mode, rngs=rngs, quant=quant, **kwargs))
 
   def __call__(
       self,
@@ -253,7 +251,8 @@ class NNXSequentialBlockDecoderLayers(nnx.Module):
   ) -> jnp.ndarray:
 
     # Iterate over the pre-initialized layers
-    for layer in self.layers:
+    for number in range(self.num_decoder_layers):
+      layer = getattr(self, f"layers_{number}")
       inputs = layer(
           inputs,
           decoder_segment_ids,
@@ -288,7 +287,6 @@ class NNXDecoder(nnx.Module):
     self.quant = quant
     self.model_mode = model_mode
     self.rngs = rngs
-
     decoder_block_classes = self.get_decoder_layers()
 
     self.decoder_norm = self.get_norm_layer(num_features=config.emb_dim, rngs=rngs)(
@@ -334,8 +332,33 @@ class NNXDecoder(nnx.Module):
 
     if self.using_pipeline:
       self.pipeline_module = self.get_pipeline_stage_module(decoder_block_classes)
+      self.num_pipeline_layers = config.pipeline_parallel_layers
+      num_remaining_layers = config.num_decoder_layers - self.num_pipeline_layers
+      
+      if num_remaining_layers > 0:
+        # We assume the remainder layers use the standard block class (blocks[0])
+        # Note: This logic might need adjustment if DeepSeek splits dense/moe across pipeline boundary
+        layer_cls = decoder_block_classes[0] 
+        
+        if config.scan_layers:
+          self.remainder_layers = self._create_scanned_layers(
+              layer_cls, 
+              length=num_remaining_layers, 
+              rngs=rngs
+          )
+        else:
+          self.remainder_layers = nnx.List([])
+          for i in range(num_remaining_layers):
+            # We use "layers_outside_pipeline" to match Linen naming conventions
+            self._create_and_register_layer(
+                layer_cls, 
+                rngs, 
+                "layers_outside_pipeline", 
+                i, 
+                target_list=self.remainder_layers
+            )
 
-    if self.config.scan_layers:
+    elif self.config.scan_layers:
       if self.is_deepseek:
         assert len(decoder_block_classes) == 2
         dense_cls, moe_cls = decoder_block_classes
@@ -386,7 +409,7 @@ class NNXDecoder(nnx.Module):
         return blocks[0]
 
     base_stage_cls = get_layer_to_pipeline(decoder_blocks, cfg)
-
+    
     if cfg.num_layers_per_pipeline_stage == 1:
       stage_module = self._create_single_layer(base_stage_cls, self.rngs)
     elif cfg.scan_layers_per_stage:
@@ -411,14 +434,20 @@ class NNXDecoder(nnx.Module):
         layers=stage_module,
         mesh=self.mesh,
         remat_policy=self.get_remat_policy(),
-        rngs=self.rngs,  # Pipeline keeps original RNGs
+        rngs=self.rngs,
     )
 
-  def _create_and_register_layer(self, layer_cls, rngs, base_name, i):
+  def _create_and_register_layer(self, layer_cls, rngs, base_name, i, target_list=None):
     attr_name = f"{base_name}_{i}"
     layer = self._create_single_layer(layer_cls, rngs)
     setattr(self, attr_name, layer)
-    self.layers.append(layer)
+    
+    # Use the provided list or default to self.layers
+    if target_list is not None:
+        target_list.append(layer)
+    else:
+        self.layers.append(layer)
+
 
   def _create_single_layer(self, decoder_layer_class, rngs, **kwargs):
     """Helper to create a single layer (Linen or NNX)."""
@@ -435,11 +464,15 @@ class NNXDecoder(nnx.Module):
   def _create_scanned_layers(self, decoder_layer_class, length: int, rngs: nnx.Rngs, **layer_kwargs):
     """Creates a VMapped stack of layers, forcing parameter init for Compact modules."""
 
-    def create_layer_fn(rng):
+    def create_layer_fn(layer_rngs):
       layer = decoder_layer_class(
-          config=self.config, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode, rngs=rng, **layer_kwargs
+          config=self.config, 
+          mesh=self.mesh, 
+          quant=self.quant, 
+          model_mode=self.model_mode, 
+          rngs=layer_rngs, 
+          **layer_kwargs
       )
-
       return layer
 
     # Workaround for Deepseek MTP test failure.
@@ -461,6 +494,7 @@ class NNXDecoder(nnx.Module):
 
     return layers_vmapped
 
+    
   def _apply_layers_sequentially(self, layers, x_in, *args, length: int, **kwargs):
     """Runs the layer stack using nnx.scan."""
     policy = self.get_remat_policy()
@@ -817,6 +851,39 @@ class NNXDecoder(nnx.Module):
         logical_partition_spec = None
       layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
       y = self.pipeline_module(y, *layer_args, logical_partition_spec=logical_partition_spec)
+      
+      if hasattr(self, 'remainder_layers') and len(self.remainder_layers) > 0:
+        
+        # Calculate offset for KV cache retrieval
+        kv_start_idx = self.num_pipeline_layers 
+
+        if cfg.scan_layers:
+          # Run Scanned Remainder
+          # Note: scan usually handles internal KV cache differently, 
+          # but here we pass the standard args.
+          y, _ = self._apply_layers_sequentially(
+              self.remainder_layers, 
+              y, 
+              *layer_args, 
+              length=len(self.remainder_layers), 
+              **layer_kwargs
+          )
+        else:
+          # Run Sequential Loop Remainder
+          for i, layer in enumerate(self.remainder_layers):
+            global_layer_idx = kv_start_idx + i
+            kv_cache = kv_caches[global_layer_idx] if kv_caches is not None else None
+
+            out = layer(y, *layer_args, kv_cache=kv_cache, **layer_kwargs)
+
+            if isinstance(out, tuple):
+              y, kv_cache_out = out
+            else:
+              y = out
+              kv_cache_out = None
+
+            if kv_caches is not None:
+              kv_caches[global_layer_idx] = kv_cache_out
 
     elif cfg.scan_layers:
       if self.is_deepseek:
