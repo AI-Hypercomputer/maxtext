@@ -287,7 +287,7 @@ class NgramHashMapping:
 
 class MultiHeadEmbedding(nnx.Module):
 
-  def __init__(self, list_of_N: List[int], D: int, cfg, mesh, rngs: nnx.Rngs):
+  def __init__(self, list_of_N: List[int], D: int, config, mesh, rngs: nnx.Rngs):
     """
     Args:
       list_of_N: A list of prime-based vocab sizes, each element is k-th head for n-gram
@@ -311,7 +311,7 @@ class MultiHeadEmbedding(nnx.Module):
 
     # 2. Instantiate a single large embedding table.
     # Total size is the sum of all individual head vocabularies.
-    self.embedding = Embed(num_embeddings=sum(list_of_N), num_features=D, config=cfg, mesh=mesh, rngs=rngs)
+    self.embedding = Embed(num_embeddings=sum(list_of_N), num_features=D, config=config, mesh=mesh, rngs=rngs)
 
   def __call__(self, input_ids: jax.Array, model_mode: str = MODEL_MODE_TRAIN) -> jax.Array:
     """
@@ -350,9 +350,9 @@ class ShortConv(nnx.Module):
 
   def __init__(
       self,
-      cfg,
+      config,
       hidden_size: int,
-      kernel_size: int = 4,
+      kernel_size: int = 4,  # Temporal Window Size
       dilation: int = 1,
       hc_mult: int = 4,
       activation: bool = True,
@@ -379,14 +379,14 @@ class ShortConv(nnx.Module):
     )
 
     # Independent RMSNorm for each branch.
-    # TODO(shuningjin): eps, epsilon=cfg.normalization_layer_epsilon,
+    # TODO(shuningjin): eps, epsilon=config.normalization_layer_epsilon,
     #                   epsilon=1e-5,  # Match PyTorch default
     self.norms = nnx.List(
         [
             RMSNorm(
                 num_features=hidden_size,
-                dtype=cfg.dtype,
-                weight_dtype=cfg.weight_dtype,
+                dtype=config.dtype,
+                weight_dtype=config.weight_dtype,
                 kernel_axes=("norm",),
                 epsilon=1e-5,
                 rngs=self.rngs,
@@ -467,17 +467,39 @@ class Engram(nnx.Module):
     self.kernel_init = kernel_init
     self.quant = quant
     self.rngs = rngs
-    self.layer_id = layer_id
 
-    # Engram Hyperparameters
-    self.engram_heads_per_ngram = engram_heads_per_ngram
-    self.engram_embed_dim_per_ngram = engram_embed_dim_per_ngram
-    self.engram_max_ngram_size = engram_max_ngram_size
-    self.engram_kernel_size = engram_kernel_size
-    self.engram_vocab_size = engram_vocab_size
+    self.layer_id = layer_id
     self.layer_ids = layer_ids
     self.pad_id = pad_id
     self.seed = seed
+
+    # -----------------------------------------------------------------------
+    # 2. Engram Dimensions & Hyperparameters
+    # -----------------------------------------------------------------------
+
+    # Hierarchy: Engram -> n-gram order (n) -> k-th head (k)
+    # Raw Inputs
+    self.max_ngram_size = engram_max_ngram_size  # e.g., 4 (tracks 2,3,4-grams)
+    self.vocab_size = engram_vocab_size
+    self.conv_kernel_size = engram_kernel_size
+
+    # The Hierarchy (Paper Notation)
+    # K: Number of heads per n-gram order
+    self.num_heads = engram_heads_per_ngram
+
+    # D_total: Total embedding dimension for ONE n-gram order (sum of all K heads)
+    self.dim_per_ngram = engram_embed_dim_per_ngram
+
+    # D_head: Dimension of a single head (The actual size stored in the table)
+    # Logic: We split the total dimension D evenly across K heads.
+    self.dim_per_head = self.dim_per_ngram // self.num_heads
+
+    # Flattened Tensor Sizes
+    # How many n-gram orders are we tracking? (e.g. 2, 3, 4 -> 3 orders)
+    self.num_orders = self.max_ngram_size - 1
+
+    # Final concatenated size: (Num Orders) * (Dim per Order)
+    self.engram_dim = self.num_orders * self.dim_per_ngram
 
     # -----------------------------------------------------------------------
     # Vocabulary Size Calculation (Global Prime Sequence)
@@ -513,23 +535,23 @@ class Engram(nnx.Module):
 
     # 1. Multi-Head Embedding (Memory Warehouse)
     # Stores the learnable vectors E_{n,k} for all n-gram heads in one flattened table.
-    self.mhe = MultiHeadEmbedding(
-        vocab_sizes, self.engram_embed_dim_per_ngram // self.engram_heads_per_ngram, config, mesh, rngs
-    )
+    self.mhe = MultiHeadEmbedding(list_of_N=vocab_sizes, D=self.dim_per_head, config=config, mesh=mesh, rngs=rngs)
 
     # 2. Short Convolution (Temporal Smoothing)
     # Applies depthwise causal convolution to smooth the retrieved memory over time.
     self.short_conv = ShortConv(
-        config, config.base_emb_dim, self.engram_kernel_size, self.engram_max_ngram_size, hc_mult, rngs=rngs
+        config=config,
+        hidden_size=config.base_emb_dim,
+        kernel_size=self.conv_kernel_size,
+        dilation=self.max_ngram_size,
+        hc_mult=hc_mult,
+        rngs=rngs,
     )
-
-    # Flattened dimension of all retrieved n-gram embeddings
-    engram_hidden_size = engram_embed_dim_per_ngram * (self.engram_max_ngram_size - 1)
 
     # 3. Projection Layers for Gating Mechanism
     # Project retrieved memory into Value space
     self.value_proj = DenseGeneral(
-        in_features_shape=engram_hidden_size,
+        in_features_shape=self.engram_dim,
         out_features_shape=config.base_emb_dim,
         axis=-1,
         kernel_init=self.kernel_init,
@@ -547,7 +569,7 @@ class Engram(nnx.Module):
     self.key_projs = nnx.List(
         [
             DenseGeneral(
-                in_features_shape=engram_hidden_size,
+                in_features_shape=self.engram_dim,
                 out_features_shape=config.base_emb_dim,
                 axis=-1,
                 kernel_init=self.kernel_init,
