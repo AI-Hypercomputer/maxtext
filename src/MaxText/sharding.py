@@ -15,20 +15,19 @@
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
 """ Utils that are only interesting to MaxText and sharding related. """
 
-from flax import linen as nn
-
 from collections.abc import Iterable
 
 import jax
 from jax.core import Tracer
 from jax.sharding import PartitionSpec as P, NamedSharding, reshard
 
+from flax import linen as nn, nnx
 import optax
 
 from MaxText.common_types import ShardMode
+from MaxText import pyconfig
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
-
 
 _LOGGED_ACTIVATION_SHARDINGS = set()
 _LOGGED_LOGICAL_AXES = set()
@@ -413,6 +412,8 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       - updated_state_mesh_shardings: State mesh shardings with updated params field
         (unchanged if shard_optimizer_over_data is False)
   """
+  if config.pure_nnx:
+    return maybe_update_params_sharding_with_opt_nnx(config, state_mesh_shardings)
   prev_params_shardings = state_mesh_shardings.params
   if config.shard_optimizer_over_data:
     if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):
@@ -428,6 +429,78 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       # are not wrapped in `params`. Here we wrap them back.
       sharded_fp32_params = {"params": sharded_fp32_params}
     state_mesh_shardings = state_mesh_shardings.replace(params=dict(prev_params_shardings, **sharded_fp32_params))
+  return prev_params_shardings, state_mesh_shardings
+
+
+def maybe_update_params_sharding_with_opt_nnx(
+    config: pyconfig.HyperParameters, state_mesh_shardings: nnx.State
+) -> tuple[nnx.State, nnx.State]:
+  """
+  NNX version of parameter sharding update. Updates parameter sharding configuration
+  when optimizer state sharding is enabled.
+
+  When shard_optimizer_over_data is enabled (Zero-1 style sharding), this function
+  extracts the optimizer state shardings from the Adam optimizer's first moment (mu)
+  and merges them with the parameter shardings. This ensures parameter sharding is
+  consistent with how the optimizer state is distributed across the compute mesh.
+
+  Args:
+    config: Configuration with shard_optimizer_over_data flag.
+    state_mesh_shardings: The sharding state for a TrainStateNNX container.
+
+  Returns:
+    A tuple of (prev_params_shardings, updated_state_mesh_shardings):
+      - prev_params_shardings: Original parameter shardings before the update
+      - updated_state_mesh_shardings: State mesh shardings with updated params field
+        (unchanged if shard_optimizer_over_data is False)"""
+  # In TrainStateNNX, parameters are under 'model'
+  model_shardings = state_mesh_shardings.model
+  _, prev_params_shardings, _ = nnx.split(model_shardings, nnx.Param, ...)
+
+  if config.shard_optimizer_over_data:
+    sharded_fp32_params = None
+    # Check if the optimizer has any state at all (stateless optimizers like SGD omit this key)
+    if "opt_state" in state_mesh_shardings.optimizer:
+      # Access the optimizer branch to find the optax state
+      # state_mesh_shardings.optimizer contains the sharding for the nnx.Optimizer
+      opt_state = state_mesh_shardings.optimizer.opt_state
+
+      def find_adam_mu(obj):
+        # 1. Direct hit on ScaleByAdamState (Linen path or unflattened NNX)
+        if isinstance(obj, optax.ScaleByAdamState):
+          return obj.mu
+
+        # 2. Check for flattened ScaleByAdamState (nnx.State/dict)
+        # These nodes contain 'mu', 'nu', and 'count' as keys.
+        if hasattr(obj, "__getitem__") and "mu" in obj and "nu" in obj:
+          return obj["mu"]
+
+        # 3. Recursive search through containers (nnx.State, dict, list, tuple)
+        values = None
+        if hasattr(obj, "values"):  # Handles nnx.State and dict
+          values = obj.values()
+        elif isinstance(obj, (list, tuple)):
+          values = obj
+
+        if values:
+          for v in values:
+            res = find_adam_mu(v)
+            if res is not None:
+              return res
+        return None
+
+      sharded_fp32_params = find_adam_mu(opt_state)
+    if sharded_fp32_params is None:
+      actual_type = type(state_mesh_shardings.optimizer.get("opt_state", "None"))
+      raise NotImplementedError(f"Could not find Adam optimizer state in: {actual_type}")
+
+    # In NNX, the mu structure matches the model state structure directly.
+    # We create a new model sharding branch by merging existing with the mu shardings.
+    updated_model_shardings = dict(prev_params_shardings) | dict(sharded_fp32_params)
+
+    # Update the top-level state container
+    state_mesh_shardings = nnx.State(dict(state_mesh_shardings) | {"model": updated_model_shardings})
+
   return prev_params_shardings, state_mesh_shardings
 
 
