@@ -104,50 +104,47 @@ def get_maxtext_model(config, devices=None):
   return tunix_model, mesh
 
 
-def get_dataset(model_tokenizer, tmvp_config, data_dir, split="train") -> grain.MapDataset:
+def get_dataset(
+    model_tokenizer, tmvp_config, data_dir, split="train", data_files=None, dataset_name=None
+) -> grain.MapDataset:
   """Download data"""
   if not os.path.exists(data_dir):
     os.makedirs(data_dir)
 
-  data = tfds.data_source(
-      tmvp_config.dataset_name,
-      split=split,
-      data_dir=data_dir,
-      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
-      download=True,
-  )
+  if dataset_name is None:
+    raise ValueError("dataset_name must be provided")
+
+  if dataset_name.startswith("huggingface:"):
+    import datasets  # pylint: disable=import-outside-toplevel
+
+    if data_files is None:
+      hf_dataset_name = dataset_name.replace("huggingface:", "")
+      data = datasets.load_dataset(hf_dataset_name, split=split, cache_dir=data_dir)
+      if tmvp_config.debug.rl:
+        max_logging.log(f"Loaded Hugging Face dataset {hf_dataset_name} with split {split}. Size: {len(data)}")
+    else:  # data_files have been provided, useful for using slices of large datasets like nvidia/OpenMathInstruct-2
+      data = datasets.load_dataset(
+          "parquet",
+          data_files={tmvp_config.train_split: data_files},
+          split=split,
+          cache_dir=data_dir,
+      )
+  else:
+    builder_kwargs = {"file_format": tfds.core.FileFormat.ARRAY_RECORD}
+    data = tfds.data_source(
+        dataset_name,
+        split=split,
+        data_dir=data_dir,
+        builder_kwargs=builder_kwargs,
+        download=True,
+    )
 
   template_config = load_template_from_file(tmvp_config.chat_template_path)
+
   loaded_dataset = (
       grain.MapDataset.source(data)
       .shuffle(seed=tmvp_config.data_shuffle_seed)
-      .map(
-          lambda x: {
-              # passed to model forward pass
-              "prompts": model_tokenizer.apply_chat_template(
-                  [
-                      {
-                          "role": "user",
-                          "content": template_config["TEMPLATE"].format(
-                              system_prompt=template_config["SYSTEM_PROMPT"].format(
-                                  reasoning_start_token=tmvp_config.reasoning_start_token,
-                                  reasoning_end_token=tmvp_config.reasoning_end_token,
-                                  solution_start_token=tmvp_config.solution_start_token,
-                                  solution_end_token=tmvp_config.solution_end_token,
-                              ),
-                              question=x["question"].decode("utf-8"),
-                          ),
-                      },
-                  ],
-                  tokenize=False,
-                  add_generation_prompt=True,
-              ),
-              # passed to reward functions
-              "question": x["question"].decode("utf-8"),
-              # passed to reward functions
-              "answer": utils_rl.extract_hash_answer(x["answer"].decode("utf-8")),
-          }
-      )
+      .map(lambda x: utils_rl.process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x))
   )
   return loaded_dataset
 
@@ -290,9 +287,14 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
 
   # Load datasets
-  dataset = get_dataset(model_tokenizer, trainer_config, train_data_dir, trainer_config.train_split).batch(
-      trainer_config.batch_size
-  )[: trainer_config.num_batches]
+  dataset = get_dataset(
+      model_tokenizer,
+      trainer_config,
+      train_data_dir,
+      trainer_config.train_split,
+      data_files=trainer_config.hf_train_files,
+      dataset_name=trainer_config.dataset_name,
+  ).batch(trainer_config.batch_size)[: trainer_config.num_batches]
 
   if trainer_config.train_fraction == 1.0:
     train_dataset = dataset.repeat(trainer_config.num_epoch)
@@ -300,9 +302,18 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     train_dataset = dataset[: int(len(dataset) * trainer_config.train_fraction)]
     train_dataset = train_dataset.repeat(trainer_config.num_epoch)
 
-  test_dataset = get_dataset(model_tokenizer, trainer_config, test_data_dir, trainer_config.eval_split).batch(
-      trainer_config.batch_size
-  )[: trainer_config.num_test_batches]
+  eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
+  if not eval_dataset_name:
+    eval_dataset_name = trainer_config.dataset_name
+
+  test_dataset = get_dataset(
+      model_tokenizer,
+      trainer_config,
+      test_data_dir,
+      trainer_config.eval_split,
+      data_files=trainer_config.hf_eval_files,
+      dataset_name=eval_dataset_name,
+  ).batch(trainer_config.batch_size)[: trainer_config.num_test_batches]
 
   # Let's see how one batch of the dataset looks like!
   if trainer_config.debug.rl:
