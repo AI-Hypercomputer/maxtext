@@ -329,6 +329,24 @@ class MultiHeadEmbedding(nnx.Module):
 
 
 class ShortConv(nnx.Module):
+  """
+  Implements a Grouped Depthwise Causal Convolution block.
+
+  This module applies local temporal mixing (smoothing) to the retrieved embeddings.
+  - It uses independent RMSNorms for each branch
+  - followed by a 1D convolution. Note it is depth-wise:
+    mixes information across time steps [t-k, t] without mixing across channels.
+
+  Shape Legend:
+      B: Batch Size
+      L: Sequence Length
+      G: Number of Branches (hc_mult) - logical grouping of heads
+      C: Embedding Dimension per Branch (hidden_size)
+
+  Note on Convolution:
+      Conv1D - (G * C) as the total number of input channels.
+      Depthwise - It applies a separate filter to every single dimension in C, for every group G.
+  """
 
   def __init__(
       self,
@@ -345,21 +363,24 @@ class ShortConv(nnx.Module):
     total_channels = hidden_size * hc_mult
     self.rngs = rngs
 
-    # In NNX, we define the dimension layout.
-    # MaxText typically expects (Batch, Length, Channels)
+    # Depthwise Convolution:
+    # Setting feature_group_count = in_features ensures each channel is convolved
+    # independently. This learns local temporal patterns per feature.
+    # Padding="CAUSAL" ensures output[t] only depends on input[t-k : t].
     self.conv = nnx.Conv(
         in_features=total_channels,
         out_features=total_channels,
         kernel_size=(kernel_size,),
-        feature_group_count=total_channels,
+        feature_group_count=total_channels,  # Depthwise
         kernel_dilation=(dilation,),
         padding="CAUSAL",  # To match the slice [..., :T] logic
         use_bias=False,
         rngs=rngs,
     )
 
-    # Vectorized RMSNorms for the groups
-    # TODO(shuningjin): eps
+    # Independent RMSNorm for each branch.
+    # TODO(shuningjin): eps, epsilon=cfg.normalization_layer_epsilon,
+    #                   epsilon=1e-5,  # Match PyTorch default
     self.norms = nnx.List(
         [
             RMSNorm(
@@ -367,8 +388,7 @@ class ShortConv(nnx.Module):
                 dtype=cfg.dtype,
                 weight_dtype=cfg.weight_dtype,
                 kernel_axes=("norm",),
-                # epsilon=cfg.normalization_layer_epsilon,
-                epsilon=1e-5,  # Match PyTorch default
+                epsilon=1e-5,
                 rngs=self.rngs,
             )
             for _ in range(hc_mult)
@@ -378,24 +398,48 @@ class ShortConv(nnx.Module):
     self.act_fn = jax.nn.silu if activation else lambda x: x
 
   def __call__(self, x: jax.Array) -> jax.Array:
-    # Input: (B, L, G, C)
+    """
+    y = SiLU(Conv1D(RMSNorm(x)))
+
+    Args:
+        x: Input tensor of shape (B, L, G, C)
+    Returns:
+        Tensor of shape (B, L, G, C)
+    """
     B, L, G, C = x.shape
 
-    # Apply group-wise norms
+    # 1. Apply Group-wise Normalization
+    # We iterate over the 'Groups' dimension (axis 2)
     normed_chunks = []
     for i in range(G):
+      # x[:, :, i, :] shape: (B, L, C)
       normed_chunks.append(self.norms[i](x[:, :, i, :]))
 
-    # Concatenate and apply Depthwise Conv
-    x_flat = jnp.concatenate(normed_chunks, axis=-1)  # (B, L, G*C)
+    # 2. Flatten Groups for Convolution
+    # (B, L, C) x G -> (B, L, G * C)
+    x_flat = jnp.concatenate(normed_chunks, axis=-1)
+
+    # 3. Apply Depthwise Causal Conv
+    # Mixes temporal dimension L. Channels remain independent.
+    # Shape stays: (B, L, G * C)
     y = self.conv(x_flat)
     y = self.act_fn(y)
 
+    # 4. Reshape back to Branched Layout
+    # (B, L, G * C) -> (B, L, G, C)
     return y.reshape(B, L, G, C)
 
 
 class Engram(nnx.Module):
+  """
+  Implements the Engram Memory Layer.
 
+  This layer augments the standard transformer hidden states with long-range
+  n-gram statistics. It follows a Retrieve-and-Gate architecture:
+  1. Retrieve: Fetch embeddings for current n-gram contexts using Multi-Head Hashing.
+  2. Gate: Decide how much of this retrieved memory to merge based on the current state.
+  3. Mix: Apply local temporal smoothing via ShortConv.
+  """
   def __init__(
       self,
       layer_id: int,
@@ -425,6 +469,7 @@ class Engram(nnx.Module):
     self.rngs = rngs
     self.layer_id = layer_id
 
+    # Engram Hyperparameters
     self.engram_heads_per_ngram = engram_heads_per_ngram
     self.engram_embed_dim_per_ngram = engram_embed_dim_per_ngram
     self.engram_max_ngram_size = engram_max_ngram_size
@@ -458,25 +503,31 @@ class Engram(nnx.Module):
         pad_id=pad_id,
         seed=seed,
     )
-    # Extract the specific list of primes for THIS layer
+    # Extract the specific list of primes [M_{n,k}] for THIS layer only.
     # The structure is [[ngram2_head1, ngram2_head2...], [ngram3_head1...]]
     # We flatten it into a single list of ints: [N1, N2, N3, ...]
     vocab_sizes = self.hash_mapping.get_vocab_sizes(self.layer_id)
-
     print(f"DEBUG JAX Layer, Vocab Sizes: {vocab_sizes}")
 
     # -----------------------------------------------------------------------
 
-    # init module
+    # 1. Multi-Head Embedding (Memory Warehouse)
+    # Stores the learnable vectors E_{n,k} for all n-gram heads in one flattened table.
     self.mhe = MultiHeadEmbedding(
         vocab_sizes, self.engram_embed_dim_per_ngram // self.engram_heads_per_ngram, config, mesh, rngs
     )
+
+    # 2. Short Convolution (Temporal Smoothing)
+    # Applies depthwise causal convolution to smooth the retrieved memory over time.
     self.short_conv = ShortConv(
         config, config.base_emb_dim, self.engram_kernel_size, self.engram_max_ngram_size, hc_mult, rngs=rngs
     )
 
+    # Flattened dimension of all retrieved n-gram embeddings
     engram_hidden_size = engram_embed_dim_per_ngram * (self.engram_max_ngram_size - 1)
 
+    # 3. Projection Layers for Gating Mechanism
+    # Project retrieved memory into Value space
     self.value_proj = DenseGeneral(
         in_features_shape=engram_hidden_size,
         out_features_shape=config.base_emb_dim,
@@ -492,6 +543,7 @@ class Engram(nnx.Module):
         use_bias=True,
     )
 
+    # Project retrieved memory into Key space (one per branch)
     self.key_projs = nnx.List(
         [
             DenseGeneral(
@@ -512,6 +564,7 @@ class Engram(nnx.Module):
         ]
     )
 
+    # Normalization before Gating (Key)
     self.norm1 = nnx.List(
         [
             RMSNorm(
@@ -526,6 +579,7 @@ class Engram(nnx.Module):
             for _ in range(hc_mult)
         ]
     )
+    # Normalization before Gating (Query)
     self.norm2 = nnx.List(
         [
             RMSNorm(
@@ -542,32 +596,52 @@ class Engram(nnx.Module):
     )
 
   def __call__(self, hidden_states: jax.Array, input_ids: jax.Array) -> jax.Array:
-    # hash_input_ids is calculated via NgramHashMapping
+    """
+    Args:
+        hidden_states: Current transformer state (Query). Shape: (B, L, G, C)
+        input_ids: Raw token IDs. Shape: (B, L)
+    """
 
+    # 1. Generate Hash Indices
+    # Map raw text -> n-gram contexts -> hash indices z_{t,n,k}
     hash_input_ids = jnp.array(self.hash_mapping.hash(input_ids)[self.layer_id])
-    print("jax1", hash_input_ids)
 
+    # 2. Retrieve Memory
+    # Fetch e_{t,n,k} from the embedding table.
     embeddings = self.mhe(hash_input_ids)
-    embeddings = embeddings.reshape(embeddings.shape[0], embeddings.shape[1], -1)  # Flatten heads
-    print("jax2", embeddings)
 
+    # Concatenate all n-gram heads into one vector e_t
+    # (B, L, Num_Heads, D) -> (B, L, Num_Heads * D)
+    embeddings = embeddings.reshape(embeddings.shape[0], embeddings.shape[1], -1)
+
+    # 3. Gating Mechanism (Scaled Dot-Product)
+    # Decide relevance of memory (Key) to current state (Query)
     gates = []
     for i in range(len(self.key_projs)):
+      # Key: Projection of retrieved n-gram memory
       k = self.norm1[i](self.key_projs[i](embeddings))
-      print("jax3", k)
+
+      # Query: Current hidden state from the transformer
       q = self.norm2[i](hidden_states[:, :, i, :])
-      print("jax4", q)
-      # Scaled Dot Product Gating
+
+      # Gate Score: (K * Q) / sqrt(d)
       gate = jnp.sum(k * q, axis=-1) / jnp.sqrt(k.shape[-1])
-      print("jax5", gate)
+
+      # Stabilization trick: sign(x) * sqrt(|x|)
       gate = jnp.sqrt(jnp.maximum(jnp.abs(gate), 1e-6)) * jnp.sign(gate)
-      print("jax6", gate)
+
+      # Sigmoid activation to get gating probability [0, 1]
       gate = jax.nn.sigmoid(gate)[..., None]
-      print("jax7", gate)
       gates.append(gate)
 
     gates_stack = jnp.stack(gates, axis=2)
+
+    # 4. Apply Gate to Value Projection
+    # v = Gate * Value_Proj(Memory)
     v = gates_stack * self.value_proj(embeddings)[:, :, None, :]
 
+    # 5. Temporal Smoothing & Residual
+    # Output = v + DepthwiseConv(v)
+    # Note: The 'hidden_states' (residual x) is usually added by the caller/block wrapper
     output = v + self.short_conv(v)
     return output
