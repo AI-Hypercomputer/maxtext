@@ -1,0 +1,92 @@
+# Copyright 2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This file defines a module for running tests against the built maxtext package or
+# pre-built images. It can run unit tests and integration tests.
+
+name: MaxText Test Coordinator
+
+on:
+  workflow_call:
+    inputs:
+      flavor:
+        description: 'Test flavor (tpu-unit, tpu-integration, gpu-unit, gpu-integration, cpu-unit)'
+        required: true
+        type: string
+      base_image:
+        description: 'The docker image to run tests against'
+        required: true
+        type: string
+      is_scheduled_run:
+        required: false
+        type: boolean
+        default: false
+      maxtext_sha:
+        required: false
+        type: string
+      maxtext_installed:
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Job for standard Pytest-based tests
+  execute-test-package:
+    name: ${{ inputs.flavor }}
+    uses: ./.github/workflows/run_tests_against_package.yml
+    strategy:
+      matrix:
+        worker_group: ${{ fromJSON(contains(inputs.flavor, 'cpu') && '[1, 2]' || '[1]') }}
+    with:
+      # Infrastructure Mapping
+      device_type: >-
+        ${{ contains(inputs.flavor, 'tpu') && 'tpu' 
+            || (contains(inputs.flavor, 'gpu') && 'cuda12' || 'cpu') }}
+      
+      device_name: >-
+        ${{ contains(inputs.flavor, 'tpu') && 'v6e-4' 
+            || (contains(inputs.flavor, 'gpu') && 'a100-40gb-4' || 'X64') }}
+            
+      cloud_runner: >-
+        ${{ contains(inputs.flavor, 'tpu') && 'linux-x86-ct6e-180-4tpu' 
+            || (contains(inputs.flavor, 'gpu') && 'linux-x86-a2-48-a100-4gpu' || 'linux-x86-n2-16') }}
+
+      # Pytest Marker Mapping
+      pytest_marker: >-
+        ${{ inputs.flavor == 'tpu-unit' && 'not cpu_only and not gpu_only and not integration_test'
+            || (inputs.flavor == 'tpu-integration' && 'not cpu_only and not gpu_only and integration_test')
+            || (inputs.flavor == 'gpu-unit' && 'not cpu_only and not tpu_only and not integration_test')
+            || (inputs.flavor == 'gpu-integration' && 'not cpu_only and not tpu_only and integration_test')
+            || (inputs.flavor == 'cpu-unit' && 'cpu_only')
+            || '' }}
+
+      # Resource Configuration
+      xla_python_client_mem_fraction: "${{ contains(inputs.flavor, 'gpu') && '0.65' || '0.75' }}"
+      tf_force_gpu_allow_growth: "${{ contains(inputs.flavor, 'gpu') && 'true' || 'false' }}"
+      
+      container_resource_option: >-
+        ${{ contains(inputs.flavor, 'gpu') 
+            && '--shm-size 2g --runtime=nvidia --gpus all --privileged' 
+            || '--privileged' }}
+
+      # Metadata and Scaling
+      base_image: ${{ inputs.base_image }}
+      is_scheduled_run: ${{ inputs.is_scheduled_run }}
+      maxtext_installed: ${{ inputs.maxtext_installed }}
+      worker_group: ${{ matrix.worker_group }}
+      total_workers: ${{ contains(inputs.flavor, 'cpu') && 2 || 1 }}
+      maxtext_sha: ${{ inputs.maxtext_sha }}
