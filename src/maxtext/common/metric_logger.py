@@ -27,9 +27,9 @@ import jax
 
 import google_cloud_mldiagnostics as mldiag
 
-from MaxText.managed_mldiagnostics import ManagedMLDiagnostics
 from MaxText.globals import EPS
 from maxtext.common.gcp_workload_monitor import GCPWorkloadMonitor
+from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
