@@ -1060,28 +1060,6 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
-   # --- INSERT LOGGING HERE ---
-  max_logging.log("DEBUG: Inspecting PartitionSpecs in get_abstract_state")
-  
-  # Helper to find the specific problematic key
-  def find_problematic_spec(path, spec, val):
-      key_path = jax.tree_util.keystr(path)
-      # Check for the key mentioned in the error
-      if "layers_0" in key_path and "mlp" in key_path and "wo" in key_path and "kernel" in key_path:
-          max_logging.log(f"DEBUG: Key: {key_path}")
-          max_logging.log(f"DEBUG: Value Shape: {val.shape}")
-          max_logging.log(f"DEBUG: Logical Spec: {spec}")
-          
-          # Check metadata if it's LogicallyPartitioned
-          if hasattr(val, 'partitions'):
-               max_logging.log(f"DEBUG: LogicallyPartitioned partitions: {val.partitions}")
-  
-  jax.tree_util.tree_map_with_path(
-      find_problematic_spec, 
-      state_logical_annotations, 
-      max_utils.unbox_logicallypartioned(abstract_state) # We need shapes from values
-  )
-
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
   if is_training and config.shard_optimizer_over_data:
     # Add data to sharding for optimizer state

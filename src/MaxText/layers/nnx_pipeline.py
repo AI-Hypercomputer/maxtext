@@ -105,7 +105,7 @@ class Pipeline(nnx.Module):
       
       total_expansion = np.prod(broadcast_shape)
       
-      for path, variable in nnx.iter_graph(self.layers):
+      for _, variable in nnx.iter_graph(self.layers):
           # Handle RNG States
           if isinstance(variable, nnx.RngState):
               key = variable.value
@@ -117,46 +117,40 @@ class Pipeline(nnx.Module):
               continue
 
           # Handle Parameters
-          if isinstance(variable, nnx.Variable):
-              old_spec = None
-              original_value = variable.value
+          if not isinstance(variable, nnx.Variable):
+              continue
+          
+          old_spec = None
+          original_value = variable.value
 
-              # 1. Recover Sharding Spec
-              meta = variable.get_metadata()
-              sharding_meta = meta.get('sharding')
-              
-              if sharding_meta is not None and hasattr(sharding_meta, 'spec'):
-                  old_spec = sharding_meta.spec
-              
-              if old_spec is None and isinstance(original_value, nn.spmd.LogicallyPartitioned):
-                  old_spec = original_value.partitions
-                  original_value = original_value.value
+          # 1. Recover Sharding Spec
+          meta = variable.get_metadata()
+          sharding_meta = meta.get('sharding')
+          
+          if sharding_meta is not None and hasattr(sharding_meta, 'spec'):
+              old_spec = sharding_meta.spec
+          
+          if old_spec is None and isinstance(original_value, nn.spmd.LogicallyPartitioned):
+              old_spec = original_value.partitions
+              original_value = original_value.value
 
-              # 2. Broadcast Value
-              new_value = jax.lax.broadcast(jnp.asarray(original_value), broadcast_shape)
-              
-              # 3. Apply New Sharding
-              if old_spec is not None:
-                  if isinstance(old_spec, tuple) and not isinstance(old_spec, P):
-                      old_spec = P(*old_spec)
-                  
-                  new_spec_tuple = tuple(new_logical_axes) + old_spec
-                  new_spec = P(*new_spec_tuple)
-                  
-                  # Create wrapper
-                  wrapped_val = nn.spmd.LogicallyPartitioned(new_value, new_spec)
-                  variable.value = wrapped_val
-                  
-                  # DEBUG LOGGING for Target Tensor
-                  val_shape = variable.value.value.shape
-                  if len(val_shape) >= 4 and (val_shape[-1] == 3072 or val_shape[-2] == 3072):
-                      max_logging.log(f"DEBUG: Pipeline Expansion - Updated {path}")
-                      max_logging.log(f"  Old Spec: {old_spec}")
-                      max_logging.log(f"  New Spec: {new_spec}")
-                      max_logging.log(f"  Assigned Value Type: {type(variable.value)}")
-                      max_logging.log(f"  Assigned Value Shape: {variable.value.value.shape}")
-              else:
-                  variable.value = new_value
+          # 2. Broadcast Value
+          new_value = jax.lax.broadcast(jnp.asarray(original_value), broadcast_shape)
+          
+          # 3. Apply New Sharding
+          if old_spec is None:
+              variable.value = new_value
+              continue
+          
+          if isinstance(old_spec, tuple) and not isinstance(old_spec, P):
+              old_spec = P(*old_spec)
+          
+          new_spec_tuple = tuple(new_logical_axes) + old_spec
+          new_spec = P(*new_spec_tuple)
+          
+          wrapped_val = nn.spmd.LogicallyPartitioned(new_value, new_spec)
+          variable.value = wrapped_val
+
 
   def need_circ_storage(self):
     return (

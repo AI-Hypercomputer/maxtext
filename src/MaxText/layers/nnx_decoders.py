@@ -407,7 +407,6 @@ class NNXDecoder(nnx.Module):
     self.remat_policy = self.get_remat_policy()
 
     if self.using_pipeline:
-      max_logging.log(f"DEBUG: Initializing Pipeline Module with {config.pipeline_parallel_layers} layers.")
       # The pipeline module will contain the layers defined in get_pipeline_stage_module.
       self.pipeline_module = self.get_pipeline_stage_module(decoder_block_classes)
       self.num_pipeline_layers = config.pipeline_parallel_layers
@@ -417,7 +416,6 @@ class NNXDecoder(nnx.Module):
           # DeepSeek Dense Layers (Pre-Pipeline)
           dense_cls = decoder_block_classes[0]
           num_dense = config.first_num_dense_layers
-          max_logging.log(f"DEBUG: Initializing DeepSeek Dense Layers: {num_dense} layers.")
           
           if config.scan_layers:
               vmapped_dense = self._create_scanned_layers_vmap(dense_cls, length=num_dense, rngs=rngs)
@@ -429,7 +427,6 @@ class NNXDecoder(nnx.Module):
               )
 
       if num_remaining_layers > 0:
-        max_logging.log(f"DEBUG: Initializing Remainder Layers: {num_remaining_layers} layers.")
         layer_cls = decoder_block_classes[1] if self.is_deepseek else decoder_block_classes[0]
         
         if config.scan_layers:
@@ -598,9 +595,7 @@ class NNXDecoder(nnx.Module):
 
   def _get_pipeline_logical_spec(self):
       """Extracts weight sharding spec from the pipeline module to support FSDP AG."""
-      max_logging.log("DEBUG: Extracting pipeline logical specs...")
       if not hasattr(self, 'pipeline_module'):
-          max_logging.log("DEBUG: pipeline_module attribute missing!")
           return None
       
       try:
@@ -620,12 +615,10 @@ class NNXDecoder(nnx.Module):
           max_logging.log(f"DEBUG: Spec Tree Root Type: {type(spec_tree)}")
           return spec_tree
       except Exception as e:
-          max_logging.log(f"DEBUG: Failed to extract specs: {e}")
           return None
   
   def _apply_layers_sequentially(self, layers, x_in, *args, length: int, **kwargs):
     """Runs the layer stack using nnx.scan."""
-    max_logging.log(f"DEBUG: _apply_layers_sequentially started. Length: {length}, Args len: {len(args)}, Kwargs keys: {list(kwargs.keys())}")
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
     graphdef, params, state = nnx.split(
@@ -637,7 +630,6 @@ class NNXDecoder(nnx.Module):
 
     # Filter kwargs to only include keys that exist in the layer's signature
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
-    max_logging.log(f"DEBUG: Valid kwargs for layer call: {list(valid_kwargs.keys())}")
 
     def layer_fn(carry, scanned_vars):
       # Unpack the sliced variables for THIS layer
@@ -661,13 +653,11 @@ class NNXDecoder(nnx.Module):
     final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state))
     nnx.update(layers, scanned_state)
 
-    max_logging.log(f"DEBUG: _apply_layers_sequentially finished. Output shape: {final_carry.shape}")
     return final_carry, None
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
     cfg = self.config
-    max_logging.log(f"DEBUG: get_decoder_layers called for block type: {cfg.decoder_block}")
 
     def get_scannable(normal_cls, scannable_cls):
       return [scannable_cls] if cfg.scan_layers else [normal_cls]
@@ -723,7 +713,6 @@ class NNXDecoder(nnx.Module):
     """Get remat policy for jax.checkpoint."""
     policy = None
     cfg = self.config
-    max_logging.log(f"DEBUG: get_remat_policy called. Policy config: {cfg.remat_policy}")
     if cfg.remat_policy != "none":
       if cfg.remat_policy in ("minimal_with_context", "minimal_flash"):
         if cfg.remat_policy == "minimal_flash":
@@ -804,7 +793,6 @@ class NNXDecoder(nnx.Module):
 
   def get_norm_layer(self, num_features: int, rngs: nnx.Rngs):
     """get normalization layer (return type inherits from nn.Module)"""
-    max_logging.log(f"DEBUG: get_norm_layer called. Num features: {num_features}")
     if self.config.decoder_block in (
         DecoderBlockType.DEFAULT,
         DecoderBlockType.LLAMA2,
@@ -845,7 +833,6 @@ class NNXDecoder(nnx.Module):
       audio_masks=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
-    max_logging.log("DEBUG: _apply_embedding started.")
     cfg = self.config
 
     y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
@@ -889,12 +876,10 @@ class NNXDecoder(nnx.Module):
     if cfg.trainable_position_size > 0 and self.position_embedder:
       y += self.position_embedder(decoder_positions.astype("int32"), model_mode=model_mode)
 
-    max_logging.log(f"DEBUG: _apply_embedding finished. Output shape: {y.shape}")
     return y
 
   def apply_output_head(self, shared_embedding, y, deterministic, model_mode):
     """Applies final normalization and projects hidden states to logits."""
-    max_logging.log("DEBUG: apply_output_head started.")
     cfg = self.config
     if cfg.shard_mode == ShardMode.EXPLICIT:
       norm_out_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length_no_exp", "activation_embed"))
@@ -932,8 +917,8 @@ class NNXDecoder(nnx.Module):
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
 
-    max_logging.log(f"DEBUG: apply_output_head finished. Logits shape: {logits.shape}")
     return logits
+  
   def __call__(
       self,
       shared_embedding: Any,
@@ -955,7 +940,6 @@ class NNXDecoder(nnx.Module):
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
-    max_logging.log(f"DEBUG: NNXDecoder.__call__ Inputs: {decoder_input_tokens.shape}")
 
     y = self._apply_embedding(
         shared_embedding,
@@ -981,24 +965,18 @@ class NNXDecoder(nnx.Module):
       layer_kwargs["bidirectional_mask"] = bidirectional_mask
 
     if self.using_pipeline:
-      max_logging.log("DEBUG: Entering Pipeline Execution Path")
       if cfg.pipeline_fsdp_ag_once:
         logical_partition_spec = self._get_pipeline_logical_spec()
-        max_logging.log(f"DEBUG: logical_partition_spec retrieved: {logical_partition_spec is not None}")
       else:
         logical_partition_spec = None
       
       if self.is_deepseek:
-          max_logging.log("DEBUG: Running DeepSeek Dense layers...")
           y = self.dense_layers(y, *layer_args, **layer_kwargs)
 
-      max_logging.log(f"DEBUG: Calling pipeline module with inputs shape: {y.shape}")
       y = self.pipeline_module(y, *layer_args, logical_partition_spec=logical_partition_spec)
-      max_logging.log(f"DEBUG: Pipeline module returned output shape: {y.shape}")
       
       if hasattr(self, 'remainder_layers'):
         kv_start_idx = self.num_pipeline_layers 
-        max_logging.log("DEBUG: Running Remainder Layers...")
         
         # Manual loop for remainder layers to support KV cache extraction and OOM fix
         if isinstance(self.remainder_layers, NNXSequentialBlockDecoderLayers):

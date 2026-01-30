@@ -508,28 +508,6 @@ class ToLinen(linen.Module):
       if self.is_mutable_collection(collection):
 
         def _to_linen_var(x):
-          # --- DEBUG LOGGING ---
-          if isinstance(x, nnx.VariableState):
-              val = x.value
-              is_target = False
-              # Try to identify target tensor by shape/type
-              if hasattr(val, 'shape') and len(val.shape) == 4 and val.shape[1] == 2:
-                  is_target = True
-              elif isinstance(val, nn.spmd.LogicallyPartitioned) and len(val.value.shape) == 4:
-                  is_target = True
-              
-              if is_target:
-                  max_logging.log("*" * 40)
-                  max_logging.log(f"DEBUG: _to_linen_var processing target variable.")
-                  max_logging.log(f"  Collection: {collection}")
-                  max_logging.log(f"  Value Type: {type(val)}")
-                  if isinstance(val, nn.spmd.LogicallyPartitioned):
-                      max_logging.log(f"  Is LogicallyPartitioned with spec: {val.partitions}")
-                  
-                  # Check if metadata_fn is defined
-                  max_logging.log(f"  Has metadata_fn: {self.metadata_fn is not None}")
-          # ---------------------
-
           if isinstance(x, nnx.VariableState):
             if self.metadata_fn is not None:
               return self.metadata_fn(x)  # pylint: disable=too-many-function-args
