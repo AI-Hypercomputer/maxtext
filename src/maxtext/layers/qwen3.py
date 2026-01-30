@@ -29,18 +29,18 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED, MODEL_MODE_TRAIN
-from MaxText.layers import attentions
-from MaxText.layers import initializers as max_initializers
-from MaxText.layers import moe
-from MaxText.layers import nnx_wrappers
-from MaxText.layers import quantizations
-from MaxText.layers.embeddings import Qwen3OmniMoeVisionPosEmbedInterpolate, PositionalEmbedding
-from MaxText.layers.normalizations import RMSNorm, l2norm, Qwen3NextRMSNorm, Qwen3NextRMSNormGated
-from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.attentions import Attention
-from MaxText.layers.linears import DenseGeneral, MlpBlock
-from MaxText.layers.moe import RoutedMoE
-from MaxText.layers.initializers import nd_dense_init, variable_to_logically_partitioned
+from maxtext.layers import attentions
+from maxtext.layers import initializers as max_initializers
+from maxtext.layers import moe
+from maxtext.layers import nnx_wrappers
+from maxtext.layers import quantizations
+from maxtext.layers.embeddings import Qwen3OmniMoeVisionPosEmbedInterpolate, PositionalEmbedding
+from maxtext.layers.normalizations import RMSNorm, l2norm, Qwen3NextRMSNorm, Qwen3NextRMSNormGated
+from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.attentions import Attention
+from maxtext.layers.linears import DenseGeneral, MlpBlock
+from maxtext.layers.moe import RoutedMoE
+from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 from maxtext.inference import page_manager
 from maxtext.utils import max_utils
 

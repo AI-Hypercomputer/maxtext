@@ -37,8 +37,8 @@ import jax.numpy as jnp
 
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
-from MaxText.layers import attentions, moe, embeddings
-from MaxText.layers.initializers import nd_dense_init
+from maxtext.layers import attentions, moe, embeddings
+from maxtext.layers.initializers import nd_dense_init
 from maxtext.utils import maxtext_utils
 
 

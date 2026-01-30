@@ -23,14 +23,14 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from MaxText.common_types import MODEL_MODE_PREFILL, Config
-from MaxText.layers import attentions
-from MaxText.layers import initializers
-from MaxText.layers import nnx_wrappers
-from MaxText.layers import quantizations
-from MaxText.layers.attentions import Attention
-from MaxText.layers.linears import Dropout, MlpBlock
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers import attentions
+from maxtext.layers import initializers
+from maxtext.layers import nnx_wrappers
+from maxtext.layers import quantizations
+from maxtext.layers.attentions import Attention
+from maxtext.layers.linears import Dropout, MlpBlock
+from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 
 

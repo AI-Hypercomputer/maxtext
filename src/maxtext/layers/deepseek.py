@@ -26,14 +26,14 @@ from flax import nnx
 
 from MaxText.common_types import Config
 from MaxText.common_types import MODEL_MODE_PREFILL
-from MaxText.layers import attention_mla
-from MaxText.layers import initializers
-from MaxText.layers import linears
-from MaxText.layers import moe
-from MaxText.layers import nnx_wrappers
-from MaxText.layers import quantizations
-from MaxText.layers.linears import Dropout
-from MaxText.layers.normalizations import RMSNorm
+from maxtext.layers import attention_mla
+from maxtext.layers import initializers
+from maxtext.layers import linears
+from maxtext.layers import moe
+from maxtext.layers import nnx_wrappers
+from maxtext.layers import quantizations
+from maxtext.layers.linears import Dropout
+from maxtext.layers.normalizations import RMSNorm
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from maxtext.inference import page_manager
 from maxtext.utils import max_utils

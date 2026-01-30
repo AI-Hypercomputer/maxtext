@@ -53,7 +53,7 @@ from flax import nnx
 
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
-from MaxText.layers import embeddings, attention_mla
+from maxtext.layers import embeddings, attention_mla
 from MaxText.common_types import MODEL_MODE_TRAIN
 from maxtext.utils import maxtext_utils
 

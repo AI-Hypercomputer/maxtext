@@ -23,14 +23,14 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText.common_types import Config, AttentionType, MODEL_MODE_PREFILL
-from MaxText.layers import quantizations
-from MaxText.layers import nnx_wrappers
-from MaxText.layers import initializers
-from MaxText.layers.attentions import Attention
-from MaxText.layers.linears import DenseGeneral, MlpBlock, Dropout
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.initializers import variable_to_logically_partitioned
+from maxtext.layers import quantizations
+from maxtext.layers import nnx_wrappers
+from maxtext.layers import initializers
+from maxtext.layers.attentions import Attention
+from maxtext.layers.linears import DenseGeneral, MlpBlock, Dropout
+from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.utils import max_utils
 
 

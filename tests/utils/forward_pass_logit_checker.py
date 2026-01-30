@@ -59,8 +59,8 @@ from MaxText.utils.ckpt_conversion.utils.hf_utils import (
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import models
+from maxtext.layers import quantizations
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 

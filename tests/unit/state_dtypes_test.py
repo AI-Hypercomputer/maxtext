@@ -23,8 +23,8 @@ import jax.numpy as jnp
 from MaxText import pyconfig
 from MaxText import optimizers
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import models
+from maxtext.layers import quantizations
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.utils import maxtext_utils
 

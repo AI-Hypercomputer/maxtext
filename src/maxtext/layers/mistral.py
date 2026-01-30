@@ -16,33 +16,29 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-import functools
-import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
+import jax.numpy as jnp
 
+from flax import linen as nn
 from flax import nnx
 
-from MaxText.common_types import Config
-from MaxText.sharding import maybe_shard_with_logical, create_sharding
-from MaxText.layers.linears import Dropout, MlpBlock
-from MaxText.layers import initializers
-from MaxText.layers import nnx_wrappers
-from MaxText.layers import quantizations
-from MaxText.layers.attentions import Attention
-from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.common_types import MODEL_MODE_PREFILL
-from maxtext.inference import page_manager
+from maxtext.layers import nnx_wrappers, initializers
+from maxtext.layers.linears import Dropout, MlpBlock
+from maxtext.layers.models import Config
+from maxtext.layers.attentions import Attention
+from maxtext.layers import quantizations
+from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import max_utils
 
 
 # -----------------------------------------
-# The Decoder Layer specific for Llama2
+# The Decoder Layer for Mistral
 # -----------------------------------------
 
 
-class LlamaDecoderLayer(nnx.Module):
+class MistralDecoderLayer(nnx.Module):
   """Transformer decoder layer that attends to the encoder."""
 
   def __init__(
@@ -50,18 +46,14 @@ class LlamaDecoderLayer(nnx.Module):
       config: Config,
       model_mode: str,
       mesh: Mesh,
+      *,
       rngs: nnx.Rngs,
       quant: None | Quant = None,
   ):
-
     self.config = config
     self.mesh = mesh
     self.quant = quant
-
-    if model_mode == MODEL_MODE_PREFILL:
-      self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
-    else:
-      self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self.rngs = rngs
 
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
@@ -70,10 +62,9 @@ class LlamaDecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
-        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+        rngs=self.rngs,
     )
 
     self.self_attention = Attention(
@@ -101,21 +92,20 @@ class LlamaDecoderLayer(nnx.Module):
         use_ragged_attention=config.use_ragged_attention,
         ragged_block_size=config.ragged_block_size,
         model_mode=model_mode,
-        attn_logits_soft_cap=config.attn_logits_soft_cap,
-        rngs=rngs,
+        rngs=self.rngs,
     )
 
     self.post_self_attention_layer_norm = RMSNorm(
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
-        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+        rngs=self.rngs,
     )
 
     self.mlp = MlpBlock(
+        mesh=self.mesh,
         in_features=config.emb_dim,
         intermediate_dim=config.mlp_dim,
         activations=config.mlp_activations,
@@ -123,20 +113,14 @@ class LlamaDecoderLayer(nnx.Module):
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
         config=config,
-        mesh=mesh,
         quant=self.quant,
         model_mode=model_mode,
-        rngs=rngs,
+        rngs=self.rngs,
     )
 
-    self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+    self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
 
-    self._maybe_shard_with_logical = functools.partial(
-        maybe_shard_with_logical,
-        mesh=self.mesh,
-        shard_mode=config.shard_mode,
-        debug_sharding=config.debug_sharding,
-    )
+    self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
   def __call__(
       self,
@@ -145,8 +129,8 @@ class LlamaDecoderLayer(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      page_state: None | int = None,
       slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
       previous_chunk=None,
       kv_cache=None,
       attention_metadata=None,
@@ -156,13 +140,11 @@ class LlamaDecoderLayer(nnx.Module):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_sharding = create_sharding(self.mesh, self.activation_axis_names)
-    lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=lnx_sharding)
-    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
+    lnx = self.pre_self_attention_layer_norm(inputs)
+    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
-    # Self-attention block
     attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
@@ -173,33 +155,24 @@ class LlamaDecoderLayer(nnx.Module):
         slot=slot,
         page_state=page_state,
         previous_chunk=previous_chunk,
-        out_sharding=lnx_sharding,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
     )
 
-    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
+    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=lnx_sharding)
-    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
+    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
     # MLP block.
-    mlp_intermediate_sharding = create_sharding(
-        self.mesh, ("activation_batch", "activation_length_no_exp", "activation_mlp")
-    )
-    mlp_lnx = self.mlp(
-        hidden_states,
-        deterministic=deterministic,
-        intermediate_sharding=mlp_intermediate_sharding,
-        out_sharding=lnx_sharding,
-    )
-    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout(layer_output, deterministic=deterministic)
-    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
+    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
@@ -216,7 +189,7 @@ class LlamaDecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-LlamaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    LlamaDecoderLayer,
+MistralDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    MistralDecoderLayer,
     base_metadata_fn=initializers.variable_to_logically_partitioned,
 )

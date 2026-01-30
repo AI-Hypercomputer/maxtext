@@ -54,9 +54,9 @@ from MaxText.common_types import (
     AttentionType,
 )
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
-from MaxText.layers import nnx_wrappers
-from MaxText.layers.attention_op import AttentionOp
-from MaxText.layers.embeddings import (
+from maxtext.layers import nnx_wrappers
+from maxtext.layers.attention_op import AttentionOp
+from maxtext.layers.embeddings import (
     LLaMARotaryEmbedding,
     LlamaVisionRotaryEmbedding,
     Qwen3OmniMoeVisionRotaryEmbedding,
@@ -64,10 +64,10 @@ from MaxText.layers.embeddings import (
     YarnRotaryEmbedding,
     Qwen3NextRotaryEmbedding,
 )
-from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
-from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
-from MaxText.layers.normalizations import RMSNorm, Qwen3NextRMSNorm
-from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
+from maxtext.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
+from maxtext.layers.normalizations import RMSNorm, Qwen3NextRMSNorm
+from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache, page_manager, paged_attention
 from maxtext.inference.kvcache import KVQuant
 

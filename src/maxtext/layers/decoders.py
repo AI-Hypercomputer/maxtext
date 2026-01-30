@@ -31,17 +31,17 @@ from flax.linen.partitioning import ScanIn
 from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONTEXT
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.sharding import create_sharding
-from MaxText.layers import linears
-from MaxText.layers import normalizations
-from MaxText.layers import quantizations
-from MaxText.layers import pipeline
+from maxtext.layers import linears
+from maxtext.layers import normalizations
+from maxtext.layers import quantizations
+from maxtext.layers import pipeline
 from MaxText import multimodal_utils
 from MaxText import sharding
-from MaxText.layers.attentions import attention_as_linen
-from MaxText.layers.normalizations import rms_norm
-from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
-from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers import (
+from maxtext.layers.attentions import attention_as_linen
+from maxtext.layers.normalizations import rms_norm
+from maxtext.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
+from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers import (
     deepseek,
     deepseek_batchsplit,
     gemma,

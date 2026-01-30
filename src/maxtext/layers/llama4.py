@@ -26,16 +26,16 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText.common_types import Config, Array, MODEL_MODE_TRAIN, AttentionType
-from MaxText.layers import initializers
-from MaxText.layers import nnx_wrappers
-from MaxText.layers import linears
-from MaxText.layers import quantizations
-from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.attentions import Attention
-from MaxText.layers.linears import MlpBlock
-from MaxText.layers.linears import Dropout
-from MaxText.layers.moe import RoutedAndSharedMoE
+from maxtext.layers import initializers
+from maxtext.layers import nnx_wrappers
+from maxtext.layers import linears
+from maxtext.layers import quantizations
+from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.attentions import Attention
+from maxtext.layers.linears import MlpBlock
+from maxtext.layers.linears import Dropout
+from maxtext.layers.moe import RoutedAndSharedMoE
 from MaxText.common_types import MODEL_MODE_PREFILL
 from maxtext.inference import page_manager
 from maxtext.utils import max_utils

@@ -29,10 +29,10 @@ from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
-from MaxText.layers import deepseek
-from MaxText.layers import nnx_wrappers
-from MaxText.layers import pipeline
-from MaxText.layers import simple_layer
+from maxtext.layers import deepseek
+from maxtext.layers import nnx_wrappers
+from maxtext.layers import pipeline
+from maxtext.layers import simple_layer
 from MaxText.train import main as train_main
 import pytest
 

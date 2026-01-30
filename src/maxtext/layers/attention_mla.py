@@ -63,12 +63,12 @@ from MaxText.common_types import (
 )
 
 from MaxText.sharding import create_sharding
-from MaxText.layers import nnx_wrappers
-from MaxText.layers.attentions import Attention
-from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
-from MaxText.layers.linears import DenseGeneral
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers import nnx_wrappers
+from maxtext.layers.attentions import Attention
+from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
+from maxtext.layers.linears import DenseGeneral
+from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
 from maxtext.inference import page_manager
 from maxtext.inference import paged_attention

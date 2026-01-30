@@ -24,12 +24,12 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
-from MaxText.layers.linears import DenseGeneral
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.decoders import DecoderLayer
-from MaxText.layers import nnx_wrappers
+from maxtext.layers.linears import DenseGeneral
+from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.decoders import DecoderLayer
+from maxtext.layers import nnx_wrappers
 from MaxText.globals import EPS
-from MaxText.layers.initializers import variable_to_logically_partitioned
+from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 

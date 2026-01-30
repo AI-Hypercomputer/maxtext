@@ -12,53 +12,56 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Decoder layer definition for mixtral."""
+"""Transformer model definition."""
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-
+import functools
+import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
-import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
 
-from maxtext.utils import max_utils
 from MaxText.common_types import Config
-
-from MaxText.layers import nnx_wrappers, initializers
-from MaxText.layers import moe
-from MaxText.layers import quantizations
-from MaxText.layers.linears import Dropout
-from MaxText.layers.attentions import Attention
-from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.sharding import maybe_shard_with_logical, create_sharding
+from maxtext.layers.linears import Dropout, MlpBlock
+from maxtext.layers import initializers
+from maxtext.layers import nnx_wrappers
+from maxtext.layers import quantizations
+from maxtext.layers.attentions import Attention
+from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.normalizations import RMSNorm
+from MaxText.common_types import MODEL_MODE_PREFILL
+from maxtext.inference import page_manager
+from maxtext.utils import max_utils
 
 
 # -----------------------------------------
-# The Decoder Layer for Mixtral
+# The Decoder Layer specific for Llama2
 # -----------------------------------------
 
 
-class MixtralDecoderLayer(nnx.Module):
+class LlamaDecoderLayer(nnx.Module):
   """Transformer decoder layer that attends to the encoder."""
 
-  @nn.compact
   def __init__(
       self,
       config: Config,
-      mesh: Mesh,
       model_mode: str,
-      quant: None | Quant = None,
-      *,
+      mesh: Mesh,
       rngs: nnx.Rngs,
+      quant: None | Quant = None,
   ):
+
     self.config = config
     self.mesh = mesh
-    self.model_mode = model_mode
     self.quant = quant
-    self.rngs = rngs
+
+    if model_mode == MODEL_MODE_PREFILL:
+      self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+    else:
+      self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
@@ -67,9 +70,10 @@ class MixtralDecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
-        rngs=self.rngs,
+        rngs=rngs,
     )
 
     self.self_attention = Attention(
@@ -97,35 +101,42 @@ class MixtralDecoderLayer(nnx.Module):
         use_ragged_attention=config.use_ragged_attention,
         ragged_block_size=config.ragged_block_size,
         model_mode=model_mode,
-        rngs=self.rngs,
+        attn_logits_soft_cap=config.attn_logits_soft_cap,
+        rngs=rngs,
     )
 
     self.post_self_attention_layer_norm = RMSNorm(
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
-        rngs=self.rngs,
+        rngs=rngs,
     )
 
-    self.MoeBlock_0 = moe.RoutedMoE(
-        config=config,
-        num_experts=config.num_experts,
-        num_experts_per_tok=config.num_experts_per_tok,
-        mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
+    self.mlp = MlpBlock(
+        in_features=config.emb_dim,
         intermediate_dim=config.mlp_dim,
+        activations=config.mlp_activations,
+        intermediate_dropout_rate=config.dropout_rate,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        config=config,
+        mesh=mesh,
         quant=self.quant,
-        rngs=self.rngs,
+        model_mode=model_mode,
+        rngs=rngs,
     )
 
     self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
 
-    self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=self.mesh,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+    )
 
   def __call__(
       self,
@@ -134,21 +145,24 @@ class MixtralDecoderLayer(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
       previous_chunk=None,
-      page_state=None,
-      slot=None,
       kv_cache=None,
       attention_metadata=None,
   ):
+    cfg = self.config
+
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
+    lnx_sharding = create_sharding(self.mesh, self.activation_axis_names)
+    lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=lnx_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
 
-    lnx = self.pre_self_attention_layer_norm(inputs)
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
-
+    # Self-attention block
     attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
@@ -156,33 +170,38 @@ class MixtralDecoderLayer(nnx.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        slot=slot,
+        page_state=page_state,
         previous_chunk=previous_chunk,
+        out_sharding=lnx_sharding,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=lnx_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
-    load_balance_loss = None
-    # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
-    # The `name` represents the weight name in JAX/checkpoints and so the class name
-    # is just for readability.
-    mlp_lnx, load_balance_loss, _ = self.MoeBlock_0(hidden_states)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    # MLP block.
+    mlp_intermediate_sharding = create_sharding(
+        self.mesh, ("activation_batch", "activation_length_no_exp", "activation_mlp")
+    )
+    mlp_lnx = self.mlp(
+        hidden_states,
+        deterministic=deterministic,
+        intermediate_sharding=mlp_intermediate_sharding,
+        out_sharding=lnx_sharding,
+    )
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout(layer_output, deterministic=deterministic)
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
 
-    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.sow("intermediates", "moe_lb_loss", load_balance_loss)
-
-    if self.config.record_internal_nn_metrics:
+    if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
@@ -191,13 +210,13 @@ class MixtralDecoderLayer(nnx.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if self.config.scan_layers:
+    if cfg.scan_layers:
       return layer_output, None
     else:
       return layer_output, kv_cache
 
 
-MixtralDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    MixtralDecoderLayer,
+LlamaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    LlamaDecoderLayer,
     base_metadata_fn=initializers.variable_to_logically_partitioned,
 )

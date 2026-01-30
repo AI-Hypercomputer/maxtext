@@ -34,7 +34,7 @@ from jax.sharding import Mesh
 
 from MaxText import maxtext_utils, pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers.attention_op import AttentionOp
+from maxtext.layers.attention_op import AttentionOp
 
 # pylint: disable=missing-function-docstring,protected-access
 
