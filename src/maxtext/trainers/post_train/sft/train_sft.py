@@ -194,7 +194,7 @@ def main(argv: Sequence[str]) -> None:
   pathwaysutils.initialize()
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
-  mt_config = pyconfig.initialize(argv)
+  mt_config = pyconfig.initialize(argv, use_tunix_ga=True)
   max_utils.print_system_information()
 
   goodput_recorder = create_goodput_recorder(mt_config)
