@@ -15,7 +15,7 @@
 An example script to perform decoding using vLLM via Tunix or via MaxText on vLLM.
 
 Example usage with Tunix:
-  python3 -m MaxText.vllm_decode MaxText/configs/base.yml \
+  python3 -m maxtext.vllm_decode MaxText/configs/base.yml \
     model_name=llama3.1-8b tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
     tokenizer_type=huggingface hf_access_token=<your_hf_token> \
     load_parameters_path=<your_checkpoint_path> \
@@ -25,7 +25,7 @@ Example usage with Tunix:
     --use_tunix \
   
 Or without Tunix using the MaxText vLLM integration:
-  python3 -m MaxText.vllm_decode \
+  python3 -m maxtext.vllm_decode \
     --model_name qwen3-30b-a3b \
     --hf_model_name Qwen/Qwen3-30B-A3B \
     --hf_config_path src/MaxText/integration/vllm/maxtext_vllm_adapter \

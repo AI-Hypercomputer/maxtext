@@ -51,7 +51,6 @@ from MaxText.globals import EPS
 
 from MaxText.gradient_accumulation import gradient_accumulation_loss_and_grad
 from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
-from MaxText.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
 # pylint: disable=too-many-positional-arguments
 
 from maxtext.common import checkpointing, profiler
@@ -63,6 +62,7 @@ from maxtext.common.goodput import (
 )
 from maxtext.common.metric_logger import MetricLogger, record_activation_metrics
 from maxtext.common.vertex_tensorboard import VertexTensorboardManager
+from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging

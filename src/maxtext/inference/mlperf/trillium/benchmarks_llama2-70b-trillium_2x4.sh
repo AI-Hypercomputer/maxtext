@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# NOTE: please check the README located at src/MaxText/inference_mlperf/README.md for instructions on how
+# NOTE: please check the README located at src/maxtext/inference/mlperf/README.md for instructions on how
 # to set up the environment before running this script.
 # Run command:
 # bash benchmarks_llama2-70b-trillium_2x4.sh [-b benchmark_type]

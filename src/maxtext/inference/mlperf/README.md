@@ -64,7 +64,7 @@ cd ~
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
 bash setup.sh
-python3 -m pip install -r src/MaxText/inference_mlperf/requirements.txt
+python3 -m pip install -r src/maxtext/inference/mlperf/requirements.txt
 ```
 
 ### Generate quantized checkpoint
@@ -125,7 +125,7 @@ export MODEL_SIZE=llama3.1-405b
 export QUANTIZE_TYPE=int8
 
 cd maxtext && \
-python3 -m MaxText.load_and_quantize_checkpoint src/MaxText/configs/base.yml tokenizer_path=${TOKENIZER} load_parameters_path=${LOAD_PARAMS_PATH} max_prefill_predict_length=1024 max_target_length=2048 model_name=${MODEL_SIZE} ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 attention=dot_product quantization=${QUANTIZE_TYPE} save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH} async_checkpointing=false
+python3 -m maxtext.checkpoint_conversion.load_and_quantize_checkpoint src/MaxText/configs/base.yml tokenizer_path=${TOKENIZER} load_parameters_path=${LOAD_PARAMS_PATH} max_prefill_predict_length=1024 max_target_length=2048 model_name=${MODEL_SIZE} ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 attention=dot_product quantization=${QUANTIZE_TYPE} save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH} async_checkpointing=false
 ```
 
 The quantized checkpoint is saved at `${SAVE_QUANT_PARAMS_PATH}`
@@ -141,7 +141,7 @@ huggingface-cli login --token $HUGGING_FACE_TOKEN
 #### For trillium
 #### LLama2-70b:
 ```
-cd ~/maxtext/src/MaxText/inference_mlperf/trillium
+cd ~/maxtext/src/maxtext/inference/mlperf/trillium
 ```
 
 ##### Test Run

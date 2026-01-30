@@ -56,7 +56,7 @@ from maxtext.utils import maxtext_utils
 
 
 def get_golden_data(config):
-  """Get the golden data for GrpoTrainer from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py."""
+  """Get the golden data for GrpoTrainer from tests/assets/logits_generation/generate_grpo_golden_logits.py."""
   input_golden_data_path = os.path.join(
       MAXTEXT_TEST_ASSETS_ROOT,
       "golden_logits",

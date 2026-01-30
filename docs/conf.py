@@ -175,8 +175,8 @@ def run_apidoc(_):
       # Paths to exclude
       os.path.join(MAXTEXT_REPO_ROOT, "tests"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "experimental"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_mlperf"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "scratch_code"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "inference"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "scratch_code"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "utils", "ckpt_conversion"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "rl"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "multimodal_utils.py"),

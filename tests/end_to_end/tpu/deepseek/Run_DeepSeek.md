@@ -171,7 +171,7 @@ To verify the correctness of the model implementation, we perform two primary ch
 One example command to generate golden logits from HuggingFace for V2-Lite.
 
 ```sh
-python3 -m MaxText.scratch_code.generate_hf_golden_logits \
+python3 -m tests.assets.logits_generation.generate_hf_golden_logits \
     --model-id=deepseek-ai/DeepSeek-V2-Lite \
     --output-path=golden_DeepSeek-V2-Lite.jsonl \
     --prompts='I love to;Today is a;What is the'
