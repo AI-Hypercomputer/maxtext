@@ -18,7 +18,7 @@
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 
-from typing import Any, Sequence
+from typing import Any, Dict, Sequence
 import datetime
 import functools
 import os
@@ -34,7 +34,7 @@ import tensorflow as tf
 import jax
 import jax.numpy as jnp
 
-from flax import linen as nn
+from flax import linen as nn, nnx
 from flax.linen import partitioning as nn_partitioning
 
 from cloud_tpu_diagnostics import diagnostic
@@ -49,6 +49,7 @@ from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import pyconfig
 from MaxText import sharding
+from MaxText.layers import train_state_nnx
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.common_types import ShardMode
 from MaxText.globals import EPS
@@ -133,23 +134,6 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_mask=data["targets_segmentation"],
     )
 
-    if config.num_vocab_tiling > 1:
-      hidden_state_key = ("intermediates", "decoder", "hidden_states")
-      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
-      total_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
-    else:
-      one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-      xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
-      xent = sharding.maybe_shard_with_logical(
-          xent,
-          ("activation_embed_and_logits_batch", "activation_length"),
-          model.mesh,
-          config.shard_mode,
-          debug_sharding=config.debug_sharding,
-      )
-      # Mask out paddings at the end of each example.
-      xent = xent * (data["targets_segmentation"] != 0)
-      total_loss = jnp.sum(xent)
   else:
     # Flax NNX model
     logits = model(
@@ -162,11 +146,32 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
     )
-    intermediate_outputs = {}
+
+    # Capture NNX intermediates (MoE losses, hidden states, etc.)
+    intermediate_outputs = nnx.state(model, nnx.Intermediate).to_pure_dict()
+
+  # Vocab Tiling Logic
+  if config.num_vocab_tiling > 1:
+    hidden_state_key = ("intermediates", "decoder", "hidden_states")
+    hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
+
+    if isinstance(model, nn.Module):
+      total_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
+    else:
+      raise NotImplementedError("Vocab tiling for NNX modules has not been implemented.")
+  else:
+    # 5. Standard Cross Entropy Loss
     one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
     xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
-    xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
-    # Mask out paddings at the end of each example.
+
+    logical_axes = ("activation_embed_and_logits_batch", "activation_length")
+    if isinstance(model, nn.Module):
+      xent = sharding.maybe_shard_with_logical(
+          xent, logical_axes, model.mesh, config.shard_mode, debug_sharding=config.debug_sharding
+      )
+    else:
+      xent = nn.with_logical_constraint(xent, logical_axes)
+
     xent = xent * (data["targets_segmentation"] != 0)
     total_loss = jnp.sum(xent)
 
@@ -348,6 +353,149 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     new_state = _merge_dpo_state(new_state, reference_params)
 
   return new_state, metrics
+
+
+def train_step_nnx(
+    model: nnx.Module,
+    config: pyconfig.HyperParameters,
+    state_mesh_shardings: nnx.State,  # sharding of the following state module
+    params_shardings: nnx.State,  # sharding of the model module
+    data: Any,
+    state: train_state_nnx.TrainStateNNX,  # primary state including model, optimizer, and rngs
+) -> tuple[nnx.Module, Dict[str, Any]]:
+  """
+  NNX version of the training step.
+
+  Args:
+    model: The model instance being trained (the policy model in DPO).
+    config: Hyperparameters.
+    state_mesh_shardings: PyTree of PartitionSpecs for the whole TrainStateNNX container.
+    params_shardings: PyTree of PartitionSpecs for the primary model parameters.
+    data: Training data batch.
+    state: The TrainStateNNX container holding the primary model, optimizer, and rngs.
+
+  Returns:
+    new_state_nnx: Updated TrainStateNNX container.
+    metrics: Training metrics.
+  """
+  # DPO Logic: Reference params handling
+  reference_params = None
+  extra_dpo_args = []
+  _loss_fn = loss_fn
+
+  if config.use_dpo:
+    reference_params = nnx.state(model)
+    extra_dpo_args = [reference_params]
+    reference_params_sharding = state_mesh_shardings.model
+    _loss_fn = dpo_loss_fn  # Assume DPO specific loss function
+
+  # 1. Gradient Computation
+  if config.gradient_accumulation_steps > 1:
+    # (Simplified for context, assumes GA helper is updated)
+    loss, aux, raw_grads = gradient_accumulation_loss_and_grad(_loss_fn, config, state, data, extra_dpo_args)
+  else:
+    # Handle Memory Host Offload for Reference Params
+    if config.optimizer_memory_host_offload and config.use_dpo:
+      ref_sharding = getattr(state_mesh_shardings, "ref_model", params_shardings)
+      reference_params = jax.device_put(
+          reference_params,
+          max_utils.with_memory_kind(ref_sharding, "device"),
+      )
+      extra_dpo_args = [reference_params]
+
+    # Handle Sharding Optimizer Over Data
+    if config.shard_optimizer_over_data:
+      curr_params = nnx.state(state.model, nnx.Param)
+      sharded_params = jax.tree.map(
+          functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
+          curr_params,
+          params_shardings,
+      )
+      nnx.update(state.model, sharded_params)
+
+    # --- FRAMEWORK-AWARE DIFFERENTIATION LOGIC ---
+    if isinstance(state.model, nnx.Module):
+      # For NNX: Differentiate w.r.t the model object (arg 0)
+      # We use nnx.value_and_grad to properly handle stateful Param updates.
+      grad_func = nnx.value_and_grad(_loss_fn, argnums=0, has_aux=True, wrt=nnx.Param)
+      (loss, aux), raw_grads = grad_func(
+          state.model,  # arg 0: Target of differentiation
+          config,  # arg 1
+          data,  # arg 2
+          None,  # arg 3: dropout_rng (handled internally by NNX)
+          None,  # arg 4: params (handled internally by NNX)
+          *extra_dpo_args,
+          is_train=True,
+      )
+    else:
+      # For Linen: Differentiate w.r.t the explicit params dictionary (arg 4)
+      grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
+      # Note: This branch assumes 'model' is the Linen module and 'params' is state.params
+      (loss, aux), raw_grads = grad_func(
+          state.model,
+          config,
+          data,
+          state.rngs.dropout(),  # Manual RNG passing for Linen
+          state.params,  # arg 4: Target of differentiation
+          *extra_dpo_args,
+          is_train=True,
+      )
+
+  # 2. Process Gradients (Standardize precision)
+  raw_grads = jax.tree.map(
+      lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
+      raw_grads,
+  )
+
+  # Gradient Clipping
+  grads = raw_grads
+  if config.gradient_clipping_threshold > 0:
+    grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
+
+  # 3. Memory Host Offload
+  if config.optimizer_memory_host_offload:
+    state.optimizer.opt_state = jax.device_put(
+        state.optimizer.opt_state,
+        jax.tree.map(lambda x: x.with_memory_kind("device"), state_mesh_shardings.optimizer.opt_state),
+    )
+
+  if config.parameter_memory_host_offload:
+    device_params = jax.device_put(
+        nnx.state(state.model), jax.tree.map(lambda x: x.with_memory_kind("device"), state_mesh_shardings.model)
+    )
+    nnx.update(state.model, device_params)
+
+  # 4. Apply Gradients (Mutation)
+  state.apply_gradients(grads)
+
+  # 5. MoE Bias Updates
+  if config.routed_bias and config.routed_bias_update_rate > 0.0 and aux["moe_bias_updates"] is not None:
+    updates = jnp.array(aux["moe_bias_updates"][0]).transpose()
+    target_bias = state.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
+    target_bias.value = target_bias.value + updates
+
+  # 6. Metrics Collection
+  scalar_metrics = {
+      "learning/loss": loss,
+      "learning/moe_lb_loss": aux["moe_lb_loss"],
+      "learning/mtp_loss": aux["mtp_loss"],
+      "learning/total_weights": aux["total_weights"],
+  }
+
+  if not config.optimizer_memory_host_offload:
+    scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
+    scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
+    scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(nnx.state(state.model))
+
+  if config.use_dpo:
+    scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
+
+  metrics = {"scalar": scalar_metrics, "scalars": {}}
+  if config.record_internal_nn_metrics:
+    record_activation_metrics(metrics, aux["intermediate_outputs"], config)
+
+  # 7. Return Updated State PyTree
+  return nnx.state(state), metrics
 
 
 def eval_step(model, config, state, data, dropout_rng):
