@@ -66,25 +66,6 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
   """
   val = variable.value
 
-  # --- DEBUG LOGGING ---
-  # Check if this looks like the problematic tensor (Rank 4, Stage dim size 2)
-  is_target = False
-  if hasattr(val, 'shape') and len(val.shape) == 4 and val.shape[1] == 2:
-      is_target = True
-  elif isinstance(val, nn.spmd.LogicallyPartitioned) and len(val.value.shape) == 4:
-      is_target = True
-
-  if is_target:
-      max_logging.log("-" * 50)
-      max_logging.log(f"DEBUG: variable_to_logically_partitioned hit Rank 4 tensor")
-      max_logging.log(f"  Type of value: {type(val)}")
-      
-      metadata = variable.get_metadata()
-      if 'sharding' in metadata:
-          max_logging.log(f"  Metadata['sharding']: {metadata['sharding']}")
-      if 'sharding_names' in metadata:
-          max_logging.log(f"  Metadata['sharding_names']: {metadata['sharding_names']}")
-  # ---------------------
 
   if isinstance(variable.value, aqt_tensor.QTensor):
     return variable.value
@@ -92,8 +73,6 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
   # If the value is already explicitly partitioned (e.g. from nnx_pipeline),
   # return it as-is.
   if isinstance(variable.value, nn.spmd.LogicallyPartitioned):
-    if is_target:
-        max_logging.log("DEBUG: Returning existing LogicallyPartitioned value.")
     return variable.value
 
   if variable.type.__name__ == "_overwrite_with_gradient":
@@ -115,9 +94,6 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
         diff = val_rank - spec_rank
         
         if diff > 0:
-            if is_target:
-                max_logging.log(f"DEBUG: Rank mismatch detected (Val: {val_rank}, Spec: {spec_rank}). Patching spec.")
-            
             # Prepend axes based on rank difference
             # Diff 2: [Repeats, Stage, ...] -> ('circular_repeats', 'activation_stage', ...)
             # Diff 1: [Stage, ...] -> ('activation_stage', ...)
@@ -126,8 +102,6 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
             elif diff == 1:
                 sharding_names = ('activation_stage',) + sharding_names
             
-            if is_target:
-                max_logging.log(f"DEBUG: New sharding_names: {sharding_names}")
     # ---------------------------------------------
 
     return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
