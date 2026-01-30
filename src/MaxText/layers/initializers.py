@@ -98,9 +98,9 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
             # Diff 2: [Repeats, Stage, ...] -> ('circular_repeats', 'activation_stage', ...)
             # Diff 1: [Stage, ...] -> ('activation_stage', ...)
             if diff == 2:
-                sharding_names = ('circular_repeats', 'activation_stage') + sharding_names
+                sharding_names = ('circular_repeats', 'layers') + sharding_names
             elif diff == 1:
-                sharding_names = ('activation_stage',) + sharding_names
+                sharding_names = ('layers',) + sharding_names
             
     # ---------------------------------------------
 
