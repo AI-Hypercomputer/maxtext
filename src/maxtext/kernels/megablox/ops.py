@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import dataclasses
 from typing import Literal, List, Tuple
 import jax
 import jax.numpy as jnp
-from MaxText.kernels.megablox import backend
+from maxtext.kernels.megablox import backend
 from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_kernel as tokamax_backend
 import qwix
 import qwix.pallas as qpl
@@ -125,10 +125,7 @@ def _gmm_fwd(
       # QAG is only supported for following conditions
   if use_tokamax_backend:
     if quantization_rule and quantization_rule.bwd_qtype:
-      if (
-          quantization_rule.weight_calibration_method.startswith("fixed")
-          and isinstance(rhs, qpl.QArray)
-      ):
+      if quantization_rule.weight_calibration_method.startswith("fixed") and isinstance(rhs, qpl.QArray):
         if weight_gather_axes:
           for axis_name, axis_idx in weight_gather_axes:
             rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)
