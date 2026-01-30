@@ -897,15 +897,35 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
+            kv_cache = None
+            if kv_caches is not None:
+              # For models other than Qwen3-Next, kv_caches is a list of caches.
+              if cfg.decoder_block != DecoderBlockType.QWEN3_NEXT:
+                kv_cache = kv_caches[lyr]
+
             if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
               layer_kwargs = {"layer_idx": lyr}
+              # For Qwen3Next, kv_caches is a dictionary of lists of caches.
+              is_full_attention_layer = (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
+              if kv_caches is not None:
+                if is_full_attention_layer:
+                  k_cache = kv_caches["key_cache"][lyr]
+                  v_cache = kv_caches["value_cache"][lyr]
+                  kv_cache = (k_cache, v_cache)
+                else:
+                  # For GDN layers, the cache is a dictionary.
+                  # conv_state = kv_caches["conv_states"][lyr]
+                  # recurrent_state = kv_caches["recurrent_states"][lyr]
+                  # gdn_cache = {"conv_state": conv_state, "recurrent_state": recurrent_state}
+                  # kv_cache = {"gdn_cache": gdn_cache}
+                  kv_cache = None
+
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
-            kv_cache = kv_caches[lyr] if kv_caches is not None else None
-            y, kv_cache = layer(
+            y, returned_cache = layer(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
@@ -918,8 +938,16 @@ class Decoder(nn.Module):
                 attention_metadata=attention_metadata,
                 **layer_call_kwargs,
             )
-            if kv_caches is not None and kv_cache is not None:
-              kv_caches[lyr] = kv_cache
+            if kv_caches is not None and returned_cache is not None:
+              if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+                is_full_attention_layer = (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
+                if is_full_attention_layer:
+                  kv_caches["key_cache"][lyr] = returned_cache[0]
+                  kv_caches["value_cache"][lyr] = returned_cache[1]
+                else:
+                  pass
+              else:
+                kv_caches[lyr] = returned_cache
 
     assert isinstance(y, jax.Array)
 

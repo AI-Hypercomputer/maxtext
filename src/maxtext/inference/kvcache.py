@@ -230,7 +230,11 @@ def kv_cache_as_linen(
   )
 
 
-class KVCache(nnx.Module):
+class BaseCache(nnx.Module):
+  """Abstract base class for Caches."""
+  pass
+
+class KVCache(BaseCache):
   """Implementation of the KVCache."""
 
   def __init__(
@@ -842,6 +846,75 @@ class KVCache(nnx.Module):
       return self.kv_cache_autoregressive(key, value, use_ragged_attention)
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
+    
+
+class GatedDeltaNetCache(BaseCache):
+  """Cache for Linear Attention (Gated Delta Net).
+  
+  Stores the fixed-size recurrent state and the sliding window state for convolution.
+  """
+
+  def __init__(
+      self,
+      batch: int,
+      num_heads: int,
+      k_head_dim: int,
+      v_head_dim: int,
+      conv_kernel_size: int,
+      conv_dim: int,
+      dtype: DType,
+      cache_batch_axis_name: str = CACHE_BATCH,
+      cache_heads_axis_name: str = CACHE_HEADS,
+  ):
+    self.batch = batch
+    self.dtype = dtype
+
+    # 1. Recurrent State (S) for the Delta Rule
+    # Shape: [Batch, Heads, K_Dim, V_Dim]
+    # We maintain the running state matrix.
+    self.recurrent_state = nnx.Cache(
+        jnp.zeros((int(batch), num_heads, k_head_dim, v_head_dim), dtype=dtype),
+        # Sharding: Batch, Heads, None (K), None (V)
+        sharding=(cache_batch_axis_name, cache_heads_axis_name, None, None)
+    )
+
+    # 2. Convolution State for the 1D Conv
+    # Shape: [Batch, Kernel_Size - 1, Conv_Dim]
+    # We store the last (K-1) inputs to perform the sliding window conv during decoding.
+    self.conv_state = nnx.Cache(
+        jnp.zeros((int(batch), conv_kernel_size - 1, conv_dim), dtype=dtype),
+        # Sharding: Batch, None (Time), None (Dim)
+        sharding=(cache_batch_axis_name, None, None)
+    )
+
+  def __call__(self):
+    """Returns the cache variables for the layer to use."""
+    return self
+  
+
+def gated_delta_net_cache_as_linen(
+    *,
+    batch: int,
+    num_heads: int,
+    head_dim: int,
+    conv_kernel_size: int,
+    conv_dim: int,
+    dtype: DType,
+    name: str | None = None,
+):
+  """Initializes the GatedDeltaNetCache and returns it as a Linen module."""
+  return nnx_wrappers.to_linen(
+      GatedDeltaNetCache,
+      batch=batch,
+      num_heads=num_heads,
+      head_dim=head_dim,
+      conv_kernel_size=conv_kernel_size,
+      conv_dim=conv_dim,
+      dtype=dtype,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
+      abstract_init=False,
+  )
 
 
 def mla_kv_cache_as_linen(
