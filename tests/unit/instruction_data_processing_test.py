@@ -16,7 +16,7 @@
 
 import unittest
 
-from MaxText.input_pipeline import instruction_data_processing
+from maxtext.input_pipeline import instruction_data_processing
 
 
 class InstructionDataProcessingTest(unittest.TestCase):

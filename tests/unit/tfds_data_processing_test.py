@@ -26,8 +26,8 @@ import tensorflow_datasets as tfds
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
-from MaxText.input_pipeline import _tfds_data_processing
-from MaxText.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline import tfds_data_processing
+from maxtext.input_pipeline import input_pipeline_interface
 
 
 class TfdsDataProcessingTest(unittest.TestCase):
@@ -63,8 +63,8 @@ class TfdsDataProcessingTest(unittest.TestCase):
     )
     self.read_config.add_tfds_id = True
     self.train_ds = self._get_datasets()
-    self.train_iter = _tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
-    self.eval_iter = _tfds_data_processing.make_tfds_eval_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
+    self.eval_iter = tfds_data_processing.make_tfds_eval_iterator(self.config, self.mesh, self.process_indices)
 
   def _get_datasets(self):
     ds_builder = tfds.builder(self.config.dataset_name)
@@ -107,7 +107,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
-    train_iter = _tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
+    train_iter = tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
     batch2 = next(train_iter)
     self.assertTrue(tf.reduce_all(tf.equal(batch1["inputs"], batch2["inputs"])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1["targets"], batch2["targets"])))

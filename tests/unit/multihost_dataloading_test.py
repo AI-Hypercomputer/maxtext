@@ -29,8 +29,8 @@ from jax.sharding import PartitionSpec
 import tensorflow as tf
 
 from MaxText import pyconfig
-from MaxText import multihost_dataloading
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.input_pipeline import multihost_dataloading
 
 
 class MultihostDataloadingTest(unittest.TestCase):

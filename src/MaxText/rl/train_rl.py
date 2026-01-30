@@ -77,7 +77,7 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from MaxText.rl.evaluate_rl import evaluate
 from MaxText.rl import utils_rl
-from MaxText.input_pipeline.instruction_data_processing import load_template_from_file
+from maxtext.input_pipeline.instruction_data_processing import load_template_from_file
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 
 
