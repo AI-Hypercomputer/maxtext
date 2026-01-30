@@ -93,7 +93,10 @@ def get_functional_train_with_signature(
   """Get the shardings (both state and data) for `train_step`."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
   functional_train.__name__ = "train_step"
-  in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  if config.pure_nnx:
+    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
+  else:
+    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
   donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
@@ -104,7 +107,10 @@ def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shar
   """Get the shardings (both state and data) for `eval_step`."""
   functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
-  in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  if config.pure_nnx:
+    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
+  else:
+    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
   donate_argnums = ()  # state will be kept instead of being donated in eval_step
