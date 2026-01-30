@@ -8,7 +8,7 @@ from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from MaxText import max_logging # Import for debug logging
+from MaxText import max_logging  # Import for debug logging
 from MaxText.common_types import EP_AS_CONTEXT, MODEL_MODE_TRAIN, Config, ShardMode
 from MaxText.sharding import (
     all_gather_over_fsdp,
@@ -18,6 +18,7 @@ from MaxText.sharding import (
     maybe_shard_with_logical,
     maybe_shard_with_name,
 )
+
 
 class Pipeline(nnx.Module):
   """Module that implements pipelining across stages (NNX Version)."""
@@ -37,7 +38,7 @@ class Pipeline(nnx.Module):
     self.rngs = rngs
 
     self.layers = layers
-    
+
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
     self.forwarding_delay = 2 if self.config.pipeline_delay_activation_forwarding else 1
     self.pipeline_microbatch_size = self.config.micro_batch_size_to_train_on // self.config.num_pipeline_microbatches
@@ -87,70 +88,69 @@ class Pipeline(nnx.Module):
     )
 
   def _expand_pipeline_state(self):
-      """
-      Broadcasts the single-stage layer state to the full pipeline shape.
-      """
-      num_repeats = self.config.num_pipeline_repeats
-      num_stages = self.num_stages
-      
-      new_logical_axes = []
-      broadcast_shape = []
-      
-      if num_repeats > 1:
-          new_logical_axes.append('circular_repeats')
-          broadcast_shape.append(num_repeats)
-      
-      new_logical_axes.append('layers') 
-      broadcast_shape.append(num_stages)
-      
-      total_expansion = np.prod(broadcast_shape)
-      
-      for _, variable in nnx.iter_graph(self.layers):
-          # Handle RNG States
-          if isinstance(variable, nnx.RngState):
-              key = variable.value
-              if not jax.dtypes.issubdtype(key.dtype, jax.dtypes.prng_key):
-                  key = jax.random.key(key)
-              new_keys = jax.random.split(key, total_expansion)
-              new_keys = new_keys.reshape(tuple(broadcast_shape) + key.shape)
-              variable.value = new_keys
-              continue
+    """
+    Broadcasts the single-stage layer state to the full pipeline shape.
+    """
+    num_repeats = self.config.num_pipeline_repeats
+    num_stages = self.num_stages
 
-          # Handle Parameters
-          if not isinstance(variable, nnx.Variable):
-              continue
-          
-          old_spec = None
-          original_value = variable.value
+    new_logical_axes = []
+    broadcast_shape = []
 
-          # 1. Recover Sharding Spec
-          meta = variable.get_metadata()
-          sharding_meta = meta.get('sharding')
-          
-          if sharding_meta is not None and hasattr(sharding_meta, 'spec'):
-              old_spec = sharding_meta.spec
-          
-          if old_spec is None and isinstance(original_value, nn.spmd.LogicallyPartitioned):
-              old_spec = original_value.partitions
-              original_value = original_value.value
+    if num_repeats > 1:
+      new_logical_axes.append("circular_repeats")
+      broadcast_shape.append(num_repeats)
 
-          # 2. Broadcast Value
-          new_value = jax.lax.broadcast(jnp.asarray(original_value), broadcast_shape)
-          
-          # 3. Apply New Sharding
-          if old_spec is None:
-              variable.value = new_value
-              continue
-          
-          if isinstance(old_spec, tuple) and not isinstance(old_spec, P):
-              old_spec = P(*old_spec)
-          
-          new_spec_tuple = tuple(new_logical_axes) + old_spec
-          new_spec = P(*new_spec_tuple)
-          
-          wrapped_val = nn.spmd.LogicallyPartitioned(new_value, new_spec)
-          variable.value = wrapped_val
+    new_logical_axes.append("layers")
+    broadcast_shape.append(num_stages)
 
+    total_expansion = np.prod(broadcast_shape)
+
+    for _, variable in nnx.iter_graph(self.layers):
+      # Handle RNG States
+      if isinstance(variable, nnx.RngState):
+        key = variable.value
+        if not jax.dtypes.issubdtype(key.dtype, jax.dtypes.prng_key):
+          key = jax.random.key(key)
+        new_keys = jax.random.split(key, total_expansion)
+        new_keys = new_keys.reshape(tuple(broadcast_shape) + key.shape)
+        variable.value = new_keys
+        continue
+
+      # Handle Parameters
+      if not isinstance(variable, nnx.Variable):
+        continue
+
+      old_spec = None
+      original_value = variable.value
+
+      # 1. Recover Sharding Spec
+      meta = variable.get_metadata()
+      sharding_meta = meta.get("sharding")
+
+      if sharding_meta is not None and hasattr(sharding_meta, "spec"):
+        old_spec = sharding_meta.spec
+
+      if old_spec is None and isinstance(original_value, nn.spmd.LogicallyPartitioned):
+        old_spec = original_value.partitions
+        original_value = original_value.value
+
+      # 2. Broadcast Value
+      new_value = jax.lax.broadcast(jnp.asarray(original_value), broadcast_shape)
+
+      # 3. Apply New Sharding
+      if old_spec is None:
+        variable.value = new_value
+        continue
+
+      if isinstance(old_spec, tuple) and not isinstance(old_spec, P):
+        old_spec = P(*old_spec)
+
+      new_spec_tuple = tuple(new_logical_axes) + old_spec
+      new_spec = P(*new_spec_tuple)
+
+      wrapped_val = nn.spmd.LogicallyPartitioned(new_value, new_spec)
+      variable.value = wrapped_val
 
   def need_circ_storage(self):
     return (
@@ -439,10 +439,10 @@ class Pipeline(nnx.Module):
     def func_to_vmap(graph, state, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
       # Explicitly unbox any LogicallyPartitioned wrappers in the state
       def unbox_val(x):
-          if isinstance(x, nn.spmd.LogicallyPartitioned):
-              return x.value
-          return x
-      
+        if isinstance(x, nn.spmd.LogicallyPartitioned):
+          return x.value
+        return x
+
       state = jax.tree.map(unbox_val, state)
       module = nnx.merge(graph, state)
       return module(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
@@ -512,6 +512,35 @@ class Pipeline(nnx.Module):
     else:
       remat_policy = save_input_policy
     return remat_policy
+
+  def get_weight_sharding(self, *init_args):
+    """Get weight sharding function for this pipeline.
+
+    Args:
+        *init_args: Arguments passed for initialization (unused in NNX as state is persistent).
+
+    Returns:
+        A PyTree of PartitionSpecs matching the structure of the layer state.
+    """
+    # Extract the full state of the layers module
+    state = nnx.state(self.layers)
+
+    def get_spec(leaf):
+      # leaf is a VariableState
+
+      # 1. Check for explicit sharding metadata on the VariableState
+      # This metadata is updated by _expand_pipeline_state
+      if hasattr(leaf, "sharding") and hasattr(leaf.sharding, "spec"):
+        return leaf.sharding.spec
+
+      # 2. Check if value is wrapped in LogicallyPartitioned (fallback)
+      if hasattr(leaf, "value") and isinstance(leaf.value, nn.spmd.LogicallyPartitioned):
+        return leaf.value.partitions
+
+      return None
+
+    logical_partition_spec = jax.tree.map(get_spec, state)
+    return logical_partition_spec
 
   @staticmethod
   def get_logical_spec_repeats_removed(full_logical):
@@ -590,7 +619,7 @@ class Pipeline(nnx.Module):
       layers_state = self.all_gather_over_fsdp(layers_state, logical_partition_spec)
 
     pipeline_weights_state = layers_state
-    
+
     logical_partition_spec = self.get_logical_spec_repeats_removed(logical_partition_spec)
 
     def scan_body(carry, _):

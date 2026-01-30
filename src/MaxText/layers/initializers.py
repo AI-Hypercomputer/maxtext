@@ -66,7 +66,6 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
   """
   val = variable.value
 
-
   if isinstance(variable.value, aqt_tensor.QTensor):
     return variable.value
 
@@ -84,24 +83,24 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
       sharding_names = metadata["sharding_names"]
     else:
       sharding_names = metadata["sharding"]
-    
+
     # --- Auto-Patching for Pipeline Expansion ---
     # If the value rank is greater than the sharding rank, it implies pipeline expansion
     # occurred (broadcasting), but the metadata is stale. We patch the spec here.
-    if hasattr(val, 'ndim') and isinstance(sharding_names, tuple):
-        val_rank = val.ndim
-        spec_rank = len(sharding_names)
-        diff = val_rank - spec_rank
-        
-        if diff > 0:
-            # Prepend axes based on rank difference
-            # Diff 2: [Repeats, Stage, ...] -> ('circular_repeats', 'activation_stage', ...)
-            # Diff 1: [Stage, ...] -> ('activation_stage', ...)
-            if diff == 2:
-                sharding_names = ('circular_repeats', 'layers') + sharding_names
-            elif diff == 1:
-                sharding_names = ('layers',) + sharding_names
-            
+    if hasattr(val, "ndim") and isinstance(sharding_names, tuple):
+      val_rank = val.ndim
+      spec_rank = len(sharding_names)
+      diff = val_rank - spec_rank
+
+      if diff > 0:
+        # Prepend axes based on rank difference
+        # Diff 2: [Repeats, Stage, ...] -> ('circular_repeats', 'activation_stage', ...)
+        # Diff 1: [Stage, ...] -> ('activation_stage', ...)
+        if diff == 2:
+          sharding_names = ("circular_repeats", "layers") + sharding_names
+        elif diff == 1:
+          sharding_names = ("layers",) + sharding_names
+
     # ---------------------------------------------
 
     return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
