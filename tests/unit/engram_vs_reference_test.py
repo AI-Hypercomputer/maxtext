@@ -16,8 +16,9 @@
 """
 Tests for Engram: MultiHeadEmbedding, ShortConv, Engram
 
-reference: https://github.com/deepseek-ai/Engram/blob/fb7f84a21f91223715394a33a1dc24bbfb7f788e/engram_demo_v1.py
+Reference implementation: https://github.com/deepseek-ai/Engram/blob/fb7f84a21f91223715394a33a1dc24bbfb7f788e/engram_demo_v1.py
 s
+
 To run the test
   pip install torch numpy transformers sympy
   python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -54,6 +55,7 @@ from MaxText import maxtext_utils
 from MaxText.layers.engram import Engram as EngramJAX
 from MaxText.layers.engram import ShortConv as ShortConvJAX
 from MaxText.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX
+from MaxText.layers.engram import NgramHashMapping as NgramHashMappingJAX
 
 
 # -----------------------------------------------------------------------------
@@ -605,15 +607,6 @@ def to_jax_norm(pt_norm):
   """Extracts scale parameter from a norm layer."""
   return {"scale": to_jax(pt_norm.weight)}
 
-
-def to_jax_linear(pt_linear):
-  """(Out, In) -> {'kernel': (In, Out), 'bias': (Out)}"""
-  out = {"kernel": to_jax(pt_linear.weight.T)}
-  if pt_linear.bias is not None:
-    out["bias"] = to_jax(pt_linear.bias)
-  return out
-
-
 def to_jax_vmap(pt_module_list, transform_fn):
   """
   Applies transform_fn to a list of modules and stacks the
@@ -628,12 +621,10 @@ def to_jax_shortconv(pt_layer):
   """
   Converts a ShortConv layer containing a Conv and a ModuleList of Norms.
   """
-  # 1. Conv Weights. PyTorch: (Out, In//Groups, Kernel) -> JAX: (Kernel, In//Groups, Out)
-  conv_kernel = pt_layer.conv.weight.permute(2, 1, 0)
-
   return {
-      "conv": {"kernel": to_jax(conv_kernel)},
-      # 2. Weights for the Norms: List[Norm] -> {'scale': (Groups, Channels)}
+      # (Out, In//Groups, Kernel) -> (Kernel, In//Groups, Out)
+      "conv": {"kernel": to_jax(pt_layer.conv.weight.permute(2, 1, 0))},
+      # List[Norm] -> Stacked norm (Groups, Channels)
       "norms": to_jax_vmap(pt_layer.norms, to_jax_norm),
   }
 
@@ -644,6 +635,7 @@ class ShortConvTest(parameterized.TestCase):
     super().setUp()
     torch.manual_seed(42)
     np.random.seed(42)
+    self.nnx_rngs = nnx.Rngs(params=0)
 
   @parameterized.named_parameters(
       # {"testcase_name": "base", "hidden_size": 32, "hc_mult": 4, "kernel_size": 4, "dilation": 1},
@@ -666,10 +658,11 @@ class ShortConvTest(parameterized.TestCase):
     pt_model.eval()
 
     # 2. Init JAX
-    rngs = nnx.Rngs(params=0)
     config = Config()
     cfg, mesh = get_cfg_and_mesh(config)
-    jax_model = ShortConvJAX(cfg, hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation, rngs=rngs)
+    jax_model = ShortConvJAX(
+        cfg, hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation, rngs=self.nnx_rngs
+    )
     print(jax_model)
 
     # 3. Transfer Weights
@@ -705,6 +698,14 @@ class ShortConvTest(parameterized.TestCase):
 # -----------------------------------------------------------------------------
 
 
+def to_jax_linear(pt_linear):
+  """(Out, In) -> {'kernel': (In, Out), 'bias': (Out)}"""
+  out = {"kernel": to_jax(pt_linear.weight.T)}
+  if pt_linear.bias is not None:
+    out["bias"] = to_jax(pt_linear.bias)
+  return out
+
+
 def to_jax_engram(pt_engram) -> dict:
   return {
       "mhe": to_jax_mhe(pt_engram.multi_head_embedding),
@@ -728,6 +729,7 @@ class EngramTest(parameterized.TestCase):
     torch.set_default_dtype(torch.float32)
     torch.manual_seed(42)
     np.random.seed(42)
+    self.nnx_rng = nnx.Rngs(params=0)
 
     self.batch_size = 2
     self.seq_len = 8
@@ -737,68 +739,72 @@ class EngramTest(parameterized.TestCase):
     self.engram_cfg = EngramConfig(self.config)
     self.backbone_config = BackBoneConfig(self.config)
 
-    self.nnx_rng = nnx.Rngs(params=0)
-
   @parameterized.named_parameters(
       {"testcase_name": "standard_run", "batch_size": 2, "seq_len": 16},
   )
   def test_engram_match(self, batch_size, seq_len):
-    # 1. Setup PyTorch Reference
-
+    # 1. torch
     EngramPT = Engram
     pt_layer = EngramPT(layer_id=self.layer_id, backbone_config=self.backbone_config, engram_cfg=self.engram_cfg)
     init_torch_weights(pt_layer)
     pt_layer.eval()
 
+    # Prepare Inputs
+    # Create random input_ids and hidden_states
+    input_ids_np = np.random.randint(0, 1000, (batch_size, seq_len))
+    pt_input_ids = torch.from_numpy(input_ids_np)
+    # (B, L, G, D)
+    pt_hidden_states = torch.randn(
+        batch_size, seq_len, self.backbone_config.hc_mult, self.backbone_config.hidden_size, dtype=torch.float32
+    )
+
+    # Run Inference
+    with torch.no_grad():
+      pt_out = pt_layer(pt_hidden_states, pt_input_ids, self.backbone_config)
+
+    # 2 Jax
     # "deepseek-ai/DeepSeek-V3"
     tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
 
-    # 2. Setup JAX NNX Implementation
-    config = Config()
-    cfg, mesh = get_cfg_and_mesh(config)
+    jax_hash_mapping = NgramHashMappingJAX(
+        engram_vocab_size=self.config.engram_vocab_size,
+        max_ngram_size=self.config.engram_max_ngram_size,
+        n_embed_per_ngram=self.config.engram_embed_dim_per_ngram,
+        n_head_per_ngram=self.config.engram_heads_per_ngram,
+        # IMPORTANT: We must pass the FULL list of layer_ids
+        # The mapping finds primes sequentially across all layers
+        layer_ids=self.config.engram_layer_ids,
+        tokenizer=tokenizer,
+        pad_id=self.config.engram_pad_id,
+        seed=self.config.engram_seed,
+    )
+
+    vocab_sizes = jax_hash_mapping.get_vocab_sizes(self.layer_id)
+
+    # Setup model
+    cfg, mesh = get_cfg_and_mesh(self.config)
     jax_layer = EngramJAX(
-        layer_id=self.layer_id,
         rngs=self.nnx_rng,
         config=cfg,
         mesh=mesh,
-        tokenizer=tokenizer,
+        vocab_sizes=vocab_sizes,
         hc_mult=self.config.hc_mult,
         engram_heads_per_ngram=self.config.engram_heads_per_ngram,
         engram_embed_dim_per_ngram=self.config.engram_embed_dim_per_ngram,
         engram_max_ngram_size=self.config.engram_max_ngram_size,
         engram_kernel_size=self.config.engram_kernel_size,
-        engram_vocab_size=self.config.engram_vocab_size,
-        layer_ids=self.config.engram_layer_ids,
-        pad_id=self.config.engram_pad_id,
-        seed=self.config.engram_seed,
     )
 
-    print("torch_layer", pt_layer.state_dict())
-    print("jax_layer", jax_layer)
-
-    # 3. Synchronize Weights
+    # Synchronize Weights
     jax_weights = to_jax_engram(pt_layer)
     nnx.update(jax_layer, jax_weights)
 
-    # 4. Prepare Inputs
-    # Create random input_ids and hidden_states
-    input_ids_np = np.random.randint(0, 1000, (batch_size, seq_len))
-
-    pt_input_ids = torch.from_numpy(input_ids_np)
-
-    # (B, L, G, D)
-    pt_hidden_states = torch.randn(
-        batch_size, seq_len, self.backbone_config.hc_mult, self.backbone_config.hidden_size, dtype=torch.float32
-    )
+    jax_hash_input_ids = jax_hash_mapping.hash(input_ids_np)[self.layer_id]
     jax_hidden_states = to_jax(pt_hidden_states)
 
-    # 5. Run Inference
-    with torch.no_grad():
-      pt_out = pt_layer(pt_hidden_states, pt_input_ids, self.backbone_config)
+    jax_out = jax_layer(jax_hidden_states, jax_hash_input_ids)
 
-    jax_out = jax_layer(jax_hidden_states, to_jax(pt_input_ids))
-
-    # 6. Numerical Comparison
+    # 3 Compare
     print(f"\nPT Output Mean: {pt_out.mean().item():.6f}")
     print(f"JAX Output Mean: {jax_out.mean():.6f}")
 

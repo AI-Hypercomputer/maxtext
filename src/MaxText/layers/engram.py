@@ -13,13 +13,12 @@
 # limitations under the License.
 
 
-from typing import List, Optional
+from typing import List, Optional, Callable
 from dataclasses import dataclass, field
 import math
-from typing import List, Callable
-
 import numpy as np
 from sympy import isprime
+
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer
@@ -40,7 +39,7 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 DeepSeek-AI, `Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models
   <https://arxiv.org/pdf/2601.07372>`_, 2026
   
-Implementation: https://github.com/deepseek-ai/Engram/blob/main/engram_demo_v1.py
+Reference implementation: https://github.com/deepseek-ai/Engram/blob/main/engram_demo_v1.py
 """
 
 
@@ -165,7 +164,7 @@ class NgramHashMapping:
       n_embed_per_ngram,
       n_head_per_ngram,
       layer_ids,
-      tokenizer,  # pass the global tokenizer to avoid re-loading
+      tokenizer,
       pad_id,
       seed,
   ):
@@ -430,6 +429,38 @@ class ShortConv(nnx.Module):
     # (B, L, G * C) -> (B, L, G, C)
     return y.reshape(B, L, G, C)
 
+  # -----------------------------------------------------------------------
+  # Vocabulary Size Calculation (Global Prime Sequence)
+  # -----------------------------------------------------------------------
+  # Engram uses unique prime numbers for the vocabulary size of every head
+  # in every layer to maximize hash collision independence.
+
+  # We instantiate NgramHashMapping here to replicate this deterministic
+  # sequence. Ideally, this mapping should be created once globally and
+  # the resulting vocab_sizes passed into this layer to improve startup time.
+
+  # # --- Hash Mapping ---
+  # self.hash_mapping = NgramHashMapping(
+  #     engram_vocab_size=engram_vocab_size,
+  #     max_ngram_size=engram_max_ngram_size,
+  #     n_embed_per_ngram=engram_embed_dim_per_ngram,
+  #     n_head_per_ngram=engram_heads_per_ngram,
+  #     # IMPORTANT: We must pass the FULL list of layer_ids, not just self.layer_id.
+  #     # The mapping finds primes sequentially across all layers; passing a partial
+  #     # list would reset the prime search and break alignment with the reference model.
+  #     layer_ids=layer_ids,
+  #     # Inject the pre-loaded tokenizer to avoid redundant disk I/O per layer.
+  #     tokenizer=tokenizer,
+  #     pad_id=pad_id,
+  #     seed=seed,
+  # )
+
+  # # Extract the specific list of primes [M_{n,k}] for THIS layer only.
+  # # The structure is [[ngram2_head1, ngram2_head2...], [ngram3_head1...]]
+  # # We flatten it into a single list of ints: [N1, N2, N3, ...]
+  # vocab_sizes = self.hash_mapping.get_vocab_sizes(self.layer_id)
+  # print(f"DEBUG JAX Layer, Vocab Sizes: {vocab_sizes}")
+
 
 class Engram(nnx.Module):
   """
@@ -440,27 +471,24 @@ class Engram(nnx.Module):
   1. Retrieve: Fetch embeddings for current n-gram contexts using Multi-Head Hashing.
   2. Gate: Decide how much of this retrieved memory to merge based on the current state.
   3. Mix: Apply local temporal smoothing via ShortConv.
+
+  Note: vocab_sizes = hash_mapping.get_vocab_sizes(layer_id)
   """
 
   def __init__(
       self,
-      layer_id: int,
       rngs: nnx.Rngs,
       config,
       mesh,
-      tokenizer,  # pass the tokenizer to avoid re-loading
       quant: Optional[Quant] = None,
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       *,
+      vocab_sizes,
       hc_mult,
       engram_heads_per_ngram,
       engram_embed_dim_per_ngram,
       engram_max_ngram_size,
       engram_kernel_size,
-      engram_vocab_size,
-      layer_ids,
-      pad_id,
-      seed,
   ):
     self.config = config
     self.mesh = mesh
@@ -469,11 +497,6 @@ class Engram(nnx.Module):
     self.kernel_init = kernel_init
     self.quant = quant
     self.rngs = rngs
-
-    self.layer_id = layer_id
-    self.layer_ids = layer_ids
-    self.pad_id = pad_id
-    self.seed = seed
     self.hc_mult = hc_mult
 
     # --- Dimensions ---
@@ -484,7 +507,7 @@ class Engram(nnx.Module):
     # Hierarchy: Engram -> n-gram order (n) -> k-th head (k)
     # Raw Inputs
     self.max_ngram_size = engram_max_ngram_size  # e.g., 4 (tracks 2,3,4-grams)
-    self.vocab_size = engram_vocab_size
+    # self.vocab_size = engram_vocab_size
     self.conv_kernel_size = engram_kernel_size
     # The Hierarchy (Paper Notation)
     # K: Number of heads per n-gram order
@@ -499,38 +522,6 @@ class Engram(nnx.Module):
     self.num_orders = self.max_ngram_size - 1
     # Final concatenated size: (Num Orders) * (Dim per Order)
     self.engram_dim = self.num_orders * self.dim_per_ngram
-
-    # -----------------------------------------------------------------------
-    # Vocabulary Size Calculation (Global Prime Sequence)
-    # -----------------------------------------------------------------------
-    # Engram uses unique prime numbers for the vocabulary size of every head
-    # in every layer to maximize hash collision independence.
-
-    # We instantiate NgramHashMapping here to replicate this deterministic
-    # sequence. Ideally, this mapping should be created once globally and
-    # the resulting vocab_sizes passed into this layer to improve startup time.
-
-    # --- Hash Mapping ---
-    self.hash_mapping = NgramHashMapping(
-        engram_vocab_size=engram_vocab_size,
-        max_ngram_size=engram_max_ngram_size,
-        n_embed_per_ngram=engram_embed_dim_per_ngram,
-        n_head_per_ngram=engram_heads_per_ngram,
-        # IMPORTANT: We must pass the FULL list of layer_ids, not just self.layer_id.
-        # The mapping finds primes sequentially across all layers; passing a partial
-        # list would reset the prime search and break alignment with the reference model.
-        layer_ids=layer_ids,
-        # Inject the pre-loaded tokenizer to avoid redundant disk I/O per layer.
-        tokenizer=tokenizer,
-        pad_id=pad_id,
-        seed=seed,
-    )
-
-    # Extract the specific list of primes [M_{n,k}] for THIS layer only.
-    # The structure is [[ngram2_head1, ngram2_head2...], [ngram3_head1...]]
-    # We flatten it into a single list of ints: [N1, N2, N3, ...]
-    vocab_sizes = self.hash_mapping.get_vocab_sizes(self.layer_id)
-    print(f"DEBUG JAX Layer, Vocab Sizes: {vocab_sizes}")
 
     # --- 1. Multi-Head Embedding ---
     # Stores the learnable vectors E_{n,k} for all n-gram heads in one flattened table.
@@ -610,7 +601,7 @@ class Engram(nnx.Module):
     # Note: Creates separate parameters for Q norms
     self.q_norms = create_norms(rngs)
 
-  def __call__(self, hidden_states: jax.Array, input_ids: jax.Array) -> jax.Array:
+  def __call__(self, hidden_states: jax.Array, hash_input_ids: jax.Array) -> jax.Array:
     """
     Args:
         hidden_states: Current transformer state (Query). Shape: (B, L, G, C)
@@ -619,6 +610,7 @@ class Engram(nnx.Module):
         output: Engram-augmented residuals. Shape: (B, L, G, C)
 
     Note: G = hc_mult
+    Note: hash_input_ids = hash_mapping.hash(input_ids)[layer_id]
     """
     B, L, G, C = hidden_states.shape
 
@@ -626,7 +618,7 @@ class Engram(nnx.Module):
     # 1. Generate Hash Indices
     # Map raw text -> n-gram contexts -> hash indices z_{t,n,k}
     # (B, L) -> (B, L, H_en), where H_en is the total count of heads across all n-gram orders.
-    hash_input_ids = jnp.array(self.hash_mapping.hash(input_ids)[self.layer_id])
+    # hash_input_ids = jnp.array(self.hash_mapping.hash(input_ids)[self.layer_id])
 
     # 2. Retrieve Memory
     # Fetch e_{t,n,k} from the embedding table.
