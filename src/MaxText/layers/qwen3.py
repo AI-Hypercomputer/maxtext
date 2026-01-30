@@ -28,7 +28,6 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from MaxText import max_utils
 from MaxText.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 from MaxText.layers import attentions
 from MaxText.layers import initializers as max_initializers
