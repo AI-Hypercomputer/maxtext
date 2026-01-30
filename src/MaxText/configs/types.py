@@ -739,6 +739,7 @@ class HardwareAndMesh(BaseModel):
   enable_nnx: bool = Field(False, description="Whether to use NNX for model definition.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
+  pure_nnx_decoder: bool = Field(False, description="Whether to enable pure NNX decoder.")
 
 
 class LayoutAndSharding(BaseModel):
