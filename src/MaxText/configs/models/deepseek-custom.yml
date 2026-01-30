@@ -59,8 +59,8 @@ index_topk: 256                # Reduced from 2048
 
 # Hyper-connections: mHC enabled (4 streams)
 mhc_expansion_rate: 4
+mhc_res_alpha_scale: 0.01
+mhc_pre_alpha_scale: 0.01
+mhc_post_alpha_scale: 0.01
 sinkhorn_iterations: 20
 sinkhorn_scaling: 0.05
-ns_steps: 5
-ns_eps: 1e-7
-ns_coeffs: [3.0, -3.2, 1.2]

@@ -15,18 +15,11 @@
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from typing import Callable, Optional, Any, Union, Dict
-from functools import partial
-
-
-def default(v, d):
-  def exists(v):
-    return v is not None
-
-  def divisible_by(num, den):
-    return (num % den) == 0
-
-  return v if exists(v) else d
+from typing import Callable
+from MaxText.common_types import Config
+from MaxText.layers.normalizations import RMSNorm
+from maxtext.utils import max_utils
+from MaxText.layers.initializers import nd_dense_init, default_bias_init
 
 
 # TODO: unit tests
@@ -56,8 +49,8 @@ def sinkhorn_log(logits, iterations=20, scaling=0.05):
   return jnp.exp(Z + jnp.expand_dims(u, axis=-1) + jnp.expand_dims(v, axis=-2))
 
 
-# TODO: parameter shape & values
 # TODO: update sharding
+# TODO: unit tests
 class ManifoldConstrainedHyperConnections(nnx.Module):
   """Manifold-Constrained Hyper Connection (mHC)."""
 
@@ -71,68 +64,99 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.config = config
     self.sinkhorn_iterations = config.sinkhorn_iterations
     self.sinkhorn_scaling = config.sinkhorn_scaling
-    self.mhc_expansion_rate = config.mhc_expansion_rate
+    self.k = config.mhc_expansion_rate
+    self.mhc_norm = RMSNorm(
+        num_features=self.config.emb_dim,
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=self.config.normalization_layer_epsilon,
+        rngs=rngs,
+    )
 
-    # Parameters
-    # Width Connection (Permutation matrix logits)
-    h_res_init = jnp.full((self.mhc_expansion_rate, self.mhc_expansion_rate), -8.0)
-    # Manually fill diagonal for JAX array
-    indices = jnp.arange(self.mhc_expansion_rate)
-    h_res_init = h_res_init.at[indices, indices].set(0.0)
-    self.H_res_logits = nnx.Param(h_res_init)
+    # Scaler
+    self.mhc_res_alpha_scale = self.config.mhc_res_alpha_scale
+    self.mhc_pre_alpha_scale = self.config.mhc_pre_alpha_scale
+    self.mhc_post_alpha_scale = self.config.mhc_post_alpha_scale
 
-    # Pre-branch selection logits
-    h_pre_init = jnp.full((1, self.mhc_expansion_rate), -8.0)
-    # TODO: how to handle layer index here
-    init_idx = default(layer_index, jax.random.randint(rngs.params(), (), 0, self.mhc_expansion_rate))
-    self.H_pre_logits = nnx.Param(h_pre_init.at[:, init_idx].set(0.0))
+    # Weight matrices
+    scale_init = nd_dense_init(1.0, "fan_in", "normal")
+    batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, self.model_mode)
+    self.res_alpha = nnx.Param(
+        scale_init(
+            rngs.params(),
+            (self.k, batch_size, sequence_length, -1, self.k * self.k),
+            self.weight_dtype,
+        ),
+        sharding=(None, "activation_batch", "activation_norm_length", "activation_embed", None),
+        in_axis=0,
+        out_axis=1,
+    )
+    self.pre_alpha = nnx.Param(
+        scale_init(
+            rngs.params(),
+            (self.k, batch_size, sequence_length, -1, self.k,),
+            self.weight_dtype,
+        ),
+        sharding=("activation_batch", "activation_norm_length", "activation_embed", None),
+    )
+    self.post_alpha = nnx.Param(
+        scale_init(
+            rngs.params(),
+            (self.k, batch_size, sequence_length, -1, self.k,),
+            self.weight_dtype,
+        ),
+        sharding=("activation_batch", "activation_norm_length", "activation_embed", None),
+    )
 
-    # 3. Post-branch selection logits
-    self.H_post_logits = nnx.Param(jnp.zeros((1, self.mhc_expansion_rate)))
+    # Bias
+    self.res_beta = nnx.Param(
+        default_bias_init(self.rngs.params(), (self.k,), self.weight_dtype),
+        sharding=(None, None),
+    )
+    self.pre_beta = nnx.Param(
+        default_bias_init(self.rngs.params(), (self.k,), self.weight_dtype),
+        sharding=(None, None),
+    )
+    self.post_beta = nnx.Param(
+        default_bias_init(self.rngs.params(), (self.k, self.k), self.weight_dtype),
+        sharding=(None, None),
+    )
 
-  def width_connection(self, inputs: jnp.ndarray):
-    """Processes residual streams and prepares branch input."""
-    # 1. Compute Width Weights (Sinkhorn)
-    h_res = sinkhorn_log(self.H_res_logits.value, self.sinkhorn_iterations, self.sinkhorn_scaling)
-    # Apply permutation across streams: (s t, b l s d -> b l t d)
-    residuals_out = jnp.einsum("st,blsd->bltd", h_res, inputs)
+  def res_mapping(self, x: jnp.ndarray):
+    h_res = jnp.einsum("nbsd,nbsdm -> m", x, self.res_alpha)
+    h_res = jnp.reshape(h_res, (self.k, self.k))
+    intermediate = self.mhc_res_alpha_scale * h_res + self.res_beta
+    output = sinkhorn_log(intermediate, self.sinkhorn_iterations, self.sinkhorn_scaling)
+    return output
 
-    # 2. Compute Pre-branch Selection (Softmax)
-    h_pre = jax.nn.softmax(self.H_pre_logits.value, axis=-1)
-    # Weighted sum of streams for branch input
-    branch_input = jnp.einsum("vs,blsd->blvd", h_pre, inputs)
-
-    # Single view handling, (batch, length, dim)
-    branch_input = jnp.squeeze(branch_input, axis=2)
-
-    # 3. Post-branch Weights
-    h_post = jax.nn.softmax(self.H_post_logits.value, axis=-1)
-    return branch_input, residuals_out, h_post
-
-  def depth_connection(self, branch_output: jnp.ndarray, residuals: jnp.ndarray, beta: jnp.ndarray):
-    """Adds branch results back into the multiple residual streams."""
-    # branch_output: (batch, length, dim)
-    # beta: (views, streams) -> (1, streams)
-    if beta.ndim == 2:
-      beta = beta[0]  # Take first view
-    return jnp.einsum("bld,s->blsd", branch_output, beta)
+  def mapping(self, x: jnp.ndarray, alpha_scale: jnp.ndarray, alpha: jnp.ndarray, beta: jnp.ndarray, scale: int):
+    h = jnp.einsum("nbsd,nbsdm -> m", x, alpha)
+    intermediate = alpha_scale * h + beta
+    output = scale * jax.nn.sigmoid(intermediate)
+    return output
 
   def __call__(
       self,
       branch_fn: Callable,
-      inputs: jnp.ndarray,
-      config: Any,
-      mesh: jax.sharding.Mesh,
-      logical_axes: tuple,
+      x: jnp.ndarray,
       *args,
       **kwargs,
   ) -> jnp.ndarray:
-    # 1. Width Logic
-    branch_input, processed_residuals, beta = self.width_connection(inputs)
-    # 2. Execute Branch (Attention or MLP)
-    branch_out = branch_fn(branch_input, *args, **kwargs)
-    # 3. Depth Logic
-    return self.depth_connection(branch_out, processed_residuals, beta)
+    # 1. RMS norm, x shape as [expansion_rate, batch, seq, emb]
+    x = self.mhc_norm(x)
+    # 2. Pre mapping, shape as [1, expansion_rate]
+    pre_mapping = self.mapping(x, self.mhc_pre_alpha_scale, self.pre_alpha, self.pre_beta, 1.0)
+    layer_input = jnp.einsum("nbsd,n -> bsd", x, pre_mapping)
+    # 3. Attention or MLP
+    layer_out = branch_fn(layer_input, *args, **kwargs)
+    # 4. Post mapping, shape as [1, expansion_rate]
+    post_mapping = self.mapping(x, self.mhc_post_alpha_scale, self.post_alpha, self.post_beta, 2.0)
+    post_out = jnp.einsum("bsd,n -> nbsd", layer_out, post_mapping)
+    # 5. Residual mapping, res_out shape as [expansion_rate, batch, seq, emb]
+    res_mapping = self.res_mapping(x)
+    res_out = jnp.einsum("nbsd,nm -> mbsd", x, res_mapping)
+    return res_out, post_out
 
 
 def get_expand_functions(expansion_rate: int):
@@ -142,11 +166,11 @@ def get_expand_functions(expansion_rate: int):
   """
 
   def expand(x: jnp.ndarray):
-    # (batch, length, dim) -> (batch, length, streams, dim)
-    return jnp.repeat(jnp.expand_dims(x, axis=2), expansion_rate, axis=2)
+    # (batch, length, dim) -> (streams, batch, length, dim)
+    return jnp.repeat(jnp.expand_dims(x, axis=0), expansion_rate, axis=0)
 
   def reduce(x: jnp.ndarray):
-    # (batch, length, streams, dim) -> (batch, length, dim)
-    return jnp.sum(x, axis=2)
+    # (streams, batch, length, dim) -> (batch, length, dim)
+    return jnp.sum(x, axis=0)
 
   return expand, reduce
