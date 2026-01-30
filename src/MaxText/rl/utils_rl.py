@@ -237,7 +237,9 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
 
 def get_match_numbers_regex(tmvp_config):
   """Returns a compiled regex to extract the answer from a completion."""
-  match_numbers = re.compile(rf"{tmvp_config.solution_start_token}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL)
+  match_numbers = re.compile(
+      rf"{tmvp_config.solution_start_token}.*?([-+]?[\d\.,]{{1,}})", flags=re.MULTILINE | re.DOTALL
+  )
   if tmvp_config.debug.rl:
     match_numbers.findall(f"{tmvp_config.solution_start_token}  0.34  {tmvp_config.solution_end_token}")
   return match_numbers
