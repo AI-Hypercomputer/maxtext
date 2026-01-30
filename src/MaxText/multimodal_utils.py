@@ -64,9 +64,11 @@ LLAMA4_PIXEL_SHUFFLE_RATIO = 0.5  # TODO(hengtaoguo): We should reuse config.pix
 
 # Qwen3OmniMoe-specific processing
 QWEN3_OMNI_VISION_START_TOKEN = 151652  # <|vision_start|>
+QWEN3_OMNI_VISION_END_TOKEN = 151653  # <|vision_eos|>
 QWEN3_OMNI_IMAGE_TOKEN = 151655  # <|image_pad|>
 QWEN3_OMNI_VIDEO_TOKEN = 151656  # <|video_pad|>
 QWEN3_OMNI_AUDIO_START_TOKEN = 151669  # <|audio_start|>
+QWEN3_OMNI_AUDIO_END_TOKEN = 151648  # <|audio_eos|>
 QWEN3_OMNI_AUDIO_TOKEN = 151675  # <|audio_pad|>
 QWEN3_TEMPORAL_PATCH_SIZE = 2
 QWEN3_OMNI_IMAGE_SIZE = 768
@@ -597,7 +599,7 @@ def prepare_text_for_image_fusion(texts, model_name, processor_output=None):
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     num_images = processor_output.pixel_values.shape[0] if processor_output else 1
     return add_extra_tokens_for_images_gemma3(texts, max_num_images=num_images)
-  if model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+  elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     return add_extra_tokens_for_images_llama4(texts, processor_output)
   else:
     raise ValueError(f"Model {model_name} does not support multimodal inference.")
@@ -773,6 +775,142 @@ def add_extra_tokens_for_images_gemma3(
       tokens=tokens,
       max_num_images=max_num_images,
   )
+
+
+def add_extra_tokens_for_qwen3_omni(
+    tokens: np.ndarray | list,
+    image_grid_thw: np.ndarray | None = None,
+    video_grid_thw: np.ndarray | None = None,
+    audio_lengths: np.ndarray | None = None,
+    spatial_merge_size: int = 2,
+    use_audio_in_video: bool = False,
+    second_per_grids: np.ndarray | None = None,
+    position_id_per_seconds: int = 25,
+):
+  """Add extra tokens for Qwen3-Omni multimodal sequences.
+
+  Expands special tokens (<|image_pad|>, <|video_pad|>, <|audio_pad|>) into
+  the correct number of placeholder tokens based on grid dimensions and merge size.
+
+  For audio-in-video mode, interleaves audio and video tokens based on temporal ordering.
+
+  Args:
+    tokens: Input token sequence (1D array or list).
+    image_grid_thw: Image dimensions (num_images, 3) with [temporal, height, width].
+    video_grid_thw: Video dimensions (num_videos, 3) with [temporal, height, width].
+    audio_lengths: Pre-computed audio token counts (num_audios,).
+    spatial_merge_size: Number of patches merged spatially (e.g., 2 for 2x2→1).
+    use_audio_in_video: If True, interleave audio and video tokens.
+    second_per_grids: Time interval per temporal grid (num_videos,).
+    position_id_per_seconds: Temporal granularity (tokens per second).
+
+  Returns:
+    Expanded token sequence with correct number of image/video/audio tokens.
+  """
+  if not isinstance(tokens, np.ndarray):
+    tokens = np.asarray(tokens)
+
+  tokens = tokens.flatten()  # Ensure 1D
+
+  # Merge lengths for computing number of tokens
+  merge_length = spatial_merge_size**2
+
+  # Convert to list for easier manipulation
+  token_list = tokens.tolist()
+  new_tokens = []
+
+  image_idx = 0
+  video_idx = 0
+  audio_idx = 0
+
+  i = 0
+  while i < len(token_list):
+    token = token_list[i]
+
+    # Handle image tokens
+    if token == QWEN3_OMNI_IMAGE_TOKEN and image_grid_thw is not None and image_idx < len(image_grid_thw):
+      grid = image_grid_thw[image_idx]
+      num_image_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+      new_tokens.extend([QWEN3_OMNI_IMAGE_TOKEN] * num_image_tokens)
+      image_idx += 1
+
+    # Handle audio-in-video: <|vision_start|><|video_pad|><|vision_end|>
+    elif (
+        use_audio_in_video
+        and token == QWEN3_OMNI_VISION_START_TOKEN
+        and i + 2 < len(token_list)
+        and token_list[i + 1] == QWEN3_OMNI_VIDEO_TOKEN
+        and token_list[i + 2] == QWEN3_OMNI_VISION_END_TOKEN
+        and video_grid_thw is not None
+        and video_idx < len(video_grid_thw)
+    ):
+
+      if audio_lengths is None or audio_idx >= len(audio_lengths):
+        raise ValueError("audio_lengths required for audio-in-video mode")
+      if second_per_grids is None or video_idx >= len(second_per_grids):
+        raise ValueError("second_per_grids required for audio-in-video mode")
+
+      audio_length = audio_lengths[audio_idx]
+      audio_token_indices = np.arange(audio_length)
+
+      curr_video_grid = video_grid_thw[video_idx]
+      height = curr_video_grid[1] // spatial_merge_size
+      width = curr_video_grid[2] // spatial_merge_size
+      num_frames = curr_video_grid[0]
+
+      video_token_indices = np.arange(num_frames).reshape(-1, 1, 1)
+      video_token_indices = np.broadcast_to(video_token_indices, (num_frames, height, width)).flatten()
+      video_token_indices = video_token_indices * second_per_grids[video_idx] * position_id_per_seconds
+
+      new_tokens.append(QWEN3_OMNI_VISION_START_TOKEN)
+      new_tokens.append(QWEN3_OMNI_AUDIO_START_TOKEN)
+
+      video_data_idx = 0
+      audio_data_idx = 0
+
+      while video_data_idx < len(video_token_indices) and audio_data_idx < len(audio_token_indices):
+        if video_token_indices[video_data_idx] <= audio_token_indices[audio_data_idx]:
+          new_tokens.append(QWEN3_OMNI_VIDEO_TOKEN)
+          video_data_idx += 1
+        else:
+          new_tokens.append(QWEN3_OMNI_AUDIO_TOKEN)
+          audio_data_idx += 1
+
+      while video_data_idx < len(video_token_indices):
+        new_tokens.append(QWEN3_OMNI_VIDEO_TOKEN)
+        video_data_idx += 1
+
+      while audio_data_idx < len(audio_token_indices):
+        new_tokens.append(QWEN3_OMNI_AUDIO_TOKEN)
+        audio_data_idx += 1
+
+      new_tokens.append(QWEN3_OMNI_AUDIO_END_TOKEN)
+      new_tokens.append(QWEN3_OMNI_VISION_END_TOKEN)
+
+      video_idx += 1
+      audio_idx += 1
+      i += 2
+
+    # Handle video tokens (without audio-in-video)
+    elif token == QWEN3_OMNI_VIDEO_TOKEN and video_grid_thw is not None and video_idx < len(video_grid_thw):
+      grid = video_grid_thw[video_idx]
+      num_video_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+      new_tokens.extend([QWEN3_OMNI_VIDEO_TOKEN] * num_video_tokens)
+      video_idx += 1
+
+    # Handle audio tokens (standalone, not in video)
+    elif token == QWEN3_OMNI_AUDIO_TOKEN and audio_lengths is not None and audio_idx < len(audio_lengths):
+      num_audio_tokens = int(audio_lengths[audio_idx])
+      new_tokens.extend([QWEN3_OMNI_AUDIO_TOKEN] * num_audio_tokens)
+      audio_idx += 1
+
+    # All other tokens pass through unchanged
+    else:
+      new_tokens.append(token)
+
+    i += 1
+
+  return np.array(new_tokens, dtype=np.int32)
 
 
 def insert_sequence(
