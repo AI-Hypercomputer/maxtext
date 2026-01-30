@@ -143,6 +143,9 @@ def _load_full_state_from_path(
     enable_orbax_v1,
     checkpoint_conversion_fn,
     source_checkpoint_layout,
+    checkpoint_storage_concurrent_gb,
+    use_ocdbt,
+    use_zarr3,
 ):
   """Load full state from checkpoint at specified path.
 
@@ -155,6 +158,9 @@ def _load_full_state_from_path(
       maxtext-supported state.
     source_checkpoint_layout: String representation of the checkpoint layout of
       the source checkpoint.
+    checkpoint_storage_concurrent_gb: concurrent GB for checkpoint byte I/O.
+    use_ocdbt: Whether to use OCDBT format.
+    use_zarr3: Whether to use Zarr3 format.
 
   Returns:
     The loaded state.
@@ -184,7 +190,13 @@ def _load_full_state_from_path(
   else:
     # Original v0 logic.
     p = epath.Path(path)
-    return ocp.StandardCheckpointer().restore(p, abstract_unboxed_pre_state)
+    handler = ocp.PyTreeCheckpointHandler(
+        restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+        save_concurrent_gb=checkpoint_storage_concurrent_gb,
+        use_ocdbt=use_ocdbt,
+        use_zarr3=use_zarr3,
+    )
+    return ocp.Checkpointer(handler).restore(p, abstract_unboxed_pre_state)
 
 
 def create_orbax_checkpoint_manager(
@@ -198,6 +210,7 @@ def create_orbax_checkpoint_manager(
     use_zarr3: bool = True,
     enable_continuous_checkpointing: bool = False,
     max_num_checkpoints_to_keep: int = 10,
+    checkpoint_storage_concurrent_gb: int = 96,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -209,7 +222,14 @@ def create_orbax_checkpoint_manager(
   # Base configuration for all dataset types
   item_names = ("items",)
   # we need to use ocdbt and zarr3 to control max file size in the checkpoint
-  item_handlers = {"items": PyTreeCheckpointHandler(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)}
+  item_handlers = {
+      "items": PyTreeCheckpointHandler(
+          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+          save_concurrent_gb=checkpoint_storage_concurrent_gb,
+          use_ocdbt=use_ocdbt,
+          use_zarr3=use_zarr3,
+      )
+  }
 
   if dataset_type == "grain":
     item_names += ("iter",)
@@ -596,6 +616,9 @@ def load_state_if_possible(
         enable_orbax_v1=enable_orbax_v1,
         checkpoint_conversion_fn=checkpoint_conversion_fn,
         source_checkpoint_layout=source_checkpoint_layout,
+        checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+        use_ocdbt=use_ocdbt,
+        use_zarr3=use_zarr3,
     )
     return {"items": restored_state}, None
   else:
