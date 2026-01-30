@@ -28,7 +28,7 @@ Or without Tunix using the MaxText vLLM integration:
   python3 -m maxtext.vllm_decode \
     --model_name qwen3-30b-a3b \
     --hf_model_name Qwen/Qwen3-30B-A3B \
-    --hf_config_path src/MaxText/integration/vllm/maxtext_vllm_adapter \
+    --hf_config_path src/maxtext/integration/vllm/maxtext_vllm_adapter \
     --load_parameters_path <your_checkpoint_path> \
     --ici_tensor_parallelism 4 \
     --gpu_memory_utilization 0.5 \
@@ -49,7 +49,7 @@ from maxtext.utils import max_logging
 from MaxText import pyconfig
 from MaxText.common_types import Config
 from MaxText.globals import MAXTEXT_CONFIGS_DIR
-from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
 from vllm import LLM
