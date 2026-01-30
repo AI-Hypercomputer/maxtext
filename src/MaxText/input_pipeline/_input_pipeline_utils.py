@@ -292,19 +292,17 @@ class HFDataSource(grain.RandomAccessDataSource):
 
   def __init__(
       self,
-      dataset: datasets.IterableDataset,
+      dataset: datasets.IterableDataset | datasets.Dataset,
       dataloading_host_index: int,
       dataloading_host_count: int,
       num_threads: int,
-      max_target_length: int,
-      data_column_names: list[str],
+      streaming: bool,
   ):
     self.dataset = dataset
     self.num_threads = num_threads
+    self.streaming = streaming
     self.dataloading_host_count = dataloading_host_count
     self.dataloading_host_index = dataloading_host_index
-    self.max_target_lenth = max_target_length
-    self.data_column_names = data_column_names
     if hasattr(dataset, "n_shards"):
       self.n_shards = dataset.n_shards
     else:
@@ -340,11 +338,17 @@ class HFDataSource(grain.RandomAccessDataSource):
   def __len__(self):
     """Return length of the HF dataset. Since HuggingFace IterableDataset does not have length,
     a fake length bigger than the dataset is returned"""
-    return 10_000_000_000
+    if not self.streaming:
+      return len(self.dataset)
+    else:
+      return 10_000_000_000
 
   def __getitem__(self, index):
     """Since HuggingFace IterableDataset does not support random access by index.
     The next item in the iterator is returned."""
+    if not self.streaming:
+      return self.dataset[index]
+
     if not self.data_iters:
       self.data_iters = [iter(x) for x in self.datasets]
     idx = int(current_thread().name.split("_")[1])
