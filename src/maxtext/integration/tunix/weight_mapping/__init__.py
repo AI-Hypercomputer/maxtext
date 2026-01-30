@@ -18,10 +18,10 @@ This module defines the `StandaloneVllmWeightMapping` class, which acts as a
 dispatcher to retrieve the correct weight mapping configuration for a given
 model name. This allows for easy extension to support new models.
 """
-from MaxText.integration.tunix.weight_mapping.deepseek3 import DEEPSEEK_VLLM_MAPPING
-from MaxText.integration.tunix.weight_mapping.gpt_oss import GPT_OSS_VLLM_MAPPING
-from MaxText.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
-from MaxText.integration.tunix.weight_mapping.qwen3 import QWEN3_VLLM_MAPPING
+from maxtext.integration.tunix.weight_mapping.deepseek3 import DEEPSEEK_VLLM_MAPPING
+from maxtext.integration.tunix.weight_mapping.gpt_oss import GPT_OSS_VLLM_MAPPING
+from maxtext.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
+from maxtext.integration.tunix.weight_mapping.qwen3 import QWEN3_VLLM_MAPPING
 
 
 class StandaloneVllmWeightMapping:
