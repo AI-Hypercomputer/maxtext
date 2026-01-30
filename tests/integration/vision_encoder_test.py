@@ -31,7 +31,7 @@ from flax.core.scope import VariableDict
 
 from MaxText import pyconfig
 from MaxText import multimodal_utils
-from MaxText.layers import models
+from maxtext.layers import models
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT, MAXTEXT_ASSETS_ROOT
 from MaxText import maxengine
 

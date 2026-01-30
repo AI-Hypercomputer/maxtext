@@ -31,8 +31,8 @@ from jax.sharding import Mesh
 from flax import nnx
 
 from MaxText import pyconfig
-from MaxText.layers import qwen3, normalizations
-from MaxText.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated
+from maxtext.layers import qwen3, normalizations
+from maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated
 from MaxText.globals import MAXTEXT_PKG_DIR
 
 

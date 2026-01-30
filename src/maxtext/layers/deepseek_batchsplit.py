@@ -22,13 +22,13 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from MaxText import common_types
 from MaxText.common_types import Config
-from MaxText.layers import attention_mla
-from MaxText.layers import initializers
-from MaxText.layers import linears
-from MaxText.layers import moe
-from MaxText.layers import normalizations
-from MaxText.layers import nnx_wrappers
-from MaxText.layers import quantizations
+from maxtext.layers import attention_mla
+from maxtext.layers import initializers
+from maxtext.layers import linears
+from maxtext.layers import moe
+from maxtext.layers import normalizations
+from maxtext.layers import nnx_wrappers
+from maxtext.layers import quantizations
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from maxtext.inference import page_manager
 from maxtext.utils import max_utils

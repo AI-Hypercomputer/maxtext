@@ -30,8 +30,8 @@ from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import models
+from maxtext.layers import quantizations
 
 MAX_PREFILL_PREDICT_LENGTH = 4
 

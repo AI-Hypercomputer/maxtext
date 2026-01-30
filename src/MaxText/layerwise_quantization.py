@@ -45,8 +45,8 @@ from flax import nnx
 
 from MaxText import common_types
 from MaxText import pyconfig
-from MaxText.layers import models, quantizations, deepseek
 from maxtext.common import checkpointing
+from maxtext.layers import models, quantizations, deepseek
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils

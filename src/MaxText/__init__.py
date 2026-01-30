@@ -30,8 +30,8 @@ from collections.abc import Sequence
 from jax.sharding import Mesh
 
 from MaxText import pyconfig
-from MaxText.layers import models
 from MaxText import dpo_utils
+from maxtext.layers import models
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from maxtext.utils.model_creation_utils import from_config

@@ -30,11 +30,11 @@ from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config, DType
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import linears
-from MaxText.layers import moe
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
-from MaxText.layers.quantizations import Fp8Quantization
-from MaxText.layers import nnx_wrappers
+from maxtext.layers import linears
+from maxtext.layers import moe
+from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
+from maxtext.layers.quantizations import Fp8Quantization
+from maxtext.layers import nnx_wrappers
 
 
 class TokenDroppingTest(unittest.TestCase):

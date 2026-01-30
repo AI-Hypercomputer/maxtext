@@ -44,7 +44,6 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 from MaxText import pyconfig
 from MaxText import sharding
-from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.common_types import ShardMode
 from MaxText.globals import EPS
 # Placeholder: internal
@@ -63,6 +62,7 @@ from maxtext.common.goodput import (
 )
 from maxtext.common.metric_logger import MetricLogger, record_activation_metrics
 from maxtext.common.vertex_tensorboard import VertexTensorboardManager
+from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging

@@ -72,10 +72,10 @@ from MaxText.common_types import (
 from MaxText.kernels import jax_flash_attention
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha
-from MaxText.layers import nnx_wrappers
-from MaxText.layers.initializers import variable_to_logically_partitioned
-from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.sharding import logical_to_mesh_axes, maybe_shard_with_name
+from maxtext.layers import nnx_wrappers
+from maxtext.layers.initializers import variable_to_logically_partitioned
+from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import page_manager
 from maxtext.inference.kvcache import KVQuant, KVTensor
 from maxtext.utils import max_utils

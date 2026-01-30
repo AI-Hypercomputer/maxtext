@@ -23,7 +23,7 @@ import torch
 import jax
 import jax.numpy as jnp
 
-from MaxText.layers import embeddings
+from maxtext.layers import embeddings
 
 
 """  

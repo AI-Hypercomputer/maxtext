@@ -32,10 +32,10 @@ import flax.linen as nn
 from MaxText.sharding import maybe_shard_with_logical
 from MaxText.common_types import DecoderBlockType, ShardMode, DType, Array, Config
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, EP_AS_CONTEXT
-from MaxText.layers import nnx_wrappers, quantizations
-from MaxText.layers import normalizations
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
-from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers import nnx_wrappers, quantizations
+from maxtext.layers import normalizations
+from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
+from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 
@@ -478,7 +478,7 @@ class MlpBlock(nnx.Module):
     ):
       return functools.partial(normalizations.RMSNorm, num_features=num_features)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
-      from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
+      from maxtext.layers import gpt3  # pylint: disable=import-outside-toplevel
 
       return functools.partial(
           gpt3.Gpt3LayerNorm, num_features=num_features, reductions_in_fp32=False, use_bias=self.use_bias

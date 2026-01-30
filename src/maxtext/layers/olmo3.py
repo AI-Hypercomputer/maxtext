@@ -1,5 +1,5 @@
 """
-Copyright 2025 Google LLC
+Copyright 2023-2026 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Decoder layer definition for GPT OSS models."""
+"""Decoder layer definition for Olmo 3 models."""
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -29,23 +29,25 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText.common_types import AttentionType
-from MaxText.layers import initializers
-from MaxText.layers import attentions
-from MaxText.layers import models
-from MaxText.layers import moe
-from MaxText.layers import quantizations
-from MaxText.layers.attentions import Attention
-from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers import nnx_wrappers
+from maxtext.layers import initializers
+from maxtext.layers import attentions
+from maxtext.layers import models
+from maxtext.layers import quantizations
+from maxtext.layers.attentions import Attention
+from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers import nnx_wrappers
+from maxtext.layers.linears import MlpBlock
 from maxtext.utils import max_utils
 
 
 # -----------------------------------------
-# The Decoder Layer for GPT OSS models
+# The Decoder Layer for Olmo3 models
 # -----------------------------------------
 
-GPT_OSS_ATTENTION_PATTERN = (
+OLMO3_ATTENTION_PATTERN = (
+    attentions.AttentionType.LOCAL_SLIDING,
+    attentions.AttentionType.LOCAL_SLIDING,
     attentions.AttentionType.LOCAL_SLIDING,
     attentions.AttentionType.GLOBAL,
 )
@@ -53,11 +55,11 @@ GPT_OSS_ATTENTION_PATTERN = (
 
 def get_attention_type(layer_id):
   """Get attention type based on layer ID."""
-  layer_id %= len(GPT_OSS_ATTENTION_PATTERN)
-  return GPT_OSS_ATTENTION_PATTERN[layer_id]
+  layer_id %= len(OLMO3_ATTENTION_PATTERN)
+  return OLMO3_ATTENTION_PATTERN[layer_id]
 
 
-class GptOssDecoderLayer(nnx.Module):
+class Olmo3DecoderLayer(nnx.Module):
   """Transformer decoder layer that attends to the encoder."""
 
   def __init__(
@@ -78,15 +80,6 @@ class GptOssDecoderLayer(nnx.Module):
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
-    self.pre_self_attention_layer_norm = RMSNorm(
-        num_features=dummy_inputs_shape[-1],
-        dtype=config.dtype,
-        weight_dtype=jnp.float32,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
-    )
-
     self.post_self_attention_layer_norm = RMSNorm(
         num_features=dummy_inputs_shape[-1],
         dtype=config.dtype,
@@ -96,8 +89,17 @@ class GptOssDecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
+    self.post_mlp_layer_norm = RMSNorm(
+        num_features=dummy_inputs_shape[-1],
+        dtype=config.dtype,
+        weight_dtype=jnp.float32,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+        rngs=rngs,
+    )
+
     # Self-attention block
-    self.GptOssAttention = Attention(
+    self.attention = Attention(
         config=config,
         num_query_heads=config.num_query_heads,
         num_kv_heads=config.num_kv_heads,
@@ -118,20 +120,21 @@ class GptOssDecoderLayer(nnx.Module):
         sliding_window_size=config.sliding_window_size,
         query_pre_attn_scalar=(config.head_dim**-0.5),
         model_mode=model_mode,
+        use_qk_norm=config.use_qk_norm,
         rngs=rngs,
     )
 
-    self.GptOssMlp = moe.RoutedMoE(
-        config=config,
-        num_experts=config.num_experts,
-        num_experts_per_tok=config.num_experts_per_tok,
-        mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
+    self.mlp = MlpBlock(
+        in_features=config.emb_dim,
         intermediate_dim=config.mlp_dim,
+        activations=config.mlp_activations,
+        intermediate_dropout_rate=config.dropout_rate,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
-        quant=self.quant,
+        config=config,
+        mesh=mesh,
+        quant=quant,
+        model_mode=model_mode,
         rngs=rngs,
     )
 
@@ -156,12 +159,9 @@ class GptOssDecoderLayer(nnx.Module):
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
-    lnx = self.pre_self_attention_layer_norm(inputs)
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
-
-    attention_lnx, kv_cache = self.GptOssAttention(
-        lnx,
-        lnx,
+    attention_lnx, kv_cache = self.attention(
+        inputs,
+        inputs,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
@@ -173,16 +173,21 @@ class GptOssDecoderLayer(nnx.Module):
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
+
+    # Normalize stream before addition
+    attention_lnx = self.post_self_attention_layer_norm(attention_lnx)
+    attention_lnx = nn.with_logical_constraint(
+        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
+
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(
-        hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
-    )
+    mlp_lnx = self.mlp(intermediate_inputs)
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
-    load_balance_loss = None
-    mlp_lnx, load_balance_loss, _ = self.GptOssMlp(hidden_states)
+    # Normalize stream before addition
+    mlp_lnx = self.post_mlp_layer_norm(mlp_lnx)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
@@ -192,9 +197,6 @@ class GptOssDecoderLayer(nnx.Module):
         layer_output,
         ("activation_batch", "activation_norm_length", "activation_embed"),
     )
-
-    if cfg.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.sow("intermediates", "moe_lb_loss", load_balance_loss)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
@@ -211,17 +213,17 @@ class GptOssDecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-GptOssDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    GptOssDecoderLayer,
+Olmo3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    Olmo3DecoderLayer,
     base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
 
 
-class GptOssScannableBlock(nnx.Module):
-  """A repeatable block of GPT OSS decoder layers.
+class Olmo3ScannableBlock(nnx.Module):
+  """A repeatable block of Olmo 3 decoder layers.
 
     This block applies multiple decoder layers sequentially, using the attention
-    pattern defined by GPT_OSS_ATTENTION_PATTERN. It's designed to be
+    pattern defined by OLMO3_ATTENTION_PATTERN. It's designed to be
     used with `nn.scan` for efficient compilation.
 
   Attributes:
@@ -246,7 +248,7 @@ class GptOssScannableBlock(nnx.Module):
     for layer_id in range(config.inhomogeneous_layer_cycle_interval):
       attention_type = get_attention_type(layer_id)
       layer_name = f"layers_{layer_id}"
-      layer = GptOssDecoderLayer(
+      layer = Olmo3DecoderLayer(
           config=config,
           mesh=mesh,
           model_mode=model_mode,
@@ -287,7 +289,7 @@ class GptOssScannableBlock(nnx.Module):
       return y
 
 
-GptOssScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    GptOssScannableBlock,
+Olmo3ScannableBlockToLinen = nnx_wrappers.to_linen_class(
+    Olmo3ScannableBlock,
     base_metadata_fn=initializers.variable_to_logically_partitioned,
 )

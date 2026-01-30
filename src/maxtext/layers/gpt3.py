@@ -28,14 +28,14 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
-from MaxText.layers import initializers, nnx_wrappers
-from MaxText.layers.linears import DenseGeneral, MlpBlock, canonicalize_tuple, normalize_axes
-from MaxText.layers import models
-from MaxText.layers import quantizations
-from MaxText.layers import linears
-from MaxText.layers.attentions import AttentionOp, KVQuant
-from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init
-from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers import initializers, nnx_wrappers
+from maxtext.layers.linears import DenseGeneral, MlpBlock, canonicalize_tuple, normalize_axes
+from maxtext.layers import models
+from maxtext.layers import quantizations
+from maxtext.layers import linears
+from maxtext.layers.attentions import AttentionOp, KVQuant
+from maxtext.layers.initializers import Initializer, NdInitializer, nd_dense_init
+from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 

@@ -29,7 +29,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_REPO_ROOT
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
-from MaxText.layers import models
+from maxtext.layers import models
 
 
 Transformer = models.Transformer

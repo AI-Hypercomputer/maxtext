@@ -24,9 +24,9 @@ from flax import nnx
 from MaxText.common_types import Config
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers.decoders import DecoderLayer
-from MaxText.layers import multi_token_prediction  # The class under test
-from MaxText.layers import embeddings
+from maxtext.layers.decoders import DecoderLayer
+from maxtext.layers import multi_token_prediction  # The class under test
+from maxtext.layers import embeddings
 from MaxText.common_types import MODEL_MODE_TRAIN
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils

@@ -28,8 +28,8 @@ from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import models
+from maxtext.layers import quantizations
 
 
 def init_random_model_vars(model, rng, example_batch):

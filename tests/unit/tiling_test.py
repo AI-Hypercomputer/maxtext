@@ -31,8 +31,8 @@ from MaxText.common_types import Config
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import models
+from maxtext.layers import quantizations
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 

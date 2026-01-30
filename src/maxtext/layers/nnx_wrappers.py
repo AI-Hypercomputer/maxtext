@@ -568,7 +568,7 @@ def to_linen_class(
 
   For example:
     >>> from flax import linen as nn, nnx
-    >>> from MaxText.layers import linears
+    >>> from maxtext.layers import linears
     >>> # Create a specialized Linen wrapper for linears.DenseGeneral
     >>> LinenDenseGeneral = to_linen_class(linears.DenseGeneral)
     >>> # Now, LinenDenseGeneral can be used like a regular Linen module

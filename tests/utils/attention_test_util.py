@@ -27,7 +27,7 @@ from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, EP_AS_CONTEXT, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers.attention_mla import MLA
+from maxtext.layers.attention_mla import MLA
 from MaxText.sharding import maybe_shard_with_name
 
 

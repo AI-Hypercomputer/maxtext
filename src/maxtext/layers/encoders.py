@@ -19,8 +19,8 @@ from flax import nnx
 from jax.sharding import Mesh
 
 from MaxText.common_types import Config
-from MaxText.layers import nnx_wrappers
-from MaxText.layers import initializers
+from maxtext.layers import nnx_wrappers
+from maxtext.layers import initializers
 
 
 class VisionEncoder(nnx.Module):
@@ -35,7 +35,7 @@ class VisionEncoder(nnx.Module):
   def _setup_vision_encoder_layers(self):
     """Setup vision encoder layers specific to the model, instantiate NNX modules."""
     if self.config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
-      from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
+      from maxtext.layers import gemma3  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Gemma3VisionEncoderLayer_0"
       projector_name = "VisionEmbedder_0"
@@ -43,7 +43,7 @@ class VisionEncoder(nnx.Module):
       setattr(self, projector_name, gemma3.VisionEmbedder(config=self.config, mesh=self.mesh, rngs=self.rngs))
       return encoder_name, projector_name
     elif self.config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
-      from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
+      from maxtext.layers import llama4  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Llama4VisionModel_0"
       projector_name = "Llama4MultiModalProjector_0"
@@ -51,7 +51,7 @@ class VisionEncoder(nnx.Module):
       setattr(self, projector_name, llama4.Llama4MultiModalProjector(config=self.config, mesh=self.mesh, rngs=self.rngs))
       return encoder_name, projector_name
     elif self.config.model_name in ["qwen3-omni-30b-a3b"]:
-      from MaxText.layers import qwen3  # pylint: disable=import-outside-toplevel
+      from maxtext.layers import qwen3  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Qwen3OmniMoeVisionEncoder_0"
       projector_name = "Qwen3OmniMoeVisionProjector_0"
@@ -88,7 +88,7 @@ class AudioEncoder(nnx.Module):
   def _setup_audio_encoder_layers(self):
     """Setup audio encoder layers specific to the model, instantiate NNX modules."""
     if self.config.model_name in ["qwen3-omni-30b-a3b"]:
-      from MaxText.layers import qwen3  # pylint: disable=import-outside-toplevel
+      from maxtext.layers import qwen3  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Qwen3OmniAudioEncoder_0"
       projector_name = "Qwen3OmniAudioProjector_0"
