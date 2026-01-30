@@ -21,6 +21,7 @@ import warnings
 
 from flax import config as flax_config
 from flax import linen
+from flax import linen as nn
 from flax import core
 from flax import nnx
 from flax.core import FrozenDict
@@ -488,6 +489,8 @@ class ToLinen(linen.Module):
 
   def _update_variables(self, module):
     """Store the NNX module's graph def and state inside Linen module variables."""
+    from MaxText import max_logging # Import locally
+
     state = nnx.state(module, nnx.Not(nnx.RngState))
 
     collection_flat_state: dict[str, list[tuple[tuple[str, ...], tp.Any]]] = {}
@@ -505,6 +508,28 @@ class ToLinen(linen.Module):
       if self.is_mutable_collection(collection):
 
         def _to_linen_var(x):
+          # --- DEBUG LOGGING ---
+          if isinstance(x, nnx.VariableState):
+              val = x.value
+              is_target = False
+              # Try to identify target tensor by shape/type
+              if hasattr(val, 'shape') and len(val.shape) == 4 and val.shape[1] == 2:
+                  is_target = True
+              elif isinstance(val, nn.spmd.LogicallyPartitioned) and len(val.value.shape) == 4:
+                  is_target = True
+              
+              if is_target:
+                  max_logging.log("*" * 40)
+                  max_logging.log(f"DEBUG: _to_linen_var processing target variable.")
+                  max_logging.log(f"  Collection: {collection}")
+                  max_logging.log(f"  Value Type: {type(val)}")
+                  if isinstance(val, nn.spmd.LogicallyPartitioned):
+                      max_logging.log(f"  Is LogicallyPartitioned with spec: {val.partitions}")
+                  
+                  # Check if metadata_fn is defined
+                  max_logging.log(f"  Has metadata_fn: {self.metadata_fn is not None}")
+          # ---------------------
+
           if isinstance(x, nnx.VariableState):
             if self.metadata_fn is not None:
               return self.metadata_fn(x)  # pylint: disable=too-many-function-args
@@ -520,8 +545,6 @@ class ToLinen(linen.Module):
         )
         for k, v in collection_state.items():
           self.put_variable(collection, k, v)
-
-
 class _Missing:
   ...
 

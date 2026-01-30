@@ -1,32 +1,15 @@
-# Copyright 2023–2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-""" Pipeline layer wrapping a decoder layer(s). Supports circular pipelining """
-
-from typing import Any
+from typing import Any, Optional
 
 import jax
-import jax.ad_checkpoint
+import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 from flax import nnx
-from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+from MaxText import max_logging # Import for debug logging
 from MaxText.common_types import EP_AS_CONTEXT, MODEL_MODE_TRAIN, Config, ShardMode
-from MaxText.layers import nnx_wrappers
 from MaxText.sharding import (
     all_gather_over_fsdp,
     create_sharding,
@@ -35,7 +18,6 @@ from MaxText.sharding import (
     maybe_shard_with_logical,
     maybe_shard_with_name,
 )
-
 
 class Pipeline(nnx.Module):
   """Module that implements pipelining across stages (NNX Version)."""
@@ -55,14 +37,15 @@ class Pipeline(nnx.Module):
     self.rngs = rngs
 
     self.layers = layers
-    self.layers_initialized = False
-
+    
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
     self.forwarding_delay = 2 if self.config.pipeline_delay_activation_forwarding else 1
     self.pipeline_microbatch_size = self.config.micro_batch_size_to_train_on // self.config.num_pipeline_microbatches
-    microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
-    self.microbatches_per_stage = microbatches_per_stage
+    self.microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
     self.use_circ_storage = self.need_circ_storage()
+
+    # Eagerly expand state to full pipeline size
+    self._expand_pipeline_state()
 
     if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       self.batch_axis_name = "activation_batch_no_exp"
@@ -102,6 +85,78 @@ class Pipeline(nnx.Module):
         if self.config.shard_mode == ShardMode.EXPLICIT
         else None
     )
+
+  def _expand_pipeline_state(self):
+      """
+      Broadcasts the single-stage layer state to the full pipeline shape.
+      """
+      num_repeats = self.config.num_pipeline_repeats
+      num_stages = self.num_stages
+      
+      new_logical_axes = []
+      broadcast_shape = []
+      
+      if num_repeats > 1:
+          new_logical_axes.append('circular_repeats')
+          broadcast_shape.append(num_repeats)
+      
+      new_logical_axes.append('activation_stage') 
+      broadcast_shape.append(num_stages)
+      
+      total_expansion = np.prod(broadcast_shape)
+      
+      for path, variable in nnx.iter_graph(self.layers):
+          # Handle RNG States
+          if isinstance(variable, nnx.RngState):
+              key = variable.value
+              if not jax.dtypes.issubdtype(key.dtype, jax.dtypes.prng_key):
+                  key = jax.random.key(key)
+              new_keys = jax.random.split(key, total_expansion)
+              new_keys = new_keys.reshape(tuple(broadcast_shape) + key.shape)
+              variable.value = new_keys
+              continue
+
+          # Handle Parameters
+          if isinstance(variable, nnx.Variable):
+              old_spec = None
+              original_value = variable.value
+
+              # 1. Recover Sharding Spec
+              meta = variable.get_metadata()
+              sharding_meta = meta.get('sharding')
+              
+              if sharding_meta is not None and hasattr(sharding_meta, 'spec'):
+                  old_spec = sharding_meta.spec
+              
+              if old_spec is None and isinstance(original_value, nn.spmd.LogicallyPartitioned):
+                  old_spec = original_value.partitions
+                  original_value = original_value.value
+
+              # 2. Broadcast Value
+              new_value = jax.lax.broadcast(jnp.asarray(original_value), broadcast_shape)
+              
+              # 3. Apply New Sharding
+              if old_spec is not None:
+                  if isinstance(old_spec, tuple) and not isinstance(old_spec, P):
+                      old_spec = P(*old_spec)
+                  
+                  new_spec_tuple = tuple(new_logical_axes) + old_spec
+                  new_spec = P(*new_spec_tuple)
+                  
+                  # Create wrapper
+                  wrapped_val = nn.spmd.LogicallyPartitioned(new_value, new_spec)
+                  variable.value = wrapped_val
+                  
+                  # DEBUG LOGGING for Target Tensor
+                  val_shape = variable.value.value.shape
+                  if len(val_shape) >= 4 and (val_shape[-1] == 3072 or val_shape[-2] == 3072):
+                      max_logging.log(f"DEBUG: Pipeline Expansion - Updated {path}")
+                      max_logging.log(f"  Old Spec: {old_spec}")
+                      max_logging.log(f"  New Spec: {new_spec}")
+                      max_logging.log(f"  Assigned Value Type: {type(variable.value)}")
+                      max_logging.log(f"  Assigned Value Shape: {variable.value.value.shape}")
+              else:
+                  variable.value = new_value
 
   def need_circ_storage(self):
     return (
@@ -388,6 +443,13 @@ class Pipeline(nnx.Module):
 
   def get_main_vmap_func_for_iterations(self):
     def func_to_vmap(graph, state, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+      # Explicitly unbox any LogicallyPartitioned wrappers in the state
+      def unbox_val(x):
+          if isinstance(x, nn.spmd.LogicallyPartitioned):
+              return x.value
+          return x
+      
+      state = jax.tree.map(unbox_val, state)
       module = nnx.merge(graph, state)
       return module(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
@@ -457,9 +519,6 @@ class Pipeline(nnx.Module):
       remat_policy = save_input_policy
     return remat_policy
 
-  def get_weight_sharding(self, *init_args):
-    pass
-
   @staticmethod
   def get_logical_spec_repeats_removed(full_logical):
     if full_logical is None:
@@ -469,13 +528,6 @@ class Pipeline(nnx.Module):
       return jax.sharding.PartitionSpec(*[dim for dim in spec if dim != "circular_repeats"])
 
     return jax.tree.map(_remove_from_spec, full_logical)
-
-  @staticmethod
-  def _remove_logically_partition(weights):
-    def _remove_logically_partition_leaf(v):
-      return getattr(v, "value") if isinstance(v, nn.spmd.LogicallyPartitioned) else v
-
-    return jax.tree.map(_remove_logically_partition_leaf, weights)
 
   @staticmethod
   def _remove_fsdp_from_physical_partition_spec(pps):
@@ -533,26 +585,6 @@ class Pipeline(nnx.Module):
           (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
       )
 
-    if not self.layers_initialized:
-      # Extract state of the ALREADY INITIALIZED module
-      initial_state = nnx.state(self.layers)
-
-      # Broadcast state to create vectorized weights: [repeats, stages, ...]
-      # Note: This creates TIED weights across stages (copies).
-      # If distinct initialization is required, the input module must be provided as a factory or re-seeded list.
-      num_repeats = self.config.num_pipeline_repeats if self.config.num_pipeline_repeats > 1 else 1
-
-      broadcast_shape = []
-      if num_repeats > 1:
-        broadcast_shape.append(num_repeats)
-      broadcast_shape.append(self.num_stages)
-
-      vectorized_state = jax.tree.map(lambda x: jax.lax.broadcast(x, broadcast_shape), initial_state)
-
-      # Update self.layers with the vectorized state so it holds the full pipeline stack
-      nnx.update(self.layers, vectorized_state)
-      self.layers_initialized = True
-
     loop_state = self.init_states(inputs)
     bubble_iterations = self.forwarding_delay * (self.num_stages - 1)
     real_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats
@@ -564,6 +596,7 @@ class Pipeline(nnx.Module):
       layers_state = self.all_gather_over_fsdp(layers_state, logical_partition_spec)
 
     pipeline_weights_state = layers_state
+    
     logical_partition_spec = self.get_logical_spec_repeats_removed(logical_partition_spec)
 
     def scan_body(carry, _):
@@ -598,16 +631,3 @@ class Pipeline(nnx.Module):
     )
 
     return final_output
-
-
-def pipeline_as_linen(
-    config: Config,
-    layers: nn.Module,
-    mesh: Mesh,
-    remat_policy: Any = None,
-    name: str = "pipeline",
-):
-  rngs = nnx.Rngs(params=jax.random.PRNGKey(config.init_weights_seed), dropout=1)
-  return nnx_wrappers.to_linen(
-      Pipeline, config=config, layers=layers, mesh=mesh, remat_policy=remat_policy, name=name, rngs=rngs
-  )
