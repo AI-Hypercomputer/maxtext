@@ -21,6 +21,7 @@ import warnings
 
 from flax import config as flax_config
 from flax import linen
+from flax import linen as nn
 from flax import core
 from flax import nnx
 from flax.core import FrozenDict
@@ -488,6 +489,8 @@ class ToLinen(linen.Module):
 
   def _update_variables(self, module):
     """Store the NNX module's graph def and state inside Linen module variables."""
+    from MaxText import max_logging # Import locally
+
     state = nnx.state(module, nnx.Not(nnx.RngState))
 
     collection_flat_state: dict[str, list[tuple[tuple[str, ...], tp.Any]]] = {}
@@ -520,8 +523,6 @@ class ToLinen(linen.Module):
         )
         for k, v in collection_state.items():
           self.put_variable(collection, k, v)
-
-
 class _Missing:
   ...
 
