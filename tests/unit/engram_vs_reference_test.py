@@ -76,7 +76,7 @@ class Config:
   engram_vocab_size: List[int] = field(default_factory=lambda: [129280 * 5, 129280 * 5])
   engram_layer_ids: List[int] = field(default_factory=lambda: [1, 15])
   engram_kernel_size: int = 4  # kernel_size
-  engram_embed_dim_per_ngram: int = 512  # n_embed_per_ngram
+  engram_embed_dim_per_ngram: int = 256  # n_embed_per_ngram
   engram_heads_per_ngram: int = 8  # n_head_per_ngram
   # hashing: new
   engram_pad_id: int = 2  # not the same as tokenizer.pad_id
@@ -522,7 +522,7 @@ def get_cfg_and_mesh(config):  # config, run_name, dtype, batch_size, seq_len
 # -----------------------------------------------------------------------------
 
 
-def get_mhe_weights(pt_layer):
+def to_jax_mhe(pt_layer):
   """
   Extracts weights from PyTorch MultiHeadEmbedding.
   """
@@ -559,7 +559,7 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
     print(jax_model)
 
     # 3. Transfer Weights
-    weights = get_mhe_weights(pt_model)
+    weights = to_jax_mhe(pt_model)
     nnx.update(jax_model, weights)
 
     # 4. Input Data
@@ -601,35 +601,40 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
 # -----------------------------------------------------------------------------
 
 
-# nnx.List expects integer indices in the State dictionary.
-# Use Integer keys (0, 1) instead of String keys ("0", "1")
-def to_nnx_list_dict(weight_list):
-  return {i: w for i, w in enumerate(weight_list)}
+def to_jax_norm(pt_norm):
+  """Extracts scale parameter from a norm layer."""
+  return {"scale": to_jax(pt_norm.weight)}
 
 
-# def get_shortconv_weights(pt_layer):
-#   conv_weight = pt_layer.conv.weight.permute(2, 1, 0)
-#   short_conv_norms = [{"scale": to_jax(n.weight)} for n in pt_layer.norms]
-#   return {"conv": {"kernel": to_jax(conv_weight)}, "norms": to_nnx_list_dict(short_conv_norms)}
+def to_jax_linear(pt_linear):
+  """(Out, In) -> {'kernel': (In, Out), 'bias': (Out)}"""
+  out = {"kernel": to_jax(pt_linear.weight.T)}
+  if pt_linear.bias is not None:
+    out["bias"] = to_jax(pt_linear.bias)
+  return out
 
 
-def get_shortconv_weights(pt_layer):
-  # 1. Conv Weights
-  # PyTorch: (Out, In/Groups, K) -> JAX: (K, In/Groups, Out)
-  conv_weight = pt_layer.conv.weight.permute(2, 1, 0)
+def to_jax_vmap(pt_module_list, transform_fn):
+  """
+  Applies transform_fn to a list of modules and stacks the
+  resulting PyTrees along a new leading axis.
+  """
+  jax_trees = [transform_fn(m) for m in pt_module_list]
+  # Stacks all keys (kernel, bias, etc.) along a new 0-th dimension
+  return jax.tree.map(lambda *xs: jnp.stack(xs), *jax_trees)
 
-  # 2. Norm Weights
-  # We must STACK the weights to match the vmapped shape (Groups, Channels)
-  # pt_layer.norms is a ModuleList, so we iterate and stack
-  norm_scales_list = [to_jax(n.weight) for n in pt_layer.norms]
-  stacked_norm_scales = jnp.stack(norm_scales_list, axis=0)
+
+def to_jax_shortconv(pt_layer):
+  """
+  Converts a ShortConv layer containing a Conv and a ModuleList of Norms.
+  """
+  # 1. Conv Weights. PyTorch: (Out, In//Groups, Kernel) -> JAX: (Kernel, In//Groups, Out)
+  conv_kernel = pt_layer.conv.weight.permute(2, 1, 0)
 
   return {
-      "conv": {"kernel": to_jax(conv_weight)},
-      "norms": {
-          # The vmapped module expects one key 'scale' with the stacked array
-          "scale": stacked_norm_scales
-      },
+      "conv": {"kernel": to_jax(conv_kernel)},
+      # 2. Weights for the Norms: List[Norm] -> {'scale': (Groups, Channels)}
+      "norms": to_jax_vmap(pt_layer.norms, to_jax_norm),
   }
 
 
@@ -641,8 +646,8 @@ class ShortConvTest(parameterized.TestCase):
     np.random.seed(42)
 
   @parameterized.named_parameters(
-      {"testcase_name": "base", "hidden_size": 32, "hc_mult": 4, "kernel_size": 4, "dilation": 1},
-      # {"testcase_name": "dilated", "hidden_size": 16, "hc_mult": 2, "kernel_size": 3, "dilation": 2},
+      # {"testcase_name": "base", "hidden_size": 32, "hc_mult": 4, "kernel_size": 4, "dilation": 1},
+      {"testcase_name": "dilated", "hidden_size": 16, "hc_mult": 2, "kernel_size": 3, "dilation": 2},
       # {"testcase_name": "no_activation", "hidden_size": 32, "hc_mult": 4, "kernel_size": 4, "dilation": 1},
   )
   def test_shortconv_match(self, hidden_size, hc_mult, kernel_size, dilation):
@@ -668,7 +673,7 @@ class ShortConvTest(parameterized.TestCase):
     print(jax_model)
 
     # 3. Transfer Weights
-    weights = get_shortconv_weights(pt_model)
+    weights = to_jax_shortconv(pt_model)
     nnx.update(jax_model, weights)
 
     # 4. Input Data
@@ -700,64 +705,18 @@ class ShortConvTest(parameterized.TestCase):
 # -----------------------------------------------------------------------------
 
 
-# Map Linear layers with Bias
-def map_linear(pt_linear):
-  d = {"kernel": to_jax(pt_linear.weight.T)}
-  if pt_linear.bias is not None:
-    d["bias"] = to_jax(pt_linear.bias)
-  return d
-
-
-# def get_jax_engram_weights(pt_engram) -> dict:
-
-#   key_projs_weights = [map_linear(proj) for proj in pt_engram.key_projs]
-#   norm1_weights = [{"scale": to_jax(n.weight)} for n in pt_engram.norm1]
-#   norm2_weights = [{"scale": to_jax(n.weight)} for n in pt_engram.norm2]
-
-#   return {
-#       "mhe": get_mhe_weights(pt_engram.multi_head_embedding),
-#       "value_proj": map_linear(pt_engram.value_proj),
-#       "key_projs": to_nnx_list_dict(key_projs_weights),
-#       "k_norms": to_nnx_list_dict(norm1_weights),
-#       "q_norms": to_nnx_list_dict(norm2_weights),
-#       "short_conv": get_shortconv_weights(pt_engram.short_conv),
-#   }
-
-
-def get_jax_engram_weights(pt_engram) -> dict:
-  # --- Helper: Stack List of Linear Weights ---
-  # Turns a list of dicts [{'kernel': K1, 'bias': B1}, ...]
-  # into a single dict {'kernel': Stacked_K, 'bias': Stacked_B}
-  def stack_linears(pt_layers):
-    # 1. Convert each layer individually using your existing map_linear
-    #    map_linear handles the transpose (Out, In) -> (In, Out)
-    weights_list = [map_linear(l) for l in pt_layers]
-
-    # 2. Stack them
-    return {
-        "kernel": jnp.stack([w["kernel"] for w in weights_list], axis=0),
-        "bias": jnp.stack([w["bias"] for w in weights_list], axis=0),
-    }
-
-  # --- Helper: Stack List of Norm Weights ---
-  def stack_norms(pt_layers):
-    scales = [to_jax(l.weight) for l in pt_layers]
-    return {"scale": jnp.stack(scales, axis=0)}
-
-  # --- Main Dictionary ---
+def to_jax_engram(pt_engram) -> dict:
   return {
-      "mhe": get_mhe_weights(pt_engram.multi_head_embedding),
+      "mhe": to_jax_mhe(pt_engram.multi_head_embedding),
       # Standard Single Layer (No Stacking needed)
-      "value_proj": map_linear(pt_engram.value_proj),
+      "value_proj": to_jax_linear(pt_engram.value_proj),
       # Vectorized Layers (Stacking needed)
       # Result shapes: Kernel (G, In, Out), Bias (G, Out)
-      "key_projs": stack_linears(pt_engram.key_projs),
+      "key_projs": to_jax_vmap(pt_engram.key_projs, to_jax_linear),
       # Result shapes: Scale (G, C)
-      # Note: Mapping pt_engram.norm1 -> k_norms
-      "k_norms": stack_norms(pt_engram.norm1),
-      # Note: Mapping pt_engram.norm2 -> q_norms
-      "q_norms": stack_norms(pt_engram.norm2),
-      "short_conv": get_shortconv_weights(pt_engram.short_conv),
+      "k_norms": to_jax_vmap(pt_engram.norm1, to_jax_norm),
+      "q_norms": to_jax_vmap(pt_engram.norm2, to_jax_norm),
+      "short_conv": to_jax_shortconv(pt_engram.short_conv),
   }
 
 
@@ -818,7 +777,7 @@ class EngramTest(parameterized.TestCase):
     print("jax_layer", jax_layer)
 
     # 3. Synchronize Weights
-    jax_weights = get_jax_engram_weights(pt_layer)
+    jax_weights = to_jax_engram(pt_layer)
     nnx.update(jax_layer, jax_weights)
 
     # 4. Prepare Inputs
