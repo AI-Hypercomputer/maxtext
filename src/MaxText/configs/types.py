@@ -950,6 +950,7 @@ class HfDataset(BaseModel):
   hf_path: str = Field("", description="Path of the Hugging Face dataset.")
   hf_name: str = Field("", description="Name of the Hugging Face dataset.")
   hf_data_dir: PathStr = Field("", description="Data directory for the HF dataset.")
+  hf_data_streaming: bool = Field(True, description="")
   hf_train_files: Optional[str] = Field(None, description="Files for the HF training split.")
   hf_eval_split: str = Field("", description="Name of the HF evaluation split.")
   hf_eval_files: Optional[str] = Field(None, description="Files for the HF evaluation split.")
@@ -2271,8 +2272,8 @@ class MaxTextConfig(
       self.tokenizer_type = TokenizerType.TIKTOKEN
     if self.eval_interval > 0 >= self.eval_steps and self.generate_padding_batch_eval:
       raise ValueError("`eval_steps` must be > 0 when `generate_padding_batch_eval` is True.")
-    if self.dataset_type == "hf" and self.num_epoch != 1:
-      raise ValueError("HuggingFace pipeline only supports num_epoch=1.")
+    if self.dataset_type == "hf" and self.num_epoch != 1 and self.hf_data_streaming:
+      raise ValueError("Streaming HuggingFace pipeline only supports num_epoch=1.")
     if self.rl.loss_algo == "grpo":
       self.use_grpo = True
     else:
