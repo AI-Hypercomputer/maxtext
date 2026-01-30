@@ -31,6 +31,7 @@ NdInitializer = Callable[[PRNGKey, Shape, DType, InitializerAxis, InitializerAxi
 default_embed_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
 
 default_bias_init = jax.nn.initializers.constant(0.0)
+default_scalar_init = jax.nn.initializers.constant(0.01)
 
 
 def nd_dense_init(scale, mode, distribution):

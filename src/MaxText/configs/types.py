@@ -210,6 +210,7 @@ ModelName = Literal[
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
+    "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
     "gemma-2b",
@@ -1057,6 +1058,13 @@ class TrainingLoop(BaseModel):
   init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
 
 
+class ManifoldConstrainedHyperConnections(BaseModel):
+  """Configuration for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
+
+  mhc_expansion_rate: int = Field(0, description="The number of parallel streams in Hyper Connection.")
+  sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
+
+
 class Optimizer(BaseModel):
   """Configuration for the optimizer and learning rate schedule."""
 
@@ -1743,6 +1751,7 @@ class MaxTextConfig(
     # Training, Optimization, and Fine-Tuning
     RematAndOffload,
     TrainingLoop,
+    ManifoldConstrainedHyperConnections,
     Optimizer,
     AdamW,
     Muon,
