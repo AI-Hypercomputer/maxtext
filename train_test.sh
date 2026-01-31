@@ -45,14 +45,14 @@ fi
 export JAX_PLATFORMS=tpu
 export SPARSE_MODEL_TRAINING=False
 
-export PYTHONPATH=./src:$PYTHONPATH
+export PYTHONPATH=./src:${PYTHONPATH:-''}
 python -u multihost_runner_orig.py \
     --TPU_PREFIX=${TPU_PREFIX} \
     --COMMAND="
     export TPU_LOG_DIR=/home/zephyr/tpu_logs
     export WANDB_API_KEY='7d11bbca76b3081b6bd1efbbcf1572aab26c5d56'
     source ~/maxtext_env_py311/bin/activate
-    export PYTHONPATH=./src:\$PYTHONPATH
+    export PYTHONPATH=./src:\${PYTHONPATH:-''}
     ~/maxtext_env_py311/bin/python -u -m src.MaxText.train src/MaxText/configs/base.yml \
         run_name=${RUN_NAME} \
         base_output_directory=${BASE_OUTPUT_DIRECTORY} \
