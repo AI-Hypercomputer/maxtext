@@ -25,7 +25,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR
 from MaxText.input_pipeline import _tfds_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 
@@ -35,7 +35,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],

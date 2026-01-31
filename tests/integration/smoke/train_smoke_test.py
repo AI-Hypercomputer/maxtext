@@ -19,7 +19,7 @@ import unittest
 from absl.testing import absltest
 
 from MaxText.train import main as train_main
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 
 
 class Train(unittest.TestCase):
@@ -30,7 +30,7 @@ class Train(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",
@@ -58,7 +58,7 @@ class Train(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",
@@ -87,7 +87,7 @@ class Train(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",

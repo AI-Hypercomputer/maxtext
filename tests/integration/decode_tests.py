@@ -24,7 +24,7 @@ from absl.testing import absltest
 from contextlib import redirect_stdout
 
 from maxtext.decode import main as decode_main
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 
 pytestmark = pytest.mark.integration_test
 
@@ -36,7 +36,7 @@ class DecodeTests(unittest.TestCase):
   CONFIGS = {
       "base": [  # tests decode
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -49,7 +49,7 @@ class DecodeTests(unittest.TestCase):
       ],
       "int8": [  # tests decode with int8 quantization
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -64,7 +64,7 @@ class DecodeTests(unittest.TestCase):
       ],
       "pdb_lt_1": [  # tests decode with per_device_batch_size < 1
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -77,7 +77,7 @@ class DecodeTests(unittest.TestCase):
       ],
       "decode_sampling": [
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           f"load_parameters_path={GEMMA_2B_CKPT_PATH}",

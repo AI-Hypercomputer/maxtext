@@ -51,7 +51,7 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 from flax import nnx
 
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText import pyconfig
 from MaxText.layers import embeddings, attention_mla
 from MaxText.common_types import MODEL_MODE_TRAIN
@@ -754,7 +754,7 @@ def get_jax_mla_weights(pt_mla, cfg):
 def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len):
   """Returns MaxText configuration and mesh."""
   cfg = pyconfig.initialize(
-      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
       run_name=run_name,
       enable_checkpointing=False,
       model_name="default",

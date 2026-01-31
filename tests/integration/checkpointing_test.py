@@ -29,7 +29,7 @@ import json
 from math import isclose
 import os.path
 import pytest
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText.train import main as train_main
 
 
@@ -65,7 +65,7 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
   return (
       [
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           f"hardware={hardware}",
           f"run_name=runner_{run_date}",
           f"steps={steps}",

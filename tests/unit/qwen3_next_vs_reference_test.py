@@ -33,7 +33,7 @@ from flax import nnx
 from MaxText import pyconfig
 from MaxText.layers import qwen3, normalizations
 from MaxText.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 
 
 # ----------------------------------------------------------------------
@@ -619,7 +619,7 @@ class TestQwen3Next(unittest.TestCase):
     self.cfg = pyconfig.initialize(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             # Base settings for the test
             "run_name=qwen3_next_test",
             "dtype=float32",
@@ -1074,7 +1074,7 @@ class TestQwen3Next(unittest.TestCase):
     cfg = pyconfig.initialize(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             # Base settings for the test
             "run_name=qwen3_next_test",
             "dtype=float32",

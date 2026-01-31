@@ -35,7 +35,7 @@ import optax
 from MaxText import sharding
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
@@ -223,9 +223,7 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
   """test class for multiple collection state in maxutils"""
 
   def setUp(self):
-    self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
-    )
+    self.config = pyconfig.initialize([None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")], enable_checkpointing=False)
     self.model = ModelWithMultipleCollections(self.config.max_target_length, nnx.Rngs(0))
     self.key = random.key(0)
     self.tx = optax.adam(learning_rate=0.001)
@@ -275,9 +273,7 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
   """Tests initialization of transformer states in max_utils.py"""
 
   def setUp(self):
-    self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
-    )
+    self.config = pyconfig.initialize([None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")], enable_checkpointing=False)
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
@@ -735,7 +731,7 @@ class TestLearningRateSchedules(unittest.TestCase):
     warmup_steps = int(learning_rate_schedule_steps * warmup_steps_fraction)
 
     config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         enable_checkpointing=False,
         learning_rate=learning_rate,
         learning_rate_schedule_steps=learning_rate_schedule_steps,
@@ -777,7 +773,7 @@ class TestLearningRateSchedules(unittest.TestCase):
     # Test both decay styles: linear and cosine
     for decay_style in ["linear", "cosine"]:
       config = pyconfig.initialize(
-          [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+          [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
           enable_checkpointing=False,
           learning_rate=learning_rate,
           learning_rate_schedule_steps=learning_rate_schedule_steps,
@@ -815,7 +811,7 @@ class TestLearningRateSchedules(unittest.TestCase):
     # Test invalid fractions - should raise during config initialization
     with self.assertRaises(ValueError) as cm:
       pyconfig.initialize(
-          [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+          [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
           enable_checkpointing=False,
           learning_rate=learning_rate,
           learning_rate_schedule_steps=learning_rate_schedule_steps,

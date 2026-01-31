@@ -17,7 +17,7 @@
 import os
 import unittest
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from unittest import mock
 from maxtext.common.goodput import create_goodput_recorder, maybe_monitor_goodput, maybe_record_goodput, GoodputEvent
 
@@ -28,7 +28,7 @@ class GoodputUtilsTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         base_output_directory="gs://runner-maxtext-logs",
         run_name="runner_test",
         enable_checkpointing=False,

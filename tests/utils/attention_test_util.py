@@ -26,7 +26,7 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, EP_AS_CONTEXT, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText.layers.attention_mla import MLA
 from MaxText.sharding import maybe_shard_with_name
 
@@ -54,7 +54,7 @@ class MLATestBase(parameterized.TestCase):
     super().setUp()
     jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         **self.config_arguments,
     )
     self.cfg = config
@@ -66,7 +66,7 @@ class MLATestBase(parameterized.TestCase):
   def init_mla(self, config_arguments, rope_type):
     """Helper function to initialize MLA with different model names."""
     cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         **config_arguments,
         rope_type=rope_type,
     )

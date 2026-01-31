@@ -28,7 +28,7 @@ from jax.sharding import Mesh
 from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR
 from MaxText.layers import deepseek
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import pipeline
@@ -189,7 +189,7 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_minimum_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         enable_checkpointing=False,
         enable_goodput_recording=False,
         run_name="circular_minimum_microbatches",
@@ -206,7 +206,7 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_extra_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         enable_checkpointing=False,
         enable_goodput_recording=False,
         run_name="circular_extra_microbatches",
@@ -223,7 +223,7 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_deepseek_megablox_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         enable_checkpointing=False,
         enable_goodput_recording=False,
         run_name="circular_moe",
@@ -246,7 +246,7 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_ag_once(self):
     # 2 stages, 8 microbatches, all gather once
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         enable_checkpointing=False,
         enable_goodput_recording=False,
         run_name="circular_ag_once",
@@ -264,7 +264,7 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         enable_checkpointing=False,
         run_name="non_circular",
         max_target_length=128,
@@ -283,7 +283,7 @@ class PipelineParallelismTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_test",
             "dataset_path=gs://maxtext-dataset",
@@ -312,7 +312,7 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_delay_activation_forwarding_same_output_and_grad(self):
     # 4 stages, delayed activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         enable_checkpointing=False,
         enable_goodput_recording=False,
         run_name="activation_forwarding",
@@ -333,7 +333,7 @@ class PipelineParallelismTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_test",
             "dataset_path=gs://maxtext-dataset",
@@ -365,7 +365,7 @@ class PipelineParallelismTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_test",
             "dataset_path=gs://maxtext-dataset",
@@ -399,7 +399,7 @@ class PipelineParallelismTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_fp8_test",
             "dataset_path=gs://maxtext-dataset",
@@ -431,7 +431,7 @@ class PipelineParallelismTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_nanoo_fp8_test",
             "dataset_path=gs://maxtext-dataset",

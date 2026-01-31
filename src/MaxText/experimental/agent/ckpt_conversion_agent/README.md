@@ -18,7 +18,7 @@ pip install -q -U "google-genai>=1.0.0"
 
 The agent requires context files about the target and source model's parameter names and tensor shapes. You can generate them using the [`save_param.py`](../ckpt_conversion_agent/utils/save_param.py) script. The output directory defined by `config.base_output_directory`. The default is `src/MaxText/experimental/agent/ckpt_conversion_agent/context/<model_name>` folder.
 ```bash
-python3 -m MaxText.experimental.agent.ckpt_conversion_agent.utils.save_param src/MaxText/configs/base.yml \
+python3 -m MaxText.experimental.agent.ckpt_conversion_agent.utils.save_param src/maxtext/configs/base.yml \
   per_device_batch_size=1 run_name=param_<model_name> model_name=<model_name> scan_layers=false \
   --hf_model_config=<hf_model_id>
 ```
@@ -66,7 +66,7 @@ If a ground-truth version isn't available, you'll need to debug the conversion m
 3. After the conversion is done, run a decode to check the correctness of the generated code.
 Example command:
 ```bash
-python3 -m maxtext.decode src/MaxText/configs/base.yml model_name=gemma3-4b tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma3 \
+python3 -m maxtext.decode src/maxtext/configs/base.yml model_name=gemma3-4b tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma3 \
   load_parameters_path=<Your-converted-ckpt-path> per_device_batch_size=1 run_name=ht_test \
   max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false scan_layers=true \
   prompt='I love to' attention='dot_product'
@@ -75,7 +75,7 @@ If outputs are wrong, you can use jax.debug.print() to print the layer-wise mean
 
 4. To further validate the converted checkpoint, we recommend to use the [forward_pass_logit_checker.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md#verifying-conversion-correctness) to compare the original ckpt with the converted ckpt:
 ```bash
-python3 -m tests.utils.forward_pass_logit_checker src/MaxText/configs/base.yml \
+python3 -m tests.utils.forward_pass_logit_checker src/maxtext/configs/base.yml \
     tokenizer_path=assets/tokenizers/<tokenizer> \
     load_parameters_path=<path-to-maxtext-checkpoint> \
     model_name=<MODEL_NAME> \
