@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration test for pedagogical_examples/shmap_collective_matmul.py"""
+"""Integration test for maxtext/examples/shmap_collective_matmul.py"""
 
 import os.path
 import sys
@@ -24,7 +24,7 @@ from MaxText.globals import MAXTEXT_REPO_ROOT
 sys.path.append(os.path.join(MAXTEXT_REPO_ROOT, "pedagogical_examples"))
 
 # Uncomment the import when b/415022795 is fixed
-# from pedagogical_examples.shmap_collective_matmul import main
+# from maxtext.examples.shmap_collective_matmul import main
 
 
 @pytest.mark.skip(reason="Enable when b/415022795 is fixed")
