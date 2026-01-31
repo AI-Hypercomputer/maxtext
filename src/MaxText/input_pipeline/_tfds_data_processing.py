@@ -27,7 +27,7 @@ import jax
 from MaxText import multihost_dataloading
 from MaxText import tokenizer
 from MaxText import sequence_packing
-from MaxText.input_pipeline import _input_pipeline_utils
+from maxtext.input_pipeline import _input_pipeline_utils
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 

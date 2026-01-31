@@ -19,8 +19,8 @@ import unittest
 
 import grain.python as grain
 import numpy as np
-from MaxText.input_pipeline import _grain_tokenizer
-from MaxText.input_pipeline import _input_pipeline_utils
+from maxtext.input_pipeline import _grain_tokenizer
+from maxtext.input_pipeline import _input_pipeline_utils
 from numpy.testing import assert_array_equal
 
 

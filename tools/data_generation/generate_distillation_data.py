@@ -60,7 +60,7 @@ from huggingface_hub import create_repo, get_full_repo_name, repo_exists, upload
 
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
-from MaxText.input_pipeline import _distillation_data_processing
+from maxtext.input_pipeline import _distillation_data_processing
 
 from jetstream.core.proto import jetstream_pb2
 from jetstream.core.proto import jetstream_pb2_grpc

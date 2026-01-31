@@ -27,8 +27,8 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 from MaxText import pyconfig
-from MaxText.input_pipeline import _grain_data_processing
-from MaxText.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline import _grain_data_processing
+from maxtext.input_pipeline import input_pipeline_interface
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT
 
 

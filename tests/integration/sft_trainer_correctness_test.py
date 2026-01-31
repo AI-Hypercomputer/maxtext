@@ -42,7 +42,7 @@ from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
-from MaxText.input_pipeline import _input_pipeline_utils
+from maxtext.input_pipeline import _input_pipeline_utils
 from MaxText.layers import models
 from MaxText.layers import quantizations
 

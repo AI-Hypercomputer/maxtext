@@ -488,10 +488,80 @@ def get_dense_moe_layers(config):
   elif config.decoder_block == DecoderBlockType.LLAMA4:
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
+  elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+    num_moe_layers = config.num_decoder_layers
+    num_dense_layers = 0
   else:
-    raise ValueError("Currently we only support DeepSeek and Llama4 calculation.")
+    raise ValueError("Currently we only support DeepSeek, Llama4, and Qwen3-Next calculation.")
 
   return num_dense_layers, num_moe_layers
+
+
+def calculate_gated_delta_net_flops_per_device(config):
+  """Calculates the FLOPs for a single Gated Delta Net (Linear Attention) layer."""
+  B = config.per_device_batch_size
+  S = config.max_target_length
+  E = config.emb_dim
+
+  H_k = config.gdn_num_key_heads
+  H_v = config.gdn_num_value_heads
+  D_k = config.gdn_key_head_dim
+  D_v = config.gdn_value_head_dim
+  C = config.gdn_chunk_size
+  K_conv = config.gdn_conv_kernel_dim
+
+  K_dim = H_k * D_k
+  V_dim = H_v * D_v
+
+  # 1. Projections (Learnable Weights)
+  # in_proj_qkvz: E -> 2*K_dim + 2*V_dim
+  flops_qkvz = 2 * B * S * E * (2 * K_dim + 2 * V_dim)
+  # in_proj_ba: E -> 2*H_v
+  flops_ba = 2 * B * S * E * (2 * H_v)
+  # out_proj: V_dim -> E
+  flops_out = 2 * B * S * V_dim * E
+
+  flops_projections = flops_qkvz + flops_ba + flops_out
+
+  # 2. Convolution (Learnable Weights)
+  # Depthwise conv on dim (2*K_dim + V_dim)
+  # 2 * B * S * Channels * Kernel
+  flops_conv = 2 * B * S * (2 * K_dim + V_dim) * K_conv
+
+  # 3. Core Gated Delta Net (Attention-like operations)
+  # Assumptions:
+  # H = H_v (broadcasting K to V heads if H_v > H_k)
+  # N = num_chunks & N * C ~ S
+  #
+  # Query (Q): [B, S, H_v, D_k]
+  # Keys (K): [B, S, H_v, D_k]
+  # Values (V): [B, S, H_v, D_v]
+  # Intra-Chunk Attention (A): [B, N, H_v, C, C]
+  # Recurrent State (S): [B, N, H_v, D_k, D_v]
+
+  # - Intra-chunk terms (per chunk C):
+  #   - attn (K*K): 2 * B * S * H_v * C * D_k
+  #   - val_intra (A*V): 2 * B * S * H_v * C * D_v
+  #   - k_cum (A*K): 2 * B * S * H_v * C * D_k
+  #   - inner_attn_body loop (iterative refinement): ≈ (C - 1) * B * H * N * C^2 ≈ B * H * S * C^2
+  flops_intra = 2 * B * S * H_v * C * (2 * D_k + D_v) + (B * H_v * S * C**2)
+
+  # - Inter-chunk terms (Recurrent State D_k * D_v):
+  #   - attn_i (Q*K): 2 * B * S * H_v * C * D_k
+  #   - v_prime (K*S): 2 * B * S * H_v * D_k * D_v
+  #   - attn_inter (Q*S): 2 * B * S * H_v * D_k * D_v
+  #   - core_out (A*V): 2 * B * S * H_v * C * D_v
+  #   - update (K*V): 2 * B * S * H_v * D_k * D_v
+  flops_inter = (2 * B * S * H_v * C * (D_k + D_v)) + (6 * B * S * H_v * D_k * D_v)
+
+  flops_core = flops_intra + flops_inter
+
+  # Weights part: Projections + Conv
+  gdn_weight_flops = flops_projections + flops_conv
+  # Attention part: Core
+  gdn_attn_flops = flops_core
+
+  return gdn_weight_flops, gdn_attn_flops
 
 
 def calculate_gemma3_vision_layers_tflops_per_device(config):
@@ -634,7 +704,7 @@ def calculate_tflops_training_per_device(config, log=True):
   # MLP flops
   if config.num_experts > 1:
     # calculation based on dropless implementation
-    if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
+    if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4, DecoderBlockType.QWEN3_NEXT):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
@@ -702,6 +772,24 @@ def calculate_tflops_training_per_device(config, log=True):
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
+  elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+    gdn_weight_flops_per_layer, gdn_attn_flops_per_layer = calculate_gated_delta_net_flops_per_device(config)
+    cycle_interval = config.inhomogeneous_layer_cycle_interval
+    num_full_attn_layers = config.num_decoder_layers // cycle_interval
+    num_linear_attn_layers = config.num_decoder_layers - num_full_attn_layers
+
+    # Weights TFLOPs:
+    total_weights = (
+        total_ffn_flops
+        + embedding_flops
+        + (qkv_flops + projection_flops) * num_full_attn_layers
+        + gdn_weight_flops_per_layer * num_linear_attn_layers
+    )
+    learnable_weight_tflops = total_weights * 3 / 10**12
+
+    # Attention TFLOPs:
+    total_attn = (causal_attention_flops * num_full_attn_layers) + (gdn_attn_flops_per_layer * num_linear_attn_layers)
+    attention_tflops = total_attn * 3 / 10**12
   else:
     # multiply by 3 for both feed forward and back propagation flops
     learnable_weight_tflops = (

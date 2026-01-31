@@ -24,8 +24,8 @@ from jax.experimental import mesh_utils
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.input_pipeline import _hf_data_processing
-from MaxText.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline import _hf_data_processing
+from maxtext.input_pipeline import input_pipeline_interface
 
 
 class HfDataProcessingTest(unittest.TestCase):

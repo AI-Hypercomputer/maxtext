@@ -26,8 +26,8 @@ import grain.python as grain
 
 import numpy as np
 
-from MaxText.input_pipeline import _input_pipeline_utils
-from MaxText.input_pipeline import instruction_data_processing
+from maxtext.input_pipeline import _input_pipeline_utils
+from maxtext.input_pipeline import instruction_data_processing
 from MaxText import multihost_dataloading
 
 
