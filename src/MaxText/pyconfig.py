@@ -111,7 +111,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   for key, value in raw_keys.items():
     if key not in valid_fields:
       logger.warning("Ignoring invalid/unsupported field from YAML/CLI: %s", repr(key))
-      raise ValueError(f"{key!r} not in {", ".join(map(repr, valid_fields))}.")
+      raise ValueError(f"{key!r} not in {', '.join(map(repr, valid_fields))}.")
 
     new_value = value
     if isinstance(new_value, str) and new_value.lower() == "none":
