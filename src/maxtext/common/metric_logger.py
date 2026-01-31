@@ -103,7 +103,8 @@ class MetricLogger:
     if self.config.managed_mldiagnostics:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
       
-    if self.config.enable_wandb: 
+    self.enable_wandb = self.config.enable_wandb and socket.gethostname().endswith("-0") # you should only init wandb on one host.
+    if self.enable_wandb: 
       wandb.init(
         project=config.wandb_project_name,
         name=config.wandb_run_name,
@@ -131,7 +132,7 @@ class MetricLogger:
       if self.config.managed_mldiagnostics:
         self.write_metrics_to_managed_mldiagnostics(metrics, step)
         
-      if self.config.enable_wandb and jax.process_index() == 0:
+      if self.enable_wandb:
         self.write_metrics_to_wandb(metrics, step)
 
   def log_metrics(self, metrics, step, is_training):
