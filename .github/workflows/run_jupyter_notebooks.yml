@@ -96,7 +96,7 @@ jobs:
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
             filename=$(basename "$notebook")
             output_name="${filename%.ipynb}_output.ipynb"
-            
+
             echo "------------------------------------------------------"
             echo "Running $filename ..."
             echo "------------------------------------------------------"
