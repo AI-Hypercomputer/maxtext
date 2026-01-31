@@ -39,7 +39,7 @@ q_lora_rank: 384               # Reduced from 1536
 kv_lora_rank: 128              # Reduced from 512
 qk_nope_head_dim: 32           # Reduced from 128
 qk_rope_head_dim: 16           # Reduced from 64
-v_head_dim: 64                 # Reduced from 128
+v_head_dim: 128
 # RoPE
 mscale: 1.0
 rope_type: "yarn"
@@ -57,10 +57,9 @@ index_n_heads: 16              # Reduced from 64
 index_head_dim: 64             # Reduced from 128
 index_topk: 256                # Reduced from 2048
 
-# Hyper-connections: mHC enabled (4 streams)
+# Hyper-connections: mHC enabled
 mhc_expansion_rate: 4
 mhc_res_alpha_scale: 0.01
 mhc_pre_alpha_scale: 0.01
 mhc_post_alpha_scale: 0.01
 sinkhorn_iterations: 20
-sinkhorn_scaling: 0.05

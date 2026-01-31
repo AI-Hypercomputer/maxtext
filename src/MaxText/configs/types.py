@@ -1049,6 +1049,16 @@ class TrainingLoop(BaseModel):
   init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
 
 
+class ManifoldConstrainedHyperConnections(BaseModel):
+  """Configuration for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
+
+  mhc_expansion_rate: int = Field(0, description="The number of parallel streams in Hyper Connection.")
+  mhc_res_alpha_scale: float = Field(0.01, description="The scale for the residual mapping.")
+  mhc_pre_alpha_scale: float = Field(0.01, description="The scale for the pre mapping.")
+  mhc_post_alpha_scale: float = Field(0.01, description="The scale for the post mapping.")
+  sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
+
+
 class Optimizer(BaseModel):
   """Configuration for the optimizer and learning rate schedule."""
 
@@ -1728,6 +1738,7 @@ class MaxTextConfig(
     # Training, Optimization, and Fine-Tuning
     RematAndOffload,
     TrainingLoop,
+    ManifoldConstrainedHyperConnections,
     Optimizer,
     AdamW,
     Muon,

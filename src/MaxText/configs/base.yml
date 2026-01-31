@@ -1051,3 +1051,15 @@ vllm_hf_config_path: ""
 vllm_additional_config: {}
 # When use_jax_splash=True, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
 force_q_layout: false
+
+################################## DeepSeek Manifold-Constrained Hyper Connections (mHC) ##################################
+# The number of parallel streams in Hyper Connection.
+mhc_expansion_rate: 0
+# The scale for the residual mapping.
+mhc_res_alpha_scale: 0.01
+# The scale for the pre mapping.
+mhc_pre_alpha_scale: 0.01
+# The scale for the post mapping.
+mhc_post_alpha_scale: 0.01
+# The number of iterations for the Sinkhorn-Knopp algorithm.
+sinkhorn_iterations: 20
