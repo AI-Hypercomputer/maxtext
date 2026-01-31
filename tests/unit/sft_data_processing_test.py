@@ -26,9 +26,9 @@ from parameterized import parameterized_class
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
-from MaxText.input_pipeline import _hf_data_processing
-from MaxText.input_pipeline import input_pipeline_interface
-from MaxText.input_pipeline._hf_data_processing import _get_pad_id
+from maxtext.input_pipeline import _hf_data_processing
+from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline._hf_data_processing import _get_pad_id
 
 PROMPT_DATA = [
     [

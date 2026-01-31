@@ -16,7 +16,7 @@
 
 import numpy as np
 from MaxText import train_tokenizer
-from MaxText.input_pipeline import _input_pipeline_utils
+from maxtext.input_pipeline import _input_pipeline_utils
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
 
 import unittest

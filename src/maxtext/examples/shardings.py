@@ -123,7 +123,6 @@ def main(_argv: Sequence[str]) -> None:
   devices = jax.devices()
   num_devices = len(devices)
   print(f"Devices: {devices} (num_devices: {num_devices})")
-  assert len(devices) > 1, "You must have at least two devices"
 
   # Assert that we have correct inputs of sharding that fit the number of chips
   assert (
