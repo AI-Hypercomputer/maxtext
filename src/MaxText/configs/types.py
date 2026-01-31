@@ -1514,6 +1514,7 @@ class VLLM(BaseModel):
   max_num_seqs: Optional[int] = Field(None, description="Max number of sequences in vLLM.")
   vllm_additional_config: dict[str, Any] = Field(default_factory=dict, description="Additional vLLM config options.")
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
+  stop_strings: Optional[list[str]] = Field(None, description="List of strings to stop generation.")
 
 
 class RL(BaseModel):
