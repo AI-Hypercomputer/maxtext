@@ -34,4 +34,4 @@ logits_via_embedding: True # from "tie_word_embeddings": true
 normalize_embedding_logits: False
 enable_dropout: False # deterministic for testing
 
-# tokenizer_type: "huggingface"
+tokenizer_type: "huggingface"
