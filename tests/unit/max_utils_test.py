@@ -28,7 +28,7 @@ from flax import linen as nn
 import optax
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.utils import max_utils
 from maxtext.utils.train_utils import setup_train_loop
 
@@ -119,7 +119,7 @@ class UnscanTest(unittest.TestCase):
         "model_name": "llama3.1-8b",
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         **init_kwargs,
     )
     return config

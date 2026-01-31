@@ -25,7 +25,7 @@ from MaxText import optimizers
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.utils import maxtext_utils
 
 Transformer = models.transformer_as_linen
@@ -60,14 +60,14 @@ class StateDtypes(unittest.TestCase):
     jax.tree_util.tree_map_with_path(lambda x, y: self.assertEqual(y.dtype, expected_dtype), weights)
 
   def test_default_float32(self):
-    argv = [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"), "enable_checkpointing=False"]
+    argv = [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"), "enable_checkpointing=False"]
     weights = self.get_weights(argv)
     self.assert_pytree_is_dtype(weights, jnp.float32)
 
   def test_set_bf16(self):
     argv = [
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "enable_checkpointing=False",
         "weight_dtype=bfloat16",
     ]
@@ -75,11 +75,11 @@ class StateDtypes(unittest.TestCase):
     self.assert_pytree_is_dtype(weights, jnp.bfloat16)
 
   def test_default_mu_float32(self):
-    argv = [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"), "enable_checkpointing=False"]
+    argv = [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"), "enable_checkpointing=False"]
     mu = self.get_mu(argv)
     self.assert_pytree_is_dtype(mu, jnp.float32)
 
   def test_set_mu_bf16(self):
-    argv = [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"), "enable_checkpointing=False", "mu_dtype=bfloat16"]
+    argv = [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"), "enable_checkpointing=False", "mu_dtype=bfloat16"]
     mu = self.get_mu(argv)
     self.assert_pytree_is_dtype(mu, jnp.bfloat16)

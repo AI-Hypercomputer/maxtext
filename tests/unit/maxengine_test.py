@@ -29,7 +29,7 @@ from jax.sharding import Mesh
 from maxtext.utils import maxtext_utils
 from MaxText import pyconfig, maxengine
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.maxengine import MaxEngine
@@ -61,7 +61,7 @@ class MaxEngineTest(unittest.TestCase):
         "return_log_prob": True,
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         **init_kwargs,
     )
     return config
@@ -79,7 +79,7 @@ class MaxEngineTest(unittest.TestCase):
 
   def test_stack_and_unstack_prefill_cache(self):
     config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         enable_checkpointing=False,
         stack_prefill_result_cache=True,
     )

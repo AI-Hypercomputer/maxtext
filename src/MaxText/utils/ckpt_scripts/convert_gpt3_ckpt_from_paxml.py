@@ -52,7 +52,7 @@ import tensorstore as ts
 from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText.layers import quantizations
 from MaxText.layers.models import transformer_as_linen
 from maxtext.common import checkpointing
@@ -75,7 +75,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   base_args = [
       "",
-      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),  # base arg
+      os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),  # base arg
       "per_device_batch_size=1",
       "ici_fsdp_parallelism=-1",
       "ici_tensor_parallelism=1",

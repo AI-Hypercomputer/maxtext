@@ -15,7 +15,7 @@
 An example script to perform decoding using vLLM via Tunix or via MaxText on vLLM.
 
 Example usage with Tunix:
-  python3 -m maxtext.vllm_decode MaxText/configs/base.yml \
+  python3 -m maxtext.vllm_decode maxtext/configs/base.yml \
     model_name=llama3.1-8b tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
     tokenizer_type=huggingface hf_access_token=<your_hf_token> \
     load_parameters_path=<your_checkpoint_path> \
@@ -47,7 +47,7 @@ import transformers
 from maxtext.utils import model_creation_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
@@ -183,7 +183,7 @@ def decode_with_vllm(
       f"and EP={ici_expert_parallelism if enable_expert_parallel else 0}..."
   )
 
-  vllm_config_path = os.path.join(MAXTEXT_PKG_DIR, "configs", "vllm.yml")
+  vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "vllm.yml")
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 

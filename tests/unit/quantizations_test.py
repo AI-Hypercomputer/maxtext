@@ -32,7 +32,7 @@ from flax import nnx
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText import pyconfig
 from MaxText.layers import nnx_wrappers, quantizations
 from MaxText.kernels.megablox import gmm
@@ -105,7 +105,7 @@ class QuantTestModule(nnx.Module):
 
 def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
   config = pyconfig.initialize(
-      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
       enable_checkpointing=False,
       quantization=quant_str,
       quant_cfg_path=quant_cfg_path,
@@ -171,7 +171,7 @@ class QuantizationTest(unittest.TestCase):
   def test_mixed_precision_config_int8w(self):
     quant = _configure_quantization(
         quant_str="intmp",
-        quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "int8_weight_only.json"),
+        quant_cfg_path=os.path.join(MAXTEXT_CONFIGS_DIR, "quantization", "int8_weight_only.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1)
     # pylint: disable=unsupported-membership-test
@@ -183,7 +183,7 @@ class QuantizationTest(unittest.TestCase):
   def test_mixed_precision_config_scale(self):
     quant = _configure_quantization(
         quant_str="intmp",
-        quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "dense_llm_weight_only_scale.json"),
+        quant_cfg_path=os.path.join(MAXTEXT_CONFIGS_DIR, "quantization", "dense_llm_weight_only_scale.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     # pylint: disable=unsupported-membership-test
@@ -198,7 +198,7 @@ class QuantizationTest(unittest.TestCase):
   def test_mixed_precision_config_subchannel(self):
     quant = _configure_quantization(
         quant_str="intmp",
-        quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "dense_llm_subchannel.json"),
+        quant_cfg_path=os.path.join(MAXTEXT_CONFIGS_DIR, "quantization", "dense_llm_subchannel.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     # pylint: disable=unsupported-membership-test
@@ -314,7 +314,7 @@ class QuantTest(unittest.TestCase):
         "base_num_decoder_layers": 12,
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         **init_kwargs,
     )
     return config

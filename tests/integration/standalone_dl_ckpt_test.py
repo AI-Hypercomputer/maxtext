@@ -17,7 +17,7 @@ import unittest
 import pytest
 from tools.gcs_benchmarks.standalone_checkpointer import main as sckpt_main
 from tools.gcs_benchmarks.standalone_dataloader import main as sdl_main
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 from datetime import datetime
 import random
 import string
@@ -41,7 +41,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sdl_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
@@ -60,7 +60,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sckpt_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
@@ -81,7 +81,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sckpt_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",

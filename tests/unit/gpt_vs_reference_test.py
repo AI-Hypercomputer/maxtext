@@ -35,7 +35,7 @@ from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
 
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText import pyconfig
 from MaxText.layers import attentions, moe, embeddings
 from MaxText.layers.initializers import nd_dense_init
@@ -295,7 +295,7 @@ class GptOssMLPTest(unittest.TestCase):
 
     # MaxText model
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         run_name="gpt_oss_mlp_test",
         enable_checkpointing=False,
         model_name="default",
@@ -402,7 +402,7 @@ class GptOssAttentionTest(unittest.TestCase):
     )
 
     cfg_dot = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         run_name="gpt_oss_attention_test_dot",
         enable_checkpointing=False,
         model_name="default",
@@ -465,7 +465,7 @@ class GptOssAttentionTest(unittest.TestCase):
     )
 
     cfg_flash = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         run_name="gpt_oss_attention_test_flash",
         enable_checkpointing=False,
         model_name="default",

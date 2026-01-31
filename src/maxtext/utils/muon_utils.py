@@ -34,7 +34,7 @@ import jax
 from optax.contrib._muon import MuonDimensionNumbers as mdn
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText.layers import models, quantizations
 from maxtext.utils import maxtext_utils
 
@@ -150,7 +150,7 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False):
   # Setup config
   argv = [
       None,
-      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
       f"model_name={model_name}",
       f"scan_layers={scan_layers}",
       "attention=dot_product",
