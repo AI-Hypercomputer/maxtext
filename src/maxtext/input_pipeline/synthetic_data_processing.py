@@ -25,7 +25,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from MaxText import multihost_dataloading
+from maxtext.input_pipeline import multihost_dataloading
 from MaxText import pyconfig
 
 

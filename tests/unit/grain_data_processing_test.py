@@ -27,9 +27,9 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 from MaxText import pyconfig
-from MaxText.input_pipeline import _grain_data_processing
-from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT
+from maxtext.input_pipeline import grain_data_processing
+from maxtext.input_pipeline import input_pipeline_interface
 
 
 class GrainArrayRecordProcessingTest(unittest.TestCase):
@@ -66,7 +66,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
@@ -87,7 +87,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
 
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
-    train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
     batch2 = next(train_iter)
     self.assertTrue((batch1["inputs"] == batch2["inputs"]).all())
     self.assertTrue((batch1["targets"] == batch2["targets"]).all())
@@ -142,7 +142,7 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProc
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
 class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessingTest):
@@ -180,9 +180,10 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessing
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
+@pytest.mark.skip(reason="Skipping this test class due to out of memory issue.")
 class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
   """Test grain data processing with auto-tuning enabled (grain_worker_count=-1)."""
 
@@ -215,7 +216,7 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
   @pytest.mark.skip(
       reason=(
@@ -262,7 +263,7 @@ class GrainArrayRecordBestFitPackingTest(GrainArrayRecordProcessingTest):
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
 class GrainParquetProcessingTest(unittest.TestCase):
@@ -300,7 +301,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
@@ -321,7 +322,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
 
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
-    train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
     batch2 = next(train_iter)
     self.assertTrue((batch1["inputs"] == batch2["inputs"]).all())
     self.assertTrue((batch1["targets"] == batch2["targets"]).all())
