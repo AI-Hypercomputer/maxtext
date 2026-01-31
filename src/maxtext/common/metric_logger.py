@@ -100,7 +100,8 @@ class MetricLogger:
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     self.buffered_train_metrics = None
     
-    self.enable_wandb = socket.gethostname().endswith("-0") and getattr(config, "enable_wandb", False) 
+    # self.enable_wandb = socket.gethostname().endswith("-0") and getattr(config, "enable_wandb", False) 
+    self.enable_wandb = getattr(config, "enable_wandb", False)
     if self.enable_wandb:
       wandb.init(
         project=config.wandb_project_name,
@@ -132,7 +133,7 @@ class MetricLogger:
       if self.config.managed_mldiagnostics:
         self.write_metrics_to_managed_mldiagnostics(metrics, step)
         
-      if self.enable_wandb:
+      if self.enable_wandb and jax.process_index() == 0:
         self.write_metrics_to_wandb(metrics, step)
 
   def log_metrics(self, metrics, step, is_training):
@@ -280,6 +281,7 @@ class MetricLogger:
         mldiag.metrics.record(mapped_metric_name, value, step=int(step))
 
   def write_metrics_to_wandb(self, metrics, step):
+    """Write metrics to weights and biases (wandb)."""
     flat_metrics = {}
     for key, val in metrics.get("scalar", {}).items():
       flat_metrics[key] = float(val)

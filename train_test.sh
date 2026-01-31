@@ -58,7 +58,6 @@ python -u multihost_runner_orig.py \
         base_output_directory=${BASE_OUTPUT_DIRECTORY} \
         dataset_type=grain \
         grain_train_files=${DATA_FILES} \
-        start_from_file_index=0 \
         grain_file_type='arrayrecord' \
         grain_worker_count=1 \
         enable_data_shuffling=${SHUFFLE} \
