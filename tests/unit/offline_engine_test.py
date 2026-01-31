@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 from maxtext.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 
 
 class OfflineEngineTest(unittest.TestCase):
@@ -59,7 +59,7 @@ class OfflineEngineTest(unittest.TestCase):
         "skip_jax_distributed_system": True,
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         **init_kwargs,
     )
     return config

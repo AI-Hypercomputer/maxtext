@@ -46,7 +46,7 @@ from jetstream.engine.tokenizer_pb2 import TokenizerType
 from MaxText import multimodal_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from MaxText.layers import models, quantizations
 from maxtext.inference import inference_utils
 from maxtext.inference.page_manager import PageManager, PageState
@@ -1713,7 +1713,7 @@ def create_engine_from_config_flags(
       args[k.strip()] = v.strip()
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
   if maxengine_config_filepath is None:
-    maxengine_config_filepath = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
+    maxengine_config_filepath = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
   updated_args = [os.path.join(MAXTEXT_PKG_DIR, "maxengine_server.py"), maxengine_config_filepath]
   for k, v in args.items():
     option = f"{k}={v}"

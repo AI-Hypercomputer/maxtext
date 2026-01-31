@@ -39,7 +39,7 @@ from transformers import TrainingArguments, AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_TEST_ASSETS_ROOT
 from tests.integration.sft_trainer_correctness_test import get_maxtext_logits, get_token_log_probs, prepare_maxtext_inputs
 
 
@@ -54,7 +54,7 @@ DATA = {
 def initialize_maxtext_config(config):
   """Initializes configuration for MaxText."""
   cfg_with_ckpt = pyconfig.initialize(
-      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+      [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "sft.yml")],
       run_name="compare_maxtext_with_trl_logits",
       model_name=config.model_name,
       tokenizer_path=config.tokenizer_path,
@@ -70,7 +70,7 @@ def initialize_maxtext_config(config):
   )
 
   cfg_without_ckpt = pyconfig.initialize(
-      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+      [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "sft.yml")],
       run_name="generate_sft_golden_data",
       model_name="default",
       enable_checkpointing=False,

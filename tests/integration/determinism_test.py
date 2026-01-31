@@ -27,7 +27,7 @@ import unittest
 import pytest
 
 from MaxText.train import main as train_main
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 
 pytestmark = pytest.mark.integration_test
 
@@ -52,7 +52,7 @@ class DeterminismTests(unittest.TestCase):
     run_name = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     common_config = [
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "steps=5",
         "enable_checkpointing=False",
         "enable_data_shuffling=True",

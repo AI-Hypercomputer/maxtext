@@ -20,7 +20,7 @@ from datetime import datetime
 import os
 import pytest
 
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR
 from MaxText.train import main as train_main
 from MaxText.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
 from maxtext.decode import main as decode_main
@@ -44,7 +44,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   test_config = [
       None,
-      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
       "base_output_directory=gs://runner-maxtext-logs",
       "async_checkpointing=False",
       f"hardware={hardware}",

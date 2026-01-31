@@ -23,7 +23,7 @@ from MaxText import globals as maxtext_globals
 from MaxText import train
 
 train_main = train.main
-MAXTEXT_PKG_DIR = maxtext_globals.MAXTEXT_PKG_DIR
+MAXTEXT_CONFIGS_DIR = maxtext_globals.MAXTEXT_CONFIGS_DIR
 gettempdir = tempfile.gettempdir
 
 
@@ -40,7 +40,7 @@ class Train(parameterized.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             f"base_output_directory={test_tmpdir}",
             "run_name=ragged_dot_smoke_test",
             "base_emb_dim=128",

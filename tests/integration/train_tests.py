@@ -18,7 +18,7 @@ import unittest
 import pytest
 import jax
 from MaxText.train import main as train_main
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 from absl.testing import absltest
 
 
@@ -28,7 +28,7 @@ class TrainTests(unittest.TestCase):
   CONFIGS = {
       "base": [  # short test for train.py with TFDS c4
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -39,7 +39,7 @@ class TrainTests(unittest.TestCase):
       ],
       "synthetic": [  # tests base config with synthetic dataset
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -51,7 +51,7 @@ class TrainTests(unittest.TestCase):
       ],
       "pdb_lt_1": [  # tests base config with per_device_batch_size < 1
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -64,7 +64,7 @@ class TrainTests(unittest.TestCase):
       ],
       "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -75,7 +75,7 @@ class TrainTests(unittest.TestCase):
       ],
       "int8": [  # tests base config with int8
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -87,7 +87,7 @@ class TrainTests(unittest.TestCase):
       ],
       "fp8": [  # tests base config with fp8
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -99,7 +99,7 @@ class TrainTests(unittest.TestCase):
       ],
       "nanoo_fp8": [  # tests base config with nanoo_fp8
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -111,7 +111,7 @@ class TrainTests(unittest.TestCase):
       ],
       "te_fp8_delayedscaling": [  # tests base config with te_fp8_delayedscaling
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -123,7 +123,7 @@ class TrainTests(unittest.TestCase):
       ],
       "te_fp8_currentscaling": [  # tests base config with te_fp8_currentscaling
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -135,7 +135,7 @@ class TrainTests(unittest.TestCase):
       ],
       "te_mxfp8": [  # tests base config with te_mxfp8
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -147,7 +147,7 @@ class TrainTests(unittest.TestCase):
       ],
       "dropout": [  # tests base config with dropout
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "dataset_path=gs://maxtext-dataset",
@@ -161,7 +161,7 @@ class TrainTests(unittest.TestCase):
       ],
       "hf_input_pipeline": [  # test for train.py with TFDS c4, using HF input pipeline
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "steps=2",
@@ -285,7 +285,7 @@ class TrainTests(unittest.TestCase):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     cudnn_flash_te = [  # tests base config on GPU with flash attention
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         "dataset_path=gs://maxtext-dataset",
@@ -304,7 +304,7 @@ class TrainTests(unittest.TestCase):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     context_parallel = [  # tests base config on GPU with All-Gather based context parallelism
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         "dataset_path=gs://maxtext-dataset",
@@ -327,7 +327,7 @@ class TrainTests(unittest.TestCase):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     tensor_parallel = [  # tests base config on GPU with Tensor Parallelism
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         "dataset_path=gs://maxtext-dataset",
@@ -348,7 +348,7 @@ class TrainTests(unittest.TestCase):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     optimizer_offload = [  # tests base config on GPU with optimizer state offload
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         "dataset_path=gs://maxtext-dataset",
@@ -368,7 +368,7 @@ class TrainTests(unittest.TestCase):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     parameter_offload = [  # tests base config on GPU with parameter offload
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         "dataset_path=gs://maxtext-dataset",
@@ -387,7 +387,7 @@ class TrainTests(unittest.TestCase):
   def test_gpu_cudnn_flash_jax(self):
     cudnn_flash_jax = [  # tests base config on GPU with flash attention
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         "dataset_path=gs://maxtext-dataset",
@@ -410,7 +410,7 @@ class TrainTests(unittest.TestCase):
   def test_tpu_zero1_gradient_accumulation(self):
     zero1_ga = [  # tests Zero-1 optimizer sharding with gradient accumulation
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         "dataset_path=gs://maxtext-dataset",
@@ -440,7 +440,7 @@ class TrainTests(unittest.TestCase):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     zero1_ga = [  # tests Zero-1 optimizer sharding with gradient accumulation
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         "dataset_path=gs://maxtext-dataset",
@@ -474,7 +474,7 @@ class TrainTests(unittest.TestCase):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     packed_attention = [  # tests base config on GPU with Packed (THD) attention
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         "dataset_path=gs://maxtext-dataset",
@@ -495,7 +495,7 @@ class TrainTests(unittest.TestCase):
     os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"  # Disable scan for ring attention
     ring_attention = [  # tests base config on GPU with ring attention
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
         "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         "dataset_path=gs://maxtext-dataset",

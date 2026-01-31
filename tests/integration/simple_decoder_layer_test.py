@@ -19,7 +19,7 @@ import os.path
 import pytest
 
 from MaxText.train import main as train_main
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 
 pytestmark = pytest.mark.integration_test
 
@@ -31,7 +31,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
             "dataset_path=gs://maxtext-dataset",
@@ -48,7 +48,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
             "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
             "dataset_path=gs://maxtext-dataset",

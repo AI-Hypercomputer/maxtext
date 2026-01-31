@@ -33,7 +33,7 @@ fixes:
   - "/github/workspace/::"
 ignore:
   - "src/maxtext/assets"
-  - "src/MaxText/configs"
+  - "src/maxtext/configs"
   - "src/MaxText/examples"
   - "src/MaxText/experimental"
   - "src/maxtext/inference"

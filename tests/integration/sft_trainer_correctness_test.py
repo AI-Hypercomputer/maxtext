@@ -41,7 +41,7 @@ from transformers import AutoTokenizer
 from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
 from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -57,7 +57,7 @@ def get_golden_data(model_name):
 def initialize_config():
   """Initialize configurations."""
   return pyconfig.initialize(
-      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+      [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "sft.yml")],
       run_name="test-sft-trainer-correctness",
       model_name="default",
       tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer"),

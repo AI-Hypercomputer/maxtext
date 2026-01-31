@@ -58,7 +58,7 @@ python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_unscanned_ckpt --base-mode
 You can train from scratch to generate a new checkpoint. One example command to run pretraining with gpt-oss-20b on v5p-8.
 
 ```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+python3 -m MaxText.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=megablox_pre_training \
     model_name=gpt-oss-20b \
@@ -84,7 +84,7 @@ After you have a MaxText-compatible scanned checkpoint, you could finetune it wi
 One example command to run general finetuning with gpt-oss-20b on v5p-8.
 
 ```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+python3 -m MaxText.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=megablox_fine_tuning \
     model_name=gpt-oss-20b \
@@ -110,7 +110,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
 One example command to run supervised finetuning with gpt-oss-20b on v5p-8. Supervised finetuning is only working with HuggingFace conversational datasets. And, you can customize the dataset path using the `hf_path` config. If using [gated dataset](https://huggingface.co/docs/hub/en/datasets-gated) or [gated model](https://huggingface.co/docs/hub/en/models-gated), you need additionally provide the access token with `hf_access_token` config.
 
 ```sh
-python3 -m MaxText.sft_trainer src/MaxText/configs/sft.yml \
+python3 -m MaxText.sft_trainer src/maxtext/configs/post_train/sft.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=megablox_supervised_fine_tuning \
     model_name=gpt-oss-20b \
@@ -137,7 +137,7 @@ python3 -m MaxText.sft_trainer src/MaxText/configs/sft.yml \
 One example command to run decoding with gpt-oss-20b on v5p-8 with unscanned checkpoint for fast decoding.
 
 ```sh
-python3 -m maxtext.decode src/MaxText/configs/base.yml \
+python3 -m maxtext.decode src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=decode \
     model_name=gpt-oss-20b \
@@ -182,7 +182,7 @@ Run command below to compare logits between HuggingFace and MaxText.
 
 ```sh
 python3 -m tests.utils.forward_pass_logit_checker \
-    src/MaxText/configs/base.yml \
+    src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=forward_logits_check \
     model_name=gpt-oss-20b \

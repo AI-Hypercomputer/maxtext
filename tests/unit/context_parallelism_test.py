@@ -27,7 +27,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec, NamedSharding
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.utils import maxtext_utils
 
 
@@ -62,7 +62,7 @@ class ContextParallelismTest(unittest.TestCase):
 
   def setUp(self):
     config_cp = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         **self.config_arguments,
         ici_context_parallelism=4,  # use context parallelism of 4
         context_parallel_load_balance=False,  # set load_balancing to False such that

@@ -30,7 +30,7 @@ import tensorflow as tf
 
 from MaxText import pyconfig
 from MaxText import multihost_dataloading
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 
 
 class MultihostDataloadingTest(unittest.TestCase):
@@ -39,7 +39,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     super().setUp()
     batch_size = 4
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],

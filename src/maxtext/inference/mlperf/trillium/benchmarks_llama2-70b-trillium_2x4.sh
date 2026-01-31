@@ -74,7 +74,7 @@ if [[ -z ${QUANTIZATION} ]] ; then
   export QUANT_PATH=""
 #   export QUANTIZATION="intmp"
 #   export QUANT_MP="qkv_subchannel_512"
-#   export QUANT_PATH="/home/${USER}/maxtext/MaxText/configs/quantization/${QUANT_MP}.json"
+#   export QUANT_PATH="/home/${USER}/maxtext/maxtext/configs/quantization/${QUANT_MP}.json"
 fi
 
 if [[ -z ${KV_QUANT_DTYPE} ]] ; then

@@ -29,7 +29,7 @@ from jax.experimental import mesh_utils
 from MaxText import pyconfig
 from MaxText.input_pipeline import _grain_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT
+from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT
 
 
 class GrainArrayRecordProcessingTest(unittest.TestCase):
@@ -43,7 +43,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
     super().setUp()
     temp_dir = tempfile.gettempdir()
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -121,7 +121,7 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProc
     ]
     grain_train_files = ";".join(grain_train_files)
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -159,7 +159,7 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessing
       json.dump(mixture_config, f)
 
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -190,7 +190,7 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
     super().setUp()
     temp_dir = tempfile.gettempdir()
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -238,7 +238,7 @@ class GrainArrayRecordBestFitPackingTest(GrainArrayRecordProcessingTest):
     super().setUp()
     temp_dir = tempfile.gettempdir()
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -276,7 +276,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
     super().setUp()
     temp_dir = tempfile.gettempdir()
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
