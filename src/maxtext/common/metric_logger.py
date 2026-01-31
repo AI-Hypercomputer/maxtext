@@ -100,17 +100,15 @@ class MetricLogger:
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     self.buffered_train_metrics = None
     
-    # self.enable_wandb = socket.gethostname().endswith("-0") and getattr(config, "enable_wandb", False) 
-    self.enable_wandb = getattr(config, "enable_wandb", False)
-    if self.enable_wandb:
+    if self.config.managed_mldiagnostics:
+      ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
+      
+    if self.config.enable_wandb: 
       wandb.init(
         project=config.wandb_project_name,
         name=config.wandb_run_name,
         resume="allow",
-      )
-    
-    if self.config.managed_mldiagnostics:
-      ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
+      ) # Initialize wandb logger.
 
   def reset_eval_metrics(self):
     """Resets the cumulative metrics dictionary for a new evaluation run."""
@@ -133,7 +131,7 @@ class MetricLogger:
       if self.config.managed_mldiagnostics:
         self.write_metrics_to_managed_mldiagnostics(metrics, step)
         
-      if self.enable_wandb and jax.process_index() == 0:
+      if self.config.enable_wandb and jax.process_index() == 0:
         self.write_metrics_to_wandb(metrics, step)
 
   def log_metrics(self, metrics, step, is_training):
