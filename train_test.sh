@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-source scripts/get_tpu_bucket_name.sh
+source get_tpu_bucket_name.sh
 
 export TPU_PREFIX="$(get_tpu_name)"
 export BUCKET_NAME="$(get_bucket_name)"
@@ -45,13 +45,15 @@ fi
 export JAX_PLATFORMS=tpu
 export SPARSE_MODEL_TRAINING=False
 
+export PYTHONPATH=./src:$PYTHONPATH
 python -u multihost_runner_orig.py \
     --TPU_PREFIX=${TPU_PREFIX} \
     --COMMAND="
     export TPU_LOG_DIR=/home/zephyr/tpu_logs
     export WANDB_API_KEY='7d11bbca76b3081b6bd1efbbcf1572aab26c5d56'
-    source ~/maxtext_env/bin/activate
-    ~/maxtext_env/bin/python -u -m MaxText.train MaxText/configs/base.yml \
+    source ~/maxtext_env_py311/bin/activate
+    export PYTHONPATH=./src:\$PYTHONPATH
+    ~/maxtext_env_py311/bin/python -u -m src.MaxText.train src/MaxText/configs/base.yml \
         run_name=${RUN_NAME} \
         base_output_directory=${BASE_OUTPUT_DIRECTORY} \
         dataset_type=grain \
@@ -78,12 +80,12 @@ python -u multihost_runner_orig.py \
         packing=false \
     "
 
-bash scripts/convert.sh gen_param_ckpt \
-    --model=${MODEL_NAME} \
-    --orbax_ckpt_name=${RUN_NAME} \
-    --step=49999 \
-    --hf_model_name=Llama-3.1-8B \
-    --direct_run_name=${RUN_NAME}
+# bash scripts/convert.sh gen_param_ckpt \
+#     --model=${MODEL_NAME} \
+#     --orbax_ckpt_name=${RUN_NAME} \
+#     --step=49999 \
+#     --hf_model_name=Llama-3.1-8B \
+#     --direct_run_name=${RUN_NAME}
 
 # bash scripts/convert.sh eval \
 #     --model=${MODEL_NAME} \
