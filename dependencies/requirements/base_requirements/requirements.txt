@@ -4,6 +4,7 @@ array-record
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
+decord
 flax
 gcsfs
 google-api-python-client
@@ -16,6 +17,7 @@ jax
 jaxlib
 jaxtyping
 jsonlines
+librosa
 ml-collections
 ml-goodput-measurement
 numpy
