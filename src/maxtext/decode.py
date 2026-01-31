@@ -25,8 +25,8 @@ from jetstream.engine import engine_api
 
 from MaxText import maxengine
 from MaxText import pyconfig
-from MaxText import multimodal_utils
-from MaxText.multimodal import preprocessor
+from MaxText.multimodal import processor as mm_processor
+from MaxText.multimodal import utils as mm_utils
 from maxtext.common import profiler
 from maxtext.utils import max_utils
 # Placeholder: internal
@@ -99,14 +99,14 @@ def main(argv: Sequence[str]) -> None:
 
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
-  processor_outputs = multimodal_utils.PreprocessorOutput()
+  processor_outputs = mm_utils.PreprocessorOutput()
   if config.use_multimodal:
-    processor_outputs = preprocessor.preprocess_mm_data(config)
-    image_offsets = multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_outputs)
+    processor_outputs = mm_processor.preprocess_mm_data(config)
+    image_offsets = mm_processor.get_image_offsets(config.model_name, processor_output=processor_outputs)
 
     prefill_length -= image_offsets
-    text = multimodal_utils.reformat_prompt(
-        text,
+    text = mm_processor.reformat_prompt(
+        prompt=config.prompt,
         image_placeholder=config.image_placeholder,
         model_name=config.model_name,
         num_images=processor_outputs.num_images,
@@ -121,7 +121,7 @@ def main(argv: Sequence[str]) -> None:
     has_chat_template = False
   tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
   if config.use_multimodal:
-    tokens = multimodal_utils.prepare_text_for_image_fusion(
+    tokens = mm_processor.prepare_text_for_image_fusion(
         tokens, model_name=config.model_name, processor_output=processor_outputs
     )
     true_length += image_offsets
