@@ -18,7 +18,7 @@ import re
 import optax
 from maxtext.utils import max_logging
 
-
+EPSILON = 1e-6
 # Constants for normalization
 SUBSTITUTIONS = [
     ("an ", ""),
@@ -187,7 +187,24 @@ def normalize_final_answer(final_answer: str) -> str:
   if final_answer.replace(",", "").isdigit():
     final_answer = final_answer.replace(",", "")
 
-  return final_answer.strip()
+  return final_answer
+
+
+def parse_number_or_fraction(text: str) -> float | str:
+  """Parses a string that might be a float or a LaTeX fraction."""
+  # Check for fraction format: frac{num}{den}
+  match = re.search(r"frac\{(.+?)\}\{(.+?)\}", text)
+  if match:
+    try:
+      numerator = float(match.group(1))
+      denominator = float(match.group(2))
+      return numerator / denominator
+    except ValueError:
+      pass
+  try:
+    return float(text)
+  except ValueError:
+    return text
 
 
 def check_answer(prompts, completions, answer, tmvp_config, **kargs):
@@ -205,20 +222,22 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
     if guess is None:
       scores.append(0)
       continue
-    if "DAPO" in tmvp_config.dataset_name:
+    if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
       guess = normalize_final_answer(guess)
       true_answer = normalize_final_answer(true_answer)
     # Correct answer gets tmvp_config.reward_exact_format_match points!
-    if guess == true_answer:
+    if guess == true_answer or parse_number_or_fraction(guess) == parse_number_or_fraction(true_answer):
       score += tmvp_config.reward_exact_format_match
     # Match if spaces are seen
-    elif guess.strip() == true_answer.strip():
+    elif guess.strip() == true_answer.strip() or parse_number_or_fraction(guess.strip()) == parse_number_or_fraction(true_answer.strip()):
       score += tmvp_config.reward_white_space_format_match
     else:
       # We also reward it if the answer is close via ratios!
       # Ie if the answer is within some range, reward it!
       try:
-        ratio = float(guess) / float(true_answer)
+        val_guess = parse_number_or_fraction(guess.strip())
+        val_true = parse_number_or_fraction(true_answer.strip())
+        ratio = (val_guess + EPSILON) / (val_true + EPSILON)
         if ratio >= 0.9 and ratio <= 1.1:
           score += tmvp_config.reward_ratio_guess_to_answer_high
         elif ratio >= 0.8 and ratio <= 1.2:
@@ -266,8 +285,8 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
       continue
     # Convert to numbers
     try:
-      true_answer = float(true_answer.strip())
-      guess = float(guess.strip())
+      true_answer = float(normalize_final_answer(true_answer).strip())
+      guess = float(normalize_final_answer(guess).strip())
       scores.append(1.5 if guess == true_answer else 0.0)
     except:
       scores.append(0)
