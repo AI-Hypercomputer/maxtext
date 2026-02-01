@@ -25,15 +25,20 @@ on:
       device_name:
         required: true
         type: string
-      image_type:
-        required: false
+      base_image:
+        required: true
         type: string
       cloud_runner:
         required: false
         type: string
       maxtext_sha:
-        required: true
+        required: false
         type: string
+      # Flag to skip source checkout and wheel installation
+      maxtext_installed:
+        required: false
+        type: boolean
+        default: false
     secrets:
       HF_TOKEN:
         required: true
@@ -44,17 +49,20 @@ jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/tpu-prod-env-multipod/maxtext-unit-test-${{ inputs.device_type == 'cpu' && 'tpu' || inputs.device_type }}:${{ inputs.image_type != '' && inputs.image_type }}
+      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }}
     steps:
       - name: Checkout MaxText
+        if: ${{ !inputs.maxtext_installed }}
         uses: actions/checkout@v5
         with:
           ref: ${{ inputs.maxtext_sha }}
       - name: Download the MaxText wheel
+        if: ${{ !inputs.maxtext_installed }}
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
           name: maxtext-wheel
       - name: Install MaxText and Dependencies
+        if: ${{ !inputs.maxtext_installed }}
         shell: bash
         run: |
           python3 -m uv venv --seed
@@ -64,10 +72,6 @@ jobs:
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
           uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
           uv pip install -r src/install_maxtext_extra_deps/extra_deps_from_github.txt
-
-          # Install dependencies for running notebooks
-          uv pip install papermill ipykernel ipywidgets
-          .venv/bin/python3 -m ipykernel install --user --name maxtext_venv
 
           # Install Tunix for post-training notebooks
           git clone https://github.com/google/tunix
@@ -90,8 +94,23 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          if [ "${{ inputs.maxtext_installed }}" == "true" ]; then
+            # Move to the directory where code is baked into the image. See the Dockerfile.
+            # This is necessary because GHA sets an empty workspace by default.
+            cd /deps
+            PYTHON_EXE="python3"
+            PAPERMILL_EXE="papermill"
+          else
+            PYTHON_EXE=".venv/bin/python3"
+            PAPERMILL_EXE=".venv/bin/papermill"
+          fi
+
           MAXTEXT_REPO_ROOT=$(pwd)
           MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
+
+          # Install dependencies for running notebooks
+          $PYTHON_EXE -m pip install papermill ipykernel ipywidgets
+          $PYTHON_EXE -m ipykernel install --user --name maxtext_venv
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
             filename=$(basename "$notebook")
@@ -101,7 +120,7 @@ jobs:
             echo "Running $filename ..."
             echo "------------------------------------------------------"
 
-            .venv/bin/papermill "$notebook" "$output_name" -k maxtext_venv
+            $PAPERMILL_EXE "$notebook" "$output_name" -k maxtext_venv
           done
       - name: Record Commit IDs
         shell: bash
