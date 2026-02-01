@@ -23,31 +23,46 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.input_pipeline import _hf_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
+from maxtext.common.gcloud_stub import is_decoupled
+from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
 
 
 class HfDataProcessingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+    decoupled = is_decoupled()
+    # Note: this test uses gs://max-experiments/ (not gs://runner-maxtext-logs)
+    base_output_directory = get_test_base_output_directory(cloud_path="gs://max-experiments/")
+    self.config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
+        base_output_directory=base_output_directory,
         dataset_type="hf",
         hf_path="parquet",
         hf_data_dir="",
-        hf_train_files="gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet",
+        hf_train_files=(
+            os.path.join(
+                "tests",
+                "assets",
+                "local_datasets",
+                "c4_en_dataset_minimal",
+                "hf",
+                "c4",
+                "c4-train-00000-of-01637.parquet",
+            )
+            if decoupled
+            else "gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet"
+        ),
         tokenizer_path="google-t5/t5-large",
         enable_checkpointing=False,
     )
-    self.config = config
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(

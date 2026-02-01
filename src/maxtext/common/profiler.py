@@ -21,7 +21,9 @@ import shutil
 
 import jax
 
-import google_cloud_mldiagnostics as mldiag
+from maxtext.common.gcloud_stub import mldiagnostics_modules
+
+mldiag, _ = mldiagnostics_modules()
 
 from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics
 from maxtext.utils import max_logging

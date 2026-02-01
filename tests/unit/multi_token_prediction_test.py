@@ -13,7 +13,6 @@
 # limitations under the License.
 """ multi_token_prediction_test """
 
-import os.path
 import unittest
 
 import jax
@@ -23,13 +22,16 @@ from flax import nnx
 
 from MaxText.common_types import Config
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers.decoders import DecoderLayer
 from MaxText.layers import multi_token_prediction  # The class under test
 from MaxText.layers import embeddings
 from MaxText.common_types import MODEL_MODE_TRAIN
+from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
+
+from tests.utils.test_helpers import get_test_config_path
+
 
 TEST_LAYER_NUM = 1
 
@@ -39,11 +41,14 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="multi_token_prediction_layer_test",
         skip_jax_distributed_system=True,
         per_device_batch_size=8,
+        **extra_args,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
     self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
@@ -193,12 +198,15 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="mtp_block_test",
         skip_jax_distributed_system=True,
         mtp_num_layers=2,
         base_emb_dim=16,
+        **extra_args,
     )
     self.nnx_rngs = nnx.Rngs(params=0)
     self.rng = jax.random.PRNGKey(43)

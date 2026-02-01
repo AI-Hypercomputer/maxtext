@@ -6,7 +6,7 @@ This document provides a guide to use the multimodal functionalities in MaxText 
 - **Multimodal Decode**: Inference with text+images as input.
 - **Supervised Fine-Tuning (SFT)**: Apply SFT to the model using a visual-question-answering dataset.
 
-We also provide a [colab](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/examples/multimodal_gemma3_demo.ipynb) for multimodal features demonstration. The following table provides a list of models and modalities we currently support:
+We also provide a [colab](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/multimodal_gemma3_demo.ipynb) for multimodal features demonstration. The following table provides a list of models and modalities we currently support:
 
 | Models                                         | Input Modalities | Output Modalities |
 | :--------------------------------------------- | :--------------- | :---------------- |

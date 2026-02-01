@@ -16,6 +16,7 @@
 import subprocess
 import unittest
 import os.path
+import pytest
 import numpy as np
 import jax
 from jax.sharding import Mesh
@@ -287,6 +288,7 @@ QWEN_DATA = {
         {"test_data": QWEN_DATA},
     ]
 )
+@pytest.mark.external_training  # Uses gsutil to pull tokenizer.
 class SFTDataProcessingTest(unittest.TestCase):
   test_data = {}
 

@@ -43,7 +43,7 @@ Before proceeding, please verify that the specific notebook you are running work
 
 ### Step 1: Choose an Example
 
-1.a. Visit the [MaxText examples directory](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/MaxText/examples) on Github.
+1.a. Visit the [MaxText examples directory](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/examples) on Github.
 
 1.b. Find the notebook you want to run (e.g., `sft_qwen3_demo.ipynb`) and copy its URL.
 

@@ -20,7 +20,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jetstream.engine import engine_api
+from maxtext.common.gcloud_stub import jetstream, is_decoupled
+
+config_lib, engine_api, token_utils, tokenizer_api, token_params_ns = jetstream()
+
+jetstream_is_stub = getattr(config_lib, "_IS_STUB", False) or getattr(engine_api, "_IS_STUB", False)
+
+if is_decoupled() and jetstream_is_stub:
+  raise RuntimeError("prefill_packing imported while DECOUPLE_GCLOUD=TRUE. This module depends on JetStream.")
 
 from MaxText.maxengine import MaxEngine
 
@@ -116,7 +123,7 @@ class PrefillProcessor:
       input_true_length: int,
       rng: PRNGKeyType,
       return_prompt_logp: bool = False,
-  ) -> tuple[engine_api.ResultTokens, DecodeState]:
+  ) -> tuple[Any, DecodeState]:
     """Process a new input."""
 
     process_fn = self._process_compiled(model_params, len(input_tokens_padded), return_prompt_logp)
@@ -162,7 +169,7 @@ class PrefillProcessor:
       decode_state: DecodeState,
       rng: PRNGKeyType,
       return_prompt_logp: bool = False,
-  ) -> tuple[engine_api.ResultTokens, DecodeState]:
+  ) -> tuple[Any, DecodeState]:
     """Prefill and insert a request."""
 
     prefill_result, first_token = self.engine.prefill(
@@ -205,7 +212,7 @@ class BatchedPrefillProcessor:
       input_prompt: jax.Array,
       input_padding: int,
       capacity: int,
-      prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
+      prefill_done: Callable[[list[tuple[Any, int]], list[int], DecodeState], None],
       return_prompt_logp: bool = False,
   ) -> None:
     """Process a new input.
@@ -241,7 +248,7 @@ class BatchedPrefillProcessor:
       self,
       model_params: Params,
       decode_state: DecodeState,
-      prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
+      prefill_done: Callable[[list[tuple[Any, int]], list[int], DecodeState], None],
       return_prompt_logp: bool = False,
   ) -> None:
     """Process all remaining items in buckets."""
@@ -262,7 +269,7 @@ class BatchedPrefillProcessor:
       input_padding: int,
       decode_state: DecodeState,
       return_prompt_logp: bool = False,
-  ) -> tuple[list[tuple[engine_api.ResultTokens, int]], DecodeState]:
+  ) -> tuple[list[tuple[Any, int]], DecodeState]:
     """Process all items in a bucket."""
     # pylint: disable=import-outside-toplevel
     from maxtext.inference.offline_engine import PrefillResult  # type: ignore
@@ -388,7 +395,7 @@ class BatchedPrefillProcessor:
       true_lengths: jax.Array,
       decode_state: DecodeState,
       return_prompt_logp: bool = False,
-  ) -> tuple[list[engine_api.ResultTokens], DecodeState]:
+  ) -> tuple[list[Any], DecodeState]:
     """Prefill and insert a packed request."""
 
     cache, prefix_state, first_tokens = self.engine.prefill_concat(

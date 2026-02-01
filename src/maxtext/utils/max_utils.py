@@ -28,6 +28,7 @@ from typing import Any
 from etils import epath
 import flax
 import jax
+from pathlib import Path
 from contextlib import contextmanager
 from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec as P
@@ -36,10 +37,11 @@ import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
 import psutil
-from tensorboardX import writer
 
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
+from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.common.gcloud_stub import writer, _TENSORBOARDX_AVAILABLE
 from maxtext.utils import max_logging
+from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
@@ -139,8 +141,37 @@ def summarize_size_from_pytree(params):
 
 
 def initialize_summary_writer(tensorboard_dir, run_name):
+  """Return a tensorboardX SummaryWriter or a no-op stub.
+
+  In decoupled mode (no Google Cloud), this prefers a repo-local
+  ``local_tensorboard`` directory when tensorboardX is available.
+  """
+  if jax.process_index() != 0:
+    return None
+
+  if not _TENSORBOARDX_AVAILABLE:
+    max_logging.log("tensorboardX not available; using no-op SummaryWriter.")
+    return writer.SummaryWriter()
+
+  if is_decoupled():
+    # decoupled and tensorboardX is available -> write to repo-local 'local_tensorboard'
+    try:
+      repo_tb = Path(__file__).resolve().parents[2] / "local_tensorboard"
+      repo_tb.mkdir(parents=True, exist_ok=True)
+      summary_writer_path = str(repo_tb / run_name) if run_name else str(repo_tb)
+      max_logging.log(f"Decoupled: using local tensorboard dir {summary_writer_path}")
+      return writer.SummaryWriter(summary_writer_path)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      max_logging.log(f"Decoupled: failed to use local tensorboard dir: {e}; using no-op SummaryWriter.")
+      return writer.SummaryWriter()
+
+  # Check if dir or run_name exists!
+  if not tensorboard_dir or not run_name:
+    max_logging.log("tensorboard_dir or run_name missing; using no-op SummaryWriter to avoid crash.")
+    return writer.SummaryWriter()
+
   summary_writer_path = os.path.join(tensorboard_dir, run_name)
-  return writer.SummaryWriter(summary_writer_path) if jax.process_index() == 0 else None
+  return writer.SummaryWriter(summary_writer_path)
 
 
 def close_summary_writer(summary_writer):
@@ -611,12 +642,18 @@ def print_model_vars(print_str, model_vars):
 
 def get_project():
   """Get project"""
-  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
-  project_outputs = completed_command.stdout.decode().strip().split("\n")
-  if len(project_outputs) < 1 or project_outputs[-1] == "":
-    max_logging.log("You must specify config.vertex_tensorboard_project or set 'gcloud config set project <project>'")
+  if is_decoupled():
+    return os.environ.get("LOCAL_GCLOUD_PROJECT", "local-maxtext-project")
+  try:
+    completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
+    project_outputs = completed_command.stdout.decode().strip().split("\n")
+    if len(project_outputs) < 1 or project_outputs[-1] == "":
+      max_logging.log("You must specify config.vertex_tensorboard_project or set 'gcloud config set project <project>'")
+      return None
+    return project_outputs[-1]
+  except (FileNotFoundError, subprocess.CalledProcessError) as ex:
+    max_logging.log(f"Unable to retrieve gcloud project (decoupled={is_decoupled()}): {ex}")
     return None
-  return project_outputs[-1]
 
 
 def delete_pytree(p):

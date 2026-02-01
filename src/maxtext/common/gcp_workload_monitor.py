@@ -24,13 +24,13 @@ import requests  # type: ignore[pyi-error]
 
 import jax
 
-from google.api import metric_pb2, monitored_resource_pb2
-from google.api_core.exceptions import GoogleAPIError
-from google.cloud import monitoring_v3
-
 from urllib3.util.retry import Retry
 
 from maxtext.utils import max_logging
+from maxtext.common.gcloud_stub import monitoring_modules
+
+monitoring_v3, metric_pb2, monitored_resource_pb2, GoogleAPIError, _MONITORING_STUB = monitoring_modules()
+_GCLOUD_AVAILABLE = not _MONITORING_STUB
 
 
 _METADATA_SERVER_URL = "http://metadata.google.internal/computeMetadata/v1/"
@@ -45,7 +45,7 @@ class GCPWorkloadMonitor:
     self.workload_id = f"{run_name if run_name else 'maxtext-unnamed'}-{timestamp}"
     self.zone = get_node_zone()
     self.project_id = get_gcp_project_id()
-    self.client = monitoring_v3.MetricServiceClient()
+    self.client = monitoring_v3.MetricServiceClient() if _GCLOUD_AVAILABLE else None
     self.heartbeat_reporting_started = False
     self.performance_reporting_started = False
     self.termination_event = threading.Event()
@@ -93,6 +93,9 @@ class GCPWorkloadMonitor:
 
   def _report_heartbeat(self, local_rank: str, global_rank: str):
     """Reports heartbeat metric for the process specified by the given local rank & global rank."""
+    if not _GCLOUD_AVAILABLE:
+      max_logging.log("[DECOUPLED NO-OP] heartbeat metric skipped (google monitoring unavailable).")
+      return
     try:
       now = time.time()
       seconds = int(now)
@@ -126,11 +129,12 @@ class GCPWorkloadMonitor:
       )
 
       # Send data to Google Cloud Monitoring
-      self.client.create_time_series(
+      if self.client is not None:
+        self.client.create_time_series(
           request={"name": f"projects/{self.project_id}", "time_series": [series]},
           timeout=30,
-      )
-      max_logging.log("Heartbeat metric successfully sent to GCP.")
+        )
+        max_logging.log("Heartbeat metric successfully sent to GCP.")
     except GoogleAPIError as e:
       max_logging.log(f"Failed to send heartbeat to GCP: {e}")
     except Exception as e:  # pylint: disable=broad-exception-caught
@@ -138,6 +142,9 @@ class GCPWorkloadMonitor:
 
   def _report_performance(self, performance_metric):
     """Reports performance metric to GCP."""
+    if not _GCLOUD_AVAILABLE:
+      max_logging.log("[DECOUPLED NO-OP] performance metric skipped (google monitoring unavailable).")
+      return
     try:
       now = time.time()
       seconds = int(now)
@@ -165,11 +172,12 @@ class GCPWorkloadMonitor:
       )
 
       # Send data to Google Cloud Monitoring
-      self.client.create_time_series(
+      if self.client is not None:
+        self.client.create_time_series(
           request={"name": f"projects/{self.project_id}", "time_series": [series]},
           timeout=30,
-      )
-      max_logging.log("Performance metric successfully sent to GCP.")
+        )
+        max_logging.log("Performance metric successfully sent to GCP.")
     except GoogleAPIError as e:
       max_logging.log(f"Failed to send performance to GCP: {e}")
     except Exception as e:  # pylint: disable=broad-exception-caught

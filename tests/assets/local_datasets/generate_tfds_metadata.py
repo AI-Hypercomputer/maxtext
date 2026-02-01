@@ -18,7 +18,6 @@ Usage:
   python local_datasets/generate_tfds_metadata.py \
       --root local_datasets/c4_en_dataset_minimal \
       --version 3.1.0 \
-      --source-version 3.0.1 \
       --force
 
 This script creates a tiny TFDS builder and outputs the ``dataset_info.json`` and 
@@ -29,36 +28,22 @@ After running, you can point TFDS to ``--root`` and load with
 """
 from __future__ import annotations
 import os
+import json
 import argparse
 import tensorflow_datasets as tfds  # type: ignore
 
 
-def ensure_symlink(root: str, source_version: str, version: str) -> str:
-  """Ensure a symlink exists from source_version to version under root/c4/en.
-
-  Returns the target version directory path.
-  """
-  src = os.path.join(root, "c4", "en", source_version)
-  dst = os.path.join(root, "c4", "en", version)
-  if not os.path.isdir(src):
-    raise FileNotFoundError(f"Source version directory not found: {src}")
-  if not os.path.lexists(dst):
-    try:
-      os.symlink(src, dst)
-      print(f"Created symlink {dst} -> {src}")
-    except OSError as exc:
-      print(f"Symlink creation failed (continuing): {exc}")
-  else:
-    print(f"Symlink already exists: {dst}")
-  return dst
-
-
 def write_metadata(root: str, version_dir: str, dataset_version: str, force: bool = False) -> None:
   """Write TFDS ``dataset_info.json`` and ``features.json`` for local C4 shards."""
+
   info_path = os.path.join(version_dir, "dataset_info.json")
-  if os.path.exists(info_path) and not force:
-    print("dataset_info.json already exists; skipping overwrite (use --force to regenerate).")
-    return
+  if os.path.exists(info_path):
+    if force:
+      os.remove(info_path)
+      print("Removed existing dataset_info.json due to --force.")
+    else:
+      print("dataset_info.json already exists; skipping overwrite (use --force to regenerate).")
+      return
 
   # Discover shards (we assume they exist and are correct; counts are fixed)
   num_shards_train = 8
@@ -107,6 +92,17 @@ def write_metadata(root: str, version_dir: str, dataset_version: str, force: boo
   info.write_to_directory(version_dir)
   print(f"Wrote TFDS dataset_info & features to {version_dir}")
 
+  info_path = os.path.join(version_dir, "dataset_info.json")
+  try:
+    with open(info_path, "r", encoding="utf-8") as f:
+      data = json.load(f)
+    if isinstance(data.get("splits"), dict):
+      data["splits"] = list(data["splits"].values())
+      with open(info_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+  except (OSError, json.JSONDecodeError) as e:
+    print(f"Warning: Could not patch splits in dataset_info.json: {e}")
+
 
 def main() -> None:
   """CLI entry point for generating TFDS metadata."""
@@ -122,19 +118,17 @@ def main() -> None:
       help="Target version to expose via TFDS",
   )
   ap.add_argument(
-      "--source-version",
-      default="3.0.1",
-      help="Existing version directory with shards",
-  )
-  ap.add_argument(
       "--force",
       action="store_true",
       help="Overwrite existing dataset_info.json if present",
   )
   args = ap.parse_args()
 
-  target_dir = ensure_symlink(args.root, args.source_version, args.version)
-  write_metadata(args.root, target_dir, args.version, force=args.force)
+  # Use the version directory directly
+  version_dir = os.path.join(args.root, "c4", "en", args.version)
+  if not os.path.isdir(version_dir):
+    raise FileNotFoundError(f"Version directory not found: {version_dir}")
+  write_metadata(args.root, version_dir, args.version, force=args.force)
   print("Done.")
 
 
