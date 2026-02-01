@@ -1278,10 +1278,11 @@ class AttentionOp(nnx.Module):
       # max_logits will share similar sharding as query but last dim is unrelated to model
       # Using None for the last dimension of max_logits sharding
       if isinstance(axis_names_q, jax.sharding.PartitionSpec):
-        max_logits_spec = axis_names_q[:-1] + (None,)
+        # max_logits is Rank 3 (batch, heads, seq), so drop the last dimension (d_kv)
+        max_logits_spec = jax.sharding.PartitionSpec(*axis_names_q[:-1])
       else:
         # Fallback if axis_names_q is not a PartitionSpec (unlikely in this context)
-        max_logits_spec = axis_names_q
+        max_logits_spec = axis_names_q[:-1]
       out_specs = (axis_names_q, max_logits_spec)
 
     @functools.partial(
@@ -1418,11 +1419,11 @@ class AttentionOp(nnx.Module):
       x, max_logits = ret
       x = jnp.transpose(x, axes=(0, 2, 1, 3))
 
-      # Max over lanes and sequence length (dim 2 and 3 of max_logits)
-      # max_logits from kernel is (batch, heads, q_len, lanes)
+      # Max over sequence length (dim 2 of max_logits)
+      # max_logits from kernel is (batch, heads, q_len)
       # output needs to be (batch, heads)
       # Note: q_len is sharded. We first reduce locally.
-      max_logits_local = jnp.max(max_logits, axis=(2, 3))
+      max_logits_local = jnp.max(max_logits, axis=2)
 
       return x, max_logits_local
 
@@ -1684,15 +1685,6 @@ class AttentionOp(nnx.Module):
     elif model_mode == MODEL_MODE_PREFILL:
       attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
 
-    if record_max_logits:
-      # attn_weights shape: [b, n_kv, g, t, s]
-      # Max over t (query len) and s (key len)
-      # Result shape: [b, n_kv, g] -> reshape to [b, n_heads]
-      max_logits_per_group = jnp.max(attn_weights, axis=(-2, -1))
-      b, n_kv, g = max_logits_per_group.shape
-      max_logits = max_logits_per_group.reshape(b, n_kv * g)
-      self.sow("intermediates", "max_logits", max_logits)
-
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
       attn_weights = attn_weights * self.attn_logits_soft_cap
@@ -1735,6 +1727,17 @@ class AttentionOp(nnx.Module):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
+
+    # We record max logits AFTER soft-capping and masking to match Flash/Splash attention behavior.
+    if record_max_logits:
+      # attn_weights shape: [b, n_kv, g, t, s]
+      # Max over t (query len) and s (key len)
+      # Result shape: [b, n_kv, g] -> reshape to [b, n_heads]
+      # Note: Masked values are large negatives (DEFAULT_MASK_VALUE), so max() correctly ignores them.
+      max_logits_per_group = jnp.max(attn_weights, axis=(-2, -1))
+      b, n_kv, g = max_logits_per_group.shape
+      max_logits = max_logits_per_group.reshape(b, n_kv * g)
+      self.sow("intermediates", "max_logits", max_logits)
 
     local_out, local_max, local_sum = self.compute_local_attention(
         attn_weights, value, q_seq_len, model_mode, wv_product_einsum, sinks

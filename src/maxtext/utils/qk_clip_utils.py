@@ -31,16 +31,30 @@ def calculate_max_logit_metric(intermediate_outputs):
   """
   all_max_logits = []
 
+  def _get_key_name(k):
+    """Helper to unwrap JAX path keys."""
+    if hasattr(k, "key"):
+      return k.key
+    if hasattr(k, "idx"):
+      return k.idx
+    return k
+
   def extract_logits(path, val):
-    if path and path[-1] == "max_logits":
-      # val is tuple from sow: (max_logits_array,)
-      all_max_logits.append(val[0])
+    # 'sow' stores values in a tuple/list. tree_map descends into it.
+    # The path to the leaf array will look like: (..., 'max_logits', 0)
+    # So we check if the parent key (path[-2]) is 'max_logits'.
+    if len(path) >= 2:
+      parent_key = _get_key_name(path[-2])
+      if parent_key == "max_logits":
+        all_max_logits.append(val)
 
   jax.tree_util.tree_map_with_path(extract_logits, intermediate_outputs)
 
   if not all_max_logits:
     return None
 
+  # Reduce each layer individually first to avoid
+  # creating a massive concatenated array of all logits.
   layer_maxes = [jnp.max(m) for m in all_max_logits]
   global_max_logit = jnp.max(jnp.stack(layer_maxes))
   return global_max_logit
@@ -59,11 +73,20 @@ def apply_qk_clip(state, intermediate_outputs, config):
       forward pass. It is expected to contain 'max_logits' entries sowed by
       Attention layers if QK-Clip is enabled.
     config: The model configuration object, containing QK-Clip hyperparameters
-      (e.g. qk_clip_threshold, qk_nope_head_dim).
+      (e.g. qk_clip_threshold, qk_nope_head_dim) and attention_type.
 
   Returns:
     A new training state with updated (clipped) parameters.
+
+  Raises:
+    ValueError: If the configured attention_type is not 'mla'.
   """
+  if getattr(config, "attention_type", None) != "mla":
+    raise ValueError(
+        f"QK-Clip is only supported for MLA attention (attention_type='mla'). "
+        f"Current configuration: {getattr(config, 'attention_type', 'None')}"
+    )
+
   tau = float(config.qk_clip_threshold)
 
   def clip_mla_weights(path, param):
