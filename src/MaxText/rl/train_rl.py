@@ -532,6 +532,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
           rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
           rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
+          rollout_vllm_stop_strings=trainer_config.stop_strings,
           **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
       ),
   )
@@ -587,7 +588,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       ],
       algo_config=grpo_config,
   )
-
   # Before we train the model, let's evaluate the model on the test set so we can
   # see the improvement post training.
   #

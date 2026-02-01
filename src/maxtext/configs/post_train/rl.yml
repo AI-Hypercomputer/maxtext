@@ -138,6 +138,7 @@ max_target_length: 1024
 kv_cache_buffer: 256
 hbm_utilization_vllm: 0.72
 swap_space_vllm_gb: 2
+stop_strings: ["</answer>"]
 # Generation Configuration During Training
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
