@@ -364,7 +364,6 @@ class SFTDataProcessingTest(unittest.TestCase):
         add_eos=self.config.add_eos,
         packing=self.config.packing,
         generate_padding_batch=False,
-        use_dpo=self.config.use_dpo,
         use_sft=self.config.use_sft,
         sft_train_on_completion_only=self.config.sft_train_on_completion_only,
         grain_worker_count=0,

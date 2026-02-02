@@ -15,7 +15,6 @@
 # pylint: disable=bare-except, consider-using-generator
 """ Utils that are only interesting for training in MaxText. """
 
-import os
 import jax
 import functools
 from flax.linen import partitioning as nn_partitioning
@@ -25,7 +24,6 @@ from MaxText.rampup_batch import create_rampup_manager
 from maxtext.common import checkpointing
 from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
-from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -249,38 +247,6 @@ def setup_train_loop(config, recorder, devices=None):
       maxtext_utils.print_shardings_params(
           state.params, state_mesh_shardings.params, model.mesh, logical_annotations.params
       )
-
-    if config.use_dpo:
-      abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
-      max_logging.log(
-          "Restoring reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
-      )
-      try:
-        step0_restored, _ = checkpointing.load_state_if_possible(
-            checkpoint_manager,
-            data_iterator,
-            load_parameters_from_path="",
-            load_full_state_from_path="",
-            checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
-            abstract_unboxed_pre_state=abstract_state,
-            enable_single_replica_ckpt_restoring=False,
-            dataset_type=config.dataset_type,
-            step=0,
-            use_ocdbt=config.checkpoint_storage_use_ocdbt,
-            use_zarr3=config.checkpoint_storage_use_zarr3,
-            enable_orbax_v1=config.enable_orbax_v1,
-            checkpoint_conversion_fn=config.checkpoint_conversion_fn,
-            source_checkpoint_layout=config.source_checkpoint_layout,
-        )
-      except FileNotFoundError:
-        step0_restored = None
-      if step0_restored is not None:
-        reference_params = step0_restored["items"].params["params"]
-        state = _merge_dpo_state(state, reference_params)
-      else:
-        max_logging.log(
-            "Could not restore reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
-        )
 
   return (
       init_rng,

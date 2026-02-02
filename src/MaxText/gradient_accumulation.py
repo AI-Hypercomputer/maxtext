@@ -30,7 +30,6 @@ def gradient_accumulation_loss_and_grad(
     params_shardings,
     data,
     dropout_rng,
-    extra_dpo_args,
 ):
   """
   Calculates gradients using gradient accumulation.
@@ -45,7 +44,7 @@ def gradient_accumulation_loss_and_grad(
 
   Args:
       _loss_fn: The loss function to differentiate. Its signature is expected
-          to be: `(model, config, data, dropout_rng, params, *extra_args, is_train=True)`.
+          to be: `(model, config, data, dropout_rng, params, is_train=True)`.
       config: Model and training configuration object. Must contain
           `gradient_accumulation_steps` and `shard_optimizer_over_data`.
       model: The model module.
@@ -54,7 +53,6 @@ def gradient_accumulation_loss_and_grad(
       data: A PyTree of batched data. The leading dimension is assumed
           to be the total batch size (microbatch_size * num_accumulations).
       dropout_rng: JAX PRNGKey for dropout.
-      extra_dpo_args: A tuple of extra arguments to pass to the loss function.
 
   Returns:
       A tuple containing:
@@ -91,7 +89,7 @@ def gradient_accumulation_loss_and_grad(
 
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
-    (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, ga_params, *extra_dpo_args, is_train=True)
+    (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, ga_params, is_train=True)
     acc_grad_and_loss["loss"] += aux["total_loss"]
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
     acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]

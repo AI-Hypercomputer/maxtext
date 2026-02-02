@@ -805,15 +805,7 @@ def calculate_tflops_training_per_device(config, log=True):
   learnable_weight_tflops = learnable_weight_tflops * config.gradient_accumulation_steps
   attention_tflops = attention_tflops * config.gradient_accumulation_steps
 
-  # DPO includes one additional forward pass per gradient accumulation step
-  if config.use_dpo:
-    reference_model_tflops = learnable_weight_tflops / 3  # additional forward pass
-    reference_model_attention_tflops = attention_tflops / 3
-    attention_tflops = attention_tflops + reference_model_attention_tflops
-  else:
-    reference_model_tflops = 0
-
-  total_tflops = learnable_weight_tflops + attention_tflops + reference_model_tflops
+  total_tflops = learnable_weight_tflops + attention_tflops
 
   if config.use_multimodal:
     # Add vision layers TFLOPs for multimodal models

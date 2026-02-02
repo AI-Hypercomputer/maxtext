@@ -342,10 +342,6 @@ class MetricLogger:
       self.cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] += float(
           metrics["scalar"].get("evaluation/mtp_acceptance_rate_percent", 0.0)
       )
-      if self.config.use_dpo:
-        self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] += float(
-            metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0)
-        )
 
     if eval_step_count:
       eval_loss = self.cumulative_eval_metrics["scalar"]["eval/total_loss"] / (
@@ -361,10 +357,6 @@ class MetricLogger:
       self.cumulative_eval_metrics["scalar"]["eval/avg_mtp_acceptance_rate_percent"] = (
           self.cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] / eval_step_count
       )
-      if self.config.use_dpo:
-        self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = (
-            self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] / eval_step_count
-        )
 
       self.write_metrics(self.cumulative_eval_metrics, step, is_training=False)
 

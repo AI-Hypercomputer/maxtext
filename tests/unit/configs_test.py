@@ -113,7 +113,6 @@ def run_config_validation(config_file_path: str):
 
 BASE_CONFIGS = [
     os.path.join(CONFIGS_DIR, "base.yml"),
-    os.path.join(CONFIGS_DIR, "post_train", "dpo.yml"),
     os.path.join(CONFIGS_DIR, "gpu/gpu_smoke_test.yml"),
     os.path.join(CONFIGS_DIR, "post_train", "rl.yml"),
     os.path.join(CONFIGS_DIR, "post_train", "rl_mt_jt.yml"),

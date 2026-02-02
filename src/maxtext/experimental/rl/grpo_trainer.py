@@ -489,8 +489,6 @@ def eval_step(model, config, state, data, dropout_rng):
           "evaluation/moe_lb_loss": moe_lb_loss,
       },
   }
-  if config.use_dpo:
-    metrics["scalar"]["evaluation/grpo_reward_accuracy"] = aux["reward_accuracy"]
 
   return metrics
 
