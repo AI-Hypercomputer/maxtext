@@ -185,7 +185,7 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
       elif message["role"] == "user":
         round_msgs.append(message)
         prompt_in_chat_template = tokenizer_model.apply_chat_template(
-            round_msgs, add_generation_prompt=False, tokenize=False
+            round_msgs, add_generation_prompt=True, tokenize=False
         )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
@@ -194,7 +194,7 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
         prompt_completion_tokens = tokenizer_model.apply_chat_template(
             round_msgs, add_generation_prompt=False, tokenize=True
         )
-        prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=False, tokenize=True)
+        prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True)
         completion_tokens = prompt_completion_tokens[len(prompt_tokens) :]
         completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
         messages.append(completion_in_chat_template)
