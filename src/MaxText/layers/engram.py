@@ -98,44 +98,40 @@ class CompressedTokenizer:
     """
     Build the mapping from original vocabulary to the compressed vocabulary
     """
-    # Maps original_tid -> compressed_nid
-    old2new = {}
-    # Maps normalized_string -> compressed_nid
-    key2new = {}
-    # List of unique canonical strings
-    new_tokens = []
-
     vocab_size = len(self.tokenizer)
-    for tid in range(vocab_size):
-      # 1. Decode the token back to raw text
-      text = self.tokenizer.decode([tid], skip_special_tokens=False)
+    # Lookup table: Maps original_tid -> compressed_nid, many-to-one
+    old2new = np.empty(vocab_size, dtype=np.int64)
+    # Maps normalized_string -> compressed_nid, one-to-one
+    # num_new_token equals to len(key2new)
+    key2new = {}
 
-      # 2. Handle invalid/broken byte sequences (e.g., partial UTF-8 tokens)
-      if "�" in text:
-        # If decode fails, use the raw token string (e.g., 'Ġ', '<0x0A>')
+    for tid in range(vocab_size):
+      # Decode the token back to raw text
+      text = self.tokenizer.decode([tid], skip_special_tokens=False)
+      if "\ufffd" in text:
+        # Case 1: Handle invalid/broken byte sequences
+        # If decode produces replacement character � (unicode \ufffd)
+        # use the raw token string instead
         key = self.tokenizer.convert_ids_to_tokens(tid)
       else:
-        # 3. Normalize the text (e.g., "  APPLE" -> "apple")
-        norm = self.normalizer.normalize_str(text)
-        # Fallback to original if norm results in empty
-        key = norm if norm else text
+        # Normalize the text (e.g., "  APPLE" -> "apple")
+        normalized_text = self.normalizer.normalize_str(text)
+        # Case 2: Use normalized text
+        # Case 3: Fall back to raw text if normalization results in empty string
+        key = normalized_text if normalized_text else text
 
-      # 4. Deduplicate: if "Apple" and "apple" both become "apple", they get the same ID
+      # update key2new
       nid = key2new.get(key)
       if nid is None:
-        nid = len(new_tokens)
+        nid = len(key2new)
         key2new[key] = nid
-        new_tokens.append(key)
+      # update old2new
       old2new[tid] = nid
 
-    # 5. Create a high-speed NumPy lookup array for the forward pass
-    lookup = np.empty(vocab_size, dtype=np.int64)
-    for tid in range(vocab_size):
-      lookup[tid] = old2new[tid]
+    # lookup_table, num_new_token
+    return old2new, len(key2new)
 
-    return lookup, len(new_tokens)
-
-  def _compress(self, input_ids):
+  def __call__(self, input_ids):
     """
     Maps original token IDs to canonical IDs using the pre-computed table.
     """
@@ -143,13 +139,10 @@ class CompressedTokenizer:
     # Ignore negative IDs (often used for padding/masks)
     valid_mask = input_ids >= 0
     valid_ids = input_ids[valid_mask]
-    output_ids = input_ids.copy()
     # Vectorized replacement: O(1) lookup per token
+    output_ids = input_ids.copy()
     output_ids[valid_mask] = self.lookup_table[valid_ids]
     return output_ids
-
-  def __call__(self, input_ids):
-    return self._compress(input_ids)
 
 
 class NgramHashMapping:

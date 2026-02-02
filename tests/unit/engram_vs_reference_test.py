@@ -26,6 +26,7 @@ To run the test
   python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "MultiHeadEmbeddingTest"
   python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "ShortConvTest"
   python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "EngramTest"
+  python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "CompressedTokenizerTest"
 """
 
 
@@ -52,10 +53,12 @@ from jax.sharding import Mesh
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
 from MaxText import maxtext_utils
-from MaxText.layers.engram import Engram as EngramJAX
-from MaxText.layers.engram import ShortConv as ShortConvJAX
-from MaxText.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX
+
+from MaxText.layers.engram import CompressedTokenizer as CompressedTokenizerJAX
 from MaxText.layers.engram import NgramHashMapping as NgramHashMappingJAX
+from MaxText.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX
+from MaxText.layers.engram import ShortConv as ShortConvJAX
+from MaxText.layers.engram import Engram as EngramJAX
 
 
 # -----------------------------------------------------------------------------
@@ -813,6 +816,31 @@ class EngramTest(parameterized.TestCase):
         to_jax(pt_out), jax_out, rtol=1e-4, atol=1e-4, err_msg="Engram output mismatch between PT and JAX"
     )
     print("✅ Engram Layer match: PASS")
+
+
+class CompressedTokenizerTest(parameterized.TestCase):
+
+  def test_tokenierzer_match(self):
+
+    tokenizer_path = "deepseek-ai/DeepSeek-V3"
+    hf_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+    np.random.seed(42)
+    batch, seq_len = 2, 3
+    input_ids = np.random.randint(0, len(hf_tokenizer), (batch, seq_len))
+
+    CompressedTokenizerPT = CompressedTokenizer
+    pt_tokenizer = CompressedTokenizerPT(tokenizer_path)
+    pt_lookup_table = pt_tokenizer.lookup_table
+    pt_out = pt_tokenizer(input_ids)
+
+    jax_tokenizer = CompressedTokenizerJAX(hf_tokenizer)
+    jax_lookup_table = jax_tokenizer.lookup_table
+    jax_out = jax_tokenizer(input_ids)
+
+    np.testing.assert_equal(jax_lookup_table, pt_lookup_table)
+    np.testing.assert_equal(len(pt_tokenizer), len(jax_tokenizer))
+    np.testing.assert_array_equal(pt_out, jax_out)
 
 
 if __name__ == "__main__":
