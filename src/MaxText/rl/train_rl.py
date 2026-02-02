@@ -191,15 +191,32 @@ def setup_configs_and_devices(argv: list[str]):
     for i in range(config.num_trainer_slices, config.num_trainer_slices + config.num_samplers_slices):
       sampler_devices.extend(devices_by_slice[slice_indices[i]])
 
+    trainer_devices_per_slice = len(trainer_devices) // config.num_trainer_slices
+    trainer_fsdp = trainer_devices_per_slice
+    tp = config.ici_tensor_parallelism
+    if tp > 1:
+      if trainer_devices_per_slice % tp != 0:
+        raise ValueError(
+            f"trainer_devices_per_slice ({trainer_devices_per_slice}) must be divisible by tensor parallelism ({tp})"
+        )
+      if config.ici_fsdp_parallelism != -1 and config.ici_fsdp_parallelism * tp != trainer_devices_per_slice:
+        raise ValueError(
+            f"ici_fsdp_parallelism ({config.ici_fsdp_parallelism}) * ici_tensor_parallelism ({tp}) must equal "
+            f"devices_per_slice ({trainer_devices_per_slice})"
+        )
+      trainer_fsdp = trainer_devices_per_slice // tp
+
     trainer_update = {
         "num_slices": config.num_trainer_slices,
-        "ici_fsdp_parallelism": len(trainer_devices) // config.num_trainer_slices,
+        "ici_fsdp_parallelism": trainer_fsdp,
+        "ici_tensor_parallelism": tp,
         "dcn_data_parallelism": config.num_trainer_slices,
     }
 
     sampler_update = {
         "num_slices": config.num_samplers_slices,
         "ici_fsdp_parallelism": len(sampler_devices) // config.num_samplers_slices,
+        "ici_tensor_parallelism": -1,
         "dcn_data_parallelism": config.num_samplers_slices,
     }
 
