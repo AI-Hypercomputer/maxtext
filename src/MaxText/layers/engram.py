@@ -146,57 +146,67 @@ class CompressedTokenizer:
 
 
 class NgramHashMapping:
-  """
-  non-parametric
-  """
 
   def __init__(
       self,
       engram_vocab_size,
       max_ngram_size,
-      n_embed_per_ngram,
       n_head_per_ngram,
       layer_ids,
       tokenizer,
       pad_id,
       seed,
   ):
-    self.vocab_size_per_ngram = engram_vocab_size
+    """
+    engram_vocab_size: each n-gram has total size > engram_vocab_size[n-2] * n_head_per_ngram
+    """
+    self.min_head_vocab_size_per_ngram = engram_vocab_size
     self.max_ngram_size = max_ngram_size
-    self.n_embed_per_ngram = n_embed_per_ngram
     self.n_head_per_ngram = n_head_per_ngram
-    self.pad_id = pad_id
     self.layer_ids = layer_ids
 
+    # initialize compreseed tokenizer
     self.compressed_tokenizer = CompressedTokenizer(tokenizer)
     self.tokenizer_vocab_size = len(self.compressed_tokenizer)
-    if self.pad_id is not None:
-      self.pad_id = int(self.compressed_tokenizer.lookup_table[self.pad_id])
+    # TODO: why not just use pad_id = tokenizer.pad_id
+    if pad_id is not None:
+      self.pad_id = int(self.compressed_tokenizer.lookup_table[pad_id])
 
+    # calculate layer multipliers {layer_id: multiplier}
+    self.layer_multipliers = self._calculate_multipliers_across_layers(seed)
+
+    # Each head k maps to an embedding table of prime size
+    # {layer_id: [[2gram_head1,...,2gram_headK], ...[Ngram_head1,...,Ngram_headK]}
+    self.vocab_size_across_layers = self._calculate_vocab_size_across_layers()
+
+  def _calculate_multipliers_across_layers(self, seed):
+    # calculate layer multipliers
     max_long = np.iinfo(np.int64).max
     M_max = int(max_long // self.tokenizer_vocab_size)
     half_bound = max(1, M_max // 2)
     PRIME_1 = 10007
 
-    self.layer_multipliers = {}
-
+    layer_multipliers = {}
     for layer_id in self.layer_ids:
       base_seed = int(seed + PRIME_1 * int(layer_id))
       g = np.random.default_rng(base_seed)
       r = g.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
-      multipliers = r * 2 + 1
-      self.layer_multipliers[layer_id] = multipliers
+      multipliers = r * 2 + 1  # odd
+      layer_multipliers[layer_id] = multipliers
+    return layer_multipliers
 
-    # Each head k maps to an embedding table of prime size
-    self.vocab_size_across_layers = self.calculate_vocab_size_across_layers()
+  def _calculate_vocab_size_across_layers(self):
+    """
+    Vocabulary Size Calculation (Global Prime Sequence): Engram uses unique prime numbers for the vocabulary size
+    of every head in every layer to maximize hash collision independence.
+    """
 
-  def find_next_prime(self, start, seen_primes):
-    candidate = start + 1
-    while candidate in seen_primes or not isprime(candidate):
-      candidate += 1
-    return candidate
+    def find_next_prime(start, seen_primes):
+      candidate = start + 1
+      while candidate in seen_primes or not isprime(candidate):
+        candidate += 1
+      return candidate
 
-  def calculate_vocab_size_across_layers(self):
     seen_primes = set()
     vocab_size_across_layers = {}
 
@@ -204,15 +214,15 @@ class NgramHashMapping:
       all_ngram_vocab_sizes = []
       for ngram in range(2, self.max_ngram_size + 1):
         current_ngram_heads_sizes = []
-        # Maps n-gram order to the list index
-        # If ngram=2 (Bigram), index is 0.
-        # If ngram=3 (Trigram), index is 1.
-        vocab_size = self.vocab_size_per_ngram[ngram - 2]
+
+        # use predefined size as start
+        n_gram_index = ngram - 2
+        vocab_size = self.min_head_vocab_size_per_ngram[n_gram_index]
         current_prime_search_start = vocab_size - 1
 
         num_head = self.n_head_per_ngram
         for _ in range(num_head):
-          found_prime = self.find_next_prime(current_prime_search_start, seen_primes)
+          found_prime = find_next_prime(current_prime_search_start, seen_primes)
           seen_primes.add(found_prime)
           current_ngram_heads_sizes.append(found_prime)
           current_prime_search_start = found_prime
@@ -222,56 +232,79 @@ class NgramHashMapping:
 
     return vocab_size_across_layers
 
+  def get_vocab_sizes(self, layer_id: int):
+    """
+    Extract the specific list of primes for THIS layer
+    The structure is [[ngram2_head1, ngram2_head2...], [ngram3_head1...]]
+    We flatten it into a single list of ints: [N1, N2, N3, ...]
+    """
+    return [x for y in self.vocab_size_across_layers[layer_id] for x in y]
+
   def _get_ngram_hashes(
       self,
-      input_ids: np.ndarray,
+      compressed_ids: np.ndarray,
       layer_id: int,
   ) -> np.ndarray:
-    x = np.asarray(input_ids, dtype=np.int64)
-    B, T = x.shape
+    """
+    The cat sat -> [10, 25, 32]
+    max ngram = 3
 
-    multipliers = self.layer_multipliers[layer_id]
+    3 multiplier: m0=3, m1=5, m3=7
 
-    def shift_k(k: int) -> np.ndarray:
+    sliding window via shifting:
+      shift0: [The, cat, sat] -> [10, 25, 32]
+      shift1: [PAD, The, cat] -> [0, 10, 25]
+      shift2: [PAD, PAD, The] -> [0, 10, 10]
+
+    2-gram: (shift0 * m0) XOR (shift1 * m1)
+      [sat, cat] -> (32 * 3) ^ (25 * 5)
+
+    3-gram: (shift0 * m0) XOR (shift1 * m1) XOR (shift2 * m2)
+      [sat, cat, The] -> (32 * 3) ^ (25 * 5) ^ (10 * 7)
+
+    for l-th layer, n-gram, k-th head, mod by embedding size m
+    """
+
+    # 1 sliding window via shifting
+    def shift_k(x, k: int) -> np.ndarray:
       if k == 0:
         return x
+      T = x.shape[1]
       shifted = np.pad(x, ((0, 0), (k, 0)), mode="constant", constant_values=self.pad_id)[:, :T]
       return shifted
 
-    base_shifts = [shift_k(k) for k in range(self.max_ngram_size)]
+    x = np.asarray(compressed_ids, dtype=np.int64)
+    base_shifts = [shift_k(x, k) for k in range(self.max_ngram_size)]
 
+    # 2 multiplier for each shift
+    multipliers = self.layer_multipliers[layer_id]
+
+    # 3 calculate hashes across n-grams
     all_hashes = []
-
+    mix = base_shifts[0] * multipliers[0]  # init hash
+    vocab_sizes = self.vocab_size_across_layers[layer_id]  # init vocab as mod
     for n in range(2, self.max_ngram_size + 1):
+      # multiplicative bitwise xor as hash function
+      k = n - 1
+      mix = np.bitwise_xor(mix, base_shifts[k] * multipliers[k])
+      # for K heads at this n-gram level, get primes vocab sizes
       n_gram_index = n - 2
-      tokens = base_shifts[:n]
-      # Lightweight multiplicative-XOR hash
-      mix = tokens[0] * multipliers[0]
-      for k in range(1, n):
-        mix = np.bitwise_xor(mix, tokens[k] * multipliers[k])
-      num_heads_for_this_ngram = self.n_head_per_ngram
-      head_vocab_sizes = self.vocab_size_across_layers[layer_id][n_gram_index]
+      vocab_sizes_for_this_gram = vocab_sizes[n_gram_index]
+      mods = np.array(vocab_sizes_for_this_gram, dtype=np.int64)
+      # Broadcast Modulo: (B, T, 1) % (K,) -> (B, T, K)
+      head_hashes = mix[..., None] % mods
+      all_hashes.append(head_hashes)
 
-      # For each n-gram order n, we employ K distinct hash heads
-      for j in range(num_heads_for_this_ngram):
-        mod = int(head_vocab_sizes[j])
-        head_hash = mix % mod
-        all_hashes.append(head_hash.astype(np.int64, copy=False))
+    # (B, T, K * (max_ngram_size-1))
+    return np.concatenate(all_hashes, axis=2)
 
-    return np.stack(all_hashes, axis=2)
-
-  def hash(self, input_ids):
-    input_ids = self.compressed_tokenizer(input_ids)
+  def __call__(self, input_ids):
+    compressed_ids = self.compressed_tokenizer(input_ids)
     hash_ids_for_all_layers = {}
     for layer_id in self.layer_ids:
-      hash_ids_for_all_layers[layer_id] = self._get_ngram_hashes(input_ids, layer_id=layer_id)
+      hash_ids = self._get_ngram_hashes(compressed_ids, layer_id=layer_id)
+      hash_ids_for_all_layers[layer_id] = hash_ids
     return hash_ids_for_all_layers
-
-  def get_vocab_sizes(self, layer_id: int):
-    # 2. Extract the specific list of primes for THIS layer
-    # The structure is [[ngram2_head1, ngram2_head2...], [ngram3_head1...]]
-    # We flatten it into a single list of ints: [N1, N2, N3, ...]
-    return [x for y in self.vocab_size_across_layers[layer_id] for x in y]
 
 
 class MultiHeadEmbedding(nnx.Module):
@@ -421,38 +454,6 @@ class ShortConv(nnx.Module):
     # 4. Reshape back to Branched Layout
     # (B, L, G * C) -> (B, L, G, C)
     return y.reshape(B, L, G, C)
-
-  # -----------------------------------------------------------------------
-  # Vocabulary Size Calculation (Global Prime Sequence)
-  # -----------------------------------------------------------------------
-  # Engram uses unique prime numbers for the vocabulary size of every head
-  # in every layer to maximize hash collision independence.
-
-  # We instantiate NgramHashMapping here to replicate this deterministic
-  # sequence. Ideally, this mapping should be created once globally and
-  # the resulting vocab_sizes passed into this layer to improve startup time.
-
-  # # --- Hash Mapping ---
-  # self.hash_mapping = NgramHashMapping(
-  #     engram_vocab_size=engram_vocab_size,
-  #     max_ngram_size=engram_max_ngram_size,
-  #     n_embed_per_ngram=engram_embed_dim_per_ngram,
-  #     n_head_per_ngram=engram_heads_per_ngram,
-  #     # IMPORTANT: We must pass the FULL list of layer_ids, not just self.layer_id.
-  #     # The mapping finds primes sequentially across all layers; passing a partial
-  #     # list would reset the prime search and break alignment with the reference model.
-  #     layer_ids=layer_ids,
-  #     # Inject the pre-loaded tokenizer to avoid redundant disk I/O per layer.
-  #     tokenizer=tokenizer,
-  #     pad_id=pad_id,
-  #     seed=seed,
-  # )
-
-  # # Extract the specific list of primes [M_{n,k}] for THIS layer only.
-  # # The structure is [[ngram2_head1, ngram2_head2...], [ngram3_head1...]]
-  # # We flatten it into a single list of ints: [N1, N2, N3, ...]
-  # vocab_sizes = self.hash_mapping.get_vocab_sizes(self.layer_id)
-  # print(f"DEBUG JAX Layer, Vocab Sizes: {vocab_sizes}")
 
 
 class Engram(nnx.Module):

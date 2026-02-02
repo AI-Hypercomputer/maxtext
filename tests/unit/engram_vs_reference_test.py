@@ -16,17 +16,18 @@
 """
 Tests for Engram: MultiHeadEmbedding, ShortConv, Engram
 
-Reference implementation: https://github.com/deepseek-ai/Engram/blob/fb7f84a21f91223715394a33a1dc24bbfb7f788e/engram_demo_v1.py
-s
+Reference implementation: 
+https://github.com/deepseek-ai/Engram/blob/fb7f84a21f91223715394a33a1dc24bbfb7f788e/engram_demo_v1.py
 
 To run the test
   pip install torch numpy transformers sympy
   python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
   python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s
+  python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "CompressedTokenizerTest"
+  python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "NgramHashMappingTest"
   python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "MultiHeadEmbeddingTest"
   python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "ShortConvTest"
   python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "EngramTest"
-  python3 -m pytest -v --pyargs tests.unit.engram_vs_reference_test -rP -s -k "CompressedTokenizerTest"
 """
 
 
@@ -399,9 +400,7 @@ class Engram(nn.Module):
         pad_id=engram_cfg.pad_id,
         seed=engram_cfg.seed,
     )
-    print(
-        "DEBUG torch Layer Vocab Sizes", [x for y in self.hash_mapping.vocab_size_across_layers[self.layer_id] for x in y]
-    )
+
     self.multi_head_embedding = MultiHeadEmbedding(
         list_of_N=[x for y in self.hash_mapping.vocab_size_across_layers[self.layer_id] for x in y],
         D=engram_cfg.n_embed_per_ngram // engram_cfg.n_head_per_ngram,
@@ -455,32 +454,27 @@ class Engram(nn.Module):
     return output
 
 
-# class TransformerBlock(nn.Module):
+class TransformerBlock(nn.Module):
 
-#   def __init__(self, layer_id):
-#     super().__init__()
-#     self.attn = lambda x: x
-#     self.moe = lambda x: x
-#     self.engram = None
-#     if layer_id in engram_cfg.layer_ids:
-#       self.engram = Engram(layer_id=layer_id)
+  def __init__(self, layer_id):
+    super().__init__()
+    self.attn = lambda x: x
+    self.moe = lambda x: x
+    self.engram = None
+    if layer_id in engram_cfg.layer_ids:
+      self.engram = Engram(layer_id=layer_id)
 
-#   def forward(self, input_ids, hidden_states):
-#     if self.engram is not None:
-#       hidden_states = self.engram(hidden_states=hidden_states, input_ids=input_ids) + hidden_states
-#     hidden_states = self.attn(hidden_states) + hidden_states
-#     hidden_states = self.moe(hidden_states) + hidden_states
-#     return hidden_states
+  def forward(self, input_ids, hidden_states):
+    if self.engram is not None:
+      hidden_states = self.engram(hidden_states=hidden_states, input_ids=input_ids) + hidden_states
+    hidden_states = self.attn(hidden_states) + hidden_states
+    hidden_states = self.moe(hidden_states) + hidden_states
+    return hidden_states
 
 
 # -----------------------------------------------------------------------------
 # Test JAX Module: Helper
 # -----------------------------------------------------------------------------
-
-
-"""
-Tests for Engram: N-gram Hashing and Injection Layer
-"""
 
 
 def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
@@ -523,6 +517,79 @@ def get_cfg_and_mesh(config):  # config, run_name, dtype, batch_size, seq_len
 
 
 # -----------------------------------------------------------------------------
+# Test JAX Module (non-pareamteric): CompressedTokenizer, NgramHashMapping
+# -----------------------------------------------------------------------------
+
+
+class CompressedTokenizerTest(parameterized.TestCase):
+
+  def test_tokenierzer_match(self):
+
+    tokenizer_path = "deepseek-ai/DeepSeek-V3"
+    hf_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+    np.random.seed(42)
+    batch, seq_len = 2, 3
+    input_ids = np.random.randint(0, len(hf_tokenizer), (batch, seq_len))
+
+    CompressedTokenizerPT = CompressedTokenizer
+    pt_tokenizer = CompressedTokenizerPT(tokenizer_path)
+    pt_lookup_table = pt_tokenizer.lookup_table
+    pt_out = pt_tokenizer(input_ids)
+
+    jax_tokenizer = CompressedTokenizerJAX(hf_tokenizer)
+    jax_lookup_table = jax_tokenizer.lookup_table
+    jax_out = jax_tokenizer(input_ids)
+
+    np.testing.assert_equal(jax_lookup_table, pt_lookup_table)
+    np.testing.assert_equal(len(pt_tokenizer), len(jax_tokenizer))
+    np.testing.assert_array_equal(pt_out, jax_out)
+
+
+class NgramHashMappingTest(parameterized.TestCase):
+
+  def test_hash_match(self):
+
+    self.config = Config()
+    self.engram_cfg = EngramConfig(self.config)
+    self.backbone_config = BackBoneConfig(self.config)
+
+    tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
+
+    np.random.seed(42)
+    batch, seq_len = 2, 3
+    input_ids = np.random.randint(0, len(tokenizer), (batch, seq_len))
+
+    NgramHashMappingPT = NgramHashMapping
+    pt_hash_mapping = NgramHashMappingPT(
+        engram_vocab_size=self.engram_cfg.engram_vocab_size,
+        max_ngram_size=self.engram_cfg.max_ngram_size,
+        n_embed_per_ngram=self.engram_cfg.n_embed_per_ngram,
+        n_head_per_ngram=self.engram_cfg.n_head_per_ngram,
+        layer_ids=self.engram_cfg.layer_ids,
+        tokenizer_name_or_path=self.engram_cfg.tokenizer_name_or_path,
+        pad_id=self.engram_cfg.pad_id,
+        seed=self.engram_cfg.seed,
+    )
+    pt_out = pt_hash_mapping.hash(input_ids)
+
+    jax_hash_mapping = NgramHashMappingJAX(
+        engram_vocab_size=self.config.engram_vocab_size,
+        max_ngram_size=self.config.engram_max_ngram_size,
+        n_head_per_ngram=self.config.engram_heads_per_ngram,
+        layer_ids=self.config.engram_layer_ids,
+        tokenizer=tokenizer,
+        pad_id=self.config.engram_pad_id,
+        seed=self.config.engram_seed,
+    )
+    jax_out = jax_hash_mapping(input_ids)
+
+    # keys are layer_ids
+    self.assertDictEqual(jax_hash_mapping.vocab_size_across_layers, pt_hash_mapping.vocab_size_across_layers)
+    np.testing.assert_equal(pt_out, jax_out)
+
+
+# -----------------------------------------------------------------------------
 # Test JAX Module: MultiHeadEmbedding
 # -----------------------------------------------------------------------------
 
@@ -556,8 +623,6 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
 
     # 2. Init JAX
     rngs = nnx.Rngs(params=0)
-    # jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, rngs)
-
     config = Config()
     cfg, mesh = get_cfg_and_mesh(config)
     jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, cfg, mesh, rngs)
@@ -736,9 +801,9 @@ class EngramTest(parameterized.TestCase):
 
     self.batch_size = 2
     self.seq_len = 8
-    self.layer_id = 1
+    self.layer_id = 1  # an element of config.engram_layer_ids
 
-    self.config = Config(engram_layer_ids=[self.layer_id])
+    self.config = Config()
     self.engram_cfg = EngramConfig(self.config)
     self.backbone_config = BackBoneConfig(self.config)
 
@@ -772,17 +837,14 @@ class EngramTest(parameterized.TestCase):
     jax_hash_mapping = NgramHashMappingJAX(
         engram_vocab_size=self.config.engram_vocab_size,
         max_ngram_size=self.config.engram_max_ngram_size,
-        n_embed_per_ngram=self.config.engram_embed_dim_per_ngram,
         n_head_per_ngram=self.config.engram_heads_per_ngram,
-        # IMPORTANT: We must pass the FULL list of layer_ids
-        # The mapping finds primes sequentially across all layers
         layer_ids=self.config.engram_layer_ids,
         tokenizer=tokenizer,
         pad_id=self.config.engram_pad_id,
         seed=self.config.engram_seed,
     )
 
-    vocab_sizes = jax_hash_mapping.get_vocab_sizes(self.layer_id)
+    vocab_sizes = jax_hash_mapping.get_vocab_sizes(self.layer_id)  # layer specific
 
     # Setup model
     cfg, mesh = get_cfg_and_mesh(self.config)
@@ -802,7 +864,7 @@ class EngramTest(parameterized.TestCase):
     jax_weights = to_jax_engram(pt_layer)
     nnx.update(jax_layer, jax_weights)
 
-    jax_hash_input_ids = jax_hash_mapping.hash(input_ids_np)[self.layer_id]
+    jax_hash_input_ids = jax_hash_mapping(input_ids_np)[self.layer_id]  # layer specific
     jax_hidden_states = to_jax(pt_hidden_states)
 
     jax_out = jax_layer(jax_hidden_states, jax_hash_input_ids)
@@ -816,31 +878,6 @@ class EngramTest(parameterized.TestCase):
         to_jax(pt_out), jax_out, rtol=1e-4, atol=1e-4, err_msg="Engram output mismatch between PT and JAX"
     )
     print("✅ Engram Layer match: PASS")
-
-
-class CompressedTokenizerTest(parameterized.TestCase):
-
-  def test_tokenierzer_match(self):
-
-    tokenizer_path = "deepseek-ai/DeepSeek-V3"
-    hf_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
-    np.random.seed(42)
-    batch, seq_len = 2, 3
-    input_ids = np.random.randint(0, len(hf_tokenizer), (batch, seq_len))
-
-    CompressedTokenizerPT = CompressedTokenizer
-    pt_tokenizer = CompressedTokenizerPT(tokenizer_path)
-    pt_lookup_table = pt_tokenizer.lookup_table
-    pt_out = pt_tokenizer(input_ids)
-
-    jax_tokenizer = CompressedTokenizerJAX(hf_tokenizer)
-    jax_lookup_table = jax_tokenizer.lookup_table
-    jax_out = jax_tokenizer(input_ids)
-
-    np.testing.assert_equal(jax_lookup_table, pt_lookup_table)
-    np.testing.assert_equal(len(pt_tokenizer), len(jax_tokenizer))
-    np.testing.assert_array_equal(pt_out, jax_out)
 
 
 if __name__ == "__main__":
