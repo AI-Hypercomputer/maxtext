@@ -48,7 +48,7 @@ def main(argv: Sequence[str]) -> None:
   for i, (model_name, topology, num_slice) in enumerate(TEST_CASES):
     print(f"\n[{i+1}/{total}] Processing: {model_name} | {topology} | Slice {num_slice}")
 
-    base_path = Path(f"{MAXTEXT_REPO_ROOT}/tests/utils/sharding_info_new/{model_name}/" f"{topology}/slice_{num_slice}/")
+    base_path = Path(f"{MAXTEXT_REPO_ROOT}/tests/utils/sharding_info/{model_name}/" f"{topology}/slice_{num_slice}/")
     json_path_named = base_path / "named_shardings.json"
     json_path_logical = base_path / "logical_shardings.json"
 

@@ -124,7 +124,7 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
       f"model_name={model_name}",
   ]
 
-  root_dir = "tests/utils/sharding_info_new"
+  root_dir = "tests/utils/sharding_info"
   base_path = os.path.join(root_dir, model_name, topology, f"slice_{num_slice}")
 
   named_json_path = os.path.join(base_path, "named_shardings.json")
@@ -229,7 +229,7 @@ class TestGetAbstractState:
     assert isinstance(param_leaf, jax.ShapeDtypeStruct)
     assert param_leaf.dtype == jnp.float32
 
-    root_dir = "tests/utils/sharding_info_new"  # Or your target directory
+    root_dir = "tests/utils/sharding_info"  # Or your target directory
     base_path = os.path.join(root_dir, model_name, topology, f"slice_{num_slice}")
     os.makedirs(base_path, exist_ok=True)  # Ensure directory exists for saving actual
 

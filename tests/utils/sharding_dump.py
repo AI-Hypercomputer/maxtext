@@ -408,7 +408,7 @@ def main(argv: Sequence[str]) -> None:
   validate_config(config)
 
   base_path = Path(
-      f"{MAXTEXT_REPO_ROOT}/tests/utils/sharding_info_new/{config.model_name}/"
+      f"{MAXTEXT_REPO_ROOT}/tests/utils/sharding_info/{config.model_name}/"
       f"{config.compile_topology}/slice_{config.compile_topology_num_slices}/"
   )
   json_path_named = base_path / "named_shardings.json"
