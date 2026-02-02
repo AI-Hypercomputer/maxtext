@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 # import optax
 
+from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
 from MaxText import pyconfig
 from MaxText import maxtext_utils
@@ -117,13 +118,13 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
   """
   params = [
       "/deps/MaxText/tests/unit/sharding_compare_test",
-      get_test_config_path(),
+      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
       f"compile_topology={topology}",
       f"compile_topology_num_slices={num_slice}",
       f"model_name={model_name}",
   ]
 
-  root_dir = "tests/utils/sharding_info"
+  root_dir = "tests/utils/sharding_info_new"
   base_path = os.path.join(root_dir, model_name, topology, f"slice_{num_slice}")
 
   named_json_path = os.path.join(base_path, "named_shardings.json")
