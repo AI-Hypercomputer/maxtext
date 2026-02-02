@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,13 +17,14 @@
 
 from typing import Sequence
 
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_REPO_ROOT
 from tests.utils.sharding_dump import TEST_CASES
 from tests.utils.test_helpers import get_test_config_path
 import os
 import subprocess
 
 from absl import app
+from pathlib import Path
 
 
 def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
@@ -37,6 +38,7 @@ def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
           f"compile_topology={topology}",
           f"compile_topology_num_slices={num_slice}",
           f"model_name={model_name}",
+          "weight_dtype=float32",
       ],
       check=True,
   )
@@ -48,12 +50,18 @@ def main(argv: Sequence[str]) -> None:
   for i, (model_name, topology, num_slice) in enumerate(TEST_CASES):
     print(f"\n[{i+1}/{total}] Processing: {model_name} | {topology} | Slice {num_slice}")
 
+    base_path = Path(f"{MAXTEXT_REPO_ROOT}/tests/utils/sharding_info/{model_name}/" f"{topology}/slice_{num_slice}/")
+    json_path_named = base_path / "named_shardings.json"
+    json_path_logical = base_path / "logical_shardings.json"
+
+    if json_path_named.exists() and json_path_logical.exists():
+      print("  -> Sharding files already exist. Skipping.")
+      continue
+
     try:
       run_single_dump(model_name, topology, str(num_slice))
     except subprocess.CalledProcessError:
       print(f"!!! FAILED: {model_name} {topology} {num_slice}")
-    except Exception as e:  # pylint: disable=broad-except
-      print(f"!!! ERROR: {e}")
 
 
 if __name__ == "__main__":
