@@ -14,7 +14,7 @@
 
 
 """
-Tests for Engram: MultiHeadEmbedding, ShortConv, Engram
+Tests for Engram: CompressedTokenizer, NgramHashMapping, MultiHeadEmbedding, ShortConv, Engram
 
 Reference implementation: 
 https://github.com/deepseek-ai/Engram/blob/fb7f84a21f91223715394a33a1dc24bbfb7f788e/engram_demo_v1.py
@@ -454,22 +454,22 @@ class Engram(nn.Module):
     return output
 
 
-class TransformerBlock(nn.Module):
+# class TransformerBlock(nn.Module):
 
-  def __init__(self, layer_id):
-    super().__init__()
-    self.attn = lambda x: x
-    self.moe = lambda x: x
-    self.engram = None
-    if layer_id in engram_cfg.layer_ids:
-      self.engram = Engram(layer_id=layer_id)
+#   def __init__(self, layer_id):
+#     super().__init__()
+#     self.attn = lambda x: x
+#     self.moe = lambda x: x
+#     self.engram = None
+#     if layer_id in engram_cfg.layer_ids:
+#       self.engram = Engram(layer_id=layer_id)
 
-  def forward(self, input_ids, hidden_states):
-    if self.engram is not None:
-      hidden_states = self.engram(hidden_states=hidden_states, input_ids=input_ids) + hidden_states
-    hidden_states = self.attn(hidden_states) + hidden_states
-    hidden_states = self.moe(hidden_states) + hidden_states
-    return hidden_states
+#   def forward(self, input_ids, hidden_states):
+#     if self.engram is not None:
+#       hidden_states = self.engram(hidden_states=hidden_states, input_ids=input_ids) + hidden_states
+#     hidden_states = self.attn(hidden_states) + hidden_states
+#     hidden_states = self.moe(hidden_states) + hidden_states
+#     return hidden_states
 
 
 # -----------------------------------------------------------------------------
@@ -655,7 +655,7 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
     np.testing.assert_array_equal(jax_offsets, pt_offsets, err_msg="Offsets mismatch")
 
     # 7. Verify Output
-    # Shape: (B, L, H, D)
+    # Shape: (B, S, H, D)
     self.assertEqual(y_jax.shape, (batch, seq_len, num_heads, dim))
 
     diff = np.abs(y_jax - to_jax(y_pt)).max()
@@ -738,7 +738,7 @@ class ShortConvTest(parameterized.TestCase):
     nnx.update(jax_model, weights)
 
     # 4. Input Data
-    # Shape: (B, L, G, C)
+    # Shape: (B, S, G, C)
     x_pt = torch.randn(batch_size, seq_len, hc_mult, hidden_size)
     x_jax = to_jax(x_pt)
 
@@ -821,7 +821,7 @@ class EngramTest(parameterized.TestCase):
     # Create random input_ids and hidden_states
     input_ids_np = np.random.randint(0, 1000, (batch_size, seq_len))
     pt_input_ids = torch.from_numpy(input_ids_np)
-    # (B, L, G, D)
+    # (B, S, G, D)
     pt_hidden_states = torch.randn(
         batch_size, seq_len, self.backbone_config.hc_mult, self.backbone_config.hidden_size, dtype=torch.float32
     )

@@ -254,7 +254,7 @@ class NgramHashMapping:
     sliding window via shifting:
       shift0: [The, cat, sat] -> [10, 25, 32]
       shift1: [PAD, The, cat] -> [0, 10, 25]
-      shift2: [PAD, PAD, The] -> [0, 10, 10]
+      shift2: [PAD, PAD, The] -> [0, 0, 10]
 
     2-gram: (shift0 * m0) XOR (shift1 * m1)
       [sat, cat] -> (32 * 3) ^ (25 * 5)
@@ -291,11 +291,11 @@ class NgramHashMapping:
       n_gram_index = n - 2
       vocab_sizes_for_this_gram = vocab_sizes[n_gram_index]
       mods = np.array(vocab_sizes_for_this_gram, dtype=np.int64)
-      # Broadcast Modulo: (B, T, 1) % (K,) -> (B, T, K)
+      # Broadcast Modulo: (B, S, 1) % (K,) -> (B, S, K)
       head_hashes = mix[..., None] % mods
       all_hashes.append(head_hashes)
 
-    # (B, T, K * (max_ngram_size-1))
+    # (B, S, K * (max_ngram_size-1))
     return np.concatenate(all_hashes, axis=2)
 
   def __call__(self, input_ids):
@@ -361,7 +361,7 @@ class ShortConv(nnx.Module):
 
   Shape Legend:
       B: Batch Size
-      L: Sequence Length
+      S: Sequence Length
       G: Number of Branches (hc_mult) - logical grouping of heads
       C: Embedding Dimension per Branch (hidden_size)
 
@@ -423,18 +423,18 @@ class ShortConv(nnx.Module):
     y = SiLU(Conv1D(RMSNorm(x)))
 
     Args:
-        x: Input tensor of shape (B, L, G, C)
+        x: Input tensor of shape (B, S, G, C)
     Returns:
-        Tensor of shape (B, L, G, C)
+        Tensor of shape (B, S, G, C)
 
     Note: G = hc_mult
     """
-    B, L, G, C = x.shape
+    B, S, G, C = x.shape
 
     # 1. Apply Norms (Vectorized over Group dim)
     # in_axes=(0, 2):  norms is axis 0, x is axis 2
     # out_axes=2:      put the group dim back at axis 2
-    # shape stays: (B, L, G, C)
+    # shape stays: (B, S, G, C)
     @nnx.vmap(in_axes=(0, 2), out_axes=2)
     def apply_norms(norms, x):
       return norms(x)
@@ -442,18 +442,18 @@ class ShortConv(nnx.Module):
     x = apply_norms(self.norms, x)
 
     # 2. Flatten Groups for Conv
-    # (B, L, G, C) -> (B, L, G * C)
-    x_flat = x.reshape(B, L, G * C)
+    # (B, S, G, C) -> (B, S, G * C)
+    x_flat = x.reshape(B, S, G * C)
 
     # 3. Apply Single Conv
     # Causal; Depthwise (Mixes temporal dimension L. Channels remain independent)
-    # Shape stays: (B, L, G * C)
+    # Shape stays: (B, S, G * C)
     y = self.conv(x_flat)
     y = self.act_fn(y)
 
     # 4. Reshape back to Branched Layout
-    # (B, L, G * C) -> (B, L, G, C)
-    return y.reshape(B, L, G, C)
+    # (B, S, G * C) -> (B, S, G, C)
+    return y.reshape(B, S, G, C)
 
 
 class Engram(nnx.Module):
@@ -598,27 +598,27 @@ class Engram(nnx.Module):
   def __call__(self, hidden_states: jax.Array, hash_input_ids: jax.Array) -> jax.Array:
     """
     Args:
-        hidden_states: Current transformer state (Query). Shape: (B, L, G, C)
-        input_ids: Raw token IDs. Shape: (B, L)
+        hidden_states: Current transformer state (Query). Shape: (B, S, G, C)
+        input_ids: Raw token IDs. Shape: (B, S)
     Returns:
-        output: Engram-augmented residuals. Shape: (B, L, G, C)
+        output: Engram-augmented residuals. Shape: (B, S, G, C)
 
     Note: G = hc_mult
     Note: hash_input_ids = hash_mapping.hash(input_ids)[layer_id]
     """
-    B, L, G, C = hidden_states.shape
+    B, S, G, C = hidden_states.shape
 
     # 1. Retrieve Memory
     # 1. Generate Hash Indices
     # Map raw text -> n-gram contexts -> hash indices z_{t,n,k}
-    # (B, L) -> (B, L, H_en), where H_en is the total count of heads across all n-gram orders.
+    # (B, S) -> (B, S, H_en), where H_en is the total count of heads across all n-gram orders.
     # hash_input_ids = jnp.array(self.hash_mapping.hash(input_ids)[self.layer_id])
 
     # 2. Retrieve Memory
     # Fetch e_{t,n,k} from the embedding table.
     # Flatten all n-gram heads into one vector e_t
-    # (B, L, H_en) -> (B, L, H_en, D_head) -> (B, L, D_en)
-    embeddings = self.mhe(hash_input_ids).reshape(B, L, -1)
+    # (B, S, H_en) -> (B, S, H_en, D_head) -> (B, S, D_en)
+    embeddings = self.mhe(hash_input_ids).reshape(B, S, -1)
 
     # 3. Gating Mechanism (Scaled Dot-Product)
     # Decide relevance of memory (Key) to current state (Query)
@@ -626,13 +626,13 @@ class Engram(nnx.Module):
     # 2. Compute Keys (Vectorized Broadcast)
     # We want to apply each of the G key_projs to the SAME embeddings.
     # in_axes: (0, None) -> 0 splits the Dense layers, None broadcasts embeddings
-    # out_axes: 2        -> Stack the results at axis 2 to get (B, L, G, C)
+    # out_axes: 2        -> Stack the results at axis 2 to get (B, S, G, C)
     @nnx.vmap(in_axes=(0, None), out_axes=2)
     def apply_projs(projs, x):
       return projs(x)
 
     # Key: Projection of retrieved n-gram memory
-    #  (B, L, D_en) ->  (B, L, G, C)
+    #  (B, S, D_en) ->  (B, S, G, C)
     keys_unnorm = apply_projs(self.key_projs, embeddings)
 
     # 3. Compute Norms (Vectorized Map)
@@ -641,17 +641,17 @@ class Engram(nnx.Module):
     def apply_norms(norms, x):
       return norms(x)
 
-    # K: (B, L, G, C) shape stays
+    # K: (B, S, G, C) shape stays
     k = apply_norms(self.k_norms, keys_unnorm)
 
     # Query: Current hidden state from the transformer
-    # Q: (B, L, G, C) shape stays
+    # Q: (B, S, G, C) shape stays
     q = apply_norms(self.q_norms, hidden_states)
 
     # 4. Gating (Vectorized)
     # Gate Score (Scalar per token)
 
-    # Dot product: (B, L, G)
+    # Dot product: (B, S, G)
     qk_product = jnp.einsum("blgc,blgc->blg", q, k, precision=self.config.matmul_precision)
     # Scale
     gate_logits = qk_product / jnp.sqrt(C)
@@ -659,20 +659,20 @@ class Engram(nnx.Module):
     # TODO(shuningjin): why, Stabilization trick: sign(x) * sqrt(|x|)
     gate_logits = jnp.sqrt(jnp.maximum(jnp.abs(gate_logits), 1e-6)) * jnp.sign(gate_logits)
     # Sigmoid activation to get gating probability [0, 1]
-    gates = jax.nn.sigmoid(gate_logits)  # (B, L, G)
+    gates = jax.nn.sigmoid(gate_logits)  # (B, S, G)
 
     # 5. Value Projection & Gating: v = Gate * Value_Proj(Memory)
 
-    # Project Engram Memory to Value: (B, L, D_en) -> (B, L, C)
+    # Project Engram Memory to Value: (B, S, D_en) -> (B, S, C)
     value = self.value_proj(embeddings)
 
     # Apply gate to value: broadcast and multiply
-    # (B, L, G, 1) * (B, L, 1, C) -> (B, L, G, C)
+    # (B, S, G, 1) * (B, S, 1, C) -> (B, S, G, C)
     v = gates[:, :, :, None] * value[:, :, None, :]
 
     # 6. Temporal Smoothing (ShortConv)
     # Apply Depthwise Conv (mixes L, keeps G and C independent)
-    # Shape remains, (B, L, G, C)
+    # Shape remains, (B, S, G, C)
     conv_out = self.short_conv(v)
 
     # residual for conv component
