@@ -24,7 +24,6 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from MaxText.common_types import Config
 from MaxText.common_types import MODEL_MODE_PREFILL
-from maxtext.inference import page_manager
 from MaxText.layers import attention_mla
 from MaxText.layers import deepseek_batchsplit
 from MaxText.layers import initializers
@@ -37,7 +36,7 @@ from MaxText.layers.normalizations import RMSNorm
 from MaxText.sharding import create_sharding
 from MaxText.sharding import maybe_shard_with_logical
 from maxtext.utils import max_utils
-
+from maxtext.inference import page_manager
 
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
