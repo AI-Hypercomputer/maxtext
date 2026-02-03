@@ -21,7 +21,7 @@ from absl.testing import absltest
 from maxtext.common.gcloud_stub import is_decoupled
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
 from MaxText.train import main as train_main
-from maxtext.tests.utils.test_helpers import get_test_dataset_path, get_test_base_output_directory
+from tests.utils.test_helpers import get_test_dataset_path, get_test_base_output_directory
 
 
 class Train(unittest.TestCase):

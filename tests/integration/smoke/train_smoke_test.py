@@ -18,7 +18,7 @@ import unittest
 
 from absl.testing import absltest
 
-from maxtext.tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
+from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 from MaxText.train import main as train_main
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled

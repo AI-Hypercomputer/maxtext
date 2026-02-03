@@ -20,7 +20,7 @@ import tempfile
 from absl.testing import absltest
 from absl.testing import parameterized
 
-from maxtext.tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path
 from MaxText import globals as maxtext_globals, train
 
 train_main = train.main
