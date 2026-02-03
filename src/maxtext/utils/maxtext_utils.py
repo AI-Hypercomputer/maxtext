@@ -536,6 +536,7 @@ def calculate_gated_delta_net_flops_per_device(config):
   # We multiply by 2 for FMA
   flops_conv = 2 * B * S * K_conv * (2 * K_dim + V_dim)
 
+<<<<<<< HEAD
   # 3. Core Gated Delta Net
   # This counts 4 distinct O(D^2) operations in the recurrent update:
   #   KK^T, VK^T, S(a(I-bKK^T)), and SQ.
@@ -543,6 +544,29 @@ def calculate_gated_delta_net_flops_per_device(config):
   # Total Core FLOPs = 2 (FMA) * 4 (Ops) * H * D^2 = 8 * H * D^2 per token.
   # We use D_k * D_v to generalize D^2 for potentially differing head dimensions.
   flops_core_per_token = H_v * (D_k * D_v) * 8
+=======
+  # 3. Core Gated Delta Net (Optimized WY Representation)
+  # The implementation broadcasts K heads to V heads if H_v > H_k
+  H_eff = max(H_k, H_v) 
+
+  # Per-token costs derived from jax_chunk_gated_delta_rule:
+  # Intra-chunk Pre-computation:
+  #   S = K @ K.T: 2 * C * D_k
+  #   A = (I+S)^-1: ~ C^2 (Triangular solve approximation)
+  #   U = A @ V: 2 * C * D_v
+  #   W = A @ K: 2 * C * D_k
+  # Scan / Output:
+  #   Out_Inter (Q @ h): 2 * D_k * D_v
+  #   Out_Intra_QK (Q @ K.T): 2 * C * D_k
+  #   Out_Intra_AV (Attn @ V): 2 * C * D_v
+  #   State_Update (W.T @ U): 2 * D_k * D_v
+  
+  # Summing per-token factors: 
+  # (2*C*D_k) + C^2 + (2*C*D_v) + (2*C*D_k) + (2*D_k*D_v) + (2*C*D_k) + (2*C*D_v) + (2*D_k*D_v)
+  # = 6*C*D_k + 4*C*D_v + 4*D_k*D_v + C^2
+  
+  flops_core_per_token = H_eff * (6 * C * D_k + 4 * C * D_v + 4 * D_k * D_v + C**2)
+>>>>>>> 09f85a04f (Update tflops calc to align with WY-optimized GDN)
   flops_core = B * S * flops_core_per_token
 
   # Weights part: Projections + Conv
