@@ -538,6 +538,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   if config.shard_mode == ShardMode.EXPLICIT:
     jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
+  os.environ["HF_DATASETS_DISABLE_DILL"] = "1"
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)

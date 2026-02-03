@@ -77,7 +77,7 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from MaxText.rl.evaluate_rl import evaluate
 from MaxText.rl import utils_rl
-from MaxText.input_pipeline.instruction_data_processing import load_template_from_file
+from maxtext.input_pipeline.instruction_data_processing import load_template_from_file
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 
 
@@ -369,7 +369,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   else:
     max_logging.log("Creating policy model with same config as reference model on trainer mesh")
     actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
-
 
   if trainer_config.debug.rl:
     max_logging.log("Policy Model initialized successfully")

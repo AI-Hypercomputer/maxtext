@@ -27,10 +27,10 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import multihost_utils
 
-from MaxText import tokenizer
-from MaxText import multihost_dataloading
-from MaxText import sequence_packing
-from MaxText.input_pipeline._input_pipeline_utils import get_tokenizer
+from maxtext.input_pipeline import tokenizer
+from maxtext.input_pipeline import multihost_dataloading
+from maxtext.input_pipeline.packing import sequence_packing
+from maxtext.input_pipeline.input_pipeline_utils import get_tokenizer
 from maxtext.utils import max_logging
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
