@@ -12,22 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-base_config: "base.yml"
-attention: "vllm_rpa"
-# NNX required for vLLM integration
-enable_nnx: True
-# Avoid re-initializing JAX distributed system when using vLLM
-skip_jax_distributed_system: True
-# Scanned layers are not supported with vLLM integration
-scan_layers: False
-# Set weight dtype to bfloat16 as is done in vLLM
-weight_dtype: bfloat16
 
+base_config: "vllm.yml"
 
-# -------------- Logical Axis Rules --------------
-mesh_axes: ['data', 'attn_dp', 'model', 'expert']
 logical_axis_rules: [
-                      ['activation_batch', ['expert']],
+                      ['activation_batch', ['']],
                       ['activation_batch_no_exp', []],
                       ['activation_embed_and_logits_batch', ['expert']],
                       ['activation_embed_and_logits_batch_sequence', ['expert']],
@@ -40,35 +29,41 @@ logical_axis_rules: [
                       ['activation_q_length', ['expert']],
                       ['activation_attn_embed', 'model'],
                       ['activation_embed', ['model', 'attn_dp']],
-                      ['activation_mlp', ['model', 'attn_dp']],
+                      ['activation_mlp', ['model', 'attn_dp', 'expert']],
                       ['activation_kv', ['model']],
                       ['activation_prefill_kv_batch', ['expert']],
-                      ['activation_kv_batch', ['expert']],
+                      ['activation_kv_batch', ['']],
                       ['activation_kv_batch_no_exp', []],
-                      ['activation_kv_head_dim', ['model']],
+                      ['activation_kv_head_dim', ['model', 'attn_dp', 'expert']],
                       ['activation_vocab', ['model', 'attn_dp']],
                       ['activation_norm_length', []],
                       ['activation_exp', ['expert']],
                       ['decode_batch', ['expert']],
                       ['decode_length', []],
-                      ['mlp', ['model', 'attn_dp']],
-                      ['mlp_no_fsdp', ['model', 'attn_dp']],
-                      ['moe_mlp', ['model', 'attn_dp']],
-                      ['vocab', ['model', 'attn_dp']],
-                      ['heads', ['model']],
-                      ['q_heads', ['model']],
-                      ['kv_heads', ['model']],
-                      ['kv_head_dim', []],
+                      ['mlp_no_fsdp', ['model', 'attn_dp', 'expert']],
+                      ['vocab', ['model', 'attn_dp', 'expert']],
+                      ['heads', ['expert', 'attn_dp', 'model']],
+                      ['q_heads', []],
+                      ['kv_heads', []],
+                      ['kv_head_dim', ['model', 'attn_dp', 'expert']],
+                      ['kv', ['model', 'attn_dp', 'expert']],
                       ['kv', []],
-                      ['embed', ['expert']],
+                      ['embed', []],
+                      ['mlp', ['model', 'attn_dp', 'expert']],
+                      ['moe_mlp', []],
                       ['embed_tensor_transpose', ['attn_dp', 'model']],
                       ['embed_no_exp', []],
-                      ['q_lora', ['expert']],
-                      ['kv_lora', ['expert']],
+                      ['q_lora', []],
+                      ['kv_lora', []],
                       ['norm', []],
                       ['cache_heads', ['model']],
-                      ['exp', ['expert']],
+                      ['exp', ['expert', 'attn_dp', 'model']],
                       ['paged_kv_heads', ['model']],
+                      ['cache_batch_prefill', []],
+                      ['cache_batch', []],
+                      ['cache_sequence', []],
+                      ['cache_heads_none', []],
+                      ['cache_kv', []],
+                      ['kv_lora_up_proj',['expert', 'attn_dp', 'model']],
+                      ['q_lora_up_proj',['expert', 'attn_dp', 'model']],
                     ]
-data_sharding: [['data', 'attn_dp', 'model', 'expert']]
-input_data_sharding_logical_axes: ['activation_embed_and_logits_batch']

@@ -351,16 +351,14 @@ class RoutedMoE(nnx.Module):
 
     if self.config.shard_exp_on_fsdp:
       # special sharding for dsv3
-      self.wi_kernel_axes = ("embed_no_exp", None, "mlp")
-      self.wo_kernel_axes = ("embed_no_exp", "mlp", None)
+      self.wi_kernel_axes = ("embed_no_exp", None, "moe_mlp")
+      self.wo_kernel_axes = ("embed_no_exp", "moe_mlp", None)
     elif self.config.use_2d_fsdp_sharding:
-      self.wi_kernel_axes = ("embed_no_exp", "mlp", None)
-      self.wo_kernel_axes = ("embed_no_exp", "mlp", None)
-    elif self.config.use_batch_split_schedule:
-      self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
+      self.wi_kernel_axes = ("embed_no_exp", "moe_mlp", None)
+      self.wo_kernel_axes = ("embed_no_exp", "moe_mlp", None)
     else:
-      self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
-      self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
+      self.wi_kernel_axes = ("exp", "embed_no_exp", "moe_mlp")
+      self.wo_kernel_axes = ("exp", "moe_mlp", "embed_no_exp")
 
     if self.config.attention == "vllm_rpa":
       # vLLM uses 'model' as the tensor parallelism axis name
@@ -1377,11 +1375,11 @@ class RoutedMoE(nnx.Module):
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
-      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp"))
-      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp"))
+      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "moe_mlp"))
+      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "moe_mlp"))
 
       # Unshard on fsdp_transpose axis
-      wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp", "embed_tensor_transpose"))
+      wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "moe_mlp", "embed_tensor_transpose"))
 
       # Make sure XLA does not optimize by combining above All-Gather to unshard
       # on FSDP axis and the subsequent unshard on fsdp_transpose axis
@@ -1829,7 +1827,7 @@ class RoutedMoE(nnx.Module):
             dispatch_axis,
         )
       with jax.named_scope("wi_0"):
-        w0_kernel_axes = ("exp", None, "mlp")
+        w0_kernel_axes = ("exp", None, "moe_mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
             mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
@@ -1846,7 +1844,7 @@ class RoutedMoE(nnx.Module):
         )
         layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
-        w1_kernel_axes = ("exp", None, "mlp")
+        w1_kernel_axes = ("exp", None, "moe_mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
             mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
@@ -1863,7 +1861,7 @@ class RoutedMoE(nnx.Module):
         layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
       with jax.named_scope("wo"):
-        wo_kernel_axes = ("exp", "mlp", None)
+        wo_kernel_axes = ("exp", "moe_mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
             mlp_down_einsum,

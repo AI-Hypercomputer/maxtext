@@ -47,7 +47,6 @@ import transformers
 from maxtext.utils import model_creation_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
@@ -80,15 +79,24 @@ flags.DEFINE_integer("max_target_length", 1024, "Maximum total context length (M
 flags.DEFINE_integer("max_prefill_length", 512, "Maximum prefill length.")
 flags.DEFINE_float("gpu_memory_utilization", 0.72, "Fraction of GPU memory to be used for the model executor.")
 
+# vllm config variables
+flags.DEFINE_integer("vllm_swap_space", 2, "per device swap space in GB")
+flags.DEFINE_integer("vllm_async_scheduling", 1, "Async DP Scheduler for vLLM")
+
 # Decoding
 flags.DEFINE_bool("use_tunix", False, "Whether to use Tunix for vLLM decoding.")
 flags.DEFINE_string("prompt", "Suggest some famous landmarks in London.", "The prompt to decode.")
 flags.DEFINE_integer("decode_sampling_temperature", 0, "Temperature for sampling.")
 flags.DEFINE_integer("decode_sampling_nucleus_p", 1, "Nucleus sampling probability.")
 flags.DEFINE_integer("decode_sampling_top_k", 1, "Top-k sampling probability.")
+flags.DEFINE_string(
+    "vllm_config_path",
+    "src/MaxText/configs/vllm.yml",
+    "Path to vLLM config file. Defaults to MAXTEXT_PKG_DIR/configs/vllm.yml.",
+)
 
 # Mark required flags
-flags.mark_flag_as_required("hf_config_path")
+# flags.mark_flag_as_required("hf_config_path")
 
 
 def decode_with_vllm(
@@ -103,13 +111,15 @@ def decode_with_vllm(
     max_prefill_length: int,
     max_target_length: int,
     gpu_memory_utilization: float,
+    vllm_swap_space: int,
+    vllm_async_scheduling: int,
     enable_expert_parallel: bool,
     prompt: str,
     decode_sampling_temperature: float,
     decode_sampling_nucleus_p: float,
     decode_sampling_top_k: float,
     debug_sharding: bool,
-    vllm_config_path: str | None = None,
+    vllm_config_path: str,
 ) -> None:
   """Decode using vLLM with a MaxText model implementation.
 
@@ -130,7 +140,7 @@ def decode_with_vllm(
     decode_sampling_temperature: Temperature for sampling.
     decode_sampling_nucleus_p: Nucleus sampling probability.
     decode_sampling_top_k: Top-k sampling probability.
-    vllm_config_path: Path to vLLM config file. Defaults to MAXTEXT_PKG_DIR/configs/vllm.yml.
+    vllm_config_path: Path to vLLM config file. Defaults to src/MaxText/configs/vllm.yml.
   """
 
   # Prepare vLLM Arguments
@@ -145,6 +155,8 @@ def decode_with_vllm(
   vllm_args["enable_expert_parallel"] = enable_expert_parallel
   vllm_args["hf_config_path"] = hf_config_path
   vllm_args["gpu_memory_utilization"] = gpu_memory_utilization
+  vllm_args["swap_space"] = vllm_swap_space
+  vllm_args["async_scheduling"] = vllm_async_scheduling
 
   # Prepare MaxText and sharding configs (Parallelism is dynamic)
   vllm_args["additional_config"]["maxtext_config"] = {
@@ -185,7 +197,6 @@ def decode_with_vllm(
       f"and EP={ici_expert_parallelism if enable_expert_parallel else 0}..."
   )
 
-  vllm_config_path = os.path.join(MAXTEXT_PKG_DIR, "configs", "vllm.yml")
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
@@ -291,12 +302,15 @@ def main(argv: Sequence[str]) -> None:
         max_target_length=FLAGS.max_target_length,
         max_prefill_length=FLAGS.max_prefill_length,
         gpu_memory_utilization=FLAGS.gpu_memory_utilization,
+        vllm_swap_space=FLAGS.vllm_swap_space,
+        vllm_async_scheduling=FLAGS.vllm_async_scheduling,
         enable_expert_parallel=FLAGS.enable_expert_parallel,
         prompt=FLAGS.prompt,
         decode_sampling_temperature=FLAGS.decode_sampling_temperature,
         decode_sampling_nucleus_p=FLAGS.decode_sampling_nucleus_p,
         decode_sampling_top_k=FLAGS.decode_sampling_top_k,
         debug_sharding=FLAGS.debug_sharding,
+        vllm_config_path=FLAGS.vllm_config_path,
     )
 
 
