@@ -370,34 +370,25 @@ class ShortConv(nnx.Module):
   Implements a Grouped Depthwise Causal Convolution block.
 
   Applies local temporal mixing (smoothing) to the retrieved embeddings.
-  - It uses independent RMSNorms for each branch
-  - followed by a 1D convolution. Note it is depth-wise:
+  - Independent RMSNorms for each branch
+  - 1D convolution. Note it is depth-wise:
     mixes information across time steps [t-k, t] without mixing across channels.
-
-  Shape annotation:
-    B: Batch Size
-    S: Sequence Length
-    G: Number of Branches (hc_mult) - logical grouping of heads
-    C: Embedding Dimension per Branch (hidden_size)
-
-  Note on Convolution:
-    Conv1D - (G * C) as the total number of input channels.
-    Depthwise - It applies a separate filter to every single dimension in C, for every group G.
   """
 
   def __init__(
       self,
       config,
-      hidden_size: int,
+      hidden_size: int,  # base_emb_dim
       kernel_size: int = 4,  # Temporal Window Size
       dilation: int = 1,
       hc_mult: int = 4,
       rngs: nnx.Rngs = None,
   ):
     self.hc_mult = hc_mult
+    # (G * D) as the total number of input channels
     total_channels = hidden_size * hc_mult
 
-    # B: Vectorized Norms (One unique module per group)
+    # Vectorized Norms: One unique module per group
     @nnx.split_rngs(splits=hc_mult)
     @nnx.vmap(in_axes=0, out_axes=0)
     def create_norms(r):
@@ -430,46 +421,48 @@ class ShortConv(nnx.Module):
 
   def __call__(self, x: jax.Array) -> jax.Array:
     """
-    y = SiLU(Conv1D(RMSNorm(x)))
+    Compute y = SiLU(Conv1D(RMSNorm(x)))
 
     Args:
-      x: Input tensor of shape (B, S, G, C)
+      x: Input tensor of shape (B, S, G, D)
     Returns:
-      Tensor of shape (B, S, G, C)
+      Tensor of shape (B, S, G, D)
 
-    Note: G = hc_mult
+    Shape annotation:
+      B: Batch Size
+      S: Sequence Length
+      G: Number of Branches (hc_mult)
+      D: base_emb_dim
     """
-    B, S, G, C = x.shape
+    B, S, G, D = x.shape
 
     # Apply Norms (Vectorized over Group dim)
     # in_axes=(0, 2): norms is axis 0, x is axis 2, out_axes=2: put the group dim back at axis 2
-    # shape stays (B, S, G, C)
+    # shape stays (B, S, G, D)
     @nnx.vmap(in_axes=(0, 2), out_axes=2)
     def apply_norms(norms, x):
       return norms(x)
 
     x = apply_norms(self.norms, x)
 
-    # Flatten branch: (B, S, G, C) -> (B, S, G * C)
-    x_flat = x.reshape(B, S, G * C)
-    # Apply depthwise conv to mixes temporal dimension only
-    # Shape stays (B, S, G * C)
+    # Flatten branch: (B, S, G, D) -> (B, S, G * D)
+    x_flat = x.reshape(B, S, G * D)
+    # Depthwise Convolution to mixes temporal dimension S only. Shape stays (B, S, G * D)
     y = self.conv(x_flat)
+    # Activation
     y = jax.nn.silu(y)
-
-    # Restore branch: (B, S, G * C) -> (B, S, G, C)
-    return y.reshape(B, S, G, C)
+    # Restore branch: (B, S, G * D) -> (B, S, G, D)
+    return y.reshape(B, S, G, D)
 
 
 class Engram(nnx.Module):
   """
-  Implements the Engram Memory Layer.
+  Implements the Engram Memory Layer with n-gram statistics.
 
-  This layer augments the standard transformer hidden states with long-range
-  n-gram statistics. It follows a Retrieve-and-Gate architecture:
-  1. Retrieve: Fetch embeddings for current n-gram contexts using Multi-Head Hashing.
-  2. Gate: Decide how much of this retrieved memory to merge based on the current state.
-  3. Mix: Apply local temporal smoothing via ShortConv.
+  It follows a Retrieve-and-Gate paradigm:
+  - Context-independent Retrieval: Fetch n-gram embeddings using Multi-Head Hashing as static memory.
+  - Context-aware Gating: Decide how much of this retrieved memory to use based on the current dynamic state.
+  - Mix: Apply local temporal smoothing via ShortConv.
 
   Note: vocab_sizes = hash_mapping.get_vocab_sizes(layer_id)
   """
@@ -482,7 +475,7 @@ class Engram(nnx.Module):
       quant: Optional[Quant] = None,
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       *,
-      hc_mult: int = 1,
+      hc_mult: int = 4,
       vocab_sizes,
       engram_num_heads: int,
       engram_head_dim: int,
@@ -593,20 +586,22 @@ class Engram(nnx.Module):
   def __call__(self, hidden_states: jax.Array, hash_input_ids: jax.Array) -> jax.Array:
     """
     Args:
-      hidden_states: Current transformer state (Query). Shape: (B, S, G, C)
+      hidden_states: Current transformer state (Query). Shape: (B, S, G, D)
       hash_input_ids: Raw token IDs. Shape: (B, S, H_total)
-      output: Engram-augmented residuals. Shape: (B, S, G, C)
+      output: Engram-augmented residuals. Shape: (B, S, G, D)
 
     Note: hash_input_ids = hash_mapping.hash(input_ids)[layer_id]
 
     Shape annotation:
       B: Batch Size
       S: Sequence Length
-      G: Number of Branches (hc_mult)
-      C: Embedding Dimension per Branch (hidden_size)
+      G: hc_mult, Number of Branches
       H_total: Total number of heads across n-grams. num_head * num_ngrams
+      D: base_emb_dim
+      D_head: Dimension of a single head embedding
+      D_en: Dimension of flattened embedding across heads and n-grams
     """
-    B, S, _, C = hidden_states.shape
+    B, S, _, D = hidden_states.shape
 
     # 1. Retrieve Memory from Embedding
     # (B, S, H_total) -> (B, S, H_total, D_head)
@@ -617,12 +612,12 @@ class Engram(nnx.Module):
     # 2. Static Memory as Key
     # Vectorized broadcast: apply each of the G key_projs to the SAME embeddings.
     # in_axes: (0, None) -> 0 splits the Dense layers, None broadcasts embeddings
-    # out_axes: 2        -> Stack the results at axis 2 to get (B, S, G, C)
+    # out_axes: 2        -> Stack the results at axis 2 to get (B, S, G, D)
     @nnx.vmap(in_axes=(0, None), out_axes=2)
     def apply_projs(projs, x):
       return projs(x)
 
-    # (B, S, D_en) ->  (B, S, G, C)
+    # (B, S, D_en) ->  (B, S, G, D)
     key = apply_projs(self.key_projs, embeddings)
 
     # 3. Compute Norms
@@ -631,32 +626,32 @@ class Engram(nnx.Module):
     def apply_norms(norms, x):
       return norms(x)
 
-    # (B, S, G, C) shape stays
+    # (B, S, G, D) shape stays
     key = apply_norms(self.k_norms, key)
 
     # 4. Dynamic Context as Query
-    # (B, S, G, C) shape stays
+    # (B, S, G, D) shape stays
     query = apply_norms(self.q_norms, hidden_states)
 
     # 5. QK product as Gates
-    # Decide relevance of memory (Key) to current state (Query)
+    # Compute similarity of memory (Key) and current state (Query)
     qk_product = jnp.einsum("bsgc,bsgc->bsg", query, key, precision=self.config.matmul_precision)
-    gate = qk_product / jnp.sqrt(C)
+    gate = qk_product / jnp.sqrt(D)
     # TODO(shuningjin): why, Stabilization trick: sign(x) * sqrt(|x|)
     gate = jnp.sqrt(jnp.maximum(jnp.abs(gate), 1e-6)) * jnp.sign(gate)
     # Sigmoid activation to get gating probability [0, 1]
     gate = jax.nn.sigmoid(gate)  # (B, S, G)
 
     # 6. Static Memory as Value
-    # (B, S, D_en) -> (B, S, C)
+    # (B, S, D_en) -> (B, S, D)
     value = self.value_proj(embeddings)
 
     # 7. Apply Gates to Value
-    # (B, S, G, 1) * (B, S, 1, C) -> (B, S, G, C)
+    # (B, S, G, 1) * (B, S, 1, D) -> (B, S, G, D)
     gated_value = gate[:, :, :, None] * value[:, :, None, :]
 
     # 8. ShortConv as Temporal Smoothing
-    # Shape remains, (B, S, G, C)
+    # Shape remains, (B, S, G, D)
     # Apply depthwise conv to mix S
     conv_output = self.short_conv(gated_value)
     # residual for conv component
