@@ -1002,6 +1002,31 @@ class FineTuning(BaseModel):
   use_grpo: None | bool = Field(None, description="If True, enables Group Relative Policy Optimization.")
 
 
+class LoRA(BaseModel):
+  """Configuration for LoRA / QLoRA adapters."""
+
+  enable_lora: bool = Field(False, description="If True, enables LoRA/QLoRA during fine-tuning.")
+  lora_rank: NonNegativeInt = Field(0, description="LoRA rank. Set >0 when LoRA is enabled.")
+  lora_alpha: NonNegativeFloat = Field(0.0, description="LoRA alpha scaling factor.")
+  lora_module_path: str = Field(
+      "",
+      description=(
+          "Regex identifying target modules for LoRA, e.g."
+          " '.*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj'."
+      ),
+  )
+  lora_weight_qtype: str | None = Field(
+      None,
+      description=(
+          "Optional quantization type for QLoRA (e.g., 'nf4'). If set, QLoRA is applied."
+      ),
+  )
+  lora_tile_size: NonNegativeInt | None = Field(
+      None,
+      description="Optional tile size for QLoRA (e.g., 128 or 256).",
+  )
+
+
 class Distillation(BaseModel):
   """Configuration for Knowledge Distillation."""
 
@@ -1731,6 +1756,7 @@ class MaxTextConfig(
     AdamW,
     Muon,
     FineTuning,
+    LoRA,
     Distillation,
     # Reinforcement Learning
     RLHardware,

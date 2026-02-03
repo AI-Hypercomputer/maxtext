@@ -20,6 +20,16 @@ sft_train_on_completion_only: True
 packing: True
 learning_rate: 2.e-5
 
+# -------------- LoRA / QLoRA --------------
+# Enable LoRA/QLoRA by setting enable_lora: True and configuring the fields below.
+enable_lora: False
+lora_rank: 0
+lora_alpha: 0.0
+lora_module_path: ""
+# For QLoRA, set lora_weight_qtype (e.g., "nf4") and optionally lora_tile_size.
+lora_weight_qtype: null
+lora_tile_size: null
+
 # -------------- HF pipeline --------------
 dataset_type: hf
 hf_path: 'HuggingFaceH4/ultrachat_200k'
