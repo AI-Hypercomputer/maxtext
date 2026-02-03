@@ -31,8 +31,8 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
 )
 
 from MaxText import multimodal_utils
-from MaxText.input_pipeline._input_pipeline_utils import ComputeQwen3OmniPositions
 from MaxText.layers.embeddings import Qwen3OmniMoeThinkerTextRotaryEmbedding as JaxMRoPE
+from maxtext.input_pipeline.input_pipeline_utils import ComputeQwen3OmniPositions
 
 
 # Qwen3-Omni special token IDs
