@@ -28,8 +28,8 @@ from jax.sharding import PartitionSpec
 import tensorflow as tf
 
 from MaxText import pyconfig
+from MaxText import multihost_dataloading
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
-from maxtext.input_pipeline import multihost_dataloading
 
 
 class MultihostDataloadingTest(unittest.TestCase):

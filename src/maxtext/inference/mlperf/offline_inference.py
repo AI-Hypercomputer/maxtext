@@ -35,8 +35,8 @@ from jetstream.engine import engine_api
 # pylint: disable=no-name-in-module
 from MaxText.maxengine import MaxEngine
 from MaxText.maxengine import set_engine_vars_from_base_engine
-from maxtext.input_pipeline.packing.prefill_packing import PrefillProcessor
-from maxtext.input_pipeline.packing.prefill_packing import BatchedPrefillProcessor
+from MaxText.prefill_packing import PrefillProcessor
+from MaxText.prefill_packing import BatchedPrefillProcessor
 
 DecodeState = Any
 Params = Any

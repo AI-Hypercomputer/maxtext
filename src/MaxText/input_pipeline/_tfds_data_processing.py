@@ -24,10 +24,10 @@ import tensorflow_datasets as tfds
 
 import jax
 
-from maxtext.input_pipeline import multihost_dataloading
-from maxtext.input_pipeline import tokenizer
-from maxtext.input_pipeline.packing import sequence_packing
-from maxtext.input_pipeline import input_pipeline_utils
+from MaxText import multihost_dataloading
+from MaxText import tokenizer
+from MaxText import sequence_packing
+from MaxText.input_pipeline import _input_pipeline_utils
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -99,14 +99,14 @@ def preprocessing_pipeline(
   if not use_dpo:
     assert len(data_column_names) == 1
     dataset = dataset.map(
-        lambda x: input_pipeline_utils.normalize_features(x, data_column_names[0]), num_parallel_calls=AUTOTUNE
+        lambda x: _input_pipeline_utils.normalize_features(x, data_column_names[0]), num_parallel_calls=AUTOTUNE
     )
   else:
     dataset = dataset.map(lambda x: {col: x[col] for col in data_column_names}, num_parallel_calls=AUTOTUNE)
 
   data_column_names = data_column_names if use_dpo else ("inputs", "targets")
 
-  tokenizer_model = input_pipeline_utils.get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
+  tokenizer_model = _input_pipeline_utils.get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
   if tokenizer_model.pad_id is not None:
     pad_id = tokenizer_model.pad_id
   elif tokenizer_model.unk_id is not None:
@@ -125,7 +125,7 @@ def preprocessing_pipeline(
     # 1 token for both inputs and targets
     extra_tokens = 1 if not use_dpo else 0
     dataset = dataset.map(
-        lambda x: input_pipeline_utils.truncate_to_max_allowable_length(x, max_target_length + extra_tokens),
+        lambda x: _input_pipeline_utils.truncate_to_max_allowable_length(x, max_target_length + extra_tokens),
         num_parallel_calls=AUTOTUNE,
     )
 
@@ -138,7 +138,7 @@ def preprocessing_pipeline(
   # Shift inputs for teacher-forced training
   if shift and not use_dpo:
     dataset = dataset.map(
-        input_pipeline_utils.shift_data_by_truncation, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True
+        _input_pipeline_utils.shift_data_by_truncation, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True
     )
 
   # Perform greedy sequence packing and batching
@@ -154,7 +154,7 @@ def preprocessing_pipeline(
         drop_remainder=drop_remainder,
     )
     dataset = dataset.map(
-        lambda x: input_pipeline_utils.add_segmentation_and_position(x, data_column_names, padding_token=pad_id),
+        lambda x: _input_pipeline_utils.add_segmentation_and_position(x, data_column_names, padding_token=pad_id),
         num_parallel_calls=tf.data.AUTOTUNE,
         deterministic=True,
     )

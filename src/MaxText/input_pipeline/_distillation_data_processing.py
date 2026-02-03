@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 
 import datasets
 
-from maxtext.input_pipeline import input_pipeline_utils
+from MaxText.input_pipeline import _input_pipeline_utils
 from maxtext.utils import max_logging
 
 
@@ -85,7 +85,7 @@ def process_dataset(config, dataset):  # pylint: disable=redefined-outer-name
   assert any(
       set(data_column_names) == set(supported) for supported in supported_columns
   ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_column_names}"
-  assert input_pipeline_utils.is_conversational(
+  assert _input_pipeline_utils.is_conversational(
       dataset.features, data_column_names
   ), "Dataset is not in conversational format."
 

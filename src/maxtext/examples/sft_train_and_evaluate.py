@@ -88,7 +88,7 @@ from flax import nnx
 
 from MaxText.globals import MAXTEXT_REPO_ROOT
 from MaxText import pyconfig
-from maxtext.input_pipeline import instruction_data_processing
+from MaxText.input_pipeline import instruction_data_processing
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.post_train.sft import train_sft
 from maxtext.utils import max_logging

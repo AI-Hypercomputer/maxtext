@@ -19,8 +19,8 @@ import unittest
 
 import grain.python as grain
 import numpy as np
-from maxtext.input_pipeline import grain_tokenizer
-from maxtext.input_pipeline import input_pipeline_utils
+from MaxText.input_pipeline import _grain_tokenizer
+from MaxText.input_pipeline import _input_pipeline_utils
 from numpy.testing import assert_array_equal
 
 
@@ -51,7 +51,7 @@ class TokenizerTransformTest(unittest.TestCase):
 
   def test_tokenize_and_trim(self):
     """Tests the 1:1 MapTransform (truncation) logic."""
-    trim_op = grain_tokenizer.TokenizeAndTrim(
+    trim_op = _grain_tokenizer.TokenizeAndTrim(
         feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
     )
     trim_ds = self.base_ds.map(trim_op)
@@ -70,7 +70,7 @@ class TokenizerTransformTest(unittest.TestCase):
 
   def test_tokenize_and_chunk(self):
     """Tests the 1:N FlatMapTransform (chunking) logic."""
-    chunk_op = grain_tokenizer.TokenizeAndChunk(
+    chunk_op = _grain_tokenizer.TokenizeAndChunk(
         feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
     )
     chunk_ds = self.base_ds.apply(chunk_op)
@@ -90,10 +90,10 @@ class TokenizerTransformTest(unittest.TestCase):
 
   def test_trim_and_pad_chaining(self):
     """Tests chaining TokenizeAndTrim.map() -> PadOrTrimToMaxLength.map()"""
-    trim_op = grain_tokenizer.TokenizeAndTrim(
+    trim_op = _grain_tokenizer.TokenizeAndTrim(
         feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
     )
-    pad_op = input_pipeline_utils.PadOrTrimToMaxLength(max_length=self.pad_length, pad_id=self.pad_id)
+    pad_op = _input_pipeline_utils.PadOrTrimToMaxLength(max_length=self.pad_length, pad_id=self.pad_id)
     chained_ds = self.base_ds.map(trim_op).map(pad_op)
     results = list(chained_ds)
     self.assertEqual(len(results), len(self.source_data))
@@ -110,10 +110,10 @@ class TokenizerTransformTest(unittest.TestCase):
 
   def test_chunk_and_pad_chaining(self):
     """Tests chaining TokenizeAndChunk.apply() -> PadOrTrimToMaxLength.map()"""
-    chunk_op = grain_tokenizer.TokenizeAndChunk(
+    chunk_op = _grain_tokenizer.TokenizeAndChunk(
         feature_names=self.feature_names, sequence_length=self.max_len, tokenizer=self.mock_tokenizer
     )
-    pad_op = input_pipeline_utils.PadOrTrimToMaxLength(max_length=self.pad_length, pad_id=self.pad_id)
+    pad_op = _input_pipeline_utils.PadOrTrimToMaxLength(max_length=self.pad_length, pad_id=self.pad_id)
     chained_ds = self.base_ds.apply(chunk_op).map(pad_op)
     results = list(chained_ds)
     self.assertEqual(len(results), 5)

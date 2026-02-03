@@ -26,10 +26,10 @@ import jax
 from grain.experimental import BestFitPackIterDataset, pick_performance_config
 import grain.python as grain
 
-from maxtext.input_pipeline import input_pipeline_utils
-from maxtext.input_pipeline import grain_tokenizer
-from maxtext.input_pipeline import multihost_dataloading
-from maxtext.input_pipeline import tokenizer
+from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.input_pipeline import _grain_tokenizer
+from MaxText import multihost_dataloading
+from MaxText import tokenizer
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
@@ -199,10 +199,10 @@ def pretrain_preprocessing_pipeline(
 ):
   """Use grain pipeline to pre-process the dataset and return iterators for pretrain"""
   if config.grain_file_type == "arrayrecord":
-    dataset = dataset.map(input_pipeline_utils.ParseFeatures(data_columns, tokenize))
-    dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
+    dataset = dataset.map(_input_pipeline_utils.ParseFeatures(data_columns, tokenize))
+    dataset = dataset.map(_input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
   else:
-    dataset = dataset.map(input_pipeline_utils.KeepFeatures(feature_names=data_columns))
+    dataset = dataset.map(_input_pipeline_utils.KeepFeatures(feature_names=data_columns))
 
   assert len(data_columns) == 1
   text_column = data_columns[0]
@@ -224,13 +224,13 @@ def pretrain_preprocessing_pipeline(
 
   if tokenize:
     if config.use_truncation:
-      dataset = dataset.map(grain_tokenizer.TokenizeAndTrim(text_column, config.max_target_length, tokenizer_model))
+      dataset = dataset.map(_grain_tokenizer.TokenizeAndTrim(text_column, config.max_target_length, tokenizer_model))
     else:
-      dataset = dataset.apply(grain_tokenizer.TokenizeAndChunk(text_column, config.max_target_length, tokenizer_model))
+      dataset = dataset.apply(_grain_tokenizer.TokenizeAndChunk(text_column, config.max_target_length, tokenizer_model))
 
   data_columns = ("inputs", "targets")
   rekey_dict = {col: text_column for col in data_columns}
-  dataset = dataset.map(input_pipeline_utils.Rekey(rekey_dict))
+  dataset = dataset.map(_input_pipeline_utils.Rekey(rekey_dict))
 
   # Pack and Batch examples.
   batch_size = config.global_batch_size_to_load // jax.process_count()
@@ -273,15 +273,15 @@ def pretrain_preprocessing_pipeline(
         "targets_position": "targets_positions",
         "inputs_position": "inputs_positions",
     }
-    dataset = dataset.map(input_pipeline_utils.Rekey(rekey_dict))
+    dataset = dataset.map(_input_pipeline_utils.Rekey(rekey_dict))
   else:
-    dataset = dataset.map(input_pipeline_utils.PadOrTrimToMaxLength(config.max_target_length, pad_id))
+    dataset = dataset.map(_input_pipeline_utils.PadOrTrimToMaxLength(config.max_target_length, pad_id))
   batch_fn = functools.partial(grain.experimental.batch_and_pad, batch_size=batch_size, pad_value=pad_id)
   dataset = dataset.batch(batch_size, batch_fn=batch_fn)
 
   # Shift inputs for teacher-forced training
   dataset = dataset.map(
-      input_pipeline_utils.ShiftData(
+      _input_pipeline_utils.ShiftData(
           ignored_ids=[pad_id],
           axis=1,
       )
@@ -313,8 +313,8 @@ def dpo_preprocessing_pipeline(
 ):
   """Use grain to pre-process the dataset and return iterators for dpo fine-tuning"""
   if config.grain_file_type == "arrayrecord":
-    dataset = dataset.map(input_pipeline_utils.ParseFeatures(data_columns, tokenize))
-    dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
+    dataset = dataset.map(_input_pipeline_utils.ParseFeatures(data_columns, tokenize))
+    dataset = dataset.map(_input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
   tokenizer_model = tokenizer.build_tokenizer(
       config.tokenizer_path,
       config.tokenizer_type,
@@ -331,9 +331,9 @@ def dpo_preprocessing_pipeline(
     pad_id = -1
 
   if tokenize:
-    dataset = dataset.map(grain_tokenizer.TokenizeAndTrim(data_columns, config.max_target_length, tokenizer_model))
+    dataset = dataset.map(_grain_tokenizer.TokenizeAndTrim(data_columns, config.max_target_length, tokenizer_model))
 
-  dataset = dataset.map(input_pipeline_utils.PadOrTrimToMaxLength(config.max_target_length, pad_id))
+  dataset = dataset.map(_input_pipeline_utils.PadOrTrimToMaxLength(config.max_target_length, pad_id))
   batch_size = config.global_batch_size_to_load // jax.process_count()
   batch_fn = functools.partial(grain.experimental.batch_and_pad, batch_size=batch_size, pad_value=pad_id)
   dataset = dataset.batch(batch_size, batch_fn=batch_fn)

@@ -177,7 +177,7 @@ def setup_train_loop(config, recorder, devices=None):
     state: the initialized train state
   """
   # pylint: disable=import-outside-toplevel
-  from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
+  from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     model = model_creation_utils.from_config(config, devices)

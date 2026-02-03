@@ -38,13 +38,13 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
 
+from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
+from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from maxtext.input_pipeline import input_pipeline_utils
-from maxtext.utils import maxtext_utils
 
 
 def get_golden_data(model_name):
@@ -80,15 +80,15 @@ def prepare_maxtext_inputs(maxtext_data, config):
       add_eos_token=False,
       model_max_length=config.max_target_length,
   )
-  data = input_pipeline_utils.apply_chat_template(maxtext_data, tokenizer, "messages")
-  tokenized_data = input_pipeline_utils.tokenization(
+  data = _input_pipeline_utils.apply_chat_template(maxtext_data, tokenizer, "messages")
+  tokenized_data = _input_pipeline_utils.tokenization(
       data,
       hf_tokenizer=tokenizer,
       truncation=False,
       max_length=config.max_target_length,
       column_names=["messages"],
   )
-  masked_inputs = input_pipeline_utils.SFTPromptMasking(
+  masked_inputs = _input_pipeline_utils.SFTPromptMasking(
       text_column_name="messages",
       completion_only=False,
       max_target_length=config.max_target_length,

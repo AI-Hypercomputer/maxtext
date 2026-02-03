@@ -60,7 +60,7 @@ from huggingface_hub import create_repo, get_full_repo_name, repo_exists, upload
 
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
-from maxtext.input_pipeline import distillation_data_processing
+from MaxText.input_pipeline import _distillation_data_processing
 
 from jetstream.core.proto import jetstream_pb2
 from jetstream.core.proto import jetstream_pb2_grpc
@@ -231,7 +231,7 @@ def upload_data(config, data, batch_num):  # pylint: disable=redefined-outer-nam
 
 def generate_data(config):  # pylint: disable=redefined-outer-name
   """Generates data for distillation."""
-  dataset = distillation_data_processing.load_dataset(config)
+  dataset = _distillation_data_processing.load_dataset(config)
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(
       config.tokenizer_path,
@@ -244,8 +244,8 @@ def generate_data(config):  # pylint: disable=redefined-outer-name
     data = dataset[start_idx : start_idx + config.batch_size]
     start_idx += config.batch_size
     sampled_dataset = Dataset.from_dict(data)
-    sampled_dataset = distillation_data_processing.process_dataset(config, sampled_dataset)
-    requests = distillation_data_processing.filter_dataset(config, sampled_dataset, tokenizer)
+    sampled_dataset = _distillation_data_processing.process_dataset(config, sampled_dataset)
+    requests = _distillation_data_processing.filter_dataset(config, sampled_dataset, tokenizer)
     distillation_data = generate_completions(config, requests, tokenizer)
     upload_data(config, distillation_data, batch_num)
 

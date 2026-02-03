@@ -16,8 +16,8 @@
 
 import numpy as np
 from MaxText import train_tokenizer
+from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
-from maxtext.input_pipeline import input_pipeline_utils
 
 import unittest
 import pytest
@@ -38,7 +38,7 @@ class TokenizerTest(unittest.TestCase):
     assets_path = "tests"
     vocab_model_name = "test_tokenizer"
     cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
-    cls.source_tokenizer = input_pipeline_utils.get_tokenizer(
+    cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
         os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         "sentencepiece",
         add_bos=False,
@@ -56,7 +56,7 @@ class TokenizerTest(unittest.TestCase):
         vocab_size=cls.vocab_size,
         max_corpus_chars=cls.max_corpus_chars,
     )
-    cls.test_tokenizer = input_pipeline_utils.get_tokenizer(
+    cls.test_tokenizer = _input_pipeline_utils.get_tokenizer(
         cls.tokenizer_path, "sentencepiece", add_bos=False, add_eos=False
     )
 
@@ -82,7 +82,7 @@ class TikTokenTest(unittest.TestCase):
   def setUpClass(cls):
     dataset_name = "c4/en:3.0.1"
     dataset_path = "gs://maxtext-dataset"
-    cls.source_tokenizer = input_pipeline_utils.get_tokenizer(
+    cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
         os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer_llama3.tiktoken"),
         "tiktoken",
         add_bos=False,
@@ -119,10 +119,10 @@ class HFTokenizerTest(unittest.TestCase):
         ["gcloud", "storage", "cp", "-R", source, destination],
         check=True,
     )
-    cls.hf_tokenizer = input_pipeline_utils.get_tokenizer(
+    cls.hf_tokenizer = _input_pipeline_utils.get_tokenizer(
         os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "gemma2-2b"), "huggingface", add_bos=False, add_eos=False
     )
-    cls.sp_tokenizer = input_pipeline_utils.get_tokenizer(
+    cls.sp_tokenizer = _input_pipeline_utils.get_tokenizer(
         os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
     )
 

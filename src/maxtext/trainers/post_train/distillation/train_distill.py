@@ -48,7 +48,7 @@ from orbax import checkpoint
 # MaxText Imports
 from MaxText import optimizers
 from MaxText import pyconfig
-from maxtext.input_pipeline import tokenizer
+from MaxText import tokenizer
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
