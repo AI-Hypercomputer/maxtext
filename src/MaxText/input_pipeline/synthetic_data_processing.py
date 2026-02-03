@@ -19,8 +19,6 @@ from typing import Any
 
 import numpy as np
 
-import tensorflow as tf
-
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
@@ -99,27 +97,17 @@ class PlaceHolderDataIterator:
 
   @staticmethod
   def get_place_holder_synthetic_data(config: pyconfig.HyperParameters):
-    """fill negative value in synthetic data"""
-    output = {}
-    output["inputs"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
-    )
-    output["inputs_position"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
-    )
-    output["inputs_segmentation"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
-    )
-    output["targets"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
-    )
-    output["targets_position"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
-    )
-    output["targets_segmentation"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
-    )
-    dataset = tf.data.Dataset.zip((output))  # pytype: disable=wrong-arg-types
-    dataset = dataset.repeat()
-    dataset = dataset.batch(config.global_batch_size_to_load // jax.process_count())
-    return dataset
+    """Fills negative value in synthetic data."""
+    batch_size = config.global_batch_size_to_load // jax.process_count()
+    output_shape = (batch_size, config.max_target_length)
+    output = {
+        "inputs": np.full(output_shape, -1, dtype=np.int32),
+        "inputs_position": np.full(output_shape, -1, dtype=np.int32),
+        "inputs_segmentation": np.full(output_shape, -1, dtype=np.int32),
+        "targets": np.full(output_shape, -1, dtype=np.int32),
+        "targets_position": np.full(output_shape, -1, dtype=np.int32),
+        "targets_segmentation": np.full(output_shape, -1, dtype=np.int32),
+    }
+
+    while True:
+      yield output

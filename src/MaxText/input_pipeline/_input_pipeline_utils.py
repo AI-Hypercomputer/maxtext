@@ -22,46 +22,45 @@ import datasets
 from datasets.distributed import split_dataset_by_node
 import grain.python as grain
 import numpy as np
-import tensorflow as tf
-from MaxText import tokenizer
+# import tensorflow as tf
 from MaxText import multimodal_utils
 from maxtext.utils import max_logging
 
-Features = dict[str, tf.Tensor]
-AUTOTUNE = tf.data.experimental.AUTOTUNE
+# Features = dict[str, tf.Tensor]
+# AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 ########## Functions used by TFDS pipeline
 
 
-def normalize_features(x, column_name):
-  return {"inputs": x[column_name], "targets": x[column_name]}
+# def normalize_features(x, column_name):
+#   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, dataset_type="tfds"):
-  # Load tokenizer
-  tokenizer_model = tokenizer.build_tokenizer(
-      tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type
-  )
-  return tokenizer_model
+# def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, dataset_type="tfds"):
+#   # Load tokenizer
+#   tokenizer_model = tokenizer.build_tokenizer(
+#       tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type
+#   )
+#   return tokenizer_model
 
 
-def truncate_to_max_allowable_length(x, max_length):
-  return {k: v[:max_length] for k, v in x.items()}
+# def truncate_to_max_allowable_length(x, max_length):
+#   return {k: v[:max_length] for k, v in x.items()}
 
 
-def shift_data_by_truncation(x):
-  x["inputs"] = x["inputs"][:-1]
-  x["targets"] = x["targets"][1:]
-  return x
+# def shift_data_by_truncation(x):
+#   x["inputs"] = x["inputs"][:-1]
+#   x["targets"] = x["targets"][1:]
+#   return x
 
 
-def add_segmentation_and_position(x, data_columns, padding_token=0):
-  for data_column in data_columns:
-    x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != padding_token, tf.int32)
-    x[f"{data_column}_position"] = tf.broadcast_to(
-        tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :], x[data_column].shape
-    )
-  return x
+# def add_segmentation_and_position(x, data_columns, padding_token=0):
+#   for data_column in data_columns:
+#     x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != padding_token, tf.int32)
+#     x[f"{data_column}_position"] = tf.broadcast_to(
+#         tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :], x[data_column].shape
+#     )
+#   return x
 
 
 ########## Functions used by HF pipeline
@@ -360,26 +359,26 @@ class HFDataSource(grain.RandomAccessDataSource):
 ########## Functions used by Grain pipeline
 
 
-@dataclasses.dataclass
-class ParseFeatures(grain.MapTransform):
-  """Parse serialized example"""
+# @dataclasses.dataclass
+# class ParseFeatures(grain.MapTransform):
+#   """Parse serialized example"""
 
-  def __init__(self, data_columns, tokenize):
-    self.data_columns = data_columns
-    if tokenize:
-      self.dtype = tf.string
-    else:
-      self.dtype = tf.int64
+#   def __init__(self, data_columns, tokenize):
+#     self.data_columns = data_columns
+#     if tokenize:
+#       self.dtype = tf.string
+#     else:
+#       self.dtype = tf.int64
 
-  def map(self, element):
-    def _parse(example):
-      parsed = tf.io.parse_example(
-          example,
-          {col: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True) for col in self.data_columns},
-      )
-      return parsed
+#   def map(self, element):
+#     def _parse(example):
+#       parsed = tf.io.parse_example(
+#           example,
+#           {col: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True) for col in self.data_columns},
+#       )
+#       return parsed
 
-    return _parse(element)
+#     return _parse(element)
 
 
 @dataclasses.dataclass
