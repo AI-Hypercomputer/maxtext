@@ -198,9 +198,9 @@ def test_gpt_configs(config_file):
 DEEPSEEK_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "deepseek2-16b.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek2-236b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "deepseek3-tiny.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek3-test.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek3-671b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deepseek3-671b-2dfsdp.yml"),
 ]
 
 

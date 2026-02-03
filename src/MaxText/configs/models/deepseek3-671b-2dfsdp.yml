@@ -60,6 +60,7 @@ mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']
 data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']]
 logical_axis_rules: [
     ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
+    ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
     ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
     ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
     ['activation_norm_length', ['context']],
@@ -68,10 +69,12 @@ logical_axis_rules: [
     ['embed_no_exp', ['fsdp']],
     ['q_lora', ['fsdp']],
     ['kv_lora', ['fsdp']],
-    ['q_lora_up_proj', ['fsdp_transpose']],
-    ['kv_lora_up_proj', ['fsdp_transpose']],
-    ['q_heads', ['fsdp_transpose']],
-    ['kv_heads', ['fsdp_transpose']],
-    ['heads', ['fsdp_transpose']],
-    ['mlp', ['fsdp_transpose']],
+    ['q_lora_up_proj', ['fsdp_transpose', 'expert']],
+    ['kv_lora_up_proj', ['fsdp_transpose', 'expert']],
+    ['q_heads', ['fsdp_transpose', 'expert']],
+    ['kv_heads', ['fsdp_transpose', 'expert']],
+    ['heads', ['fsdp_transpose', 'expert']],
+    ['mlp', ['fsdp_transpose', 'expert']],
+    ['mlp_only_fsdp_transpose', ['fsdp_transpose']],
+    ['mlp_only_tensor', ['expert']],
 ]
