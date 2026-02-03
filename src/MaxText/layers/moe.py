@@ -951,9 +951,9 @@ class RoutedMoE(nnx.Module):
             # fusion (max reduce over contracting dimension).
             tiling = (tiling[0], k, tiling[2])
 
-          is_tpu = (self.mesh.devices.flat[0] == "tpu")
+          is_tpu = self.mesh.devices.flat[0] == "tpu"
           # TPU needs random mosaic_fusion_group; GPU/CPU needs deterministic ID for autotuner sync
-          mosaic_group_id = f"{random.randint(0, 1000000000)}" if is_tpu else '0'
+          mosaic_group_id = f"{random.randint(0, 1000000000)}" if is_tpu else "0"
           with set_xla_metadata(
               ragged_dot_tiling=",".join([str(t) for t in tiling]),
               mosaic_fusion_group=mosaic_group_id,

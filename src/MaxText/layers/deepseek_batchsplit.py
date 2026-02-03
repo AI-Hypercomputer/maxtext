@@ -58,15 +58,9 @@ def fetch_weights(params, dtype):
                   params["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"],
               ),
               (
-                  params["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"][
-                      "kernel"
-                  ],
-                  params["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"][
-                      "kernel"
-                  ],
-                  params["DeepSeekMoeBlock_0"]["shared_experts"]["wo"][
-                      "kernel"
-                  ],
+                  params["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"],
+                  params["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"],
+                  params["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"],
               ),
           ),
       ),
@@ -201,11 +195,11 @@ def batch_split_schedule(
 
 
 def staggered_call(fn, xs):
-  for i in range(len(xs)):
+  for i, x in enumerate(xs):
     if i == len(xs) - 1:
-      xs[i] = fn(xs[i])
+      xs[i] = fn(x)
     else:
-      xs[i], xs[i + 1] = jax.lax.optimization_barrier((fn(xs[i]), xs[i + 1]))
+      xs[i], xs[i + 1] = jax.lax.optimization_barrier((fn(x), xs[i + 1]))
   return xs
 
 
@@ -215,9 +209,7 @@ def with_data_parallel_constraint(x, mesh):
       None,
       None,
   )
-  return jax.lax.with_sharding_constraint(
-      x, jax.NamedSharding(mesh, activation_pspec)
-  )
+  return jax.lax.with_sharding_constraint(x, jax.NamedSharding(mesh, activation_pspec))
 
 
 def dot(x, y, axes=1):
@@ -290,9 +282,7 @@ def mla_with_norms(
         dtype=dtype,
     )
 
-  return staggered_call(
-      fn, list(zip(inputs, decoder_segment_ids, decoder_positions))
-  )
+  return staggered_call(fn, list(zip(inputs, decoder_segment_ids, decoder_positions)))
 
 
 def mla(
@@ -484,9 +474,7 @@ def kv_projection(
   )
 
 
-def get_key_value(
-    low_rank_main, key_rope, wkv_b_weights, *, qk_nope_head_dim, num_query_heads
-):
+def get_key_value(low_rank_main, key_rope, wkv_b_weights, *, qk_nope_head_dim, num_query_heads):
   """Gets key and value from compressed KV latent vector and key rope."""
   kv_out = dot(low_rank_main, wkv_b_weights)
 
@@ -541,20 +529,13 @@ def yarn(
   half_dim = embedding_dims // 2
   # Compute base frequencies for each (even-indexed) dimension.
   # (Note: We use jnp.arange with float32 for precision.)
-  freqs = 1.0 / (
-      rope_theta
-      ** (2.0 * jnp.arange(0, half_dim, dtype=jnp.float32) / embedding_dims)
-  )
+  freqs = 1.0 / (rope_theta ** (2.0 * jnp.arange(0, half_dim, dtype=jnp.float32) / embedding_dims))
 
   low = (
-      embedding_dims
-      * math.log(original_max_position_embeddings / (beta_fast * 2 * math.pi))
-      / (2 * math.log(rope_theta))
+      embedding_dims * math.log(original_max_position_embeddings / (beta_fast * 2 * math.pi)) / (2 * math.log(rope_theta))
   )
   high = (
-      embedding_dims
-      * math.log(original_max_position_embeddings / (beta_slow * 2 * math.pi))
-      / (2 * math.log(rope_theta))
+      embedding_dims * math.log(original_max_position_embeddings / (beta_slow * 2 * math.pi)) / (2 * math.log(rope_theta))
   )
   low = max(math.floor(low), 0)
   high = min(math.ceil(high), embedding_dims - 1)
@@ -565,9 +546,7 @@ def yarn(
   freqs = freqs / rope_factor * (1 - smooth) + freqs * smooth
 
   # Precompute frequencies for all positions by taking the outer product.
-  t = jnp.arange(
-      max_position_embeddings, dtype=jnp.float32
-  )  # shape [max_position_embeddings]
+  t = jnp.arange(max_position_embeddings, dtype=jnp.float32)  # shape [max_position_embeddings]
   # This gives a [max_position_embeddings, half_dim] tensor with rows as time steps.
   freqs = jnp.outer(t, freqs)
 
@@ -578,9 +557,7 @@ def yarn(
   freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
   freqs = jnp.repeat(freqs, 2, axis=-1)  # shape: [B, S, 1, embedding_dims]
   # inputs @ mask: [B, S, N, embedding_dims] @ [embedding_dims, embedding_dims] -> [B, S, N, embedding_dims]
-  output = inputs * jnp.cos(freqs) + jnp.matmul(
-      inputs, pairwise_swap_and_negate_mask
-  ) * jnp.sin(freqs)
+  output = inputs * jnp.cos(freqs) + jnp.matmul(inputs, pairwise_swap_and_negate_mask) * jnp.sin(freqs)
   return output.astype(fprop_dtype)
 
 
@@ -671,9 +648,7 @@ def route(
   # Communicate local results across the expert axis.
   x = jax.lax.all_gather(x, axis_name=expert_axis_name, tiled=True)
   weights = jax.lax.all_gather(weights, axis_name=expert_axis_name, tiled=True)
-  selected_experts = jax.lax.all_gather(
-      selected_experts, axis_name=expert_axis_name, tiled=True
-  )
+  selected_experts = jax.lax.all_gather(selected_experts, axis_name=expert_axis_name, tiled=True)
   group_sizes = jax.lax.psum(group_sizes, axis_name=expert_axis_name)
 
   # Sort the gathered tokens and weights.
@@ -703,14 +678,10 @@ def unroute(
   )
 
   # Sum across expert shards.
-  return jax.lax.psum_scatter(
-      x, expert_axis_name, scatter_dimension=0, tiled=True
-  )
+  return jax.lax.psum_scatter(x, expert_axis_name, scatter_dimension=0, tiled=True)
 
 
-def compute(
-    x, w0, w1, wo, group_sizes, weights, *, wi_tile_size, wo_tile_size, dtype
-):
+def compute(x, w0, w1, wo, group_sizes, weights, *, wi_tile_size, wo_tile_size, dtype):
   """Processes routed tokens through the MLP."""
   gmm_fn = functools.partial(
       megablox.gmm,
@@ -747,9 +718,7 @@ def route_compute_unroute(
 
   def route_fn(inputs):
     # Shared expert.
-    y = dot(
-        jax.nn.silu(dot(inputs, shared_w0)) * dot(inputs, shared_w1), shared_wo
-    )
+    y = dot(jax.nn.silu(dot(inputs, shared_w0)) * dot(inputs, shared_w1), shared_wo)
 
     inputs = jnp.reshape(inputs, (-1, inputs.shape[-1]))
     selected_experts, weights, group_sizes = expert_selection(

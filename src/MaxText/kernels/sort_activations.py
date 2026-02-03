@@ -73,9 +73,7 @@ def _unroute_fwd(
   )
 
 
-def _unroute_bwd(
-    use_custom_mosaic_kernel: bool, residuals: jax.Array, grads: jax.Array
-) -> tuple[jax.Array, None]:
+def _unroute_bwd(use_custom_mosaic_kernel: bool, residuals: jax.Array, grads: jax.Array) -> tuple[jax.Array, None]:
   selected_experts = residuals
   return _route_impl(grads, selected_experts, use_custom_mosaic_kernel), None
 
@@ -90,8 +88,7 @@ def _route_impl(
 ) -> jax.Array:
   """Gather `tokens` according to `selected_experts`."""
   assert (
-      tokens.shape[0] == selected_experts.shape[0]
-      and selected_experts.ndim == 2
+      tokens.shape[0] == selected_experts.shape[0] and selected_experts.ndim == 2
   ), f"{tokens.shape=}, {selected_experts.shape=}"
   if use_custom_mosaic_kernel:
     raise NotImplementedError("Custom Mosaic kernel not implemented.")
@@ -104,10 +101,8 @@ def _unroute_impl(
     selected_experts: jax.Array,
     use_custom_mosaic_kernel: bool,
 ) -> jax.Array:
-  assert (
-      tokens.shape[0] == selected_experts.shape[0] * selected_experts.shape[1]
-      and selected_experts.ndim == 2
-  )
+  """Reverse the routing operation, restoring tokens to their original order."""
+  assert tokens.shape[0] == selected_experts.shape[0] * selected_experts.shape[1] and selected_experts.ndim == 2
   inds = jnp.argsort(jnp.argsort(jnp.ravel(selected_experts)))
   return jnp.sum(
       jnp.reshape(
@@ -118,9 +113,7 @@ def _unroute_impl(
   )
 
 
-def _sort_impl(
-    tokens: jax.Array, inds: jax.Array, use_custom_mosaic_kernel: bool
-) -> jax.Array:
+def _sort_impl(tokens: jax.Array, inds: jax.Array, use_custom_mosaic_kernel: bool) -> jax.Array:
   if use_custom_mosaic_kernel:
     raise NotImplementedError("Custom Mosaic kernel not implemented.")
   else:
