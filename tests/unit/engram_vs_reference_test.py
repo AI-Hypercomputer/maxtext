@@ -400,7 +400,6 @@ class Engram(nn.Module):
         pad_id=engram_cfg.pad_id,
         seed=engram_cfg.seed,
     )
-
     self.multi_head_embedding = MultiHeadEmbedding(
         list_of_N=[x for y in self.hash_mapping.vocab_size_across_layers[self.layer_id] for x in y],
         D=engram_cfg.n_embed_per_ngram // engram_cfg.n_head_per_ngram,
@@ -416,12 +415,8 @@ class Engram(nn.Module):
     self.key_projs = nn.ModuleList(
         [nn.Linear(engram_hidden_size, backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)]
     )
-    self.norm1 = nn.ModuleList(
-        [nn.RMSNorm(backbone_config.hidden_size, eps=1e-6) for _ in range(backbone_config.hc_mult)]
-    )
-    self.norm2 = nn.ModuleList(
-        [nn.RMSNorm(backbone_config.hidden_size, eps=1e-6) for _ in range(backbone_config.hc_mult)]
-    )
+    self.norm1 = nn.ModuleList([nn.RMSNorm(backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)])
+    self.norm2 = nn.ModuleList([nn.RMSNorm(backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)])
 
   # added argument: backbone_config
   def forward(self, hidden_states, input_ids, backbone_config):
@@ -524,8 +519,7 @@ class CompressedTokenizerTest(parameterized.TestCase):
     batch, seq_len = 2, 3
     input_ids = np.random.randint(0, len(hf_tokenizer), (batch, seq_len))
     # torch
-    CompressedTokenizerPT = CompressedTokenizer
-    pt_tokenizer = CompressedTokenizerPT(tokenizer_path)
+    pt_tokenizer = CompressedTokenizer(tokenizer_path)
     pt_lookup_table = pt_tokenizer.lookup_table
     pt_out = pt_tokenizer(input_ids)
     # jax
@@ -550,8 +544,7 @@ class NgramHashMappingTest(parameterized.TestCase):
     batch, seq_len = 2, 3
     input_ids = np.random.randint(0, len(tokenizer), (batch, seq_len))
     # torch
-    NgramHashMappingPT = NgramHashMapping
-    pt_hash_mapping = NgramHashMappingPT(
+    pt_hash_mapping = NgramHashMapping(
         engram_vocab_size=self.engram_cfg.engram_vocab_size,
         max_ngram_size=self.engram_cfg.max_ngram_size,
         n_embed_per_ngram=self.engram_cfg.n_embed_per_ngram,
@@ -613,8 +606,7 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
     x_jax = jnp.array(input_np)
 
     # 1 PyTorch
-    MultiHeadEmbeddingPT = MultiHeadEmbedding
-    pt_model = MultiHeadEmbeddingPT(vocab_sizes, dim)
+    pt_model = MultiHeadEmbedding(vocab_sizes, dim)
     init_torch_weights(pt_model)
     pt_model.eval()
     with torch.no_grad():
@@ -699,8 +691,7 @@ class ShortConvTest(parameterized.TestCase):
     x_jax = to_jax(x_pt)
 
     # 1 PyTorch
-    ShortConvPT = ShortConv
-    pt_model = ShortConvPT(hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation)
+    pt_model = ShortConv(hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation)
     init_torch_weights(pt_model)
     pt_model.eval()
     with torch.no_grad():
@@ -737,7 +728,7 @@ def to_jax_linear(pt_linear):
 
 def to_jax_engram(pt_engram) -> dict:
   return {
-      "mhe": to_jax_mhe(pt_engram.multi_head_embedding),
+      "multi_head_embedding": to_jax_mhe(pt_engram.multi_head_embedding),
       # Standard Single Layer (No Stacking needed)
       "value_proj": to_jax_linear(pt_engram.value_proj),
       # Vectorized Layers (Stacking needed)
@@ -783,8 +774,7 @@ class EngramTest(parameterized.TestCase):
     )
 
     # 1. torch
-    EngramPT = Engram
-    pt_layer = EngramPT(layer_id=self.layer_id, backbone_config=self.backbone_config, engram_cfg=self.engram_cfg)
+    pt_layer = Engram(layer_id=self.layer_id, backbone_config=self.backbone_config, engram_cfg=self.engram_cfg)
     init_torch_weights(pt_layer)
     pt_layer.eval()
 

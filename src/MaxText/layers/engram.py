@@ -386,8 +386,6 @@ class ShortConv(nnx.Module):
     total_channels = hidden_size * hc_mult
 
     # B: Vectorized Norms (One unique module per group)
-    # TODO(shuningjin): eps, epsilon=config.normalization_layer_epsilon,
-    #                   epsilon=1e-5,  # Match PyTorch default
     @nnx.split_rngs(splits=hc_mult)
     @nnx.vmap(in_axes=0, out_axes=0)
     def create_norms(r):
@@ -395,8 +393,8 @@ class ShortConv(nnx.Module):
           num_features=hidden_size,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
+          epsilon=config.normalization_layer_epsilon,
           kernel_axes=("norm",),
-          epsilon=1e-5,
           rngs=r,
       )
 
@@ -507,7 +505,7 @@ class Engram(nnx.Module):
     self.engram_dim = self.num_orders * self.dim_per_ngram
 
     # Embedding for all n-gram heads in one flattened table.
-    self.mhe = MultiHeadEmbedding(
+    self.multi_head_embedding = MultiHeadEmbedding(
         vocab_sizes=vocab_sizes, dim_per_head=self.dim_per_head, config=config, mesh=mesh, rngs=rngs
     )
 
@@ -565,8 +563,6 @@ class Engram(nnx.Module):
     self.key_projs = create_key_projs(rngs)
 
     # C. Norms (Independent weights per group)
-    # TODO(shuningjin): epsilon=config.normalization_layer_epsilon,
-    # epsilon=1e-6,  # Match PyTorch default
     @nnx.split_rngs(splits=hc_mult)
     @nnx.vmap(in_axes=0, out_axes=0)
     def create_norms(r):
@@ -574,8 +570,8 @@ class Engram(nnx.Module):
           num_features=config.base_emb_dim,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
+          epsilon=config.normalization_layer_epsilon,
           kernel_axes=("norm",),
-          epsilon=1e-6,
           rngs=r,
       )
 
@@ -608,7 +604,7 @@ class Engram(nnx.Module):
     # Fetch e_{t,n,k} from the embedding table.
     # Flatten all n-gram heads into one vector e_t
     # (B, S, H_en) -> (B, S, H_en, D_head) -> (B, S, D_en)
-    embeddings = self.mhe(hash_input_ids).reshape(B, S, -1)
+    embeddings = self.multi_head_embedding(hash_input_ids).reshape(B, S, -1)
 
     # 3. Gating Mechanism (Scaled Dot-Product)
     # Decide relevance of memory (Key) to current state (Query)
