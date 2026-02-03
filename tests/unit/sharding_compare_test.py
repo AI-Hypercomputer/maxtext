@@ -216,7 +216,7 @@ def abstract_state_and_shardings(request):
 class TestGetAbstractState:
   """Test class for get_abstract_state function and sharding comparison."""
 
-  def test_get_abstract_state_sharding(self, abstract_state_and_shardings):
+  def test_get_abstract_state_sharding(self, abstract_state_and_shardings):  # pylint: disable=redefined-outer-name
     """Tests that get_abstract_state returns a state with the correct abstract structure and compares sharding."""
 
     model_name, topology, num_slice, abstract_state, state_mesh_shardings, logical_shardings = (
