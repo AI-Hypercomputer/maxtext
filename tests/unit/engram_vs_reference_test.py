@@ -74,7 +74,7 @@ class Config:
   base_emb_dim: int = 1024
   tokenizer_path: str = "deepseek-ai/DeepSeek-V3"
   # mhc: new
-  hc_mult: int = 2
+  hc_mult: int = 2  # > 1 - use MHC, 1 - not use MHC
   # engram: new
   engram_max_ngram_size: int = 3  # max_ngram_size, use 2...N
   # independent hash table sizes for each n-gram order (e.g., bigrams, trigrams, 4-grams, etc.)
@@ -82,8 +82,9 @@ class Config:
   engram_vocab_size: List[int] = field(default_factory=lambda: [129280 * 5, 129280 * 5])
   engram_layer_ids: List[int] = field(default_factory=lambda: [1, 15])
   engram_kernel_size: int = 4  # kernel_size
-  engram_embed_dim_per_ngram: int = 256  # n_embed_per_ngram
-  engram_heads_per_ngram: int = 8  # n_head_per_ngram
+  # engram_embed_dim_per_ngram: int = 256  # n_embed_per_ngram
+  engram_head_dim: int = 32
+  engram_num_heads: int = 8  # n_head_per_ngram
   # hashing: new
   engram_pad_id: int = 2  # not the same as tokenizer.pad_id
   engram_seed: int = 0
@@ -96,8 +97,9 @@ class EngramConfig:
     self.tokenizer_name_or_path = config.tokenizer_path
     self.engram_vocab_size = config.engram_vocab_size
     self.max_ngram_size = config.engram_max_ngram_size
-    self.n_embed_per_ngram = config.engram_embed_dim_per_ngram
-    self.n_head_per_ngram = config.engram_heads_per_ngram
+    # self.n_embed_per_ngram = config.engram_embed_dim_per_ngram
+    self.n_embed_per_ngram = config.engram_head_dim * config.engram_num_heads
+    self.n_head_per_ngram = config.engram_num_heads
     self.layer_ids = config.engram_layer_ids
     self.pad_id = config.engram_pad_id
     self.seed = config.engram_seed
@@ -559,7 +561,7 @@ class NgramHashMappingTest(parameterized.TestCase):
     jax_hash_mapping = NgramHashMappingJAX(
         engram_vocab_size=self.config.engram_vocab_size,
         max_ngram_size=self.config.engram_max_ngram_size,
-        n_head_per_ngram=self.config.engram_heads_per_ngram,
+        engram_num_heads=self.config.engram_num_heads,
         layer_ids=self.config.engram_layer_ids,
         tokenizer=tokenizer,
         pad_id=self.config.engram_pad_id,
@@ -592,10 +594,10 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
     np.random.seed(42)
 
   @parameterized.named_parameters(
-      {"testcase_name": "basic", "vocab_sizes": [100, 200, 150], "dim": 32, "batch": 2, "seq_len": 10},
-      {"testcase_name": "single_head", "vocab_sizes": [500], "dim": 64, "batch": 1, "seq_len": 5},
+      {"testcase_name": "basic", "vocab_sizes": [100, 200, 150], "head_dim": 32, "batch": 2, "seq_len": 10},
+      {"testcase_name": "single_head", "vocab_sizes": [500], "head_dim": 64, "batch": 1, "seq_len": 5},
   )
-  def test_mhe_match(self, vocab_sizes, dim, batch, seq_len):
+  def test_mhe_match(self, vocab_sizes, head_dim, batch, seq_len):
     num_heads = len(vocab_sizes)
 
     # Input data: indices must be within the range of each specific head's vocab.
@@ -606,7 +608,7 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
     x_jax = jnp.array(input_np)
 
     # 1 PyTorch
-    pt_model = MultiHeadEmbedding(vocab_sizes, dim)
+    pt_model = MultiHeadEmbedding(vocab_sizes, head_dim)
     init_torch_weights(pt_model)
     pt_model.eval()
     with torch.no_grad():
@@ -616,7 +618,7 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
     rngs = nnx.Rngs(params=0)
     config = Config()
     cfg, mesh = get_cfg_and_mesh(config)
-    jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, cfg, mesh, rngs)
+    jax_model = MultiHeadEmbeddingJAX(vocab_sizes, head_dim, cfg, mesh, rngs)
     # weight transfer
     weights = to_jax_mhe(pt_model)
     nnx.update(jax_model, weights)
@@ -674,24 +676,17 @@ class ShortConvTest(parameterized.TestCase):
   @parameterized.named_parameters(
       # {"testcase_name": "base", "hidden_size": 32, "hc_mult": 4, "kernel_size": 4, "dilation": 1},
       {"testcase_name": "dilated", "hidden_size": 16, "hc_mult": 2, "kernel_size": 3, "dilation": 2},
-      # {"testcase_name": "no_activation", "hidden_size": 32, "hc_mult": 4, "kernel_size": 4, "dilation": 1},
   )
   def test_shortconv_match(self, hidden_size, hc_mult, kernel_size, dilation):
     batch_size = 2
     seq_len = 10
-    activation = True
-
-    # Handle the named parameter check for no_activation
-    # TODO(shuningjin)
-    if "no_activation" in self._testMethodName:
-      activation = False
 
     # Input Data, Shape: (B, S, G, C)
     x_pt = torch.randn(batch_size, seq_len, hc_mult, hidden_size)
     x_jax = to_jax(x_pt)
 
     # 1 PyTorch
-    pt_model = ShortConv(hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation)
+    pt_model = ShortConv(hidden_size, kernel_size, dilation, hc_mult=hc_mult)
     init_torch_weights(pt_model)
     pt_model.eval()
     with torch.no_grad():
@@ -700,9 +695,7 @@ class ShortConvTest(parameterized.TestCase):
     # 2 JAX
     config = Config()
     cfg, mesh = get_cfg_and_mesh(config)
-    jax_model = ShortConvJAX(
-        cfg, hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation, rngs=self.nnx_rngs
-    )
+    jax_model = ShortConvJAX(cfg, hidden_size, kernel_size, dilation, hc_mult=hc_mult, rngs=self.nnx_rngs)
     # Transfer Weights
     weights = to_jax_shortconv(pt_model)
     nnx.update(jax_model, weights)
@@ -788,7 +781,7 @@ class EngramTest(parameterized.TestCase):
     jax_hash_mapping = NgramHashMappingJAX(
         engram_vocab_size=self.config.engram_vocab_size,
         max_ngram_size=self.config.engram_max_ngram_size,
-        n_head_per_ngram=self.config.engram_heads_per_ngram,
+        engram_num_heads=self.config.engram_num_heads,
         layer_ids=self.config.engram_layer_ids,
         tokenizer=tokenizer,
         pad_id=self.config.engram_pad_id,
@@ -803,10 +796,10 @@ class EngramTest(parameterized.TestCase):
         rngs=self.nnx_rng,
         config=cfg,
         mesh=mesh,
-        vocab_sizes=vocab_sizes,
         hc_mult=self.config.hc_mult,
-        engram_heads_per_ngram=self.config.engram_heads_per_ngram,
-        engram_embed_dim_per_ngram=self.config.engram_embed_dim_per_ngram,
+        vocab_sizes=vocab_sizes,
+        engram_num_heads=self.config.engram_num_heads,
+        engram_head_dim=self.config.engram_head_dim,
         engram_max_ngram_size=self.config.engram_max_ngram_size,
         engram_kernel_size=self.config.engram_kernel_size,
     )
