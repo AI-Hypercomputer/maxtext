@@ -387,8 +387,14 @@ def _build_single_axis_stacked_tensor(
   tensors_to_stack = []
 
   if config.scan_layers:
-    # If it's a standard scanned layer, we use the configured param_scan_axis.
-    axis_to_stack = config.param_scan_axis
+    # Workaround to load the HF model due to mismatched tensor ordering.
+    if len(hf_source_keys) == getattr(config, "base_num_decoder_layers", -1):
+      if getattr(config, "enable_nnx", False):
+        axis_to_stack = 0
+      else:
+        axis_to_stack = config.param_scan_axis
+    else:
+      axis_to_stack = 0
   else:
     # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
     axis_to_stack = 0
