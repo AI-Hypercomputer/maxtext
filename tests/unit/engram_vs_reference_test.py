@@ -430,23 +430,16 @@ class Engram(nn.Module):
     input_ids: [B, L]
     """
     hash_input_ids = torch.from_numpy(self.hash_mapping.hash(input_ids)[self.layer_id])
-    print("pt1", hash_input_ids)
     embeddings = self.multi_head_embedding(hash_input_ids).flatten(start_dim=-2)
-    print("pt2", embeddings)
     gates = []
     for hc_idx in range(backbone_config.hc_mult):
       key = self.key_projs[hc_idx](embeddings)
       normed_key = self.norm1[hc_idx](key)
-      print("pt3", normed_key)
       query = hidden_states[:, :, hc_idx, :]
       normed_query = self.norm2[hc_idx](query)
-      print("pt4", normed_query)
       gate = (normed_key * normed_query).sum(dim=-1) / math.sqrt(backbone_config.hidden_size)
-      print("pt5", gate)
       gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
-      print("pt6", gate)
       gate = gate.sigmoid().unsqueeze(-1)
-      print("pt7", gate)
       gates.append(gate)
     gates = torch.stack(gates, dim=2)
     value = gates * self.value_proj(embeddings).unsqueeze(2)
@@ -524,23 +517,22 @@ def get_cfg_and_mesh(config):  # config, run_name, dtype, batch_size, seq_len
 class CompressedTokenizerTest(parameterized.TestCase):
 
   def test_tokenierzer_match(self):
-
+    np.random.seed(42)
     tokenizer_path = "deepseek-ai/DeepSeek-V3"
     hf_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
-    np.random.seed(42)
+    # input
     batch, seq_len = 2, 3
     input_ids = np.random.randint(0, len(hf_tokenizer), (batch, seq_len))
-
+    # torch
     CompressedTokenizerPT = CompressedTokenizer
     pt_tokenizer = CompressedTokenizerPT(tokenizer_path)
     pt_lookup_table = pt_tokenizer.lookup_table
     pt_out = pt_tokenizer(input_ids)
-
+    # jax
     jax_tokenizer = CompressedTokenizerJAX(hf_tokenizer)
     jax_lookup_table = jax_tokenizer.lookup_table
     jax_out = jax_tokenizer(input_ids)
-
+    # compare
     np.testing.assert_equal(jax_lookup_table, pt_lookup_table)
     np.testing.assert_equal(len(pt_tokenizer), len(jax_tokenizer))
     np.testing.assert_array_equal(pt_out, jax_out)
@@ -549,17 +541,15 @@ class CompressedTokenizerTest(parameterized.TestCase):
 class NgramHashMappingTest(parameterized.TestCase):
 
   def test_hash_match(self):
-
+    np.random.seed(42)
     self.config = Config()
     self.engram_cfg = EngramConfig(self.config)
     self.backbone_config = BackBoneConfig(self.config)
-
     tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
-
-    np.random.seed(42)
+    # input
     batch, seq_len = 2, 3
     input_ids = np.random.randint(0, len(tokenizer), (batch, seq_len))
-
+    # torch
     NgramHashMappingPT = NgramHashMapping
     pt_hash_mapping = NgramHashMappingPT(
         engram_vocab_size=self.engram_cfg.engram_vocab_size,
@@ -572,7 +562,7 @@ class NgramHashMappingTest(parameterized.TestCase):
         seed=self.engram_cfg.seed,
     )
     pt_out = pt_hash_mapping.hash(input_ids)
-
+    # jax
     jax_hash_mapping = NgramHashMappingJAX(
         engram_vocab_size=self.config.engram_vocab_size,
         max_ngram_size=self.config.engram_max_ngram_size,
@@ -583,7 +573,7 @@ class NgramHashMappingTest(parameterized.TestCase):
         seed=self.config.engram_seed,
     )
     jax_out = jax_hash_mapping(input_ids)
-
+    # compare
     # keys are layer_ids
     self.assertDictEqual(jax_hash_mapping.vocab_size_across_layers, pt_hash_mapping.vocab_size_across_layers)
     np.testing.assert_equal(pt_out, jax_out)
@@ -615,55 +605,39 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
   def test_mhe_match(self, vocab_sizes, dim, batch, seq_len):
     num_heads = len(vocab_sizes)
 
-    # 1. Init PyTorch
+    # Input data: indices must be within the range of each specific head's vocab.
+    input_np = np.zeros((batch, seq_len, num_heads), dtype=np.int32)
+    for i, v_size in enumerate(vocab_sizes):
+      input_np[:, :, i] = np.random.randint(0, v_size, (batch, seq_len))
+    x_pt = torch.from_numpy(input_np).long()
+    x_jax = jnp.array(input_np)
+
+    # 1 PyTorch
     MultiHeadEmbeddingPT = MultiHeadEmbedding
     pt_model = MultiHeadEmbeddingPT(vocab_sizes, dim)
     init_torch_weights(pt_model)
     pt_model.eval()
+    with torch.no_grad():
+      y_pt = pt_model(x_pt)
 
-    # 2. Init JAX
+    # 2 JAX
     rngs = nnx.Rngs(params=0)
     config = Config()
     cfg, mesh = get_cfg_and_mesh(config)
     jax_model = MultiHeadEmbeddingJAX(vocab_sizes, dim, cfg, mesh, rngs)
-    print(jax_model)
-
-    # 3. Transfer Weights
+    # weight transfer
     weights = to_jax_mhe(pt_model)
     nnx.update(jax_model, weights)
-
-    # 4. Input Data
-    # Input indices must be within the range of each specific head's vocab.
-    # e.g., if vocab_sizes=[100, 200], input for head 0 must be < 100.
-    input_np = np.zeros((batch, seq_len, num_heads), dtype=np.int32)
-    for i, v_size in enumerate(vocab_sizes):
-      input_np[:, :, i] = np.random.randint(0, v_size, (batch, seq_len))
-
-    x_pt = torch.from_numpy(input_np).long()
-    x_jax = jnp.array(input_np)
-
-    # 5. Forward Pass
-    with torch.no_grad():
-      y_pt = pt_model(x_pt)
-
+    # forward
     y_jax = jax_model(x_jax)
 
-    # 6. Debug / Verify Offsets
-    # Check if JAX offsets match PT offsets
+    # 3 Compare
+    # Check offsets
     jax_offsets = jax_model.offsets
     pt_offsets = pt_model.offsets.cpu().numpy()
-    np.testing.assert_array_equal(jax_offsets, pt_offsets, err_msg="Offsets mismatch")
-
-    # 7. Verify Output
-    # Shape: (B, S, H, D)
-    self.assertEqual(y_jax.shape, (batch, seq_len, num_heads, dim))
-
-    diff = np.abs(y_jax - to_jax(y_pt)).max()
-    print(f"\nTest: {self._testMethodName} | Max Diff: {diff:.6f}")
-
-    np.testing.assert_allclose(
-        y_jax, to_jax(y_pt), rtol=1e-5, atol=1e-5, err_msg=f"MultiHeadEmbedding output mismatch. Max Diff: {diff}"
-    )
+    np.testing.assert_array_equal(jax_offsets, pt_offsets)
+    # Check outputs
+    np.testing.assert_allclose(y_jax, to_jax(y_pt), rtol=1e-5, atol=1e-5)
 
 
 # -----------------------------------------------------------------------------
@@ -716,48 +690,35 @@ class ShortConvTest(parameterized.TestCase):
     activation = True
 
     # Handle the named parameter check for no_activation
+    # TODO(shuningjin)
     if "no_activation" in self._testMethodName:
       activation = False
 
-    # 1. Init PyTorch
+    # Input Data, Shape: (B, S, G, C)
+    x_pt = torch.randn(batch_size, seq_len, hc_mult, hidden_size)
+    x_jax = to_jax(x_pt)
+
+    # 1 PyTorch
     ShortConvPT = ShortConv
     pt_model = ShortConvPT(hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation)
     init_torch_weights(pt_model)
     pt_model.eval()
+    with torch.no_grad():
+      y_pt = pt_model(x_pt)
 
-    # 2. Init JAX
+    # 2 JAX
     config = Config()
     cfg, mesh = get_cfg_and_mesh(config)
     jax_model = ShortConvJAX(
         cfg, hidden_size, kernel_size, dilation, hc_mult=hc_mult, activation=activation, rngs=self.nnx_rngs
     )
-    print(jax_model)
-
-    # 3. Transfer Weights
+    # Transfer Weights
     weights = to_jax_shortconv(pt_model)
     nnx.update(jax_model, weights)
-
-    # 4. Input Data
-    # Shape: (B, S, G, C)
-    x_pt = torch.randn(batch_size, seq_len, hc_mult, hidden_size)
-    x_jax = to_jax(x_pt)
-
-    # 5. Forward Pass
-    with torch.no_grad():
-      y_pt = pt_model(x_pt)
-
+    # Forward Pass
     y_jax = jax_model(x_jax)
 
-    # 6. Verify
-    # # Check output shape
-    # self.assertEqual(y_jax.shape, (batch_size, seq_len, hc_mult, hidden_size))
-
-    # # Check values
-    # diff = np.abs(y_jax - to_jax(y_pt)).max()
-    # print(f"\nTest: {self._testMethodName} | Max Diff: {diff:.6f}")
-
-    # err_msg=f"ShortConv output mismatch. Max Diff: {diff}
-
+    # 3 Compare
     np.testing.assert_allclose(y_jax, to_jax(y_pt), rtol=1e-5, atol=1e-5)
 
 
@@ -801,7 +762,7 @@ class EngramTest(parameterized.TestCase):
 
     self.batch_size = 2
     self.seq_len = 8
-    self.layer_id = 1  # an element of config.engram_layer_ids
+    self.layer_id = 1  # must belong to config.engram_layer_ids
 
     self.config = Config()
     self.engram_cfg = EngramConfig(self.config)
@@ -811,11 +772,6 @@ class EngramTest(parameterized.TestCase):
       {"testcase_name": "standard_run", "batch_size": 2, "seq_len": 16},
   )
   def test_engram_match(self, batch_size, seq_len):
-    # 1. torch
-    EngramPT = Engram
-    pt_layer = EngramPT(layer_id=self.layer_id, backbone_config=self.backbone_config, engram_cfg=self.engram_cfg)
-    init_torch_weights(pt_layer)
-    pt_layer.eval()
 
     # Prepare Inputs
     # Create random input_ids and hidden_states
@@ -826,12 +782,17 @@ class EngramTest(parameterized.TestCase):
         batch_size, seq_len, self.backbone_config.hc_mult, self.backbone_config.hidden_size, dtype=torch.float32
     )
 
-    # Run Inference
+    # 1. torch
+    EngramPT = Engram
+    pt_layer = EngramPT(layer_id=self.layer_id, backbone_config=self.backbone_config, engram_cfg=self.engram_cfg)
+    init_torch_weights(pt_layer)
+    pt_layer.eval()
+
+    # forward
     with torch.no_grad():
       pt_out = pt_layer(pt_hidden_states, pt_input_ids, self.backbone_config)
 
     # 2 Jax
-    # "deepseek-ai/DeepSeek-V3"
     tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
 
     jax_hash_mapping = NgramHashMappingJAX(
@@ -864,20 +825,14 @@ class EngramTest(parameterized.TestCase):
     jax_weights = to_jax_engram(pt_layer)
     nnx.update(jax_layer, jax_weights)
 
+    # Data
     jax_hash_input_ids = jax_hash_mapping(input_ids_np)[self.layer_id]  # layer specific
     jax_hidden_states = to_jax(pt_hidden_states)
-
+    # Forward
     jax_out = jax_layer(jax_hidden_states, jax_hash_input_ids)
 
     # 3 Compare
-    print(f"\nPT Output Mean: {pt_out.mean().item():.6f}")
-    print(f"JAX Output Mean: {jax_out.mean():.6f}")
-
-    # We expect high similarity since we copied weights exactly
-    np.testing.assert_allclose(
-        to_jax(pt_out), jax_out, rtol=1e-4, atol=1e-4, err_msg="Engram output mismatch between PT and JAX"
-    )
-    print("✅ Engram Layer match: PASS")
+    np.testing.assert_allclose(to_jax(pt_out), jax_out, rtol=1e-4, atol=1e-4)
 
 
 if __name__ == "__main__":

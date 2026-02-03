@@ -18,17 +18,13 @@ from dataclasses import dataclass, field
 import math
 import numpy as np
 from sympy import isprime
-
-import torch
-import torch.nn as nn
-from transformers import AutoTokenizer
 from tokenizers import normalizers, Regex
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from MaxText.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
+from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode, MODEL_MODE_PREFILL, Array, Config, DType
 from MaxText.layers.embeddings import Embed
 from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
 from MaxText.layers.linears import DenseGeneral
@@ -176,22 +172,28 @@ class NgramHashMapping:
     self.layer_multipliers = self._calculate_multipliers_across_layers(seed)
 
     # Each head k maps to an embedding table of prime size
-    # {layer_id: [[2gram_head1,...,2gram_headK], ...[Ngram_head1,...,Ngram_headK]}
+    # {layer_id: [[2gram_head1,...,2gram_headH], ..., [Ngram_head1,...,Ngram_headH]}
     self.vocab_size_across_layers = self._calculate_vocab_size_across_layers()
 
-  def _calculate_multipliers_across_layers(self, seed):
-    # calculate layer multipliers
+  def _calculate_multipliers_across_layers(self, seed: int):
+    """
+    return dict {layer_id: a list of max_ngram_size multipliers}
+    """
+    # Pre-calculate bounds
     max_long = np.iinfo(np.int64).max
-    M_max = int(max_long // self.tokenizer_vocab_size)
-    half_bound = max(1, M_max // 2)
-    PRIME_1 = 10007
+    m_max = int(max_long // self.tokenizer_vocab_size)
+    half_bound = max(1, m_max // 2)
+    # Large prime for seed decorrelation
+    LAYER_PRIME_OFFSET = 10007
 
     layer_multipliers = {}
     for layer_id in self.layer_ids:
-      base_seed = int(seed + PRIME_1 * int(layer_id))
-      g = np.random.default_rng(base_seed)
-      r = g.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
-      multipliers = r * 2 + 1  # odd
+      # Generate a layer-specific seed
+      layer_seed = int(seed + LAYER_PRIME_OFFSET * int(layer_id))
+      np_rng = np.random.default_rng(layer_seed)
+      # generate max_ngram_size random integers and transform to odd
+      random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
+      multipliers = random_value * 2 + 1
       layer_multipliers[layer_id] = multipliers
     return layer_multipliers
 
@@ -199,9 +201,17 @@ class NgramHashMapping:
     """
     Vocabulary Size Calculation (Global Prime Sequence): Engram uses unique prime numbers for the vocabulary size
     of every head in every layer to maximize hash collision independence.
+
+    Example: Layers: [0], N-gram sizes: 2-gram and 3-gram (max_ngram_size = 3),
+      Heads per N-gram: 2 (n_head_per_ngram = 2), Min Vocab Sizes: [10, 12] (for 2-grams and 3-grams)
+        layer 0 - 2-gram - h1 - start (10-1) -> first unseen prime 11
+        layer 0 - 2-gram - h2 - start 11 -> first unseen prime 13
+        layer 0 - 3-gram - h1 - start (12-1) -> first unseen prime 17
+        layer 0 - 3-gram - h2 - start 17 -> first unseen prime 19
+      Output: {0: [[11, 13], [17, 19]]}
     """
 
-    def find_next_prime(start, seen_primes):
+    def find_next_unseen_prime(start, seen_primes):
       candidate = start + 1
       while candidate in seen_primes or not isprime(candidate):
         candidate += 1
@@ -222,7 +232,7 @@ class NgramHashMapping:
 
         num_head = self.n_head_per_ngram
         for _ in range(num_head):
-          found_prime = find_next_prime(current_prime_search_start, seen_primes)
+          found_prime = find_next_unseen_prime(current_prime_search_start, seen_primes)
           seen_primes.add(found_prime)
           current_ngram_heads_sizes.append(found_prime)
           current_prime_search_start = found_prime
@@ -246,10 +256,10 @@ class NgramHashMapping:
       layer_id: int,
   ) -> np.ndarray:
     """
-    The cat sat -> [10, 25, 32]
+    Tokens: The cat sat -> Compressed IDs: [10, 25, 32]
     max ngram = 3
 
-    3 multiplier: m0=3, m1=5, m3=7
+    3 multiplier: m0=3, m1=5, m3=7 (specific to l-th layer)
 
     sliding window via shifting:
       shift0: [The, cat, sat] -> [10, 25, 32]
@@ -262,7 +272,7 @@ class NgramHashMapping:
     3-gram: (shift0 * m0) XOR (shift1 * m1) XOR (shift2 * m2)
       [sat, cat, The] -> (32 * 3) ^ (25 * 5) ^ (10 * 7)
 
-    for l-th layer, n-gram, k-th head, mod by embedding size m
+    mod by vocab size m (specific to l-th layer, n-gram, h-th head)
     """
 
     # 1 sliding window via shifting
@@ -287,15 +297,15 @@ class NgramHashMapping:
       # multiplicative bitwise xor as hash function
       k = n - 1
       mix = np.bitwise_xor(mix, base_shifts[k] * multipliers[k])
-      # for K heads at this n-gram level, get primes vocab sizes
+      # for H heads at this n-gram level, get primes vocab sizes
       n_gram_index = n - 2
       vocab_sizes_for_this_gram = vocab_sizes[n_gram_index]
       mods = np.array(vocab_sizes_for_this_gram, dtype=np.int64)
-      # Broadcast Modulo: (B, S, 1) % (K,) -> (B, S, K)
+      # Broadcast Modulo: (B, S, 1) % (H,) -> (B, S, H)
       head_hashes = mix[..., None] % mods
       all_hashes.append(head_hashes)
 
-    # (B, S, K * (max_ngram_size-1))
+    # (B, S, H * (max_ngram_size-1))
     return np.concatenate(all_hashes, axis=2)
 
   def __call__(self, input_ids):
@@ -309,44 +319,36 @@ class NgramHashMapping:
 
 class MultiHeadEmbedding(nnx.Module):
 
-  def __init__(self, list_of_N: List[int], D: int, config, mesh, rngs: nnx.Rngs):
+  def __init__(self, vocab_sizes: List[int], dim_per_head: int, config, mesh, rngs: nnx.Rngs):
     """
     Args:
-      list_of_N: A list of prime-based vocab sizes, each element is k-th head for n-gram
-          for example, 2-gram and 3-gram, each with 2 heads, the flattened list is
-          e.g., m[n=2,k=0]=2, m[n=2,k=1]=3, m[n=3,k=0]=5, m[n=3,k=1]=7
-      D: The embedding dimension (for a single head).
+      vocab_sizes: A list of prime-based vocab sizes, each element is h-th head for n-gram
+          for example, 2-gram and 3-gram, each with 2 heads. For instance, flattened list can be
+          m[n=2,h=0]=2, m[n=2,h=1]=3, m[n=3,h=0]=5, m[n=3,h=1]=7
+      dim_per_head: The embedding dimension for a single head.
     """
-    self.num_heads = len(list_of_N)
+    self.num_heads = len(vocab_sizes)
 
-    # To implement the concatenation (||) efficiently, we store all E[n,k] for all k
-    # in a single flattened table. Offsets act as the boundaries between
-    # E[n,k] and E[n,k+1]
-
-    # 1. Calculate the starting position for each head's memory block.
-    # If list_of_N is [100, 200, 150], offsets will be [0, 100, 300].
-    # This prevents different heads from colliding in the single large table.
-
-    # prefix sum
-    offsets = np.cumsum([0] + list_of_N[:-1])
+    # The embedding for heads across n-grams are stored in a single flattened table.
+    # Offsets act as the boundaries. Prefix sum to get the start position.
+    # If vocab_sizes is [100, 200, 150], offsets will be [0, 100, 300].
+    offsets = np.cumsum([0] + vocab_sizes[:-1])
     self.offsets = jnp.array(offsets, dtype=jnp.int32)
 
-    # 2. Instantiate a single large embedding table.
-    # Total size is the sum of all individual head vocabularies.
-    self.embedding = Embed(num_embeddings=sum(list_of_N), num_features=D, config=config, mesh=mesh, rngs=rngs)
+    # Total size is the sum of vocabularies acorss all heads all n-grams
+    self.embedding = Embed(
+        num_embeddings=sum(vocab_sizes), num_features=dim_per_head, config=config, mesh=mesh, rngs=rngs
+    )
 
   def __call__(self, input_ids: jax.Array, model_mode: str = MODEL_MODE_TRAIN) -> jax.Array:
     """
     Args:
       input_ids: Indices from MultiHeadHashing, shape (Batch, Length, Num_Heads)
     """
-    # 3. Shift local head indices to global table indices.
-    # Example: If Head 1 wants index 5, it stays 5. If Head 2 wants index 5,
-    # it becomes 5 + 100 = 105.
+    # Shift to indices in flattened table
     shifted_ids = input_ids + self.offsets
 
-    # 4. Perform a vectorized gather from the large embedding table.
-    # Result shape: (Batch, Length, Num_Heads, D)
+    # (batch, length, num_heads, dim)
     return self.embedding(shifted_ids, model_mode=model_mode)
 
 
@@ -354,7 +356,7 @@ class ShortConv(nnx.Module):
   """
   Implements a Grouped Depthwise Causal Convolution block.
 
-  This module applies local temporal mixing (smoothing) to the retrieved embeddings.
+  Applies local temporal mixing (smoothing) to the retrieved embeddings.
   - It uses independent RMSNorms for each branch
   - followed by a 1D convolution. Note it is depth-wise:
     mixes information across time steps [t-k, t] without mixing across channels.
@@ -383,21 +385,6 @@ class ShortConv(nnx.Module):
     self.hc_mult = hc_mult
     total_channels = hidden_size * hc_mult
 
-    # A: Single Shared Convolution
-    # Note: feature_group_count=in_features makes this Depthwise (channels don't mix)
-    # Padding="CAUSAL" ensures output[t] only depends on input[t-k : t].
-    # weights: {"kernel": (kernel_size, in_features//feature_group_count=1, total_channels)}
-    self.conv = nnx.Conv(
-        in_features=total_channels,
-        out_features=total_channels,
-        kernel_size=(kernel_size,),
-        feature_group_count=total_channels,  # Depthwise
-        kernel_dilation=(dilation,),
-        padding="CAUSAL",  # To match the slice [..., :T] logic
-        use_bias=False,
-        rngs=rngs,
-    )
-
     # B: Vectorized Norms (One unique module per group)
     # TODO(shuningjin): eps, epsilon=config.normalization_layer_epsilon,
     #                   epsilon=1e-5,  # Match PyTorch default
@@ -413,8 +400,23 @@ class ShortConv(nnx.Module):
           rngs=r,
       )
 
-    # weights: {"scale": (hc_mult, hidden_size)}
+    # Weights: {"scale": (hc_mult, hidden_size)}
     self.norms = create_norms(rngs)
+
+    # Single Shared Convolution
+    #    Depthwise: channels don't mix, feature_group_count=in_features
+    #    Padding: "CAUSAL" ensures output[t] only depends on input[t-k : t].
+    # Weights: {"kernel": (kernel_size, in_features//feature_group_count=1, total_channels)}
+    self.conv = nnx.Conv(
+        in_features=total_channels,
+        out_features=total_channels,
+        kernel_size=(kernel_size,),
+        feature_group_count=total_channels,
+        kernel_dilation=(dilation,),
+        padding="CAUSAL",  # To match the slice [..., :T] logic, TODO(shuningjin)
+        use_bias=False,
+        rngs=rngs,
+    )
 
     self.act_fn = jax.nn.silu if activation else lambda x: x
 
@@ -431,28 +433,23 @@ class ShortConv(nnx.Module):
     """
     B, S, G, C = x.shape
 
-    # 1. Apply Norms (Vectorized over Group dim)
-    # in_axes=(0, 2):  norms is axis 0, x is axis 2
-    # out_axes=2:      put the group dim back at axis 2
-    # shape stays: (B, S, G, C)
+    # Apply Norms (Vectorized over Group dim)
+    # in_axes=(0, 2): norms is axis 0, x is axis 2, out_axes=2: put the group dim back at axis 2
+    # shape stays (B, S, G, C)
     @nnx.vmap(in_axes=(0, 2), out_axes=2)
     def apply_norms(norms, x):
       return norms(x)
 
     x = apply_norms(self.norms, x)
 
-    # 2. Flatten Groups for Conv
-    # (B, S, G, C) -> (B, S, G * C)
+    # Flatten branch: (B, S, G, C) -> (B, S, G * C)
     x_flat = x.reshape(B, S, G * C)
-
-    # 3. Apply Single Conv
-    # Causal; Depthwise (Mixes temporal dimension L. Channels remain independent)
-    # Shape stays: (B, S, G * C)
+    # Apply depthwise conv to mixes temporal dimension only
+    # Shape stays (B, S, G * C)
     y = self.conv(x_flat)
     y = self.act_fn(y)
 
-    # 4. Reshape back to Branched Layout
-    # (B, S, G * C) -> (B, S, G, C)
+    # Restore branch: (B, S, G * C) -> (B, S, G, C)
     return y.reshape(B, S, G, C)
 
 
@@ -493,33 +490,26 @@ class Engram(nnx.Module):
     self.rngs = rngs
     self.hc_mult = hc_mult
 
-    # --- Dimensions ---
-    # -----------------------------------------------------------------------
-    # 2. Engram Dimensions & Hyperparameters
-    # -----------------------------------------------------------------------
-
-    # Hierarchy: Engram -> n-gram order (n) -> k-th head (k)
+    # Hierarchy: Engram -> n-gram Order -> h-th Head
     # Raw Inputs
     self.max_ngram_size = engram_max_ngram_size  # e.g., 4 (tracks 2,3,4-grams)
-    # self.vocab_size = engram_vocab_size
     self.conv_kernel_size = engram_kernel_size
-    # The Hierarchy (Paper Notation)
-    # K: Number of heads per n-gram order
+    # H: Number of heads per n-gram order
     self.num_heads = engram_heads_per_ngram
     # D_total: Total embedding dimension for ONE n-gram order (sum of all K heads)
     self.dim_per_ngram = engram_embed_dim_per_ngram
     # D_head: Dimension of a single head (The actual size stored in the table)
     # Logic: We split the total dimension D evenly across K heads.
     self.dim_per_head = self.dim_per_ngram // self.num_heads
-    # Flattened Tensor Sizes
     # How many n-gram orders are we tracking? (e.g. 2, 3, 4 -> 3 orders)
     self.num_orders = self.max_ngram_size - 1
-    # Final concatenated size: (Num Orders) * (Dim per Order)
+    # Final concatenated size: (num orders) * (dim per rrder)
     self.engram_dim = self.num_orders * self.dim_per_ngram
 
-    # --- 1. Multi-Head Embedding ---
-    # Stores the learnable vectors E_{n,k} for all n-gram heads in one flattened table.
-    self.mhe = MultiHeadEmbedding(list_of_N=vocab_sizes, D=self.dim_per_head, config=config, mesh=mesh, rngs=rngs)
+    # Embedding for all n-gram heads in one flattened table.
+    self.mhe = MultiHeadEmbedding(
+        vocab_sizes=vocab_sizes, dim_per_head=self.dim_per_head, config=config, mesh=mesh, rngs=rngs
+    )
 
     # --- 2. Short Convolution (Already Vectorized internally) ---
     # Applies depthwise causal convolution to smooth the retrieved memory over time.
@@ -641,18 +631,18 @@ class Engram(nnx.Module):
     def apply_norms(norms, x):
       return norms(x)
 
-    # K: (B, S, G, C) shape stays
+    # (B, S, G, C) shape stays
     k = apply_norms(self.k_norms, keys_unnorm)
 
     # Query: Current hidden state from the transformer
-    # Q: (B, S, G, C) shape stays
+    # (B, S, G, C) shape stays
     q = apply_norms(self.q_norms, hidden_states)
 
     # 4. Gating (Vectorized)
     # Gate Score (Scalar per token)
 
     # Dot product: (B, S, G)
-    qk_product = jnp.einsum("blgc,blgc->blg", q, k, precision=self.config.matmul_precision)
+    qk_product = jnp.einsum("bsgc,bsgc->bsg", q, k, precision=self.config.matmul_precision)
     # Scale
     gate_logits = qk_product / jnp.sqrt(C)
     # Stabilize
@@ -678,5 +668,5 @@ class Engram(nnx.Module):
     # residual for conv component
     out = v + conv_out
 
-    # Note: The 'hidden_states' (residual x) is usually added by the caller/block wrapper
+    # Note: hidden_states will be added by the caller
     return out
