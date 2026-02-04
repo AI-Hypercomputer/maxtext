@@ -27,7 +27,7 @@ pytype
 pillow>=11.1.0
 sentencepiece
 tensorflow-text>=2.13.0
-tensorflow>=2.13.0
+tensorflow==2.19.1
 tensorflow-datasets
 tensorboardx>=2.6.2.2
 tensorboard-plugin-profile
