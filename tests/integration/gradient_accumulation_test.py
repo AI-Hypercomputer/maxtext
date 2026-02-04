@@ -13,7 +13,8 @@
 # limitations under the License.
 
 """Integration tests for gradient accumulation."""
-
+import subprocess
+import sys
 import tempfile
 
 import numpy as np
@@ -175,72 +176,63 @@ class GradientAccumulationTest(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
-  def test_tunix_sft_grad_accumulate_same_loss(self):
-    from maxtext.trainers.post_train.sft.train_sft import main as tunix_sft_train
+  def test_tunix_sft_grad_accumulate_same_loss_subprocess(self):
     random_suffix = generate_random_string()
     temp_dir = tempfile.gettempdir()
     run_accumulate_metrics_file = os.path.join(temp_dir, f"runner_sft_grad_accumulate_{random_suffix}.txt")
     run_regular_metrics_file = os.path.join(temp_dir, f"runner_sft_regular_{random_suffix}.txt")
 
+    # Base arguments shared by both runs
+    # Note: We remove 'None' because we'll use sys.executable -m
     shared_maxtext_args = [
-        None,
-        get_test_config_path(),
-        f"base_output_directory={self.base_output_directory}",
-        f"dataset_path={self.dataset_path}",
-        "gradient_clipping_threshold=0",  # Ensures we are testing raw scales of gradients (clipping off).
-        "enable_checkpointing=False",
-        "enable_goodput_recording=False",
-        "base_emb_dim=128",
-        "base_num_decoder_layers=2",
-        "max_target_length=512",
-        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-        "steps=5",
-        "use_sft=True",
-        "use_tunix_gradient_accumulation=True",
+      get_test_config_path(),
+      f"base_output_directory={self.base_output_directory}",
+      f"dataset_path={self.dataset_path}",
+      "gradient_clipping_threshold=0",
+      "enable_checkpointing=False",
+      "enable_goodput_recording=False",
+      "base_emb_dim=128",
+      "base_num_decoder_layers=2",
+      "max_target_length=512",
+      rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+      "steps=5",
+      "use_sft=True",
+      "use_tunix_gradient_accumulation=True",
     ]
 
-    # Run SFT with gradient accumulation (simulating Batch=2 via 1 * 4)
-    tunix_sft_train(
-        shared_maxtext_args
-        + [
-            f"run_name=runner_sft_grad_accumulate_{random_suffix}",
-            f"metrics_file={run_accumulate_metrics_file}",
-            "per_device_batch_size=1",
-            "gradient_accumulation_steps=4",
-        ]
-    )
+    def run_sft_subprocess(extra_args):
+      """Helper to launch the training script as a separate OS process."""
+      cmd = [
+              sys.executable, "-m", "maxtext.trainers.post_train.sft.train_sft"
+            ] + shared_maxtext_args + extra_args
 
-    # Run SFT regular (Batch=4)
-    tunix_sft_train(
-        shared_maxtext_args
-        + [
-            f"run_name=runner_sft_grad_accumulate_regular_{random_suffix}",
-            f"metrics_file={run_regular_metrics_file}",
-            "per_device_batch_size=4",
-            "gradient_accumulation_steps=1",
-        ]
-    )
+      env = os.environ.copy()
+      print(f"Running command: {' '.join(cmd)}")
+      return subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
 
+    # 1. Run SFT with gradient accumulation
+    run_sft_subprocess([
+      f"run_name=runner_sft_grad_accumulate_{random_suffix}",
+      f"metrics_file={run_accumulate_metrics_file}",
+      "per_device_batch_size=1",
+      "gradient_accumulation_steps=4",
+    ])
+
+    # 2. Run SFT regular
+    run_sft_subprocess([
+      f"run_name=runner_sft_grad_accumulate_regular_{random_suffix}",
+      f"metrics_file={run_regular_metrics_file}",
+      "per_device_batch_size=4",
+      "gradient_accumulation_steps=1",
+    ])
+
+    # --- Metrics Validation Logic (Same as before) ---
     def get_last_metric_from_file(filepath):
       return json.loads(Path(filepath).read_text(encoding="utf8").splitlines()[-1])
 
     accum_metrics = get_last_metric_from_file(run_accumulate_metrics_file)
     regular_metrics = get_last_metric_from_file(run_regular_metrics_file)
 
-    # Assert losses roughly equal
-    accum_loss = accum_metrics["learning/loss"]
-    regular_loss = regular_metrics["learning/loss"]
-
-    print(f"[SFT Grad Accum Test] Loss (Accum): {accum_loss}", flush=True)
-    print(f"[SFT Grad Accum Test] Loss (Regular): {regular_loss}", flush=True)
-
-    np.testing.assert_allclose(accum_loss, regular_loss, rtol=0.01)
-
-    # Assert per device tflops are the same
-    accum_tflops = accum_metrics["perf/per_device_tflops"]
-    regular_tflops = regular_metrics["perf/per_device_tflops"]
-
-    print(f"[SFT Grad Accum Test] TFLOPS (Accum): {accum_tflops}", flush=True)
-    print(f"[SFT Grad Accum Test] TFLOPS (Regular): {regular_tflops}", flush=True)
-
-    np.testing.assert_equal(accum_tflops, regular_tflops)
+    # Assertions
+    np.testing.assert_allclose(accum_metrics["learning/loss"], regular_metrics["learning/loss"], rtol=0.01)
+    np.testing.assert_equal(accum_metrics["perf/per_device_tflops"], regular_metrics["perf/per_device_tflops"])
