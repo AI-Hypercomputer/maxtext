@@ -561,6 +561,7 @@ class SplashAttention(BaseModel):
       0,
       description="the number of reduction steps. For now, only 3 or all the kv steps are supported.",
   )
+  use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
 
 
 class PagedAttention(BaseModel):
