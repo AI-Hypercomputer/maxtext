@@ -1109,7 +1109,10 @@ def setup_initial_state(
         # The update of data_iterator state happens in place, no need to assign explicitly
         state = restored["items"]
 
-      # TODO: For NNX, convert the pure dict to nnx.State.
+      # For NNX, convert the pure dict to nnx.State using the abstract state as template
+      if config.pure_nnx:
+        nnx.replace_by_pure_dict(unboxed_abstract_state, state)
+        state = unboxed_abstract_state
     else:
       init_state_partial = init_state_fn
       init_state_partial.__name__ = "initialize_state"

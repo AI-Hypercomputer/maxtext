@@ -576,8 +576,13 @@ def load_state_if_possible(
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
-      restore_args = jax.tree_util.tree_map(map_to_pspec, abstract_unboxed_pre_state)
-      checkpoint_args = ocp.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args)
+      # Convert nnx.State to pure dict to match how checkpoints are saved for NNX
+      restore_target = abstract_unboxed_pre_state
+      if isinstance(abstract_unboxed_pre_state, nnx.State):
+        restore_target = abstract_unboxed_pre_state.to_pure_dict()
+
+      restore_args = jax.tree_util.tree_map(map_to_pspec, restore_target)
+      checkpoint_args = ocp.args.PyTreeRestore(item=restore_target, restore_args=restore_args)
 
       match (checkpoint_manager, dataset_type, data_iterator):
         # Case 1: Matches if 'checkpoint_manager' is an instance of either EmergencyCheckpointManager
@@ -703,15 +708,35 @@ def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
 
 
-def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None):
-  """Save checkpoint if checkpointing is enabled."""
+def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None, force=False):
+  """Save checkpoint if checkpointing is enabled.
+
+  Args:
+    checkpoint_manager: The checkpoint manager.
+    state: The training state to save.
+    config: The config object.
+    data_iterator: The data iterator.
+    step: The step number. If None, extracts from state (for Linen TrainState).
+    force: If True, force save the checkpoint regardless of checkpoint_period.
+  """
   if checkpoint_manager is None:
     return
 
   # Determine the effective step for saving a checkpoint.
   # If 'step' is not provided, this call is for a potential final checkpoint
   # and use the last completed step from the state.
-  actual_step = (int(state.step) - 1) if step is None else int(step)
+  if step is not None:
+    actual_step = int(step)
+  else:
+    if config.pure_nnx:
+      actual_step = int(state.optimizer.step) - 1
+    else:
+      # Linen TrainState has .step attribute
+      actual_step = int(state.step) - 1
+
+  if config.pure_nnx:
+    # Convert nnx.State to dict.
+    state = state.to_pure_dict()
 
   # Determine if a checkpoint save should be forced, overriding the usual `config.checkpoint_period` logic.
   # This occurs if this function was called:

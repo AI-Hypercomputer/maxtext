@@ -649,20 +649,22 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
-        # pylint: disable=not-callable
-        nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+        if not config.pure_nnx:
+          # pylint: disable=not-callable
+          nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             if config.shard_optimizer_over_data:
               state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
-            state, metrics = p_train_step(state, example_batch)
+            if config.pure_nnx:
+              state, metrics = p_train_step(state, example_batch)
+            else:
+              state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()
 
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      if config.pure_nnx:
-        state_to_save = state.to_pure_dict()
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
       if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
@@ -687,7 +689,10 @@ def train_loop(config, recorder, state=None):
           if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
             break
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-            eval_metrics = p_eval_step(state, eval_batch, nextrng)
+            if config.pure_nnx:
+              eval_metrics = p_eval_step(state, eval_batch)
+            else:
+              eval_metrics = p_eval_step(state, eval_batch, nextrng)
           metric_logger.record_eval_metrics(step, metrics=eval_metrics)
           max_logging.log(f"Completed eval step {eval_step_count}")
           eval_step_count += 1
@@ -705,8 +710,6 @@ def train_loop(config, recorder, state=None):
 
     if config.save_checkpoint_on_completion:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      if config.pure_nnx:
-        state_to_save = nnx.state(state).to_pure_dict()
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
