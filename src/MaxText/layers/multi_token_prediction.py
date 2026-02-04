@@ -118,10 +118,12 @@ class MultiTokenPredictionLayer(nnx.Module):
     self.transformer_layer = nnx_wrappers.ToNNX(mtp_transformer_layer, rngs=rngs)
 
     # ToNNX requires explicit initialization with sample inputs for proper parameter setup.
+    # The batch size of the dummy input MUST be compatible with the sharding configuration.
+    dummy_batch_size = self.config.ici_data_parallelism * self.config.ici_fsdp_parallelism
     self.transformer_layer.lazy_init(
-        inputs=jnp.zeros((1, 1, cfg.base_emb_dim), dtype=cfg.dtype),
+        inputs=jnp.zeros((dummy_batch_size, 1, self.config.base_emb_dim), dtype=self.config.dtype),
         decoder_segment_ids=None,
-        decoder_positions=jnp.zeros((1, 1), dtype=jnp.int32),
+        decoder_positions=jnp.zeros((dummy_batch_size, 1), dtype=jnp.int32),
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
@@ -253,9 +255,7 @@ class MultiTokenPredictionBlock(nnx.Module):
 
       mtp_logits = self.decoder.apply_output_head(shared_embedding, mtp_hidden_state, deterministic, model_mode)
 
-      mtp_xent, _ = max_utils.cross_entropy_with_logits(
-          mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0
-      )
+      mtp_xent, _ = max_utils.cross_entropy_with_logits(mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0)
       mtp_xent_masked = mtp_xent * rolled_target_mask
 
       if model_mode == MODEL_MODE_TRAIN:
@@ -279,9 +279,7 @@ class MultiTokenPredictionBlock(nnx.Module):
 
 def calculate_mtp_loss(intermediate_outputs, config):
   """Calculates Multi-Token Prediction loss from intermediate outputs."""
-  mtp_losses_data = maxtext_utils.get_nested_value(
-      intermediate_outputs, ("mtp_losses", "mtp_block", "losses"), default=None
-  )
+  mtp_losses_data = maxtext_utils.get_nested_value(intermediate_outputs, ("mtp_losses", "mtp_block", "losses"), default=None)
   mtp_weights_data = maxtext_utils.get_nested_value(
       intermediate_outputs, ("mtp_losses", "mtp_block", "weights"), default=None
   )
