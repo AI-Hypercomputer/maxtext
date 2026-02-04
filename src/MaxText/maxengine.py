@@ -413,6 +413,8 @@ class MaxEngine(_BaseEngine):
       params: Params,
       existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
+      positions: jax.Array | None = None,
+      mrope_deltas: jax.Array | None = None,
       images: jax.Array | None = None,
       image_masks: jax.Array | None = None,
       audio_values: jax.Array | None = None,
@@ -480,8 +482,13 @@ class MaxEngine(_BaseEngine):
 
     full_true_length = start_position + true_length
 
-    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
+    input_tokens = jnp.expand_dims(padded_tokens, 0)
+
+    if positions is not None:
+      if positions.ndim == 2:
+        positions = jnp.expand_dims(positions, 1)
+    else:
+      positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
     if self.config.use_multimodal and images is not None:
       if images.ndim == 3:
@@ -563,7 +570,12 @@ class MaxEngine(_BaseEngine):
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
-    next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
+
+    if mrope_deltas is not None:
+      next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32) + mrope_deltas
+    else:
+      next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
+
     return {
         "logits": selected_logits,
         "cache": cache,
@@ -581,6 +593,8 @@ class MaxEngine(_BaseEngine):
       params: Params,
       existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
+      positions: jax.Array | None = None,
+      mrope_deltas: jax.Array | None = None,
       images: jax.Array | None = None,
       image_masks: jax.Array | None = None,
       audio_values: jax.Array | None = None,
@@ -616,6 +630,8 @@ class MaxEngine(_BaseEngine):
         params=params,
         existing_prefix=existing_prefix,
         padded_tokens=padded_tokens,
+        positions=positions,
+        mrope_deltas=mrope_deltas,
         images=images,
         image_masks=image_masks,
         audio_values=audio_values,

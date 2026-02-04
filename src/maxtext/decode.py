@@ -16,6 +16,7 @@
 
 import os
 from typing import Sequence, Any
+import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -129,11 +130,28 @@ def main(argv: Sequence[str]) -> None:
   except AttributeError as _:
     has_chat_template = False
   tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
+
+  position_ids = None
+  mrope_position_deltas = None
+
   if config.use_multimodal:
     tokens = multimodal_utils.prepare_text_for_image_fusion(
         tokens, model_name=config.model_name, processor_output=processor_outputs
     )
     true_length += image_offsets
+
+    if config.use_mrope:
+      position_ids, mrope_position_deltas = multimodal_utils.get_rope_index(
+          input_ids=tokens,
+          image_grid_thw=processor_outputs.pixel_grid_thw,  # pytype: disable=attribute-error
+          video_grid_thw=processor_outputs.video_grid_thw,  # pytype: disable=attribute-error
+          attention_mask=np.ones_like(tokens),
+          use_audio_in_video=config.use_audio and processor_outputs.num_videos > 0,  # pytype: disable=attribute-error
+          audio_lengths=processor_outputs.audio_lengths,  # pytype: disable=attribute-error
+          second_per_grids=processor_outputs.video_second_per_grid,  # pytype: disable=attribute-error
+          spatial_merge_size=config.spatial_merge_size_for_vit,  # pytype: disable=attribute-error
+          position_id_per_seconds=config.position_id_per_seconds,
+      )
 
   assert (
       true_length <= config.max_prefill_predict_length
@@ -159,6 +177,8 @@ def main(argv: Sequence[str]) -> None:
       prefill_result, first_token = engine.prefill(
           params=params,
           padded_tokens=tokens,
+          positions=position_ids,
+          mrope_deltas=mrope_position_deltas,
           images=processor_outputs.pixel_values if config.use_multimodal else None,
           image_masks=processor_outputs.pixel_mask if config.use_multimodal and "llama4" in config.model_name else None,
           audio_values=processor_outputs.audio_values if config.use_audio else None,

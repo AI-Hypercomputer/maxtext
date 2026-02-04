@@ -59,6 +59,7 @@ from MaxText.layers.attention_op import AttentionOp
 from MaxText.layers.embeddings import (
     LLaMARotaryEmbedding,
     LlamaVisionRotaryEmbedding,
+    Qwen3OmniMoeThinkerTextRotaryEmbedding,
     Qwen3OmniMoeVisionRotaryEmbedding,
     RotaryEmbedding,
     YarnRotaryEmbedding,
@@ -160,6 +161,8 @@ def attention_as_linen(
     is_nope_layer: bool = False,
     is_vision: bool = False,
     model_mode: str = MODEL_MODE_TRAIN,
+    use_mrope: bool = False,
+    mrope_section: tuple[int, int, int] | None = None,
     name: str | None = None,
 ):
   """A factory function to create an Attention as a Linen module.
@@ -222,6 +225,8 @@ def attention_as_linen(
       is_nope_layer=is_nope_layer,
       is_vision=is_vision,
       model_mode=model_mode,
+      use_mrope=use_mrope,
+      mrope_section=mrope_section,
       name=name,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
@@ -320,6 +325,8 @@ class Attention(nnx.Module):
       is_vision: bool = False,
       model_mode: str = MODEL_MODE_TRAIN,
       base_kv_cache: bool = True,
+      use_mrope: bool = False,
+      mrope_section: tuple[int, int, int] | None = None,
       name: str | None = None,
       rngs: Optional[nnx.Rngs] = None,
   ):
@@ -414,6 +421,8 @@ class Attention(nnx.Module):
     self.is_nope_layer = is_nope_layer
     self.is_vision = is_vision
     self.model_mode = model_mode
+    self.use_mrope = use_mrope
+    self.mrope_section = mrope_section
     self.rngs = rngs
 
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
@@ -742,6 +751,17 @@ class Attention(nnx.Module):
         )
       else:
         raise ValueError(f"Unsupported model type for vision rotary embedding: {self.config.model_name}")
+
+    elif self.use_mrope:
+      rotary_embedding = Qwen3OmniMoeThinkerTextRotaryEmbedding(
+          min_timescale=self.config.rope_min_timescale,
+          max_timescale=self.config.rope_max_timescale,
+          embedding_dims=rope_embedding_dims,
+          cast_as_fprop_dtype=True,
+          fprop_dtype=self.dtype,
+          mrope_section=self.mrope_section,
+          rngs=self.rngs,
+      )
 
     elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
       rotary_embedding = LLaMARotaryEmbedding(
