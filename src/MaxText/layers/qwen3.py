@@ -21,6 +21,7 @@ import math
 
 import jax
 import jax.nn
+from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp

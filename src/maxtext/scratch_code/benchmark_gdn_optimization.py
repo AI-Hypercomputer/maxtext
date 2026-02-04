@@ -254,20 +254,24 @@ def run_comparison():
         ITERS = 5           
         WARMUP = 1
 
-    NUM_HEADS = 32
+    HIDDEN_SIZE = 2048
+    NUM_KEY_HEADS = 16
+    NUM_VALUE_HEADS = 32
     HEAD_DIM = 128
+    CONV_KERNEL_DIM = 4
     CHUNK_SIZE = 64
     PROFILE_DIR = "/tmp/maxtext_gdn_profile"
     
     print(f"Config: Batch={BATCH}, SeqLen={SEQ_LEN}, Dtype={DTYPE}")
+    print(f"Model: H={HIDDEN_SIZE}, K_Heads={NUM_KEY_HEADS}, V_Heads={NUM_VALUE_HEADS}, HeadDim={HEAD_DIM}")
 
     dummy_config = types.SimpleNamespace(
-        emb_dim=NUM_HEADS * HEAD_DIM,
-        gdn_num_value_heads=NUM_HEADS,
-        gdn_num_key_heads=NUM_HEADS,
+        emb_dim=HIDDEN_SIZE,
+        gdn_num_value_heads=NUM_VALUE_HEADS,
+        gdn_num_key_heads=NUM_KEY_HEADS,
         gdn_key_head_dim=HEAD_DIM,
         gdn_value_head_dim=HEAD_DIM,
-        gdn_conv_kernel_dim=4,
+        gdn_conv_kernel_dim=CONV_KERNEL_DIM,
         dtype=DTYPE,
         matmul_precision='default', 
         normalization_layer_epsilon=1e-6,
@@ -293,7 +297,7 @@ def run_comparison():
 
     # 3. INPUTS
     key = jax.random.PRNGKey(42)
-    inputs = jax.random.normal(key, (BATCH, SEQ_LEN, NUM_HEADS * HEAD_DIM), dtype=DTYPE)
+    inputs = jax.random.normal(key, (BATCH, SEQ_LEN, HIDDEN_SIZE), dtype=DTYPE)
 
     # -------------------------------------------------------------------------
     # Helper: Pure Functional wrappers to avoid Flax/JAX Version mismatch issues
