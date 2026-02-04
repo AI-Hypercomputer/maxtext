@@ -884,9 +884,7 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
-    def gmm(
-        inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes
-    ):
+    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count):
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -926,7 +924,6 @@ class RoutedMoE(nnx.Module):
               use_tokamax_backend=self.config.use_tokamax_gmm,
               weight_gather_axes=weight_gather_axes,
               input_buffer_count=input_buffer_count,
-              combine_scopes=combine_scopes,
           )
         else:
           output = tokamax.ragged_dot(
@@ -1241,16 +1238,8 @@ class RoutedMoE(nnx.Module):
           self.config.wo_tile_dlhs_buffer_count,
           self.config.wo_tile_drhs_buffer_count,
       )
-
-      wi_combine_scopes = self.config.wi_combine_scopes
-      wo_combine_scopes = self.config.wo_combine_scopes
       layer_w0 = gmm_fn(
-          x,
-          w0,
-          tiling=wi_tile_size,
-          weight_gather_axes=wi_gather_axes,
-          input_buffer_count=wi_input_buffer_count,
-          combine_scopes=wi_combine_scopes,
+          x, w0, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes, input_buffer_count=wi_input_buffer_count
       )
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
@@ -1259,12 +1248,7 @@ class RoutedMoE(nnx.Module):
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
 
       layer_w1 = gmm_fn(
-          x,
-          w1,
-          tiling=wi_tile_size,
-          weight_gather_axes=wi_gather_axes,
-          input_buffer_count=wi_input_buffer_count,
-          combine_scopes=wi_combine_scopes,
+          x, w1, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes, input_buffer_count=wi_input_buffer_count
       )
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
@@ -1279,7 +1263,6 @@ class RoutedMoE(nnx.Module):
           tiling=wo_tile_size,
           weight_gather_axes=wo_gather_axes,
           input_buffer_count=wo_input_buffer_count,
-          combine_scopes=wo_combine_scopes,
       )
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(
