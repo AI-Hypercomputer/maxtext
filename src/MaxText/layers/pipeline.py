@@ -124,7 +124,7 @@ class Pipeline(nn.Module):
         + self.iterations_to_complete_first_microbatch_one_repeat()
     )
 
-  def _maybe_shard_with_logical(self, inputs, logical_axes):
+  def _maybe_shard_with_logical(self, inputs, logical_axes, sharding_desc=""):
     """Wrapper of maybe_shard_with_logical"""
     return maybe_shard_with_logical(
         inputs,
@@ -133,6 +133,7 @@ class Pipeline(nn.Module):
         mesh=self.mesh,
         rules=self.config.logical_axis_rules,
         debug_sharding=self.config.debug_sharding,
+        sharding_desc=sharding_desc,
     )
 
   def _maybe_shard_with_name(self, inputs, sharding_name):
@@ -160,12 +161,14 @@ class Pipeline(nn.Module):
     # Shift is used to rotate the output of each pipeline into the input of the next
     # shift has shape [num_stages, micro_size, sequence, embed]
     shift = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
-    shift = self._maybe_shard_with_logical(shift, self.stages_in_logical)
+    shift = self._maybe_shard_with_logical(shift, self.stages_in_logical, sharding_desc="pipeline/shift")
 
     # Prev outputs has the same shape of the output (and shift)
     if self.config.pipeline_delay_activation_forwarding:
       prev_outputs = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
-      prev_outputs = self._maybe_shard_with_logical(prev_outputs, self.stages_in_logical)
+      prev_outputs = self._maybe_shard_with_logical(
+          prev_outputs, self.stages_in_logical, sharding_desc="pipeline/prev_outputs"
+      )
     else:
       prev_outputs = None
 
@@ -176,7 +179,7 @@ class Pipeline(nn.Module):
         inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:], out_sharding=self.state_io_sharding
     )
     # We shard the pipeline_microbatch_size axis by data/fsdp, not num_microbatches since those are looped over.
-    state_io = self._maybe_shard_with_logical(state_io, self.state_io_logical)
+    state_io = self._maybe_shard_with_logical(state_io, self.state_io_logical, sharding_desc="pipeline/state_io")
 
     # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only
     # needed when num_microbatches > num_stages, else instead the final stage will immediately pass to the first without
@@ -220,7 +223,7 @@ class Pipeline(nn.Module):
     # Setup potential input from state_io, which has a rotating microbatch index (size of microbatches_per_stage)
     state_io_batch_idx = loop_iteration % self.microbatches_per_stage
     state_io_slice = state_io[:, state_io_batch_idx]
-    shift = self._maybe_shard_with_logical(shift, self.stages_in_logical)
+    shift = self._maybe_shard_with_logical(shift, self.stages_in_logical, sharding_desc="pipeline/shift")
 
     if self.use_circ_storage:
       # Setup potential input from circ_storage, which also has a rotating index for microbatch,
@@ -235,7 +238,9 @@ class Pipeline(nn.Module):
     # state_io we instead grab from the last stage's output (possibly buffered when num_microbatches > num_stages, e.g.
     # from circ_storage).
     first_stage_in = jnp.where(loop_iteration < self.config.num_pipeline_microbatches, state_io_slice, circular_stage_in)
-    first_stage_in = self._maybe_shard_with_logical(first_stage_in, self.stages_in_logical)
+    first_stage_in = self._maybe_shard_with_logical(
+        first_stage_in, self.stages_in_logical, sharding_desc="pipeline/first_stage_in"
+    )
 
     # Note that first_stage_in may correspond to bubble computation during the last few iterations.
     # However, these bubble computation results remain in the shift buffer (do not make it back to state_io) and are
@@ -253,7 +258,7 @@ class Pipeline(nn.Module):
 
     # Selects input (from stream_io) for stage 0, other stages get from shift (the rotated previous output)
     stages_in = select_state_or_input(first_stage_in, shift)
-    stages_in = self._maybe_shard_with_logical(stages_in, self.stages_in_logical)
+    stages_in = self._maybe_shard_with_logical(stages_in, self.stages_in_logical, sharding_desc="pipeline/stages_in")
     return stages_in
 
   def shard_dim_by_stages(self, x, dim: int, physical_partition_spec: P | None, is_stage_weight: bool = False):

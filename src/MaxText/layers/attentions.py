@@ -1029,8 +1029,8 @@ class Attention(nnx.Module):
     else:
       input_axis_names = self.decode_input_axis_names
 
-    inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
-    inputs_kv = self._maybe_shard_with_logical(inputs_kv, input_axis_names)
+    inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names, sharding_desc="attention/inputs_q")
+    inputs_kv = self._maybe_shard_with_logical(inputs_kv, input_axis_names, sharding_desc="attention/input_kv")
     qkv_sharding = create_sharding(self.mesh, input_axis_names)
 
     # apply projection.
@@ -1081,21 +1081,27 @@ class Attention(nnx.Module):
       query = (query * attn_scales[:, :, jnp.newaxis, jnp.newaxis]).astype(self.dtype)
 
     if model_mode == MODEL_MODE_PREFILL:
-      query = self._maybe_shard_with_logical(query, self.prefill_query_axis_names)
-      key = self._maybe_shard_with_logical(key, self.prefill_key_axis_names)
-      value = self._maybe_shard_with_logical(value, self.prefill_value_axis_names)
+      query = self._maybe_shard_with_logical(query, self.prefill_query_axis_names, sharding_desc="attention/query")
+      key = self._maybe_shard_with_logical(key, self.prefill_key_axis_names, sharding_desc="attention/key")
+      value = self._maybe_shard_with_logical(value, self.prefill_value_axis_names, sharding_desc="attention/value")
     elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      query = self._maybe_shard_with_logical(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = self._maybe_shard_with_logical(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-      value = self._maybe_shard_with_logical(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      query = self._maybe_shard_with_logical(
+          query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV), sharding_desc="attention/query"
+      )
+      key = self._maybe_shard_with_logical(
+          key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV), sharding_desc="attention/key"
+      )
+      value = self._maybe_shard_with_logical(
+          value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV), sharding_desc="attention/value"
+      )
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      query = self._maybe_shard_with_logical(query, self.ep_query_axis_names)
-      key = self._maybe_shard_with_logical(key, self.ep_key_axis_names)
-      value = self._maybe_shard_with_logical(value, self.ep_value_axis_names)
+      query = self._maybe_shard_with_logical(query, self.ep_query_axis_names, sharding_desc="attention/query")
+      key = self._maybe_shard_with_logical(key, self.ep_key_axis_names, sharding_desc="attention/key")
+      value = self._maybe_shard_with_logical(value, self.ep_value_axis_names, sharding_desc="attention/value")
     else:
-      query = self._maybe_shard_with_logical(query, self.query_axis_names)
-      key = self._maybe_shard_with_logical(key, self.key_axis_names)
-      value = self._maybe_shard_with_logical(value, self.value_axis_names)
+      query = self._maybe_shard_with_logical(query, self.query_axis_names, sharding_desc="attention/query")
+      key = self._maybe_shard_with_logical(key, self.key_axis_names, sharding_desc="attention/key")
+      value = self._maybe_shard_with_logical(value, self.value_axis_names, sharding_desc="attention/value")
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
@@ -1134,13 +1140,13 @@ class Attention(nnx.Module):
       )
     out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
     if model_mode == MODEL_MODE_PREFILL:
-      out = self._maybe_shard_with_logical(out, self.prefill_out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.prefill_out_axis_names, sharding_desc="attention/out")
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.ep_out_axis_names, sharding_desc="attention/out")
     elif model_mode == MODEL_MODE_TRAIN:
-      out = self._maybe_shard_with_logical(out, self.out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.out_axis_names, sharding_desc="attention/out")
     else:
-      out = self._maybe_shard_with_logical(out, self.decode_out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.decode_out_axis_names, sharding_desc="attention/out")
     if self.is_qwen3_next:
       out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
       out = out * jax.nn.sigmoid(gate)
