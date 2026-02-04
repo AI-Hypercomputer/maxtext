@@ -92,6 +92,13 @@ class GradientAccumulationTest(unittest.TestCase):
         ]
     )
 
+    import jax
+    live_arrays = jax.live_arrays()
+    print(f"Number of live arrays: {len(live_arrays)}")
+    for arr in live_arrays:
+      print(f"Array shape: {arr.shape}, dtype: {arr.dtype}")
+      arr.delete()
+
     # Assert losses roughly equal
     with (
         open(run_accumulate_metrics_file, "rt", encoding="utf8") as accum_run,
