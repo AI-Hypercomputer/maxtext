@@ -67,7 +67,7 @@ class Config:
 
   base_emb_dim: int = 1024
   tokenizer_path: str = "deepseek-ai/DeepSeek-V3"
-  # TODO: add configs to base.yml during engram integration
+  # TODO (ranran, shuningjin): add configs to base.yml during engram integration
   # mhc
   hc_mult: int = 2  # if > 1 use MHC, if 1 not use MHC
   # engram
@@ -111,7 +111,6 @@ class BackBoneConfig:
 
 # -----------------------------------------------------------------------------
 # Torch Reference Implementation
-# https://github.com/deepseek-ai/Engram/blob/fb7f84a21f91223715394a33a1dc24bbfb7f788e/engram_demo_v1.py
 # -----------------------------------------------------------------------------
 
 

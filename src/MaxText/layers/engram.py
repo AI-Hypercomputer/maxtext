@@ -13,9 +13,7 @@
 # limitations under the License.
 
 
-from typing import List, Optional, Callable
-from dataclasses import dataclass, field
-import math
+from typing import List, Optional
 import numpy as np
 from sympy import isprime
 from tokenizers import normalizers, Regex
@@ -140,9 +138,14 @@ class CompressedTokenizer:
 
 class NgramHashMapping:
   """
-  Use hash-based mapping for n-gram, as the combinatorial space is intractable for one-to-one mapping.
-  - To alleviate collision, initialize with unique prime vocab sizes across heads.
-  - When lookup, create n-gram window via shift. Hash via lightweight multiplicative-XOR inside window.
+  Maps n-grams to hash-based indices for memory lookup.
+
+  This class implements the hashing mechanism for Engram, which converts n-gram
+  sequences into integer IDs. Since the combinatorial space of n-grams is too
+  large for direct mapping, it uses a hash-based approach with:
+  1. Unique prime vocabulary sizes per head to minimize collisions.
+  2. A sliding window generated via shifting.
+  3. A lightweight multiplicative-XOR hash function.
   """
 
   def __init__(
@@ -156,37 +159,46 @@ class NgramHashMapping:
       seed,
   ):
     """
-    engram_vocab_size: each n-gram has total size > engram_vocab_size[n-2] * n_head_per_ngram
-    engram_num_heads: n_head_per_ngram
+    Args:
+      engram_vocab_size: A list of (n-1) minimum vocabulary sizes for each n-gram order.
+      max_ngram_size: The maximum n-gram size to track (e.g., 3 for 2-grams and 3-grams).
+      engram_num_heads: Number of heads per n-gram order.
+      layer_ids: List of layer indices where Engram is applied.
+      tokenizer: The base Hugging Face tokenizer.
+      pad_id: Padding token ID from the original tokenizer.
+      seed: Random seed for hash multiplier generation.
     """
     self.min_head_vocab_size_per_ngram = engram_vocab_size
     self.max_ngram_size = max_ngram_size
     self.n_head_per_ngram = engram_num_heads
     self.layer_ids = layer_ids
 
-    # initialize compreseed tokenizer
+    # Initialize compressed tokenizer
     self.compressed_tokenizer = CompressedTokenizer(tokenizer)
     self.tokenizer_vocab_size = len(self.compressed_tokenizer)
-    # TODO: why not just use pad_id = tokenizer.pad_id
+    # TODO(shuningjin): why not just use pad_id = tokenizer.pad_id
     if pad_id is not None:
       self.pad_id = int(self.compressed_tokenizer.lookup_table[pad_id])
 
-    # calculate layer multipliers {layer_id: multiplier}
+    # Calculate layer multipliers {layer_id: multipliers}
     self.layer_multipliers = self._calculate_multipliers_across_layers(seed)
 
     # Each head k maps to an embedding table of prime size
-    # {layer_id: [[2gram_head1,...,2gram_headH], ..., [Ngram_head1,...,Ngram_headH]}
+    # Structure: {layer_id: [[2gram_head1, ..., 2gram_headH], ..., [Ngram_head1, ..., Ngram_headH]]}
     self.vocab_size_across_layers = self._calculate_vocab_size_across_layers()
 
   def _calculate_multipliers_across_layers(self, seed: int):
     """
-    return dict {layer_id: a list of max_ngram_size multipliers}
+    Pre-calculates random odd multipliers for each layer and n-gram position.
+
+    Returns:
+      A dictionary mapping layer_id to a list of max_ngram_size multipliers.
     """
-    # Pre-calculate bounds
+    # Pre-calculate bounds for random generation
     max_long = np.iinfo(np.int64).max
     m_max = int(max_long // self.tokenizer_vocab_size)
     half_bound = max(1, m_max // 2)
-    # Large prime for seed decorrelation
+    # Large prime offset for seed decorrelation across layers
     LAYER_PRIME_OFFSET = 10007
 
     layer_multipliers = {}
@@ -194,7 +206,7 @@ class NgramHashMapping:
       # Generate a layer-specific seed
       layer_seed = int(seed + LAYER_PRIME_OFFSET * int(layer_id))
       np_rng = np.random.default_rng(layer_seed)
-      # generate max_ngram_size random integers and transform to odd
+      # Generate 'max_ngram_size' random integers and transform them to odd numbers
       random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
       multipliers = random_value * 2 + 1
       layer_multipliers[layer_id] = multipliers
@@ -231,7 +243,7 @@ class NgramHashMapping:
       for ngram in range(2, self.max_ngram_size + 1):
         current_ngram_heads_sizes = []
 
-        # use predefined size as start
+        # Use predefined minimum size as the starting point
         n_gram_index = ngram - 2
         vocab_size = self.min_head_vocab_size_per_ngram[n_gram_index]
         current_prime_search_start = vocab_size - 1
@@ -272,7 +284,7 @@ class NgramHashMapping:
       Tokens: The cat sat -> Compressed IDs: [10, 25, 32]
       max ngram = 3
 
-      3 multiplier: m0=3, m1=5, m3=7 (specific to l-th layer)
+      3 multipliers: m0=3, m1=5, m2=7 (specific to l-th layer)
 
       sliding window via shifting:
         shift0: [The, cat, sat] -> [10, 25, 32]
@@ -288,37 +300,43 @@ class NgramHashMapping:
       mod by vocab size m (specific to l-th layer, n-gram, h-th head)
     """
 
-    # 1 sliding window via shifting
-    def shift_k(x, k: int) -> np.ndarray:
-      if k == 0:
-        return x
-      T = x.shape[1]
-      shifted = np.pad(x, ((0, 0), (k, 0)), mode="constant", constant_values=self.pad_id)[:, :T]
-      return shifted
-
     x = np.asarray(compressed_ids, dtype=np.int64)
-    base_shifts = [shift_k(x, k) for k in range(self.max_ngram_size)]
+    B, T = x.shape
 
-    # 2 multiplier for each shift
+    # 1. Create sliding window via shifting
+    base_shifts = []
+    for k in range(self.max_ngram_size):
+      if k == 0:
+        base_shifts.append(x)
+      else:
+        # Pre-allocate full array filled with PAD_ID
+        shifted = np.full((B, T), self.pad_id, dtype=np.int64)
+        # Fast memory copy, slicing and assignment
+        # Example: T=5, k=1. shifted[:, 1:] = x[:, :4]
+        shifted[:, k:] = x[:, :-k]
+        base_shifts.append(shifted)
+
+    # 2. Retrieve multipliers for each shift position
     multipliers = self.layer_multipliers[layer_id]
 
-    # 3 calculate hashes across n-grams
+    # 3. Calculate hashes across n-gram orders
     all_hashes = []
-    mix = base_shifts[0] * multipliers[0]  # init hash
+    hash = base_shifts[0] * multipliers[0]  # init hash
     vocab_sizes = self.vocab_size_across_layers[layer_id]  # init vocab as mod
     for n in range(2, self.max_ngram_size + 1):
-      # multiplicative bitwise xor as hash function
+      # Update hash using multiplicative bitwise XOR
       k = n - 1
-      mix = np.bitwise_xor(mix, base_shifts[k] * multipliers[k])
-      # for H heads at this n-gram level, get primes vocab sizes
+      hash = np.bitwise_xor(hash, base_shifts[k] * multipliers[k])
+      # Get prime vocab sizes for the H heads at this n-gram level
       n_gram_index = n - 2
       vocab_sizes_for_this_gram = vocab_sizes[n_gram_index]
       mods = np.array(vocab_sizes_for_this_gram, dtype=np.int64)
       # Broadcast Modulo: (B, S, 1) % (H,) -> (B, S, H)
-      head_hashes = mix[..., None] % mods
+      head_hashes = hash[..., None] % mods
       all_hashes.append(head_hashes)
 
-    # (B, S, H_total), H_total = H * num_ngram_orders
+    # Concatenate heads across n-gram orders
+    # (B, S, H_total), where H_total = H * num_ngram_orders
     all_hashes = np.concatenate(all_hashes, axis=2)
     return all_hashes
 
@@ -332,46 +350,58 @@ class NgramHashMapping:
 
 
 class MultiHeadEmbedding(nnx.Module):
+  """
+  A multi-head embedding layer that maps multiple sets of indices to a shared flattened table.
+
+  Each 'head' represents a different n-gram order and its associated hash heads.
+  To optimize memory and computation, all heads share a single large embedding table,
+  with each head assigned a unique segment defined by prime-based vocabulary sizes.
+  """
 
   def __init__(self, vocab_sizes: List[int], head_dim: int, config, mesh, rngs: nnx.Rngs):
     """
     Args:
-      vocab_sizes: A list of prime-based vocab sizes, each element is h-th head for n-gram
-        for example, 2-gram and 3-gram, each with 2 heads. For instance, flattened list can be
-        m[n=2,h=0]=2, m[n=2,h=1]=3, m[n=3,h=0]=5, m[n=3,h=1]=7
+      vocab_sizes: A flattened list of prime-based vocabulary sizes for all heads across all n-gram orders.
+        Example: For 2-gram and 3-gram, each with 2 heads, the list might be [v2_h1, v2_h2, v3_h1, v3_h2].
       head_dim: The embedding dimension for a single head.
+      config: Global configuration object.
+      mesh: The device mesh for partitioning.
+      rngs: Rngs object for initialization.
     """
     self.num_heads = len(vocab_sizes)
 
-    # The embedding for heads across n-grams are stored in a single flattened table.
-    # Offsets act as the boundaries. Prefix sum to get the start position.
+    # Heads across all n-grams are stored in a single flattened embedding table.
+    # 'offsets' define the starting index for each head's vocabulary segment.
     # If vocab_sizes is [100, 200, 150], offsets will be [0, 100, 300].
-    offsets = np.cumsum([0] + vocab_sizes[:-1])
+    offsets = np.cumsum([0] + vocab_sizes[:-1])  # prefix sum
     self.offsets = jnp.array(offsets, dtype=jnp.int32)
 
-    # Total size is the sum of vocabularies acorss all heads all n-grams
+    # The total table size is the sum of vocabulary sizes across all heads.
     self.embedding = Embed(num_embeddings=sum(vocab_sizes), num_features=head_dim, config=config, mesh=mesh, rngs=rngs)
 
   def __call__(self, input_ids: jax.Array, model_mode: str = MODEL_MODE_TRAIN) -> jax.Array:
     """
+    Retrieves embeddings for the given multi-head indices.
+
     Args:
-      input_ids: Indices from MultiHeadHashing, shape (B, S, H_total)
+      input_ids: Hashed indices of shape (B, S, H_total), where H_total is the total number of heads.
+      model_mode: The model mode (e.g., train, eval).
 
     Returns:
-      embedding: (B, S, H_total, D_head)
+      embeddings: A tensor of shape (B, S, H_total, D_head).
     """
-    # Shift to indices in flattened table
+    # Shift local head indices to their corresponding positions in the global flattened table.
     shifted_ids = input_ids + self.offsets
 
-    # (batch, length, num_heads_total, head_dim)
+    # Perform embedding lookup: (B, S, H_total) -> (B, S, H_total, D_head)
     return self.embedding(shifted_ids, model_mode=model_mode)
 
 
 class ShortConv(nnx.Module):
   """
-  Implements a Grouped Depthwise Causal Convolution block.
+  A Depthwise Causal Convolution block, with multi-branch input and output.
 
-  Applies local temporal mixing (smoothing) to the retrieved embeddings.
+  Applies local temporal smoothing to the retrieved embeddings.
   - Independent RMSNorms for each branch
   - 1D convolution. Note it is depth-wise:
     mixes information across time steps [t-k, t] without mixing across channels.
@@ -380,14 +410,23 @@ class ShortConv(nnx.Module):
   def __init__(
       self,
       config,
-      hidden_size: int,  # base_emb_dim
-      kernel_size: int = 4,  # Temporal Window Size
+      hidden_size: int,
+      kernel_size: int = 4,
       dilation: int = 1,
       hc_mult: int = 4,
       rngs: nnx.Rngs = None,
   ):
+    """
+    Args:
+      config: Global configuration object.
+      hidden_size (D): Dimension of each branch, use `base_emb_dim`
+      kernel_size: Size of the convolution window (temporal span).
+      dilation: Dilation rate for the convolution.
+      hc_mult (G): Number of branches.
+      rngs: Rngs object for parameter initialization.
+    """
     self.hc_mult = hc_mult
-    # (G * D) as the total number of input channels
+    # Total input channels across all branches: (G * D)
     total_channels = hidden_size * hc_mult
 
     # Norm (vectorized)
@@ -404,7 +443,7 @@ class ShortConv(nnx.Module):
           rngs=r,
       )
 
-    # Weights: {"scale": (hc_mult, hidden_size)}
+    # Parameters: {"scale": (G, D)}
     self.norms = create_norms(rngs)
 
     # Convolution (shared)
@@ -424,23 +463,24 @@ class ShortConv(nnx.Module):
 
   def __call__(self, x: jax.Array) -> jax.Array:
     """
-    Compute y^i = SiLU(Conv1D(RMSNorm^i(x^i))), i is index for branch dim.
+    Compute y^i = SiLU(Conv1D(RMSNorm^i(x^i))) for each branch i.
 
     Args:
       x: Input tensor of shape (B, S, G, D)
     Returns:
-      Tensor of shape (B, S, G, D)
+      Output tensor of shape (B, S, G, D)
 
     Shape annotation:
-      B: Batch Size
-      S: Sequence Length
-      G: Number of Branches (hc_mult)
-      D: base_emb_dim
+      B: Batch size
+      S: Sequence length (temporal dimension)
+      G: Number of branches (hc_mult)
+      D: Hidden size (base_emb_dim)
     """
     B, S, G, D = x.shape
 
     # Apply Norms (Vectorized over Group dim)
-    # in_axes=(0, 2): norms is axis 0, x is axis 2, out_axes=2: put the group dim back at axis 2
+    # `in_axes=(0, 2)`: norms is axis 0, x is axis 2
+    # `out_axes=2`: put the group dim back at axis 2
     # shape stays (B, S, G, D)
     @nnx.vmap(in_axes=(0, 2), out_axes=2)
     def apply_norms(norms, x):
@@ -448,9 +488,9 @@ class ShortConv(nnx.Module):
 
     x = apply_norms(self.norms, x)
 
-    # Flatten branch: (B, S, G, D) -> (B, S, G * D)
+    # Flatten branches into channel: (B, S, G, D) -> (B, S, G * D)
     x_flat = x.reshape(B, S, G * D)
-    # Depthwise Convolution to mixes temporal dimension S only. Shape stays (B, S, G * D)
+    # Depthwise Convolution to mix temporal dimension S only. Shape stays (B, S, G * D)
     y = self.conv(x_flat)
     # Activation
     y = jax.nn.silu(y)
@@ -460,14 +500,12 @@ class ShortConv(nnx.Module):
 
 class Engram(nnx.Module):
   """
-  Implements the Engram Memory Layer with n-gram statistics.
+  Implements the Engram Memory Layer with n-gram embedding.
 
   It follows a Retrieve-and-Gate paradigm:
   - Context-independent Retrieval: Fetch n-gram embeddings using Multi-Head Hashing as static memory.
   - Context-aware Gating: Decide how much of this retrieved memory to use based on the current dynamic state.
   - Mix: Apply local temporal smoothing via ShortConv.
-
-  Note: vocab_sizes = hash_mapping.get_vocab_sizes(layer_id)
   """
 
   def __init__(
@@ -486,11 +524,20 @@ class Engram(nnx.Module):
       engram_kernel_size: int,
   ):
     """
-    hc_mult (G): > 1 - use MHC, 1 - not use MHC
-    engram_max_ngram_size: track 2...N-grams
-    engram_kernel_size: 1d convolution kernel size
-    engram_num_heads (H): Number of heads per n-gram order
-    engram_head_dim (D_head): Dimension of a single head. The actual size stored in the table.
+    Args:
+      rngs: Random number generators for initialization.
+      config: Global configuration object.
+      mesh: Device mesh for partitioning.
+      quant: Quantization configuration (optional).
+      kernel_init: Initializer for dense layer kernels.
+      hc_mult (G): Multi-Head Compression multiplier. Number of parallel branches.
+        If > 1, uses Multi-Head Compression (MHC).
+      vocab_sizes: List of prime vocabulary sizes for the MultiHeadEmbedding,
+        derived from `hash_mapping.get_vocab_sizes(layer_id)`.
+      engram_num_heads (H): Number of heads per n-gram order.
+      engram_head_dim (D_head): Dimension of a single head embedding.
+      engram_max_ngram_size: Maximum n-gram size to track (e.g., 3 means 2-grams and 3-grams).
+      engram_kernel_size: Kernel size for the ShortConv 1D convolution.
     """
     self.config = config
     self.mesh = mesh
@@ -505,10 +552,10 @@ class Engram(nnx.Module):
     self.max_ngram_size = engram_max_ngram_size
     self.conv_kernel_size = engram_kernel_size
     num_ngram_orders = self.max_ngram_size - 1
-    # D_en: Final concatenated size
+    # D_en: Final concatenated size of the retrieved memory
     self.engram_dim = engram_head_dim * engram_num_heads * num_ngram_orders
 
-    # Embedding: all n-gram heads in one flattened table
+    # Embedding: all n-gram heads across orders stored in one flattened table
     self.multi_head_embedding = MultiHeadEmbedding(
         vocab_sizes=vocab_sizes, head_dim=engram_head_dim, config=config, mesh=mesh, rngs=rngs
     )
@@ -523,6 +570,7 @@ class Engram(nnx.Module):
           out_features_shape=config.base_emb_dim,
           axis=-1,
           kernel_init=self.kernel_init,
+          # TODO(shuningjin): this needs to be actual logical axis? @reviewer
           kernel_axes=("engram_dim", "embed"),
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
@@ -560,6 +608,7 @@ class Engram(nnx.Module):
         out_features_shape=config.base_emb_dim,
         axis=-1,
         kernel_init=self.kernel_init,
+        # TODO(shuningjin): this needs to be actual logical axis? @reviewer
         kernel_axes=("engram_dim", "embed"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
@@ -583,19 +632,22 @@ class Engram(nnx.Module):
 
   def __call__(self, hidden_states: jax.Array, hash_input_ids: jax.Array) -> jax.Array:
     """
+    Computes the Engram output by retrieving, gating, and smoothing n-gram memory.
+
     Args:
-      hidden_states: Current transformer state (Query). Shape: (B, S, G, D)
+      hidden_states: Current transformer state (Query). Shape: (B, S, G, D).
       hash_input_ids: Hashed token IDs. Shape: (B, S, H_total).
         Produced by `hash_mapping.hash(input_ids)[layer_id]`.
+
     Returns:
       Shape: (B, S, G, D)
 
-    - retireve memory E
+    - retrieve embedding as memory E
     - compute similarity between memory and context
         K^i = RMSNormK^i(Wk^i @ E)
         Q^i = RMSNormQ^i(hidden)
         gate^i = sigmoid(K^i @ Q^i)
-    - updated memory
+    - update memory
         V = Wv @ E
         Vnew^i = gate^i * V
     - temporal smooth
