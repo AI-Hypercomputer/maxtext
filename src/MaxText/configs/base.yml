@@ -455,6 +455,7 @@ logical_axis_rules: [
                       ["kv_lora_up_proj",[]],
                       ['norm', ['tensor', 'tensor_transpose']],
                       ['layers', 'stage'],
+                      ['qkv', []],
                       ['kv', []],
                       ['kv_head_dim', []],
                       ['cache_batch_prefill', []],
