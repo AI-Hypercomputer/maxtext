@@ -203,6 +203,14 @@ wo_tile_dlhs_mlp_dim: 1024
 wo_tile_drhs_batch_seq: 512
 wo_tile_drhs_embed_dim: 1024
 wo_tile_drhs_mlp_dim: 1024
+
+wi_tile_fwd_buffer_count: 2
+wi_tile_dlhs_buffer_count: 2
+wi_tile_drhs_buffer_count: 2
+wo_tile_fwd_buffer_count: 2
+wo_tile_dlhs_buffer_count: 2
+wo_tile_drhs_buffer_count: 2
+
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
 # how the expert axis is used to shard attention weights and activations

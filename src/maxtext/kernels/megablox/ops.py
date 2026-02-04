@@ -42,6 +42,7 @@ def gmm(
     use_qwix_quantization: bool = False,
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
+    input_buffer_count: tuple[int, int, int] = (2, 2, 2),
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -61,7 +62,7 @@ def gmm(
       )
 
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
-  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9, 10, 11))
+  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 5, 8, 9, 10, 11, 12))
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
       lhs,
@@ -69,6 +70,7 @@ def gmm(
       group_sizes,
       preferred_element_type,
       tiling,
+      input_buffer_count,
       group_offset,
       existing_out,
       transpose_rhs,
@@ -85,6 +87,7 @@ def _gmm_fwd(
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
     tiling: tuple[int, int, int, int, int, int, int, int, int] = (128, 128, 128, 128, 128, 128, 128, 128, 128),
+    input_buffer_count: tuple[int, int, int] = (2, 2, 2),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
@@ -125,9 +128,7 @@ def _gmm_fwd(
       # QAG is only supported for following conditions
   if use_tokamax_backend:
     if quantization_rule and quantization_rule.bwd_qtype:
-      if quantization_rule.weight_calibration_method.startswith(
-          "fixed"
-      ) and isinstance(rhs, qpl.QArray):
+      if quantization_rule.weight_calibration_method.startswith("fixed") and isinstance(rhs, qpl.QArray):
         if weight_gather_axes:
           for axis_name, axis_idx in weight_gather_axes:
             rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)
@@ -142,6 +143,7 @@ def _gmm_fwd(
         group_offset=group_offset,
         transpose_rhs=transpose_rhs,
         interpret=interpret,
+        input_buffer_count=input_buffer_count[0],
     )
   else:
     out = backend.gmm(
@@ -163,6 +165,7 @@ def _gmm_bwd(
     rhs_dtype: jax.typing.DTypeLike,
     preferred_element_type: jnp.dtype,
     tiling: tuple[int, int, int, int, int, int, int, int, int],
+    input_buffer_count: tuple[int, int, int],
     transpose_rhs: bool,
     interpret: bool,
     quantization_rule: qwix.QtRule | None,
@@ -229,6 +232,7 @@ def _gmm_bwd(
         group_offset=group_offset,
         transpose_rhs=not transpose_rhs,
         interpret=interpret,
+        input_buffer_count=input_buffer_count[1],
     )
     drhs = tokamax_backend.tgmm(
         lhs=lhs.swapaxes(0, 1),
@@ -240,6 +244,7 @@ def _gmm_bwd(
         group_offset=group_offset,
         num_actual_groups=num_actual_groups,
         interpret=interpret,
+        input_buffer_count=input_buffer_count[2],
     )
     if quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
       # Scatter back in reverse order of gather
