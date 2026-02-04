@@ -1,30 +1,14 @@
-# Copyright 2023–2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""Module for decoder layers"""
-# pylint: disable=arguments-differ
-# pylint: disable=no-name-in-module
-
 import functools
 import inspect
-from typing import Any
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from MaxText import max_logging, maxtext_utils, multimodal_utils, sharding
 from MaxText.common_types import (
@@ -71,8 +55,6 @@ from MaxText.sharding import create_sharding
 class NNXDecoderLayer(nnx.Module):
   """
   Transformer decoder layer that attends to the encoder.
-  This is the core, reusable building block for both the main model's
-  decoder stack and the auxiliary MTP layers.
   """
 
   def __init__(
@@ -237,22 +219,22 @@ class NNXSequentialBlockDecoderLayers(nnx.Module):
     self.config = config
     self.num_decoder_layers = num_decoder_layers
     self.remat_policy = remat_policy
+    max_logging.info(f"NNXSequential - Init for {num_decoder_layers} layers with offset {layer_idx_offset}")
 
     for i in range(num_decoder_layers):
       # Calculate layer-specific arguments based on global index
       global_idx = layer_idx_offset + i
       layer_init_kwargs = kwargs.copy()
-
-      # Model-specific initialization logic matching Linen
+      
       if config.decoder_block == DecoderBlockType.GEMMA3:
-        layer_init_kwargs["attention_type"] = gemma3.get_attention_type(layer_id=global_idx)
+          layer_init_kwargs["attention_type"] = gemma3.get_attention_type(layer_id=global_idx)
       elif config.decoder_block == DecoderBlockType.LLAMA4:
-        layer_init_kwargs["is_nope_layer"] = llama4.determine_is_nope_layer(global_idx, config.nope_layer_interval)
-        layer_init_kwargs["is_moe_layer"] = llama4.determine_is_moe_layer(global_idx, config.interleave_moe_layer_step)
+          layer_init_kwargs["is_nope_layer"] = llama4.determine_is_nope_layer(global_idx, config.nope_layer_interval)
+          layer_init_kwargs["is_moe_layer"] = llama4.determine_is_moe_layer(global_idx, config.interleave_moe_layer_step)
       elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
-        layer_init_kwargs["layer_idx"] = global_idx
+          layer_init_kwargs["layer_idx"] = global_idx
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
-        layer_init_kwargs["attention_type"] = gpt_oss.get_attention_type(layer_id=global_idx)
+          layer_init_kwargs["attention_type"] = gpt_oss.get_attention_type(layer_id=global_idx)
 
       setattr(
           self,
@@ -271,44 +253,44 @@ class NNXSequentialBlockDecoderLayers(nnx.Module):
       page_state: Any | None = None,
       **kwargs,
   ) -> jnp.ndarray:
-
+    
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
 
     for number in range(self.num_decoder_layers):
       layer = getattr(self, f"layers_{number}")
-
+      
       if self.remat_policy is not None:
-        graphdef, params, mutable_state = nnx.split(layer, nnx.Param, ...)
-
-        def rematted_forward(g, p, s, x, *args, **kw):
-          m = nnx.merge(g, p, s)
-          out = m(x, *args, **kw)
-          _, new_s = nnx.split(m, nnx.Param, ...)
-          return out, new_s
-
-        forward_with_ckpt = jax.checkpoint(rematted_forward, policy=self.remat_policy, prevent_cse=prevent_cse)
-
-        inputs_out, new_mutable_state = forward_with_ckpt(
-            graphdef,
-            params,
-            mutable_state,
-            inputs,
-            decoder_segment_ids,
-            decoder_positions,
-            deterministic,
-            model_mode,
-            None,  # previous_chunk
-            slot,
-            page_state,
-            None,  # kv_cache
-            None,  # attention_metadata
-            **kwargs,  # pass remaining kwargs like bidirectional_mask
-        )
-        # Update only the mutable state. Offloaded params remain untouched.
-        nnx.update(layer, new_mutable_state)
-        inputs = inputs_out
+         # OOM Fix: Split Params (Static) from Mutable State.
+         graphdef, params, mutable_state = nnx.split(layer, nnx.Param, ...)
+         
+         def rematted_forward(g, p, s, x, *args, **kw):
+             m = nnx.merge(g, p, s)
+             out = m(x, *args, **kw)
+             _, new_s = nnx.split(m, nnx.Param, ...)
+             return out, new_s
+             
+         forward_with_ckpt = jax.checkpoint(rematted_forward, policy=self.remat_policy, prevent_cse=prevent_cse)
+         
+         inputs_out, new_mutable_state = forward_with_ckpt(
+             graphdef, 
+             params, 
+             mutable_state, 
+             inputs, 
+             decoder_segment_ids,
+             decoder_positions,
+             deterministic,
+             model_mode,
+             None, # previous_chunk
+             slot,
+             page_state,
+             None, # kv_cache
+             None, # attention_metadata
+             **kwargs # pass remaining kwargs
+         )
+         nnx.update(layer, new_mutable_state)
+         inputs = inputs_out
       else:
-        inputs = layer(
+         inputs = layer(
             inputs,
             decoder_segment_ids,
             decoder_positions,
@@ -317,29 +299,37 @@ class NNXSequentialBlockDecoderLayers(nnx.Module):
             slot=slot,
             page_state=page_state,
             **kwargs,
-        )
+         )
 
       if self.config.scan_layers:
         inputs = inputs[0]
-
+        
     if self.config.scan_layers:
       return inputs, None
     return inputs
 
 
 class NNXScannedBlockDecoderLayers(nnx.Module):
-  """Scanned series of decoder layers."""
-
+  """Scanned series of decoder layers.
+  
+  Used primarily by Pipeline to wrap vmapped layers in a callable module.
+  """
   def __init__(self, vmapped_layers, num_layers, config, remat_policy=None):
-    self.layers = vmapped_layers
-    self.num_layers = num_layers
-    self.config = config
-    self.remat_policy = remat_policy
+      self.layers = vmapped_layers
+      self.num_layers = num_layers
+      self.config = config
+      self.remat_policy = remat_policy
 
   def __call__(self, x, *args, **kwargs):
-    return _apply_scanned_layers(
-        self.layers, x, *args, length=self.num_layers, remat_policy=self.remat_policy, config=self.config, **kwargs
-    )
+      return _apply_scanned_layers(
+          self.layers, 
+          x, 
+          *args, 
+          length=self.num_layers, 
+          remat_policy=self.remat_policy, 
+          config=self.config,
+          **kwargs
+      )
 
 
 class NNXDecoder(nnx.Module):
@@ -354,6 +344,7 @@ class NNXDecoder(nnx.Module):
       *,
       rngs: nnx.Rngs,
   ):
+    max_logging.log(f"DEBUG: Initializing NNXDecoder for model {config.model_name}")
     self.config = config
     self.mesh = mesh
     self.quant = quant
@@ -403,44 +394,37 @@ class NNXDecoder(nnx.Module):
     self.remat_policy = self.get_remat_policy()
 
     if self.using_pipeline:
-      # The pipeline module will contain the layers defined in get_pipeline_stage_module.
+      max_logging.log(f"DEBUG: Initializing Pipeline Module with {config.pipeline_parallel_layers} layers.")
       self.pipeline_module = self.get_pipeline_stage_module(decoder_block_classes)
       self.num_pipeline_layers = config.pipeline_parallel_layers
-
+      
       num_remaining_layers = config.num_decoder_layers - self.num_pipeline_layers
       if self.is_deepseek:
-        # DeepSeek Dense Layers (Pre-Pipeline)
-        dense_cls = decoder_block_classes[0]
-        num_dense = config.first_num_dense_layers
-
-        if config.scan_layers:
-          vmapped_dense = self._create_scanned_layers_vmap(dense_cls, length=num_dense, rngs=rngs)
-          self.dense_layers = NNXScannedBlockDecoderLayers(vmapped_dense, num_dense, config, self.remat_policy)
-        else:
-          self.dense_layers = NNXSequentialBlockDecoderLayers(
-              dense_cls, num_dense, config, mesh, model_mode, rngs, quant, remat_policy=self.remat_policy
-          )
+          # DeepSeek Dense Layers (Pre-Pipeline)
+          dense_cls = decoder_block_classes[0]
+          num_dense = config.first_num_dense_layers
+          
+          if config.scan_layers:
+              # Directly store vmapped module to avoid extra nesting
+              self.dense_layers = self._create_scanned_layers_vmap(dense_cls, length=num_dense, rngs=rngs)
+          else:
+              self.dense_layers = NNXSequentialBlockDecoderLayers(
+                  dense_cls, num_dense, config, mesh, model_mode, rngs, quant, 
+                  remat_policy=self.remat_policy
+              )
 
       if num_remaining_layers > 0:
+        max_logging.log(f"DEBUG: Initializing Remainder Layers: {num_remaining_layers} layers.")
         layer_cls = decoder_block_classes[1] if self.is_deepseek else decoder_block_classes[0]
-
+        
         if config.scan_layers:
-          vmapped_remainder = self._create_scanned_layers_vmap(layer_cls, length=num_remaining_layers, rngs=rngs)
-          self.remainder_layers = NNXScannedBlockDecoderLayers(
-              vmapped_remainder, num_remaining_layers, config, self.remat_policy
-          )
+           # Directly store vmapped module to avoid extra nesting
+           self.remainder_layers = self._create_scanned_layers_vmap(layer_cls, length=num_remaining_layers, rngs=rngs)
         else:
-          # Use Sequential Block for consistent Remat/Init logic
           self.remainder_layers = NNXSequentialBlockDecoderLayers(
-              layer_cls,
-              num_remaining_layers,
-              config,
-              mesh,
-              model_mode,
-              rngs,
-              quant,
+              layer_cls, num_remaining_layers, config, mesh, model_mode, rngs, quant,
               remat_policy=self.remat_policy,
-              layer_idx_offset=self.num_pipeline_layers,
+              layer_idx_offset=self.num_pipeline_layers
           )
 
     elif self.config.scan_layers:
@@ -449,13 +433,11 @@ class NNXDecoder(nnx.Module):
         dense_cls, moe_cls = decoder_block_classes
 
         num_dense = config.first_num_dense_layers
-        vmapped_dense = self._create_scanned_layers_vmap(dense_cls, length=num_dense, rngs=rngs)
-        self.dense_layers = NNXScannedBlockDecoderLayers(vmapped_dense, num_dense, config, self.remat_policy)
+        self.dense_layers = self._create_scanned_layers_vmap(dense_cls, length=num_dense, rngs=rngs)
 
         num_moe = config.num_decoder_layers - config.first_num_dense_layers
-        vmapped_moe = self._create_scanned_layers_vmap(moe_cls, length=num_moe, rngs=rngs)
-        self.moe_stack = NNXScannedBlockDecoderLayers(vmapped_moe, num_moe, config, self.remat_policy)
-
+        self.moe_stack = self._create_scanned_layers_vmap(moe_cls, length=num_moe, rngs=rngs)
+        
       elif self.is_gemma3:
         # Gemma 3 scanning logic
         attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
@@ -466,40 +448,58 @@ class NNXDecoder(nnx.Module):
         RemattedGemma3Block = gemma3.Gemma3ScannableBlock
 
         if scan_length > 0:
-          vmapped_gemma = self._create_scanned_layers_vmap(
-              RemattedGemma3Block, length=scan_length, rngs=rngs, num_of_layers=attention_pattern_length
-          )
-          self.layers = NNXScannedBlockDecoderLayers(vmapped_gemma, scan_length, config, self.remat_policy)
-
+          self.layers = self._create_scanned_layers_vmap(RemattedGemma3Block, length=scan_length, rngs=rngs, num_of_layers=attention_pattern_length)
+          
         self.layers_remainder = RemattedGemma3Block(
             config=self.config, mesh=mesh, quant=self.quant, model_mode=self.model_mode, **rem_layer_kwargs, rngs=rngs
         )
       else:
+        # STANDARD SCANNED PATH
         layer_cls = decoder_block_classes[0]
         num_layers = config.num_decoder_layers
-        vmapped_layers = self._create_scanned_layers_vmap(layer_cls, length=num_layers, rngs=rngs)
-        self.layers = NNXScannedBlockDecoderLayers(vmapped_layers, num_layers, config, self.remat_policy)
+        # Directly store vmapped module to result in 'decoder/layers/...'
+        self.layers = self._create_scanned_layers_vmap(layer_cls, length=num_layers, rngs=rngs)
     else:
-      # Sequential Unscanned (Uses NNXSequentialBlockDecoderLayers for convenience and correctness of Init)
+      # Sequential Unscanned
+      # Standard Sequential (No Pipeline, No Scan)
+      # FIX: Flatten layers to match Linen's decoder/layers_0 structure
       if self.is_deepseek:
-        dense_cls, moe_cls = decoder_block_classes
-        num_dense = config.first_num_dense_layers
-        num_moe = config.num_decoder_layers - config.first_num_dense_layers
-
-        self.dense_layers = NNXSequentialBlockDecoderLayers(
-            dense_cls, num_dense, config, mesh, model_mode, rngs, quant, self.remat_policy
-        )
-        self.moe_layers = NNXSequentialBlockDecoderLayers(
-            moe_cls, num_moe, config, mesh, model_mode, rngs, quant, self.remat_policy, layer_idx_offset=num_dense
-        )
+          dense_cls, moe_cls = decoder_block_classes
+          num_dense = config.first_num_dense_layers
+          num_moe = config.num_decoder_layers - config.first_num_dense_layers
+          
+          # Flatten Dense
+          for i in range(num_dense):
+             layer = self._create_single_layer(dense_cls, rngs)
+             setattr(self, f"dense_layers_{i}", layer)
+             
+          # Flatten MoE
+          for i in range(num_moe):
+             layer = self._create_single_layer(moe_cls, rngs)
+             setattr(self, f"moe_layers_{i}", layer)
+             
       else:
         layer_cls = decoder_block_classes[0]
-        self.layers = NNXSequentialBlockDecoderLayers(
-            layer_cls, config.num_decoder_layers, config, mesh, model_mode, rngs, quant, self.remat_policy
-        )
+        for i in range(config.num_decoder_layers):
+             # Replicate model-specific kwarg logic
+             layer_kwargs = {}
+             if config.decoder_block == DecoderBlockType.GEMMA3:
+                 layer_kwargs["attention_type"] = gemma3.get_attention_type(layer_id=i)
+             elif config.decoder_block == DecoderBlockType.LLAMA4:
+                 layer_kwargs["is_nope_layer"] = llama4.determine_is_nope_layer(i, config.nope_layer_interval)
+                 layer_kwargs["is_moe_layer"] = llama4.determine_is_moe_layer(i, config.interleave_moe_layer_step)
+             elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+                 layer_kwargs["layer_idx"] = i
+             elif config.decoder_block == DecoderBlockType.GPT_OSS:
+                 layer_kwargs["attention_type"] = gpt_oss.get_attention_type(layer_id=i)
+
+             layer = self._create_single_layer(layer_cls, rngs, **layer_kwargs)
+             setattr(self, f"layers_{i}", layer)
+
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """Creates the Pipeline module with the correct stage configuration."""
+    max_logging.log(f"DEBUG: get_pipeline_stage_module called.")
     cfg = self.config
 
     def get_layer_to_pipeline(blocks, cfg):
@@ -510,10 +510,8 @@ class NNXDecoder(nnx.Module):
 
     base_stage_cls = get_layer_to_pipeline(decoder_blocks, cfg)
     remat_policy = self.get_remat_policy() if cfg.set_remat_policy_on_layers_per_stage else None
-
+    
     if cfg.num_layers_per_pipeline_stage == 1:
-      # Wrapping single layer in Sequential allows for consistent Remat policy application
-      # and interface compatibility.
       stage_module = NNXSequentialBlockDecoderLayers(
           decoder_layer=base_stage_cls,
           num_decoder_layers=1,
@@ -522,7 +520,7 @@ class NNXDecoder(nnx.Module):
           model_mode=self.model_mode,
           rngs=self.rngs,
           quant=self.quant,
-          remat_policy=remat_policy,
+          remat_policy=remat_policy
       )
     elif cfg.scan_layers_per_stage:
       vmapped_stage = self._create_scanned_layers_vmap(
@@ -530,8 +528,12 @@ class NNXDecoder(nnx.Module):
           length=cfg.num_layers_per_pipeline_stage,
           rngs=self.rngs,
       )
+      # For Pipeline, we MUST return a callable Module, so we wrap it.
       stage_module = NNXScannedBlockDecoderLayers(
-          vmapped_stage, cfg.num_layers_per_pipeline_stage, cfg, remat_policy=remat_policy
+          vmapped_stage, 
+          cfg.num_layers_per_pipeline_stage, 
+          cfg, 
+          remat_policy=remat_policy
       )
     else:
       stage_module = NNXSequentialBlockDecoderLayers(
@@ -542,7 +544,7 @@ class NNXDecoder(nnx.Module):
           model_mode=self.model_mode,
           rngs=self.rngs,
           quant=self.quant,
-          remat_policy=remat_policy,
+          remat_policy=remat_policy
       )
 
     return pipeline.Pipeline(
@@ -554,7 +556,6 @@ class NNXDecoder(nnx.Module):
     )
 
   def _create_single_layer(self, decoder_layer_class, rngs, **kwargs):
-    """Helper to create a single layer (Linen or NNX)."""
     if issubclass(decoder_layer_class, nnx.Module):
       return decoder_layer_class(
           config=self.config, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs, **kwargs
@@ -567,21 +568,20 @@ class NNXDecoder(nnx.Module):
 
   def _create_scanned_layers_vmap(self, decoder_layer_class, length: int, rngs: nnx.Rngs, **layer_kwargs):
     """Creates a VMapped stack of layers, forcing parameter init."""
-
     def create_layer_fn(layer_rngs):
       layer = decoder_layer_class(
-          config=self.config,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=self.model_mode,
-          rngs=layer_rngs,
-          **layer_kwargs,
+          config=self.config, 
+          mesh=self.mesh, 
+          quant=self.quant, 
+          model_mode=self.model_mode, 
+          rngs=layer_rngs, 
+          **layer_kwargs
       )
       return layer
 
     try:
       forked_rngs = rngs.fork(split=length)
-    except:
+    except: 
       pass
 
     layers_vmapped = nnx.vmap(
@@ -592,69 +592,53 @@ class NNXDecoder(nnx.Module):
         transform_metadata={nnx.PARTITION_NAME: "layers"},
     )(forked_rngs)
 
+    max_logging.log("DEBUG: Patching sharding specs for scanned layers...")
+    # Patch sharding specs for scanned layers to include 'layers' axis
+    
     return layers_vmapped
 
   def _get_pipeline_logical_spec(self):
-    """Extracts weight sharding spec from the pipeline module to support FSDP AG."""
-    if not hasattr(self, "pipeline_module"):
-      return None
-
-    try:
-      # Now that pipeline state is eagerly initialized with correct specs in pipeline.py,
-      # we can just read the specs directly.
-      state = nnx.state(self.pipeline_module.layers)
-
-      def _get_spec(leaf):
-        if hasattr(leaf, "sharding") and hasattr(leaf.sharding, "spec"):
-          return leaf.sharding.spec
-        if hasattr(leaf, "value") and isinstance(leaf.value, nn.spmd.LogicallyPartitioned):
-          return leaf.value.partitions
-        return None
-
-      spec_tree = jax.tree.map(_get_spec, state)
-      # Simply log types to check structure
-      max_logging.log(f"DEBUG: Spec Tree Root Type: {type(spec_tree)}")
-      return spec_tree
-    except Exception as e:
-      return None
+      """Extracts weight sharding spec from the pipeline module to support FSDP AG."""
+      if not hasattr(self, 'pipeline_module'):
+          return None
+      
+      try:
+          state = nnx.state(self.pipeline_module.layers)
+          def _get_spec(leaf):
+             if hasattr(leaf, 'sharding') and hasattr(leaf.sharding, 'spec'):
+                 return leaf.sharding.spec
+             if hasattr(leaf, 'value') and isinstance(leaf.value, nn.spmd.LogicallyPartitioned):
+                 return leaf.value.partitions
+             return None
+          
+          return jax.tree.map(_get_spec, state)
+      except:
+          return None
 
   def _apply_layers_sequentially(self, layers, x_in, *args, length: int, **kwargs):
     """Runs the layer stack using nnx.scan."""
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
-    graphdef, params, state = nnx.split(
-        layers, nnx.Param, ...
-    )  # state: the mutable state we carry (KV cache, RNGs, etc.)
+    graphdef, params, state = nnx.split(layers, nnx.Param, ...)
 
-    layer_cls = layers.__class__  # Access the underlying class
+    layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)
-
-    # Filter kwargs to only include keys that exist in the layer's signature
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
 
     def layer_fn(carry, scanned_vars):
-      # Unpack the sliced variables for THIS layer
       current_params, current_state = scanned_vars
-
-      # Merge using the SLICED state
       layer = nnx.merge(graphdef, current_params, current_state)
-
-      # Run the layer (Filter kwargs if using the solution from previous turn)
       layer_out = layer(carry, *args, **valid_kwargs)
-
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
-
-      # Extract the updated state to return it
-      # _, new_current_state = nnx.split(layer, nnx.Param, ...)
       new_current_state = nnx.state(layer)
       return new_carry, new_current_state
 
     layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
-
     final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state))
     nnx.update(layers, scanned_state)
 
     return final_carry, None
+
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
@@ -920,6 +904,7 @@ class NNXDecoder(nnx.Module):
 
     return logits
 
+
   def __call__(
       self,
       shared_embedding: Any,
@@ -965,64 +950,52 @@ class NNXDecoder(nnx.Module):
     if cfg.decoder_block == DecoderBlockType.GEMMA3:
       layer_kwargs["bidirectional_mask"] = bidirectional_mask
 
+
     if self.using_pipeline:
       if cfg.pipeline_fsdp_ag_once:
         logical_partition_spec = self._get_pipeline_logical_spec()
       else:
         logical_partition_spec = None
-
+      
       if self.is_deepseek:
-        y = self.dense_layers(y, *layer_args, **layer_kwargs)
+          # DeepSeek Dense - check if scanned or sequential
+          if cfg.scan_layers:
+             y, _ = self._apply_layers_sequentially(self.dense_layers, y, *layer_args, length=cfg.first_num_dense_layers, **layer_kwargs)
+          else:
+             y = self.dense_layers(y, *layer_args, **layer_kwargs)
 
       y = self.pipeline_module(y, *layer_args, logical_partition_spec=logical_partition_spec)
-
-      if hasattr(self, "remainder_layers"):
-        kv_start_idx = self.num_pipeline_layers
-
-        # Manual loop for remainder layers to support KV cache extraction and OOM fix
+      
+      if hasattr(self, 'remainder_layers'):
+        kv_start_idx = self.num_pipeline_layers 
+        
         if isinstance(self.remainder_layers, NNXSequentialBlockDecoderLayers):
-          idx_counter = 0
-          prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
-
-          for i in range(self.remainder_layers.num_decoder_layers):
-            layer = getattr(self.remainder_layers, f"layers_{i}")
-            global_idx = kv_start_idx + idx_counter
-            kv_cache = kv_caches[global_idx] if kv_caches is not None else None
-
-            if self.remat_policy is not None:
-              graphdef, params, mutable_state = nnx.split(layer, nnx.Param, ...)
-
-              def rematted_forward(g, p, s, x, kv, *args, **kw):
-                m = nnx.merge(g, p, s)
-                out = m(x, *args, kv_cache=kv, **kw)
-                _, new_s = nnx.split(m, nnx.Param, ...)
-                return out, new_s
-
-              forward_ckpt = jax.checkpoint(rematted_forward, policy=self.remat_policy, prevent_cse=prevent_cse)
-
-              out, new_mutable_state = forward_ckpt(
-                  graphdef, params, mutable_state, y, kv_cache, *layer_args, **layer_kwargs
-              )
-              nnx.update(layer, new_mutable_state)
-            else:
-              out = layer(y, *layer_args, kv_cache=kv_cache, **layer_kwargs)
-
-            if isinstance(out, tuple):
-              y, kv_cache_out = out
-            else:
-              y = out
-              kv_cache_out = None
-
-            if kv_caches is not None:
-              kv_caches[global_idx] = kv_cache_out
-            idx_counter += 1
+             idx_counter = 0
+             for i in range(self.remainder_layers.num_decoder_layers):
+                layer = getattr(self.remainder_layers, f"layers_{i}")
+                global_idx = kv_start_idx + idx_counter
+                kv_cache = kv_caches[global_idx] if kv_caches is not None else None
+                out = layer(y, *layer_args, kv_cache=kv_cache, **layer_kwargs)
+                
+                if isinstance(out, tuple):
+                   y, kv_cache_out = out
+                else:
+                   y = out
+                   kv_cache_out = None
+                
+                if kv_caches is not None:
+                   kv_caches[global_idx] = kv_cache_out
+                idx_counter += 1
         else:
-          y, _ = self.remainder_layers(y, *layer_args, **layer_kwargs)
+            # Scanned remainder - direct helper call
+            num_remaining = cfg.num_decoder_layers - self.num_pipeline_layers
+            y, _ = self._apply_layers_sequentially(self.remainder_layers, y, *layer_args, length=num_remaining, **layer_kwargs)
 
     elif cfg.scan_layers:
       if self.is_deepseek:
-        y, _ = self.dense_layers(y, *layer_args, **layer_kwargs)
-        y, _ = self.moe_stack(y, *layer_args, **layer_kwargs)
+        y, _ = self._apply_layers_sequentially(self.dense_layers, y, *layer_args, length=cfg.first_num_dense_layers, **layer_kwargs)
+        num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
+        y, _ = self._apply_layers_sequentially(self.moe_stack, y, *layer_args, length=num_moe, **layer_kwargs)
       elif self.is_gemma3:
         y = self._apply_gemma3_scanned_blocks(
             y,
@@ -1036,47 +1009,47 @@ class NNXDecoder(nnx.Module):
             slot,
         )
       else:
-        y, _ = self.layers(y, *layer_args, **layer_kwargs)
-    else:
-      # Standard Sequential (No Pipeline, No Scan)
-      if self.is_deepseek:
-        layer_groups = [self.dense_layers, self.moe_layers]
-      else:
-        layer_groups = [self.layers]
+        # Standard Scan: Directly call helper on vmapped module
+        y, _ = self._apply_layers_sequentially(self.layers, y, *layer_args, length=cfg.num_decoder_layers, **layer_kwargs)
 
+    else:
+      # Sequential Unscanned
+      # Standard Sequential (No Pipeline, No Scan)
       idx_counter = 0
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
 
-      for group in layer_groups:
-        for i in range(group.num_decoder_layers):
-          layer = getattr(group, f"layers_{i}")
+      if self.is_deepseek:
+          # Iterate over flattened attributes
+          layer_names = [f"dense_layers_{i}" for i in range(cfg.first_num_dense_layers)]
+          layer_names += [f"moe_layers_{i}" for i in range(cfg.num_decoder_layers - cfg.first_num_dense_layers)]
+      else:
+          layer_names = [f"layers_{i}" for i in range(cfg.num_decoder_layers)]
+
+      for layer_name in layer_names:
+          layer = getattr(self, layer_name)
           kv_cache = kv_caches[idx_counter] if kv_caches is not None else None
 
-          # Apply Remat + OOM Fix (Param Offload Safety)
+          # Apply Remat + OOM Fix
           if self.remat_policy is not None:
-            graphdef, params, mutable_state = nnx.split(layer, nnx.Param, ...)
-
-            def rematted_forward(g, p, s, x, kv, *args, **kw):
-              m = nnx.merge(g, p, s)
-              out = m(x, *args, kv_cache=kv, **kw)
-              _, new_s = nnx.split(m, nnx.Param, ...)
-              return out, new_s
-
-            forward_ckpt = jax.checkpoint(rematted_forward, policy=self.remat_policy, prevent_cse=prevent_cse)
-
-            out, new_mutable_state = forward_ckpt(
-                graphdef, params, mutable_state, y, kv_cache, *layer_args, **layer_kwargs
-            )
-            nnx.update(layer, new_mutable_state)
+             graphdef, params, mutable_state = nnx.split(layer, nnx.Param, ...)
+             
+             def rematted_forward(g, p, s, x, kv, *args, **kw):
+                 m = nnx.merge(g, p, s)
+                 out = m(x, *args, kv_cache=kv, **kw)
+                 _, new_s = nnx.split(m, nnx.Param, ...)
+                 return out, new_s
+             
+             forward_ckpt = jax.checkpoint(rematted_forward, policy=self.remat_policy, prevent_cse=prevent_cse)
+             y, new_mutable_state = forward_ckpt(graphdef, params, mutable_state, y, kv_cache, *layer_args, **layer_kwargs)
+             nnx.update(layer, new_mutable_state)
           else:
-            out = layer(y, *layer_args, kv_cache=kv_cache, **layer_kwargs)
+             y = layer(y, *layer_args, kv_cache=kv_cache, **layer_kwargs)
 
-          if isinstance(out, tuple):
-            y, kv_cache_out = out
+          if isinstance(y, tuple):
+             y, kv_cache_out = y
           else:
-            y = out
-            kv_cache_out = None
-
+             kv_cache_out = None
+          
           if kv_caches is not None:
             kv_caches[idx_counter] = kv_cache_out
           idx_counter += 1
@@ -1105,11 +1078,9 @@ class NNXDecoder(nnx.Module):
   ):
     """Applies Gemma3 scanned decoder blocks, handling main scan and remainders."""
     cfg = self.config
-    attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
-    scan_length = cfg.num_decoder_layers // attention_pattern_length
+    scan_length = cfg.num_decoder_layers // len(gemma3.GEMMA3_ATTENTION_PATTERN)
     layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
 
-    # Apply the main scan over the full blocks
     if scan_length > 0:
       broadcast_args = (
           decoder_segment_ids,
@@ -1117,12 +1088,11 @@ class NNXDecoder(nnx.Module):
           deterministic,
           model_mode,
       )
-      y, _ = self.layers(y, *broadcast_args, **layer_call_kwargs)
+      # Layers is the vmapped module
+      y, _ = self._apply_layers_sequentially(self.layers, y, *broadcast_args, length=scan_length, **layer_call_kwargs)
 
-    # Apply any remaining layers that did not fit into a full scanned block
-    num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
+    num_remaining_layers = cfg.num_decoder_layers % len(gemma3.GEMMA3_ATTENTION_PATTERN)
     if num_remaining_layers > 0:
-      # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
       y, _ = self.layers_remainder(
           y,
           decoder_segment_ids,
@@ -1138,26 +1108,27 @@ class NNXDecoder(nnx.Module):
 
 
 def _apply_scanned_layers(layers, x_in, *args, length: int, remat_policy=None, config=None, **kwargs):
-  """Runs the layer stack using jax.lax.scan."""
-  prevent_cse = maxtext_utils.should_prevent_cse_in_remat(config) if config else False
+    """Helper for NNXScannedBlockDecoderLayers.__call__ (Pipeline use case)."""
+    # This is identical to _apply_layers_sequentially but externalized
+    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(config) if config else False
+    
+    graphdef, params, state = nnx.split(layers, nnx.Param, ...) 
 
-  graphdef, params, state = nnx.split(layers, nnx.Param, ...)
+    def layer_fn(carry, scanned_vars):
+      current_params, current_state = scanned_vars
+      layer = nnx.merge(graphdef, current_params, current_state)
+      layer_out = layer(carry, *args, **kwargs)
+      new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+      new_current_state = nnx.state(layer)
+      return new_carry, new_current_state
 
-  def layer_fn(carry, scanned_vars):
-    current_params, current_state = scanned_vars
-    layer = nnx.merge(graphdef, current_params, current_state)
-    layer_out = layer(carry, *args, **kwargs)
-    new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
-    new_current_state = nnx.state(layer)
-    return new_carry, new_current_state
+    if remat_policy:
+        layer_fn = jax.checkpoint(layer_fn, policy=remat_policy, prevent_cse=prevent_cse)
 
-  if remat_policy:
-    layer_fn = jax.checkpoint(layer_fn, policy=remat_policy, prevent_cse=prevent_cse)
+    final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state), length=length)
+    nnx.update(layers, scanned_state)
 
-  final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state), length=length)
-  nnx.update(layers, scanned_state)
-
-  return final_carry, None
+    return final_carry, None
 
 
 def decoder_as_linen(
