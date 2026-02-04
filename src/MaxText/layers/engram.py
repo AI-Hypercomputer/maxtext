@@ -41,13 +41,11 @@ Reference implementation: https://github.com/deepseek-ai/Engram/blob/main/engram
 
 class CompressedTokenizer:
   """
-  Implements a lossy, canonicalizing wrapper for a standard tokenizer to optimize
-  n-gram pattern matching.
+  A lossy, canonicalizing wrapper for a standard tokenizer to optimize n-gram lookup.
 
-  By applying aggressive normalization (lowercasing, accent stripping, and whitespace
-  collapsing), this class maps multiple distinct tokens (e.g., 'Apple', ' apple',
-  'APPLE') to a single unified ID. This many-to-one mapping effectively reduces
-  the combinatorial n-gram space.
+  By applying normalization (lowercasing, accent stripping, and whitespace
+  collapsing), this class maps semantically equivalent tokens (e.g., 'Apple', ' apple',
+  'APPLE') to a single unified ID. This many-to-one mapping reduces the combinatorial n-gram space.
 
   Attributes:
     tokenizer: The base Hugging Face tokenizer.
@@ -98,7 +96,6 @@ class CompressedTokenizer:
     # Lookup table: Maps original_tid -> compressed_nid, many-to-one
     old2new = np.empty(vocab_size, dtype=np.int64)
     # Maps normalized_string -> compressed_nid, one-to-one
-    # num_new_token equals to len(key2new)
     key2new = {}
 
     for tid in range(vocab_size):
@@ -142,6 +139,11 @@ class CompressedTokenizer:
 
 
 class NgramHashMapping:
+  """
+  Use hash-based mapping for n-gram, as the combinatorial space is intractable for one-to-one mapping.
+  - To alleviate collision, initialize with unique prime vocab sizes across heads.
+  - When lookup, create n-gram window via shift. Hash via lightweight multiplicative-XOR inside window.
+  """
 
   def __init__(
       self,
@@ -388,7 +390,8 @@ class ShortConv(nnx.Module):
     # (G * D) as the total number of input channels
     total_channels = hidden_size * hc_mult
 
-    # Vectorized Norms: One unique module per group
+    # Norm (vectorized)
+    # independent weight per branch, branched input
     @nnx.split_rngs(splits=hc_mult)
     @nnx.vmap(in_axes=0, out_axes=0)
     def create_norms(r):
@@ -404,9 +407,9 @@ class ShortConv(nnx.Module):
     # Weights: {"scale": (hc_mult, hidden_size)}
     self.norms = create_norms(rngs)
 
-    # Single Shared Convolution
-    #    Depthwise: channels don't mix, feature_group_count=in_features
-    #    Padding: "CAUSAL" ensures output[t] only depends on input[t-k : t].
+    # Convolution (shared)
+    # Depthwise: feature_group_count=in_features, channels don't mix. mixes temporal dimension only
+    # Padding: "CAUSAL" ensures output[t] only depends on input[t-k : t]
     # Weights: {"kernel": (kernel_size, in_features//feature_group_count=1, total_channels)}
     self.conv = nnx.Conv(
         in_features=total_channels,
@@ -414,14 +417,14 @@ class ShortConv(nnx.Module):
         kernel_size=(kernel_size,),
         feature_group_count=total_channels,
         kernel_dilation=(dilation,),
-        padding="CAUSAL",  # To match the slice [..., :T] logic, TODO(shuningjin)
+        padding="CAUSAL",
         use_bias=False,
         rngs=rngs,
     )
 
   def __call__(self, x: jax.Array) -> jax.Array:
     """
-    Compute y = SiLU(Conv1D(RMSNorm(x)))
+    Compute y^i = SiLU(Conv1D(RMSNorm^i(x^i))), i is index for branch dim.
 
     Args:
       x: Input tensor of shape (B, S, G, D)
@@ -505,18 +508,13 @@ class Engram(nnx.Module):
     # D_en: Final concatenated size
     self.engram_dim = engram_head_dim * engram_num_heads * num_ngram_orders
 
-    # Embedding for all n-gram heads in one flattened table.
+    # Embedding: all n-gram heads in one flattened table
     self.multi_head_embedding = MultiHeadEmbedding(
         vocab_sizes=vocab_sizes, head_dim=engram_head_dim, config=config, mesh=mesh, rngs=rngs
     )
 
-    # --- 3. Vectorized Gating Layers ---
-
-    # Project retrieved memory into Key space (one per branch)s
-    # B. Key Projections (Shared input, Independent weights per group)
-    # We create G copies of DenseGeneral
-
-    # Key: Projection of retrieved n-gram memory
+    # Key Projection (vectorized): retrieved n-gram memory -> Key
+    # Independent weights per branch, Shared input
     @nnx.split_rngs(splits=hc_mult)
     @nnx.vmap(in_axes=0, out_axes=0)
     def create_key_projs(r):
@@ -525,7 +523,7 @@ class Engram(nnx.Module):
           out_features_shape=config.base_emb_dim,
           axis=-1,
           kernel_init=self.kernel_init,
-          kernel_axes=("a", "b"),  # TODO(shuningjin)
+          kernel_axes=("engram_dim", "embed"),
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           quant=self.quant,
@@ -537,7 +535,8 @@ class Engram(nnx.Module):
 
     self.key_projs = create_key_projs(rngs)
 
-    # C. Norms (Independent weights per group)
+    # Norms (vectorized)
+    # Independent weights per branch, Branched input
     @nnx.split_rngs(splits=hc_mult)
     @nnx.vmap(in_axes=0, out_axes=0)
     def create_norms(r):
@@ -555,14 +554,13 @@ class Engram(nnx.Module):
     # Query Normalization
     self.q_norms = create_norms(rngs)
 
-    # Project retrieved memory into Value space
-    # A. Value Projection (Shared input, Shared weights -> Standard Layer)
+    # Value Projection (shared): Retrieved memory -> Value
     self.value_proj = DenseGeneral(
         in_features_shape=self.engram_dim,
         out_features_shape=config.base_emb_dim,
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("a", "b"),  # TODO(shuningjin)
+        kernel_axes=("engram_dim", "embed"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -572,7 +570,7 @@ class Engram(nnx.Module):
         use_bias=True,
     )
 
-    # --- 2. Short Convolution (Already Vectorized internally) ---
+    # Short Convolution (vectorized internally)
     # Applies depthwise causal convolution to smooth the retrieved memory over time.
     self.short_conv = ShortConv(
         config=config,
@@ -587,10 +585,21 @@ class Engram(nnx.Module):
     """
     Args:
       hidden_states: Current transformer state (Query). Shape: (B, S, G, D)
-      hash_input_ids: Raw token IDs. Shape: (B, S, H_total)
-      output: Engram-augmented residuals. Shape: (B, S, G, D)
+      hash_input_ids: Hashed token IDs. Shape: (B, S, H_total).
+        Produced by `hash_mapping.hash(input_ids)[layer_id]`.
+    Returns:
+      Shape: (B, S, G, D)
 
-    Note: hash_input_ids = hash_mapping.hash(input_ids)[layer_id]
+    - retireve memory E
+    - compute similarity between memory and context
+        K^i = RMSNormK^i(Wk^i @ E)
+        Q^i = RMSNormQ^i(hidden)
+        gate^i = sigmoid(K^i @ Q^i)
+    - updated memory
+        V = Wv @ E
+        Vnew^i = gate^i * V
+    - temporal smooth
+        out = ShortConv(Vnew) + Vnew
 
     Shape annotation:
       B: Batch Size
@@ -637,7 +646,8 @@ class Engram(nnx.Module):
     # Compute similarity of memory (Key) and current state (Query)
     qk_product = jnp.einsum("bsgc,bsgc->bsg", query, key, precision=self.config.matmul_precision)
     gate = qk_product / jnp.sqrt(D)
-    # TODO(shuningjin): why, Stabilization trick: sign(x) * sqrt(|x|)
+    # compress range for gate: sign(x) * sqrt(max(|x|, 1e-6))
+    # stabilize input to sigmoid
     gate = jnp.sqrt(jnp.maximum(jnp.abs(gate), 1e-6)) * jnp.sign(gate)
     # Sigmoid activation to get gating probability [0, 1]
     gate = jax.nn.sigmoid(gate)  # (B, S, G)
