@@ -160,9 +160,6 @@ class GradientAccumulationTest(unittest.TestCase):
     sft_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            "base_output_directory=gs://runner-maxtext-logs",
-            "dataset_path=gs://maxtext-dataset",
             get_test_config_path(),
             f"base_output_directory={self.base_output_directory}",
             f"dataset_path={self.dataset_path}",

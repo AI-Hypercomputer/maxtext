@@ -106,6 +106,13 @@ class GradientAccumulationTest(unittest.TestCase):
         ]
     )
 
+    import jax
+    live_arrays = jax.live_arrays()
+    print(f"Number of live arrays: {len(live_arrays)}")
+    for arr in live_arrays:
+      print(f"Array shape: {arr.shape}, dtype: {arr.dtype}")
+      arr.delete()
+
     def get_last_metric_from_file(filepath):
       return json.loads(Path(filepath).read_text(encoding="utf8").splitlines()[-1])
 
