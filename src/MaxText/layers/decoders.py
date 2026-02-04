@@ -152,6 +152,8 @@ class DecoderLayer(nn.Module):
         ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
+        use_mrope=cfg.use_mrope,
+        mrope_section=cfg.mrope_section,
         model_mode=model_mode,
     )
 

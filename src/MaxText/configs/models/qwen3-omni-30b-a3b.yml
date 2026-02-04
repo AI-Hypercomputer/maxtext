@@ -74,3 +74,7 @@ conv_chunksize_for_audio: 500
 num_conv_layers_for_audio: 3
 max_timescale_for_audio: 10000.0
 max_sample_len_for_audio: 10000
+# MRoPE Settings (Multi-dimensional RoPE for multimodal)
+use_mrope: true
+mrope_section: [24, 20, 20]
+position_id_per_seconds: 25
