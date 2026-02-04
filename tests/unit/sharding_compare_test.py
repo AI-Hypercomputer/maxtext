@@ -30,7 +30,7 @@ from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText import optimizers
 
-from tests.utils.sharding_dump import load_json, TEST_CASES, named_shardings_to_json, partition_specs_to_json, save_json
+from tests.utils.sharding_dump import load_json, TEST_CASES, named_shardings_to_json, partition_specs_to_json
 
 Transformer = models.transformer_as_linen
 
@@ -245,10 +245,6 @@ class TestGetAbstractState:
     actual_named = named_shardings_to_json(state_mesh_shardings, abstract_state)
     expected_named = load_json(named_json_path)
 
-    actual_named_json_path = os.path.join(base_path, "actual_named_shardings_1.json")
-    save_json(actual_named_json_path, actual_named)
-    print(f"Saved actual physical shardings to {actual_named_json_path}")
-
     if compare_sharding_jsons(expected_named, "Expected (Physical)", actual_named, "Actual (Physical)"):
       error_messages.append(f"Physical sharding mismatch for {model_name} on {topology} slice {num_slice}")
 
@@ -261,10 +257,6 @@ class TestGetAbstractState:
     # Use logical_shardings from the fixture
     actual_logical = partition_specs_to_json(logical_shardings, abstract_state)
     expected_logical = load_json(logical_json_path)
-
-    actual_logical_json_path = os.path.join(base_path, "actual_logical_shardings_1.json")
-    save_json(actual_logical_json_path, actual_logical)
-    print(f"Saved actual logical shardings to {actual_logical_json_path}")
 
     if compare_sharding_jsons(expected_logical, "Expected (Logical)", actual_logical, "Actual (Logical)"):
       error_messages.append(f"Logical sharding mismatch for {model_name} on {topology} slice {num_slice}")
