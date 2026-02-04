@@ -87,7 +87,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   Args:
     model: A nn.Module
     config: Config of parameters
-    data: Batch of data to apply to the model
+    data: Batch of data to apply to teh model
     dropout_rng: A key to use to generate rng for dropout
     params: Model params
     is_train: True for train_step and False for eval_step
@@ -115,7 +115,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     mutable_collections.append("mtp_acceptance")
 
   if isinstance(model, nn.Module):
-    # inputs, targets, segments, positions = apply_args
+    # inputs, targets, segments, positions = apply_args.  
     rng1, aqt_rng = jax.random.split(dropout_rng)
 
     # Flax Linen model
