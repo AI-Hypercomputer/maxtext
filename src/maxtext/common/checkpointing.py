@@ -196,7 +196,11 @@ def _load_full_state_from_path(
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
     )
-    return ocp.Checkpointer(handler).restore(p, abstract_unboxed_pre_state)
+    # Provide sharding info to ensure restoration returns JAX arrays (not NumPy arrays).
+    restore_args = jax.tree_util.tree_map(
+        lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding), abstract_unboxed_pre_state
+    )
+    return ocp.Checkpointer(handler).restore(p, abstract_unboxed_pre_state, restore_args=restore_args)
 
 
 def create_orbax_checkpoint_manager(
