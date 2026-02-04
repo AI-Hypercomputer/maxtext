@@ -16,14 +16,24 @@
 
 import sys
 import unittest
-import os.path
+import pytest
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from maxtext.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.common.gcloud_stub import is_decoupled
+
+pytestmark = [pytest.mark.external_serving]
+
+# Conditional import: only load when not in decoupled mode to avoid collection errors.
+# offline_engine depends on prefill_packing, which requires JetStream.
+if not is_decoupled():
+  from maxtext.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
+else:
+  OfflineEngine = InputData = CompletionOutput = None  # Will never be used due to external_serving marker
+
+from tests.utils.test_helpers import get_test_config_path
 
 
 class OfflineEngineTest(unittest.TestCase):
@@ -59,7 +69,7 @@ class OfflineEngineTest(unittest.TestCase):
         "skip_jax_distributed_system": True,
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **init_kwargs,
     )
     return config

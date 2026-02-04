@@ -22,11 +22,15 @@ import unittest
 import pytest
 import string
 import random
+import os
 import os.path
 
 from MaxText.train import main as train_main
 from MaxText.sft_trainer import main as sft_main
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
+from maxtext.common.gcloud_stub import is_decoupled
+
+from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
 
 def generate_random_string(length=10):
@@ -35,6 +39,16 @@ def generate_random_string(length=10):
 
 
 class GradientAccumulationTest(unittest.TestCase):
+
+  def setUp(self):
+    """Set up test fixtures before each test method."""
+    decoupled = is_decoupled()
+    self.dataset_path = get_test_dataset_path()
+    self.base_output_directory = (
+        os.environ.get("LOCAL_BASE_OUTPUT", get_test_base_output_directory())
+        if decoupled
+        else get_test_base_output_directory()
+    )
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
@@ -45,15 +59,15 @@ class GradientAccumulationTest(unittest.TestCase):
     run_regular_metrics_file = os.path.join(temp_dir, f"runner_regular_{random_suffix}.txt")
     shared_maxtext_args = [
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-        "base_output_directory=gs://runner-maxtext-logs",
-        "dataset_path=gs://maxtext-dataset",
+        get_test_config_path(),
+        f"base_output_directory={self.base_output_directory}",
+        f"dataset_path={self.dataset_path}",
         "gradient_clipping_threshold=0",  # Ensures we are testing raw scales of gradients (clipping off)
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
         "base_emb_dim=256",
         "base_num_decoder_layers=4",
-        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
         "steps=20",
     ]
     # Run with gradient accumulation with accumulate_steps=10, per_device_batch=1 --> simulating per_device_batch=10
@@ -145,7 +159,7 @@ class GradientAccumulationTest(unittest.TestCase):
             "enable_goodput_recording=False",
             "base_emb_dim=256",
             "base_num_decoder_layers=4",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "steps=3",
             "gradient_accumulation_steps=2",
             "use_sft=True",

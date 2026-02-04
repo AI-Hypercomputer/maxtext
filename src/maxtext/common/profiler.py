@@ -21,10 +21,12 @@ import shutil
 
 import jax
 
-import google_cloud_mldiagnostics as mldiag
+from maxtext.common.gcloud_stub import mldiagnostics_modules
 
-from MaxText import max_logging
-from MaxText.managed_mldiagnostics import ManagedMLDiagnostics
+mldiag, _ = mldiagnostics_modules()
+
+from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics
+from maxtext.utils import max_logging
 
 
 class Profiler:

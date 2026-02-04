@@ -31,6 +31,16 @@ from MaxText.input_pipeline import instruction_data_processing
 from MaxText import multihost_dataloading
 
 
+def _get_pad_id(tokenizer):
+  if tokenizer.pad_token_id is not None:
+    pad_id = tokenizer.pad_token_id
+  elif tokenizer.unk_token_id is not None:
+    pad_id = tokenizer.unk_token_id
+  else:
+    pad_id = -1
+  return pad_id
+
+
 def vision_sft_preprocessing_pipeline(
     dataset,
     config,
@@ -89,12 +99,7 @@ def vision_sft_preprocessing_pipeline(
       legacy=False,
       token=config.hf_access_token,
   )
-  if tokenizer.pad_token_id is not None:
-    pad_id = tokenizer.pad_token_id
-  elif tokenizer.unk_token_id is not None:
-    pad_id = tokenizer.unk_token_id
-  else:
-    pad_id = -1
+  pad_id = _get_pad_id(tokenizer)
 
   dataset = dataset.map(
       _input_pipeline_utils.tokenization,
@@ -246,12 +251,7 @@ def preprocessing_pipeline(
   else:
     dataset = dataset.select_columns(data_column_names)
 
-  if tokenizer.pad_token_id is not None:
-    pad_id = tokenizer.pad_token_id
-  elif tokenizer.unk_token_id is not None:
-    pad_id = tokenizer.unk_token_id
-  else:
-    pad_id = -1
+  pad_id = _get_pad_id(tokenizer)
 
   if tokenize:
     dataset = dataset.map(

@@ -81,7 +81,7 @@ if [[ -z ${CHECKPOINT} ]] ; then
 fi
 
 if [[ -z ${TOKENIZER_PATH} ]] ; then
-    export TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}/tokenizer.llama2"
+    export TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets}}/tokenizer.llama2"
 fi
 
 if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];

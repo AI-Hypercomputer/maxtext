@@ -18,16 +18,14 @@
 
 from typing import Optional
 
-from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
-import jax.numpy as jnp
-
 from flax import nnx
-
-from MaxText import max_utils
+from jax.ad_checkpoint import checkpoint_name
+import jax.numpy as jnp
+from jax.sharding import Mesh
 from MaxText.common_types import Config
 from MaxText.common_types import MODEL_MODE_PREFILL
 from MaxText.layers import attention_mla
+from MaxText.layers import deepseek_batchsplit
 from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import moe
@@ -35,7 +33,9 @@ from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
 from MaxText.layers.linears import Dropout
 from MaxText.layers.normalizations import RMSNorm
-from MaxText.sharding import maybe_shard_with_logical, create_sharding
+from MaxText.sharding import create_sharding
+from MaxText.sharding import maybe_shard_with_logical
+from maxtext.utils import max_utils
 from maxtext.inference import page_manager
 
 # -----------------------------------------
@@ -366,6 +366,21 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
+
+    # If using batch split schedule, call the batch split version of the layer.
+    if self.config.use_batch_split_schedule:
+      outputs = deepseek_batchsplit.batch_split_schedule(
+          inputs,
+          nnx.to_pure_dict(nnx.state(self, nnx.Param)),
+          decoder_positions,
+          decoder_segment_ids,
+          model_mode=model_mode,
+          mesh=self.mesh,
+          quant=self.quant,
+          cfg=self.config,
+      )
+      return outputs, None
+
     x = self.with_logical_constraint(inputs)
     x = checkpoint_name(x, "decoder_layer_input")
 

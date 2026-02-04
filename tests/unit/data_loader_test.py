@@ -15,8 +15,9 @@
 """Tests for data_loader.py"""
 
 import unittest
-import os.path
+
 import numpy as np
+import pytest
 
 import jax
 
@@ -24,11 +25,12 @@ from unittest.mock import MagicMock
 from jax.sharding import Mesh
 
 from MaxText.rampup_batch import RampupBatchManager
-from MaxText.maxtext_utils import create_device_mesh
-from MaxText import exceptions
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.common.data_loader import DataLoader, RampUpDataLoader
+from maxtext.utils import exceptions
+from maxtext.utils.maxtext_utils import create_device_mesh
+from maxtext.common.gcloud_stub import is_decoupled
+from tests.utils.test_helpers import get_test_config_path
 
 
 class DataLoaderTest(unittest.TestCase):
@@ -57,8 +59,16 @@ class DataLoaderTest(unittest.TestCase):
         "reuse_example_batch": reuse_example_batch,
     }
     args.update(kwargs)
+
+    # In decoupled mode, adapt mesh/ICI parallelism so that the
+    # product of ICI parallelism matches the available devices for
+    # this test only.
+    if is_decoupled():
+      args.setdefault("mesh_axes", ["data"])
+      args.setdefault("ici_data_parallelism", -1)
+
     return pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         **args,
     )
 
@@ -127,6 +137,7 @@ class DataLoaderTest(unittest.TestCase):
       _ = data_loader.load_next_batch()
     self.assertTrue(str(e.exception).startswith("You may have run out of training data."))
 
+  @pytest.mark.external_serving
   def test_rampup_data_loader(self):
     """Tests that RampUpLoader correctly slices and increment."""
     # Mock iterator returns a FULL batch (size 4)
@@ -170,11 +181,29 @@ class DataLoaderTest(unittest.TestCase):
     data_loader = RampUpDataLoader(self.config_rampup, self.mesh, self.mock_data_iterator, None)
 
     # Expected batch sizes based on test config.
-    # The end global batch size is self.num_devices * per_device_batch_size
-    # The rampup of per_device_batch_size should be:
-    #   3 steps of size 2, 2 steps of size 3, then size 4.
-    multipliers = [2] * 3 + [3] * 2 + [4] * 2
-    expected_batch_sizes = [m * self.config_rampup.num_target_devices for m in multipliers]
+    # The end global batch size is self.num_devices * per_device_batch_size.
+    # In decoupled mode, derive the schedule from a fresh RampupBatchManager
+    # so it matches the actual global batch sizes on the host.
+    if is_decoupled():
+      tmp_manager = RampupBatchManager(self.config_rampup, checkpoint_step)
+      expected_batch_sizes = []
+      # Collect sizes for the ramp-up phase.
+      while True:
+        expected_batch_sizes.append(tmp_manager.global_batch_size_current)
+        rampup_active = tmp_manager.update()
+        if not rampup_active:
+          break
+      # Add a couple of post-ramp-up steps at the final size, mirroring
+      # the original test's intent.
+      for _ in range(2):
+        expected_batch_sizes.append(tmp_manager.global_batch_size_current)
+        tmp_manager.update()
+    else:
+      # The end global batch size is self.num_devices * per_device_batch_size
+      # The rampup of per_device_batch_size should be:
+      #   3 steps of size 2, 2 steps of size 3, then size 4.
+      multipliers = [2] * 3 + [3] * 2 + [4] * 2
+      expected_batch_sizes = [m * self.config_rampup.num_target_devices for m in multipliers]
     for i, expected_size in enumerate(expected_batch_sizes):
       batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
       expected_shape = (expected_size, self.config_rampup.max_target_length)

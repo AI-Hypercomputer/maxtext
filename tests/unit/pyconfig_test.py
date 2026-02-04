@@ -18,8 +18,9 @@ import unittest
 import os.path
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.pyconfig import resolve_config_path
+from MaxText.globals import MAXTEXT_PKG_DIR
+from tests.utils.test_helpers import get_test_config_path
 
 
 class PyconfigTest(unittest.TestCase):
@@ -27,7 +28,7 @@ class PyconfigTest(unittest.TestCase):
 
   def test_empty_string_parse_as_empty_string(self):
     config = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
         skip_jax_distributed_system=True,  # We should check for this automatically instead - b/407047411
         quantization="",
     )
@@ -36,7 +37,7 @@ class PyconfigTest(unittest.TestCase):
 
   def test_multiple_unmodifiable_configs(self):
     config_train = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -51,7 +52,7 @@ class PyconfigTest(unittest.TestCase):
         ici_fsdp_parallelism=4,
     )
     config_inference = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "decode.py"), os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [os.path.join(MAXTEXT_PKG_DIR, "decode.py"), get_test_config_path()],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -74,7 +75,7 @@ class PyconfigTest(unittest.TestCase):
 
   def test_overriding_model(self):
     config = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
         skip_jax_distributed_system=True,
         model_name="gemma-7b",
         override_model_config=True,

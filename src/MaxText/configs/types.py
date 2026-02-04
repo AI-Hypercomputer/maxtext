@@ -33,10 +33,11 @@ from pydantic.functional_validators import model_validator, field_validator
 from pydantic.main import BaseModel
 from pydantic.types import PositiveInt, NonNegativeFloat, NonNegativeInt
 
-from MaxText import accelerator_to_spec_map, max_utils
+from MaxText import accelerator_to_spec_map
 from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
-from MaxText.utils import gcs_utils
+from maxtext.utils import gcs_utils
+from maxtext.utils import max_utils
 
 logger = logging.getLogger(__name__)
 
@@ -870,7 +871,7 @@ class Tokenizer(BaseModel):
 
   vocab_size: int = Field(32_000, description="The size of the vocabulary.")
   tokenizer_path: PathStr = Field(
-      os.path.join("assets", "tokenizer.llama2"),
+      os.path.join("assets", "tokenizers", "tokenizer.llama2"),
       description="Path to the tokenizer model file.",
   )
   tokenizer_type: TokenizerType = Field(TokenizerType.SENTENCEPIECE, description="The type of tokenizer.")
@@ -1484,6 +1485,9 @@ class VLLM(BaseModel):
   kv_cache_buffer: int = Field(256, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, description="Swap space in GB for vLLM.")
+  enable_dp_attention: bool = Field(False, description="Enable the attn_dp mesh axis in vLLM.")
+  max_num_batched_tokens: Optional[int] = Field(None, description="Max number of batched tokens in vLLM.")
+  max_num_seqs: Optional[int] = Field(None, description="Max number of sequences in vLLM.")
   vllm_additional_config: dict[str, Any] = Field(default_factory=dict, description="Additional vLLM config options.")
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
 
@@ -1831,8 +1835,8 @@ class MaxTextConfig(
           filter(
               os.path.exists,
               (
-                  os.path.join(MAXTEXT_ASSETS_ROOT, os.path.basename(tokenizer_path)),
-                  os.path.join(MAXTEXT_ASSETS_ROOT, tokenizer_path),
+                  os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", os.path.basename(tokenizer_path)),
+                  os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", tokenizer_path),
               ),
           ),
           tokenizer_path,

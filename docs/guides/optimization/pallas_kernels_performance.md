@@ -62,8 +62,8 @@ To maximize performance, MaxText uses custom Pallas kernels for memory-bandwidth
 
 - **Serving Attention (Paged & Ragged):** For high-throughput inference, this kernel efficiently fetches non-contiguous "pages" of the KV cache from memory. It is a key optimization for our serving stack and is used for models running on MaxText's inference engine.
 
-  - [`src/MaxText/inference/paged_attention.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/inference/paged_attention.py)
-  - [`src/MaxText/inference/paged_attention_kernel_v2.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/inference/paged_attention_kernel_v2.py)
+  - [`src/maxtext/inference/paged_attention.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/inference/paged_attention.py)
+  - [`src/maxtext/inference/paged_attention_kernel_v2.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/inference/paged_attention_kernel_v2.py)
 
 - **MoE Grouped Matmul (Megablox GMM):** Sparse/irregular grouped GEMMs driven by host-built metadata.
 

@@ -24,7 +24,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from MaxText import max_utils
+from maxtext.utils import max_utils
 from MaxText.common_types import Config
 
 from MaxText.layers import nnx_wrappers, initializers

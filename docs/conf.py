@@ -28,16 +28,15 @@ https://www.sphinx-doc.org/en/master/usage/configuration.html
 import os
 import os.path
 import sys
-import warnings
+import logging
+from sphinx.util import logging as sphinx_logging
 
 # Prevent JAX/Torch/TF from trying to access TPU/GPU during doc build
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
-MAXTEXT_REPO_ROOT = os.environ.get("MAXTEXT_REPO_ROOT", os.path.join(os.path.dirname(os.path.dirname(__file__))))
-sys.path.insert(0, os.path.abspath(os.path.join(MAXTEXT_REPO_ROOT, "test")))
-sys.path.insert(0, os.path.abspath(os.path.join(MAXTEXT_REPO_ROOT, "src")))
 
-warnings.filterwarnings("ignore", category=FutureWarning, module="keras.src.export.tf2onnx_lib")
+MAXTEXT_REPO_ROOT = os.environ.get("MAXTEXT_REPO_ROOT", os.path.join(os.path.dirname(os.path.dirname(__file__))))
+sys.path.insert(0, os.path.abspath(os.path.join(MAXTEXT_REPO_ROOT, "src")))
 
 project = "MaxText"
 # pylint: disable=redefined-builtin
@@ -62,15 +61,7 @@ templates_path = ["_templates"]
 source_suffix = [".rst", ".ipynb", ".md"]
 
 # Suppress specific warnings
-suppress_warnings = [
-    "app.add_node",
-    "ref.python",
-    "myst.xref_ambiguous",
-    "docutils",
-    "autodoc",
-    "autodoc.duplicate_object_description",
-    "toc.not_included",
-]
+suppress_warnings = ["autodoc.import_object"]
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
@@ -94,18 +85,14 @@ myst_linkify_fuzzy_links = False
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"
 autodoc_mock_imports = [
-    "cloud_tpu_diagnostics",
-    "google_cloud_mldiagnostics",
-    "jetstream",
-    "librosa",
-    "ml_goodput_measurement",
-    "pathwaysutils",
     "safetensors",
     "tensorflow_datasets",
     "torch",
     "tpu_inference",
-    "transformer_engine",
     "vllm",
+    "grain",
+    "librosa",
+    "sentencepiece",
 ]
 autosummary_generate = True
 
@@ -129,10 +116,12 @@ exclude_patterns = [
     os.path.join("guides", "run_maxtext", "run_maxtext_via_multihost_job.md"),
     os.path.join("guides", "run_maxtext", "run_maxtext_via_multihost_runner.md"),
     os.path.join("explanations", "llm_calculator.ipynb"),
-    os.path.join("reference", "api.rst"),
     os.path.join("run_maxtext", "run_maxtext_via_multihost_job.md"),
     os.path.join("run_maxtext", "run_maxtext_via_multihost_runner.md"),
     os.path.join("reference", "core_concepts", "llm_calculator.ipynb"),
+    os.path.join("reference", "api_generated", "modules.rst"),
+    os.path.join("reference", "api_generated", "install_maxtext_extra_deps.rst"),
+    os.path.join("reference", "api_generated", "install_maxtext_extra_deps.install_github_deps.rst"),
 ]
 
 
@@ -175,8 +164,8 @@ def run_apidoc(_):
       # Paths to exclude
       os.path.join(MAXTEXT_REPO_ROOT, "tests"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "experimental"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "inference_mlperf"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "scratch_code"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "inference"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "scratch_code"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "utils", "ckpt_conversion"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "rl"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "multimodal_utils.py"),
@@ -191,8 +180,31 @@ def run_apidoc(_):
     sys.exit(1)
 
 
-# Connect the apidoc generation to the Sphinx build process
+class FilterSphinxWarnings(logging.Filter):
+  """Filter autosummary 'duplicate object description' warnings.
+
+  These warnings are unnecessary as they do not cause missing documentation
+  or rendering issues, so it is safe to filter them out.
+  """
+
+  def __init__(self, app):
+    self.app = app
+    super().__init__()
+
+  def filter(self, record: logging.LogRecord) -> bool:
+    msg = record.getMessage()
+    filter_out = ("duplicate object description",)
+    return not msg.strip().startswith(filter_out)
+
+
 def setup(app):
+  """Set up the Sphinx application with custom behavior."""
+
+  # Connect the apidoc generation to the Sphinx build process
   run_apidoc(None)
   print("running:", app)
-  # app.connect("builder-inited", run_apidoc)
+
+  # Set up custom logging filters
+  logger = logging.getLogger("sphinx")
+  warning_handler, *_ = [h for h in logger.handlers if isinstance(h, sphinx_logging.WarningStreamHandler)]
+  warning_handler.filters.insert(0, FilterSphinxWarnings(app))

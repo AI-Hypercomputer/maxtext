@@ -29,8 +29,8 @@ try:
 except ImportError:
   decord = None
 
-from MaxText import max_logging
 from MaxText.multimodal import utils as mm_utils
+from maxtext.utils import max_logging
 
 # Image constants.
 IMAGE_MEAN = 127.5  # Mean value for image normalization.

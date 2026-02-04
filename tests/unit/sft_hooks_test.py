@@ -15,7 +15,7 @@
 """Tests for training and data loading hooks for SFT"""
 import pytest
 
-pytestmark = pytest.mark.tpu_only
+pytestmark = [pytest.mark.tpu_only, pytest.mark.external_training]
 
 import jax
 
@@ -25,11 +25,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 from jax.sharding import Mesh
 
-from MaxText import maxtext_utils
 from MaxText import pyconfig
-from MaxText.maxtext_utils import create_device_mesh
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.trainers.post_train.sft import hooks
+from maxtext.utils import maxtext_utils
 
 
 class SFTHooksTest(unittest.TestCase):
@@ -43,7 +42,7 @@ class SFTHooksTest(unittest.TestCase):
         base_output_directory="test",
         skip_jax_distributed_system=True,
     )
-    self.mesh = Mesh(create_device_mesh(self.config), self.config.mesh_axes)
+    self.mesh = Mesh(maxtext_utils.create_device_mesh(self.config), self.config.mesh_axes)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(self.config)
 
     self.training_hooks = hooks.SFTTrainingHooks(self.config, self.mesh, learning_rate_schedule, goodput_recorder=None)

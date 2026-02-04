@@ -24,12 +24,12 @@ from jax.sharding import Mesh, NamedSharding
 
 from flax import nnx
 
-from MaxText import max_logging
-from MaxText import max_utils
 from MaxText.sharding import logical_to_mesh_axes, create_sharding
 from MaxText.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 
 _MAX_WAVELENGTH = 10_000
 

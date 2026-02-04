@@ -49,9 +49,6 @@ from jax.sharding import Mesh
 
 import tensorstore as ts
 
-from MaxText import max_logging
-from MaxText import maxtext_utils
-from MaxText import max_utils
 from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
@@ -59,6 +56,9 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import quantizations
 from MaxText.layers.models import transformer_as_linen
 from maxtext.common import checkpointing
+from maxtext.utils import max_logging
+from maxtext.utils import maxtext_utils
+from maxtext.utils import max_utils
 
 
 def fmt_size(num_bytes: int) -> str:

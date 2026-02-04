@@ -47,9 +47,9 @@ from jetstream.engine import chunked_prefill
 
 from absl import app
 
-from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import pyconfig
+from maxtext.utils import max_utils
 
 _WARMUP_ITERS = 2
 _BENCHMARK_ITERS = 5

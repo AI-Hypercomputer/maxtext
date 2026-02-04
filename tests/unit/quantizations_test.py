@@ -35,13 +35,16 @@ from aqt.jax.v2.flax import aqt_flax
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
 from MaxText.layers import nnx_wrappers, quantizations
-from MaxText import maxtext_utils
-from MaxText import model_creation_utils
 from MaxText.kernels.megablox import gmm
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
+from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.utils import maxtext_utils
+from maxtext.utils import model_creation_utils
+from tests.utils.test_helpers import get_test_config_path
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
+MAXTEXT_PKG_DIR = os.path.join("src", MAXTEXT_PKG_DIR)
 
 
 class QuantTestModule(nnx.Module):
@@ -105,7 +108,7 @@ class QuantTestModule(nnx.Module):
 
 def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
   config = pyconfig.initialize(
-      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      [None, get_test_config_path()],
       enable_checkpointing=False,
       quantization=quant_str,
       quant_cfg_path=quant_cfg_path,
@@ -298,23 +301,29 @@ class QuantTest(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
-    init_kwargs = {
-        "run_name": "test",
-        "dataset_type": "synthetic",
-        "enable_checkpointing": False,
-        "enable_goodput_recording": False,
-        "steps": 1,
-        "per_device_batch_size": 1,
-        "use_qwix_quantization": True,
-        "skip_jax_distributed_system": True,
-        "base_emb_dim": 1024,
-        "base_num_query_heads": 8,
-        "base_num_kv_heads": 8,
-        "base_mlp_dim": 4096,
-        "base_num_decoder_layers": 12,
-    } | kwargs
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    init_kwargs = (
+        {
+            "run_name": "test",
+            "dataset_type": "synthetic",
+            "enable_checkpointing": False,
+            "enable_goodput_recording": False,
+            "steps": 1,
+            "per_device_batch_size": 1,
+            "use_qwix_quantization": True,
+            "skip_jax_distributed_system": True,
+            "base_emb_dim": 1024,
+            "base_num_query_heads": 8,
+            "base_num_kv_heads": 8,
+            "base_mlp_dim": 4096,
+            "base_num_decoder_layers": 12,
+        }
+        | kwargs
+        | extra_args
+    )
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **init_kwargs,
     )
     return config
@@ -419,10 +428,12 @@ class QuantTest(unittest.TestCase):
     self.quantization_config("fp8_full")
 
   @pytest.mark.gpu_only
+  @pytest.mark.external_serving
   def test_fp8_gpu_quantization(self):
     self.quantization_config("fp8_gpu", grad_tolerance=1.0)
 
   @pytest.mark.gpu_only
+  @pytest.mark.external_serving
   def test_fp8_nanoo_quantization(self):
     self.quantization_config("fp8_nanoo", grad_tolerance=1.0)
 

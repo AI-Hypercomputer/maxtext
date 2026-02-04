@@ -19,11 +19,11 @@ import json
 import os
 import pytest
 
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
 from MaxText import pyconfig
 
 from tests.utils.sharding_dump import named_shardings_to_json, load_named_sharding_json, TEST_CASES
+from tests.utils.test_helpers import get_test_config_path
 
 
 def compute_checksum(d: dict) -> str:
@@ -83,7 +83,7 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
   """Test if the sharding of new model implementation is as expected."""
   params = [
       "/deps/MaxText/tests/unit/sharding_compare_test",
-      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      get_test_config_path(),
       f"compile_topology={topology}",
       f"compile_topology_num_slices={num_slice}",
       f"model_name={model_name}",

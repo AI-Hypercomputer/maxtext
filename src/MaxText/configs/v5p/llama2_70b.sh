@@ -46,7 +46,7 @@ export LIBTPU_INIT_ARGS="--xla_tpu_enable_async_collective_fusion_fuse_all_gathe
 
 python3 -m MaxText.$EXECUTABLE "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml model_name=llama2-70b\
   base_output_directory=$OUTPUT_PATH dataset_path=${DATASET_PATH}\
-  tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.llama2 remat_policy=save_dot_except_mlpwi per_device_batch_size=4\
+  tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"/tokenizer.llama2 remat_policy=save_dot_except_mlpwi per_device_batch_size=4\
   steps=30 enable_checkpointing=false use_iota_embed=true max_target_length=4096\
   profiler=xplane skip_first_n_steps_for_profiler=10 profiler_steps=5 gcs_metrics=true\
   dataset_type=$DATASET_TYPE reuse_example_batch=$REUSE_EXAMPLE_BATCH

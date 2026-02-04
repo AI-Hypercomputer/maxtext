@@ -42,7 +42,6 @@ import transformers
 
 import MaxText as mt
 from MaxText import maxengine
-from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state, setup_train_loop
@@ -53,10 +52,14 @@ from MaxText.layers import quantizations
 from MaxText.experimental.rl import grpo_utils
 from maxtext.inference import offline_engine
 from maxtext.inference.offline_engine import InputData
+from maxtext.utils import maxtext_utils
+
+# This test is for serving pathways via offline_engine and maxengine.
+pytestmark = [pytest.mark.external_training]
 
 
 def get_golden_data(config):
-  """Get the golden data for GrpoTrainer from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py."""
+  """Get the golden data for GrpoTrainer from tests/assets/logits_generation/generate_grpo_golden_logits.py."""
   input_golden_data_path = os.path.join(
       MAXTEXT_TEST_ASSETS_ROOT,
       "golden_logits",

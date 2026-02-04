@@ -18,23 +18,35 @@ import unittest
 
 from absl.testing import absltest
 
+from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 from MaxText.train import main as train_main
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from maxtext.common.gcloud_stub import is_decoupled
 
 
 class Train(unittest.TestCase):
   """Smoke test G3 only"""
+
+  def setUp(self):
+    """Set up test fixtures before each test method."""
+    decoupled = is_decoupled()
+    self.dataset_path = get_test_dataset_path()
+    self.base_output_directory = (
+        os.environ.get("LOCAL_BASE_OUTPUT", get_test_base_output_directory())
+        if decoupled
+        else get_test_base_output_directory()
+    )
 
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             # pylint: disable=f-string-without-interpolation
-            f"base_output_directory=gs://runner-maxtext-logs",
+            f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
-            r"dataset_path=gs://maxtext-dataset",
+            r"dataset_path={self.dataset_path}",
             "base_emb_dim=8",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -46,7 +58,7 @@ class Train(unittest.TestCase):
             "dataset_type=synthetic",
             "steps=10",
             "enable_checkpointing=False",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",
@@ -60,9 +72,9 @@ class Train(unittest.TestCase):
             None,
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
             # pylint: disable=f-string-without-interpolation
-            f"base_output_directory=gs://runner-maxtext-logs",
+            f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
-            r"dataset_path=gs://maxtext-dataset",
+            r"dataset_path={self.dataset_path}",
             "base_emb_dim=8",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -74,7 +86,7 @@ class Train(unittest.TestCase):
             "dataset_type=synthetic",
             "steps=10",
             "enable_checkpointing=False",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",
@@ -87,11 +99,11 @@ class Train(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             # pylint: disable=f-string-without-interpolation
-            f"base_output_directory=gs://runner-maxtext-logs",
+            f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
-            r"dataset_path=gs://maxtext-dataset",
+            r"dataset_path={self.dataset_path}",
             "base_emb_dim=8",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -104,7 +116,7 @@ class Train(unittest.TestCase):
             "steps=10",
             "shard_mode=explicit",
             "enable_checkpointing=False",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",

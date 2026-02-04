@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# NOTE: please check the README located at src/MaxText/inference_mlperf/README.md for instructions on how
+# NOTE: please check the README located at src/maxtext/inference/mlperf/README.md for instructions on how
 # to set up the environment before running this script.
 # Run command:
 # bash benchmarks_llama2-70b-trillium_2x4.sh [-b benchmark_type]
@@ -86,7 +86,7 @@ if [[ -z ${CHECKPOINT} ]] ; then
 fi
 
 if [[ -z ${TOKENIZER_PATH} ]] ; then
-  export TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}/tokenizer.llama2" # NOTE: you may need to change this path for your VM
+  export TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets}}/tokenizer.llama2" # NOTE: you may need to change this path for your VM
 fi
 
 if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];

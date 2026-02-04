@@ -92,7 +92,7 @@ enable_tunix_perf_metrics: False
 batch_size: 1
 # Increase `batch_size` and `MAX_STEPS` for better results.
 # num_batches: 3738
-num_batches: 4  # 200
+num_batches: 4
 # A batch can be split into multiple micro batches for memory management
 # and/or async sampling and training.
 micro_batch_size: -1
@@ -144,6 +144,11 @@ swap_space_vllm_gb: 2
 decode_sampling_temperature: 0.9
 decode_sampling_top_k: 50
 decode_sampling_nucleus_p: 1.0
+# Optional sharding configuration for samplers
+enable_dp_attention: False
+# Performance tuning for samplers
+max_num_batched_tokens: null
+max_num_seqs: null
 
 # ====== Checkpoint Configuration ======
 enable_checkpointing: True
@@ -166,12 +171,13 @@ reasoning_start_token: '<reasoning>'
 reasoning_end_token: '</reasoning>'
 solution_start_token: '<answer>'
 solution_end_token: '</answer>'
-chat_template_path: 'src/MaxText/examples/chat_templates/gsm8k_rl.json'
+chat_template_path: 'src/maxtext/examples/chat_templates/gsm8k_rl.json'
 skip_jax_distributed_system: True
 
 # # TODO(@mazumdera): fix this
 # Dataset Configuration
-dataset_name: 'gsm8k'
+dataset_name: 'gsm8k' # huggingface:open-r1/DAPO-Math-17k-Processed
+eval_dataset_name: 'gsm8k' # huggingface:BytedTsinghua-SIA/AIME-2024
 train_split: 'train'
 eval_split: 'test'
 tokenizer_type: 'huggingface'

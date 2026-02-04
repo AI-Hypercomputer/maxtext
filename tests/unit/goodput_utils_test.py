@@ -14,12 +14,16 @@
 
 """Tests for goodput_utils.py"""
 
-import os
 import unittest
-from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
 from unittest import mock
+
+import pytest
+
+from MaxText import pyconfig
 from maxtext.common.goodput import create_goodput_recorder, maybe_monitor_goodput, maybe_record_goodput, GoodputEvent
+from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
+
+pytestmark = [pytest.mark.external_training]
 
 
 class GoodputUtilsTest(unittest.TestCase):
@@ -27,9 +31,10 @@ class GoodputUtilsTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    base_output_directory = get_test_base_output_directory()
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        base_output_directory="gs://runner-maxtext-logs",
+        [None, get_test_config_path()],
+        base_output_directory=base_output_directory,
         run_name="runner_test",
         enable_checkpointing=False,
         monitor_goodput=True,

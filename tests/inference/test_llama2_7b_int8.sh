@@ -1,13 +1,18 @@
 #!/bin/bash
 
+CONFIG_PATH="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml"
+if [ "${DECOUPLE_GCLOUD^^}" = "TRUE" ]; then
+  CONFIG_PATH="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/decoupled_base_test.yml"
+fi
+
 # Define the arguments in an array
 args=(
   "-m"
   "maxtext.decode"
-  "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml"
-  "tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.llama2"
+  "${CONFIG_PATH}"
+  "tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"/tokenizer.llama2"
   "model_name=llama2-7b"
-  "load_parameters_path=gs://msingh-bkt/checkpoints/quant_llama2-7b-chat/20241120034012/int8_"
+  "load_parameters_path=gs://msingh-bkt/checkpoints/quant_llama2-7b-chat/20241120034012/int8_" # TODO(gulsumgudukbay):  pre-generated quant checkpoint
   "checkpoint_is_quantized=true"
   "quantization=int8"
   "weight_dtype=bfloat16"

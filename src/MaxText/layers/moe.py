@@ -30,14 +30,14 @@ from jax.sharding import NamedSharding, Mesh
 from jax.sharding import PartitionSpec as P
 import jax.numpy as jnp
 from MaxText import common_types as ctypes
-from MaxText import max_logging
-from MaxText import max_utils
 from MaxText.common_types import ShardMode
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from MaxText.kernels import megablox as mblx
 from MaxText.sharding import logical_to_mesh_axes
 from MaxText.layers import attentions, linears, nnx_wrappers, quantizations
 from MaxText.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 import numpy as np
 import qwix.pallas as qpl
 import tokamax
@@ -950,9 +950,13 @@ class RoutedMoE(nnx.Module):
             # Use full contraction for QWIX quantization to allow quantization
             # fusion (max reduce over contracting dimension).
             tiling = (tiling[0], k, tiling[2])
+
+          is_tpu = self.mesh.devices.flat[0] == "tpu"
+          # TPU needs random mosaic_fusion_group; GPU/CPU needs deterministic ID for autotuner sync
+          mosaic_group_id = f"{random.randint(0, 1000000000)}" if is_tpu else "0"
           with set_xla_metadata(
               ragged_dot_tiling=",".join([str(t) for t in tiling]),
-              mosaic_fusion_group=f"{random.randint(0, 1000000000)}",
+              mosaic_fusion_group=mosaic_group_id,
           ):
             output = jax.lax.ragged_dot(
                 lhs=inputs,

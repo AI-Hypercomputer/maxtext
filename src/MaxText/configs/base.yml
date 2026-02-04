@@ -455,6 +455,7 @@ logical_axis_rules: [
                       ["kv_lora_up_proj",[]],
                       ['norm', ['tensor', 'tensor_transpose']],
                       ['layers', 'stage'],
+                      ['qkv', []],
                       ['kv', []],
                       ['kv_head_dim', []],
                       ['cache_batch_prefill', []],
@@ -526,7 +527,7 @@ num_vocab_tiling: 1
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
-tokenizer_path: "src/MaxText/assets/tokenizer.llama2"
+tokenizer_path: "src/MaxText/src/maxtext/assets/tokenizers/tokenizer.llama2"
 # tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
 # grain pipeline supports tokenizer_type: sentencepiece, huggingface
 # hf pipeline only supports huggingface type, and will ignore tokenizer_type flag

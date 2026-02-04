@@ -165,7 +165,7 @@ To verify the correctness of the model implementation, we perform Logit Comparis
 One example command to generate golden logits from HuggingFace for gpt-oss-20b:
 
 ```sh
-python3 -m MaxText.scratch_code.generate_hf_golden_logits \
+python3 -m tests.assets.logits_generation.generate_hf_golden_logits \
     --model-id=openai/gpt-oss-20b \
     --output-path=golden_data_gpt-oss-20b.jsonl \
     --prompts='I love to;Today is a;What is the' \
