@@ -101,6 +101,7 @@ def main(argv: Sequence[str]) -> None:
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
   processor_outputs = multimodal_utils.PreprocessorOutput()
+
   if config.use_multimodal:
     processor_outputs = preprocessor.preprocess_mm_data(config)
     image_offsets = multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_outputs)
