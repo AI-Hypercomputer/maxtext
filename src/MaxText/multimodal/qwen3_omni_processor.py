@@ -30,6 +30,7 @@ except ImportError:
   decord = None
 
 from MaxText.multimodal import utils as mm_utils
+from MaxText import multimodal_utils
 from maxtext.utils import max_logging
 
 # Image constants.
@@ -487,3 +488,149 @@ def preprocess_mm_data_qwen3_omni(config):
     processor_outputs.audio_mask = mt_audio_mask
 
   return processor_outputs
+
+
+def add_extra_tokens_for_qwen3_omni(
+    tokens: np.ndarray | list,
+    image_grid_thw: np.ndarray | None = None,
+    video_grid_thw: np.ndarray | None = None,
+    audio_lengths: np.ndarray | None = None,
+    spatial_merge_size: int = 2,
+    use_audio_in_video: bool = False,
+    second_per_grids: np.ndarray | None = None,
+    position_id_per_seconds: int = 25,
+):
+  """Add extra tokens for Qwen3-Omni multimodal sequences.
+
+  Expands special tokens (<|image_pad|>, <|video_pad|>, <|audio_pad|>) into
+  the correct number of placeholder tokens based on grid dimensions and merge size.
+
+  For audio-in-video mode, interleaves audio and video tokens based on temporal ordering.
+
+  Args:
+    tokens: Input token sequence (1D array or list).
+    image_grid_thw: Image dimensions (num_images, 3) with [temporal, height, width].
+    video_grid_thw: Video dimensions (num_videos, 3) with [temporal, height, width].
+    audio_lengths: Pre-computed audio token counts (num_audios,).
+    spatial_merge_size: Number of patches merged spatially (e.g., 2 for 2x2→1).
+    use_audio_in_video: If True, interleave audio and video tokens.
+    second_per_grids: Time interval per temporal grid (num_videos,).
+    position_id_per_seconds: Temporal granularity (tokens per second).
+
+  Returns:
+    Expanded token sequence with correct number of image/video/audio tokens.
+  """
+  if not isinstance(tokens, np.ndarray):
+    tokens = np.asarray(tokens)
+
+  tokens = tokens.flatten()  # Ensure 1D
+
+  # Merge lengths for computing number of tokens
+  merge_length = spatial_merge_size**2
+
+  # Convert to list for easier manipulation
+  token_list = tokens.tolist()
+  new_tokens = []
+
+  image_idx = 0
+  video_idx = 0
+  audio_idx = 0
+
+  i = 0
+  while i < len(token_list):
+    token = token_list[i]
+
+    # Handle image tokens
+    if (
+        token == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
+        and image_grid_thw is not None
+        and image_idx < len(image_grid_thw)
+    ):
+      grid = image_grid_thw[image_idx]
+      num_image_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+      new_tokens.extend([multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN] * num_image_tokens)
+      image_idx += 1
+
+    # Handle audio-in-video: <|vision_start|><|video_pad|><|vision_end|>
+    elif (
+        use_audio_in_video
+        and token == multimodal_utils.QWEN3_OMNI_VISION_START_TOKEN
+        and i + 2 < len(token_list)
+        and token_list[i + 1] == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN
+        and token_list[i + 2] == multimodal_utils.QWEN3_OMNI_VISION_END_TOKEN
+        and video_grid_thw is not None
+        and video_idx < len(video_grid_thw)
+    ):
+
+      if audio_lengths is None or audio_idx >= len(audio_lengths):
+        raise ValueError("audio_lengths required for audio-in-video mode")
+      if second_per_grids is None or video_idx >= len(second_per_grids):
+        raise ValueError("second_per_grids required for audio-in-video mode")
+
+      audio_length = audio_lengths[audio_idx]
+      audio_token_indices = np.arange(audio_length)
+
+      curr_video_grid = video_grid_thw[video_idx]
+      height = curr_video_grid[1] // spatial_merge_size
+      width = curr_video_grid[2] // spatial_merge_size
+      num_frames = curr_video_grid[0]
+
+      video_token_indices = np.arange(num_frames).reshape(-1, 1, 1)
+      video_token_indices = np.broadcast_to(video_token_indices, (num_frames, height, width)).flatten()
+      video_token_indices = video_token_indices * second_per_grids[video_idx] * position_id_per_seconds
+
+      new_tokens.append(multimodal_utils.QWEN3_OMNI_VISION_START_TOKEN)
+      new_tokens.append(multimodal_utils.QWEN3_OMNI_AUDIO_START_TOKEN)
+
+      video_data_idx = 0
+      audio_data_idx = 0
+
+      while video_data_idx < len(video_token_indices) and audio_data_idx < len(audio_token_indices):
+        if video_token_indices[video_data_idx] <= audio_token_indices[audio_data_idx]:
+          new_tokens.append(multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN)
+          video_data_idx += 1
+        else:
+          new_tokens.append(multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN)
+          audio_data_idx += 1
+
+      while video_data_idx < len(video_token_indices):
+        new_tokens.append(multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN)
+        video_data_idx += 1
+
+      while audio_data_idx < len(audio_token_indices):
+        new_tokens.append(multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN)
+        audio_data_idx += 1
+
+      new_tokens.append(multimodal_utils.QWEN3_OMNI_AUDIO_END_TOKEN)
+      new_tokens.append(multimodal_utils.QWEN3_OMNI_VISION_END_TOKEN)
+
+      video_idx += 1
+      audio_idx += 1
+      i += 2
+
+    # Handle video tokens (without audio-in-video)
+    elif (
+        token == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN
+        and video_grid_thw is not None
+        and video_idx < len(video_grid_thw)
+    ):
+      grid = video_grid_thw[video_idx]
+      num_video_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+      new_tokens.extend([multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN] * num_video_tokens)
+      video_idx += 1
+
+    # Handle audio tokens (standalone, not in video)
+    elif (
+        token == multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN and audio_lengths is not None and audio_idx < len(audio_lengths)
+    ):
+      num_audio_tokens = int(audio_lengths[audio_idx])
+      new_tokens.extend([multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN] * num_audio_tokens)
+      audio_idx += 1
+
+    # All other tokens pass through unchanged
+    else:
+      new_tokens.append(token)
+
+    i += 1
+
+  return np.array(new_tokens, dtype=np.int32)

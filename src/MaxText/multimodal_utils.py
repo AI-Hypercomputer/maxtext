@@ -64,9 +64,11 @@ LLAMA4_PIXEL_SHUFFLE_RATIO = 0.5  # TODO(hengtaoguo): We should reuse config.pix
 
 # Qwen3OmniMoe-specific processing
 QWEN3_OMNI_VISION_START_TOKEN = 151652  # <|vision_start|>
+QWEN3_OMNI_VISION_END_TOKEN = 151653  # <|vision_eos|>
 QWEN3_OMNI_IMAGE_TOKEN = 151655  # <|image_pad|>
 QWEN3_OMNI_VIDEO_TOKEN = 151656  # <|video_pad|>
 QWEN3_OMNI_AUDIO_START_TOKEN = 151669  # <|audio_start|>
+QWEN3_OMNI_AUDIO_END_TOKEN = 151648  # <|audio_eos|>
 QWEN3_OMNI_AUDIO_TOKEN = 151675  # <|audio_pad|>
 QWEN3_TEMPORAL_PATCH_SIZE = 2
 QWEN3_OMNI_IMAGE_SIZE = 768
@@ -597,7 +599,7 @@ def prepare_text_for_image_fusion(texts, model_name, processor_output=None):
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     num_images = processor_output.pixel_values.shape[0] if processor_output else 1
     return add_extra_tokens_for_images_gemma3(texts, max_num_images=num_images)
-  if model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+  elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     return add_extra_tokens_for_images_llama4(texts, processor_output)
   else:
     raise ValueError(f"Model {model_name} does not support multimodal inference.")
@@ -1114,16 +1116,16 @@ def get_chunked_index(token_indices: jax.Array, tokens_per_chunk: int, remove_in
 
 
 def get_rope_index(
-    input_ids: jax.Array,
-    image_grid_thw: jax.Array | None = None,
-    video_grid_thw: jax.Array | None = None,
-    attention_mask: jax.Array | None = None,
+    input_ids: np.ndarray,
+    image_grid_thw: np.ndarray | None = None,
+    video_grid_thw: np.ndarray | None = None,
+    attention_mask: np.ndarray | None = None,
     use_audio_in_video: bool = False,
-    audio_lengths: jax.Array | None = None,
-    second_per_grids: jax.Array | None = None,
+    audio_lengths: np.ndarray | None = None,
+    second_per_grids: np.ndarray | None = None,
     spatial_merge_size: int = 2,
     position_id_per_seconds: int = 25,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[np.ndarray, np.ndarray]:
   """Calculate 3D RoPE position indices for multimodal sequences.
 
   This function computes position IDs that encode both sequential (text) and
@@ -1165,27 +1167,27 @@ def get_rope_index(
   # Handle text-only case (no multimodal content)
   if image_grid_thw is None and video_grid_thw is None:
     if attention_mask is None:
-      attention_mask = jnp.ones_like(input_ids)
+      attention_mask = np.ones_like(input_ids)
 
     # Create sequential 1D positions
-    position_ids = jnp.cumsum(attention_mask.astype(jnp.float32), axis=-1) - 1
-    position_ids = jnp.where(attention_mask == 0, 1.0, position_ids)
+    position_ids = np.cumsum(attention_mask.astype(np.float32), axis=-1) - 1
+    position_ids = np.where(attention_mask == 0, 1.0, position_ids)
 
     # Expand to 3D (same value in all dimensions for text-only)
-    position_ids = jnp.broadcast_to(position_ids[jnp.newaxis, :, :], (3, batch_size, seq_len))
+    position_ids = np.broadcast_to(position_ids[np.newaxis, :, :], (3, batch_size, seq_len))
 
     # Calculate deltas for each sequence
-    max_position_ids = jnp.max(position_ids, axis=(0, 2), keepdims=True).transpose(1, 0, 2)  # (batch, 1, 1)
-    mrope_position_deltas = max_position_ids.squeeze(-1) + 1 - jnp.sum(attention_mask, axis=-1, keepdims=True)
+    max_position_ids = np.max(position_ids, axis=(0, 2), keepdims=True).transpose(1, 0, 2)  # (batch, 1, 1)
+    mrope_position_deltas = max_position_ids.squeeze(-1) + 1 - np.sum(attention_mask, axis=-1, keepdims=True)
 
     return position_ids, mrope_position_deltas
 
   # Multimodal case: process each sequence in batch
   if attention_mask is None:
-    attention_mask = jnp.ones_like(input_ids)
+    attention_mask = np.ones_like(input_ids)
 
   attention_mask_bool = attention_mask == 1
-  position_ids = jnp.zeros((3, batch_size, seq_len), dtype=jnp.float32)
+  position_ids = np.zeros((3, batch_size, seq_len), dtype=jnp.float32)
   mrope_position_deltas = []
 
   # Process each sequence in the batch
@@ -1194,16 +1196,16 @@ def get_rope_index(
     valid_input_ids = input_ids[i][attention_mask_bool[i]]
 
     # Count multimodal elements in this sequence
-    vision_start_indices = jnp.where(valid_input_ids == QWEN3_OMNI_VISION_START_TOKEN)[0]
-    vision_tokens = valid_input_ids[vision_start_indices + 1] if len(vision_start_indices) > 0 else jnp.array([])
+    vision_start_indices = np.where(valid_input_ids == QWEN3_OMNI_VISION_START_TOKEN)[0]
+    vision_tokens = valid_input_ids[vision_start_indices + 1] if len(vision_start_indices) > 0 else np.array([])
 
-    audio_nums = jnp.sum(valid_input_ids == QWEN3_OMNI_AUDIO_START_TOKEN).item()
-    image_nums = jnp.sum(vision_tokens == QWEN3_OMNI_IMAGE_TOKEN).item() if len(vision_tokens) > 0 else 0
+    audio_nums = np.sum(valid_input_ids == QWEN3_OMNI_AUDIO_START_TOKEN).item()
+    image_nums = np.sum(vision_tokens == QWEN3_OMNI_IMAGE_TOKEN).item() if len(vision_tokens) > 0 else 0
     video_nums = (
         (
-            jnp.sum(vision_tokens == QWEN3_OMNI_AUDIO_START_TOKEN).item()
+            np.sum(vision_tokens == QWEN3_OMNI_AUDIO_START_TOKEN).item()
             if use_audio_in_video
-            else jnp.sum(vision_tokens == QWEN3_OMNI_VIDEO_TOKEN).item()
+            else np.sum(vision_tokens == QWEN3_OMNI_VIDEO_TOKEN).item()
         )
         if len(vision_tokens) > 0
         else 0
@@ -1249,7 +1251,7 @@ def get_rope_index(
       # Add text tokens before multimodal element
       text_len = min_ed - st
       if text_len > 0:
-        text_pos = jnp.arange(text_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+        text_pos = np.arange(text_len).reshape(1, -1).repeat(3, axis=0) + st_idx
         llm_pos_ids_list.append(text_pos)
         st_idx += text_len
 
@@ -1260,7 +1262,7 @@ def get_rope_index(
         bos_len, eos_len = 1, 1
 
       # Add BOS token(s)
-      bos_pos = jnp.arange(bos_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+      bos_pos = np.arange(bos_len).reshape(1, -1).repeat(3, axis=0) + st_idx
       llm_pos_ids_list.append(bos_pos)
       st_idx += bos_len
 
@@ -1268,7 +1270,7 @@ def get_rope_index(
       # Audio Only
       if min_ed == ed_audio_start:
         audio_len = _get_feat_extract_output_lengths(audio_lengths[audio_idx]).item()
-        audio_pos = jnp.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+        audio_pos = np.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
         llm_pos_ids_list.append(audio_pos)
 
         st += int(text_len + bos_len + audio_len + eos_len)
@@ -1280,12 +1282,12 @@ def get_rope_index(
         grid_t = image_grid_thw[image_idx, 0].item()
         grid_hs = image_grid_thw[:, 1]
         grid_ws = image_grid_thw[:, 2]
-        t_index = jnp.arange(grid_t, dtype=jnp.float32) * 1 * position_id_per_seconds
+        t_index = np.arange(grid_t, dtype=np.float32) * 1 * position_id_per_seconds
 
         image_pos = get_llm_pos_ids_for_vision(st_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
         llm_pos_ids_list.append(image_pos)
 
-        image_len = int(jnp.prod(image_grid_thw[image_idx]).item() // (spatial_merge_size**2))
+        image_len = int(np.prod(image_grid_thw[image_idx]).item() // (spatial_merge_size**2))
         st += int(text_len + bos_len + image_len + eos_len)
         image_idx += 1
         remain_images -= 1
@@ -1295,12 +1297,12 @@ def get_rope_index(
         grid_t = video_grid_thw[video_idx, 0].item()
         grid_hs = video_grid_thw[:, 1]
         grid_ws = video_grid_thw[:, 2]
-        t_index = jnp.arange(grid_t, dtype=jnp.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+        t_index = np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
 
         video_pos = get_llm_pos_ids_for_vision(st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
         llm_pos_ids_list.append(video_pos)
 
-        video_len = int(jnp.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))
+        video_len = int(np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))
         st += int(text_len + bos_len + video_len + eos_len)
         video_idx += 1
         remain_videos -= 1
@@ -1308,12 +1310,12 @@ def get_rope_index(
       # Audio in Video (interleaved)
       elif min_ed == ed_vision_start and ed_vision_start + 1 == ed_audio_start:
         audio_len = _get_feat_extract_output_lengths(audio_lengths[audio_idx]).item()
-        audio_llm_pos_ids = jnp.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+        audio_llm_pos_ids = np.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
 
         grid_t = video_grid_thw[video_idx, 0].item()
         grid_hs = video_grid_thw[:, 1]
         grid_ws = video_grid_thw[:, 2]
-        t_index = jnp.arange(grid_t, dtype=jnp.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+        t_index = np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
 
         video_llm_pos_ids = get_llm_pos_ids_for_vision(st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
 
@@ -1334,7 +1336,7 @@ def get_rope_index(
         if audio_data_index < audio_llm_pos_ids.shape[1]:
           llm_pos_ids_list.append(audio_llm_pos_ids[:, audio_data_index:])
 
-        video_len = int(jnp.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))
+        video_len = int(np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))
         st += int(text_len + bos_len + audio_len + video_len + eos_len)
 
         audio_idx += 1
@@ -1344,26 +1346,26 @@ def get_rope_index(
 
       # Add EOS token(s)
       st_idx = llm_pos_ids_list[-1].max().item() + 1 if len(llm_pos_ids_list) > 0 else 0
-      eos_pos = jnp.arange(eos_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+      eos_pos = np.arange(eos_len).reshape(1, -1).repeat(3, axis=0) + st_idx
       llm_pos_ids_list.append(eos_pos)
 
     # Add any remaining text tokens
     if st < len(input_tokens):
       st_idx = llm_pos_ids_list[-1].max().item() + 1 if len(llm_pos_ids_list) > 0 else 0
       text_len = len(input_tokens) - st
-      remaining_text_pos = jnp.arange(text_len).reshape(1, -1).repeat(3, axis=0) + st_idx
+      remaining_text_pos = np.arange(text_len).reshape(1, -1).repeat(3, axis=0) + st_idx
       llm_pos_ids_list.append(remaining_text_pos)
 
     # Concatenate all position IDs for this sequence
-    llm_positions = jnp.concatenate(llm_pos_ids_list, axis=1)
+    llm_positions = np.concatenate(llm_pos_ids_list, axis=1)
 
     # Place into position_ids tensor at valid positions
-    valid_positions = jnp.where(attention_mask_bool[i])[0]
-    position_ids = position_ids.at[:, i, valid_positions].set(llm_positions)
+    valid_positions = np.where(attention_mask_bool[i])[0]
+    position_ids[:, i, valid_positions] = llm_positions
 
     # Calculate delta for this sequence
     mrope_position_deltas.append(llm_positions.max().item() + 1 - len(valid_input_ids))
 
-  mrope_position_deltas = jnp.array(mrope_position_deltas).reshape(batch_size, 1)
+  mrope_position_deltas = np.array(mrope_position_deltas).reshape(batch_size, 1)
 
   return position_ids, mrope_position_deltas
