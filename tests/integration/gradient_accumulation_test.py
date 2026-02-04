@@ -31,7 +31,6 @@ from MaxText.train import main as train_main
 from MaxText.sft_trainer import main as sft_main
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
-from maxtext.trainers.post_train.sft.train_sft import main as tunix_sft_train
 
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
@@ -177,6 +176,7 @@ class GradientAccumulationTest(unittest.TestCase):
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tunix_sft_grad_accumulate_same_loss(self):
+    from maxtext.trainers.post_train.sft.train_sft import main as tunix_sft_train
     random_suffix = generate_random_string()
     temp_dir = tempfile.gettempdir()
     run_accumulate_metrics_file = os.path.join(temp_dir, f"runner_sft_grad_accumulate_{random_suffix}.txt")
