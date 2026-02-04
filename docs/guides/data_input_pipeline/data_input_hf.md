@@ -43,4 +43,3 @@ tokenizer_path: 'google-t5/t5-large'  # for using https://huggingface.co/google-
 
 1. Streaming data directly from Hugging Face Hub may be impacted by the traffic of the server. During peak hours you may encounter "504 Server Error: Gateway Time-out". It's recommended to download the Hugging Face dataset to a Cloud Storage bucket or disk for the most stable experience.
 2. Streaming data directly from Hugging Face Hub works in multi-host settings with a small number of hosts. With a host number larger than 16, you might encounter a "read time out" error.
-3. Only supports `num_epoch=1` at the moment.

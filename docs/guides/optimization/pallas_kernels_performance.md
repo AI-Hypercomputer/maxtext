@@ -214,11 +214,11 @@ Dispatch a kernel on multiple devices with `jax.shard_map`. It’s usually simpl
 ## ✅ Putting it all together (checklist)
 
 1. **Profile** the baseline using `named_scope` and `block_until_ready`.
-1. **Tile arrays into smaller chunks using BlockSpecs** (virtually always necessary, even for simple kernels).
-1. Build a **sweep harness** for block shapes (and optionally scalar prefetch grid choices).
-1. **Validate** end-to-end performance in the model, not just microbenchmarks.
-1. Consider **maintainability** and guard the new kernel with tests.
-1. Consider applying **`jax.vmap`** to a Pallas kernel to simplify implementation; think of it as prepending grid dimensions automatically.
+2. **Tile arrays into smaller chunks using BlockSpecs** (virtually always necessary, even for simple kernels).
+3. Build a **sweep harness** for block shapes (and optionally scalar prefetch grid choices).
+4. **Validate** end-to-end performance in the model, not just microbenchmarks.
+5. Consider **maintainability** and guard the new kernel with tests.
+6. Consider applying **`jax.vmap`** to a Pallas kernel to simplify implementation; think of it as prepending grid dimensions automatically.
 
 ## 📚 References
 

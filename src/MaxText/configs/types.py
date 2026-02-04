@@ -2288,10 +2288,34 @@ class MaxTextConfig(
     ):
       logger.warning("`tokenizer_type` is not 'tiktoken' when using llama3 tokenizer. Overriding to 'tiktoken'.")
       self.tokenizer_type = TokenizerType.TIKTOKEN
+    # Data input validations
+    if self.dataset_type == DatasetType.HF:
+      if not self.hf_path:
+        raise ValueError("hf_path can't be empty when dataset_type=hf")
+      if self.hf_eval_files:
+        self.hf_eval_split = "train"
+      if self.eval_interval > 0 and not self.hf_eval_split:
+        raise ValueError("Please specify hf_eval_split or set eval_interval to <=0.")
+    elif self.dataset_type == DatasetType.GRAIN:
+      if not self.grain_train_files and not self.grain_train_mixture_config_path:
+        raise ValueError("When dataset_type=grain, please set grain_train_files or grain_train_mixture_config_path")
+      if self.eval_interval > 0 and not self.grain_eval_files:
+        raise ValueError("Please specify grain_eval_files or set eval_interval to <=0.")
+      if self.tokenizer_type not in (TokenizerType.SENTENCEPIECE, TokenizerType.HUGGINGFACE):
+        raise ValueError(
+            f"grain pipeline only supports tokenizer_type: sentencepiece, huggingface, but got {self.tokenizer_type}"
+        )
+    elif self.dataset_type == DatasetType.TFDS:
+      if not self.dataset_name:
+        raise ValueError("dataset_name can't be empty when dataset_type=tfds")
+      if self.eval_interval > 0 and not self.eval_split:
+        raise ValueError("Please specify eval_split or set eval_interval to <=0.")
+
+    if self.sharding_tolerance > 1.0 or self.sharding_tolerance < 0.0:
+      logger.warning("'sharding_tolerance: allowed percentage of non-sharded parameters' should be between 0.0 and 1.0")
+
     if self.eval_interval > 0 >= self.eval_steps and self.generate_padding_batch_eval:
       raise ValueError("`eval_steps` must be > 0 when `generate_padding_batch_eval` is True.")
-    if self.dataset_type == "hf" and self.num_epoch != 1:
-      raise ValueError("HuggingFace pipeline only supports num_epoch=1.")
     if self.rl.loss_algo == "grpo":
       self.use_grpo = True
     else:
