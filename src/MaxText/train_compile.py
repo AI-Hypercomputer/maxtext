@@ -219,11 +219,11 @@ def main(argv: Sequence[str]) -> None:
 
   # Create target mesh
   topology_mesh = get_topology_mesh(config)
-
+  print("get_topology_mesh done", flush=True)
   # Print system information after building the compile topology to avoid
   # prematurely initializing the backend.
   max_utils.print_system_information()
-
+  print("print_system_information done", flush=True)
   # Get shaped inputs
   (
       shaped_train_args,
@@ -232,10 +232,10 @@ def main(argv: Sequence[str]) -> None:
       logical_annotations,
       model,
   ) = get_shaped_inputs(topology_mesh, config)
-
+  print("get_shaped_inputs done", flush=True)
   # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
-
+  print("get_input_data_sharding done", flush=True)
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
       maxtext_utils.get_functional_train_with_signature(

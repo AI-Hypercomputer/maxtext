@@ -72,6 +72,8 @@ def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
           f"compile_topology_num_slices={num_slice}",
           f"model_name={model_name}",
           "weight_dtype=float32",
+          "log_config=false",
+          "debug_sharding=true",
       ],
       check=True,
   )
@@ -89,7 +91,7 @@ def main(argv: Sequence[str]) -> None:
     print("Error: To specify a single test case, --model_name, --topology, and --num_slice must all be provided.")
     return
   else:
-    cases_to_run = TEST_CASES
+    cases_to_run = TEST_CASES[:1]
     print(f"Running all {len(TEST_CASES)} predefined test cases.")
 
   total = len(cases_to_run)
@@ -100,9 +102,9 @@ def main(argv: Sequence[str]) -> None:
     json_path_named = base_path / "named_shardings.json"
     json_path_logical = base_path / "logical_shardings.json"
 
-    if json_path_named.exists() and json_path_logical.exists():
-      print("  -> Sharding files already exist. Skipping.")
-      continue
+    #if json_path_named.exists() and json_path_logical.exists():
+    #  print("  -> Sharding files already exist. Skipping.")
+    #  continue
 
     try:
       run_single_dump(model_name, topology, str(num_slice))

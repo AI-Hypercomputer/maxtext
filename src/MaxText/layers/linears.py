@@ -524,7 +524,7 @@ class MlpBlock(nnx.Module):
     x = functools.reduce(operator.mul, activations).astype(self.dtype)
     # Apply dropout and final dense output projection.
     x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
-    x = self._maybe_shard_with_logical(x, self.intermediate_logical)
+    x = self._maybe_shard_with_logical(x, self.intermediate_logical, sharding_desc="linears/x")
     output = self.wo(x, out_sharding=out_sharding)
 
     output = checkpoint_name(output, "mlpwo")

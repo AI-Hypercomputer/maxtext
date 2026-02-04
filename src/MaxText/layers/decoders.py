@@ -109,9 +109,9 @@ class DecoderLayer(nn.Module):
       logical_axis_names = ("activation_batch", "activation_length_no_exp", "activation_embed")
 
     if model_mode == MODEL_MODE_PREFILL:
-      inputs = _maybe_shard_with_logical(inputs, logical_axis_names)
+      inputs = _maybe_shard_with_logical(inputs, logical_axis_names, sharding_desc="decoders/inputs")
     else:
-      inputs = _maybe_shard_with_logical(inputs, logical_axis_names)
+      inputs = _maybe_shard_with_logical(inputs, logical_axis_names, sharding_desc="decoders/inputs")
 
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
@@ -124,9 +124,9 @@ class DecoderLayer(nn.Module):
         kernel_axes=("norm",),
     )(inputs)
     if model_mode == MODEL_MODE_PREFILL:
-      lnx = _maybe_shard_with_logical(lnx, logical_axis_names)
+      lnx = _maybe_shard_with_logical(lnx, logical_axis_names, sharding_desc="decoders/lnx")
     else:
-      lnx = _maybe_shard_with_logical(lnx, logical_axis_names)
+      lnx = _maybe_shard_with_logical(lnx, logical_axis_names, sharding_desc="decoders/lnx")
 
     attention_layer = attention_as_linen(
         config=self.config,
@@ -166,9 +166,9 @@ class DecoderLayer(nn.Module):
     )
 
     if model_mode == MODEL_MODE_PREFILL:
-      attention_lnx = _maybe_shard_with_logical(attention_lnx, logical_axis_names)
+      attention_lnx = _maybe_shard_with_logical(attention_lnx, logical_axis_names, sharding_desc="decoders/attention_lnx")
     else:
-      attention_lnx = _maybe_shard_with_logical(attention_lnx, logical_axis_names)
+      attention_lnx = _maybe_shard_with_logical(attention_lnx, logical_axis_names, sharding_desc="decoders/attention_lnx")
 
     # MLP block.
     mlp_lnx = linears.mlp_block(
@@ -185,9 +185,9 @@ class DecoderLayer(nn.Module):
         mesh=self.mesh,
     )(lnx, deterministic=deterministic)
     if model_mode == MODEL_MODE_PREFILL:
-      mlp_lnx = _maybe_shard_with_logical(mlp_lnx, logical_axis_names)
+      mlp_lnx = _maybe_shard_with_logical(mlp_lnx, logical_axis_names, sharding_desc="decoders/mlp_lnx")
     else:
-      mlp_lnx = _maybe_shard_with_logical(mlp_lnx, logical_axis_names)
+      mlp_lnx = _maybe_shard_with_logical(mlp_lnx, logical_axis_names, sharding_desc="decoders/mlp_lnx")
 
     next_layer_addition = mlp_lnx + attention_lnx
 
@@ -200,11 +200,13 @@ class DecoderLayer(nn.Module):
       layer_output = _maybe_shard_with_logical(
           layer_output,
           logical_axis_names,
+          sharding_desc="decoders/layer_output",
       )
     else:
       layer_output = _maybe_shard_with_logical(
           layer_output,
           logical_axis_names,
+          sharding_desc="decoders/layer_output",
       )
 
     if cfg.record_internal_nn_metrics:
