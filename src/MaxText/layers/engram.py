@@ -22,9 +22,9 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode, MODEL_MODE_PREFILL, Array, Config, DType
+from MaxText.common_types import MODEL_MODE_TRAIN, Array, Config
 from MaxText.layers.embeddings import Embed
-from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
+from MaxText.layers.initializers import nd_dense_init, NdInitializer
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -332,7 +332,7 @@ class MultiHeadEmbedding(nnx.Module):
 
   """
 
-  def __init__(self, vocab_sizes: List[int], head_dim: int, config, mesh, rngs: nnx.Rngs):
+  def __init__(self, vocab_sizes: List[int], head_dim: int, config: Config, mesh, rngs: nnx.Rngs):
     """
     Args:
       vocab_sizes: Flattened list of prime vocabulary sizes for all heads across all n-gram orders.
@@ -352,7 +352,7 @@ class MultiHeadEmbedding(nnx.Module):
     # The total embedding size is the sum of all individual head vocabularies.
     self.embedding = Embed(num_embeddings=sum(vocab_sizes), num_features=head_dim, config=config, mesh=mesh, rngs=rngs)
 
-  def __call__(self, input_ids: jax.Array, model_mode: str = MODEL_MODE_TRAIN) -> jax.Array:
+  def __call__(self, input_ids: Array, model_mode: str = MODEL_MODE_TRAIN) -> Array:
     """
     Retrieves embeddings for multi-head indices.
 
@@ -382,7 +382,7 @@ class ShortConv(nnx.Module):
 
   def __init__(
       self,
-      config,
+      config: Config,
       hidden_size: int,
       kernel_size: int = 4,
       dilation: int = 1,
@@ -434,7 +434,7 @@ class ShortConv(nnx.Module):
         rngs=rngs,
     )
 
-  def __call__(self, x: jax.Array) -> jax.Array:
+  def __call__(self, x: Array) -> Array:
     """
     Compute y^i = SiLU(Conv1D(RMSNorm^i(x^i))) for each branch i.
 
@@ -483,7 +483,7 @@ class Engram(nnx.Module):
   def __init__(
       self,
       rngs: nnx.Rngs,
-      config,
+      config: Config,
       mesh,
       quant: Optional[Quant] = None,
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
@@ -600,7 +600,7 @@ class Engram(nnx.Module):
         rngs=rngs,
     )
 
-  def __call__(self, hidden_states: jax.Array, hash_input_ids: jax.Array) -> jax.Array:
+  def __call__(self, hidden_states: Array, hash_input_ids: Array) -> Array:
     """
     Computes the Engram output by retrieving, gating, and smoothing n-gram memory.
 
