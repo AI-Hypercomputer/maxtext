@@ -179,9 +179,13 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   # Zero1+GA to reduce communication overhead.
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
-  if config.gradient_accumulation_steps > 1:
+  if config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation:
     loss = total_loss
   else:
+    # When using Tunix gradient accumulation, we revert to standard normalization.
+    # Unlike the manual accumulation path above, Tunix (via optax.MultiSteps) expects
+    # a normalized loss for each step. It handles the accumulation state
+    # updates and scaling internally.
     loss = total_loss / (total_weights + EPS)
 
   # Calculate and Add MTP Loss
