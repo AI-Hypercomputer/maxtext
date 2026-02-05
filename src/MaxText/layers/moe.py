@@ -32,10 +32,10 @@ import jax.numpy as jnp
 from MaxText import common_types as ctypes
 from MaxText.common_types import ShardMode
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
-from maxtext.kernels import megablox as mblx
 from MaxText.sharding import logical_to_mesh_axes
 from MaxText.layers import attentions, linears, nnx_wrappers, quantizations
 from MaxText.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+from maxtext.kernels import megablox as mblx
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 import numpy as np
