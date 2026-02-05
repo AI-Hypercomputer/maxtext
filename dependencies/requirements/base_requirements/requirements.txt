@@ -34,9 +34,8 @@ pytype
 sentencepiece
 tensorboard-plugin-profile
 tensorboardx
-tensorflow-datasets
-tensorflow-text
-tensorflow
+# tensorflow-datasets
+# tensorflow-text
 tiktoken
 tokamax
 transformers
