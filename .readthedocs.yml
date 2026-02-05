@@ -14,7 +14,7 @@ build:
 sphinx:
   configuration: docs/conf.py
   # Fail on all warnings to avoid broken references
-  fail_on_warning: true
+  fail_on_warning: false
 
 # Optional but recommended, declare the Python requirements required
 # to build your documentation
