@@ -230,6 +230,7 @@ def test_mistral_configs(config_file):
 
 QWEN_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "qwen3-0.6b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "qwen3-1.7b.yml"),
     os.path.join(CONFIGS_DIR, "models", "qwen3-4b.yml"),
     os.path.join(CONFIGS_DIR, "models", "qwen3-4b-thinking-2507.yml"),
     os.path.join(CONFIGS_DIR, "models", "qwen3-8b.yml"),
