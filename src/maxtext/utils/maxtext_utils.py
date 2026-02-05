@@ -1386,7 +1386,7 @@ def create_learning_rate_schedule(config):
   boundaries = []
 
   if warmup_steps > 0:
-    warmup_schedule = optax.linear_schedule(init_value=0.0, end_value=lr, transition_steps=warmup_steps - 1)
+    warmup_schedule = optax.linear_schedule(init_value=0.0, end_value=lr, transition_steps=warmup_steps)
     pieces.append(warmup_schedule)
     boundaries.append(warmup_steps)
 
@@ -1408,7 +1408,7 @@ def create_learning_rate_schedule(config):
     if decay_steps > 0:
       # Create decay schedule based on wsd_decay_style
       if config.wsd_decay_style == types.WsdDecayStyle.LINEAR:
-        decay_schedule = optax.linear_schedule(init_value=lr, end_value=final_lr, transition_steps=decay_steps - 1)
+        decay_schedule = optax.linear_schedule(init_value=lr, end_value=final_lr, transition_steps=decay_steps)
       else:  # COSINE
         decay_schedule = make_cos_schedule(lr, final_lr, decay_steps)
       pieces.append(decay_schedule)
