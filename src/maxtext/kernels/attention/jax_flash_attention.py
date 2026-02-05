@@ -1,4 +1,4 @@
-#  Copyright 2025 Google LLC
+#  Copyright 2026 Google LLC
 #
 #  Licensed under the Apache License, Version 2.0 (the "License");
 #  you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-from MaxText.kernels import splash_attention_kernel
+from maxtext.kernels.attention import splash_attention_kernel
 
 SegmentIds = splash_attention_kernel.SegmentIds
 

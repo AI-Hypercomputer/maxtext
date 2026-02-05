@@ -21,8 +21,8 @@ from typing import Sequence
 
 import jax
 import jax.numpy as jnp
-from MaxText.kernels import megablox
-from MaxText.kernels import sort_activations
+from maxtext.kernels import megablox
+from maxtext.kernels import sort_activations
 from MaxText.layers import attention_op
 from MaxText.layers import quantizations
 

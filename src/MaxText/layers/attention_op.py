@@ -68,16 +68,15 @@ from MaxText.common_types import (
     Q_LENGTH,
     Q_LENGTH_NO_EXP,
 )
-
-from MaxText.kernels import jax_flash_attention
-from MaxText.kernels.ragged_attention import ragged_gqa
-from MaxText.kernels.ragged_attention import ragged_mha
+from maxtext.inference import page_manager
+from maxtext.inference.kvcache import KVQuant, KVTensor
+from maxtext.kernels.attention import jax_flash_attention
+from maxtext.kernels.attention.ragged_attention import ragged_gqa
+from maxtext.kernels.attention.ragged_attention import ragged_mha
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import variable_to_logically_partitioned
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.sharding import logical_to_mesh_axes, maybe_shard_with_name
-from maxtext.inference import page_manager
-from maxtext.inference.kvcache import KVQuant, KVTensor
 from maxtext.utils import max_utils
 import numpy as np
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
