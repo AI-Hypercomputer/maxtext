@@ -279,6 +279,8 @@ def _patch_qwix_find_param(qwix_flax_util):
   def _safe_find_param(x, ptq_array_type=None):
     module = qwix_flax_util.get_current_module()
     candidates = {}
+
+    # 1) Pure NNX: scan attributes for nnx.Params / ptq arrays.
     if isinstance(module, nnx.Module):
       array_types = (nnx.Param,) if ptq_array_type is None else (nnx.Param, ptq_array_type)
       for name, node in module.__dict__.items():
@@ -290,6 +292,24 @@ def _patch_qwix_find_param(qwix_flax_util):
             except Exception:
               continue
           candidates[name] = value
+
+      # 2) ToNNX / Linen bridge: if attributes didn't reveal the param,
+      #    inspect the module.variables (params dict) for kernel-like entries.
+      if hasattr(module, "variables") and isinstance(module.variables, dict):
+        params = module.variables.get("params", {})
+
+        def _gather_params(prefix, subtree):
+          if isinstance(subtree, dict):
+            for k, v in subtree.items():
+              yield from _gather_params(prefix + (k,), v)
+          else:
+            yield prefix, subtree
+
+        for path, leaf in _gather_params((), params):
+          # use the last path component as a friendly name
+          name = str(path[-1]) if path else ""
+          candidates[name] = leaf
+
     else:
       return original_find_param(x, ptq_array_type)
 
@@ -370,41 +390,91 @@ def _precreate_lora_params(target_model, lora_provider, qwix_flax_util, qwix_lor
   rules = getattr(lora_provider, "_rules", [])
   if not rules:
     return
+
   for path, module in target_model.iter_modules():
     module_path = "/".join(map(str, path))
+    
     for rule in rules:
       if rule.op_names and "dot_general" not in rule.op_names:
         continue
-      if not re.fullmatch(rule.module_path, module_path):
-        continue
-      if not hasattr(module, "kernel"):
-        continue
-      if not hasattr(module, "in_features_shape") or not hasattr(module, "out_features_shape"):
+
+      kernel_tensor = None
+      in_rank = 0
+      out_rank = 0
+      found_param_name = "kernel"
+
+      # Case A: Pure NNX (Standard attributes)
+      if hasattr(module, "kernel") and hasattr(module, "in_features_shape"):
+        try:
+          kernel_tensor = qwix_flax_util.unbox(module.kernel)
+          in_rank = len(module.in_features_shape)
+          out_rank = len(module.out_features_shape)
+        except Exception:
+          kernel_tensor = None
+
+      # Case B: ToNNX / Linen bridge (Hidden in variables)
+      elif hasattr(module, "variables") and isinstance(module.variables, dict):
+        params = module.variables.get("params", {})
+
+        def _gather(prefix, subtree):
+          if isinstance(subtree, dict):
+            for k, v in subtree.items():
+              yield from _gather(prefix + (k,), v)
+          else:
+            yield prefix, subtree
+
+        for param_path, leaf in _gather((), params):
+          # Match rule.module_path against synthetic path: module/submodule/param
+          full_param_path = module_path
+          if param_path:
+            full_param_path = full_param_path + "/" + "/".join(map(str, param_path))
+
+          if re.fullmatch(rule.module_path, full_param_path):
+            kernel_tensor = leaf
+            found_param_name = str(param_path[-1])
+            
+            # CRITICAL FIX: Bypass ToNNX proxy's __getattr__ by forcing the 
+            # attribute directly onto the object instance.
+            try:
+                object.__setattr__(module, found_param_name, leaf)
+            except Exception:
+                pass
+
+            # Heuristic for rank inference (Bridge doesn't provide metadata)
+            ndim = getattr(kernel_tensor, "ndim", 0)
+            if ndim == 3: # Typically [Heads, In, Out]
+              in_rank, out_rank = 1, 2
+            else: # Standard [In, Out]
+              in_rank, out_rank = 1, 1
+            break
+
+      if kernel_tensor is None:
         continue
 
-      def _init_for_module(self):
-        kernel_value = qwix_flax_util.unbox(self.kernel)
-        kernel_shape = getattr(kernel_value, "shape", ())
-        in_rank = len(self.in_features_shape)
-        out_rank = len(self.out_features_shape)
-        extra_rank = max(0, len(kernel_shape) - (in_rank + out_rank))
+      # Closure to define LoRA A and B shapes and sharding
+      def _init_for_module(self, k_tensor=kernel_tensor, i_r=in_rank, o_r=out_rank, p_name=found_param_name):
+        kernel_shape = getattr(k_tensor, "shape", ())
+        extra_rank = max(0, len(kernel_shape) - (i_r + o_r))
+        
         prefix_shape = kernel_shape[:extra_rank]
-        in_shape = kernel_shape[extra_rank : extra_rank + in_rank]
-        out_shape = kernel_shape[extra_rank + in_rank :]
+        in_shape = kernel_shape[extra_rank : extra_rank + i_r]
+        out_shape = kernel_shape[extra_rank + i_r :]
 
         in_size = int(math.prod(in_shape))
         out_size = int(math.prod(out_shape))
+        
         if in_size <= 0 or out_size <= 0:
           return
 
         a_shape = prefix_shape + (in_size, rule.rank)
         b_shape = prefix_shape + (rule.rank, out_size)
+        
         prefix_axes = tuple(range(extra_rank))
         a_sharding_transpose = prefix_axes + (None,)
         b_sharding_transpose = prefix_axes + (None,)
 
         qwix_lora._get_or_create_lora_params(
-            name="kernel",
+            name=p_name,
             rule=rule,
             a_shape=a_shape,
             b_shape=b_shape,
