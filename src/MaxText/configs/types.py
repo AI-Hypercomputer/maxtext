@@ -84,6 +84,7 @@ class QuantizationType(str, Enum):
   TE_FP8_CS = "te_fp8_currentscaling"
   TE_MXFP8 = "te_mxfp8"
   TE_NVFP4 = "te_nvfp4"
+  TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
 
 
 class KvQuantAxis(str, Enum):
