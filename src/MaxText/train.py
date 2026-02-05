@@ -324,23 +324,25 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     # Updates the shape to be aligned with state.
     moe_bias_updates = jnp.array(moe_bias_updates[0]).transpose()
     new_state = maxtext_utils.update_state_param(new_state, target_path, moe_bias_updates)
-
-  scalar_metrics = {
-      "learning/loss": loss,
-      "learning/moe_lb_loss": moe_lb_loss,
-      "learning/mtp_loss": mtp_loss,
-      "learning/total_weights": total_weights,
-  }
-  if not config.optimizer_memory_host_offload:
-    scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
-    scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
-    scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
-  if config.use_dpo:
-    scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
-  metrics = {
-      "scalar": scalar_metrics,
-      "scalars": {},
-  }
+  if config.enable_metric_writing:
+    scalar_metrics = {
+        "learning/loss": loss,
+        "learning/moe_lb_loss": moe_lb_loss,
+        "learning/mtp_loss": mtp_loss,
+        "learning/total_weights": total_weights,
+    }
+    if not config.optimizer_memory_host_offload:
+      scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
+      scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
+      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
+    if config.use_dpo:
+      scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
+    metrics = {
+        "scalar": scalar_metrics,
+        "scalars": {},
+    }
+  else:
+    metrics = {'scalar': {'learning/loss': loss}, 'scalars': {}}
 
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
@@ -431,7 +433,10 @@ def train_loop(config, recorder, state=None):
       compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
       compiled_stats = compiled.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_stats)
-
+    elif config.pre_compile:
+      # pre compile graph
+      p_train_step = p_train_step_lower.compile()
+      p_eval_step = p_eval_step_lower.compile()
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
@@ -441,13 +446,20 @@ def train_loop(config, recorder, state=None):
 
   try:
     last_step_completion = datetime.datetime.now()
+    p_random_next = jax.jit(jax.random.fold_in).lower(init_rng, start_step).compile()
+    mllog_utils.init_print(config, start_step)
+    mllog_utils.init_stop()
+    mllog_utils.run_start()
+    mllog_utils.block_start(config)
+    
     for step in np.arange(start_step, config.steps):
       prof.maybe_activate_profiler(step, state)
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
         # pylint: disable=not-callable
-        nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+        #nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+        nextrng = p_random_next(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             if config.shard_optimizer_over_data:
@@ -487,6 +499,7 @@ def train_loop(config, recorder, state=None):
           max_logging.log(f"Completed eval step {eval_step_count}")
           eval_step_count += 1
         metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
+        mllog_utils.early_stop_check(config, step, eval_loss, start_step)
         if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
           prof.deactivate()
           raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
