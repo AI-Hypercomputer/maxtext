@@ -212,7 +212,7 @@ expert_shard_attention_option: "fsdp"
 
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
-# Shard the expert dimension of the MLP weights on the FSDP axis. 
+# Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: False
 # use fsdp and fsdp_transpose axes for sharding the moe weights
@@ -527,7 +527,7 @@ num_vocab_tiling: 1
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
-tokenizer_path: "src/MaxText/src/maxtext/assets/tokenizers/tokenizer.llama2"
+tokenizer_path: "src/maxtext/assets/tokenizers/tokenizer.llama2"
 # tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
 # grain pipeline supports tokenizer_type: sentencepiece, huggingface
 # hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
@@ -1019,7 +1019,7 @@ use_mrope: false
 mrope_section: [24, 20, 20]
 position_id_per_seconds: 25
 
-# Subslice shape in the form of "x,y,z" when using pathways (single controller). 
+# Subslice shape in the form of "x,y,z" when using pathways (single controller).
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""
 
