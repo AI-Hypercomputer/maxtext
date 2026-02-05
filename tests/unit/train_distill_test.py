@@ -123,7 +123,7 @@ class TrainDistillTest(unittest.TestCase):
     config.mu_dtype = "float32"
     config.gradient_clipping_threshold = 1.0
     config.warmup_steps_fraction = 0.1
-    config.cosine_learning_rate_final_fraction = 0.1
+    config.learning_rate_final_fraction = 0.1
 
     # 1. Test Valid Creation
     opt = train_distill.get_distillation_optimizer(config, max_train_steps=100)
