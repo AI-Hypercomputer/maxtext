@@ -34,8 +34,8 @@ import transformers
 
 import grain.python as grain
 
-from MaxText.input_pipeline import input_pipeline_interface
-from MaxText.input_pipeline import _input_pipeline_utils
+from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline import input_pipeline_utils
 
 
 class SingleHostDataLoader:
@@ -143,7 +143,7 @@ def preprocessing_pipeline(
     )
 
     dataset = dataset.map(
-        _input_pipeline_utils.tokenization,
+        input_pipeline_utils.tokenization,
         batched=True,
         fn_kwargs={
             "hf_tokenizer": tokenizer,
@@ -153,7 +153,7 @@ def preprocessing_pipeline(
         },
     )
   dataset = dataset.select_columns(data_column_names)
-  dataset = _input_pipeline_utils.HFDataSource(
+  dataset = input_pipeline_utils.HFDataSource(
       dataset,
       dataloading_host_index,
       dataloading_host_count,
@@ -168,7 +168,7 @@ def preprocessing_pipeline(
 
   operations = [
       grain.MapOperation(lists2array),
-      _input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, add_true_length=True),
+      input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, add_true_length=True),
       grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder),
   ]
 

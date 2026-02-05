@@ -14,9 +14,13 @@
 
 """Input pipeline using Huggingface datasets."""
 
+import os
 import ml_collections
 
 import jax
+
+# Disable dill to avoid conflict with gfile (dill requires buffering=0, which gfile forbids)
+os.environ["HF_DATASETS_DISABLE_DILL"] = "1"
 
 import datasets
 
@@ -26,9 +30,9 @@ import grain.python as grain
 
 import numpy as np
 
-from MaxText.input_pipeline import _input_pipeline_utils
-from MaxText.input_pipeline import instruction_data_processing
-from MaxText import multihost_dataloading
+from maxtext.input_pipeline import input_pipeline_utils
+from maxtext.input_pipeline import instruction_data_processing
+from maxtext.input_pipeline import multihost_dataloading
 
 
 def _get_pad_id(tokenizer):
@@ -67,7 +71,7 @@ def vision_sft_preprocessing_pipeline(
   # If multiple image columns are provided, merge them into a single 'images' column.
   if isinstance(image_column, list):
     dataset = dataset.map(
-        _input_pipeline_utils.merge_image_columns,
+        input_pipeline_utils.merge_image_columns,
         fn_kwargs={
             "image_columns": image_column,
             "max_num_images_per_example": config.max_num_images_per_example,
@@ -81,7 +85,7 @@ def vision_sft_preprocessing_pipeline(
     dataset = dataset.rename_column(image_column, "images")
 
   dataset = dataset.map(
-      _input_pipeline_utils.reformat_prompt,
+      input_pipeline_utils.reformat_prompt,
       fn_kwargs={
           "column": text_columns[0],
           "image_placeholder": config.image_placeholder,
@@ -89,12 +93,12 @@ def vision_sft_preprocessing_pipeline(
       },
   )
   dataset = dataset.map(
-      _input_pipeline_utils.reformat_response,
+      input_pipeline_utils.reformat_response,
       fn_kwargs={"column": text_columns[1], "model_name": config.model_name},
   )
 
   dataset = dataset.map(
-      _input_pipeline_utils.pre_process_image_sft,
+      input_pipeline_utils.pre_process_image_sft,
       fn_kwargs={"image_column": "images", "model_name": config.model_name},
   )
 
@@ -108,7 +112,7 @@ def vision_sft_preprocessing_pipeline(
   pad_id = _get_pad_id(tokenizer)
 
   dataset = dataset.map(
-      _input_pipeline_utils.tokenization,
+      input_pipeline_utils.tokenization,
       batched=True,
       batch_size=global_batch_size,
       fn_kwargs={
@@ -119,11 +123,11 @@ def vision_sft_preprocessing_pipeline(
       },
   )
   dataset = dataset.map(
-      _input_pipeline_utils.prepare_text_for_image_fusion,
+      input_pipeline_utils.prepare_text_for_image_fusion,
       fn_kwargs={"column_name": text_columns[0], "model_name": config.model_name},
   )
 
-  dataset = _input_pipeline_utils.HFDataSource(
+  dataset = input_pipeline_utils.HFDataSource(
       dataset=dataset,
       dataloading_host_index=dataloading_host_index,
       dataloading_host_count=dataloading_host_count,
@@ -133,7 +137,7 @@ def vision_sft_preprocessing_pipeline(
   )
   operations = []
   operations.append(
-      _input_pipeline_utils.SFTPromptMaskingVision(
+      input_pipeline_utils.SFTPromptMaskingVision(
           query_column=text_columns[0],
           response_column=text_columns[1],
           max_target_length=config.max_target_length,
@@ -142,17 +146,17 @@ def vision_sft_preprocessing_pipeline(
   )
   # TODO(aireenmei, hengtaoguo): support packing
   operations.append(
-      _input_pipeline_utils.PadOrTrimToMaxLength(
+      input_pipeline_utils.PadOrTrimToMaxLength(
           config.max_target_length,
           pad_id,
           model_name=config.model_name,
           max_num_images_per_example=config.max_num_images_per_example,
       )
   )
-  operations.append(_input_pipeline_utils.ExtractImagesAndMasks())
+  operations.append(input_pipeline_utils.ExtractImagesAndMasks())
   operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
-  operations.append(_input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
-  operations.append(_input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
+  operations.append(input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
+  operations.append(input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
   dummy_index_sampler = grain.IndexSampler(
       num_records=len(dataset),
       num_epochs=1,
@@ -241,7 +245,7 @@ def preprocessing_pipeline(
         dataset=dataset, data_columns=data_column_names, chat_template_path=chat_template_path
     )
 
-    assert _input_pipeline_utils.is_conversational(
+    assert input_pipeline_utils.is_conversational(
         dataset.features, data_column_names
     ), "Dataset is not in conversational format."
 
@@ -251,7 +255,7 @@ def preprocessing_pipeline(
           {combined_column_name: [{"content": datasets.Value(dtype="string"), "role": datasets.Value(dtype="string")}]}
       )
       dataset = dataset.map(
-          _input_pipeline_utils.combine_columns,
+          input_pipeline_utils.combine_columns,
           fn_kwargs={"columns": data_column_names, "data_column": combined_column_name},
           remove_columns=data_column_names,
           features=dataset_features,
@@ -259,7 +263,7 @@ def preprocessing_pipeline(
 
     data_column_names = list(dataset.features.keys())
     dataset = dataset.map(
-        _input_pipeline_utils.apply_chat_template,
+        input_pipeline_utils.apply_chat_template,
         fn_kwargs={"tokenizer_model": tokenizer, "data_column_name": data_column_names[0]},
     )
   else:
@@ -269,7 +273,7 @@ def preprocessing_pipeline(
 
   if tokenize:
     dataset = dataset.map(
-        _input_pipeline_utils.tokenization,
+        input_pipeline_utils.tokenization,
         batched=True,
         fn_kwargs={
             "hf_tokenizer": tokenizer,
@@ -279,7 +283,7 @@ def preprocessing_pipeline(
         },
     )
 
-  dataset = _input_pipeline_utils.HFDataSource(
+  dataset = input_pipeline_utils.HFDataSource(
       dataset,
       dataloading_host_index,
       dataloading_host_count,
@@ -290,7 +294,7 @@ def preprocessing_pipeline(
   operations = []
   if use_sft:
     operations.append(
-        _input_pipeline_utils.SFTPromptMasking(
+        input_pipeline_utils.SFTPromptMasking(
             text_column_name=data_column_names[0],
             completion_only=sft_train_on_completion_only,
             max_target_length=max_target_length,
@@ -307,7 +311,7 @@ def preprocessing_pipeline(
     operations.append(grain.MapOperation(lists2array))
   else:
     assert len(data_column_names) == 1
-    operations.append(_input_pipeline_utils.HFNormalizeFeatures(data_column_names[0]))
+    operations.append(input_pipeline_utils.HFNormalizeFeatures(data_column_names[0]))
     data_column_names = ("inputs", "targets")
 
   if packing and not use_dpo:
@@ -322,13 +326,13 @@ def preprocessing_pipeline(
             max_sequences_per_bin=max_segments,
         )
     )
-    operations.append(_input_pipeline_utils.ReformatPacking(data_column_names))
+    operations.append(input_pipeline_utils.ReformatPacking(data_column_names))
   else:
-    operations.append(_input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id))
+    operations.append(input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id))
     operations.append(grain.Batch(batch_size=batch_size, drop_remainder=drop_remainder))
 
   if shift and not use_dpo:
-    operations.append(_input_pipeline_utils.ShiftData(ignored_ids=[pad_id, tokenizer.bos_token_id], axis=1))
+    operations.append(input_pipeline_utils.ShiftData(ignored_ids=[pad_id, tokenizer.bos_token_id], axis=1))
 
   # Since HuggingFace IterableDataset does not support access through index
   # Indexes generated by dummy_index_sampler is not used.
