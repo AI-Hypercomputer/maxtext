@@ -22,22 +22,34 @@ on:
   pull_request_review:
   pull_request_review_comment:
   workflow_dispatch:
+    inputs:
+      pull_number:
+        description: 'The Pull Request number to process manually'
+        required: true
+        type: string
 
 jobs:
   AddPullReady:
     permissions:
       checks: read
       pull-requests: write
+      issues: write
+      contents: read
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/github-script@v7
         with:
           script: |
+            const token_status = await github.rest.rateLimit.get();
+            console.log("X-OAuth-Scopes:", token_status.headers['x-oauth-scopes']);
             const owner = "google"
             const repo = "maxtext"
             let pull_number = -1
-            if (context.payload.pull_request !== undefined) {
+            if (context.payload.inputs && context.payload.inputs.pull_number) {
+              pull_number = parseInt(context.payload.inputs.pull_number)
+              console.log(`Manual trigger for PR #${pull_number}`)
+            } else if (context.payload.pull_request !== undefined) {
               pull_number = context.payload.pull_request.number
             } else if (context.payload.workflow_run !== undefined) {
               if (context.payload.workflow_run.pull_requests.length === 0) {
