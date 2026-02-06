@@ -310,6 +310,7 @@ qkv_proj: 'remat'
 out_proj: 'remat'
 mla_q: 'remat'
 mla_kv: 'remat'
+attention_out: 'remat'
 
 optimizer_memory_host_offload: False
 parameter_memory_host_offload: False

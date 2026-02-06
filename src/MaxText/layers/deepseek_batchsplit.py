@@ -336,6 +336,7 @@ def mla(
       qk_nope_head_dim=qk_nope_head_dim,
       mscale=mscale,
   )
+  query = jax.ad_checkpoint.checkpoint_name(query, "query_proj")
   key, value = kv_projection(
       inputs,
       positions,
@@ -355,6 +356,8 @@ def mla(
       qk_nope_head_dim=qk_nope_head_dim,
       num_query_heads=num_query_heads,
   )
+  key = jax.ad_checkpoint.checkpoint_name(key, "key_proj")
+  value = jax.ad_checkpoint.checkpoint_name(value, "value_proj")
   out = attention_op_fn(
       query,
       key,
@@ -363,7 +366,9 @@ def mla(
       model_mode,
       cached_values=[None, None],
   )
+  out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
   out = dot(out, out_weights, axes=2)
+  out = jax.ad_checkpoint.checkpoint_name(out, "out_proj")
   return out
 
 
@@ -402,6 +407,7 @@ def query_projection(
       epsilon=epsilon,
       dtype=dtype,
   )
+  low_rank_q = jax.ad_checkpoint.checkpoint_name(low_rank_q, "mla_q")
   q = dot(low_rank_q, wq_b_weights)
 
   # Split into non-positional and rotary parts.
@@ -451,6 +457,7 @@ def kv_projection(
       epsilon=kv_norm_epsilon,
       dtype=dtype,
   )
+  low_rank_main = jax.ad_checkpoint.checkpoint_name(low_rank_main, "mla_kv")
   key_rope = jnp.expand_dims(low_rank_rope, axis=2)
   key_rope = yarn(
       key_rope,
@@ -690,6 +697,8 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, wi_tile_size, wo_tile_size, 
   )
   layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size)
   layer_w1 = gmm_fn(x, w1, tiling=wi_tile_size)
+  layer_w0 = jax.ad_checkpoint.checkpoint_name(layer_w0, "mlpwi_0")
+  layer_w1 = jax.ad_checkpoint.checkpoint_name(layer_w1, "mlpwi_1")
   intermediate_layer = jax.nn.silu(layer_w0) * layer_w1
   intermediate_layer *= weights[:, None]
   return gmm_fn(intermediate_layer, wo, tiling=wo_tile_size)

@@ -1132,6 +1132,7 @@ class Attention(nnx.Module):
           bidirectional_mask,
           self.sinks,
       )
+    out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
     if model_mode == MODEL_MODE_PREFILL:
       out = self._maybe_shard_with_logical(out, self.prefill_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
