@@ -794,68 +794,8 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       config.wi_tile_drhs_embed_dim,
       config.wi_tile_drhs_mlp_dim,
   )
-  wo_tile_size = (
-      config.wo_tile_fwd_batch_seq,
-      config.wo_tile_fwd_embed_dim,
-      config.wo_tile_fwd_mlp_dim,
-      config.wo_tile_dlhs_batch_seq,
-      config.wo_tile_dlhs_embed_dim,
-      config.wo_tile_dlhs_mlp_dim,
-      config.wo_tile_drhs_batch_seq,
-      config.wo_tile_drhs_embed_dim,
-      config.wo_tile_drhs_mlp_dim,
-  )
-  wi_input_buffer_count = (
-      config.wi_tile_fwd_buffer_count,
-      config.wi_tile_dlhs_buffer_count,
-      config.wi_tile_drhs_buffer_count,
-  )
-  wo_input_buffer_count = (
-      config.wo_tile_fwd_buffer_count,
-      config.wo_tile_dlhs_buffer_count,
-      config.wo_tile_drhs_buffer_count,
-  )
-
-  wi_combine_scopes = config.wi_combine_scopes
-  wo_combine_scopes = config.wo_combine_scopes
-  if config.use_qwix_quantization:
-    gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
-    w0_pspec = nn.logical_to_mesh_axes(gating_pspec)
-    wo_pspec = nn.logical_to_mesh_axes(linear_pspec)
-    ignored_axes = ("expert", "tensor", "tensor_transpose")
-
-    def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
-      if pspec_dim_axes is None:
-        return []
-      axes = (pspec_dim_axes,) if isinstance(pspec_dim_axes, str) else pspec_dim_axes
-      active = []
-      for ax in axes:
-        if ax and ax not in ignored_axes and mesh.shape.get(ax, 1) > 1:
-          active.append((ax, tensor_dim_index))
-      return active
-
-    wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
-    wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
-
-    wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
-    wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
-
-  layer_w0 = gmm_fn(
-      x,
-      w0,
-      tiling=wi_tile_size,
-      weight_gather_axes=wi_gather_axes,
-      input_buffer_count=wi_input_buffer_count,
-      combine_scopes=wi_combine_scopes,
-  )
-  layer_w1 = gmm_fn(
-      x,
-      w1,
-      tiling=wi_tile_size,
-      weight_gather_axes=wi_gather_axes,
-      input_buffer_count=wi_input_buffer_count,
-      combine_scopes=wi_combine_scopes,
-  )
+  layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size)
+  layer_w1 = gmm_fn(x, w1, tiling=wi_tile_size)
   layer_w0 = jax.ad_checkpoint.checkpoint_name(layer_w0, "mlpwi_0")
   layer_w1 = jax.ad_checkpoint.checkpoint_name(layer_w1, "mlpwi_1")
   intermediate_layer = jax.nn.silu(layer_w0) * layer_w1
