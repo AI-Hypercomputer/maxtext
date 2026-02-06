@@ -30,6 +30,9 @@ from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText.layers import nnx_wrappers, quantizations
+from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
+from MaxText.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from maxtext.common.gcloud_stub import is_decoupled

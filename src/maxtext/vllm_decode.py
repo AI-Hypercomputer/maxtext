@@ -119,7 +119,7 @@ def decode_with_vllm(
     decode_sampling_nucleus_p: float,
     decode_sampling_top_k: float,
     debug_sharding: bool,
-    vllm_config_path: str,
+    vllm_config_path: str | None = None,
 ) -> None:
   """Decode using vLLM with a MaxText model implementation.
 
@@ -140,7 +140,7 @@ def decode_with_vllm(
     decode_sampling_temperature: Temperature for sampling.
     decode_sampling_nucleus_p: Nucleus sampling probability.
     decode_sampling_top_k: Top-k sampling probability.
-    vllm_config_path: Path to vLLM config file. Defaults to src/MaxText/configs/vllm.yml.
+    vllm_config_path: Path to vLLM config file. Defaults to MAXTEXT_PKG_DIR/configs/vllm.yml.
   """
 
   # Prepare vLLM Arguments

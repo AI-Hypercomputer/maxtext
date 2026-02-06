@@ -494,7 +494,9 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
       )
 
-  argv_list = ["", str(trainer_config.vllm_config_path), "log_config=False"]
+  configs_dir = os.environ.get("MAXTEXT_CONFIGS_DIR", os.path.join(MAXTEXT_PKG_DIR, "configs"))
+  vllm_config_path = epath.Path(configs_dir) / "vllm.yml"
+  argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
   with nn_partitioning.axis_rules(vllm_config.logical_axis_rules):

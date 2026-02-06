@@ -94,24 +94,11 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          if [ "${{ inputs.maxtext_installed }}" == "true" ]; then
-            # Move to the directory where code is baked into the image. See the Dockerfile.
-            # This is necessary because GHA sets an empty workspace by default.
-            cd /deps
-            PYTHON_EXE="python3"
-            PAPERMILL_EXE="papermill"
-          else
-            PYTHON_EXE=".venv/bin/python3"
-            PAPERMILL_EXE=".venv/bin/papermill"
-          fi
+          source .venv/bin/activate
 
           export MAXTEXT_REPO_ROOT=$(pwd)
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
           export MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
-
-          # Install dependencies for running notebooks
-          $PYTHON_EXE -m pip install papermill ipykernel ipywidgets
-          $PYTHON_EXE -m ipykernel install --user --name maxtext_venv
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
             filename=$(basename "$notebook")
@@ -121,7 +108,7 @@ jobs:
             echo "Running $filename ..."
             echo "------------------------------------------------------"
 
-            $PAPERMILL_EXE "$notebook" "$output_name" -k maxtext_venv
+            papermill "$notebook" "$output_name" -k maxtext_venv
           done
       - name: Record Commit IDs
         shell: bash

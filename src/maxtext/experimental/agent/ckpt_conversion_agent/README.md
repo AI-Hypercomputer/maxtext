@@ -18,7 +18,7 @@ pip install -q -U "google-genai>=1.0.0"
 
 The agent requires context files about the target and source model's parameter names and tensor shapes. You can generate them using the [`save_param.py`](../ckpt_conversion_agent/utils/save_param.py) script. The output directory defined by `config.base_output_directory`. The default is `src/MaxText/experimental/agent/ckpt_conversion_agent/context/<model_name>` folder.
 ```bash
-python3 -m maxtext.experimental.agent.ckpt_conversion_agent.utils.save_param src/maxtext/configs/base.yml \
+python3 -m MaxText.experimental.agent.ckpt_conversion_agent.utils.save_param src/maxtext/configs/base.yml \
   per_device_batch_size=1 run_name=param_<model_name> model_name=<model_name> scan_layers=false \
   --hf_model_config=<hf_model_id>
 ```

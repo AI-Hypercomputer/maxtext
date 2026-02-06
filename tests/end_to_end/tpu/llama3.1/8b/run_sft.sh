@@ -57,7 +57,7 @@ fi
 echo "Running fine-tuning on checkpoint: ${PRE_TRAINED_MODEL_CKPT_PATH}"
 
 # Run Supervised Fine-Tuning on MaxText checkpoint using HuggingFaceH4/ultrachat_200k dataset
-python3 -m maxtext.trainers.post_train.sft.train_sft "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs/post_train}"/sft.yml \
+python3 -m maxtext.trainers.post_train.sft.train_sft "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/sft.yml \
     run_name=${RUN_NAME} base_output_directory=${BASE_OUTPUT_DIRECTORY}/${PRE_TRAINED_MODEL} \
     model_name=${PRE_TRAINED_MODEL} load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH} \
     hf_access_token=$HF_TOKEN tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \
