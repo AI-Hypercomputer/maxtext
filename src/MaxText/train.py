@@ -40,7 +40,6 @@ from flax.linen import partitioning as nn_partitioning
 
 from MaxText import pyconfig
 from MaxText import sharding
-from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.common_types import ShardMode
 from MaxText.globals import EPS
 # Placeholder: internal
@@ -48,7 +47,7 @@ from MaxText.globals import EPS
 from MaxText.gradient_accumulation import gradient_accumulation_loss_and_grad
 from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
 # pylint: disable=too-many-positional-arguments
-
+from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from maxtext.common import checkpointing, profiler
 from maxtext.common.goodput import (
     GoodputEvent,

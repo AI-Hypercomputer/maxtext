@@ -35,7 +35,8 @@ from optax.contrib._muon import MuonDimensionNumbers as mdn
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import models, quantizations
+from maxtext.models import models
+from maxtext.layers import quantizations
 from maxtext.utils import maxtext_utils
 
 

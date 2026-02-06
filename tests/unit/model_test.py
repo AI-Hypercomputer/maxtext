@@ -29,8 +29,8 @@ from maxtext.utils import maxtext_utils
 from maxtext.common.gcloud_stub import is_decoupled
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.models import models
+from maxtext.layers import quantizations
 from tests.utils.test_helpers import get_test_config_path
 
 MAX_PREFILL_PREDICT_LENGTH = 4

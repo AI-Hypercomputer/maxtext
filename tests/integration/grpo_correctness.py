@@ -36,11 +36,11 @@ from datasets import load_dataset
 from maxtext.utils import maxtext_utils
 from maxtext.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state
 from maxtext.experimental.rl.grpo_utils import compute_log_probs
+from maxtext.models import models
+import pytest
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import models
-import pytest
 
 pytestmark = [pytest.mark.external_training]  # uses pre-generated checkpoint
 
