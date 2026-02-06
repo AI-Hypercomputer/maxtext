@@ -13,19 +13,11 @@
 # limitations under the License.
 
 """Input pipeline"""
+from __future__ import annotations
 import functools
-
 import jax
 from jax.sharding import PartitionSpec as P
-
-from MaxText import pyconfig
-from MaxText.input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
-from MaxText.input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
-from MaxText.input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
-from MaxText.input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
-from MaxText.input_pipeline.synthetic_data_processing import SyntheticDataIterator, PlaceHolderDataIterator
 from maxtext.utils import max_logging
-
 
 def get_process_loading_real_data(
     data_sharding, global_batch_size_to_load, global_batch_size_to_train_on, max_target_length, mesh
@@ -50,6 +42,7 @@ def create_process_specific_iterator(config: pyconfig.HyperParameters, mesh, pro
     iterator_fn = functools.partial(input_iterator, config, mesh, process_indices)
     output_iterator = iterator_fn()
   else:
+    from MaxText.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
     output_iterator = PlaceHolderDataIterator(config, mesh)
   return output_iterator
 
@@ -59,19 +52,23 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
 
   # Return synthetic dataset if selected
   if config.dataset_type == "synthetic":
+    from MaxText.input_pipeline.synthetic_data_processing import SyntheticDataIterator
     return SyntheticDataIterator(config, mesh), None
-  dataset_type_to_train_eval_iterator = {
-      "tfds": (make_tfds_train_iterator, make_tfds_eval_iterator),
-      "grain": (make_grain_train_iterator, make_grain_eval_iterator),
-      "hf": (make_hf_train_iterator, make_hf_eval_iterator),
-      "c4_mlperf": (make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator),
-  }
 
   # Collect train and eval iterators
-  if config.dataset_type in ["tfds", "grain", "hf", "c4_mlperf"]:
-    if config.dataset_type == "c4_mlperf":
-      assert config.packing, "c4_mlperf dataloader only works with packing. For padded version, use tfds dataloader"
-    train_iterator, eval_iterator = dataset_type_to_train_eval_iterator[config.dataset_type]
+  if config.dataset_type == "tfds":
+    from MaxText.input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
+    train_iterator, eval_iterator = make_tfds_train_iterator, make_tfds_eval_iterator
+  elif config.dataset_type == "grain":
+    from MaxText.input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
+    train_iterator, eval_iterator = make_grain_train_iterator, make_grain_eval_iterator
+  elif config.dataset_type == "hf":
+    from MaxText.input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
+    train_iterator, eval_iterator = make_hf_train_iterator, make_hf_eval_iterator
+  elif config.dataset_type == "c4_mlperf":
+    from MaxText.input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
+    assert config.packing, "c4_mlperf dataloader only works with packing. For padded version, use tfds dataloader"
+    train_iterator, eval_iterator = make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
   else:
     max_logging.log(
         f"WARNING: '{config.dataset_type}' is not a supported dataset type."
