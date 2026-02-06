@@ -36,7 +36,8 @@ from maxtext.layers.attentions import attention_as_linen
 from maxtext.layers.normalizations import rms_norm
 from maxtext.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
 from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.layers import (
+from maxtext.layers import simple_layer
+from maxtext.models import (
     deepseek,
     gemma,
     gemma2,
@@ -48,7 +49,6 @@ from maxtext.layers import (
     mistral,
     mixtral,
     qwen3,
-    simple_layer,
     olmo3,
 )
 from maxtext.inference import page_manager

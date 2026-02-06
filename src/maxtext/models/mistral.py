@@ -25,7 +25,7 @@ from flax import nnx
 
 from maxtext.layers import nnx_wrappers, initializers
 from maxtext.layers.linears import Dropout, MlpBlock
-from maxtext.layers.models import Config
+from maxtext.models.models import Config
 from maxtext.layers.attentions import Attention
 from maxtext.layers import quantizations
 from maxtext.layers.quantizations import AqtQuantization as Quant

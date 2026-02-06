@@ -21,8 +21,8 @@ import jax.numpy as jnp
 from flax import nnx
 from typing import Callable
 from MaxText.common_types import Config, Array
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.initializers import nd_dense_init, default_bias_init, default_scalar_init
+from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.initializers import nd_dense_init, default_bias_init, default_scalar_init
 from MaxText.common_types import HyperConnectionType
 
 
