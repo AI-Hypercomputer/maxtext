@@ -26,12 +26,12 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from maxtext.utils import maxtext_utils
+from maxtext.models import models
+from maxtext.layers import quantizations
+from tests.utils.test_helpers import get_test_config_path
 from MaxText import pyconfig, maxengine
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
-from MaxText.layers import models
-from MaxText.layers import quantizations
 from MaxText.maxengine import MaxEngine
-from tests.utils.test_helpers import get_test_config_path
 
 pytestmark = [pytest.mark.external_serving]
 

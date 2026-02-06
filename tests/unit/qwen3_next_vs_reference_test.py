@@ -30,8 +30,9 @@ from jax.sharding import Mesh
 from flax import nnx
 
 from MaxText import pyconfig
-from MaxText.layers import qwen3, normalizations
-from MaxText.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated
+from maxtext.models import qwen3
+from maxtext.layers import normalizations
+from maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated
 from tests.utils.test_helpers import get_test_config_path
 
 

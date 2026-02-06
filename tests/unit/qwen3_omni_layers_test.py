@@ -49,14 +49,14 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
 from MaxText import common_types
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_REPO_ROOT
-from MaxText.layers.attentions import Attention
-from MaxText.layers.embeddings import (
+from maxtext.layers.attentions import Attention
+from maxtext.layers.embeddings import (
     PositionalEmbedding,
     Qwen3OmniMoeVisionPosEmbedInterpolate as JaxQwen3OmniMoeVisionPosEmbedInterpolate,
     Qwen3OmniMoeVisionRotaryEmbedding as JaxQwen3OmniMoeVisionRotaryEmbedding,
 )
-from MaxText.layers.encoders import AudioEncoder
-from MaxText.layers.qwen3 import (
+from maxtext.layers.encoders import AudioEncoder
+from maxtext.models.qwen3 import (
     Qwen3OmniAudioEncoder,
     Qwen3OmniAudioEncoderLayer,
     Qwen3OmniMoeVisionAttention as JaxQwen3OmniMoeVisionAttention,
