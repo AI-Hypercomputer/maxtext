@@ -23,7 +23,7 @@ from typing import Union, Sequence
 from collections.abc import Iterator, Iterable
 import time
 
-import tensorflow as tf  # pylint: disable=g-import-not-at-top
+# import tensorflow as tf  # pylint: disable=g-import-not-at-top
 
 import numpy as np
 
@@ -72,31 +72,31 @@ class MultiHostDataLoadIterator:
 
   def __init__(
       self,
-      dataloader: tf.data.Dataset | Iterable,
+      dataloader: Iterable,
       global_mesh: Mesh,
       generate_padding_batch: bool = False,
       expansion_loading_factor_for_grain: int = -1,
   ):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
-    if isinstance(self.dataloader, tf.data.Dataset):
-      self.local_iterator = self.dataloader.as_numpy_iterator()
-    elif isinstance(self.dataloader, Iterable):
+    # if isinstance(self.dataloader, tf.data.Dataset):
+    #   self.local_iterator = self.dataloader.as_numpy_iterator()
+    if isinstance(self.dataloader, Iterable):
       self.local_iterator = iter(self.dataloader)
     else:
-      raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
+      raise ValueError("Type error: dataloader should be Iterable.")
     self.out_of_data = False
     self.last_local_data = None
     self.generate_padding_batch = generate_padding_batch
     self.expansion_loading_factor_for_grain = expansion_loading_factor_for_grain
 
   def reset(self):
-    if isinstance(self.dataloader, tf.data.Dataset):
-      self.local_iterator = self.dataloader.as_numpy_iterator()
-    elif isinstance(self.dataloader, Iterable):
+    # if isinstance(self.dataloader, tf.data.Dataset):
+    #   self.local_iterator = self.dataloader.as_numpy_iterator()
+    if isinstance(self.dataloader, Iterable):
       self.local_iterator = iter(self.dataloader)
     else:
-      raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
+      raise ValueError("Type error: dataloader should be Iterable.")
     self.out_of_data = False
     self.last_local_data = None
 
@@ -130,9 +130,9 @@ class MultiHostDataLoadIterator:
               local_data_list.append(next_batch)
             local_data = jtu.tree_map(lambda *xs: np.concatenate(xs, axis=0), *local_data_list)
           break  # exit the loop on success
-        except tf.errors.FailedPreconditionError as e:
-          max_logging.log(f"Failed to get next data batch due to {e}, retrying")
-          time.sleep(SLEEP_TIME)
+        # except tf.errors.FailedPreconditionError as e:
+        #   max_logging.log(f"Failed to get next data batch due to {e}, retrying")
+        #   time.sleep(SLEEP_TIME)
         except StopIteration as e:
           if self.generate_padding_batch:
             max_logging.log(
@@ -222,9 +222,9 @@ class RemoteIterator:
       colocated_python.global_shape = global_shape
       ds = get_ds_fn(dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count())
       dataloader = preprocessing_fn(dataset=ds)
-      if isinstance(dataloader, tf.data.Dataset):
-        colocated_python.iterator = dataloader.as_numpy_iterator()
-      elif isinstance(dataloader, Iterable):
+      # if isinstance(dataloader, tf.data.Dataset):
+      #   colocated_python.iterator = dataloader.as_numpy_iterator()
+      if isinstance(dataloader, Iterable):
         colocated_python.iterator = iter(dataloader)
       else:
         raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
