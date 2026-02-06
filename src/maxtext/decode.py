@@ -26,8 +26,8 @@ from MaxText import maxengine
 from MaxText import pyconfig
 from maxtext.common import profiler
 from maxtext.common.gcloud_stub import jetstream, is_decoupled
-from MaxText.multimodal import processor as mm_processor
-from MaxText.multimodal import utils as mm_utils
+from maxtext.multimodal import processor as mm_processor
+from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_utils
 
 _config_lib, engine_api, _token_utils, _tokenizer_api, _token_params_ns = jetstream()
@@ -141,7 +141,7 @@ def main(argv: Sequence[str]) -> None:
     true_length += image_offsets
 
     if config.use_mrope:
-      from MaxText.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
+      from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
 
       position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
           input_ids=tokens,

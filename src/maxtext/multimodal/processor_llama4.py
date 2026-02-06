@@ -21,7 +21,7 @@ from itertools import groupby
 import numpy as np
 from PIL import Image
 
-from MaxText.multimodal import utils as mm_utils
+from maxtext.multimodal import utils as mm_utils
 
 # Constants for Llama4-specific processing
 LLAMA4_TILE_SIZE = 336

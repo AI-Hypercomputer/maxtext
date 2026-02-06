@@ -41,7 +41,7 @@ from MaxText.configs import types
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.inference.page_manager import PageState
 from maxtext.common import checkpointing
-from MaxText.multimodal import processor as mm_processor
+from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils

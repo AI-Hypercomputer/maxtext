@@ -66,7 +66,7 @@ from MaxText.layers.qwen3 import (
     Qwen3OmniMoeVisionPatchMerger as JaxQwen3OmniMoeVisionPatchMerger,
     Qwen3OmniMoeVisionProjector as JaxQwen3OmniMoeVisionProjector,
 )
-from MaxText.multimodal import processor as mm_processor
+from maxtext.multimodal import processor as mm_processor
 from tests.utils.multimodal_test_utils import (
     assert_all_close_jax_torch,
     copy_attention_weights_to_maxtext,
