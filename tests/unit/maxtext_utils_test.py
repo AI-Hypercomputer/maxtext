@@ -119,7 +119,9 @@ class UpdateStateParamTest(unittest.TestCase):
         "layers": {"layer_0": {"bias": jnp.array([1.0, 1.0])}, "layer_1": {"bias": jnp.array([2.0, 2.0])}},
         "decoder": {"gate": {"bias": jnp.array([0.5, 0.5])}},
     }
-    self.state = train_state.TrainState(step=0, apply_fn=self.model.apply, params=self.initial_params, tx=None, opt_state={})
+    self.state = train_state.TrainState(
+        step=0, apply_fn=self.model.apply, params=self.initial_params, tx=None, opt_state={}
+    )
 
   def test_update_mode_add(self):
     target_path = ("decoder", "gate", "bias")
@@ -661,7 +663,9 @@ class TestSamplingFunctions(unittest.TestCase):
     rngs = jax.random.split(self.rng, 10)
 
     for r in rngs:
-      token = inference_utils.sample_topk_topp_weighted(self.logits, topk=10, nucleus_topp=1.0, temperature=low_temp, rng=r)
+      token = inference_utils.sample_topk_topp_weighted(
+          self.logits, topk=10, nucleus_topp=1.0, temperature=low_temp, rng=r
+      )
       self.assertEqual(token.item(), greedy_token_index)
 
   def test_invalid_args_raise_error(self):
