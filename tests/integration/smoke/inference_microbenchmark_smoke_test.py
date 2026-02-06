@@ -43,7 +43,7 @@ class Inference_Microbenchmark(unittest.TestCase):
     config = pyconfig.initialize(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "tpu_smoke_test.yml"),
+            os.path.join(MAXTEXT_PKG_DIR, "configs", "tpu", "tpu_smoke_test.yml"),
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "ici_autoregressive_parallelism=-1",
             "ici_fsdp_parallelism=1",

@@ -36,7 +36,7 @@ class SFTHooksTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        ["", os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+        ["", os.path.join(MAXTEXT_PKG_DIR, "configs", "post_train", "sft.yml")],
         per_device_batch_size=1,
         run_name="test",
         base_output_directory="test",

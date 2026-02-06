@@ -19,7 +19,7 @@ Provides a utility to load and quantize a checkpoint layer by layer. Currently, 
 
 Example cmd:
 
-python3 -m MaxText.layerwise_quantization  src/MaxText/configs/base.yml \
+python3 -m MaxText.layerwise_quantization  src/maxtext/configs/base.yml \
   tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${LOAD_PARAMS_PATH} \
   model_name=deepseek2-16b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 \
   ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 \

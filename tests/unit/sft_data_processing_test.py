@@ -314,7 +314,7 @@ class SFTDataProcessingTest(unittest.TestCase):
       tokenizer_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
 
     self.config = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "sft_trainer"), os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+        [os.path.join(MAXTEXT_PKG_DIR, "sft_trainer"), os.path.join(MAXTEXT_PKG_DIR, "configs", "post_train", "sft.yml")],
         per_device_batch_size=2,
         run_name="test",
         mesh_axes=["data"],

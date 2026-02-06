@@ -27,8 +27,9 @@ import omegaconf
 
 from MaxText import pyconfig_deprecated
 from MaxText.common_types import DecoderBlockType, ShardMode
-from MaxText.configs import types
-from MaxText.configs.types import MaxTextConfig
+from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.configs import types
+from maxtext.configs.types import MaxTextConfig
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_utils
 
@@ -83,8 +84,7 @@ def _load_config(config_name: str) -> omegaconf.DictConfig:
       # Search relative to current config, then in the default configs folder
       loaded_parent_config_filename = os.path.join(os.path.dirname(config_name), base_path)
       if not os.path.isfile(loaded_parent_config_filename):
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        loaded_parent_config_filename = os.path.join(dir_path, "configs", base_path)
+        loaded_parent_config_filename = os.path.join(MAXTEXT_PKG_DIR, "configs", base_path)
     else:
       loaded_parent_config_filename = base_path
 
