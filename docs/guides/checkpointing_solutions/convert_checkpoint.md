@@ -66,7 +66,7 @@ export LAZY_LOAD_TENSORS=<Flag to lazy load> # True to use lazy load, False to u
 Finally, run below command to complete the conversion
 
 ```bash
-python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
+python3 -m MaxText.utils.ckpt_conversion.to_maxtext maxtext/configs/base.yml \
     model_name=${HF_MODEL} \
     hf_access_token=${HF_TOKEN} \
     base_output_directory=${MODEL_CHECKPOINT_DIRECTORY} \
@@ -104,7 +104,7 @@ Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugg
 The following command converts a MaxText checkpoint and saves it locally, to GCS, or uploads it directly to the Hugging Face Hub.
 
 ```bash
-python3 -m MaxText.utils.ckpt_conversion.to_huggingface src/MaxText/configs/base.yml \
+python3 -m MaxText.utils.ckpt_conversion.to_huggingface src/maxtext/configs/base.yml \
     model_name=<MODEL_NAME> \
     load_parameters_path=<path-to-maxtext-checkpoint> \
     base_output_directory=<path-to-save-converted-checkpoint> \
@@ -131,7 +131,7 @@ To ensure the conversion was successful, you can use the `tests/utils/forward_pa
 ### Usage
 
 ```bash
-python3 -m tests.utils.forward_pass_logit_checker src/MaxText/configs/base.yml \
+python3 -m tests.utils.forward_pass_logit_checker src/maxtext/configs/base.yml \
     tokenizer_path=assets/<tokenizer> \
     load_parameters_path=<path-to-maxtext-checkpoint> \
     model_name=<MODEL_NAME> \
@@ -216,8 +216,8 @@ To extend conversion support to a new model architecture, you must define its sp
 - In [`utils/param_mapping.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/param_mapping.py), add the `hook_fn` logic (`def {MODEL}_MAXTEXT_TO_HF_PARAM_HOOK_FN`). This is the transformation needed per layer.
 
 2. **Add Hugging Face weights Shape**: In [`utils/hf_shape.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/hf_shape.py), define the tensor shape of Hugging Face format (`def {MODEL}_HF_WEIGHTS_TO_SHAPE`). This is used to ensure the tensor shape is matched after to_huggingface conversion.
-1. **Register model key**: In [`utils/utils.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/utils.py), add the new model key in `HF_IDS`.
-1. **Add transformer config**: In [`utils/hf_model_configs.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/hf_model_configs.py), add the `transformers.Config` object, describing the Hugging Face model configuration (defined in ['src/MaxText/configs/models'](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/MaxText/configs/models)). **Note**: This configuration must precisely match the MaxText model's architecture.
+3. **Register model key**: In [`utils/utils.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/utils.py), add the new model key in `HF_IDS`.
+4. **Add transformer config**: In [`utils/hf_model_configs.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/hf_model_configs.py), add the `transformers.Config` object, describing the Hugging Face model configuration (defined in ['src/maxtext/configs/models'](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/configs/models)). **Note**: This configuration must precisely match the MaxText model's architecture.
 
 Here is an example [PR to add support for gemma3 multi-modal model](https://github.com/AI-Hypercomputer/maxtext/pull/1983)
 

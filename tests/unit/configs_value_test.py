@@ -21,12 +21,12 @@ from unittest.mock import patch, MagicMock
 import pydantic
 
 from MaxText import pyconfig
-from MaxText.configs import types
 from MaxText.globals import MAXTEXT_REPO_ROOT
 from MaxText.pyconfig import initialize_pydantic
+from maxtext.configs import types
 
 # Path to the base.yml config. This assumes that `pytest` is run from the project root.
-_BASE_CONFIG_PATH = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "configs", "base.yml")
+_BASE_CONFIG_PATH = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
 
 
 class ConfigTest(unittest.TestCase):
