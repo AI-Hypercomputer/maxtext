@@ -209,6 +209,12 @@ def get_dataset(
     shard_in_read: bool = False,
 ) -> tf.data.Dataset:
   """Load and return a dataset of examples."""
+  # enable shard_in_read in training dataset
+  if split == "train2":
+    shard_in_read = True
+    max_logging.log(
+        f"overwriting {shard_in_read=} with {dataloading_host_count=}"
+    )
   if shard_in_read:
     # shard dataset in reading
     read_config = tfds.ReadConfig(
