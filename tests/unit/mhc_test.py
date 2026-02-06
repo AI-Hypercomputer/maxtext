@@ -16,6 +16,7 @@
 
 import os.path
 import unittest
+import pytest
 
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
@@ -118,6 +119,8 @@ class TestMHC(unittest.TestCase):
         ),
     )
 
+  # Skip GPU due to NotImplementedError: dynamic grid bounds not supported in the Triton backend
+  @pytest.mark.tpu_only
   def test_moe_layer_output_shape(self):
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
       module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
