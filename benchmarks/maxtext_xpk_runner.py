@@ -107,7 +107,7 @@ class WorkloadConfig:
   generate_metrics_and_upload_to_big_query: bool = True
   hardware_id: str = "v6e"
   metrics_gcs_file: str = ""
-  base_config: str = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
+  base_config: str = os.path.join("src", MAXTEXT_PKG_DIR, "configs", "base.yml")
   topology: str = dataclasses.field(init=False)
   num_devices_per_slice: int = dataclasses.field(init=False)
   db_project: str = ""

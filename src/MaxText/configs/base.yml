@@ -76,6 +76,9 @@ enable_orbax_v1: False
 checkpoint_conversion_fn: none
 # optional checkpoint context to use for loading. options: "orbax", "safetensors"
 source_checkpoint_layout: "orbax"
+
+# Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing 
+colocated_python_checkpointing: False
 ############################### end checkpointing ##################################
 
 
