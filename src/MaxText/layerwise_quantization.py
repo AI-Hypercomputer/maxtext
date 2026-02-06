@@ -30,6 +30,7 @@ python3 -m MaxText.layerwise_quantization  src/MaxText/configs/base.yml \
 
 """
 
+import functools
 import os
 from typing import Any, Sequence
 
@@ -176,12 +177,19 @@ class LayerwiseQuantization:
 
     # Model and quantization config
     self.quant = quantizations.configure_quantization(config)
-    model = models.transformer_as_linen(
-        config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
-    )
-    self.unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(
-        model, None, self.config, self.rng, self._mesh, False
-    )
+    if self.config.pure_nnx:
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      model = models.transformer_as_linen(
+          config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
+      )
+    if self.config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, None, self.config, False, self.rng)
+
+    self.unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(self.config, self._mesh, init_state_fn, False)
 
   def load_and_quantize(self) -> None:
     """
