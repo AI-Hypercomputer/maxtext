@@ -315,7 +315,7 @@ attention_out: 'remat'
 
 optimizer_memory_host_offload: False
 parameter_memory_host_offload: False
-scan_layers: True # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
+scan_layers: False # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
 param_scan_axis: 1
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
@@ -1040,8 +1040,8 @@ position_id_per_seconds: 25
 subslice_shape: ""
 
 # NNX
-enable_nnx: false
-pure_nnx_decoder: false
+enable_nnx: True
+pure_nnx_decoder: True
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net

@@ -37,10 +37,6 @@ from maxtext.inference import page_manager
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import max_utils
 
-# ------------------------------------------------------------------------------
-# The network: Transformer Definitions
-# ------------------------------------------------------------------------------
-
 
 class TransformerLinenPure(nn.Module):
   """An autoregressive transformer model."""
