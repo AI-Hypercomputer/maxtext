@@ -91,7 +91,6 @@ class Gemma3DecoderLayer(nnx.Module):
 
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
-
     self.pre_self_attention_norm = RMSNorm(
         num_features=config.emb_dim,
         dtype=config.dtype,
@@ -198,7 +197,6 @@ class Gemma3DecoderLayer(nnx.Module):
       inputs = inputs[0]
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-
     lnx = self.pre_self_attention_norm(inputs)
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 

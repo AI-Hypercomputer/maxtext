@@ -136,7 +136,6 @@ class MultiTokenPredictionLayer(nnx.Module):
         model_mode=MODEL_MODE_TRAIN,
     )
 
-
   @property
   def embedding_norm(self):
     return getattr(self, f"mtp_{self.layer_number}_embedding_norm")
@@ -168,7 +167,6 @@ class MultiTokenPredictionLayer(nnx.Module):
   @transformer_layer.setter
   def transformer_layer(self, module):
     setattr(self, f"mtp_{self.layer_number}_transformer_layer", module)
-
 
   def __call__(
       self,

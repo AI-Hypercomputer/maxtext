@@ -27,7 +27,7 @@ from flax import nnx
 
 from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.inference import page_manager
-from MaxText.layers.nnx_decoders import NNXDecoder, decoder_as_linen
+from maxtext.layers.nnx_decoders import NNXDecoder, decoder_as_linen
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.decoders import Decoder
