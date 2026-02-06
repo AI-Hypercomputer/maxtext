@@ -35,7 +35,8 @@ from jax import random
 from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_TRAIN
-from MaxText.layers import models, quantizations
+from maxtext.models import models
+from maxtext.layers import quantizations
 from maxtext.common import checkpointing
 from maxtext.utils import gcs_utils
 from maxtext.utils import lora_utils

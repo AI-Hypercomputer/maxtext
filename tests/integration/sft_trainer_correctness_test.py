@@ -43,8 +43,8 @@ from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.models import models
+from maxtext.layers import quantizations
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.utils import maxtext_utils
 

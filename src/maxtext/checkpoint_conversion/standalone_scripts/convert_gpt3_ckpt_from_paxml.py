@@ -53,8 +53,8 @@ from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import quantizations
-from MaxText.layers.models import transformer_as_linen
+from maxtext.layers import quantizations
+from maxtext.models.models import transformer_as_linen
 from maxtext.common import checkpointing
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils

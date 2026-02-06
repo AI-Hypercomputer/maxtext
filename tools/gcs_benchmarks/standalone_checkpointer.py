@@ -33,7 +33,7 @@ from flax.linen import partitioning as nn_partitioning
 
 from MaxText import pyconfig
 from MaxText.train import get_first_step
-from MaxText.layers import models
+from maxtext.models import models
 from maxtext.common import checkpointing
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils

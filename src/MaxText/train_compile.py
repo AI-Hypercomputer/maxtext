@@ -41,8 +41,8 @@ from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText import sharding
 from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.models import models
+from maxtext.layers import quantizations
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
