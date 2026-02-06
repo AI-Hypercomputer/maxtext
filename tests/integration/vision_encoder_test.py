@@ -34,8 +34,8 @@ from MaxText.layers import models
 from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT, MAXTEXT_ASSETS_ROOT
 from MaxText import maxengine
 from tests.utils.test_helpers import get_test_config_path
-from MaxText.multimodal import processor_gemma3
-from MaxText.multimodal import utils as mm_utils
+from maxtext.multimodal import processor_gemma3
+from maxtext.multimodal import utils as mm_utils
 
 
 pytestmark = [pytest.mark.external_serving, pytest.mark.integration_test]
