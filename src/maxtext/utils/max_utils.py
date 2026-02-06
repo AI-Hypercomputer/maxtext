@@ -36,6 +36,8 @@ import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
+import pathwaysutils
+from pathwaysutils.elastic import manager
 import psutil
 
 from maxtext.common.gcloud_stub import is_decoupled
@@ -46,6 +48,10 @@ from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, 
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
+
+
+elastic_manager: manager.Manager | None = None
+
 
 # pylint: disable=too-many-positional-arguments
 
@@ -330,9 +336,8 @@ def get_num_slices(raw_keys):
   if int(raw_keys["compile_topology_num_slices"]) > 0:
     return raw_keys["compile_topology_num_slices"]
   else:
-    devices = jax.devices()
     try:
-      return 1 + max(d.slice_index for d in devices)
+      return len({d.slice_index for d in live_devices()})
     except (ValueError, AttributeError):
       return 1
 
@@ -1069,3 +1074,16 @@ def transformer_engine_context():
       yield
   except (ImportError, AttributeError):
     yield
+
+
+def live_devices():
+  device_list = jax.devices()
+
+  if pathwaysutils.is_pathways_backend_used() and elastic_manager is not None:
+      return [
+          d for d in device_list
+          if d.slice_index in elastic_manager.active_slice_indices
+      ]
+  else:
+    return device_list
+
