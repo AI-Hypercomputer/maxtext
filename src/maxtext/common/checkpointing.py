@@ -18,6 +18,7 @@ import time
 from typing import Any, Optional
 
 from absl import flags
+import datetime
 from etils import epath
 from flax.training import train_state
 import jax
@@ -248,6 +249,11 @@ def create_orbax_checkpoint_manager(
   else:
     save_decision_policy = save_decision_policy_lib.FixedIntervalPolicy(interval=save_interval_steps)
     preservation_policy = preservation_policy_lib.LatestN(max_num_checkpoints_to_keep)
+  async_options = None
+  if enable_continuous_checkpointing:
+    async_options = ocp.AsyncOptions(
+        timeout_secs=int(datetime.timedelta(minutes=60).total_seconds()),
+    )
   manager = CheckpointManager(
       p,
       item_names=item_names,
@@ -257,6 +263,7 @@ def create_orbax_checkpoint_manager(
           enable_async_checkpointing=use_async,
           save_decision_policy=save_decision_policy,
           preservation_policy=preservation_policy,
+          async_options=async_options,
       ),
       logger=orbax_logger,
   )
@@ -728,6 +735,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   if config and config.enable_checkpointing:
     if (
         force
+        or (step % config.checkpoint_period == 0 and not config.enable_continuous_checkpointing)
         or (step % config.checkpoint_period == 0)
         or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
     ):
