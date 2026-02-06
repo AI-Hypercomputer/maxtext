@@ -349,7 +349,7 @@ class Gpt3DecoderLayer(nnx.Module):
 
   def __init__(
       self,
-      config: models.Config,
+      config: Config,
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,

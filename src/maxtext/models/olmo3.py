@@ -28,7 +28,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from MaxText.common_types import AttentionType
+from MaxText.common_types import AttentionType, Config
 from maxtext.layers import initializers
 from maxtext.layers import attentions
 from maxtext.models import models
@@ -64,7 +64,7 @@ class Olmo3DecoderLayer(nnx.Module):
 
   def __init__(
       self,
-      config: models.Config,
+      config: Config,
       mesh: Mesh,
       model_mode: str,
       attention_type: AttentionType,
@@ -235,7 +235,7 @@ class Olmo3ScannableBlock(nnx.Module):
 
   def __init__(
       self,
-      config: models.Config,
+      config: Config,
       mesh: Mesh,
       model_mode: str,
       quant: Optional[Quant] = None,

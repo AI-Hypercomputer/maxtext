@@ -28,7 +28,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from MaxText.common_types import AttentionType
+from MaxText.common_types import Config, AttentionType
 from maxtext.layers import initializers
 from maxtext.layers import attentions
 from maxtext.layers import moe
@@ -62,7 +62,7 @@ class GptOssDecoderLayer(nnx.Module):
 
   def __init__(
       self,
-      config: models.Config,
+      config: Config,
       mesh: Mesh,
       model_mode: str,
       attention_type: AttentionType,
@@ -233,7 +233,7 @@ class GptOssScannableBlock(nnx.Module):
 
   def __init__(
       self,
-      config: models.Config,
+      config: Config,
       mesh: Mesh,
       model_mode: str,
       quant: Optional[Quant] = None,
