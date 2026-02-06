@@ -1,0 +1,1490 @@
+{
+  ".step": {
+    "partition_spec": [],
+    "shape": []
+  },
+  ".params/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "partition_spec": [
+      "norm"
+    ],
+    "shape": [
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['bias']": {
+    "partition_spec": [
+      "embed",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['bias']": {
+    "partition_spec": [
+      "q_heads",
+      "layers",
+      "kv"
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['sinks']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['bias']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "mlp",
+      "embed_no_exp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_embed"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_0']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['bias']": {
+    "partition_spec": [
+      "embed",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['bias']": {
+    "partition_spec": [
+      "q_heads",
+      "layers",
+      "kv"
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['sinks']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['bias']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "mlp",
+      "embed_no_exp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_embed"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['layers_1']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".params/['params']/['decoder']/['logits_dense']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "vocab"
+    ],
+    "shape": [
+      2880,
+      201088
+    ]
+  },
+  ".params/['params']/['token_embedder']/['embedding']": {
+    "partition_spec": [
+      "vocab",
+      "embed"
+    ],
+    "shape": [
+      201088,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.count": {
+    "partition_spec": [],
+    "shape": []
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "partition_spec": [
+      "norm"
+    ],
+    "shape": [
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['bias']": {
+    "partition_spec": [
+      "embed",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['bias']": {
+    "partition_spec": [
+      "q_heads",
+      "layers",
+      "kv"
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['sinks']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['bias']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "mlp",
+      "embed_no_exp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_embed"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['bias']": {
+    "partition_spec": [
+      "embed",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['bias']": {
+    "partition_spec": [
+      "q_heads",
+      "layers",
+      "kv"
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['sinks']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['bias']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "mlp",
+      "embed_no_exp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_embed"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['logits_dense']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "vocab"
+    ],
+    "shape": [
+      2880,
+      201088
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['token_embedder']/['embedding']": {
+    "partition_spec": [
+      "vocab",
+      "embed"
+    ],
+    "shape": [
+      201088,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "partition_spec": [
+      "norm"
+    ],
+    "shape": [
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['bias']": {
+    "partition_spec": [
+      "embed",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['bias']": {
+    "partition_spec": [
+      "q_heads",
+      "layers",
+      "kv"
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['sinks']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['bias']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "mlp",
+      "embed_no_exp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_embed"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['bias']": {
+    "partition_spec": [
+      "embed",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      64,
+      12,
+      64,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['bias']": {
+    "partition_spec": [
+      "q_heads",
+      "layers",
+      "kv"
+    ],
+    "shape": [
+      64,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2880,
+      12,
+      64,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['sinks']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      64,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['bias']": {
+    "partition_spec": [
+      "kv_heads",
+      "layers",
+      "kv_head_dim"
+    ],
+    "shape": [
+      8,
+      12,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      2880,
+      12,
+      8,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['bias']": {
+    "partition_spec": [
+      null,
+      "layers"
+    ],
+    "shape": [
+      32,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      null
+    ],
+    "shape": [
+      2880,
+      12,
+      32
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_mlp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "mlp",
+      "embed_no_exp"
+    ],
+    "shape": [
+      32,
+      12,
+      2880,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo_bias']": {
+    "partition_spec": [
+      "exp",
+      "layers",
+      "activation_embed"
+    ],
+    "shape": [
+      32,
+      12,
+      2880
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      2880,
+      12
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['logits_dense']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "vocab"
+    ],
+    "shape": [
+      2880,
+      201088
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['token_embedder']/['embedding']": {
+    "partition_spec": [
+      "vocab",
+      "embed"
+    ],
+    "shape": [
+      201088,
+      2880
+    ]
+  },
+  ".opt_state/[2]/.count": {
+    "partition_spec": [],
+    "shape": []
+  }
+}
