@@ -692,6 +692,10 @@ class DeepSeekMoE(BaseModel):
       False,
       description="Whether to split batch into micro-batches to hide communications that yields performance benefits.",
   )
+  batch_split_factor: int = Field(
+      1,
+      description="Factor by which to split the batch into micro-batches. Only used if use_batch_split_schedule is True.",
+  )
 
 
 class Qwen3Next(BaseModel):

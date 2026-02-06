@@ -71,7 +71,8 @@ def fetch_weights(params, dtype):
 @jax.named_scope("deepseek_batchsplit_split")
 def split(x, split_factor=2):
   """Splits the input into `split_factor` parts along the batch dimension."""
-
+  if split_factor == 1:
+    return [x]
   if x is None:
     return [None] * split_factor
   else:
@@ -80,8 +81,10 @@ def split(x, split_factor=2):
 
 
 @jax.named_scope("deepseek_batchsplit_merge")
-def merge(x):
+def merge(x, split_factor=2):
   """Merges the input microbatches back into a single tensor."""
+  if split_factor == 1:
+    return x[0]
   x = jnp.stack(x, axis=1)
   return jnp.reshape(x, (-1,) + x.shape[2:])
 
@@ -104,13 +107,13 @@ def batch_split_schedule(
       None,
   )
   xs = jax.shard_map(
-      split,
+      functools.partial(split, split_factor=cfg.batch_split_factor),
       mesh=mesh,
       in_specs=activation_pspec,
-      out_specs=[activation_pspec, activation_pspec],
+      out_specs=[activation_pspec] * cfg.batch_split_factor,
   )(inputs)
-  dpos = split(positions)
-  dseg = split(segment_ids)
+  dpos = split(positions, split_factor=cfg.batch_split_factor)
+  dseg = split(segment_ids, split_factor=cfg.batch_split_factor)
   xs = [with_data_parallel_constraint(x, mesh) for x in xs]
   xs = jax.ad_checkpoint.checkpoint_name(xs, "decoder_layer_input")
 
@@ -186,9 +189,9 @@ def batch_split_schedule(
       dtype=cfg.dtype,
   )
   xs = jax.shard_map(
-      merge,
+      functools.partial(merge, split_factor=cfg.batch_split_factor),
       mesh=mesh,
-      in_specs=([activation_pspec, activation_pspec],),
+      in_specs=([activation_pspec] * cfg.batch_split_factor,),
       out_specs=activation_pspec,
   )(xs)
   return xs
