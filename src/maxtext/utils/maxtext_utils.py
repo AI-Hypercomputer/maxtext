@@ -1377,6 +1377,10 @@ def setup_initial_state(
   )
 
   # Initialization
+  elastic_manager = getattr(max_utils, "elastic_manager", None)
+  if elastic_manager and elastic_manager.new_slice_event.is_set():
+    raise manager.ScaleUpSignalError("Scale up during setup (before load_state)")
+
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
@@ -1576,10 +1580,11 @@ def add_config_to_summary_writer(config, summary_writer):
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
-    devices = jax.devices()
-
-  if config.elastic_enabled:
     devices = elastic_utils.live_devices(config)
+
+  if config.inference_benchmark:
+    num_slices = 1
+  elif config.elastic_enabled:
     num_slices = len(elastic_utils.live_slice_indices(config))
   else:
     num_slices = config.num_slices
@@ -1601,7 +1606,6 @@ def create_device_mesh(config, devices=None):
     devices = subslice_devices
 
   num_devices = len(devices)
-  num_slices = 1 if config.inference_benchmark_test else num_slices
   num_devices_per_slice = num_devices // num_slices
 
   multi_slice_env = num_slices > 1

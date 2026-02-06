@@ -26,6 +26,8 @@ import re
 import subprocess
 import time
 from typing import Any
+import subprocess
+import re
 
 from packaging.version import Version
 
@@ -40,6 +42,8 @@ import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
+import pathwaysutils
+from pathwaysutils.elastic import manager
 import psutil
 
 from maxtext.utils import elastic_utils
@@ -51,6 +55,10 @@ from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRE
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
+
+
+elastic_manager: manager.Manager | None = None
+
 
 # pylint: disable=too-many-positional-arguments
 
@@ -753,7 +761,7 @@ def summarize_pytree_data(params, name="Params", raw=False):
 def print_mem_stats(label: str):
   max_logging.log(f"\nMemstats: {label}:")
   try:
-    for d in jax.local_devices():
+    for d in live_devices():
       stats = d.memory_stats()
       used = round(stats["bytes_in_use"] / 2**30, 2)
       limit = round(stats["bytes_limit"] / 2**30, 2)

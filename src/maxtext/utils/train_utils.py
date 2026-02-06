@@ -34,6 +34,7 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils.rampup_batch import create_rampup_manager
 from maxtext.trainers.diloco import diloco
+from pathwaysutils.elastic import manager
 
 
 def create_training_optimizer(config, model):
@@ -228,6 +229,9 @@ def setup_train_loop(config, recorder, devices=None):
     checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
+    elastic_manager = getattr(max_utils, "elastic_manager", None)
+    if elastic_manager and elastic_manager.new_slice_event.is_set():
+      raise manager.ScaleUpSignalError("Scale up during setup (before data iterator)")
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
     # Validate context parallelism with packing configuration
@@ -263,6 +267,8 @@ def setup_train_loop(config, recorder, devices=None):
     # Create data_loader AFTER reordering wrapper is applied
     data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
 
+    if elastic_manager and elastic_manager.new_slice_event.is_set():
+      raise manager.ScaleUpSignalError("Scale up during setup (before state restore)")
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )

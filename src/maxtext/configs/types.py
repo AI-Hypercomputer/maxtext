@@ -1998,7 +1998,7 @@ class DerivedValues(BaseModel):
 
   num_target_devices: None | int = Field(
       None,
-      description="The number of devices computed from topology in train_compile or jax.devices() in train",
+      description="The number of devices computed from topology in train_compile or max_utils.live_devices() in train",
   )
 
   global_batch_size_to_train_on: None | int = Field(
@@ -2414,7 +2414,7 @@ class MaxTextConfig(
       elif self.elastic_enabled:
         return len(elastic_utils.live_devices(config=self))
       else:
-        return len(jax.devices())
+        return len(max_utils.live_devices())
 
     self.num_target_devices = 1  # Default for validation when JAX is not initialized
     try:

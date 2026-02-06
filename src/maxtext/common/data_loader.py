@@ -62,6 +62,8 @@ class DataLoader:
           self.update_data_iterator()
         self.last_batch = example_batch
         self.check_example_batch()
+      except jax.errors.JaxRuntimeError:
+        raise
       except Exception as e:  # pylint: disable=broad-except
         if isinstance(e, StopIteration):
           raise exceptions.StopTraining(f"You may have run out of training data. Received {type(e)} exception: ({e})")

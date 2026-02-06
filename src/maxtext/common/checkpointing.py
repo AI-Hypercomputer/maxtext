@@ -28,6 +28,7 @@ from maxtext.input_pipeline.multihost_dataloading import RemoteIteratorWrapper
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
 from maxtext.utils import exceptions
 from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 from maxtext.utils import gcs_utils
 from maxtext.utils import elastic_utils
 import numpy as np
@@ -39,6 +40,7 @@ from orbax.checkpoint._src.checkpoint_managers import save_decision_policy as sa
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 # pylint: disable=too-many-positional-arguments
+from pathwaysutils.elastic import manager
 import dataclasses
 import json
 
