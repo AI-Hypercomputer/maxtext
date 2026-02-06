@@ -36,13 +36,13 @@ from flax import struct
 from flax.linen import partitioning as nn_partitioning
 import flax
 
-from MaxText import multimodal_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models, quantizations
 from maxtext.inference import inference_utils
 from maxtext.inference.page_manager import PageManager, PageState
+from MaxText.multimodal import processor as mm_processor
 from maxtext.utils import lora_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -325,12 +325,11 @@ class MaxEngine(_BaseEngine):
 
     @jax.jit
     def model_apply(_p, _rng):
-      image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-          self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+      image_shape = mm_processor.get_dummy_image_shape_for_init(
+          model_name=self.config.model_name,
+          batch_size=self.config.micro_batch_size_to_train_on,
       )
-      audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-          self.config.model_name, config=self.config, batch_size=self.config.micro_batch_size_to_train_on
-      )
+      audio_shape = mm_processor.get_dummy_audio_shape_for_init(self.config)
       return self.model.apply(
           _p | {"aqt": {}},
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
@@ -1584,15 +1583,13 @@ class MaxEngine(_BaseEngine):
           dtype=jnp.int32,
       )
       dummy_image = jnp.ones(
-          multimodal_utils.get_dummy_image_shape_for_init(
-              self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+          mm_processor.get_dummy_image_shape_for_init(
+              model_name=self.config.model_name, batch_size=self.config.per_device_batch_size
           ),
           dtype=jnp.int32,
       )
       dummy_audio = jnp.ones(
-          multimodal_utils.get_dummy_audio_shape_for_init(
-              self.config.model_name, config=self.config, batch_size=self.config.micro_batch_size_to_train_on
-          ),
+          mm_processor.get_dummy_audio_shape_for_init(self.config),
           dtype=jnp.float32,
       )
       _, cache = self.model.apply(

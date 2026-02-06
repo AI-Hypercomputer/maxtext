@@ -35,7 +35,6 @@ from MaxText.layers import linears
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
-from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.normalizations import rms_norm
@@ -57,6 +56,7 @@ from MaxText.layers import (
     olmo3,
 )
 from maxtext.inference import page_manager
+from MaxText.multimodal import utils as mm_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -587,7 +587,7 @@ class Decoder(nn.Module):
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
       ]:
-        y = multimodal_utils.merge_mm_embeddings(
+        y = mm_utils.merge_mm_embeddings(
             text_embeddings=y,
             multimodal_embeddings=image_embeddings,
             mask=bidirectional_mask,
@@ -599,7 +599,7 @@ class Decoder(nn.Module):
 
     if audio_embeddings is not None and cfg.use_audio:
       if cfg.model_name in ["qwen3-omni-30b-a3b"]:
-        y = multimodal_utils.merge_mm_embeddings(
+        y = mm_utils.merge_mm_embeddings(
             text_embeddings=y,
             multimodal_embeddings=audio_embeddings,
             mask=audio_masks,

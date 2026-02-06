@@ -24,10 +24,10 @@ from absl import app
 
 from MaxText import maxengine
 from MaxText import pyconfig
-from MaxText import multimodal_utils
-from MaxText.multimodal import preprocessor
 from maxtext.common import profiler
 from maxtext.common.gcloud_stub import jetstream, is_decoupled
+from MaxText.multimodal import processor as mm_processor
+from MaxText.multimodal import utils as mm_utils
 from maxtext.utils import max_utils
 
 _config_lib, engine_api, _token_utils, _tokenizer_api, _token_params_ns = jetstream()
@@ -101,14 +101,14 @@ def main(argv: Sequence[str]) -> None:
 
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
-  processor_outputs = multimodal_utils.PreprocessorOutput()
+  processor_outputs = mm_utils.PreprocessorOutput()
   if config.use_multimodal:
-    processor_outputs = preprocessor.preprocess_mm_data(config)
-    image_offsets = multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_outputs)
+    processor_outputs = mm_processor.preprocess_mm_data(config)
+    image_offsets = mm_processor.get_image_offsets(config.model_name, processor_output=processor_outputs)
 
     prefill_length -= image_offsets
-    text = multimodal_utils.reformat_prompt(
-        text,
+    text = mm_processor.reformat_prompt(
+        prompt=config.prompt,
         image_placeholder=config.image_placeholder,
         model_name=config.model_name,
         num_images=processor_outputs.num_images,
@@ -135,13 +135,15 @@ def main(argv: Sequence[str]) -> None:
   mrope_position_deltas = None
 
   if config.use_multimodal:
-    tokens = multimodal_utils.prepare_text_for_image_fusion(
+    tokens = mm_processor.prepare_text_for_image_fusion(
         tokens, model_name=config.model_name, processor_output=processor_outputs
     )
     true_length += image_offsets
 
     if config.use_mrope:
-      position_ids, mrope_position_deltas = multimodal_utils.get_rope_index(
+      from MaxText.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+      position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
           input_ids=tokens,
           image_grid_thw=processor_outputs.pixel_grid_thw,  # pytype: disable=attribute-error
           video_grid_thw=processor_outputs.video_grid_thw,  # pytype: disable=attribute-error
