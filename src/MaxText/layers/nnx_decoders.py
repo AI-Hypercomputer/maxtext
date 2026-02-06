@@ -33,10 +33,10 @@ from MaxText.configs.types import PositionalEmbedding
 from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONTEXT
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.sharding import create_sharding
+from maxtext.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import initializers
 from MaxText.layers import quantizations
-from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.layers.attentions import Attention
 from MaxText.layers.normalizations import RMSNorm
@@ -61,6 +61,7 @@ from MaxText.layers import (
 from maxtext.inference import page_manager
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
+from maxtext.multimodal import utils as mm_utils
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -284,19 +285,28 @@ class NNXDecoder(nnx.Module):
         attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
         scan_length = config.num_decoder_layers // attention_pattern_length
         num_remaining_layers = config.num_decoder_layers % attention_pattern_length
+        layer_kwargs = {"num_of_layers": attention_pattern_length}
+
         rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
 
         RemattedGemma3Block = gemma3.Gemma3ScannableBlock
 
         if scan_length > 0:
-          self.layers = self._create_scanned_layers(RemattedGemma3Block, length=scan_length, rngs=rngs)
+          self.layers = self._create_scanned_layers(RemattedGemma3Block, length=scan_length, rngs=rngs, **layer_kwargs)
         self.layers_remainder = RemattedGemma3Block(
             config=self.config, mesh=mesh, quant=self.quant, model_mode=self.model_mode, **rem_layer_kwargs, rngs=rngs
         )  # pytype: disable=wrong-keyword-args
       else:
         layer_cls = decoder_block_classes[0]
-        num_layers = config.num_decoder_layers
-        self.layers = self._create_scanned_layers(layer_cls, length=num_layers, rngs=rngs)
+        num_layers = int(config.num_decoder_layers / config.inhomogeneous_layer_cycle_interval)
+        layer_kwargs = {}
+        if config.decoder_block == DecoderBlockType.LLAMA4:
+          layer_kwargs = {
+              "nope_layer_interval": self.config.nope_layer_interval,
+              "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
+          }
+
+        self.layers = self._create_scanned_layers(layer_cls, length=num_layers, rngs=rngs, **layer_kwargs)
     else:
       self.layers = nnx.List([])
       if self.is_deepseek:
@@ -366,7 +376,6 @@ class NNXDecoder(nnx.Module):
 
     layer_cls = layers.__class__  # Access the underlying class
     sig = inspect.signature(layer_cls.__call__)
-
     # Filter kwargs to only include keys that exist in the layer's signature
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
 
@@ -584,7 +593,7 @@ class NNXDecoder(nnx.Module):
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
       ]:
-        y = multimodal_utils.merge_mm_embeddings(
+        y = mm_utils.merge_mm_embeddings(
             text_embeddings=y,
             multimodal_embeddings=image_embeddings,
             mask=bidirectional_mask,
@@ -596,7 +605,7 @@ class NNXDecoder(nnx.Module):
 
     if audio_embeddings is not None and cfg.use_audio:
       if cfg.model_name in ["qwen3-omni-30b-a3b"]:
-        y = multimodal_utils.merge_mm_embeddings(
+        y = mm_utils.merge_mm_embeddings(
             text_embeddings=y,
             multimodal_embeddings=audio_embeddings,
             mask=audio_masks,
@@ -698,7 +707,6 @@ class NNXDecoder(nnx.Module):
         "previous_chunk": previous_chunk,
         "page_state": page_state,
         "slot": slot,
-        "attention_metadata": attention_metadata,
     }
 
     if cfg.decoder_block == DecoderBlockType.GEMMA3:
@@ -775,17 +783,12 @@ class NNXDecoder(nnx.Module):
     attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
     scan_length = cfg.num_decoder_layers // attention_pattern_length
 
-    layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+    layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
+    layer_kwargs = {"bidirectional_mask": bidirectional_mask}
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      broadcast_args = (
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-      )
-      y, _ = self.layers(y, *broadcast_args, **layer_call_kwargs)
+      y, _ = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
@@ -800,8 +803,9 @@ class NNXDecoder(nnx.Module):
           previous_chunk=previous_chunk,
           page_state=page_state,
           slot=slot,
-          **layer_call_kwargs,
+          **layer_kwargs,
       )
+
     return y
 
 
