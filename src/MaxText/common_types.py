@@ -114,3 +114,9 @@ class AttentionType(enum.Enum):
 class ShardMode(enum.Enum):
   AUTO = "auto"  # default
   EXPLICIT = "explicit"
+
+
+class HyperConnectionType(enum.Enum):
+  ATTENTION = "attention"
+  MLP_MOE = "mlp_moe"
+  MLP_DENSE = "mlp_dense"
