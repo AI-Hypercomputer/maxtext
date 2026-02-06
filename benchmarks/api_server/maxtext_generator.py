@@ -35,8 +35,8 @@ import numpy as np
 from dataclasses import dataclass, field
 
 from MaxText import maxengine, pyconfig
-from MaxText.multimodal import processor as mm_processor
-from MaxText.multimodal import utils as mm_utils
+from maxtext.multimodal import processor as mm_processor
+from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils
 
 # Set TF log level to avoid verbose startup messages.

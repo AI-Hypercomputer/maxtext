@@ -56,7 +56,7 @@ from MaxText.layers import (
     olmo3,
 )
 from maxtext.inference import page_manager
-from MaxText.multimodal import utils as mm_utils
+from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
