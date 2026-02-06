@@ -29,18 +29,16 @@ from flax import linen as nn
 from flax import nnx
 from flax.nnx import wrappers as nnx_wrappers
 
-from MaxText.configs.types import PositionalEmbedding
 from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONTEXT
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.sharding import create_sharding
 from MaxText.layers import linears
 from MaxText.layers import initializers
 from MaxText.layers import quantizations
-from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.layers.attentions import Attention
 from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.embeddings import Embed, attend_on_embedding
+from MaxText.layers.embeddings import Embed, attend_on_embedding, PositionalEmbedding
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers import (
     deepseek,
@@ -61,6 +59,7 @@ from MaxText.layers import (
 from maxtext.inference import page_manager
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
+from maxtext.multimodal import utils as mm_utils
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -195,10 +194,10 @@ class NNXDecoderLayer(nnx.Module):
     layer_output = _maybe_shard_with_logical(layer_output, logical_axis_names)
 
     if cfg.record_internal_nn_metrics:
-      self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
-      self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
+      self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
+      self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
+          nnx.Intermediate,
           "activation_fraction_zero",
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
@@ -284,19 +283,28 @@ class NNXDecoder(nnx.Module):
         attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
         scan_length = config.num_decoder_layers // attention_pattern_length
         num_remaining_layers = config.num_decoder_layers % attention_pattern_length
+        layer_kwargs = {"num_of_layers": attention_pattern_length}
+
         rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
 
         RemattedGemma3Block = gemma3.Gemma3ScannableBlock
 
         if scan_length > 0:
-          self.layers = self._create_scanned_layers(RemattedGemma3Block, length=scan_length, rngs=rngs)
+          self.layers = self._create_scanned_layers(RemattedGemma3Block, length=scan_length, rngs=rngs, **layer_kwargs)
         self.layers_remainder = RemattedGemma3Block(
             config=self.config, mesh=mesh, quant=self.quant, model_mode=self.model_mode, **rem_layer_kwargs, rngs=rngs
         )  # pytype: disable=wrong-keyword-args
       else:
         layer_cls = decoder_block_classes[0]
-        num_layers = config.num_decoder_layers
-        self.layers = self._create_scanned_layers(layer_cls, length=num_layers, rngs=rngs)
+        num_layers = int(config.num_decoder_layers / config.inhomogeneous_layer_cycle_interval)
+        layer_kwargs = {}
+        if config.decoder_block == DecoderBlockType.LLAMA4:
+          layer_kwargs = {
+              "nope_layer_interval": self.config.nope_layer_interval,
+              "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
+          }
+
+        self.layers = self._create_scanned_layers(layer_cls, length=num_layers, rngs=rngs, **layer_kwargs)
     else:
       self.layers = nnx.List([])
       if self.is_deepseek:
@@ -309,6 +317,32 @@ class NNXDecoder(nnx.Module):
         for i in range(config.num_decoder_layers):
           self._create_and_register_layer(layer_cls, rngs, "layers", i)
 
+      self.layers = nnx.List([])
+      
+      if self.is_deepseek:
+        dense_cls, moe_cls = decoder_block_classes
+        for i in range(config.first_num_dense_layers):
+          self._create_and_register_layer(dense_cls, rngs, "dense_layer", i)
+        for i in range(config.num_decoder_layers - config.first_num_dense_layers):
+          self._create_and_register_layer(moe_cls, rngs, "moe_layer", i)
+      else:
+        layer_cls = decoder_block_classes[0]
+        
+        for i in range(config.num_decoder_layers):
+          layer_kwargs = {}
+          if config.decoder_block == DecoderBlockType.GEMMA3:
+             layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=i)}
+          elif config.decoder_block == DecoderBlockType.LLAMA4:
+             layer_kwargs = {
+                 "is_nope_layer": llama4.determine_is_nope_layer(i, self.config.nope_layer_interval),
+                 "is_moe_layer": llama4.determine_is_moe_layer(i, self.config.interleave_moe_layer_step),
+             }
+          elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+             layer_kwargs = {"layer_idx": i}
+          elif config.decoder_block == DecoderBlockType.GPT_OSS:
+             layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=i)}
+          self._create_and_register_layer(layer_cls, rngs, "layers", i, **layer_kwargs)
+  
   def _create_and_register_layer(self, layer_cls, rngs, base_name, i):
     attr_name = f"{base_name}_{i}"
     layer = self._create_single_layer(layer_cls, rngs)
@@ -346,12 +380,16 @@ class NNXDecoder(nnx.Module):
     except:  # pylint: disable=bare-except
       pass
 
+    out_axes = nnx.StateAxes({
+        nnx.Param: self.config.param_scan_axis,
+        ...: 0
+    })
     layers_vmapped = nnx.vmap(
-        create_layer_fn,
-        in_axes=0,
-        out_axes=0,
-        axis_name="layers",
-        transform_metadata={nnx.PARTITION_NAME: "layers"},
+      create_layer_fn,
+      in_axes=0,
+      out_axes=out_axes,
+      axis_name="layers",
+      transform_metadata={nnx.PARTITION_NAME: "layers"},
     )(forked_rngs)
 
     return layers_vmapped
@@ -364,9 +402,17 @@ class NNXDecoder(nnx.Module):
         layers, nnx.Param, ...
     )  # state: the mutable state we carry (KV cache, RNGs, etc.)
 
+    scan_axis = self.config.param_scan_axis
+    if scan_axis != 0:
+        # Move scan_axis to 0 so scan can iterate over it
+        params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+
+    layer_cls = layers.__class__
+    sig = inspect.signature(layer_cls.__call__)
+    valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
+
     layer_cls = layers.__class__  # Access the underlying class
     sig = inspect.signature(layer_cls.__call__)
-
     # Filter kwargs to only include keys that exist in the layer's signature
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
 
@@ -390,6 +436,11 @@ class NNXDecoder(nnx.Module):
     layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
 
     final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state))
+
+    if scan_axis != 0:
+      scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
+      scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
+      scanned_state = nnx.State.merge(scanned_params, scanned_other)
 
     return final_carry, nnx.merge(graphdef, scanned_state)
 
@@ -584,7 +635,7 @@ class NNXDecoder(nnx.Module):
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
       ]:
-        y = multimodal_utils.merge_mm_embeddings(
+        y = mm_utils.merge_mm_embeddings(
             text_embeddings=y,
             multimodal_embeddings=image_embeddings,
             mask=bidirectional_mask,
@@ -596,7 +647,7 @@ class NNXDecoder(nnx.Module):
 
     if audio_embeddings is not None and cfg.use_audio:
       if cfg.model_name in ["qwen3-omni-30b-a3b"]:
-        y = multimodal_utils.merge_mm_embeddings(
+        y = mm_utils.merge_mm_embeddings(
             text_embeddings=y,
             multimodal_embeddings=audio_embeddings,
             mask=audio_masks,
@@ -609,7 +660,7 @@ class NNXDecoder(nnx.Module):
     y = y.astype(cfg.dtype)
 
     if cfg.use_untrainable_positional_embedding:
-      y = self.positional_embedding(y, decoder_positions)
+      y += self.positional_embedding(y, decoder_positions)
 
     if cfg.trainable_position_size > 0 and self.position_embedder:
       y += self.position_embedder(decoder_positions.astype("int32"), model_mode=model_mode)
@@ -625,7 +676,7 @@ class NNXDecoder(nnx.Module):
     else:
       norm_out_sharding = None
 
-    y = self.decoder_norm(y, norm_out_sharding)
+    y = self.decoder_norm(y, out_sharding=norm_out_sharding)
     y = self.dropout(y, deterministic=deterministic)  # NNX call
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
@@ -693,19 +744,18 @@ class NNXDecoder(nnx.Module):
         audio_masks,
     )
     layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
-
-    layer_kwargs = {
-        "previous_chunk": previous_chunk,
-        "page_state": page_state,
-        "slot": slot,
-        "attention_metadata": attention_metadata,
-    }
-
+    
+    layer_kwargs = {}
     if cfg.decoder_block == DecoderBlockType.GEMMA3:
       layer_kwargs["bidirectional_mask"] = bidirectional_mask
 
     if cfg.scan_layers:
       if self.is_deepseek:
+        layer_kwargs = {
+            "previous_chunk": previous_chunk,
+            "page_state": page_state,
+            "slot": slot,
+        }
         y, self.dense_layers = self._apply_layers_sequentially(
             self.dense_layers, y, *layer_args, length=cfg.first_num_dense_layers, **layer_kwargs
         )
@@ -733,8 +783,24 @@ class NNXDecoder(nnx.Module):
     else:
       for i, layer in enumerate(self.layers):
         kv_cache = kv_caches[i] if kv_caches is not None else None
+        
+        layer_call_kwargs = {}
+        if cfg.decoder_block == DecoderBlockType.GEMMA3:
+            layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
 
-        out = layer(y, *layer_args, kv_cache=kv_cache, **layer_kwargs)
+        out = layer(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            previous_chunk=previous_chunk,
+            page_state=page_state,
+            slot=slot,
+            kv_cache=kv_cache,
+            attention_metadata=attention_metadata,
+            **layer_call_kwargs
+        )
 
         if isinstance(out, tuple):
           y, kv_cache_out = out
@@ -775,17 +841,12 @@ class NNXDecoder(nnx.Module):
     attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
     scan_length = cfg.num_decoder_layers // attention_pattern_length
 
-    layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+    layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
+    layer_kwargs = {"bidirectional_mask": bidirectional_mask}
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      broadcast_args = (
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-      )
-      y, _ = self.layers(y, *broadcast_args, **layer_call_kwargs)
+      y, self.layers = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
@@ -800,8 +861,9 @@ class NNXDecoder(nnx.Module):
           previous_chunk=previous_chunk,
           page_state=page_state,
           slot=slot,
-          **layer_call_kwargs,
+          **layer_kwargs,
       )
+
     return y
 
 
