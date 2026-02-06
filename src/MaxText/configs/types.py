@@ -1203,7 +1203,9 @@ class AOT(BaseModel):
   compiled_trainstep_file: PathStr = Field("", description="Name of saved serialized compiled train_step.")
   compile_topology: str = Field("", description="Target hardware version, e.g. 'v5e-256'.")
   compile_topology_num_slices: int = Field(-1, description="Number of target slices.")
-
+  pre_compile: bool = Field(False, description="Enable precompile.")
+  enable_step_logging: bool = Field(False, description="Enable enable_step_logging.")
+  enable_metric_writing: bool = Field(False, description="Enable enable_metric_writing.")
 
 class DevelopmentAndDebugging(BaseModel):
   """General settings for development and debugging."""

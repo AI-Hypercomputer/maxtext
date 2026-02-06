@@ -860,7 +860,6 @@ shardy: True # Whether to use shardy XLA backend (default in Jax starting 0.7.0)
 use_ragged_attention: False
 ragged_block_size: 256
 
-overwrite_ckpt_step: -1
 pre_compile: True
 # Whether or not to log the "completed step" logs, which have some overhead with syncing the loss across all workers
 enable_step_logging: True

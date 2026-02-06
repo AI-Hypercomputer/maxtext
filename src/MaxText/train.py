@@ -56,6 +56,7 @@ from MaxText.common_types import ShardMode
 from MaxText.globals import EPS
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
+from MaxText.utils import mllog_utils
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,
@@ -499,7 +500,7 @@ def train_loop(config, recorder, state=None):
           max_logging.log(f"Completed eval step {eval_step_count}")
           eval_step_count += 1
         metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
-        mllog_utils.early_stop_check(config, step, eval_loss, start_step)
+        mllog_utils.early_stop_check(config, step, metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"], start_step)
         if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
           prof.deactivate()
           raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
