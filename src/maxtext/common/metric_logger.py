@@ -152,6 +152,7 @@ class MetricLogger:
       log_parts.extend(
           [
               f"completed step: {step}",
+              f"live slice count: {len(max_utils.live_slice_indices())}",
               f"seconds: {scalars['perf/step_time_seconds']:.3f}",
           ]
       )

@@ -28,7 +28,10 @@ from absl import app
 
 import numpy as np
 
-import pathwaysutils  # pylint: disable=unused-import
+import pathwaysutils
+from pathwaysutils.debug import watchdog
+from pathwaysutils.elastic import elastic
+from pathwaysutils.elastic import manager
 
 import tensorflow as tf
 
@@ -523,61 +526,62 @@ def train_loop(config, recorder, state=None):
   try:
     last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
-      prof.maybe_activate_profiler(step, state)
+      with watchdog.watchdog(60):
+        prof.maybe_activate_profiler(step, state)
 
-      with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
-        # pylint: disable=not-callable
-        nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
-        with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-            if config.shard_optimizer_over_data:
-              state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
-            state, metrics = p_train_step(state, example_batch, nextrng)
+        with jax.profiler.StepTraceAnnotation("train", step_num=step):
+          example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+          # pylint: disable=not-callable
+          nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+          with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
+            with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+              if config.shard_optimizer_over_data:
+                state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
+              state, metrics = p_train_step(state, example_batch, nextrng)
 
-      step_time_delta = datetime.datetime.now() - last_step_completion
-      last_step_completion = datetime.datetime.now()
+        step_time_delta = datetime.datetime.now() - last_step_completion
+        last_step_completion = datetime.datetime.now()
 
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+        state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
-      if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
-        jax.block_until_ready(state)  # Ensure compilation has finished.
-        gcs_utils.upload_dump(
-            config.dump_hlo_local_dir,
-            config.dump_hlo_gcs_dir,
-            module_name=config.dump_hlo_module_name,
-            delete_local_after=config.dump_hlo_delete_local_after,
-            all_host_upload=config.dump_hlo_upload_all,
-        )
+        if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
+          jax.block_until_ready(state)  # Ensure compilation has finished.
+          gcs_utils.upload_dump(
+              config.dump_hlo_local_dir,
+              config.dump_hlo_gcs_dir,
+              module_name=config.dump_hlo_module_name,
+              delete_local_after=config.dump_hlo_delete_local_after,
+              all_host_upload=config.dump_hlo_upload_all,
+          )
 
-      if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
-        assert eval_data_iterator
-        # Explicitly reset the eval iterator and counters before starting the eval loop
-        eval_data_iterator.reset()
-        metric_logger.reset_eval_metrics()
+        if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
+          assert eval_data_iterator
+          # Explicitly reset the eval iterator and counters before starting the eval loop
+          eval_data_iterator.reset()
+          metric_logger.reset_eval_metrics()
 
-        eval_step_count = 0
-        # pylint: disable=not-callable
-        for eval_batch in eval_data_iterator:
-          if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
-            break
-          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-            eval_metrics = p_eval_step(state, eval_batch, nextrng)
-          metric_logger.record_eval_metrics(step, metrics=eval_metrics)
-          max_logging.log(f"Completed eval step {eval_step_count}")
-          eval_step_count += 1
-        metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
-        if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
-          prof.deactivate()
-          raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
+          eval_step_count = 0
+          # pylint: disable=not-callable
+          for eval_batch in eval_data_iterator:
+            if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
+              break
+            with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+              eval_metrics = p_eval_step(state, eval_batch, nextrng)
+            metric_logger.record_eval_metrics(step, metrics=eval_metrics)
+            max_logging.log(f"Completed eval step {eval_step_count}")
+            eval_step_count += 1
+          metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
+          if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
+            prof.deactivate()
+            raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
 
-      prof.maybe_deactivate_profiler(step, state)
+        prof.maybe_deactivate_profiler(step, state)
 
-      if step == start_step:
-        max_utils.print_mem_stats("After params initialized")
+        if step == start_step:
+          max_utils.print_mem_stats("After params initialized")
 
-      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
+        metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
     if config.save_checkpoint_on_completion:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
@@ -599,7 +603,6 @@ def train_loop(config, recorder, state=None):
 
 def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]:
   """Initialization of hyperparameters and utilities"""
-  pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
@@ -660,11 +663,63 @@ def run(config, recorder, diagnostic_config):
 
 
 def main(argv: Sequence[str]) -> None:
+  pathwaysutils.initialize()
+
   config, recorder, diagnostic_config = initialize(argv)
   record_goodput(recorder, RECORD_JOB_START_TIME)
-  with maybe_monitor_goodput(config):
+  def train():
+    config, recorder, diagnostic_config = initialize(argv)
     run(config, recorder, diagnostic_config)
 
+  if pathwaysutils.is_pathways_backend_used():
+    elastic_mode = os.getenv("ELASTIC_MODE", "").lower()
+    if elastic_mode:
+      max_utils.elastic_manager = manager.Manager()
+
+      max_logging.log(f"Using {elastic_mode=}")
+      if elastic_mode == "replica-resize":
+        def pre_callback():
+          # Wait up to 1 minute before starting if there are any inactive slices
+          if max_utils.elastic_manager.inactive_slice_indices:
+            try:
+              max_utils.elastic_manager.active_slice_indices = (
+                  elastic.wait_for_slices(
+                      slice_count=max_utils.elastic_manager.total_slice_count,
+                      slice_to_devices=max_utils.elastic_manager.slice_to_devices,
+                      poll_interval=10,
+                      timeout=60,
+                  )
+              )
+            except TimeoutError:
+              # If there are still inactive slices, we must update the active
+              # slices with one final check and then proceed.
+              max_utils.elastic_manager.active_slice_indices = (
+                  elastic.get_active_slice_indices(
+                      slice_to_devices=max_utils.elastic_manager.slice_to_devices,
+                  )
+              )
+
+        train = max_utils.elastic_manager.replica_resize(
+            max_resizes=10,  # Handle up to 10 slice up or slice down transitions
+            poll_interval=10,  # Monitor thread checks inactive slice health every 10 seconds
+            pre_callback=pre_callback,
+        )(train)
+
+      elif elastic_mode == "pause-resume":
+        train = max_utils.elastic_manager.pause_resume(
+            max_retries=10,  # Handle up to 10 disruptions before restarting
+            poll_interval=10,  # While paused, checks every 10 seconds for health
+            timeout=300,  # Waits for slices to rejoin for 5 minutes
+        )(train)
+
+      else:
+        raise ValueError(f"Unknown {elastic_mode=}")
+
+    else:
+      max_logging.log("Not using any elastic_mode")
+
+  with maybe_monitor_goodput(config):
+    train()
 
 if __name__ == "__main__":
   app.run(main)

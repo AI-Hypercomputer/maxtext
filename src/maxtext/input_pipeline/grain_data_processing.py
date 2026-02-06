@@ -232,7 +232,8 @@ def pretrain_preprocessing_pipeline(
   dataset = dataset.map(input_pipeline_utils.Rekey(rekey_dict))
 
   # Pack and Batch examples.
-  batch_size = config.global_batch_size_to_load // jax.process_count()
+  # batch_size = config.global_batch_size_to_load // jax.process_count()
+  batch_size = config.per_device_batch_size * 8
   if config.expansion_factor_real_data > 1:
     # global_batch_size_to_load has been expanded in pyconfig.py when expansion_factor_real_data > 1.
     # But when using Grain, we want to keep the batch_size consistent with that in the checkpoint.
