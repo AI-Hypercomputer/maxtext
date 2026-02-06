@@ -542,7 +542,6 @@ def train_loop(config, recorder, state=None):
 
 def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]:
   """Initialization of hyperparameters and utilities"""
-  pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
@@ -604,10 +603,61 @@ def run(config, recorder, diagnostic_config):
 
 
 def main(argv: Sequence[str]) -> None:
-  config, recorder, diagnostic_config = initialize(argv)
-  with maybe_monitor_goodput(config):
+  pathwaysutils.initialize()
+  def train():
+    config, recorder, diagnostic_config = initialize(argv)
     run(config, recorder, diagnostic_config)
 
+  if pathwaysutils.is_pathways_backend_used():
+    elastic_mode = os.getenv("ELASTIC_MODE", "").lower()
+    if elastic_mode:
+      max_utils.elastic_manager = manager.Manager()
+
+      max_logging.log(f"Using {elastic_mode=}")
+      if elastic_mode == "replica-resize":
+        def pre_callback():
+          # Wait up to 1 minute before starting if there are any inactive slices
+          if max_utils.elastic_manager.inactive_slice_indices:
+            try:
+              max_utils.elastic_manager.active_slice_indices = (
+                  elastic.wait_for_slices(
+                      slice_count=max_utils.elastic_manager.total_slice_count,
+                      slice_to_devices=max_utils.elastic_manager.slice_to_devices,
+                      poll_interval=10,
+                      timeout=60,
+                  )
+              )
+            except TimeoutError:
+              # If there are still inactive slices, we must update the active
+              # slices with one final check and then proceed.
+              max_utils.elastic_manager.active_slice_indices = (
+                  elastic.get_active_slice_indices(
+                      slice_to_devices=max_utils.elastic_manager.slice_to_devices,
+                  )
+              )
+
+        train = max_utils.elastic_manager.replica_resize(
+            max_resizes=10,  # Handle up to 10 slice up or slice down transitions
+            poll_interval=10,  # Monitor thread checks inactive slice health every 10 seconds
+            pre_callback=pre_callback,
+        )(train)
+
+      elif elastic_mode == "pause-resume":
+        train = max_utils.elastic_manager.pause_resume(
+            max_retries=10,  # Handle up to 10 disruptions before restarting
+            poll_interval=10,  # While paused, checks every 10 seconds for health
+            timeout=300,  # Waits for slices to rejoin for 5 minutes
+        )(train)
+
+      else:
+        raise ValueError(f"Unknown {elastic_mode=}")
+
+    else:
+      max_logging.log("Not using any elastic_mode")
+
+  config, recorder, diagnostic_config = initialize(argv)
+  with maybe_monitor_goodput(config):
+    train()
 
 if __name__ == "__main__":
   app.run(main)

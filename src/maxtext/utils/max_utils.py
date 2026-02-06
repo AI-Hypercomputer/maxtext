@@ -36,6 +36,8 @@ import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
+import pathwaysutils
+from pathwaysutils.elastic import manager
 import psutil
 
 from maxtext.common.gcloud_stub import is_decoupled
@@ -46,6 +48,10 @@ from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRE
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
+
+
+elastic_manager: manager.Manager | None = None
+
 
 # pylint: disable=too-many-positional-arguments
 
@@ -330,9 +336,8 @@ def get_num_slices(raw_keys):
   if int(raw_keys["compile_topology_num_slices"]) > 0:
     return raw_keys["compile_topology_num_slices"]
   else:
-    devices = jax.devices()
     try:
-      return 1 + max(d.slice_index for d in devices)
+      return len(live_slice_indices())
     except (ValueError, AttributeError):
       return 1
 
@@ -690,7 +695,7 @@ def summarize_pytree_data(params, name="Params", raw=False):
 def print_mem_stats(label: str):
   max_logging.log(f"\nMemstats: {label}:")
   try:
-    for d in jax.local_devices():
+    for d in live_devices():
       stats = d.memory_stats()
       used = round(stats["bytes_in_use"] / 2**30, 2)
       limit = round(stats["bytes_limit"] / 2**30, 2)
@@ -1069,3 +1074,19 @@ def transformer_engine_context():
       yield
   except (ImportError, AttributeError):
     yield
+
+
+def live_devices():
+  device_list = jax.devices()
+
+  if pathwaysutils.is_pathways_backend_used() and elastic_manager is not None:
+      return [
+          d for d in device_list
+          if d.slice_index in elastic_manager.active_slice_indices
+      ]
+  else:
+    return device_list
+
+def live_slice_indices() -> set[int]:
+  return {d.slice_index for d in live_devices()}
+

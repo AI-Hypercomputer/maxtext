@@ -28,6 +28,7 @@ from maxtext.input_pipeline.multihost_dataloading import RemoteIterator
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
 from maxtext.utils import exceptions
 from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint import v1 as ocp_v1
@@ -37,6 +38,7 @@ from orbax.checkpoint._src.checkpoint_managers import save_decision_policy as sa
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 # pylint: disable=too-many-positional-arguments
+from pathwaysutils.elastic import manager
 import dataclasses
 import json
 
@@ -719,6 +721,14 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)
     if checkpoint_saved:
       print_save_message(actual_step, config.async_checkpointing)
+
+      if max_utils.elastic_manager is not None and max_utils.elastic_manager.new_slice_event.is_set():
+        max_logging.log("Started a checkpoint and a new slice is available. Waiting for current checkpoint to finish before interrupting.")
+        checkpoint_manager.wait_until_finished()
+        max_logging.log("Checkpoint save completed. Interrupting")
+        raise manager.NewSliceAvailableError()
+  except manager.NewSliceAvailableError:
+    raise
   except Exception as e:
     raise exceptions.StopTraining(f"Checkpointing failed. {str(e)}") from e
 
