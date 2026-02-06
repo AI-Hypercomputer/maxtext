@@ -12,7 +12,8 @@ google-cloud-aiplatform
 google-cloud-mldiagnostics
 google-cloud-monitoring
 grain[parquet]
-huggingface_hub
+huggingface_hub==0.36.0
+hf-xet!=1.2.1
 jax
 jaxlib
 jaxtyping
@@ -40,7 +41,7 @@ tensorflow-text
 tensorflow
 tiktoken
 tokamax
-transformers
+transformers==4.57.6
 qwix
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
 mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
