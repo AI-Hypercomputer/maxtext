@@ -16,10 +16,10 @@
 import unittest
 import numpy as np
 
-from MaxText.multimodal import processor as mm_processor
-from MaxText.multimodal import utils as mm_utils
-from MaxText.multimodal import processor_gemma3
-from MaxText.multimodal import processor_llama4
+from maxtext.multimodal import processor as mm_processor
+from maxtext.multimodal import utils as mm_utils
+from maxtext.multimodal import processor_gemma3
+from maxtext.multimodal import processor_llama4
 
 
 class TestTextImageFusionGemma3(unittest.TestCase):

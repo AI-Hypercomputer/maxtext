@@ -14,7 +14,7 @@
 
 """Multimodal data preprocessor router."""
 
-from MaxText.multimodal import utils as mm_utils
+from maxtext.multimodal import utils as mm_utils
 
 
 def preprocess_mm_data(config):

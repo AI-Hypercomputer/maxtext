@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
-from MaxText.multimodal import utils as mm_utils
+from maxtext.multimodal import utils as mm_utils
 
 # Constants for Gemma3-specific processing
 GEMMA_DEFAULT_IMAGE_SIZE = 896

@@ -24,8 +24,8 @@ import grain.python as grain
 import numpy as np
 import tensorflow as tf
 from MaxText import tokenizer
-from MaxText.multimodal import processor as mm_processor
-from MaxText.multimodal import utils as mm_utils
+from maxtext.multimodal import processor as mm_processor
+from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging
 
 Features = dict[str, tf.Tensor]
@@ -776,7 +776,7 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
     second_per_grids = element.get("second_per_grids")
 
     # Call the standalone get_rope_index function from multimodal_utils
-    from MaxText.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
+    from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     # TODO(jfacevedo/hengtaoguo): Now get_rope_index is Qwen3-Omni specific. We should generalize it for other models
     position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(

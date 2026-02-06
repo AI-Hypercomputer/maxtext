@@ -31,7 +31,7 @@ try:
 except ImportError:
   decord = None
 
-from MaxText.multimodal import utils as mm_utils
+from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging
 
 # Image constants.

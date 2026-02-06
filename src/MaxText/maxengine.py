@@ -42,7 +42,7 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models, quantizations
 from maxtext.inference import inference_utils
 from maxtext.inference.page_manager import PageManager, PageState
-from MaxText.multimodal import processor as mm_processor
+from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import lora_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
