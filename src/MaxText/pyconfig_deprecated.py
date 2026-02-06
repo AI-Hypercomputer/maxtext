@@ -358,6 +358,7 @@ def validate_tokamax_usage(keys):
     raise ValueError(f"Invalid tokamax's megablox kernel usage for hardware {keys['hardware']}. Only TPU is supported.")
 
 
+# All data input validations have been migrated to config/types.py
 def validate_data_input(keys):
   """validate provided parameters for data input"""
   if not keys["hf_access_token"]:

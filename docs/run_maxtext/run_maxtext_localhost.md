@@ -13,7 +13,7 @@ Before you can begin a training run, you need to configure your storage environm
 You'll need a GCS bucket to store all your training artifacts, such as logs, metrics, and model checkpoints.
 
 1. In your Google Cloud project, create a new storage bucket.
-1. Your TPU or GPU VMs require read/write access to this bucket. The simplest way to grant this is by assigning the `Storage Admin` (`roles/storage.admin`) role to the service account associated with your VMs.
+2. Your TPU or GPU VMs require read/write access to this bucket. The simplest way to grant this is by assigning the `Storage Admin` (`roles/storage.admin`) role to the service account associated with your VMs.
 
 ### Setup MaxText
 
@@ -36,14 +36,14 @@ Local development on a single host TPU/GPU VM is a convenient way to run MaxText
 
 1. Create and SSH to the single host VM of your choice. You can use any available single host TPU, such as `v5litepod-8`, `v5p-8`, or `v4-8`. For GPUs, you can use `nvidia-h100-mega-80gb`, `nvidia-h200-141gb`, or `nvidia-b200`. For setting up a TPU VM, use the Cloud TPU documentation available at https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm. For a GPU setup, refer to the guide at https://cloud.google.com/compute/docs/gpus/create-vm-with-gpus.
 
-1. Clone MaxText onto that VM.
+2. Clone MaxText onto that VM.
 
    ```bash
    git clone https://github.com/google/maxtext.git
    cd maxtext
    ```
 
-1. Once you have cloned the repository, you have two primary options for setting up the necessary dependencies on your VM: Installing in a Python Environment, or building a Docker container. For single host workloads, we recommend to install dependencies in a python environment, and for multihost workloads we recommend the containerized approach.
+3. Once you have cloned the repository, you have two primary options for setting up the necessary dependencies on your VM: Installing in a Python Environment, or building a Docker container. For single host workloads, we recommend to install dependencies in a python environment, and for multihost workloads we recommend the containerized approach.
 
 Within the root directory of the cloned repo, create a virtual environment and install dependencies and the pre-commit hook by running:
 
