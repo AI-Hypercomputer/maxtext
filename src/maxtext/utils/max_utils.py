@@ -337,7 +337,7 @@ def get_num_slices(raw_keys):
     return raw_keys["compile_topology_num_slices"]
   else:
     try:
-      return len({d.slice_index for d in live_devices()})
+      return len(live_slice_indices())
     except (ValueError, AttributeError):
       return 1
 
@@ -1086,4 +1086,7 @@ def live_devices():
       ]
   else:
     return device_list
+
+def live_slice_indices() -> set[int]:
+  return {d.slice_index for d in live_devices()}
 
