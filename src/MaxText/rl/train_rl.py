@@ -304,14 +304,75 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
 
   # Load datasets
-  dataset = get_dataset(
-      model_tokenizer,
-      trainer_config,
-      train_data_dir,
-      trainer_config.train_split,
-      data_files=trainer_config.hf_train_files,
-      dataset_name=trainer_config.dataset_name,
-  ).batch(trainer_config.batch_size)[: trainer_config.num_batches]
+  if trainer_config.dataset_name == "huggingface:nvidia/OpenMathInstruct-2":
+    import datasets  # pylint: disable=import-outside-toplevel
+
+    def prepare_openinstructmath2_dataset(
+        split: str = "train_1M",
+        seed: int = 42,
+        test_size: float = 0.05,
+        output_key: str = "expected_answer",
+    ):
+      """Load and split the OpenMathInstruct-2 dataset into train and validation sets using HF's train_test_split."""
+      max_logging.log(
+          "WARNING: For reproducible experiments, preprocess the dataset once and define your own HfDataset subclass that directly uses the preprocessed datasets."
+      )
+
+      # Load the original dataset
+      original_ds = datasets.load_dataset(
+          "parquet",
+          data_files={trainer_config.train_split: trainer_config.hf_train_files},
+          split=split,
+          cache_dir=train_data_dir,
+      )
+
+      # Split into train and validation sets using HF's train_test_split
+      split_ds = original_ds.train_test_split(test_size=test_size, seed=seed)
+
+      return {
+          "train": split_ds["train"],
+          "validation": split_ds["test"],
+      }
+
+    split_name = trainer_config.train_split if trainer_config.train_split != "train" else "train_1M"
+    splits = prepare_openinstructmath2_dataset(split=split_name)
+    template_config = load_template_from_file(trainer_config.chat_template_path)
+
+    dataset = (
+        grain.MapDataset.source(splits["train"])
+        .shuffle(seed=trainer_config.data_shuffle_seed)
+        .map(lambda x: utils_rl.process_data(trainer_config.dataset_name, model_tokenizer, template_config, trainer_config, x))
+        .batch(trainer_config.batch_size)[: trainer_config.num_batches]
+    )
+
+    test_dataset = (
+        grain.MapDataset.source(splits["validation"])
+        .shuffle(seed=trainer_config.data_shuffle_seed)
+        .map(lambda x: utils_rl.process_data(trainer_config.dataset_name, model_tokenizer, template_config, trainer_config, x))
+        .batch(trainer_config.batch_size)[: trainer_config.num_test_batches]
+    )
+  else:
+    dataset = get_dataset(
+        model_tokenizer,
+        trainer_config,
+        train_data_dir,
+        trainer_config.train_split,
+        data_files=trainer_config.hf_train_files,
+        dataset_name=trainer_config.dataset_name,
+    ).batch(trainer_config.batch_size)[: trainer_config.num_batches]
+
+    eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
+    if not eval_dataset_name:
+      eval_dataset_name = trainer_config.dataset_name
+
+    test_dataset = get_dataset(
+        model_tokenizer,
+        trainer_config,
+        test_data_dir,
+        trainer_config.eval_split,
+        data_files=trainer_config.hf_eval_files,
+        dataset_name=eval_dataset_name,
+    ).batch(trainer_config.batch_size)[: trainer_config.num_test_batches]
 
   if trainer_config.train_fraction == 1.0:
     train_dataset = dataset.repeat(trainer_config.num_epoch)
@@ -319,23 +380,16 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     train_dataset = dataset[: int(len(dataset) * trainer_config.train_fraction)]
     train_dataset = train_dataset.repeat(trainer_config.num_epoch)
 
-  eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
-  if not eval_dataset_name:
-    eval_dataset_name = trainer_config.dataset_name
-
-  test_dataset = get_dataset(
-      model_tokenizer,
-      trainer_config,
-      test_data_dir,
-      trainer_config.eval_split,
-      data_files=trainer_config.hf_eval_files,
-      dataset_name=eval_dataset_name,
-  ).batch(trainer_config.batch_size)[: trainer_config.num_test_batches]
-
-  # Let's see how one batch of the dataset looks like!
   if trainer_config.debug.rl:
-    for ele in train_dataset[:1]:
-      pprint(ele)
+    # Let's see how one batch of the dataset looks like!
+    print(f"train with {len(train_dataset)=}")
+    if trainer_config.debug.rl:
+      for ele in train_dataset[:5]:
+        pprint(ele)
+    print(f"test with {len(test_dataset)=}")
+    if trainer_config.debug.rl:
+      for ele in test_dataset[:5]:
+        pprint(ele)
 
   # Load reference model
   max_logging.log("Creating reference model and also meshes for reference and rollout")
@@ -457,6 +511,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
           rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
           rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
+          rollout_vllm_stop_strings=trainer_config.stop_strings,
           **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
       ),
   )
@@ -513,7 +568,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       ],
       algo_config=grpo_config,
   )
-
   # Before we train the model, let's evaluate the model on the test set so we can
   # see the improvement post training.
   #
