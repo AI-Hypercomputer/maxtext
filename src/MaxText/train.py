@@ -197,8 +197,16 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   # get MoE load balance loss
   moe_lb_loss = 0.0
   if config.num_experts > 1:
-    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
-    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+    # Note: the key is affected by the model implementation
+    possible_keys = [
+        ("intermediates", "decoder", "layers", "moe_lb_loss"),
+        ("intermediates", "decoder", "moe_layers", "moe_lb_loss"),
+    ]
+    for nested_key in possible_keys:
+      total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+      if total_moe_lb_loss != 0.0:
+        break
+      max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
     moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
     loss += moe_lb_loss
 

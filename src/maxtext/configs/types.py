@@ -1081,7 +1081,7 @@ class TrainingLoop(BaseModel):
 class ManifoldConstrainedHyperConnections(BaseModel):
   """Configuration for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
-  mhc_expansion_rate: int = Field(0, description="The number of parallel streams in Hyper Connection.")
+  mhc_expansion_rate: PositiveInt = Field(1, description="The number of parallel streams in Hyper Connection.")
   sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
 
 

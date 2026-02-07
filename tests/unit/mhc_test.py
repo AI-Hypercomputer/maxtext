@@ -104,6 +104,8 @@ class TestMHC(unittest.TestCase):
         num_experts=4,
         num_experts_per_tok=2,
         attention="dot_product",
+        routed_bias_update_rate=0.01,
+        load_balance_loss_weight=0.02,
     )
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
@@ -138,8 +140,15 @@ class TestMHC(unittest.TestCase):
       )
 
       b, s, k, d = self.x.shape
-      output = module(layer, x=self.x, mhc_type=HyperConnectionType.MLP_MOE)
-      self.assertEqual(output.shape, (b, s, k, d))
+      res_output, post_output, metadata = module(
+          layer, residual_x=self.x, layer_x=self.x, mhc_type=HyperConnectionType.MLP_MOE
+      )
+      # metadata includes load_balance_loss & moe_bias_updates
+      self.assertEqual(len(metadata), 2)
+      for key, value in metadata.items():
+        self.assertIsNotNone(value, f"Key '{key}' has a value of None")
+      self.assertEqual(res_output.shape, (b, s, k, d))
+      self.assertEqual(post_output.shape, (b, s, k, d))
 
   def test_dense_layer_output_shape(self):
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -158,8 +167,12 @@ class TestMHC(unittest.TestCase):
       )
 
       b, s, k, d = self.x.shape
-      output = module(layer, x=self.x, mhc_type=HyperConnectionType.MLP_DENSE)
-      self.assertEqual(output.shape, (b, s, k, d))
+      res_output, post_output, metadata = module(
+          layer, residual_x=self.x, layer_x=self.x, mhc_type=HyperConnectionType.MLP_DENSE
+      )
+      self.assertDictEqual(metadata, {})
+      self.assertEqual(res_output.shape, (b, s, k, d))
+      self.assertEqual(post_output.shape, (b, s, k, d))
 
   def test_attention_layer_output_shape(self):
     inputs_shape = (self.config.per_device_batch_size, self.config.max_target_length, self.config.emb_dim)
@@ -196,8 +209,12 @@ class TestMHC(unittest.TestCase):
       )
 
       b, s, k, d = self.x.shape
-      output = module(layer, x=self.x, mhc_type=HyperConnectionType.ATTENTION)
-      self.assertEqual(output.shape, (b, s, k, d))
+      res_output, post_output, metadata = module(
+          layer, residual_x=self.x, layer_x=self.x, mhc_type=HyperConnectionType.ATTENTION
+      )
+      self.assertDictEqual(metadata, {})
+      self.assertEqual(res_output.shape, (b, s, k, d))
+      self.assertEqual(post_output.shape, (b, s, k, d))
 
 
 if __name__ == "__main__":

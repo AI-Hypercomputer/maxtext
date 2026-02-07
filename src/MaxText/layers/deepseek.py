@@ -23,7 +23,7 @@ from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from MaxText.common_types import Config
-from MaxText.common_types import MODEL_MODE_PREFILL
+from MaxText.common_types import MODEL_MODE_PREFILL, HyperConnectionType
 from MaxText.layers import attention_mla
 from MaxText.layers import deepseek_batchsplit
 from MaxText.layers import initializers
@@ -31,6 +31,7 @@ from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
+from MaxText.layers import mhc
 from MaxText.layers.linears import Dropout
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.sharding import create_sharding
@@ -41,6 +42,10 @@ from maxtext.inference import page_manager
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
 # -----------------------------------------
+
+
+def is_mhc_enabled(expansion_rate):
+  return expansion_rate > 1
 
 
 class DeepSeekGenericLayer(nnx.Module):
@@ -122,6 +127,8 @@ class DeepSeekGenericLayer(nnx.Module):
     )
 
     self.dropout = Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      self.mhc = mhc.ManifoldConstrainedHyperConnections(self.config, self.config.emb_dim, self.mesh, self.rngs)
 
   def mlp_op(self, x, deterministic, *args, **kwargs):
     """Executes the MLP operation. To be implemented by subclasses."""
@@ -172,31 +179,21 @@ class DeepSeekGenericLayer(nnx.Module):
 
   @property
   def logical_axis_names(self):
-    if self.model_mode == MODEL_MODE_PREFILL:
-      return (
-          "activation_batch",
-          "prefill_activation_norm_length",
-          "activation_embed",
-      )
-    return (
-        "activation_batch",
-        "activation_norm_length",
-        "activation_embed",
-    )
+    """Generate logical names for activations generally."""
+    length_name = "prefill_activation_norm_length" if self.model_mode == MODEL_MODE_PREFILL else "activation_norm_length"
+    axis_names = ["activation_batch", length_name, "activation_embed"]
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      axis_names.insert(2, "mhc")
+    return axis_names
 
   @property
   def mlp_logical_axis_names(self):
-    if self.model_mode == MODEL_MODE_PREFILL:
-      return (
-          "activation_batch",
-          "prefill_activation_norm_length",
-          "activation_mlp",
-      )
-    return (
-        "activation_batch",
-        "activation_norm_length",
-        "activation_mlp",
-    )
+    """Generate logical names for activations in MLP."""
+    length_name = "prefill_activation_norm_length" if self.model_mode == MODEL_MODE_PREFILL else "activation_norm_length"
+    axis_names = ["activation_batch", length_name, "activation_mlp"]
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      axis_names.insert(2, "mhc")
+    return axis_names
 
   def post_process(self, layer_output, load_balance_loss, moe_bias_updates, kv_cache=None):
     """postprocessing."""
@@ -233,16 +230,33 @@ class DeepSeekGenericLayer(nnx.Module):
     """self-attention with normalization"""
     lnx = self.pre_attention_norm_op(inputs)
 
-    attention_lnx = self.attention_op(
-        lnx,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        previous_chunk,
-        page_state,
-        slot,
-    )
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      inputs, attention_lnx, _ = self.mhc(
+          self.self_attention,
+          residual_x=inputs,
+          layer_x=lnx,
+          mhc_type=HyperConnectionType.ATTENTION,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=self.model_mode,
+          out_sharding=self.out_sharding,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+      )
+    else:
+      attention_lnx = self.attention_op(
+          lnx,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          previous_chunk,
+          page_state,
+          slot,
+      )
+
     intermediate_inputs = inputs + attention_lnx
+
     # Normalization
     hidden_states = self.post_attention_norm_op(intermediate_inputs)
     return hidden_states, intermediate_inputs
@@ -308,7 +322,16 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         slot,
     )
 
-    mlp_lnx = self.mlp_op(hidden_states, deterministic)
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      intermediate_inputs, mlp_lnx, _ = self.mhc(
+          self.mlp,
+          residual_x=intermediate_inputs,
+          layer_x=hidden_states,
+          mhc_type=HyperConnectionType.MLP_DENSE,
+          deterministic=deterministic,
+      )
+    else:
+      mlp_lnx = self.mlp_op(hidden_states, deterministic)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
@@ -394,7 +417,17 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         slot,
     )
 
-    mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(hidden_states, deterministic)
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      intermediate_inputs, mlp_lnx, metadata = self.mhc(
+          self.DeepSeekMoeBlock_0,
+          residual_x=intermediate_inputs,
+          layer_x=hidden_states,
+          mhc_type=HyperConnectionType.MLP_MOE,
+      )
+      load_balance_loss = metadata["load_balance_loss"]
+      moe_bias_updates = metadata["moe_bias_updates"]
+    else:
+      mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(hidden_states, deterministic)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)

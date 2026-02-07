@@ -731,6 +731,11 @@ class Decoder(nn.Module):
         audio_masks,
     )
 
+    if cfg.mhc_expansion_rate > 1:
+      # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
+      y = y[:, :, None, :]
+      y = jnp.repeat(y, cfg.mhc_expansion_rate, axis=2).astype(y.dtype)
+
     policy = self.get_remat_policy()
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
     # scan does not support kwargs in layer call, passing broadcast_args as positional arg
@@ -925,7 +930,11 @@ class Decoder(nn.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    hidden_state = y
+    if cfg.mhc_expansion_rate > 1:
+      # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
+      hidden_state = jnp.sum(y, axis=2, dtype=y.dtype)
+    else:
+      hidden_state = y
 
     # When initializing with vLLM RPA attention, we need to run the output head to
     # initialize any parameters associated with it.
