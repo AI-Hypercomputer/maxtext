@@ -61,6 +61,7 @@ MODEL_NAMES = [
     # "gemma3-12b",
     # "gemma3-27b",
     # "qwen3-0.6b",
+    # "qwen3-1.7b",
     # "qwen3-4b",
     # "qwen3-8b",
     # "gpt3-175b",
