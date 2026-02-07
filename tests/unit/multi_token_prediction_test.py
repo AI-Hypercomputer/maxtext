@@ -14,11 +14,11 @@
 """ multi_token_prediction_test """
 
 import unittest
-
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from flax import nnx
+import numpy as np
 
 from MaxText.common_types import Config
 from MaxText import pyconfig
@@ -26,36 +26,40 @@ from MaxText.layers.decoders import DecoderLayer
 from MaxText.layers import multi_token_prediction  # The class under test
 from MaxText.layers import embeddings
 from MaxText.common_types import MODEL_MODE_TRAIN
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 
 from tests.utils.test_helpers import get_test_config_path
 
-
 TEST_LAYER_NUM = 1
-
 
 class MultiTokenPredictionLayerTest(unittest.TestCase):
   """Unit tests for the standalone MultiTokenPredictionLayer."""
 
   def setUp(self):
     super().setUp()
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    num_devices = max(1, jax.device_count())
+    # Basic config for most tests
+    extra_args = {
+        "ici_data_parallelism": 1,
+        "ici_fsdp_parallelism": 1,
+        "base_emb_dim": 16,
+        "per_device_batch_size": 2,
+        "attention": "dot_product",
+    }
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="multi_token_prediction_layer_test",
         skip_jax_distributed_system=True,
-        per_device_batch_size=8,
         **extra_args,
     )
-    self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
+    self.rng = jax.random.PRNGKey(42)
     self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
-    # Instantiate the Layer
+    # mesh for the basic output test
+    devices_array = np.array(jax.devices()[:num_devices]).reshape((num_devices,))
+    self.mesh = Mesh(devices_array, ('data',))
+
     self.mtp_layer = multi_token_prediction.MultiTokenPredictionLayer(
         config=self.cfg,
         mesh=self.mesh,
@@ -64,12 +68,10 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
         rngs=self.rngs,
     )
 
-    # Dimensions directly from the config object
-    self.batch_size = int(self.cfg.per_device_batch_size)
+    self.batch_size = int(self.cfg.per_device_batch_size * num_devices)
     self.seq_len = self.cfg.max_target_length
     self.embed_dim = self.cfg.base_emb_dim
 
-    # Prepare Dummy Input Data
     prev_hidden_state_shape = (self.batch_size, self.seq_len, self.embed_dim)
     target_embedding_shape = (self.batch_size, self.seq_len, self.embed_dim)
     data_rng1, data_rng2, _ = jax.random.split(self.rng, 3)
@@ -77,13 +79,11 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     self.prev_hidden_state = jax.random.normal(data_rng1, prev_hidden_state_shape, dtype=self.cfg.dtype)
     self.target_token_embedding = jax.random.normal(data_rng2, target_embedding_shape, dtype=self.cfg.dtype)
     self.position_ids = jnp.arange(self.seq_len, dtype=jnp.int32).reshape(1, -1).repeat(self.batch_size, axis=0)
-    # Simulate a simple case with no padding.
     self.decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
     max_logging.log("Setup complete.")
 
   def test_multi_token_prediction_layer_output(self):
     """Tests the basic forward pass and output shape of MultiTokenPredictionLayer."""
-
     output_hidden_state = self.mtp_layer(
         self.prev_hidden_state,
         self.target_token_embedding,
@@ -92,30 +92,93 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
-    # Assertions using unittest methods
     expected_output_shape = (self.batch_size, self.seq_len, self.embed_dim)
+    self.assertEqual(output_hidden_state.shape, expected_output_shape)
+    self.assertEqual(output_hidden_state.dtype, self.cfg.dtype)
+    self.assertFalse(jnp.isnan(output_hidden_state).any())
+    self.assertFalse(jnp.isinf(output_hidden_state).any())
 
-    # Check shape
-    self.assertEqual(
-        output_hidden_state.shape,
-        expected_output_shape,
-        f"Expected output shape {expected_output_shape}, but got {output_hidden_state.shape}",
+  def _run_sharding_test(self, expect_fail: bool, config_overrides: dict):
+    """Helper to run instantiation test with specific sharding configs."""
+
+    ici_data_parallelism = config_overrides.get("ici_data_parallelism", 1)
+    ici_fsdp_parallelism = config_overrides.get("ici_fsdp_parallelism", 1)
+
+    if ici_fsdp_parallelism == -1:
+        ici_fsdp_parallelism = max(1, jax.device_count())
+
+    num_required_devices = ici_data_parallelism * ici_fsdp_parallelism
+    available_devices = jax.devices()
+
+    if len(available_devices) < num_required_devices:
+        self.skipTest(
+            f"Test requires {num_required_devices} devices, but only {len(available_devices)} are available."
+        )
+        return # Should not be reached due to skipTest
+
+    mesh_shape = (ici_data_parallelism, ici_fsdp_parallelism)
+    device_mesh = np.array(available_devices[:num_required_devices]).reshape(mesh_shape)
+    mesh_axes = ('data', 'fsdp')
+    mesh = Mesh(device_mesh, mesh_axes)
+
+    extra_args = {
+        "base_emb_dim": 16,
+        "attention": "dot_product",
+        "mesh_axes": ['data', 'fsdp'],
+        "per_device_batch_size": 2,
+    }
+    extra_args.update(config_overrides)
+    extra_args["ici_fsdp_parallelism"] = ici_fsdp_parallelism
+    extra_args["ici_data_parallelism"] = ici_data_parallelism
+
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="mtp_layer_sharding_test",
+        skip_jax_distributed_system=True,
+        **extra_args,
     )
-    # TODO(@parambole) to check the fixed inputs in the unit test with expected values
-    # Check dtype
-    self.assertEqual(
-        output_hidden_state.dtype,
-        self.cfg.dtype,
-        f"Expected output dtype {self.cfg.dtype}, but got {output_hidden_state.dtype}",
+    rngs = nnx.Rngs(params=jax.random.PRNGKey(44))
+
+    def instantiate_layer():
+      multi_token_prediction.MultiTokenPredictionLayer(
+          config=cfg,
+          mesh=mesh,
+          layer_number=TEST_LAYER_NUM,
+          transformer_layer_module=DecoderLayer,
+          rngs=rngs,
+      )
+
+    if expect_fail:
+      with self.assertRaises(AssertionError) as context:
+        instantiate_layer()
+      self.assertIn("Batch dimension should be shardable", str(context.exception))
+      self.assertIn(f"devices_in_data_fsdp={cfg.ici_data_parallelism * cfg.ici_fsdp_parallelism}", str(context.exception))
+    else:
+      try:
+        instantiate_layer()
+      except Exception as e:
+        self.fail(f"Instantiation failed unexpectedly: {e} with config: {extra_args}")
+
+  def test_instantiation_succeeds_with_fix_fsdp2(self):
+    """Tests success with the dynamic dummy_batch_size fix and FSDP=2."""
+    self._run_sharding_test(
+        expect_fail=False,
+        config_overrides={"ici_data_parallelism": 1, "ici_fsdp_parallelism": 2}
     )
 
-    # Check for NaNs/Infs
-    self.assertFalse(jnp.isnan(output_hidden_state).any(), "Output contains NaNs")
-    self.assertFalse(jnp.isinf(output_hidden_state).any(), "Output contains Infs")
+  def test_instantiation_succeeds_default_config(self):
+    """Tests success with default -1 settings, relying on test-time resolution."""
+    self._run_sharding_test(
+        expect_fail=False,
+        config_overrides={"ici_data_parallelism": 1, "ici_fsdp_parallelism": -1}
+    )
 
-    max_logging.log("\nMultiTokenPredictionLayer unittest-style test passed!")
-    max_logging.log(f"  Config Batch: {self.batch_size}, SeqLen: {self.seq_len}, EmbedDim: {self.embed_dim}")
-    max_logging.log(f"  Output shape: {output_hidden_state.shape}")
+  def test_instantiation_succeeds_data1_fsdp1(self):
+    """Tests success with DP=1, FSDP=1."""
+    self._run_sharding_test(
+        expect_fail=False,
+        config_overrides={"ici_data_parallelism": 1, "ici_fsdp_parallelism": 1}
+    )
 
 
 # A lightweight wrapper model for robustly testing the MTPBlock.
@@ -198,24 +261,29 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    num_devices = max(1, jax.device_count())
+    fsdp_parallelism = num_devices
+    extra_args = {
+        "ici_data_parallelism": 1,
+        "ici_fsdp_parallelism": fsdp_parallelism,
+        "mtp_num_layers": 2,
+        "base_emb_dim": 16,
+        "per_device_batch_size": 2,
+        "attention": "dot_product",
+    }
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="mtp_block_test",
         skip_jax_distributed_system=True,
-        mtp_num_layers=2,
-        base_emb_dim=16,
         **extra_args,
     )
-    self.nnx_rngs = nnx.Rngs(params=0)
     self.rng = jax.random.PRNGKey(43)
     self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
     data_rng, self.init_rng = jax.random.split(self.rng)
 
-    self.batch_size, self.seq_len, self.embed_dim = 2, 8, self.cfg.base_emb_dim
+    self.batch_size, self.seq_len, self.embed_dim = int(self.cfg.per_device_batch_size * num_devices), 8, self.cfg.base_emb_dim
     key1, key2, key3 = jax.random.split(data_rng, 3)
     self.main_hidden_state = jax.random.normal(key1, (self.batch_size, self.seq_len, self.embed_dim))
     self.input_ids = jax.random.randint(key2, (self.batch_size, self.seq_len), 0, self.cfg.vocab_size)
@@ -289,9 +357,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
     )
     state = nnx.state(self.test_model)
 
-    # This section of the test now *becomes* the logic from train.py
-    # -------------------------------------------------------------
-    final_loss_for_gradient = 100.0  # A dummy main loss
+    final_loss_for_gradient = 100.0
     mtp_loss_for_logging = 0.0
 
     # Use the standard utility to get the data.
@@ -336,10 +402,6 @@ class TestRollAndMask(unittest.TestCase):
     # Shape: [4, 8]
     input_tensor = jnp.arange(batch_size * seq_len, dtype=jnp.int32).reshape((batch_size, seq_len))
 
-    # print(input_tensor)
-
-    # --- Test Case 1: Default left shift by 1 ---
-    # This is the most common operation inside the MTP loop.
     rolled_by_1 = multi_token_prediction.roll_and_mask(input_tensor, shift=-1)
 
     # Manually construct the expected output using jnp
@@ -366,8 +428,6 @@ class TestRollAndMask(unittest.TestCase):
     # --- Test Case 2: Larger left shift by 3 ---
     # This simulates a later step in a hypothetical MTP loop.
     rolled_by_3 = multi_token_prediction.roll_and_mask(input_tensor, shift=-3)
-
-    # Manually construct the expected output using jnp
     expected_3 = jnp.array(
         [
             [3, 4, 5, 6, 7, 0, 0, 0],  # First row rolled left by 3, last 3 masked
