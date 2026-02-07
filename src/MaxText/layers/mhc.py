@@ -162,11 +162,11 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     )
     self.pre_beta = nnx.Param(
         default_bias_init(self.rngs.params(), (self.k,), self.weight_dtype),
-        sharding=(None, None),
+        sharding=(None,),
     )
     self.post_beta = nnx.Param(
         default_bias_init(self.rngs.params(), (self.k,), self.weight_dtype),
-        sharding=(None, None),
+        sharding=(None,),
     )
 
   def res_mapping(self, x: Array):
@@ -190,7 +190,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
   def __call__(
       self,
       branch_fn: Callable,
-      x: Array,
+      residual_x: Array,
+      layer_x: Array,
       mhc_type: HyperConnectionType,
       **kwargs,
   ) -> Array:
@@ -198,7 +199,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
 
     Args:
         branch_fn: The function to be wrapped by the hyper-connection.
-        x: Input tensor of shape `(batch..., dim)`.
+        residual_x: Input tensor of shape `(batch, seq, expansion_rate, dim)`, generally before normalization.
+        layer_x: Input tensor of shape `(batch, seq, expansion_rate, dim)`, generally after pre-normalization.
         mhc_type: The variant of the connection to apply.
         **kwargs: Additional context passed to the branch function.
 
@@ -206,30 +208,34 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         The processed tensor, maintaining the shape of `x`.
     """
     # x shape: [batch, seq, expansion_rate, emb]
-    b, s, k, d = x.shape
+    b, s, k, d = residual_x.shape
 
     # 1. Flatten the tensor, and RMS normalization
-    norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
+    norm_residual_x = self.mhc_norm(jnp.reshape(residual_x, (b, s, k * d)))
+    norm_layer_x = self.mhc_norm(jnp.reshape(layer_x, (b, s, k * d)))
 
     # 2. Pre mapping
-    pre_mapping = self.mapping(norm_x, self.pre_alpha_scale, self.pre_alpha[...], self.pre_beta[...], 1.0)
-    layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.config.matmul_precision)
+    pre_mapping = self.mapping(norm_layer_x, self.pre_alpha_scale, self.pre_alpha[...], self.pre_beta[...], 1.0)
+    layer_input = jnp.einsum("bskd,bsk -> bsd", layer_x, pre_mapping, precision=self.config.matmul_precision)
 
     # 3. Attention or MLP
+    metadata = {}
     if mhc_type == HyperConnectionType.ATTENTION:
       layer_out, _ = branch_fn(inputs_q=layer_input, inputs_kv=layer_input, **kwargs)
     elif mhc_type == HyperConnectionType.MLP_DENSE:
       layer_out = branch_fn(inputs=layer_input, **kwargs)
     elif mhc_type == HyperConnectionType.MLP_MOE:
-      layer_out, _, _ = branch_fn(inputs=layer_input, **kwargs)
+      layer_out, load_balance_loss, moe_bias_updates = branch_fn(inputs=layer_input, **kwargs)
+      metadata["load_balance_loss"] = load_balance_loss
+      metadata["moe_bias_updates"] = moe_bias_updates
     else:
       raise ValueError(f"Unsupported type: {mhc_type}")
 
     # 4. Post mapping
-    post_mapping = self.mapping(norm_x, self.post_alpha_scale, self.post_alpha[...], self.post_beta[...], 2.0)
+    post_mapping = self.mapping(norm_layer_x, self.post_alpha_scale, self.post_alpha[...], self.post_beta[...], 2.0)
     post_out = jnp.einsum("bsd,bsk -> bskd", layer_out, post_mapping, precision=self.config.matmul_precision)
 
     # 5. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
-    res_mapping = self.res_mapping(norm_x)
-    res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.config.matmul_precision)
-    return res_out + post_out
+    res_mapping = self.res_mapping(norm_residual_x)
+    res_out = jnp.einsum("bskd,bskm -> bsmd", residual_x, res_mapping, precision=self.config.matmul_precision)
+    return res_out + post_out, metadata
