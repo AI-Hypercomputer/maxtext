@@ -1038,6 +1038,7 @@ class MLA(Attention):
       # Pass the index_mask to the Attention Op
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, index_mask=index_mask)
 
+    out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
     if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)
     else:

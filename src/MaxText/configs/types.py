@@ -876,6 +876,11 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the mla's key and value projection.",
   )
+  attention_out: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the attention output.",
+  )
+
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
 
@@ -2064,6 +2069,7 @@ class MaxTextConfig(
           "mla_kv",
           "mla_q",
           "qkv_proj",
+          "attention_out",
           "out_proj",
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
