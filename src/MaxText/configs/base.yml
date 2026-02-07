@@ -211,6 +211,9 @@ wo_tile_fwd_buffer_count: 2
 wo_tile_dlhs_buffer_count: 2
 wo_tile_drhs_buffer_count: 2
 
+wi_combine_scopes: False
+wo_combine_scopes: False
+
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
 # how the expert axis is used to shard attention weights and activations
