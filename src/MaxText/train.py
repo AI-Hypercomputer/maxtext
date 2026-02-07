@@ -40,7 +40,7 @@ from flax.linen import partitioning as nn_partitioning
 
 from MaxText import pyconfig
 from MaxText import sharding
-from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
+from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.common_types import ShardMode
 from MaxText.globals import EPS
 # Placeholder: internal

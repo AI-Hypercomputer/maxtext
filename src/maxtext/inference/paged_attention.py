@@ -32,7 +32,7 @@ from maxtext.inference import page_manager
 from maxtext.inference import paged_attention_kernel_v2
 from MaxText.sharding import logical_to_mesh_axes
 from MaxText.common_types import Array, DType, AxisNames, BATCH, LENGTH, HEAD, D_KV, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText.layers.initializers import variable_to_logically_partitioned
+from maxtext.layers.initializers import variable_to_logically_partitioned
 
 _use_kernel_v2 = False
 

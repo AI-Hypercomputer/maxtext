@@ -28,7 +28,7 @@ from maxtext.common.gcloud_stub import is_decoupled
 from MaxText import pyconfig
 from MaxText.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, EP_AS_CONTEXT, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers.attention_mla import MLA
+from maxtext.layers.attention_mla import MLA
 from MaxText.sharding import maybe_shard_with_name
 from tests.utils.test_helpers import get_test_config_path
 

@@ -26,10 +26,10 @@ import jax
 from absl import app
 from jax.tree_util import tree_flatten_with_path
 from jax.sharding import NamedSharding, PartitionSpec
+from maxtext.models import models
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_REPO_ROOT
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
-from MaxText.layers import models
 
 
 Transformer = models.Transformer

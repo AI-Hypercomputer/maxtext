@@ -31,7 +31,7 @@ from maxtext.common.gcloud_stub import is_decoupled
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.kernels.megablox import gmm
-from MaxText.layers import nnx_wrappers, quantizations
+from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path

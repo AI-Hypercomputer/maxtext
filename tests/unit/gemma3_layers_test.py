@@ -33,7 +33,7 @@ import numpy as np
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
-from MaxText.layers import embeddings
+from maxtext.layers import embeddings
 
 
 def to_jax(pt_tensor: torch.Tensor) -> jax.Array:

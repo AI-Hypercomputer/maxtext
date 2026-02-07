@@ -23,9 +23,9 @@ import flax.linen as nn
 import jax
 from jax.sharding import Mesh, AxisType
 from MaxText import pyconfig
-from MaxText.layers import quantizations
 from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
-from MaxText.layers import models
+from maxtext.models import models
+from maxtext.layers import quantizations
 from maxtext.utils import maxtext_utils
 from maxtext.utils import max_utils
 from orbax import checkpoint as ocp
