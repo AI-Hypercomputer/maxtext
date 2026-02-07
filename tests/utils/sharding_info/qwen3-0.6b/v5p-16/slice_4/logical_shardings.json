@@ -1,0 +1,464 @@
+{
+  ".step": {
+    "partition_spec": [],
+    "shape": []
+  },
+  ".params/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "partition_spec": [
+      "norm"
+    ],
+    "shape": [
+      1024
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['mlp']/['wi_0']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "mlp"
+    ],
+    "shape": [
+      1024,
+      28,
+      3072
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['mlp']/['wi_1']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "mlp"
+    ],
+    "shape": [
+      1024,
+      28,
+      3072
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['mlp']/['wo']/['kernel']": {
+    "partition_spec": [
+      "mlp",
+      "layers",
+      "embed"
+    ],
+    "shape": [
+      3072,
+      28,
+      1024
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      1024,
+      28
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      1024,
+      28
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['self_attention']/['key']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      1024,
+      28,
+      8,
+      128
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['self_attention']/['key_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      128,
+      28
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['self_attention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      16,
+      28,
+      128,
+      1024
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['self_attention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      1024,
+      28,
+      16,
+      128
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['self_attention']/['query_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      128,
+      28
+    ]
+  },
+  ".params/['params']/['decoder']/['layers']/['self_attention']/['value']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      1024,
+      28,
+      8,
+      128
+    ]
+  },
+  ".params/['params']/['token_embedder']/['embedding']": {
+    "partition_spec": [
+      "vocab",
+      "embed"
+    ],
+    "shape": [
+      151936,
+      1024
+    ]
+  },
+  ".opt_state/[0]/.count": {
+    "partition_spec": [],
+    "shape": []
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "partition_spec": [
+      "norm"
+    ],
+    "shape": [
+      1024
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['mlp']/['wi_0']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "mlp"
+    ],
+    "shape": [
+      1024,
+      28,
+      3072
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['mlp']/['wi_1']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "mlp"
+    ],
+    "shape": [
+      1024,
+      28,
+      3072
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['mlp']/['wo']/['kernel']": {
+    "partition_spec": [
+      "mlp",
+      "layers",
+      "embed"
+    ],
+    "shape": [
+      3072,
+      28,
+      1024
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      1024,
+      28
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      1024,
+      28
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['key']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      1024,
+      28,
+      8,
+      128
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['key_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      128,
+      28
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      16,
+      28,
+      128,
+      1024
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      1024,
+      28,
+      16,
+      128
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['query_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      128,
+      28
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['value']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      1024,
+      28,
+      8,
+      128
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['token_embedder']/['embedding']": {
+    "partition_spec": [
+      "vocab",
+      "embed"
+    ],
+    "shape": [
+      151936,
+      1024
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "partition_spec": [
+      "norm"
+    ],
+    "shape": [
+      1024
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['mlp']/['wi_0']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "mlp"
+    ],
+    "shape": [
+      1024,
+      28,
+      3072
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['mlp']/['wi_1']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "mlp"
+    ],
+    "shape": [
+      1024,
+      28,
+      3072
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['mlp']/['wo']/['kernel']": {
+    "partition_spec": [
+      "mlp",
+      "layers",
+      "embed"
+    ],
+    "shape": [
+      3072,
+      28,
+      1024
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      1024,
+      28
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      1024,
+      28
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['key']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      1024,
+      28,
+      8,
+      128
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['key_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      128,
+      28
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      16,
+      28,
+      128,
+      1024
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      1024,
+      28,
+      16,
+      128
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['query_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "layers"
+    ],
+    "shape": [
+      128,
+      28
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['value']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      1024,
+      28,
+      8,
+      128
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['token_embedder']/['embedding']": {
+    "partition_spec": [
+      "vocab",
+      "embed"
+    ],
+    "shape": [
+      151936,
+      1024
+    ]
+  },
+  ".opt_state/[2]/.count": {
+    "partition_spec": [],
+    "shape": []
+  }
+}
