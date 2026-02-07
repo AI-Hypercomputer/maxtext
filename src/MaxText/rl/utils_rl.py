@@ -18,6 +18,21 @@ import re
 import optax
 from maxtext.utils import max_logging
 
+
+from math_verify.errors import TimeoutException
+from math_verify.metric import math_metric
+from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
+
+# initialize math_verify_func once
+math_verify_func = math_metric(
+    gold_extraction_target=(LatexExtractionConfig(),),
+    pred_extraction_target=(
+        ExprExtractionConfig(),
+        LatexExtractionConfig(),
+    ),
+)
+
+
 EPSILON = 1e-6
 # Constants for normalization
 SUBSTITUTIONS = [
@@ -262,14 +277,49 @@ def get_match_numbers_regex(tmvp_config):
   return match_numbers
 
 
+def fix_latex_escaping(text: str) -> str:
+    """Fix common LaTeX commands that lost their backslashes due to Python string escaping.
+    
+    This handles cases where someone writes "\frac" in a regular string and it becomes "frac".
+    Also handles cases where escape sequences like \f, \n, \t were interpreted by Python.
+    """
+    # First, try to recover from Python escape sequences
+    # \f becomes form feed (\x0c), replace it back
+    if '\x0c' in text:
+        text = text.replace('\x0crac', r'\frac')
+    
+    # Common LaTeX commands that might have lost their backslashes
+    latex_commands = [
+        'frac', 'sqrt', 'pi', 'theta', 'alpha', 'beta', 'gamma', 'delta',
+        'sum', 'int', 'infty', 'cdot', 'times', 'div', 'pm', 'mp',
+        'leq', 'geq', 'neq', 'approx', 'equiv', 'sin', 'cos', 'tan',
+        'log', 'ln', 'exp', 'lim', 'to', 'rightarrow', 'leftarrow',
+        'Rightarrow', 'Leftarrow', 'overline', 'underline', 'hat', 'bar',
+        'vec', 'dot', 'ddot', 'mathbb', 'mathbf', 'mathrm', 'text',
+        'textbf', 'textit', 'boxed', 'left', 'right', 'choose', 'binom'
+    ]
+    
+    # Add backslashes to commands that appear to be missing them
+    for cmd in latex_commands:
+        # Match the command if it appears as a word boundary (not already escaped)
+        # and not already preceded by a backslash
+        text = re.sub(rf'(?<!\\)\b{cmd}\b', rf'\\{cmd}', text)
+    
+    return text
+
+
 def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
   """
-  Reward the model if the answer is correct.
+  Reward the model if the answer is correct using math_verify for robust comparison.
+  Handles both numeric values and mathematical expressions with LaTeX.
   """
   question = kargs["question"]
 
-  match_numbers = get_match_numbers_regex(tmvp_config)
-  extracted_responses = [guess.group(1) if (guess := match_numbers.search(c)) is not None else None for c in completions]
+  # Extract full answer content from solution tags (not just first number)
+  match_format = get_match_format_regex(tmvp_config)
+  extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
+
+  boxed = lambda x: "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
 
   scores = []
   if tmvp_config.debug.rl:
@@ -279,18 +329,39 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
     max_logging.log(f"Response: {completions[0]}")
     max_logging.log(f"Extracted: {extracted_responses[0]}")
     max_logging.log("END ==============================")
+  
   for guess, true_answer in zip(extracted_responses, answer):
     if guess is None:
       scores.append(0)
       continue
-    # Convert to numbers
+    
+    # Try math_verify first for robust comparison of both numbers and expressions
     try:
-      true_answer = float(normalize_final_answer(true_answer).strip())
-      guess = float(normalize_final_answer(guess).strip())
-      scores.append(1.5 if guess == true_answer else 0.0)
-    except:
-      scores.append(0)
-      continue
+      # Fix LaTeX escaping issues for both ground truth and extracted answer
+      true_answer_fixed = fix_latex_escaping(true_answer)
+      guess_fixed = fix_latex_escaping(guess)
+      
+      # Normalize for certain datasets
+      if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
+        true_answer_fixed = normalize_final_answer(true_answer_fixed)
+        guess_fixed = normalize_final_answer(guess_fixed)
+      
+      # Use math_verify to compare answers (handles both numeric and expression comparison)
+      score, _ = math_verify_func(
+          [boxed(true_answer_fixed)],
+          [boxed(guess_fixed)]
+      )
+      # Return scaled score: 1.5 for exact/correct, 0 otherwise
+      scores.append(1.5 if score > 0.1 else 0.0)
+    except (TimeoutException, Exception):
+      # Fallback to simple numeric comparison if math_verify fails
+      try:
+        guess_val = float(normalize_final_answer(guess).strip())
+        true_val = float(normalize_final_answer(true_answer).strip())
+        scores.append(1.5 if guess_val == true_val else 0.0)
+      except:
+        scores.append(0)
+  
   return scores
 
 
