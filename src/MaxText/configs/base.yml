@@ -483,6 +483,7 @@ logical_axis_rules: [
                       ['paged_kv_head_dim_size', []],
                       ['dense_layers', []],
                       ['moe_layers', []],
+                      ['engram_dim', ['tensor']],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
