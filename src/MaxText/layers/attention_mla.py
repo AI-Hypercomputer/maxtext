@@ -1025,8 +1025,6 @@ class MLA(Attention):
           inputs_positions=inputs_positions,
           attention_mask=attention_mask,
       )
-      if index_mask is not None:
-        index_mask = index_mask[:, None, None, :, :]  # [b, 1, 1, q_len, kv_len]
 
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
