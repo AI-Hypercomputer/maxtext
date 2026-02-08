@@ -28,7 +28,8 @@ from absl import app
 
 import numpy as np
 
-import pathwaysutils  # pylint: disable=unused-import
+import pathwaysutils
+from pathwaysutils.elastic import manager
 
 import tensorflow as tf
 
@@ -518,7 +519,6 @@ def train_loop(config, recorder, state=None):
 
 def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]:
   """Initialization of hyperparameters and utilities"""
-  pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
@@ -582,8 +582,20 @@ def run(config, recorder, diagnostic_config):
 
 
 def main(argv: Sequence[str]) -> None:
-  config, recorder, diagnostic_config = initialize(argv)
-  run(config, recorder, diagnostic_config)
+  pathwaysutils.initialize()
+  def train():
+    config, recorder, diagnostic_config = initialize(argv)
+    run(config, recorder, diagnostic_config)
+
+  if pathwaysutils.is_pathways_backend_used():
+    max_utils.elastic_manager = manager.Manager()
+
+    train = max_utils.elastic_manager.replica_resize(
+        max_resizes=100,
+        poll_interval=10,
+    )(train)
+
+  train()
 
 
 if __name__ == "__main__":
