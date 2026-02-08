@@ -4,7 +4,7 @@ The Hugging Face pipeline supports streaming directly from the Hugging Face Hub,
 
 ## Example config for streaming from Hugging Face Hub (no download needed)
 
-In [`src/MaxText/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/base.yml) or through command line, set the following parameters:
+In [`src/maxtext/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/base.yml) or through command line, set the following parameters:
 
 ```yaml
 dataset_type: hf
@@ -23,7 +23,7 @@ hf_access_token: ''  # provide token if using gated dataset or tokenizer
 
 ## Example config for streaming from downloaded data in a Cloud Storage bucket
 
-In [`src/MaxText/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/base.yml) or through the command line, set the following parameters:
+In [`src/maxtext/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/base.yml) or through the command line, set the following parameters:
 
 ```yaml
 dataset_type: hf

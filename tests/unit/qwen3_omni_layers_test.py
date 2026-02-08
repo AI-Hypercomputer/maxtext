@@ -83,7 +83,7 @@ from tests.utils.multimodal_test_utils import (
 )
 
 # Initialize config once for all tests
-base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "configs", "base.yml")
+base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
 jax_config = pyconfig.initialize(
     ["", base_config_path],
     model_name="qwen3-omni-30b-a3b",
@@ -584,7 +584,7 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
   """Test MaxText Qwen3 Omni preprocessor against HuggingFace reference."""
 
   def setUp(self):
-    self.base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "configs", "base.yml")
+    self.base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
     self.image_path = os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "test_image.jpg")
     self.video_path = os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "test_video.mp4")
     self.maxtext_config = pyconfig.initialize(

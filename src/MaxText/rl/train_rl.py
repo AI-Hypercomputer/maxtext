@@ -23,7 +23,7 @@ GSM8K math reasoning benchmark. The script is also flexible enough to run Group 
 Usage Examples:
 
 # GRPO on Llama3.1-8B-Instruct
-python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+python3 -m src.MaxText.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=llama3.1-8b \
   tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
   load_parameters_path=gs://path/to/checkpoint/0/items \
@@ -32,7 +32,7 @@ python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
   hf_access_token=$HF_TOKEN
 
 # GSPO on Llama3.1-70B-Instruct
-python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+python3 -m src.MaxText.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=llama3.1-70b \
   tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
   load_parameters_path=gs://path/to/checkpoint/0/items \
@@ -487,8 +487,8 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
       )
 
-  pkg_dir = os.environ.get("MAXTEXT_PKG_DIR", MAXTEXT_PKG_DIR)
-  vllm_config_path = epath.Path(pkg_dir) / "configs" / "vllm.yml"
+  configs_dir = os.environ.get("MAXTEXT_CONFIGS_DIR", os.path.join(MAXTEXT_PKG_DIR, "configs"))
+  vllm_config_path = epath.Path(configs_dir) / "vllm.yml"
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 

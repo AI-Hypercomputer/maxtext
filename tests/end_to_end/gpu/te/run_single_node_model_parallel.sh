@@ -154,7 +154,7 @@ if [[ "$TRACE" == "true" ]]; then
 fi
 # Updating the model config file as we can't pass base_num_decoder_layers=1 in additional-args
 if [ -n "$NUM_DECODER_LAYERS" ]; then
-  MODEL_CONFIG="$MAXTEXT_DIR/MaxText/configs/models/$MODEL.yml"
+  MODEL_CONFIG="$MAXTEXT_DIR/maxtext/configs/models/$MODEL.yml"
   original_num_decoder_layers=$(grep "base_num_decoder_layers" "$MODEL_CONFIG" | awk -F': ' '{print $2}')
   sed -i "s/base_num_decoder_layers: .*/base_num_decoder_layers: $NUM_DECODER_LAYERS/" "$MODEL_CONFIG"
   echo "=== Setting base_num_decoder_layers=$NUM_DECODER_LAYERS in $MODEL_CONFIG"

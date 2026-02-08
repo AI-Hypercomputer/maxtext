@@ -15,7 +15,7 @@
 An example script to perform decoding using vLLM via Tunix or via MaxText on vLLM.
 
 Example usage with Tunix:
-  python3 -m maxtext.vllm_decode MaxText/configs/base.yml \
+  python3 -m maxtext.vllm_decode maxtext/configs/base.yml \
     model_name=llama3.1-8b tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
     tokenizer_type=huggingface hf_access_token=<your_hf_token> \
     load_parameters_path=<your_checkpoint_path> \
@@ -109,6 +109,7 @@ def decode_with_vllm(
     decode_sampling_nucleus_p: float,
     decode_sampling_top_k: float,
     debug_sharding: bool,
+    vllm_config_path: str | None = None,
 ) -> None:
   """Decode using vLLM with a MaxText model implementation.
 
@@ -129,6 +130,7 @@ def decode_with_vllm(
     decode_sampling_temperature: Temperature for sampling.
     decode_sampling_nucleus_p: Nucleus sampling probability.
     decode_sampling_top_k: Top-k sampling probability.
+    vllm_config_path: Path to vLLM config file. Defaults to MAXTEXT_PKG_DIR/configs/vllm.yml.
   """
 
   # Prepare vLLM Arguments

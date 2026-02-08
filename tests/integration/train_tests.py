@@ -18,7 +18,7 @@ import unittest
 import pytest
 import jax
 from MaxText.train import main as train_main
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 from absl.testing import absltest
@@ -476,7 +476,7 @@ class TrainTests(unittest.TestCase):
   def test_tpu_zero1_gradient_accumulation(self):
     zero1_ga = [  # tests Zero-1 optimizer sharding with gradient accumulation
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        get_test_config_path(),
         "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         "dataset_path=gs://maxtext-dataset",

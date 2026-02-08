@@ -20,10 +20,10 @@
 
 Checkpoint formats in MaxText can be categorized along two axes: whether they include **training states** (e.g., optimizer properties) and whether the model's parameter weights are **stacked** or **unstacked** (aka scanned/unscanned). This results in the four types summarized below:
 
-|                           | **Unstacked Weights**  | **Stacked Weights**  |
-| :------------------------ | :------------------------------------- | :-------------------------------------- |
-| **Without Train State**   | Unstacked Inference Checkpoint         | Stacked Inference Checkpoint           |
-| **With Train State**      | Unstacked Training Checkpoint          | Stacked Training Checkpoint            |
+|                         | **Unstacked Weights**          | **Stacked Weights**          |
+| :---------------------- | :----------------------------- | :--------------------------- |
+| **Without Train State** | Unstacked Inference Checkpoint | Stacked Inference Checkpoint |
+| **With Train State**    | Unstacked Training Checkpoint  | Stacked Training Checkpoint  |
 
 We discuss these two axes respectively:
 
@@ -33,7 +33,7 @@ Checkpoints with a **training state** contain more than just the model's paramet
 
 In contrast, **inference checkpoints** contain only the parameter weights. We also call them parameter only/param-only checkpoints. This is the format most commonly used for sharing models on public platforms like HuggingFace, as they are smaller and ready for immediate use in inference or for fine-tuning.
 
-### Stacked checkpoints and JAX scan function 
+### Stacked checkpoints and JAX scan function
 
 The concept of stacked vs. unstacked checkpoints is specific to JAX-based models that use the `jax.lax.scan` function ([doc](https://jax.readthedocs.io/en/latest/_autosummary/jax.lax.scan.html)). `scan` is a powerful JAX feature that compiles sequential operations (like the layers of a Transformer) into a single, highly optimized kernel, avoiding the overhead of a Python for-loop.
 
@@ -46,6 +46,7 @@ To work with `jax.lax.scan`, the model's parameters must be "stacked". For a Tra
 *Figure 1: A comparison of an unstacked checkpoint and a stacked checkpoint for a simple language model.*
 
 Their difference can also be represented in the following pytree structure:
+
 ```
 # Stacked (aka scanned)
 "params" : {
@@ -74,9 +75,9 @@ To summarize the four checkpoint types:
 - **Stacked Inference Checkpoint:** Contains only model weights, but they are stacked for `scan`-compatible inference. Created by stripping the optimizer state from a stacked training checkpoint.
 - **Stacked Training Checkpoint:** The default format for saving and resuming training runs within MaxText. Contains both weights and optimizer state in a stacked format, optimized for `jax.lax.scan`.
 
-In MaxText, we treat **Stacked Inference Checkpoints** as the default format for checkpoint conversion. For *saving and resuming* training, MaxText uses **Stacked Training Checkpoints** by default. 
+In MaxText, we treat **Stacked Inference Checkpoints** as the default format for checkpoint conversion. For *saving and resuming* training, MaxText uses **Stacked Training Checkpoints** by default.
 
----
+______________________________________________________________________
 
 ## Using checkpoints in practice
 
@@ -86,17 +87,17 @@ Beyond understanding the formats, it's crucial to know how to use checkpoints in
 
 MaxText automatically saves checkpoints periodically during a training run. These are **Stacked Training Checkpoints** that contain the full state needed to resume.
 
--   `base_output_directory`: Specifies the GCS bucket directory where checkpoints will be saved.
--   `enable_checkpointing`: A boolean to enable or disable checkpointing.
--   `async_checkpoint`: Support training and checkpoint saving at the same time.
--   `checkpoint_period`: The interval, in training steps, at which to save a new checkpoint.
+- `base_output_directory`: Specifies the GCS bucket directory where checkpoints will be saved.
+- `enable_checkpointing`: A boolean to enable or disable checkpointing.
+- `async_checkpoint`: Support training and checkpoint saving at the same time.
+- `checkpoint_period`: The interval, in training steps, at which to save a new checkpoint.
 
 Furthermore, MaxText supports emergency checkpointing, which saves a local copy of the checkpoint that can be restored quickly after an interruption.
 
--   `enable_emergency_checkpoint`: A boolean to enable or disable this feature.
--   `local_checkpoint_directory`: The local path for storing emergency checkpoints.
--   `local_checkpoint_period`: The interval, in training steps, for saving local checkpoints.
+- `enable_emergency_checkpoint`: A boolean to enable or disable this feature.
+- `local_checkpoint_directory`: The local path for storing emergency checkpoints.
+- `local_checkpoint_period`: The interval, in training steps, for saving local checkpoints.
 
-More configs about checkpoints can be found in [here](https://github.com/AI-Hypercomputer/maxtext/blob/fafdeaa14183a8f5ca7b9f7b7542ce1655237574/src/MaxText/configs/base.yml#L23-L65).
+More configs about checkpoints can be found in [here](https://github.com/AI-Hypercomputer/maxtext/blob/fafdeaa14183a8f5ca7b9f7b7542ce1655237574/src/maxtext/configs/base.yml#L23-L65).
 
 For practical guides on checkpointing, please refer to [](checkpointing_solutions).

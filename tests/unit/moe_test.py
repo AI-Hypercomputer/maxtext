@@ -13,7 +13,6 @@
 # limitations under the License.
 """ Mixture of Experts (MoE) tests. """
 
-import os.path
 import unittest
 
 import pytest
@@ -30,7 +29,6 @@ from maxtext.utils import maxtext_utils
 from maxtext.common.gcloud_stub import is_decoupled
 from MaxText import pyconfig
 from MaxText.common_types import Config, DType
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
@@ -687,7 +685,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_expert_context_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_ep_cp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -720,7 +718,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_expert_tensor_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_ep_tp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",

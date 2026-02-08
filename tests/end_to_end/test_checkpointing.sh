@@ -36,7 +36,7 @@ then
 fi
 
 # This command runs training for some steps and saves a checkpoint.
-CMD1="python3 -m MaxText.train ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml run_name=$RUN_NAME steps=5 max_target_length=128 per_device_batch_size=1\
+CMD1="python3 -m MaxText.train ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml run_name=$RUN_NAME steps=5 max_target_length=128 per_device_batch_size=1\
     metrics_file=saved_metrics.txt checkpoint_period=3 base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
     async_checkpointing=$ASYNC_CHECKPOINTING collect_stack_trace=$COLLECT_STACK_TRACE attention=$ATTENTION"
 CMD1+=$model_params
@@ -44,7 +44,7 @@ CMD1+=$CMD_DATA
 
 # This command restores the checkpoint from the previous run and continue training from the restored checkpoint.
 # This ensures actual new training steps are executed after restoring checkpoint from the above training run.
-CMD2="python3 -m MaxText.train ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml run_name=$RUN_NAME steps=10 max_target_length=128 per_device_batch_size=1\
+CMD2="python3 -m MaxText.train ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml run_name=$RUN_NAME steps=10 max_target_length=128 per_device_batch_size=1\
     metrics_file=restored_metrics.txt base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
     async_checkpointing=$ASYNC_CHECKPOINTING collect_stack_trace=$COLLECT_STACK_TRACE attention=$ATTENTION"
 CMD2+=$model_params

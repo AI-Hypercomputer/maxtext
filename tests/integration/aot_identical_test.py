@@ -26,7 +26,7 @@ import shutil
 import hashlib
 import re
 import jax
-from MaxText.globals import MAXTEXT_PKG_DIR
+from tests.utils.test_helpers import get_test_config_path
 from MaxText import train_compile
 from MaxText import train
 
@@ -123,7 +123,7 @@ class AotHloIdenticalTest(AotBaseTest):
     # xla flag only sets once for train.main
     os.makedirs(local_landing_dir, exist_ok=True)
     train_argv = (
-        (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"))
+        (None, get_test_config_path())
         + tuple(shared_args)
         + (
             f"dump_hlo_xla_flags=--xla_dump_to={local_landing_dir} "
@@ -139,7 +139,7 @@ class AotHloIdenticalTest(AotBaseTest):
     os.makedirs(local_landing_dir, exist_ok=True)
     topology = self.get_device_user_facing_name()
     aot_args = [f"compile_topology={topology}", "compile_topology_num_slices=1"]
-    compile_argv = (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")) + tuple(shared_args) + tuple(aot_args)
+    compile_argv = (None, get_test_config_path()) + tuple(shared_args) + tuple(aot_args)
     train_compile.main(compile_argv)
     shutil.move(local_landing_dir, compile_dump_dir)
     jax.clear_caches()
@@ -191,7 +191,7 @@ class AotJaxprIdenticalTest(AotBaseTest):
     # Run train.py and dump jaxpr
     train_argv = (
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        get_test_config_path(),
         f"dump_jaxpr_local_dir={train_dump_dir}",
     ) + tuple(shared_args)
     train.main(train_argv)
@@ -201,7 +201,7 @@ class AotJaxprIdenticalTest(AotBaseTest):
     topology = self.get_device_user_facing_name()
     compile_argv = (
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        get_test_config_path(),
         f"dump_jaxpr_local_dir={compile_dump_dir}",
         f"compile_topology={topology}",
         "compile_topology_num_slices=1",

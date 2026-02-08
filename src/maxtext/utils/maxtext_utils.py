@@ -37,8 +37,8 @@ import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_c
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 from MaxText import sharding
-from MaxText.configs import types
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from maxtext.configs import types
 from maxtext.inference.page_manager import PageState
 from maxtext.common import checkpointing
 from maxtext.multimodal import processor as mm_processor

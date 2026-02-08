@@ -23,7 +23,7 @@ from absl.testing import absltest
 from contextlib import redirect_stdout
 
 from maxtext.decode import main as decode_main
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
 pytestmark = [pytest.mark.tpu_only, pytest.mark.external_serving, pytest.mark.integration_test]
@@ -80,7 +80,7 @@ class DecodeTests(unittest.TestCase):
       ],
       "decode_sampling": [
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          get_test_config_path(),
           "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           f"load_parameters_path={GEMMA_2B_CKPT_PATH}",

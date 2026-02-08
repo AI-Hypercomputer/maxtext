@@ -6,7 +6,7 @@
 bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 ```
 
-2. In [`src/MaxText/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/base.yml) or through command line, set the following parameters:
+2. In [`src/maxtext/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/base.yml) or through command line, set the following parameters:
 
 ```yaml
 dataset_type: tfds

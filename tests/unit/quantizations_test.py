@@ -27,20 +27,19 @@ from jax import lax
 from jax import numpy as jnp
 from jax.sharding import Mesh
 from MaxText import pyconfig
-from maxtext.common.gcloud_stub import is_decoupled
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
-from MaxText.globals import MAXTEXT_PKG_DIR
-from maxtext.kernels.megablox import gmm
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.kernels.megablox import gmm
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
-MAXTEXT_PKG_DIR = os.path.join("src", MAXTEXT_PKG_DIR)
 
 
 class QuantTestModule(nnx.Module):
@@ -103,15 +102,11 @@ class QuantTestModule(nnx.Module):
 
   def __call__(self, inputs):
     res_einsum = self.einsum("bc,ab->ac", inputs, self.identity)
-    res_dg = self.dot_general(
-        inputs, inputs, (((), ()), ((), ())), precision=None
-    )
+    res_dg = self.dot_general(inputs, inputs, (((), ()), ((), ())), precision=None)
     return res_einsum, res_dg
 
 
-def _configure_quantization(
-    quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False
-):
+def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
   config = pyconfig.initialize(
       [None, get_test_config_path()],
       enable_checkpointing=False,
@@ -152,9 +147,7 @@ class QuantizationTest(unittest.TestCase):
       self.assertEqual(quant.replicate_scale, False)
 
     for quant_mode in ["train", "serve", "convert"]:
-      quant = _configure_quantization(
-          quant_str="int8", mode_str=quant_mode, replicate_scale=True
-      )
+      quant = _configure_quantization(quant_str="int8", mode_str=quant_mode, replicate_scale=True)
       self.assertEqual(quant.replicate_scale, True)
 
   def test_configure_quantization_is_int8(self):
@@ -181,13 +174,9 @@ class QuantizationTest(unittest.TestCase):
   def test_mixed_precision_config_int8w(self):
     quant = _configure_quantization(
         quant_str="intmp",
-        quant_cfg_path=os.path.join(
-            MAXTEXT_PKG_DIR, "configs", "quantization", "int8_weight_only.json"
-        ),
+        quant_cfg_path=os.path.join(MAXTEXT_CONFIGS_DIR, "quantization", "int8_weight_only.json"),
     )
-    self.assertTrue(
-        isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1
-    )
+    self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1)
     # pylint: disable=unsupported-membership-test
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
     quant_cfg, _ = quant.quant_dg[quantizations.DEFAULT]
@@ -198,15 +187,12 @@ class QuantizationTest(unittest.TestCase):
     quant = _configure_quantization(
         quant_str="intmp",
         quant_cfg_path=os.path.join(
-            MAXTEXT_PKG_DIR,
-            "configs",
+            MAXTEXT_CONFIGS_DIR,
             "quantization",
             "dense_llm_weight_only_scale.json",
         ),
     )
-    self.assertTrue(
-        isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7
-    )
+    self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     # pylint: disable=unsupported-membership-test
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
     quant_cfg, _ = quant.quant_dg[quantizations.DEFAULT]
@@ -220,15 +206,12 @@ class QuantizationTest(unittest.TestCase):
     quant = _configure_quantization(
         quant_str="intmp",
         quant_cfg_path=os.path.join(
-            MAXTEXT_PKG_DIR,
-            "configs",
+            MAXTEXT_CONFIGS_DIR,
             "quantization",
             "dense_llm_subchannel.json",
         ),
     )
-    self.assertTrue(
-        isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7
-    )
+    self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     # pylint: disable=unsupported-membership-test
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
     quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
@@ -355,9 +338,7 @@ class QuantTest(unittest.TestCase):
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = (
-        {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
-    )
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     init_kwargs = (
         {
             "run_name": "test",
@@ -388,24 +369,16 @@ class QuantTest(unittest.TestCase):
     s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)
     ids = jax.random.randint(self.rng, s, 0, self.cfg.vocab_size)
 
-    decoder_segment_ids = (
-        jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+    decoder_segment_ids = jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+    decoder_positions = jnp.stack(
+        [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
     )
-    decoder_positions = jnp.stack([
-        jnp.arange(self.cfg.max_target_length, dtype=jnp.int32)
-        for _ in range(self.cfg.global_batch_size_to_train_on)
-    ])
     return ids, decoder_segment_ids, decoder_positions
 
   def pytree_allclose(self, a, b, *, tolerance=0.01):
     """Return True if every pair of leaves is all-close."""
-    leaves_a, leaves_b = jax.tree_util.tree_leaves(
-        a
-    ), jax.tree_util.tree_leaves(b)
-    return all(
-        jnp.abs(y - x).mean() / (jnp.abs(x).mean() + 1e-8) < tolerance
-        for x, y in zip(leaves_a, leaves_b)
-    )
+    leaves_a, leaves_b = jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b)
+    return all(jnp.abs(y - x).mean() / (jnp.abs(x).mean() + 1e-8) < tolerance for x, y in zip(leaves_a, leaves_b))
 
   def print_grad_diff(self, a, b):
     """Print the key path and relative error for each leaf in two gradient PyTrees."""
@@ -419,9 +392,7 @@ class QuantTest(unittest.TestCase):
 
     jax.tree_util.tree_map_with_path(compare_fn, a, b)
 
-  def quantization_config(
-      self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1
-  ):
+  def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
     """Run forward pass and backward pass for quantized model and compare with base model."""
     cfg = self.init_pyconfig(quantization=quant)
     model = model_creation_utils.create_model(self.cfg, self.mesh)
@@ -466,12 +437,8 @@ class QuantTest(unittest.TestCase):
       return jnp.mean((logits) ** 2)
 
     # Compute gradients w.r.t. both models
-    grads_base = jax.grad(loss_base)(
-        var, (ids, decoder_positions, decoder_segment_ids)
-    )
-    grads_quant = jax.grad(loss_quant)(
-        quantized_vars, (ids, decoder_positions, decoder_segment_ids)
-    )
+    grads_base = jax.grad(loss_base)(var, (ids, decoder_positions, decoder_segment_ids))
+    grads_quant = jax.grad(loss_quant)(quantized_vars, (ids, decoder_positions, decoder_segment_ids))
 
     logits, _ = model.apply(
         var,
@@ -491,14 +458,8 @@ class QuantTest(unittest.TestCase):
         rngs={"params": self.rng},
         mutable=True,
     )
-    print(
-        "relative error in logits:"
-        f" {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}"
-    )
-    assert (
-        jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()
-        < logits_tolerance
-    )
+    print("relative error in logits:" f" {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
+    assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
     self.print_grad_diff(grads_base["params"], grads_quant["params"])
     self.assertTrue(
         self.pytree_allclose(
