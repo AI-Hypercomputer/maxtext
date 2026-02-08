@@ -701,6 +701,51 @@ qwen3_omni_30b_a3b_config = transformers.Qwen3OmniMoeConfig(
     },
 )
 
+qwen3_next_80b_a3b_dict = {
+  "architectures": [
+    "Qwen3NextForCausalLM"
+  ],
+  "attention_dropout": 0.0,
+  "bos_token_id": 151643,
+  "decoder_sparse_step": 1,
+  "eos_token_id": 151645,
+  "full_attention_interval": 4,
+  "head_dim": 256,
+  "hidden_act": "silu",
+  "hidden_size": 2048,
+  "initializer_range": 0.02,
+  "intermediate_size": 5120,
+  "linear_conv_kernel_dim": 4,
+  "linear_key_head_dim": 128,
+  "linear_num_key_heads": 16,
+  "linear_num_value_heads": 32,
+  "linear_value_head_dim": 128,
+  "max_position_embeddings": 262144,
+  "mlp_only_layers": [],
+  "model_type": "qwen3_next",
+  "moe_intermediate_size": 512,
+  "norm_topk_prob": true,
+  "num_attention_heads": 16,
+  "num_experts": 512,
+  "num_experts_per_tok": 10,
+  "num_hidden_layers": 48,
+  "num_key_value_heads": 2,
+  "output_router_logits": false,
+  "partial_rotary_factor": 0.25,
+  "rms_norm_eps": 1e-06,
+  "rope_scaling": null,
+  "rope_theta": 10000000,
+  "router_aux_loss_coef": 0.001,
+  "shared_expert_intermediate_size": 512,
+  "tie_word_embeddings": false,
+  "torch_dtype": "bfloat16",
+  "transformers_version": "4.57.0.dev0",
+  "use_cache": true,
+  "use_sliding_window": false,
+  "vocab_size": 151936
+}
+qwen3_next_80b_a3b_config = transformers.Qwen3NextConfig(**qwen3_next_80b_a3b_dict)
+
 
 # from https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1/blob/main/config.json
 mixtral_8x7b_dict = {
@@ -789,6 +834,7 @@ HF_MODEL_CONFIGS = {
     "gpt-oss-20b": gpt_oss_20b_config,
     "gpt-oss-120b": gpt_oss_120b_config,
     "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,
+    "qwen3-next-80b-a3b": qwen3_next_80b_a3b_config,
     "mixtral-8x7b": mixtral_8x7b_config,
     "mixtral-8x22b": mixtral_8x22b_config,
 }
