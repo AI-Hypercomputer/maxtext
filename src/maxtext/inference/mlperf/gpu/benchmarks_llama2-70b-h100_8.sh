@@ -64,7 +64,7 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.94
 echo XLA_FLAGS: $XLA_FLAGS
 
 if [[ -z ${MAXENGINE_CONFIG_FILEPATH} ]] ; then
-    export MAXENGINE_CONFIG_FILEPATH="$(dirname $0)/../../configs/inference.yml"
+    export MAXENGINE_CONFIG_FILEPATH="$(dirname $0)/../../configs/inference/inference.yml"
 fi
 
 if [[ -z ${QUANTIZATION} ]] ; then

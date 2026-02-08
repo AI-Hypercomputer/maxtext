@@ -41,7 +41,7 @@ Example Usage:
   To convert a gemma2-2b model and save it to a specific directory:
 
     /usr/bin/time -v python src/MaxText/utils/ckpt_conversion/to_maxtext.py \
-    MaxText/configs/base.yml model_name="gemma2-2b" \
+    maxtext/configs/base.yml model_name="gemma2-2b" \
     base_output_directory="/path/to/your/output/directory" \
     hf_access_token=$HF_TOKEN hardware=cpu skip_jax_distributed_system=True \
     scan_layers=False
@@ -52,7 +52,7 @@ Example Usage:
   To convert a 70B model with minimal RAM usage:
 
    /usr/bin/time -v python src/MaxText/utils/ckpt_conversion/to_maxtext.py \
-    MaxText/configs/base.yml model_name="meta-llama/Llama-3.1-70B" \
+    maxtext/configs/base.yml model_name="meta-llama/Llama-3.1-70B" \
     base_output_directory="gs://my-bucket/maxtext-checkpoints" \
     hf_access_token=$HF_TOKEN hardware=cpu skip_jax_distributed_system=True \
     --lazy_load_tensors=True

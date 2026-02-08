@@ -1,6 +1,6 @@
 # llama2-7b
 python3 -m maxtext.inference.inference_microbenchmark \
-"${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/configs/base.yml \
+"${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
 async_checkpointing=false \
 attention=autoselected \
 dataset_path=gs://maxtext-dataset \

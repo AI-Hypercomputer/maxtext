@@ -26,7 +26,7 @@ import transformers
 from parameterized import parameterized_class
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 from MaxText.input_pipeline import _hf_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.input_pipeline._hf_data_processing import _get_pad_id
@@ -314,7 +314,7 @@ class SFTDataProcessingTest(unittest.TestCase):
       tokenizer_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
 
     self.config = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "sft_trainer"), os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+        [os.path.join(MAXTEXT_PKG_DIR, "sft_trainer"), os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml")],
         per_device_batch_size=2,
         run_name="test",
         mesh_axes=["data"],

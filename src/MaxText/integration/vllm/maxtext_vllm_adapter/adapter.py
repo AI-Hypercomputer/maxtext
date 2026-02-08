@@ -27,6 +27,7 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
 
+
 try:
   from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 except ImportError:

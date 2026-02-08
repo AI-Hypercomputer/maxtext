@@ -159,15 +159,15 @@ docker image with these local sources. To get a set of compatible commit IDs for
    [MaxText Package Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/build_and_test_maxtext.yml?query=event%3Aschedule)
    GitHub Actions workflow.
 
-1. Select the latest successful run.
+2. Select the latest successful run.
 
-1. Within the workflow run, find and click on the `maxtext_jupyter_notebooks (py312)` job, then expand the `run` job.
+3. Within the workflow run, find and click on the `maxtext_jupyter_notebooks (py312)` job, then expand the `run` job.
 
-1. Locate the `Record Commit IDs` step. The commit SHAs for `maxtext`, `tunix`,
+4. Locate the `Record Commit IDs` step. The commit SHAs for `maxtext`, `tunix`,
    `tpu-inference`, and `vllm` that were used in that successful run are listed
    in the logs of this step.
 
-1. Prior to installation, ensure that the `maxtext`, `tunix`, `vllm`, and `tpu-inference` repositories are synchronized to the specific commits recorded from the CI logs. For each repository, use the following command to switch to the correct commit: `git checkout <commit_id>`.
+5. Prior to installation, ensure that the `maxtext`, `tunix`, `vllm`, and `tpu-inference` repositories are synchronized to the specific commits recorded from the CI logs. For each repository, use the following command to switch to the correct commit: `git checkout <commit_id>`.
 
 **Note:** Clone these repositories as siblings of the `maxtext` directory (e.g.,
 in the same parent directory). After cloning, run the build from inside the
@@ -208,7 +208,7 @@ xpk workload create-pathways --workload $WORKLOAD \
 --tpu-type=$TPU_TYPE --num-slices=1 \
 --project=$PROJECT_ID --priority=high \
 --command "HF_TOKEN=${HF_TOKEN} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+python3 -m src.MaxText.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL} \
   tokenizer_path=${TOKENIZER} \
   load_parameters_path=${MAXTEXT_CKPT_PATH} \
@@ -225,7 +225,7 @@ xpk workload create-pathways --workload $WORKLOAD \
 --tpu-type=$TPU_TYPE --num-slices=1 \
 --project=$PROJECT_ID --priority=high \
 --command "HF_TOKEN=${HF_TOKEN} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+python3 -m src.MaxText.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL} \
   tokenizer_path=${TOKENIZER} \
   load_parameters_path=${MAXTEXT_CKPT_PATH} \

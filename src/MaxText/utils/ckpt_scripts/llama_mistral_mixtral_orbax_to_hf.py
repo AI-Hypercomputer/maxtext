@@ -23,7 +23,7 @@ To save a ckpt
 python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 
-python3 -m MaxText.utils.ckpt_scripts.llama_mistral_mixtral_orbax_to_hf src/MaxText/configs/base.yml
+python3 -m MaxText.utils.ckpt_scripts.llama_mistral_mixtral_orbax_to_hf src/maxtext/configs/base.yml
             base_output_directory=path/to/saving/intermediate_MaxText_files
             load_parameters_path=/path/to/src/MaxText/checkpoint run_name=<your run name> model_name=<llama2 or mistral>
             hardware=gpu

@@ -84,7 +84,7 @@ then
 fi
 
 if [[ -z ${MAXENGINE_CONFIG_FILEPATH} ]] ; then
-    MAXENGINE_CONFIG_FILEPATH="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml"
+    MAXENGINE_CONFIG_FILEPATH="${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml"
 fi
 
 
