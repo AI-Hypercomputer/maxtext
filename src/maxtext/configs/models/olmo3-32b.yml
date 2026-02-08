@@ -36,8 +36,10 @@ use_qk_norm: True
 sliding_window_size: 4096
 inhomogeneous_layer_cycle_interval: 4
 
-# RoPE (YaRN)
+# RoPE
+# Yarn RoPE for global attention, default RoPE for sliding window attention (set from olmo3.py)
 rope_type: "yarn"
+rope_interleave: False
 rope_max_timescale: 500000 # rope_theta
 rope_factor: 8.0 # factor so 0.1 * ln(rope_factor) + 1.0 = 1.2079441541679836
 original_max_position_embeddings: 8192
@@ -45,7 +47,9 @@ beta_fast: 32.0
 beta_slow: 1.0
 max_position_embeddings: 65536
 rope_attention_scaling: True
+rope_truncate: False
 
 # Embeddings
 vocab_size: 100278
 logits_via_embedding: False
+normalize_embedding_logits: False

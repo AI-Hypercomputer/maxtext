@@ -247,8 +247,9 @@ ModelName = Literal[
     "gpt-oss-120b",
     "llama4-17b-16e",
     "llama4-17b-128e",
-    "olmo3_7b",
-    "olmo3_32b",
+    "olmo3-7b",
+    'olmo3-7b-pt',
+    "olmo3-32b",
 ]
 
 

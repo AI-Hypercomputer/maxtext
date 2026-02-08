@@ -183,6 +183,10 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
       dim=-1
   )  # Sum over the vocab dim to get a single KL value per token
 
+  # Log per-token KL divergences
+  formatted_list = [f"{x:.6f}" for x in kl_divs_per_token.tolist()]
+  max_logging.log(f"Per-token KL Divergences: \n{formatted_list}")
+
   max_kl_div = kl_divs_per_token.max()
   max_logging.log(f"\nMax KL divergence for a single token in the set: {max_kl_div.item():.6f}")
 
@@ -393,7 +397,21 @@ def main(config, test_args):  # pylint: disable=W0621
       raise ValueError("run_hf_model requires hf_model_path")
 
     hf_token = config.hf_access_token
-    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch.bfloat16, token=hf_token)
+    # Map MaxText config.dtype to PyTorch dtype
+    dtype_mapping = {
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+        "float16": torch.float16,
+        jnp.bfloat16: torch.bfloat16,
+        jnp.float32: torch.float32,
+        jnp.float16: torch.float16,
+    }
+
+    # Default to bfloat16 if dtype is unrecognized
+    torch_dtype = dtype_mapping.get(config.dtype.name, torch.bfloat16)
+    max_logging.log(f"Loading HF model with dtype: {torch_dtype} (derived from config.dtype: {config.dtype})")
+
+    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch_dtype, token=hf_token)
 
     if os.path.isdir(test_args.hf_model_path):
       # local hf directory may not contain tokenizer, read from remote tokenizer
