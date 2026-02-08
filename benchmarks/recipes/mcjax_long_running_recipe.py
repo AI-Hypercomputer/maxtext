@@ -26,6 +26,7 @@ import os
 import benchmarks.recipes.args_helper as helper
 import benchmarks.maxtext_trillium_model_configs as model_configs
 import benchmarks.maxtext_xpk_runner as mxr
+from benchmarks.benchmark_utils import get_xpk_path
 from benchmarks.xpk_configs import XpkClusterConfig
 
 # Cluster Params
@@ -37,7 +38,7 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join("~", "xpk")
+XPK_PATH = get_xpk_path()
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = f"gs://{USER}-{PROJECT}-{COUNTRY}/mcjax_long_run/"
 # Generate your own runner image from MaxText repo.
