@@ -78,7 +78,13 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
   Returns:
     The variable's value, potentially wrapped in `nn.LogicallyPartitioned`.
   """
+
   if isinstance(variable.value, aqt_tensor.QTensor):
+    return variable.value
+
+  # If the value is already explicitly partitioned (e.g. from nnx_pipeline),
+  # return it as-is.
+  if isinstance(variable.value, nn.spmd.LogicallyPartitioned):
     return variable.value
 
   if variable.type.__name__ == "_overwrite_with_gradient":
@@ -90,6 +96,27 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
       sharding_names = metadata["sharding_names"]
     else:
       sharding_names = metadata["sharding"]
+
+    # Auto-Patching for Pipeline Expansion
+    # If the value rank is greater than the sharding rank, it implies pipeline expansion
+    # occurred (broadcasting), but the metadata is stale. We patch the spec here.
+
+    val = variable.value
+
+    if hasattr(val, "ndim") and isinstance(sharding_names, tuple):
+      val_rank = val.ndim
+      spec_rank = len(sharding_names)
+      diff = val_rank - spec_rank
+
+      if diff > 0:
+        # Prepend axes based on rank difference
+        # Diff 2: [Repeats, Stage, ...] -> ('circular_repeats', 'layers', ...)
+        # Diff 1: [Stage, ...] -> ('layers', ...)
+        if diff == 2:
+          sharding_names = ("circular_repeats", "layers") + sharding_names
+        elif diff == 1:
+          sharding_names = ("layers",) + sharding_names
+
     return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
         variable.value,
         sharding_names,  # type: ignore[arg-type]
