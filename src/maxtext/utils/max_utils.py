@@ -695,7 +695,7 @@ def summarize_pytree_data(params, name="Params", raw=False):
 def print_mem_stats(label: str):
   max_logging.log(f"\nMemstats: {label}:")
   try:
-    for d in jax.local_devices():
+    for d in live_devices():
       stats = d.memory_stats()
       used = round(stats["bytes_in_use"] / 2**30, 2)
       limit = round(stats["bytes_limit"] / 2**30, 2)
