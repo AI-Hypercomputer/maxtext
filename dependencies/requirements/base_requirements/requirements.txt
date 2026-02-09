@@ -32,13 +32,13 @@ pylint
 pytest
 pytype
 sentencepiece
-tensorboard-plugin-profile
+# tensorboard-plugin-profile
 tensorboardx
 # tensorflow-datasets
 # tensorflow-text
 tiktoken
-tokamax
+tokamax>=0.0.10
 transformers
 qwix
-google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
+#google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
 mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
