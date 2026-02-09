@@ -14,9 +14,9 @@
 
 """ A wrapper file for easily calculating training TFLOPs. """
 
-from MaxText.maxtext_utils import calculate_tflops_training_per_device
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.maxtext_utils import calculate_tflops_training_per_device
 import os
 from typing import Sequence, cast
 from absl import app

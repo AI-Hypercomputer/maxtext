@@ -30,7 +30,7 @@ from jax.experimental import mesh_utils
 from MaxText import pyconfig
 from MaxText.input_pipeline import _grain_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
 
@@ -246,7 +246,7 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessing
       json.dump(mixture_config, f)
 
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -300,7 +300,7 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
       base_output_directory = "gs://max-experiments/"
 
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -373,7 +373,7 @@ class GrainArrayRecordBestFitPackingTest(GrainArrayRecordProcessingTest):
       base_output_directory = "gs://max-experiments/"
 
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],

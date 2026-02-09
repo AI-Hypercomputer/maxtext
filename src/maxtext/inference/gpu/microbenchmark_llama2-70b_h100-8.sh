@@ -57,7 +57,7 @@ if [[ -z ${INFERENCE_LOG_FILE_PATH} ]] ; then
     export INFERENCE_LOG_FILE_PATH="${BASE_OUTPUT_DIRECTORY}/microbenchmark_llama2-70b_h100-8_results.txt"
 fi
 if [[ -z ${MAXENGINE_CONFIG_FILEPATH} ]] ; then
-    MAXENGINE_CONFIG_FILEPATH="$(dirname $0)/../../configs/inference.yml"
+    MAXENGINE_CONFIG_FILEPATH="$(dirname $0)/../../configs/inference/inference.yml"
 fi
 if [[ -z ${QUANTIZATION} ]] ; then
     QUANTIZATION="aqt_fp8"
