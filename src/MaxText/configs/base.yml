@@ -287,6 +287,7 @@ pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights
 # It may be useful to do the reverse when the layers_per_stage is very large.
 # The below settings only have effect when using pipeline parallelism.
 scan_pipeline_iterations: True
+scan_pipeline_repeats: True
 scan_layers_per_stage: False
 set_remat_policy_on_pipeline_iterations: True
 set_remat_policy_on_layers_per_stage: False
@@ -880,7 +881,7 @@ prometheus_port: 0
 enable_jax_profiler: False
 jax_profiler_port: 9999
 
-log_config: True # Prints the config (after defaults have been set by pyconfig logic)
+log_config: False # Prints the config (after defaults have been set by pyconfig logic)
 debug_sharding: False # Prints model weights sharding info
 
 # Checkpoint Structured logging
