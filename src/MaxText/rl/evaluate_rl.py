@@ -121,13 +121,15 @@ def score_responses(tmvp_config, question, responses, answer):
 
     # Check exact correctness
     try:
-      # Remove ',' and '$' then convert to float
-      val_extracted = float(extracted_response.replace(",", "").replace("$", "").strip())
-      val_answer = float(answer.replace(",", "").replace("$", "").strip())
+      # Normalize and parse
+      norm_extracted = utils_rl.normalize_final_answer(extracted_response).strip()
+      norm_answer = utils_rl.normalize_final_answer(answer).strip()
+      val_extracted = utils_rl.parse_number_or_fraction(norm_extracted)
+      val_answer = utils_rl.parse_number_or_fraction(norm_answer)
       is_correct = val_extracted == val_answer
 
       # Check partial correctness (within 10%)
-      ratio = val_extracted / val_answer
+      ratio = (val_extracted + utils_rl.EPSILON) / (val_answer + utils_rl.EPSILON)
       if 0.9 <= ratio <= 1.1:
         is_partially_correct = True
 
