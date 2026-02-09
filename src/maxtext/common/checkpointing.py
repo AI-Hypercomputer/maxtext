@@ -215,6 +215,9 @@ def create_orbax_checkpoint_manager(
     use_zarr3: bool = True,
     enable_continuous_checkpointing: bool = False,
     max_num_checkpoints_to_keep: int = 10,
+    enable_single_controller: bool = False,
+    colocated_python_checkpointing: bool = False,
+    enable_single_replica_ckpt_restoring: bool = False,
     checkpoint_storage_concurrent_gb: int = 96,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
@@ -267,6 +270,17 @@ def create_orbax_checkpoint_manager(
       ),
       logger=orbax_logger,
   )
+
+  # Register the pathways colocated python array handler here.
+  if enable_single_controller and colocated_python_checkpointing:
+    max_logging.log("Registering colocated python array handler")
+    checkpointing_impl = ocp.pathways.CheckpointingImpl.from_options(
+        use_colocated_python=True,
+    )
+    ocp.pathways.register_type_handlers(
+        checkpointing_impl=checkpointing_impl,
+        use_replica_parallel=enable_single_replica_ckpt_restoring,
+    )
 
   max_logging.log("Checkpoint manager created!")
   return manager

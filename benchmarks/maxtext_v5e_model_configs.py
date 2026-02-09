@@ -41,7 +41,10 @@ default_16b_v5e_256 = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+        ),
     ),
 )
 
@@ -64,7 +67,10 @@ default_32b_v5e_256 = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+        ),
     ),
 )
 
@@ -87,7 +93,10 @@ default_64b_v5e_256 = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+        ),
     ),
 )
 
@@ -113,7 +122,10 @@ default_128b_v5e_256 = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+        ),
     ),
 )
 
@@ -134,7 +146,10 @@ gpt_3_175b_v5e_256 = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+        ),
     ),
 )
 
@@ -149,14 +164,19 @@ llama2_7b_v5e_256 = _add_to_model_dictionary(
             "remat_policy": "save_qkv_proj",
             "max_target_length": 2048,
             "use_iota_embed": True,
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.llama2"),
+            "tokenizer_path": os.path.join(
+                MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.llama2"
+            ),
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "synthetic",
             "reuse_example_batch": 1,
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+        ),
     ),
 )
 
@@ -171,14 +191,19 @@ llama2_13b_v5e_256 = _add_to_model_dictionary(
             "remat_policy": "qkv_proj_offloaded",
             "max_target_length": 2048,
             "use_iota_embed": True,
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.llama2"),
+            "tokenizer_path": os.path.join(
+                MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.llama2"
+            ),
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "synthetic",
             "reuse_example_batch": 1,
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+        ),
     ),
 )
 
@@ -199,7 +224,10 @@ llama2_70b_v5e_256 = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+        ),
     ),
 )
 
@@ -222,8 +250,6 @@ llama3_1_8b_8192_v5e_256 = _add_to_model_dictionary(
             "attention": "flash",
             "use_iota_embed": True,
             "dataset_path": "gs://max-datasets-rogue",
-            "dataset_type": "synthetic",
-            "enable_checkpointing": False,
             "sa_block_q": 2048,
             "sa_block_kv": 2048,
             "sa_block_kv_compute": 2048,
@@ -236,6 +262,14 @@ llama3_1_8b_8192_v5e_256 = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            # Test colocated python checkpointing
+            "enable_checkpointing": True,
+            "colocated_python_checkpointing": True,
+            "checkpoint_period": 5,
+            "dataset_type": "grain",
+            "grain_train_files": (
+                "gs://max-datasets-rogue/array-record/c4/en/3.0.1/c4-train.array_record*"
+            ),
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -246,10 +280,18 @@ llama3_1_8b_8192_v5e_256 = _add_to_model_dictionary(
             + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
         pathways_xla_flag_options={
-            xla_flags_library.REMOVE: ["--2a886c8_chip_config_name=megachip_tccontrol"],
-            xla_flags_library.ADD_SERVER: (xla_flags_library.ENHANCED_LAUNCH_BARRIER),
-            xla_flags_library.ADD_PROXY: (xla_flags_library.ENHANCED_LAUNCH_BARRIER),
-            xla_flags_library.ADD_WORKER: (xla_flags_library.ENHANCED_LAUNCH_BARRIER),
+            xla_flags_library.REMOVE: [
+                "--2a886c8_chip_config_name=megachip_tccontrol"
+            ],
+            xla_flags_library.ADD_SERVER: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
+            xla_flags_library.ADD_PROXY: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
+            xla_flags_library.ADD_WORKER: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
         },
     ),
 )

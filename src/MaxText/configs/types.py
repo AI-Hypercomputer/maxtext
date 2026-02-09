@@ -304,6 +304,7 @@ class Checkpointing(BaseModel):
       True, description="If True, saves a final checkpoint upon training completion."
   )
   enable_continuous_checkpointing: bool = Field(False, description="If True, enables continuous checkpointing.")
+  colocated_python_checkpointing: bool = Field(False, description="If True, enables colocated python checkpointing.")
 
 
 class OrbaxStorage(BaseModel):
