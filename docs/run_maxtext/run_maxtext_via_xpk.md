@@ -129,13 +129,13 @@ pip install xpk
     -   **For TPUs:**
 
         ```
-        bash docker_build_dependency_image.sh DEVICE=tpu MODE=stable
+        bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
         ```
 
     -   **For GPUs:**
 
         ```
-        bash docker_build_dependency_image.sh DEVICE=gpu MODE=stable
+        bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=stable
         ```
 
 * * * * *
