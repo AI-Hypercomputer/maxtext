@@ -86,6 +86,10 @@ metrics_file: "" # for testing, local file that stores scalar metrics. if empty,
 # if true save metrics such as loss and tflops to gcs in {base_output_directory}/{run_name}/metrics/
 gcs_metrics: false
 
+enable_wandb: False
+wandb_project_name: ""
+wandb_run_name: ""
+
 # if true save config to gcs in {base_output_directory}/{run_name}/
 save_config_to_gcs: false
 
