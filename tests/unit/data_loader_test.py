@@ -30,7 +30,7 @@ from maxtext.utils import exceptions
 from maxtext.utils.maxtext_utils import create_device_mesh
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.utils.rampup_batch import RampupBatchManager
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 
 
 class DataLoaderTest(unittest.TestCase):
@@ -63,9 +63,7 @@ class DataLoaderTest(unittest.TestCase):
     # In decoupled mode, adapt mesh/ICI parallelism so that the
     # product of ICI parallelism matches the available devices for
     # this test only.
-    if is_decoupled():
-      args.setdefault("mesh_axes", ["data"])
-      args.setdefault("ici_data_parallelism", -1)
+    args.update(get_decoupled_parallelism_overrides(include_mesh_defaults=True))
 
     return pyconfig.initialize(
         [None, get_test_config_path()],

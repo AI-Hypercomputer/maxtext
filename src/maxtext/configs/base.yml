@@ -14,6 +14,10 @@
 
 # This sentinel is a reminder to choose a real run name.
 # If there is already a checkpoint under this run, that checkpoint will auto-resume.
+#
+# NOTE: Some unit/integration tests in MaxText do not always run this file directly.
+# When running in decoupled mode (DECOUPLE_GCLOUD=TRUE), tests may use
+# `decoupled_base_test.yml` instead of `base.yml` via `tests/utils/test_helpers.py`.
 run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!

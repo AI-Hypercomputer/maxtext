@@ -28,7 +28,6 @@ from jax import random, vmap
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from maxtext.configs import pyconfig
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.inference import inference_utils
 from maxtext.layers import quantizations
@@ -37,7 +36,7 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 import numpy as np
 import optax
 
@@ -347,7 +346,7 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
 
   def setUp(self):
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
@@ -903,8 +902,10 @@ class TestGetAbstractState(unittest.TestCase):
   """Test class for get_abstract_state."""
 
   def setUp(self):
+    extra_args = get_decoupled_parallelism_overrides()
     self.config = pyconfig.initialize(
         [None, get_test_config_path()],
+        **extra_args,
         enable_checkpointing=False,
         model_name="llama3.1-8b",
         per_device_batch_size=1,
