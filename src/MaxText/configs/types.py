@@ -1769,6 +1769,7 @@ class MaxTextConfig(
     # Reinforcement Learning
     RLHardware,
     VLLM,
+    RL,
     RLDataset,
     RLEvaluation,
     Reward,

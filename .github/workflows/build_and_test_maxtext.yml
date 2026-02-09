@@ -150,6 +150,7 @@ jobs:
         fail-fast: false
         matrix:
           image_type: ["py312"]
+          worker_group: [1, 2]
     with:
       device_type: tpu
       device_name: v6e-4
@@ -160,6 +161,8 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      worker_group: ${{ matrix.worker_group }}
+      total_workers: 2
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_tpu_integration_tests:
@@ -170,6 +173,7 @@ jobs:
         fail-fast: false
         matrix:
           image_type: ["py312"]
+          worker_group: [1, 2]
     with:
       device_type: tpu
       device_name: v6e-4
@@ -180,6 +184,8 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      worker_group: ${{ matrix.worker_group }}
+      total_workers: 2
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_unit_tests:
@@ -231,6 +237,7 @@ jobs:
         matrix:
           image_type: ["py312"]
           cuda: ["cuda12"]
+          worker_group: [1, 2]
     with:
       device_type: ${{ matrix.cuda }}
       device_name: a100-40gb-4
@@ -241,6 +248,8 @@ jobs:
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      worker_group: ${{ matrix.worker_group }}
+      total_workers: 2
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_gpu_integration_tests:
@@ -252,6 +261,7 @@ jobs:
         matrix:
           image_type: ["py312"]
           cuda: ["cuda12"]
+          worker_group: [1, 2]
     with:
       device_type: ${{ matrix.cuda }}
       device_name: a100-40gb-4
@@ -262,6 +272,8 @@ jobs:
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      worker_group: ${{ matrix.worker_group }}
+      total_workers: 2
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   all_tests_passed:
