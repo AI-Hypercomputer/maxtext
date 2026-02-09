@@ -543,11 +543,11 @@ def setup_train_loop(
     max_logging.log("Training mesh used for the workload")
     num_inference_devices = config.inference_devices_per_replica * config.inference_replicas
     training_devices = jax.devices()[num_inference_devices:]
-    model = mt.from_config(config, devices=training_devices)
+    model = mt.model_creation_utils.from_config(config, devices=training_devices)
     mesh = model.mesh
     max_logging.log("Inference mesh used for the workload")
     inference_devices = jax.devices()[:num_inference_devices]
-    inference_model = mt.from_config(config_inference, devices=inference_devices)
+    inference_model = mt.model_creation_utils.from_config(config_inference, devices=inference_devices)
     inference_mesh = inference_model.mesh
     init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
 

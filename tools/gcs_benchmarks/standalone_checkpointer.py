@@ -52,7 +52,7 @@ def checkpoint_loop(config, state=None):
     ckpt_path:
   Returns:
   """
-  model = mt.from_config(config)
+  model = mt.model_creation_utils.from_config(config)
   mesh = model.mesh
   init_rng, checkpoint_manager, _, tx = train_utils.create_training_tools(config, model, mesh)
 

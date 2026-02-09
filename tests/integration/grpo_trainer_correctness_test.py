@@ -130,8 +130,8 @@ class GrpoTrainerTest(unittest.TestCase):
         ici_tensor_parallelism=4,
         per_device_batch_size=self.config.per_device_batch_size * self.config.rl["num_generations"],
     )
-    self.model = mt.from_config(self.config)
-    self.inference_model = mt.from_config(self.config_inference)
+    self.model = mt.model_creation_utils.from_config(self.config)
+    self.inference_model = mt.model_creation_utils.from_config(self.config_inference)
     self.rtol = 1e-05
     self.atol = 1e-08
     self.rng = jax.random.PRNGKey(self.config.init_weights_seed)
