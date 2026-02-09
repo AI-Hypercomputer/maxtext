@@ -17,6 +17,8 @@
 
 import os
 import jax
+import functools
+from flax.linen import partitioning as nn_partitioning
 from MaxText import sharding
 from MaxText import optimizers
 from MaxText.rampup_batch import create_rampup_manager
@@ -28,6 +30,7 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+from maxtext.trainers.diloco import diloco
 
 
 def create_training_tools(config, model, mesh):
@@ -83,15 +86,22 @@ def create_training_tools(config, model, mesh):
 
 def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings):
   """Returns a JIT-compiled train step function, which is loaded from a file if specified in the config."""
-  (
-      functional_train,
-      in_shardings,
-      out_shardings,
-      static_argnums,
-      donate_argnums,
-  ) = maxtext_utils.get_functional_train_with_signature(
-      train_step, data_sharding, state_mesh_shardings, model, config, params_shardings
-  )
+  if config.enable_diloco:
+    functional_train = train_step
+    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+    out_shardings = (state_mesh_shardings, None)  # State, metrics
+    static_argnums = ()  # We partial out the static argnums of model and config
+    donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  else:
+    (
+        functional_train,
+        in_shardings,
+        out_shardings,
+        static_argnums,
+        donate_argnums,
+    ) = maxtext_utils.get_functional_train_with_signature(
+        train_step, data_sharding, state_mesh_shardings, model, config, params_shardings
+    )
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":
@@ -147,6 +157,9 @@ def jit_train_and_eval_step(
     params_shardings=None,
 ):
   """Returns a JIT-compiled train and eval step function."""
+  if config.enable_diloco:
+    train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
+    train_step = diloco.build_diloco_train_step(config, train_step_partial)
   data_sharding = sharding.get_input_data_sharding(config, mesh)
   p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings)
   p_eval_step = None
@@ -210,6 +223,19 @@ def setup_train_loop(config, recorder, devices=None):
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
         model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
     )
+
+    if config.enable_diloco:
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+        state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state)
+
+        # create state_mesh_shardings for the DilocoState
+        inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
+        state_mesh_shardings = diloco.DiLoCoTrainState(
+            inner_state_shardings,
+            state_mesh_shardings.params,
+            outer_opt_state_sharding,
+            jax.sharding.NamedSharding(mesh=state_mesh_shardings.step.mesh, spec=jax.sharding.PartitionSpec()),
+        )
 
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
     if not config.using_pipeline_parallelism and not config.use_multimodal:
