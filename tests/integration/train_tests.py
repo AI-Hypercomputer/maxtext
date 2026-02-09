@@ -18,6 +18,7 @@ import unittest
 import pytest
 import jax
 
+from jax._src import test_util as jtu
 from absl.testing import absltest
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
@@ -563,6 +564,8 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_ring_attention(self):
+    if jtu.is_device_rocm():
+      pytest.skip("TE ring attention context parallelism not supported on ROCm.")
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"  # Disable scan for ring attention
     ring_attention = [  # tests base config on GPU with ring attention
