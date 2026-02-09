@@ -20,6 +20,9 @@ import sys
 from typing import Any
 import copy
 
+# Disable dill to avoid conflict with gfile (dill requires buffering=0, which gfile forbids)
+os.environ["HF_DATASETS_DISABLE_DILL"] = "1"
+
 import jax
 import jax.numpy as jnp
 

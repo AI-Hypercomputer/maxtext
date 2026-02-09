@@ -18,8 +18,6 @@ import ml_collections
 
 import jax
 
-import datasets
-
 import transformers
 
 import grain.python as grain
@@ -62,6 +60,8 @@ def vision_sft_preprocessing_pipeline(
     batch_size = global_batch_size // jax.process_count()
 
   # for multi-epoch with shuffle, shuffle each epoch with different seeds then concat
+  import datasets  # pylint: disable=import-outside-toplevel
+
   if config.enable_data_shuffling and config.num_epoch > 1:
     epoch_datasets = [dataset.shuffle(seed=config.data_shuffle_seed + i) for i in range(config.num_epoch)]
     dataset = datasets.concatenate_datasets(epoch_datasets)
@@ -215,6 +215,7 @@ def preprocessing_pipeline(
     num_epoch=1,
 ):
   """pipeline for preprocessing HF dataset"""
+  import datasets  # pylint: disable=import-outside-toplevel
 
   assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible by number of global devices."
   # Tunix GA requires per-micro-batch slicing at the data level,
@@ -377,6 +378,8 @@ def make_hf_train_iterator(
     process_indices_train,
 ):
   """Load, preprocess dataset and return iterators"""
+  import datasets  # pylint: disable=import-outside-toplevel
+
   train_ds = datasets.load_dataset(
       config.hf_path,
       name=config.hf_name,
@@ -433,6 +436,8 @@ def make_hf_eval_iterator(
     process_indices_eval,
 ):
   """Make Hugging Face evaluation iterator. Load and preprocess eval dataset: and return iterator."""
+  import datasets  # pylint: disable=import-outside-toplevel
+
   eval_ds = datasets.load_dataset(
       config.hf_path,
       name=config.hf_name,
