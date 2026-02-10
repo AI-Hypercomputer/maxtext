@@ -44,6 +44,7 @@ from MaxText.layers.moe import RoutedMoE
 from MaxText.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 from maxtext.inference import page_manager
 from maxtext.utils import max_utils
+from maxtext.scratch_code import gdn_pallas
 
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
@@ -54,6 +55,120 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
+def pallas_chunk_gated_delta_rule(
+    query: jax.Array,
+    key: jax.Array,
+    value: jax.Array,
+    g: jax.Array,
+    beta: jax.Array,
+    chunk_size: int = 64,
+    initial_state: None | jax.Array = None,
+    use_qk_norm_in_gdn: bool = False,
+    compute_dtype: jnp.dtype = jnp.bfloat16,
+) -> tuple[jax.Array, None | jax.Array]:
+  """
+  Pallas-accelerated version of Gated Delta Rule.
+  Uses JAX for pre-computation (S, A, w, u) and Pallas for the recurrent scan.
+  """
+  # =========================================================================
+  # STAGE 1: PREPARATION & PADDING (Identical to JAX Impl)
+  # =========================================================================
+  initial_dtype = query.dtype
+  if use_qk_norm_in_gdn:
+    from MaxText.layers.normalizations import l2norm 
+    query = l2norm(query, dim=-1, eps=1e-6)
+    key = l2norm(key, dim=-1, eps=1e-6)
+
+  g = g.astype(jnp.float32)
+  query = query.astype(compute_dtype)
+  key = key.astype(compute_dtype)
+  value = value.astype(compute_dtype)
+  beta = beta.astype(compute_dtype)
+
+  scale = jax.lax.rsqrt(jnp.array(query.shape[-1], dtype=jnp.float32)).astype(compute_dtype)
+  query = query * scale
+
+  B, S, H, K_dim = key.shape
+  V_dim = value.shape[-1]
+  
+  pad_len = (chunk_size - (S % chunk_size)) % chunk_size
+  if pad_len > 0:
+    pad_fn = lambda x, val=0.0: jnp.pad(x, ((0,0), (0, pad_len)) + ((0,0),)*(x.ndim-2), constant_values=val)
+    query = pad_fn(query)
+    key = pad_fn(key)
+    value = pad_fn(value)
+    g = pad_fn(g)
+    beta = pad_fn(beta)
+
+  num_chunks = query.shape[1] // chunk_size
+
+  def to_chunk(x):
+    return x.reshape(B, num_chunks, chunk_size, H, -1).transpose(0, 1, 3, 2, 4)
+  def to_chunk_scalar(x):
+    return x.reshape(B, num_chunks, chunk_size, H).transpose(0, 1, 3, 2)
+
+  q_c = to_chunk(query)
+  k_c = to_chunk(key)
+  v_c = to_chunk(value)
+  g_c = to_chunk_scalar(g)
+  beta_c = to_chunk_scalar(beta)
+
+  # =========================================================================
+  # STAGE 2: INTRA-CHUNK PRE-COMPUTATION (Identical to JAX Impl)
+  # =========================================================================
+  g_cumsum = jnp.cumsum(g_c, axis=-1)
+  k_beta = k_c * beta_c[..., None]
+  
+  S = jnp.matmul(k_c, k_beta.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
+  S = S.astype(jnp.float32)
+  g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
+  mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
+  g_diff = jnp.where(mask, g_diff, -1e30) 
+  S = S * jnp.exp(g_diff)
+  S = jnp.where(mask, S, 0.0)
+  
+  identity = jnp.eye(chunk_size, dtype=jnp.float32)
+  identity_broadcasted = jnp.broadcast_to(identity, S.shape)
+  A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
+
+  v_beta = v_c * beta_c[..., None]
+  u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
+  u_chunks = u_chunks.astype(compute_dtype)
+  
+  k_beta_g = k_beta.astype(jnp.float32) * jnp.exp(g_cumsum)[..., None]
+  w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
+  w_chunks = w_chunks.astype(compute_dtype)
+
+  # =========================================================================
+  # STAGE 3: INTER-CHUNK RECURRENCE (Pallas Kernel)
+  # =========================================================================
+  # Transpose to (Batch, Heads, NumChunks, ChunkSize, Dim) for Pallas
+  w_p = w_chunks.transpose(0, 2, 1, 3, 4)
+  u_p = u_chunks.transpose(0, 2, 1, 3, 4)
+  q_p = q_c.transpose(0, 2, 1, 3, 4)
+  k_p = k_c.transpose(0, 2, 1, 3, 4)
+  v_p = v_c.transpose(0, 2, 1, 3, 4)
+  g_p = g_cumsum.transpose(0, 2, 1, 3) 
+  beta_p = beta_c.transpose(0, 2, 1, 3)
+
+  # Invoke Kernel
+  o_pallas = gdn_pallas.gdn_pallas_layer(w_p, u_p, q_p, k_p, v_p, g_p, beta_p)
+
+  # Transpose output back to: (B, N, H, C, Dim)
+  o_chunks = o_pallas.transpose(0, 2, 1, 3, 4)
+
+  # =========================================================================
+  # STAGE 4: FINALIZATION
+  # =========================================================================
+  o = o_chunks.reshape(B, -1, H, V_dim)
+  
+  if pad_len > 0:
+    o = o[:, :S, :, :]
+  
+  o = o.astype(initial_dtype)
+    
+  return o, None # State retrieval not implemented in this Pallas kernel wrapper
+
 def jax_chunk_gated_delta_rule(
     query: jax.Array,
     key: jax.Array,
@@ -63,7 +178,7 @@ def jax_chunk_gated_delta_rule(
     chunk_size: int = 64,
     initial_state: None | jax.Array = None,
     use_qk_norm_in_gdn: bool = False,
-    compute_dtype: jnp.dtype = jnp.bfloat16,  # [NEW ARG] Defaults to bf16
+    compute_dtype: jnp.dtype = jnp.bfloat16,
 ) -> tuple[jax.Array, None | jax.Array]:
   """
   Optimized JAX implementation of Gated Delta Rule (Mixed Precision + Stability Fix).
@@ -470,8 +585,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # TODO(parambole): Pass and update cache state for jax_chunk_gated_delta_rule
     # core_attn_out shape: (B, S, H_v, D_v)
-    core_attn_out, _ = jax_chunk_gated_delta_rule(
-        query, key, value, g, beta, chunk_size=cfg.gdn_chunk_size, use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn, compute_dtype=cfg.dtype
+    # core_attn_out, _ = jax_chunk_gated_delta_rule(
+    #     query, key, value, g, beta, chunk_size=cfg.gdn_chunk_size, use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn, compute_dtype=cfg.dtype
+    # )
+    core_attn_out, _ = pallas_chunk_gated_delta_rule(
+        query, key, value, g, beta, 
+        chunk_size=cfg.gdn_chunk_size, 
+        use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn, 
+        compute_dtype=cfg.dtype
     )
 
     # =========================================================================
