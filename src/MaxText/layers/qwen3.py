@@ -29,6 +29,9 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
+from jax.sharding import PartitionSpec as P
+from jax.experimental.shard_map import shard_map
+
 from MaxText.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED, MODEL_MODE_TRAIN
 from MaxText.layers import attentions
 from MaxText.layers import initializers as max_initializers
@@ -65,10 +68,12 @@ def pallas_chunk_gated_delta_rule(
     initial_state: None | jax.Array = None,
     use_qk_norm_in_gdn: bool = False,
     compute_dtype: jnp.dtype = jnp.bfloat16,
+    mesh: Mesh | None = None, # <--- Added Mesh argument
 ) -> tuple[jax.Array, None | jax.Array]:
   """
   Pallas-accelerated version of Gated Delta Rule.
   Uses JAX for pre-computation (S, A, w, u) and Pallas for the recurrent scan.
+  Wraps the Pallas call in shard_map if a mesh is provided to handle partitioning.
   """
   # =========================================================================
   # STAGE 1: PREPARATION & PADDING (Identical to JAX Impl)
@@ -140,7 +145,7 @@ def pallas_chunk_gated_delta_rule(
   w_chunks = w_chunks.astype(compute_dtype)
 
   # =========================================================================
-  # STAGE 3: INTER-CHUNK RECURRENCE (Pallas Kernel)
+  # STAGE 3: INTER-CHUNK RECURRENCE (Pallas Kernel + shard_map)
   # =========================================================================
   # Transpose to (Batch, Heads, NumChunks, ChunkSize, Dim) for Pallas
   w_p = w_chunks.transpose(0, 2, 1, 3, 4)
@@ -151,8 +156,37 @@ def pallas_chunk_gated_delta_rule(
   g_p = g_cumsum.transpose(0, 2, 1, 3) 
   beta_p = beta_c.transpose(0, 2, 1, 3)
 
-  # Invoke Kernel
-  o_pallas = gdn_pallas.gdn_pallas_layer(w_p, u_p, q_p, k_p, v_p, g_p, beta_p)
+  # Invoke Kernel (With shard_map if mesh is provided)
+  if mesh is not None:
+      # Construct PartitionSpecs based on mesh axis names
+      # Standard MaxText: Batch -> 'data'/'fsdp', Heads -> 'tensor'/'model'
+      axis_names = mesh.axis_names
+      
+      batch_axes = [ax for ax in ('data', 'fsdp', 'fsdp_transpose', 'expert') if ax in axis_names]
+      batch_spec = tuple(batch_axes) if batch_axes else None
+      
+      head_axes = [ax for ax in ('tensor', 'model') if ax in axis_names]
+      head_spec = tuple(head_axes) if head_axes else None
+      
+      # Pallas Inputs: (Batch, Heads, NumChunks, ChunkSize, Dim)
+      # Map Batch -> batch_spec, Heads -> head_spec, others -> None (Replicated/Local)
+      in_specs = P(batch_spec, head_spec, None, None, None)
+      out_specs = P(batch_spec, head_spec, None, None, None)
+      scalar_specs = P(batch_spec, head_spec, None, None) # g, beta are rank 4
+
+      # Define Sharded Caller
+      sharded_gdn = shard_map(
+          gdn_pallas.gdn_pallas_layer,
+          mesh=mesh,
+          in_specs=(in_specs, in_specs, in_specs, in_specs, in_specs, scalar_specs, scalar_specs),
+          out_specs=out_specs,
+          check_rep=False 
+      )
+      
+      o_pallas = sharded_gdn(w_p, u_p, q_p, k_p, v_p, g_p, beta_p)
+  else:
+      # Single Device / No Mesh fallback
+      o_pallas = gdn_pallas.gdn_pallas_layer(w_p, u_p, q_p, k_p, v_p, g_p, beta_p)
 
   # Transpose output back to: (B, N, H, C, Dim)
   o_chunks = o_pallas.transpose(0, 2, 1, 3, 4)
@@ -167,7 +201,7 @@ def pallas_chunk_gated_delta_rule(
   
   o = o.astype(initial_dtype)
     
-  return o, None # State retrieval not implemented in this Pallas kernel wrapper
+  return o, None
 
 def jax_chunk_gated_delta_rule(
     query: jax.Array,
@@ -394,13 +428,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
   2. output = Linear_out(y)
   """
 
-  def __init__(self, config: Config, *, rngs: nnx.Rngs):
+  def __init__(self, config: Config, *, rngs: nnx.Rngs, mesh: Mesh=None):
     """
     Args:
       config: MaxText configuration object.
       rngs: The random number generators for initialization, passed by the nnx.to_linen wrapper.
     """
     self.config = config
+    self.mesh = mesh
     cfg = self.config
 
     in_features = cfg.emb_dim
@@ -592,7 +627,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         query, key, value, g, beta, 
         chunk_size=cfg.gdn_chunk_size, 
         use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn, 
-        compute_dtype=cfg.dtype
+        compute_dtype=cfg.dtype,
+        mesh=self.mesh
     )
 
     # =========================================================================
@@ -924,7 +960,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
           rngs=rngs,
       )
     else:
-      self.attention = Qwen3NextGatedDeltaNet(config=cfg, rngs=rngs)
+      self.attention = Qwen3NextGatedDeltaNet(config=cfg, rngs=rngs, mesh=self.mesh)
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
