@@ -18,7 +18,7 @@ def gdn_scan_kernel_tpu(
 ):
     # 1. Load Initial State from HBM to VMEM (SRAM)
     # We use [0,0, ...] because the grid maps (Batch, Head) to a single block here.
-    h = h_init_ref[0, 0, 0].astype(jnp.float32)
+    h = h_init_ref[0, 0].astype(jnp.float32)
 
     for i in range(num_chunks):
         # 2. Load Inputs
