@@ -18,6 +18,7 @@ def gdn_scan_kernel_tpu(
     # Initialize State h in VMEM (SRAM)
     h = jnp.zeros((key_dim, val_dim), dtype=jnp.float32)
 
+    # Standard loop over chunks (JAX unrolls this if num_chunks is static)
     for i in range(num_chunks):
         # Load Inputs (Indexing into the chunk dimension [0,0,i])
         w = w_ref[0, 0, i] 
@@ -46,8 +47,12 @@ def gdn_scan_kernel_tpu(
         o_ref[0, 0, i] = o_chunk.astype(dtype)
 
         # --- State Update ---
-        chunk_decay = jnp.exp(g[..., -1]) 
+        # FIX: Use explicit static indexing instead of [..., -1] to avoid dynamic_slice error
+        chunk_decay = jnp.exp(g[chunk_size - 1]) 
+        
+        # update = w.T @ u
         update = jnp.dot(w.astype(jnp.float32).T, u.astype(jnp.float32))
+        
         h = h * chunk_decay + update
 
 # ==============================================================================
