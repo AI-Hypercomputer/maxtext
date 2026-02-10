@@ -827,5 +827,37 @@ class TestLearningRateSchedules(unittest.TestCase):
     self.assertIn("wsd_decay_steps_fraction", str(cm.exception))
 
 
+class TestGetAbstractState(unittest.TestCase):
+  """Test class for get_abstract_state."""
+
+  def setUp(self):
+    self.config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        model_name="llama3.1-8b",
+        per_device_batch_size=1,
+        max_target_length=16,
+    )
+    devices_array = maxtext_utils.create_device_mesh(self.config)
+    self.mesh = Mesh(devices_array, self.config.mesh_axes)
+    quant = quantizations.configure_quantization(self.config)
+    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    self.rng = jax.random.PRNGKey(0)
+    self.tx = optax.adam(learning_rate=0.001)
+
+  def test_get_abstract_state(self):
+    """Tests that get_abstract_state returns abstract arrays."""
+    # get_abstract_state returns a tuple, the first element is the abstract state.
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(self.model, self.tx, self.config, self.rng, self.mesh, None)
+
+    # Check that params are abstract
+    param_leaves = jax.tree_util.tree_leaves(abstract_state.params)
+    self.assertTrue(all(isinstance(leaf, jax.ShapeDtypeStruct) for leaf in param_leaves))
+
+    # Check that opt_state is abstract
+    opt_state_leaves = jax.tree_util.tree_leaves(abstract_state.opt_state)
+    self.assertTrue(all(isinstance(leaf, jax.ShapeDtypeStruct) for leaf in opt_state_leaves))
+
+
 if __name__ == "__main__":
   unittest.main()
