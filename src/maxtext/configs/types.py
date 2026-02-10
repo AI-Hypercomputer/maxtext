@@ -288,6 +288,7 @@ class Checkpointing(BaseModel):
   lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
   load_full_state_path: PathStr = Field("", description="Loads the complete training state from a checkpoint path.")
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
+  load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
   async_checkpointing: bool = Field(True, description="If True, uses an asynchronous checkpointer for performance.")
   checkpoint_period: int = Field(10_000, description="The frequency (in steps) at which to save checkpoints.")
   max_num_checkpoints_to_keep: int | None = Field(None, description="Maximum number of checkpoints to keep.")

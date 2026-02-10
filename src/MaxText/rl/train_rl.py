@@ -358,10 +358,18 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     )
 
   # TODO: @mazumdera: change this to use lora
-  # TODO: @xfgu: instead of restoring a second time from GCS, can we just copy reference_model
-  # Load policy model
-  max_logging.log("Creating policy model with same config as reference model on trainer mesh")
-  actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
+  if trainer_config.load_checkpoint_only_once:
+    max_logging.log("Creating policy model by copying reference model instead of restoring from checkpoint again.")
+    with reference_mesh:
+      actor_base_model = nnx.clone(reference_model.base)
+      use_no_op_mappings = "maxtext_config" in trainer_config.vllm_additional_config
+      actor_model = TunixMaxTextAdapter(base_model=actor_base_model, use_no_op_mappings=use_no_op_mappings)
+      actor_model.config = None
+    actor_mesh = reference_mesh
+  else:
+    max_logging.log("Creating policy model with same config as reference model on trainer mesh")
+    actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
+
 
   if trainer_config.debug.rl:
     max_logging.log("Policy Model initialized successfully")
@@ -530,10 +538,22 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   # Start training
 
+  if trainer_config.load_checkpoint_only_once:
+    max_logging.log("Capturing reference model state before training.")
+    ref_state_before = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
+
   max_logging.warning("Starting RL training...")
 
   with reference_mesh, nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
     rl_trainer.train(train_dataset)
+
+  if trainer_config.load_checkpoint_only_once:
+    max_logging.log("Checking if reference model state changed during training.")
+    ref_state_after = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
+    check = jax.tree_util.tree_map(jax.numpy.array_equal, ref_state_before, ref_state_after)
+    if not jax.tree_util.tree_all(check):
+      raise ValueError("Reference model parameters changed during training!")
+    max_logging.log("Reference model parameters verified to be unchanged during training.")
 
   max_logging.warning("RL Training Completed Successfully!")
 
