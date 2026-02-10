@@ -240,7 +240,7 @@ def run_comparison():
     # --- CONFIGURATION ---
     if backend == 'tpu':
         # REAL BENCHMARK SETTINGS (Heavy)
-        DTYPE = jnp.bloat16
+        DTYPE = jnp.bfloat16
         BATCH = 2
         SEQ_LEN = 4096      
         ITERS = 20          
