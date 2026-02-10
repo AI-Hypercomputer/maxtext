@@ -42,7 +42,7 @@ gdn_key_head_dim: 128
 gdn_value_head_dim: 128
 gdn_num_key_heads: 16
 gdn_num_value_heads: 32
-gdn_chunk_size: 64
+gdn_chunk_size: 128
 
 # RoPE Settings
 rope_max_timescale: 10000000

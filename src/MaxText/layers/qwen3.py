@@ -50,6 +50,10 @@ from maxtext.utils import max_utils
 # -----------------------------------------
 
 
+import jax
+import jax.numpy as jnp
+from jax import lax
+
 def jax_chunk_gated_delta_rule(
     query: jax.Array,
     key: jax.Array,
@@ -59,20 +63,32 @@ def jax_chunk_gated_delta_rule(
     chunk_size: int = 64,
     initial_state: None | jax.Array = None,
     use_qk_norm_in_gdn: bool = False,
-    matmul_precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
 ) -> tuple[jax.Array, None | jax.Array]:
   """
   Optimized JAX implementation of Gated Delta Rule using WY Representation.
   Ref: https://github.com/FLA-Computing/flash-linear-attention
+  
+  Precision: Updated to use float32 throughout for numerical stability, 
+  matching the highest precision standards.
   """
   # =========================================================================
   # STAGE 1: PREPARATION & PADDING
   # =========================================================================
   initial_dtype = query.dtype
+  
+  # 1. Normalization (if requested)
   if use_qk_norm_in_gdn:
-    from MaxText.layers.normalizations import l2norm # Ensure import exists
+    from MaxText.layers.normalizations import l2norm 
     query = l2norm(query, dim=-1, eps=1e-6)
     key = l2norm(key, dim=-1, eps=1e-6)
+
+  # 2. Precision Promotion: Cast everything to float32 immediately
+  # This matches the reference implementation to ensure high-precision accumulation
+  query = query.astype(jnp.float32)
+  key = key.astype(jnp.float32)
+  value = value.astype(jnp.float32)
+  g = g.astype(jnp.float32)
+  beta = beta.astype(jnp.float32)
 
   # Scale Query
   scale = jax.lax.rsqrt(jnp.array(query.shape[-1], dtype=jnp.float32))
@@ -110,6 +126,8 @@ def jax_chunk_gated_delta_rule(
   # =========================================================================
   # STAGE 2: INTRA-CHUNK PRE-COMPUTATION (Parallel)
   # =========================================================================
+  # Precision: All variables here are now float32
+  
   # Cumulative decay within chunks
   g_cumsum = jnp.cumsum(g_c, axis=-1)
   
@@ -118,25 +136,26 @@ def jax_chunk_gated_delta_rule(
   k_beta = k_c * beta_c[..., None]
   
   # S = k @ k_beta^T
+  # Use HIGHEST precision strictly
   S = jnp.matmul(k_c, k_beta.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
   
   # Decay for interaction: exp(g[i] - g[j])
+  # Note: calculating g_diff in float32 is crucial for stability
   g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
   S = S * jnp.exp(g_diff)
   
   # Mask strictly lower triangular
   mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
   S = jnp.where(mask, S, 0.0)
+  
   # Clip values to prevent numerical instability in the triangular solve
+  # (Though less likely to be needed with float32, still good safety)
   S = jnp.clip(S, -1e5, 1e5)
   
   # Solve A = (I + S)^-1
-  # Since S is strictly lower triangular, (I+S) is lower triangular with 1s on diagonal.
-  # We solve (I + S) * A = I
   identity = jnp.eye(chunk_size, dtype=S.dtype)
   identity_broadcasted = jnp.broadcast_to(identity, S.shape)
   
-  # Optimization: Use triangular solve instead of general solve
   A = jax.scipy.linalg.solve_triangular(
       identity + S, 
       identity_broadcasted, 
@@ -147,11 +166,13 @@ def jax_chunk_gated_delta_rule(
   # --- WY Representation ---
   # Compute U = A @ (v * beta)
   v_beta = v_c * beta_c[..., None]
-  u_chunks = jnp.matmul(A.astype(jnp.float32), v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST).astype(initial_dtype)
+  # Keep U in float32 (removed downcast to initial_dtype)
+  u_chunks = jnp.matmul(A, v_beta, precision=jax.lax.Precision.HIGHEST)
   
   # Compute W = A @ (k * beta * exp(g))
   k_beta_g = k_c * beta_c[..., None] * jnp.exp(g_cumsum)[..., None]
-  w_chunks = jnp.matmul(A.astype(jnp.float32), k_beta_g.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST).astype(initial_dtype)
+  # Keep W in float32 (removed downcast to initial_dtype)
+  w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
 
   # =========================================================================
   # STAGE 3: INTER-CHUNK RECURRENCE (Scan)
@@ -173,38 +194,37 @@ def jax_chunk_gated_delta_rule(
   chunk_decay_all = jnp.exp(g_cumsum[..., -1]).transpose(1, 0, 2)
 
   if initial_state is None:
-    h_init = jnp.zeros((B, H, K_dim, V_dim), dtype=initial_dtype)
+    h_init = jnp.zeros((B, H, K_dim, V_dim), dtype=jnp.float32)
   else:
-    h_init = initial_state
+    h_init = initial_state.astype(jnp.float32)
 
+  # All inputs to scan are now float32
   xs = (w_scan, u_scan, q_scan, k_scan, v_scan, g_scan, beta_scan, chunk_decay_all)
 
   def scan_body(h, args):
     w, u, q, k, v, g, beta, decay_val = args
+    # h is already float32, no casting needed
     
-    # --- Output Computation ---
+    # --- Output Computation (All in float32) ---
     # 1. Inter-chunk: q projected by state (decayed)
-    # q_g = q * exp(g)
     q_g = q * jnp.exp(g)[..., None]
-    term1 = jnp.matmul(q_g, h, precision=matmul_precision)
+    term1 = jnp.matmul(q_g, h, precision=jax.lax.Precision.HIGHEST)
     
     # 2. Intra-chunk: Standard causal attention
-    # attn = (q @ k.T) * decay_diff * beta
-    attn = jnp.matmul(q, k.swapaxes(-1, -2), precision=matmul_precision)
+    attn = jnp.matmul(q, k.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
     attn = attn * jnp.exp(g[..., :, None] - g[..., None, :])
     attn = jnp.where(jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool)), attn, 0.0)
     attn = attn * beta[..., None, :]
     
-    term2 = jnp.matmul(attn, v, precision=matmul_precision)
+    term2 = jnp.matmul(attn, v, precision=jax.lax.Precision.HIGHEST)
     
     o_c = term1 + term2
     
     # --- State Update (WY Form) ---
     # h_new = h * chunk_decay + W^T @ U
-    # This removes the dependency on calculating 'v_new' (delta) explicitly inside the loop
     decay_expanded = decay_val[..., None, None] # (B, H, 1, 1)
     
-    update = jnp.matmul(w.swapaxes(-1, -2), u, precision=matmul_precision)
+    update = jnp.matmul(w.swapaxes(-1, -2), u, precision=jax.lax.Precision.HIGHEST)
     h_new = h * decay_expanded + update
     
     return h_new, o_c
@@ -221,6 +241,9 @@ def jax_chunk_gated_delta_rule(
   
   if pad_len > 0:
     o = o[:, :S, :, :]
+  
+  # Cast back to original dtype only at the very end
+  o = o.astype(initial_dtype)
     
   return o, (final_h if initial_state is not None else None)
 
@@ -441,7 +464,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # TODO(parambole): Pass and update cache state for jax_chunk_gated_delta_rule
     # core_attn_out shape: (B, S, H_v, D_v)
     core_attn_out, _ = jax_chunk_gated_delta_rule(
-        query, key, value, g, beta, chunk_size=cfg.gdn_chunk_size, use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn, matmul_precision=cfg.matmul_precision
+        query, key, value, g, beta, chunk_size=cfg.gdn_chunk_size, use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn
     )
 
     # =========================================================================
@@ -607,7 +630,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
         dtype=cfg.dtype,
         kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", "vocab"),
+        kernel_axes=("embed", None),
         matmul_precision=cfg.matmul_precision,
         rngs=rngs,
     )
