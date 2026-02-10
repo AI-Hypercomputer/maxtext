@@ -525,7 +525,7 @@ def run_comparison():
             print(f"\n❌ CRITICAL FAIL at Step {step}: Parameters contain NaN or Inf after update!")
             return
 
-        print(f"  Step {step}: Loss = {loss_val:.6f} | Stability: OK")
+        print(f"  Step {step}: Loss = {float(loss_val):.6f} | Stability: OK")
 
     print(f"✅ Stability Stress Test Passed: No NaNs encountered in {TEST_STEPS} steps.")
 
