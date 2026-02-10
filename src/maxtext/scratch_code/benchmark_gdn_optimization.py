@@ -449,5 +449,85 @@ def run_comparison():
         
     print(f"Path: {PROFILE_DIR}")
 
+    # ==============================================================================
+    # PART E: STABILITY STRESS TEST (ADDITION)
+    # ==============================================================================
+    print("\n--- Stability Stress Test ---")
+
+    # 1. Define a training step that actually updates parameters (SGD)
+    def create_jitted_update_step(model, learning_rate=1e-4):
+        graphdef, params = nnx.split(model)
+        
+        @jax.jit
+        def train_update(params, x):
+            # Reconstruct model
+            m = nnx.merge(graphdef, params)
+            
+            def loss_fn(m_inner):
+                # Use a slightly more complex loss to encourage gradient flow
+                y = m_inner(x)
+                return jnp.mean(jnp.square(y))
+            
+            loss, grads = nnx.value_and_grad(loss_fn)(m)
+            
+            # Manual SGD Update: param = param - lr * grad
+            new_params = jax.tree_util.tree_map(
+                lambda p, g: p - learning_rate * g,
+                params, grads
+            )
+            return loss, grads, new_params
+            
+        return train_update, params
+
+    # 2. Initialize the update step
+    jit_update_opt, current_params = create_jitted_update_step(optimized_model)
+    
+    # 3. Run simulation loop
+    TEST_STEPS = 15
+    print(f"Running {TEST_STEPS} simulated training steps with FRESH inputs...")
+    
+    for step in range(1, TEST_STEPS + 1):
+        # Generate fresh random input to mimic varying data distribution
+        step_key = jax.random.fold_in(key, step * 100)
+        step_input = jax.random.normal(step_key, (BATCH, SEQ_LEN, HIDDEN_SIZE), dtype=DTYPE)
+        
+        # Perform update
+        loss_val, grads_val, current_params = jit_update_opt(current_params, step_input)
+        
+        # Block to ensure we catch the error at the specific step
+        jax.block_until_ready(loss_val)
+
+        # --- CHECKS ---
+        # 1. Check Loss
+        if jnp.isnan(loss_val) or jnp.isinf(loss_val):
+            print(f"\n❌ CRITICAL FAIL at Step {step}: Loss is {loss_val}!")
+            return
+
+        # 2. Check Gradients (Aggregate check)
+        grad_any_nan = jax.tree_util.tree_reduce(
+            lambda acc, x: acc or jnp.any(jnp.isnan(x)) or jnp.any(jnp.isinf(x)), 
+            grads_val, False
+        )
+        if grad_any_nan:
+            print(f"\n❌ CRITICAL FAIL at Step {step}: Gradients contain NaN or Inf!")
+            # Optional: Print which specific parameter exploded
+            # flat_grads, struct = jax.tree_util.tree_flatten(grads_val)
+            # for i, g in enumerate(flat_grads):
+            #     if jnp.any(jnp.isnan(g)): print(f"   -> Gradient index {i} is NaN")
+            return
+
+        # 3. Check Parameters
+        param_any_nan = jax.tree_util.tree_reduce(
+            lambda acc, x: acc or jnp.any(jnp.isnan(x)) or jnp.any(jnp.isinf(x)), 
+            current_params, False
+        )
+        if param_any_nan:
+            print(f"\n❌ CRITICAL FAIL at Step {step}: Parameters contain NaN or Inf after update!")
+            return
+
+        print(f"  Step {step}: Loss = {loss_val:.6f} | Stability: OK")
+
+    print(f"✅ Stability Stress Test Passed: No NaNs encountered in {TEST_STEPS} steps.")
+
 if __name__ == "__main__":
     run_comparison()
