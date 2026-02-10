@@ -36,7 +36,13 @@ _LOGGED_LOGICAL_AXES = set()
 
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
-  return create_sharding(mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules)
+  if config.enable_diloco:
+    data_sharding = create_sharding(
+        mesh, ["diloco"] + config.input_data_sharding_logical_axes, rules=config.logical_axis_rules
+    )
+  else:
+    data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules)
+  return data_sharding
 
 
 def maybe_shard_with_name(inputs, named_sharding, shard_mode, debug_sharding=False, extra_stack_level=0):
