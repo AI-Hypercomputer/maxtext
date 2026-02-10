@@ -163,14 +163,15 @@ def jax_chunk_gated_delta_rule(
   )
 
   # 5. WY Factors (Keep as float32 to preserve accuracy of the Inverse)
-  # u: f32 @ bf16 -> f32
+  # u: f32 @ bf16 -> f32 -> cast to compute_dtype (storage optimization)
   v_beta = v_c * beta_c[..., None]
   u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
+  u_chunks = u_chunks.astype(compute_dtype)
   
-  # w: f32 @ bf16 -> f32
-  # Note: exp(g) is f32, so k_term becomes f32
+  # w: f32 @ bf16 -> f32 -> cast to compute_dtype (storage optimization)
   k_beta_g = k_beta.astype(jnp.float32) * jnp.exp(g_cumsum)[..., None]
   w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
+  w_chunks = w_chunks.astype(compute_dtype)
 
   # =========================================================================
   # STAGE 3: INTER-CHUNK RECURRENCE (Scan)
@@ -232,6 +233,8 @@ def jax_chunk_gated_delta_rule(
     
     # w(f32) @ u(f32) -> f32
     update = jnp.matmul(w.swapaxes(-1, -2), u, precision=jax.lax.Precision.HIGHEST)
+    update = update.astype(jnp.float32)
+    
     h_new = h * decay_expanded + update
     
     return h_new, o_c
