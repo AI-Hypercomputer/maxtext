@@ -51,6 +51,7 @@ from jax.sharding import Mesh
 from transformers import AutoTokenizer
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
+from tunix.sft.utils import show_hbm_usage
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -329,10 +330,22 @@ def reshard_debug(trainer_config, sampler_config, trainer_devices, sampler_devic
   max_logging.log(
       "Calling rl_cluster.sync_weights() to reshard actor weights to rollout mesh..."
   )
-  with reference_mesh, nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
-    rl_cluster.sync_weights()
-    jax.block_until_ready(rl_cluster.rollout._sampler.transformer_state)
-  max_logging.log("Resharding via sync_weights() completed.")
+
+  key = jax.random.PRNGKey(42)
+  for step in range(100):
+    key, subkey = jax.random.split(key)
+    noise = jax.random.normal(subkey, ()) * 1e-3
+    # Update all actor weights to trigger full resharding
+    state = nnx.state(actor_model, nnx.Param)
+    new_state = jax.tree.map(lambda x: x + noise, state)
+    nnx.update(actor_model, new_state)
+
+    show_hbm_usage(f"HBM before step {step}:")
+    with reference_mesh, nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
+      rl_cluster.sync_weights()
+      jax.block_until_ready(rl_cluster.rollout._sampler.transformer_state)
+    show_hbm_usage(f"HBM after step {step}:")
+    max_logging.log(f"Resharding via sync_weights() completed: step {step}")
 
 
 def main(argv: Sequence[str]) -> None:
