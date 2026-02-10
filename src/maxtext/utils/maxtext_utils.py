@@ -115,7 +115,9 @@ def shard_reorder_causal_load_balanced(batch, cp_size, shard_mode):
   reordered = max_utils.reorder_causal_load_balanced(batch, cp_size)
   for _, v in batch.items():
     if isinstance(v, jax.Array):
-      reordered = sharding.maybe_shard_with_name(reordered, v.sharding, shard_mode)
+      reordered = sharding.maybe_shard_with_name(
+          reordered, v.sharding, shard_mode, sharding_desc="maxtext_utils/reordered"
+      )
       break
   return reordered
 

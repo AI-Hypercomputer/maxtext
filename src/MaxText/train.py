@@ -429,7 +429,7 @@ def train_loop(config, recorder, state=None):
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data:
-      state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
+      state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode, sharding_desc="train/state")
     maxtext_utils.maybe_dump_jaxpr(config, p_train_step, (state, shaped_batch, init_rng))
     if config.compiled_trainstep_file == "":  # compile only when there is no pre-compiled file loaded
       compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
@@ -455,7 +455,9 @@ def train_loop(config, recorder, state=None):
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             if config.shard_optimizer_over_data:
-              state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
+              state = sharding.maybe_shard_with_name(
+                  state, state_mesh_shardings, config.shard_mode, sharding_desc="train/state"
+              )
             state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion

@@ -127,23 +127,28 @@ class DeepSeekGenericLayer(nnx.Module):
     """Executes the MLP operation. To be implemented by subclasses."""
     raise NotImplementedError()
 
-  def with_logical_constraint(self, x):
+  def with_logical_constraint(self, x, sharding_desc="deepseek/x"):
     return maybe_shard_with_logical(
         x,
         logical_axes=self.logical_axis_names,
         mesh=self.mesh,
         shard_mode=self.config.shard_mode,
         debug_sharding=self.config.debug_sharding,
+        sharding_desc=sharding_desc,
     )
 
   def dropout_op(self, x, deterministic):
-    return self.with_logical_constraint(self.dropout(x, deterministic=deterministic))
+    return self.with_logical_constraint(self.dropout(x, deterministic=deterministic), sharding_desc="deepseek/dropout")
 
   def pre_attention_norm_op(self, x):
-    return self.with_logical_constraint(self.pre_self_attention_layer_norm(x))
+    return self.with_logical_constraint(
+        self.pre_self_attention_layer_norm(x), sharding_desc="deepseek/pre_attention_norm"
+    )
 
   def post_attention_norm_op(self, x):
-    return self.with_logical_constraint(self.post_self_attention_layer_norm(x))
+    return self.with_logical_constraint(
+        self.post_self_attention_layer_norm(x), sharding_desc="deepseek/post_attention_norm"
+    )
 
   def attention_op(
       self,
@@ -168,7 +173,7 @@ class DeepSeekGenericLayer(nnx.Module):
         page_state=page_state,
         slot=slot,
     )
-    return self.with_logical_constraint(attention_result)
+    return self.with_logical_constraint(attention_result, sharding_desc="deepseek/attention_result")
 
   @property
   def logical_axis_names(self):
@@ -276,7 +281,8 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
 
   def mlp_op(self, x, deterministic):
     return self.with_logical_constraint(
-        self.mlp(x, deterministic, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding)
+        self.mlp(x, deterministic, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding),
+        sharding_desc="deepseek/mlp",
     )
 
   def __call__(
@@ -295,7 +301,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-    x = self.with_logical_constraint(inputs)
+    x = self.with_logical_constraint(inputs, sharding_desc="deepseek/inputs")
     x = checkpoint_name(x, "decoder_layer_input")
 
     hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
@@ -381,7 +387,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       )
       return outputs, None
 
-    x = self.with_logical_constraint(inputs)
+    x = self.with_logical_constraint(inputs, sharding_desc="deepseek/inputs")
     x = checkpoint_name(x, "decoder_layer_input")
 
     hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
@@ -405,7 +411,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(
         x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
     )
-    return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates
+    return self.with_logical_constraint(mlp_lnx, sharding_desc="deepseek/mlp_lnx"), load_balance_loss, moe_bias_updates
 
 
 DeepSeekMoELayerToLinen = nnx_wrappers.to_linen_class(

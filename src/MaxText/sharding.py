@@ -62,7 +62,7 @@ def maybe_shard_with_name(
       sharding_desc = "Unknown"
     if not logical_axes:
       logical_axes = "Unknown"
-    max_logging.info(f"{sharding_desc} named_sharding {named_sharding}")
+    max_logging.info(f"{sharding_desc} named_sharding {named_sharding}", stacklevel=3 + extra_stack_level)
     pspec = remove_size_one_mesh_axis(getattr(named_sharding, "spec"), getattr(named_sharding, "mesh"))
     log_key = (sharding_desc, str(jax.typeof(inputs)), tuple(pspec), extra_stack_level)
     if log_key not in _LOGGED_ACTIVATION_SHARDINGS:

@@ -136,13 +136,14 @@ class Pipeline(nn.Module):
         sharding_desc=sharding_desc,
     )
 
-  def _maybe_shard_with_name(self, inputs, sharding_name):
+  def _maybe_shard_with_name(self, inputs, sharding_name, sharding_desc=""):
     """Wrapper of maybe_shard_with_name"""
     return maybe_shard_with_name(
         inputs,
         sharding_name,
         shard_mode=self.config.shard_mode,
         debug_sharding=self.config.debug_sharding,
+        sharding_desc=sharding_desc,
     )
 
   def init_states(self, inputs):
@@ -283,7 +284,7 @@ class Pipeline(nn.Module):
     else:
       pspec = P(*dims_mapping)
     sharding = jax.sharding.NamedSharding(self.mesh, pspec)
-    return self._maybe_shard_with_name(x, sharding)
+    return self._maybe_shard_with_name(x, sharding, sharding_desc="pipeline/x")
 
   def get_microbatch_and_repeat_ids(self, loop_iteration):
     """Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and
@@ -774,7 +775,7 @@ class Pipeline(nn.Module):
         self._remove_fsdp_from_physical_partition_spec, physical_partition_spec
     )
     return jax.tree.map(
-        lambda w, p: self._maybe_shard_with_name(w, NamedSharding(self.mesh, p)),
+        lambda w, p: self._maybe_shard_with_name(w, NamedSharding(self.mesh, p), sharding_desc="pipeline/w"),
         variables,
         physical_partition_spec_no_fsdp,
     )
@@ -808,7 +809,7 @@ class Pipeline(nn.Module):
     ag_sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(None, None))
     if positions is not None:
       # AG positions
-      positions = self._maybe_shard_with_name(positions, ag_sharding)
+      positions = self._maybe_shard_with_name(positions, ag_sharding, sharding_desc="pipeline/positions")
 
       positions = positions.reshape(
           (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
@@ -819,7 +820,7 @@ class Pipeline(nn.Module):
       example_position = None
       position_idx = None
     if segment_ids is not None:
-      segment_ids = self._maybe_shard_with_name(segment_ids, ag_sharding)
+      segment_ids = self._maybe_shard_with_name(segment_ids, ag_sharding, sharding_desc="pipeline/segment_ids")
       segment_ids = segment_ids.reshape(
           (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
       )

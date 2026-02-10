@@ -95,11 +95,11 @@ def vocab_tiling_linen_loss(
   def _reshape(inputs, out_shape, out_sharding):
     reshape_out_sharding = out_sharding if config.shard_mode == ShardMode.EXPLICIT else None
     inputs = jax.lax.reshape(inputs, out_shape, out_sharding=reshape_out_sharding)
-    return _maybe_shard_with_name(inputs, out_sharding)
+    return _maybe_shard_with_name(inputs, out_sharding, sharding_desc="vocabulary_tiling/inputs")
 
-  hidden_states = _maybe_shard_with_name(hidden_states, hidden_spec)
-  labels = _maybe_shard_with_name(labels, label_spec)
-  segmentation = _maybe_shard_with_name(segmentation, label_spec)
+  hidden_states = _maybe_shard_with_name(hidden_states, hidden_spec, sharding_desc="vocabulary_tiling/hidden_states")
+  labels = _maybe_shard_with_name(labels, label_spec, sharding_desc="vocabulary_tiling/labels")
+  segmentation = _maybe_shard_with_name(segmentation, label_spec, sharding_desc="vocabulary_tiling/segmentation")
   # TODO (chengnuojin) all gather only embedding table instead of all params after NNX module is enabled
   gathered_params = all_gather_over_fsdp(params, param_spec, model.mesh, config.logical_axis_rules, config.shard_mode)
 
@@ -125,9 +125,13 @@ def vocab_tiling_linen_loss(
     # Scan body accumulates loss from each tile given chunked hidden states and labels
     def _fwd_scan_body(loss_accumulator, chunk_data):
       hidden_chunk, label_chunk, segmentation_chunk = chunk_data
-      hidden_chunk = _maybe_shard_with_name(hidden_chunk, chunked_hidden_spec)
-      label_chunk = _maybe_shard_with_name(label_chunk, chunked_data_spec)
-      segmentation_chunk = _maybe_shard_with_name(segmentation_chunk, chunked_data_spec)
+      hidden_chunk = _maybe_shard_with_name(
+          hidden_chunk, chunked_hidden_spec, sharding_desc="vocabulary_tiling/hidden_chunk"
+      )
+      label_chunk = _maybe_shard_with_name(label_chunk, chunked_data_spec, sharding_desc="vocabulary_tiling/label_chunk")
+      segmentation_chunk = _maybe_shard_with_name(
+          segmentation_chunk, chunked_data_spec, sharding_desc="vocabulary_tiling/segmentation_chunk"
+      )
 
       # Calculate logits for the current chunk
       chunk_logits = model.apply(
@@ -136,7 +140,9 @@ def vocab_tiling_linen_loss(
           deterministic=deterministic,
           method="logits_from_hidden_states",
       )
-      chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
+      chunk_logits = _maybe_shard_with_name(
+          chunk_logits, chunked_logits_spec, sharding_desc="vocabulary_tiling/chunk_logits"
+      )
       one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
       chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk)
       masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
@@ -171,7 +177,9 @@ def vocab_tiling_linen_loss(
           deterministic=deterministic,
           method="logits_from_hidden_states",
       )
-      chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
+      chunk_logits = _maybe_shard_with_name(
+          chunk_logits, chunked_logits_spec, sharding_desc="vocabulary_tiling/chunk_logits"
+      )
       one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size)
       xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk)
       return jnp.sum(xent * (input_segmentation_chunk != 0))
@@ -180,9 +188,13 @@ def vocab_tiling_linen_loss(
       hidden_chunk, label_chunk, segmentation_chunk = chunk_data
 
       # Apply sharding constraints to the chunk data
-      hidden_chunk = _maybe_shard_with_name(hidden_chunk, chunked_hidden_spec)
-      label_chunk = _maybe_shard_with_name(label_chunk, chunked_data_spec)
-      segmentation_chunk = _maybe_shard_with_name(segmentation_chunk, chunked_data_spec)
+      hidden_chunk = _maybe_shard_with_name(
+          hidden_chunk, chunked_hidden_spec, sharding_desc="vocabulary_tiling/hidden_chunk"
+      )
+      label_chunk = _maybe_shard_with_name(label_chunk, chunked_data_spec, sharding_desc="vocabulary_tiling/label_chunk")
+      segmentation_chunk = _maybe_shard_with_name(
+          segmentation_chunk, chunked_data_spec, sharding_desc="vocabulary_tiling/segmentation_chunk"
+      )
 
       # Create a loss function closure that captures the current chunk's labels and segmentation.
       # This gives `jax.vjp` a function with the required signature: `loss(params, hidden_states)`.
@@ -194,7 +206,9 @@ def vocab_tiling_linen_loss(
 
       # 1.0 since total_loss is sum of all individual chunked loss
       (grad_params_update, grad_hidden_chunk) = vjp_fn(1.0)
-      grad_hidden_chunk = _maybe_shard_with_name(grad_hidden_chunk, chunked_hidden_spec)
+      grad_hidden_chunk = _maybe_shard_with_name(
+          grad_hidden_chunk, chunked_hidden_spec, sharding_desc="vocabulary_tiling/grad_hidden_chunk"
+      )
 
       grad_params_acc = jax.tree_util.tree_map(
           lambda acc, update: acc + update,
@@ -209,7 +223,9 @@ def vocab_tiling_linen_loss(
     grad_params, grad_reshaped_hidden_states = jax.lax.scan(
         _bwd_scan_body, initial_grad_params_acc, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
     )
-    grad_reshaped_hidden_states = _maybe_shard_with_name(grad_reshaped_hidden_states, reshaped_hidden_spec)
+    grad_reshaped_hidden_states = _maybe_shard_with_name(
+        grad_reshaped_hidden_states, reshaped_hidden_spec, sharding_desc="vocabulary_tiling/grad_reshaped_hidden_states"
+    )
     # TODO (chengnuojin): we may want to convert grad_params to bf16 to save memory
     # grad_params = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), gathered_params, grad_params)
     # Chain-rule to accumulate gradients
