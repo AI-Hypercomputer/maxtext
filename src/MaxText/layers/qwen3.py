@@ -68,15 +68,13 @@ def pallas_chunk_gated_delta_rule(
     initial_state: None | jax.Array = None,
     use_qk_norm_in_gdn: bool = False,
     compute_dtype: jnp.dtype = jnp.bfloat16,
-    mesh: Mesh | None = None, # <--- Added Mesh argument
+    mesh: Mesh | None = None,
 ) -> tuple[jax.Array, None | jax.Array]:
   """
   Pallas-accelerated version of Gated Delta Rule.
-  Uses JAX for pre-computation (S, A, w, u) and Pallas for the recurrent scan.
-  Wraps the Pallas call in shard_map if a mesh is provided to handle partitioning.
   """
   # =========================================================================
-  # STAGE 1: PREPARATION & PADDING (Identical to JAX Impl)
+  # STAGE 1: PREPARATION & PADDING
   # =========================================================================
   initial_dtype = query.dtype
   if use_qk_norm_in_gdn:
@@ -119,7 +117,7 @@ def pallas_chunk_gated_delta_rule(
   beta_c = to_chunk_scalar(beta)
 
   # =========================================================================
-  # STAGE 2: INTRA-CHUNK PRE-COMPUTATION (Identical to JAX Impl)
+  # STAGE 2: INTRA-CHUNK PRE-COMPUTATION
   # =========================================================================
   g_cumsum = jnp.cumsum(g_c, axis=-1)
   k_beta = k_c * beta_c[..., None]
@@ -156,39 +154,40 @@ def pallas_chunk_gated_delta_rule(
   g_p = g_cumsum.transpose(0, 2, 1, 3) 
   beta_p = beta_c.transpose(0, 2, 1, 3)
 
-  # Invoke Kernel (With shard_map if mesh is provided)
+  # Handle initial state
+  if initial_state is None:
+      h_init = jnp.zeros((B, H, K_dim, V_dim), dtype=compute_dtype)
+  else:
+      h_init = initial_state.astype(compute_dtype)
+
+  # Invoke Kernel
   if mesh is not None:
-      # Construct PartitionSpecs based on mesh axis names
-      # Standard MaxText: Batch -> 'data'/'fsdp', Heads -> 'tensor'/'model'
+      # Mesh Partitioning
       axis_names = mesh.axis_names
-      
       batch_axes = [ax for ax in ('data', 'fsdp', 'fsdp_transpose', 'expert') if ax in axis_names]
       batch_spec = tuple(batch_axes) if batch_axes else None
-      
       head_axes = [ax for ax in ('tensor', 'model') if ax in axis_names]
       head_spec = tuple(head_axes) if head_axes else None
       
-      # Pallas Inputs: (Batch, Heads, NumChunks, ChunkSize, Dim)
-      # Map Batch -> batch_spec, Heads -> head_spec, others -> None (Replicated/Local)
+      # Specs: B, H, ...
+      # h_init is (B, H, K, V)
       in_specs = P(batch_spec, head_spec, None, None, None)
-      out_specs = P(batch_spec, head_spec, None, None, None)
-      scalar_specs = P(batch_spec, head_spec, None, None) # g, beta are rank 4
+      scalar_specs = P(batch_spec, head_spec, None, None)
+      state_spec = P(batch_spec, head_spec, None, None)
 
-      # Define Sharded Caller
       sharded_gdn = shard_map(
           gdn_pallas.gdn_pallas_layer,
           mesh=mesh,
-          in_specs=(in_specs, in_specs, in_specs, in_specs, in_specs, scalar_specs, scalar_specs),
-          out_specs=out_specs,
+          in_specs=(in_specs, in_specs, in_specs, in_specs, in_specs, scalar_specs, scalar_specs, state_spec),
+          out_specs=(in_specs, state_spec), # Returns (out, final_state)
           check_rep=False 
       )
       
-      o_pallas = sharded_gdn(w_p, u_p, q_p, k_p, v_p, g_p, beta_p)
+      o_pallas, h_final = sharded_gdn(w_p, u_p, q_p, k_p, v_p, g_p, beta_p, h_init)
   else:
-      # Single Device / No Mesh fallback
-      o_pallas = gdn_pallas.gdn_pallas_layer(w_p, u_p, q_p, k_p, v_p, g_p, beta_p)
+      # Single Device
+      o_pallas, h_final = gdn_pallas.gdn_pallas_layer(w_p, u_p, q_p, k_p, v_p, g_p, beta_p, h_init)
 
-  # Transpose output back to: (B, N, H, C, Dim)
   o_chunks = o_pallas.transpose(0, 2, 1, 3, 4)
 
   # =========================================================================
@@ -201,7 +200,7 @@ def pallas_chunk_gated_delta_rule(
   
   o = o.astype(initial_dtype)
     
-  return o, None
+  return o, h_final
 
 def jax_chunk_gated_delta_rule(
     query: jax.Array,
