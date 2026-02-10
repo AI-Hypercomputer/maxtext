@@ -16,8 +16,7 @@ def gdn_scan_kernel_tpu(
     num_chunks: int, chunk_size: int, key_dim: int, val_dim: int,
     dtype: jnp.dtype = jnp.bfloat16
 ):
-    # 1. Load Initial State from HBM to VMEM (SRAM)
-    # We use [0,0, ...] because the grid maps (Batch, Head) to a single block here.
+    # 1. Load Initial State
     h = h_init_ref[0, 0].astype(jnp.float32)
 
     for i in range(num_chunks):
@@ -37,23 +36,27 @@ def gdn_scan_kernel_tpu(
         term1 = jnp.dot(q_g, h) 
 
         # Intra-chunk: (q @ k.T * decay) @ v
-        # QK^T
         attn = jnp.dot(q.astype(jnp.float32), k.astype(jnp.float32).T)
         
         # Decay: exp(g[i] - g[j])
-        # Note: g is (C,), so we broadcast to (C, C)
         g_diff = g.astype(jnp.float32)[:, None] - g.astype(jnp.float32)[None, :]
+        
+        # FIX: Apply mask BEFORE exp to prevent Inf * 0 = NaN
+        # Use float32 arithmetic for masking to avoid boolean type issues in Mosaic
+        mask_val = jnp.tri(chunk_size, dtype=jnp.float32)
+        
+        # For upper triangle (mask=0), set g_diff to -1e30 so exp() becomes 0
+        # g_diff_masked = g_diff * 1.0 + (1.0 - 0.0) * -1e30 = -1e30
+        large_neg = -1e30
+        g_diff = g_diff * mask_val + (1.0 - mask_val) * large_neg
+        
         attn_decay = jnp.exp(g_diff)
         attn = attn * attn_decay
 
-        # Masking (Causal)
-        mask_val = jnp.tri(chunk_size, dtype=jnp.float32)
-        attn = attn * mask_val
-        
-        # Gates
+        # Apply Beta gates
         attn = attn * beta.astype(jnp.float32)[:, None] 
         
-        # DV
+        # V projection
         term2 = jnp.dot(attn, v.astype(jnp.float32))
         
         o_chunk = term1 + term2
@@ -64,7 +67,7 @@ def gdn_scan_kernel_tpu(
         update = jnp.dot(w.astype(jnp.float32).T, u.astype(jnp.float32))
         h = h * chunk_decay + update
 
-    # 5. Store Final State to HBM
+    # 5. Store Final State
     h_final_ref[0, 0] = h.astype(dtype)
 
 # ==============================================================================
@@ -83,7 +86,6 @@ def _gdn_reference(w, u, q, k, v, g, beta, h_init):
     g_s = g.transpose(perm_scl)
     beta_s = beta.transpose(perm_scl)
     
-    # h_init is (B, H, K, V), ensure float32
     h_curr = h_init.astype(jnp.float32)
     B, H, N, C, Dk = k.shape
     
@@ -100,13 +102,12 @@ def _gdn_reference(w, u, q, k, v, g, beta, h_init):
         
         # Decay (g[i] - g[j])
         g_diff = gt[..., :, None] - gt[..., None, :]
-        attn = attn * jnp.exp(g_diff)
         
-        # Mask
+        # Mask before exp (match Pallas logic)
         mask = jnp.tril(jnp.ones((C, C), dtype=jnp.float32))
-        attn = attn * mask
+        g_diff = g_diff * mask + (1.0 - mask) * -1e30
         
-        # Beta
+        attn = attn * jnp.exp(g_diff)
         attn = attn * betat.astype(jnp.float32)[..., None]
         term2 = jnp.matmul(attn, vt.astype(jnp.float32))
         
@@ -136,16 +137,10 @@ def _gdn_pallas_forward(w, u, q, k, v, g, beta, h_init):
     _, _, _, _, Dv = v.shape
     
     # Specs
-    # We map grid (b,h) -> specific blocks for most inputs
-    # h_init has shape (B, H, K, V), so we map it to (1, 1, 1, K, V) effectively inside kernel logic
-    
     in_specs = pl.BlockSpec(index_map=lambda i, j: (i, j, 0, 0, 0), block_shape=(1, 1, N_chunks, C, Dk))
     val_specs = pl.BlockSpec(index_map=lambda i, j: (i, j, 0, 0, 0), block_shape=(1, 1, N_chunks, C, Dv))
     scalar_specs = pl.BlockSpec(index_map=lambda i, j: (i, j, 0, 0), block_shape=(1, 1, N_chunks, C))
     out_spec = pl.BlockSpec(index_map=lambda i, j: (i, j, 0, 0, 0), block_shape=(1, 1, N_chunks, C, Dv))
-    
-    # State Specs: Map (i,j) -> (i, j, :, :)
-    # We treat state as a "single block" of size (K, V) per head
     state_spec = pl.BlockSpec(index_map=lambda i, j: (i, j, 0, 0), block_shape=(1, 1, Dk, Dv))
 
     kernel_fn = functools.partial(
@@ -156,8 +151,8 @@ def _gdn_pallas_forward(w, u, q, k, v, g, beta, h_init):
     out, h_final = pl.pallas_call(
         kernel_fn,
         out_shape=[
-            jax.ShapeDtypeStruct((B, H, N_chunks, C, Dv), v.dtype), # Output
-            jax.ShapeDtypeStruct((B, H, Dk, Dv), v.dtype)           # Final State
+            jax.ShapeDtypeStruct((B, H, N_chunks, C, Dv), v.dtype), 
+            jax.ShapeDtypeStruct((B, H, Dk, Dv), v.dtype)
         ],
         grid=(B, H),
         in_specs=[in_specs, val_specs, in_specs, in_specs, val_specs, scalar_specs, scalar_specs, state_spec],
@@ -168,19 +163,12 @@ def _gdn_pallas_forward(w, u, q, k, v, g, beta, h_init):
     return (out, h_final), (w, u, q, k, v, g, beta, h_init)
 
 def _gdn_pallas_backward(residuals, grad_out_tuple):
-    # Unpack residuals and grads
-    # grad_out_tuple is (grad_output, grad_final_state)
-    grad_out, _ = grad_out_tuple # We typically ignore grad wrt final state in simplistic training
+    grad_out, _ = grad_out_tuple 
     w, u, q, k, v, g, beta, h_init = residuals
     
     _, vjp_fn = jax.vjp(_gdn_reference, w, u, q, k, v, g, beta, h_init)
     
-    # Backward pass via JAX reference
-    # JAX VJP expects gradients for all outputs. 
-    # If final state gradient is None/zeros, we can pass zeros or let JAX handle it if we only use first output.
-    # For safety, we construct a zero grad for h_final
     grad_h_final = jnp.zeros_like(h_init)
-    
     grads = vjp_fn((grad_out, grad_h_final))
     return grads
 
