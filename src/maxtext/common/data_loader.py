@@ -25,6 +25,7 @@ from maxtext.common.goodput import (
     maybe_record_goodput,
 )
 from maxtext.utils import exceptions
+from maxtext.trainers.diloco import diloco
 
 
 class DataLoader:
@@ -70,10 +71,13 @@ class DataLoader:
 
   def load_next_batch(self, *args, **kwargs):
     """Loads the next batch with sharding hint"""
-    return jax.device_put(
+    example_batch = jax.device_put(
         self.load_next_batch_pre_sharding(),
         self.input_data_shardings,
     )
+    if self.config.enable_diloco:
+      example_batch = diloco.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
+    return example_batch
 
   def check_example_batch(self):
     if self.config.max_checkify:
