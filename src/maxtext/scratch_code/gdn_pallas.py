@@ -107,5 +107,5 @@ def gdn_pallas_layer(w, u, q, k, v, g, beta):
         grid=grid,
         in_specs=[in_specs, val_specs, in_specs, in_specs, val_specs, scalar_specs, scalar_specs],
         out_specs=out_spec,
-        compiler_params=pltpu.TPUCompilerParams(dimension_semantics=("parallel", "parallel"))
+        compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "parallel"))
     )(w, u, q, k, v, g, beta)
