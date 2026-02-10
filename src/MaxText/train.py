@@ -440,8 +440,9 @@ def train_loop(config, recorder, state=None):
       max_utils.print_compiled_memory_stats(compiled_stats)
     elif config.pre_compile:
       # pre compile graph
-      p_train_step = p_train_step_lower.compile()
-      p_eval_step = p_eval_step_lower.compile()
+      eval_shaped_batch = maxtext_utils.get_shaped_batch_eval(config)
+      p_train_step = p_train_step.lower(state, shaped_batch, init_rng).compile()
+      p_eval_step = p_eval_step.lower(state, eval_shaped_batch, init_rng).compile()
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
@@ -465,17 +466,17 @@ def train_loop(config, recorder, state=None):
         # pylint: disable=not-callable
         #nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         nextrng = p_random_next(init_rng, step)
-        with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-            if config.shard_optimizer_over_data:
-              state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
-            state, metrics = p_train_step(state, example_batch, nextrng)
+        with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+          if config.shard_optimizer_over_data:
+            state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
+          state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()
 
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+      
+      #checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
       if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
         jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -511,8 +512,8 @@ def train_loop(config, recorder, state=None):
 
       prof.maybe_deactivate_profiler(step, state)
 
-      if step == start_step:
-        max_utils.print_mem_stats("After params initialized")
+      # if step == start_step:
+      #   max_utils.print_mem_stats("After params initialized")
 
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 

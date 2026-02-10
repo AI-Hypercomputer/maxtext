@@ -51,7 +51,7 @@ def init_print(config, start_step):
     mllogger.event(mllog.constants.SUBMISSION_BENCHMARK, mllog.constants.GPT3)
     mllogger.event(mllog.constants.OPT_NAME, mllog.constants.ADAM)
     mllogger.event(mllog.constants.OPT_BASE_LR, config.learning_rate)
-    mllogger.event(mllog.constants.OPT_END_LR, config.cosine_learning_rate_final_fraction)
+    mllogger.event(mllog.constants.OPT_END_LR, config.learning_rate_final_fraction)
     mllogger.event(mllog.constants.OPT_WEIGHT_DECAY, config.adam_weight_decay)
     mllogger.event(mllog.constants.OPT_LR_DECAY_STEPS,
                    int(config.learning_rate_schedule_steps * (1 - config.warmup_steps_fraction)))
