@@ -17,9 +17,11 @@
 import dataclasses
 import warnings
 from threading import current_thread
-from typing import Any
-import datasets
-from datasets.distributed import split_dataset_by_node
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+  import datasets
+
 import grain.python as grain
 import numpy as np
 import tensorflow as tf
@@ -145,6 +147,8 @@ def is_conversational(features, data_columns):
   data_columns = ["prompt", "completion"]
   is_conversational(features, data_columns) returns False.
   """
+  import datasets  # pylint: disable=import-outside-toplevel
+
   for column in data_columns:
     messages = features[column]
     if isinstance(messages, datasets.Sequence):
@@ -293,13 +297,16 @@ class HFDataSource(grain.RandomAccessDataSource):
 
   def __init__(
       self,
-      dataset: datasets.IterableDataset,
+      dataset: "datasets.IterableDataset",
       dataloading_host_index: int,
       dataloading_host_count: int,
       num_threads: int,
       max_target_length: int,
       data_column_names: list[str],
   ):
+    from datasets.distributed import split_dataset_by_node  # pylint: disable=import-outside-toplevel
+
+    self._split_dataset_by_node = split_dataset_by_node
     self.dataset = dataset
     self.num_threads = num_threads
     self.dataloading_host_count = dataloading_host_count
@@ -312,7 +319,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       self.n_shards = 1
     self._check_shard_count()
     self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range(self.num_threads)]
-    self.datasets = [split_dataset_by_node(dataset, world_size=self.n_shards, rank=x) for x in self.dataset_shards]
+    self.datasets = [self._split_dataset_by_node(dataset, world_size=self.n_shards, rank=x) for x in self.dataset_shards]
     self.data_iters = []
 
   def _check_shard_count(self):
@@ -333,7 +340,9 @@ class HFDataSource(grain.RandomAccessDataSource):
       )
       max_logging.log(f"New shard is {new_shard}")
       self.dataset_shards[idx] = new_shard
-      self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
+      self.datasets[idx] = self._split_dataset_by_node(
+          self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx]
+      )
       self.data_iters[idx] = iter(self.datasets[idx])
     else:
       raise StopIteration(f"Run out of shards on host {self.dataloading_host_index}, shard {new_shard} is not available")

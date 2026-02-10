@@ -23,8 +23,6 @@ The conversational dataset should conform to one of the two schemas:
 
 from dataclasses import dataclass, field
 
-import datasets
-
 from MaxText.input_pipeline import _input_pipeline_utils
 from maxtext.utils import max_logging
 
@@ -101,6 +99,8 @@ def process_dataset(config, dataset):  # pylint: disable=redefined-outer-name
 
 def load_dataset(config):  # pylint: disable=redefined-outer-name
   """Loads dataset from Hugging Face."""
+  import datasets  # pylint: disable=import-outside-toplevel
+
   assert config.dataset_type == "huggingface", "Only dataset from Hugging Face is supported."
 
   return datasets.load_dataset(

@@ -28,8 +28,6 @@ import numpy as np
 import jax
 from jax.sharding import Mesh
 
-import datasets
-
 import transformers
 
 import grain.python as grain
@@ -217,6 +215,8 @@ def make_hf_train_iterator(
   Returns:
     A local data iterator for the training set.
   """
+  import datasets  # pylint: disable=import-outside-toplevel
+
   train_ds = datasets.load_dataset(
       config.hf_path,
       data_dir=config.hf_data_dir,

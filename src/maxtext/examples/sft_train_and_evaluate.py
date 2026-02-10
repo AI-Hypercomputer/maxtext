@@ -78,7 +78,6 @@ from absl import app
 from tqdm.auto import tqdm
 from typing import Sequence
 
-import datasets
 import grain
 import os
 import re
@@ -140,6 +139,8 @@ def get_test_dataset(config, tokenizer):
     A grain.MapDataset instance for the test split, with prompts and target
     answers.
   """
+  import datasets  # pylint: disable=import-outside-toplevel
+
   template_config = instruction_data_processing.load_template_from_file(config.chat_template_path)
   dataset = datasets.load_dataset(
       DATASET_NAME,
