@@ -142,10 +142,13 @@ def jax_chunk_gated_delta_rule(
   # Decay for interaction: exp(g[i] - g[j])
   # Note: calculating g_diff in float32 is crucial for stability
   g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
-  S = S * jnp.exp(g_diff)
   
   # Mask strictly lower triangular
   mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
+  
+  g_diff = jnp.where(mask, g_diff, -1e30)
+  
+  S = S * jnp.exp(g_diff)
   S = jnp.where(mask, S, 0.0)
   
   # Clip values to prevent numerical instability in the triangular solve
@@ -212,8 +215,14 @@ def jax_chunk_gated_delta_rule(
     
     # 2. Intra-chunk: Standard causal attention
     attn = jnp.matmul(q, k.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
-    attn = attn * jnp.exp(g[..., :, None] - g[..., None, :])
-    attn = jnp.where(jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool)), attn, 0.0)
+    
+    # [CRITICAL FIX] Calculate g_diff and mask BEFORE exp
+    g_diff = g[..., :, None] - g[..., None, :]
+    mask_intra = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool))
+    g_diff = jnp.where(mask_intra, g_diff, -1e30)
+    
+    attn = attn * jnp.exp(g_diff)
+    attn = jnp.where(mask_intra, attn, 0.0)
     attn = attn * beta[..., None, :]
     
     term2 = jnp.matmul(attn, v, precision=jax.lax.Precision.HIGHEST)

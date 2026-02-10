@@ -511,9 +511,9 @@ def run_comparison():
         if grad_any_nan:
             print(f"\n❌ CRITICAL FAIL at Step {step}: Gradients contain NaN or Inf!")
             # Optional: Print which specific parameter exploded
-            # flat_grads, struct = jax.tree_util.tree_flatten(grads_val)
-            # for i, g in enumerate(flat_grads):
-            #     if jnp.any(jnp.isnan(g)): print(f"   -> Gradient index {i} is NaN")
+            flat_grads, struct = jax.tree_util.tree_flatten(grads_val)
+            for i, g in enumerate(flat_grads):
+                if jnp.any(jnp.isnan(g)): print(f"   -> Gradient index {i} is NaN")
             return
 
         # 3. Check Parameters
