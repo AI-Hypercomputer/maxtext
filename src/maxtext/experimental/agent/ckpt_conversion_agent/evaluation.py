@@ -17,8 +17,8 @@
 An evaluation gemini call to assess the generated-code vs. human-written code
 """
 
-from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template
-from MaxText.experimental.agent.ckpt_conversion_agent.base import BaseAgent
+from maxtext.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template
+from maxtext.experimental.agent.ckpt_conversion_agent.base import BaseAgent
 
 import argparse
 import zlib

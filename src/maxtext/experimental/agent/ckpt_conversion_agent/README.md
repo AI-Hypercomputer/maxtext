@@ -16,9 +16,9 @@ pip install -q -U "google-genai>=1.0.0"
 
 ## 1. Prepare the context file
 
-The agent requires context files about the target and source model's parameter names and tensor shapes. You can generate them using the [`save_param.py`](../ckpt_conversion_agent/utils/save_param.py) script. The output directory defined by `config.base_output_directory`. The default is `src/MaxText/experimental/agent/ckpt_conversion_agent/context/<model_name>` folder.
+The agent requires context files about the target and source model's parameter names and tensor shapes. You can generate them using the [`save_param.py`](../ckpt_conversion_agent/utils/save_param.py) script. The output directory defined by `config.base_output_directory`. The default is `src/maxtext/experimental/agent/ckpt_conversion_agent/context/<model_name>` folder.
 ```bash
-python3 -m MaxText.experimental.agent.ckpt_conversion_agent.utils.save_param src/maxtext/configs/base.yml \
+python3 -m maxtext.experimental.agent.ckpt_conversion_agent.utils.save_param src/maxtext/configs/base.yml \
   per_device_batch_size=1 run_name=param_<model_name> model_name=<model_name> scan_layers=false \
   --hf_model_config=<hf_model_id>
 ```
@@ -29,17 +29,17 @@ After it, you can get two `*.json` files in `config.base_output_directory` folde
 ### 2.1 Step 1: Generate the conversion plan and check DSL
 
 ```bash
-python3 -m MaxText.experimental.agent.ckpt_conversion_agent.step1 --target_model=<model_name> \
-  --dir_path=src/MaxText/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
+python3 -m maxtext.experimental.agent.ckpt_conversion_agent.step1 --target_model=<model_name> \
+  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
 ```
 
-Our engineer should check the `src/MaxText/experimental/agent/ckpt_conversion_agent/outputs/proposed_dsl.txt` for potential new DSL and assess if it's needed. Then we need to add this ops into `src/MaxText/experimental/agent/ckpt_conversion_agent/context/dsl.txt`.
+Our engineer should check the `src/maxtext/experimental/agent/ckpt_conversion_agent/outputs/proposed_dsl.txt` for potential new DSL and assess if it's needed. Then we need to add this ops into `src/maxtext/experimental/agent/ckpt_conversion_agent/context/dsl.txt`.
 
 ### 2.2 Step 2: Generate mappings
 
 ```bash
-python3 -m MaxText.experimental.agent.ckpt_conversion_agent.step2 --target_model=<model_name> \
-  --dir_path=src/MaxText/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
+python3 -m maxtext.experimental.agent.ckpt_conversion_agent.step2 --target_model=<model_name> \
+  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
 ```
 
 ## Evaluation and Debugging
@@ -52,8 +52,8 @@ You can automatically verify the output by comparing the generated code against 
 \*\**Note: This method is only possible if you have a ground-truth code implementation available for comparison.*
 
 ```bash
-python3 -m MaxText.experimental.agent.ckpt_conversion_agent.evaluation --files ground_truth/<model>.py \
-  outputs/hook_fn.py --api_key=<Your-API-KEY> --dir_path=src/MaxText/experimental/agent/ckpt_conversion_agent
+python3 -m maxtext.experimental.agent.ckpt_conversion_agent.evaluation --files ground_truth/<model>.py \
+  outputs/hook_fn.py --api_key=<Your-API-KEY> --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent
 ```
 
 ### Manual Debugging (No Ground-Truth Code)
@@ -120,6 +120,6 @@ Run the [One-shot agent Jyputer notebook](./baselines/one-shot-agent.ipynb)
 
 ### Prompt-chain Agent:
 ```bash
-python3 -m MaxText.experimental.agent.ckpt_conversion_agent.prompt_chain --target_model=<model_name> \
-  --dir_path=src/MaxText/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
+python3 -m maxtext.experimental.agent.ckpt_conversion_agent.prompt_chain --target_model=<model_name> \
+  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
 ```
