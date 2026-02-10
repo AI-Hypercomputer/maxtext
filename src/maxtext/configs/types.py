@@ -2205,8 +2205,12 @@ class MaxTextConfig(
     if self.use_sparse_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
-      if self.attention not in ("dot_product"):
-        raise ValueError("Sparse indexer is only supported dot_product attention")
+      supports_dot_product = self.attention == "dot_product"
+      supports_flash_splash = self.attention == "flash" and self.use_tokamax_splash
+      if not (supports_dot_product or supports_flash_splash):
+        raise NotImplementedError(
+            "Sparse indexer is only supported dot_product attention or flash attention with tokamax splash."
+        )
     if self.attention_type == AttentionType.CHUNK.value and (
         not isinstance(self.chunk_attn_window_size, int) or self.chunk_attn_window_size <= 0
     ):

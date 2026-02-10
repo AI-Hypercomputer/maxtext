@@ -767,7 +767,8 @@ class TrainCompile(unittest.TestCase):
             "megablox=True",
             "per_device_batch_size=1",
             "max_target_length=1024",
-            "attention=dot_product",  # TODO: update to flash attention when it's available.
+            "attention=flash",
+            "use_tokamax_splash=True",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             # without_device_limit
