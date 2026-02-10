@@ -18,7 +18,7 @@ def gdn_scan_kernel_tpu(
     # Initialize State h in VMEM (SRAM)
     h = jnp.zeros((key_dim, val_dim), dtype=jnp.float32)
 
-    # Standard loop over chunks (JAX unrolls this if num_chunks is static)
+    # Standard loop over chunks
     for i in range(num_chunks):
         # Load Inputs (Indexing into the chunk dimension [0,0,i])
         w = w_ref[0, 0, i] 
@@ -38,8 +38,13 @@ def gdn_scan_kernel_tpu(
 
         # Term 2: Intra-chunk Attention
         attn = jnp.dot(q.astype(jnp.float32), k.astype(jnp.float32).T)
-        mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool))
-        attn = jnp.where(mask, attn, 0.0) 
+        
+        # FIX: Use float32 arithmetic mask instead of bool to avoid Mosaic compilation error
+        # ("Unsupported target bitwidth for truncation" i8->i1)
+        # jnp.tri returns 1.0 on/below diagonal, 0.0 above.
+        mask_val = jnp.tri(chunk_size, dtype=jnp.float32)
+        attn = attn * mask_val
+        
         attn = attn * beta.astype(jnp.float32)[:, None] 
         term2 = jnp.dot(attn, v.astype(jnp.float32))
         
@@ -47,12 +52,9 @@ def gdn_scan_kernel_tpu(
         o_ref[0, 0, i] = o_chunk.astype(dtype)
 
         # --- State Update ---
-        # FIX: Use explicit static indexing instead of [..., -1] to avoid dynamic_slice error
+        # Explicitly use static indexing for the last element
         chunk_decay = jnp.exp(g[chunk_size - 1]) 
-        
-        # update = w.T @ u
         update = jnp.dot(w.astype(jnp.float32).T, u.astype(jnp.float32))
-        
         h = h * chunk_decay + update
 
 # ==============================================================================
@@ -89,8 +91,11 @@ def _gdn_reference(w, u, q, k, v, g, beta):
         
         # Term 2
         attn = jnp.matmul(qt.astype(jnp.float32), kt.astype(jnp.float32).swapaxes(-1, -2))
-        mask = jnp.tril(jnp.ones((C, C), dtype=bool))
-        attn = jnp.where(mask, attn, 0.0)
+        
+        # Reference masking (Logic matches jnp.tri)
+        mask = jnp.tril(jnp.ones((C, C), dtype=jnp.float32))
+        attn = attn * mask
+        
         attn = attn * betat.astype(jnp.float32)[..., None]
         term2 = jnp.matmul(attn, vt.astype(jnp.float32))
         
