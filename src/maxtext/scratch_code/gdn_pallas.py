@@ -65,7 +65,7 @@ def gdn_scan_kernel_tpu(
         h = h * chunk_decay + update
 
     # 5. Store Final State to HBM
-    h_final_ref[0, 0, 0] = h.astype(dtype)
+    h_final_ref[0, 0] = h.astype(dtype)
 
 # ==============================================================================
 # 2. JAX Reference Implementation (For Autodiff)
