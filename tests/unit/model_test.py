@@ -17,7 +17,6 @@ Model test.
 
 import sys
 import unittest
-import os.path
 
 import numpy as np
 import pytest
@@ -26,12 +25,13 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from MaxText import maxtext_utils
+from maxtext.utils import maxtext_utils
+from maxtext.common.gcloud_stub import is_decoupled
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
+from tests.utils.test_helpers import get_test_config_path
 
 MAX_PREFILL_PREDICT_LENGTH = 4
 
@@ -47,8 +47,10 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Init pyconfig."""
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -60,6 +62,7 @@ class TestModel(unittest.TestCase):
         base_num_kv_heads=2,
         max_prefill_predict_length=4,
         **kwargs,
+        **extra_args,
     )
     return config
 

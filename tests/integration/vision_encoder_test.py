@@ -30,13 +30,15 @@ import jax.numpy as jnp
 from flax.core.scope import VariableDict
 
 from MaxText import pyconfig
-from MaxText import multimodal_utils
 from MaxText.layers import models
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT, MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT, MAXTEXT_ASSETS_ROOT
 from MaxText import maxengine
+from tests.utils.test_helpers import get_test_config_path
+from maxtext.multimodal import processor_gemma3
+from maxtext.multimodal import utils as mm_utils
 
-pytestmark = pytest.mark.integration_test
 
+pytestmark = [pytest.mark.external_serving, pytest.mark.integration_test]
 
 # 4b with vit
 DEFAULT_LOAD_PARAMETERS_PATH = (
@@ -49,9 +51,9 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
   CONFIGS = {
       "gemma3-4b": [  # tests decode with multimodal gemma-4b
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          get_test_config_path(),
           "model_name=gemma3-4b",
-          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.gemma3')}",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.gemma3')}",
           "use_multimodal=True",
           "run_name=runner_test",
           f"load_parameters_path={DEFAULT_LOAD_PARAMETERS_PATH}",
@@ -81,8 +83,8 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     params = engine.load_params(rng_load_params)
 
     # Load and preprocess the image
-    images = multimodal_utils.load_image_from_path(config.image_path)
-    images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
+    images = mm_utils.load_image_from_path(config.image_path)
+    images = processor_gemma3.preprocess_mm_data_gemma3(images).pixel_values
     input_images = images[jnp.newaxis, jnp.newaxis, ...]  # pytype: disable=unsupported-operands
 
     # Initialize only the vision encoder part and extract the corresponding params

@@ -93,7 +93,7 @@ class ReferenceVisitor(ast.NodeVisitor):
       if base_name in self.git_aliases:
         # It's an external dependency. We need to format it with the attribute path.
         # Example: base_name='page_manager', attr_chain='PageState'
-        # self.git_dependencies['page_manager'] might be 'src/MaxText/inference/page_manager.py#page_manager'
+        # self.git_dependencies['page_manager'] might be 'src/maxtext/inference/page_manager.py#page_manager'
         path, obj = self.git_dependencies[base_name].split("#", 1)
 
         # As per the user request, we append the attribute access to the object name.
@@ -197,9 +197,9 @@ class DependencyAnalyzer:
     """Convert an absolute import line to a mapping of names to file anchors.
 
     Example:
-        "from MaxText.inference import page_manager, utils" ->
-        {"page_manager": "src/MaxText/inference.py#page_manager",
-         "utils": "src/MaxText/inference.py#utils"}
+        "from maxtext.inference import page_manager, utils" ->
+        {"page_manager": "src/maxtext/inference.py#page_manager",
+         "utils": "src/maxtext/inference.py#utils"}
 
     Args:
         path (str): A normalized absolute import string.
@@ -215,8 +215,8 @@ class DependencyAnalyzer:
       # or a module 'pkg' corresponds to 'path_form/pkg.py'
       # The logic in get_absolute_imports should ideally resolve this ambiguity.
       # A heuristic could be used here (e.g., checking casing) but we stick to the current logic.
-      # The user's example `from MaxText.inference import page_manager` creates a path
-      # `src/MaxText/inference.py#page_manager`, which is what the new visitor expects to correct.
+      # The user's example `from maxtext.inference import page_manager` creates a path
+      # `src/maxtext/inference.py#page_manager`, which is what the new visitor expects to correct.
       import_dict[pkg.strip()] = path_form + ".py#" + pkg.strip()
     return import_dict
 

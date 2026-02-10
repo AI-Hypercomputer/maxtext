@@ -66,7 +66,7 @@ from MaxText.layers.qwen3 import (
     Qwen3OmniMoeVisionPatchMerger as JaxQwen3OmniMoeVisionPatchMerger,
     Qwen3OmniMoeVisionProjector as JaxQwen3OmniMoeVisionProjector,
 )
-from MaxText.multimodal import preprocessor
+from maxtext.multimodal import processor as mm_processor
 from tests.utils.multimodal_test_utils import (
     assert_all_close_jax_torch,
     copy_attention_weights_to_maxtext,
@@ -83,7 +83,7 @@ from tests.utils.multimodal_test_utils import (
 )
 
 # Initialize config once for all tests
-base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "configs", "base.yml")
+base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
 jax_config = pyconfig.initialize(
     ["", base_config_path],
     model_name="qwen3-omni-30b-a3b",
@@ -584,7 +584,7 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
   """Test MaxText Qwen3 Omni preprocessor against HuggingFace reference."""
 
   def setUp(self):
-    self.base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "configs", "base.yml")
+    self.base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
     self.image_path = os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "test_image.jpg")
     self.video_path = os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "test_video.mp4")
     self.maxtext_config = pyconfig.initialize(
@@ -598,7 +598,7 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
 
   def test_preprocess_mm_data(self):
     # MaxText preprocessor
-    mt_processor_outputs = preprocessor.preprocess_mm_data(self.maxtext_config)
+    mt_processor_outputs = mm_processor.preprocess_mm_data(self.maxtext_config)
 
     # HuggingFace preprocessor
     from transformers import Qwen3OmniMoeProcessor  # pylint: disable=import-outside-toplevel

@@ -18,14 +18,15 @@ import time
 from typing import Any, Optional
 
 from absl import flags
+import datetime
 from etils import epath
 from flax.training import train_state
 import jax
-from MaxText import exceptions
-from MaxText import max_logging
 from MaxText.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 from MaxText.multihost_dataloading import MultiHostDataLoadIterator, RemoteIterator
 from MaxText.input_pipeline.input_pipeline_interface import PlaceHolderDataIterator
+from maxtext.utils import exceptions
+from maxtext.utils import max_logging
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint import v1 as ocp_v1
@@ -143,6 +144,9 @@ def _load_full_state_from_path(
     enable_orbax_v1,
     checkpoint_conversion_fn,
     source_checkpoint_layout,
+    checkpoint_storage_concurrent_gb,
+    use_ocdbt,
+    use_zarr3,
 ):
   """Load full state from checkpoint at specified path.
 
@@ -155,6 +159,9 @@ def _load_full_state_from_path(
       maxtext-supported state.
     source_checkpoint_layout: String representation of the checkpoint layout of
       the source checkpoint.
+    checkpoint_storage_concurrent_gb: concurrent GB for checkpoint byte I/O.
+    use_ocdbt: Whether to use OCDBT format.
+    use_zarr3: Whether to use Zarr3 format.
 
   Returns:
     The loaded state.
@@ -184,7 +191,17 @@ def _load_full_state_from_path(
   else:
     # Original v0 logic.
     p = epath.Path(path)
-    return ocp.StandardCheckpointer().restore(p, abstract_unboxed_pre_state)
+    handler = ocp.PyTreeCheckpointHandler(
+        restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+        save_concurrent_gb=checkpoint_storage_concurrent_gb,
+        use_ocdbt=use_ocdbt,
+        use_zarr3=use_zarr3,
+    )
+    # Provide sharding info to ensure restoration returns JAX arrays (not NumPy arrays).
+    restore_args = jax.tree_util.tree_map(
+        lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding), abstract_unboxed_pre_state
+    )
+    return ocp.Checkpointer(handler).restore(p, abstract_unboxed_pre_state, restore_args=restore_args)
 
 
 def create_orbax_checkpoint_manager(
@@ -198,6 +215,7 @@ def create_orbax_checkpoint_manager(
     use_zarr3: bool = True,
     enable_continuous_checkpointing: bool = False,
     max_num_checkpoints_to_keep: int = 10,
+    checkpoint_storage_concurrent_gb: int = 96,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -209,7 +227,14 @@ def create_orbax_checkpoint_manager(
   # Base configuration for all dataset types
   item_names = ("items",)
   # we need to use ocdbt and zarr3 to control max file size in the checkpoint
-  item_handlers = {"items": PyTreeCheckpointHandler(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)}
+  item_handlers = {
+      "items": PyTreeCheckpointHandler(
+          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+          save_concurrent_gb=checkpoint_storage_concurrent_gb,
+          use_ocdbt=use_ocdbt,
+          use_zarr3=use_zarr3,
+      )
+  }
 
   if dataset_type == "grain":
     item_names += ("iter",)
@@ -224,6 +249,11 @@ def create_orbax_checkpoint_manager(
   else:
     save_decision_policy = save_decision_policy_lib.FixedIntervalPolicy(interval=save_interval_steps)
     preservation_policy = preservation_policy_lib.LatestN(max_num_checkpoints_to_keep)
+  async_options = None
+  if enable_continuous_checkpointing:
+    async_options = ocp.AsyncOptions(
+        timeout_secs=int(datetime.timedelta(minutes=60).total_seconds()),
+    )
   manager = CheckpointManager(
       p,
       item_names=item_names,
@@ -233,6 +263,7 @@ def create_orbax_checkpoint_manager(
           enable_async_checkpointing=use_async,
           save_decision_policy=save_decision_policy,
           preservation_policy=preservation_policy,
+          async_options=async_options,
       ),
       logger=orbax_logger,
   )
@@ -596,6 +627,9 @@ def load_state_if_possible(
         enable_orbax_v1=enable_orbax_v1,
         checkpoint_conversion_fn=checkpoint_conversion_fn,
         source_checkpoint_layout=source_checkpoint_layout,
+        checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+        use_ocdbt=use_ocdbt,
+        use_zarr3=use_zarr3,
     )
     return {"items": restored_state}, None
   else:
@@ -701,6 +735,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   if config and config.enable_checkpointing:
     if (
         force
+        or (step % config.checkpoint_period == 0 and not config.enable_continuous_checkpointing)
         or (step % config.checkpoint_period == 0)
         or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
     ):

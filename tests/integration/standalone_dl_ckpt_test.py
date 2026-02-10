@@ -17,15 +17,29 @@ import unittest
 import pytest
 from tools.gcs_benchmarks.standalone_checkpointer import main as sckpt_main
 from tools.gcs_benchmarks.standalone_dataloader import main as sdl_main
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.common.gcloud_stub import is_decoupled
+
 from datetime import datetime
 import random
 import string
+import os
 import os.path
+from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
 
 class Standalone_DL_CKPT(unittest.TestCase):
   """Tests for standalone_checkpointer.py, checkpoint and restore."""
+
+  def setUp(self):
+    """Set up test fixtures before each test method."""
+    decoupled = is_decoupled()
+    self.dataset_path = get_test_dataset_path()
+    self.base_output_directory = (
+        os.environ.get("LOCAL_BASE_OUTPUT", get_test_base_output_directory())
+        if decoupled
+        else get_test_base_output_directory()
+    )
 
   def _get_random_test_name(self, test_name):
     now = datetime.now()
@@ -41,14 +55,14 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sdl_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"run_name={random_run_name}",
-            "base_output_directory=gs://runner-maxtext-logs",
-            "dataset_path=gs://maxtext-dataset",
+            f"base_output_directory={self.base_output_directory}",
+            f"dataset_path={self.dataset_path}",
             "steps=100",
             "enable_checkpointing=false",
             "enable_goodput_recording=False",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
         )
     )  # need to pass relative path to tokenizer
 
@@ -60,10 +74,10 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sckpt_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"run_name={random_run_name}",
-            "base_output_directory=gs://runner-maxtext-logs",
-            "dataset_path=gs://maxtext-dataset",
+            f"base_output_directory={self.base_output_directory}",
+            f"dataset_path={self.dataset_path}",
             "base_emb_dim=128",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -81,10 +95,10 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sckpt_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"run_name={random_run_name}",
-            "base_output_directory=gs://runner-maxtext-logs",
-            "dataset_path=gs://maxtext-dataset",
+            f"base_output_directory={self.base_output_directory}",
+            f"dataset_path={self.dataset_path}",
             "base_emb_dim=128",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",

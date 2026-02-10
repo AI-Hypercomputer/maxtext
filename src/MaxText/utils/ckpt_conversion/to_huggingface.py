@@ -40,7 +40,7 @@ Example Usage:
 
   export HF_AUTH_TOKEN="hf_YOUR_TOKEN"
   python src/MaxText/utils/ckpt_conversion/to_huggingface.py \
-    src/MaxText/configs/base.yml \
+    src/maxtext/configs/base.yml \
     model_name="gemma2-2b" \
     load_parameters_path="/path/to/your/maxtext/checkpoint/" \
     base_output_directory="/path/to/your/output/directory" \
@@ -60,9 +60,7 @@ from transformers import AutoTokenizer, AutoProcessor
 
 from absl import app
 
-from MaxText import max_utils
 from MaxText import pyconfig
-from MaxText import max_logging
 from MaxText.utils.ckpt_conversion.utils.param_mapping import (
     HOOK_FNS,
     PARAM_MAPPING,
@@ -79,6 +77,8 @@ from MaxText.utils.ckpt_conversion.utils.utils import (
     MemoryMonitorTqdm,
     print_peak_memory,
 )
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 
 
 def _get_model_mappings(

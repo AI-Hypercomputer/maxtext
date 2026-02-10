@@ -8,7 +8,7 @@ repos:
       - id: codespell
         args:
           - '-w'
-          - '--skip="*.txt,pylintrc,.*,src/MaxText/assets/*"'
+          - '--skip="*.txt,pylintrc,.*,src/maxtext/assets/*"'
           - '-L ND,nd,sems,TE,ROUGE,rouge,astroid,ags,dout'
           - '.'
         additional_dependencies:
@@ -31,7 +31,6 @@ repos:
           - '--disable=R0401,R0917,W0201,W0613'
           - "--ignore-patterns='.pytype,.*pyi$'"
           - 'benchmarks'
-          - 'end_to_end'
           - 'src'
           - 'tests'
 
@@ -57,6 +56,7 @@ repos:
     rev: 0.7.22
     hooks:
       - id: mdformat
+        args: ['--number']
         additional_dependencies: [mdformat-myst, mdformat-ruff]
         files: (docs/.)
         exclude: docs/guides/checkpointing_solutions.md

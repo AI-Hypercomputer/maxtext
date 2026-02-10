@@ -18,8 +18,9 @@ import os
 
 import jax
 
-from MaxText import max_logging
-from MaxText import max_utils
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
+from maxtext.common.gcloud_stub import is_decoupled
 
 from cloud_accelerator_diagnostics import tensorboard
 from cloud_accelerator_diagnostics import uploader
@@ -99,6 +100,10 @@ class VertexTensorboardManager:
 
   def configure_vertex_tensorboard(self, config):
     """Creates Vertex Tensorboard and start thread to upload data to Vertex Tensorboard."""
+    # Skip all Vertex related logic when decoupled from Google Cloud.
+    if is_decoupled():
+      max_logging.log("Decoupled mode -> Skipping Vertex Tensorboard configuration.")
+      return
     if jax.process_index() == 0:
       if not os.environ.get("TENSORBOARD_PROJECT"):
         if not config.vertex_tensorboard_project:

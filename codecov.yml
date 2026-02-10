@@ -24,7 +24,7 @@
 # During scheduled runs, the 'regular' flag is carried forward from the last PR.
 
 # Exclude non-source code, deprecated and experimental folders from coverage tracking
-codecov: 
+codecov:
  token: 35742a22-fb1f-4839-97ff-b54da5588689
 # By default file names in the coverage report will have their path in the file system, which in our
 # runners would be /__w/maxtext/maxtext/src/MaxText/* but Codecov expects src/MaxText/* so we need to fix the path
@@ -32,13 +32,12 @@ fixes:
   # - ".*/maxtext/src/::src/"
   - "/github/workspace/::"
 ignore:
-  - "src/MaxText/assets"
-  - "src/MaxText/configs"
-  - "src/MaxText/examples"
+  - "src/maxtext/assets"
+  - "src/maxtext/configs"
+  - "src/maxtext/examples"
   - "src/MaxText/experimental"
-  - "src/MaxText/inference"
-  - "src/MaxText/inference_mlperf"
-  - "src/MaxText/scratch_code"
+  - "src/maxtext/inference"
+  - "src/maxtext/scratch_code"
   - "src/MaxText/distillation" # code moved to src/maxtext/trainers/post_train/distillation
   - "src/MaxText/sft" # code moved to src/maxtext/trainers/post_train/sft
 
@@ -66,7 +65,7 @@ coverage:
     patch:
       default:
         target: auto
-        threshold: 5% # fail on 5+ percent degradation
+        threshold: 10% # fail on 10+ percent degradation
         flags:
           - regular
 

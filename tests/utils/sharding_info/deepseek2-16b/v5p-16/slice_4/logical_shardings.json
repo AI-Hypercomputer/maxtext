@@ -1,0 +1,980 @@
+{
+  ".step": {
+    "partition_spec": [],
+    "shape": []
+  },
+  ".params/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "partition_spec": [
+      "norm"
+    ],
+    "shape": [
+      2048
+    ]
+  },
+  ".params/['params']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  ".params/['params']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  ".params/['params']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']": {
+    "partition_spec": [
+      "mlp",
+      "dense_layers",
+      "embed"
+    ],
+    "shape": [
+      10944,
+      1,
+      2048
+    ]
+  },
+  ".params/['params']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "dense_layers"
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  ".params/['params']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "dense_layers"
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "dense_layers"
+    ],
+    "shape": [
+      512,
+      1
+    ]
+  },
+  ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "dense_layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      16,
+      1,
+      128,
+      2048
+    ]
+  },
+  ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2048,
+      1,
+      16,
+      192
+    ]
+  },
+  ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "kv_lora_up_proj"
+    ],
+    "shape": [
+      2048,
+      1,
+      576
+    ]
+  },
+  ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']": {
+    "partition_spec": [
+      "kv_lora",
+      "dense_layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      512,
+      1,
+      16,
+      256
+    ]
+  },
+  ".params/['params']/['decoder']/['logits_dense']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "vocab"
+    ],
+    "shape": [
+      2048,
+      102400
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      64
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']": {
+    "partition_spec": [
+      "exp",
+      "moe_layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']": {
+    "partition_spec": [
+      "exp",
+      "moe_layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']": {
+    "partition_spec": [
+      "exp",
+      "moe_layers",
+      "mlp",
+      "embed_no_exp"
+    ],
+    "shape": [
+      64,
+      26,
+      1408,
+      2048
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']": {
+    "partition_spec": [
+      "mlp",
+      "moe_layers",
+      "embed"
+    ],
+    "shape": [
+      2816,
+      26,
+      2048
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "moe_layers"
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "moe_layers"
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "moe_layers"
+    ],
+    "shape": [
+      512,
+      26
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "moe_layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      16,
+      26,
+      128,
+      2048
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2048,
+      26,
+      16,
+      192
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "kv_lora_up_proj"
+    ],
+    "shape": [
+      2048,
+      26,
+      576
+    ]
+  },
+  ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']": {
+    "partition_spec": [
+      "kv_lora",
+      "moe_layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      512,
+      26,
+      16,
+      256
+    ]
+  },
+  ".params/['params']/['token_embedder']/['embedding']": {
+    "partition_spec": [
+      "vocab",
+      "embed"
+    ],
+    "shape": [
+      102400,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.count": {
+    "partition_spec": [],
+    "shape": []
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "partition_spec": [
+      "norm"
+    ],
+    "shape": [
+      2048
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']": {
+    "partition_spec": [
+      "mlp",
+      "dense_layers",
+      "embed"
+    ],
+    "shape": [
+      10944,
+      1,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "dense_layers"
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "dense_layers"
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "dense_layers"
+    ],
+    "shape": [
+      512,
+      1
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "dense_layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      16,
+      1,
+      128,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2048,
+      1,
+      16,
+      192
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "kv_lora_up_proj"
+    ],
+    "shape": [
+      2048,
+      1,
+      576
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']": {
+    "partition_spec": [
+      "kv_lora",
+      "dense_layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      512,
+      1,
+      16,
+      256
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['logits_dense']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "vocab"
+    ],
+    "shape": [
+      2048,
+      102400
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      64
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']": {
+    "partition_spec": [
+      "exp",
+      "moe_layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']": {
+    "partition_spec": [
+      "exp",
+      "moe_layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']": {
+    "partition_spec": [
+      "exp",
+      "moe_layers",
+      "mlp",
+      "embed_no_exp"
+    ],
+    "shape": [
+      64,
+      26,
+      1408,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']": {
+    "partition_spec": [
+      "mlp",
+      "moe_layers",
+      "embed"
+    ],
+    "shape": [
+      2816,
+      26,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "moe_layers"
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "moe_layers"
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "moe_layers"
+    ],
+    "shape": [
+      512,
+      26
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "moe_layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      16,
+      26,
+      128,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2048,
+      26,
+      16,
+      192
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "kv_lora_up_proj"
+    ],
+    "shape": [
+      2048,
+      26,
+      576
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']": {
+    "partition_spec": [
+      "kv_lora",
+      "moe_layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      512,
+      26,
+      16,
+      256
+    ]
+  },
+  ".opt_state/[0]/.mu/['params']/['token_embedder']/['embedding']": {
+    "partition_spec": [
+      "vocab",
+      "embed"
+    ],
+    "shape": [
+      102400,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['decoder_norm']/['scale']": {
+    "partition_spec": [
+      "norm"
+    ],
+    "shape": [
+      2048
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']": {
+    "partition_spec": [
+      "mlp",
+      "dense_layers",
+      "embed"
+    ],
+    "shape": [
+      10944,
+      1,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "dense_layers"
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "dense_layers"
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "dense_layers"
+    ],
+    "shape": [
+      512,
+      1
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "dense_layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      16,
+      1,
+      128,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2048,
+      1,
+      16,
+      192
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "dense_layers",
+      "kv_lora_up_proj"
+    ],
+    "shape": [
+      2048,
+      1,
+      576
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']": {
+    "partition_spec": [
+      "kv_lora",
+      "dense_layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      512,
+      1,
+      16,
+      256
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['logits_dense']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "vocab"
+    ],
+    "shape": [
+      2048,
+      102400
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      64
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']": {
+    "partition_spec": [
+      "exp",
+      "moe_layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']": {
+    "partition_spec": [
+      "exp",
+      "moe_layers",
+      "embed_no_exp",
+      "mlp"
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']": {
+    "partition_spec": [
+      "exp",
+      "moe_layers",
+      "mlp",
+      "embed_no_exp"
+    ],
+    "shape": [
+      64,
+      26,
+      1408,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "mlp"
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']": {
+    "partition_spec": [
+      "mlp",
+      "moe_layers",
+      "embed"
+    ],
+    "shape": [
+      2816,
+      26,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "moe_layers"
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "moe_layers"
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']": {
+    "partition_spec": [
+      "norm",
+      "moe_layers"
+    ],
+    "shape": [
+      512,
+      26
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']": {
+    "partition_spec": [
+      "heads",
+      "moe_layers",
+      "kv",
+      "embed"
+    ],
+    "shape": [
+      16,
+      26,
+      128,
+      2048
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "q_heads",
+      "kv"
+    ],
+    "shape": [
+      2048,
+      26,
+      16,
+      192
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
+    "partition_spec": [
+      "embed",
+      "moe_layers",
+      "kv_lora_up_proj"
+    ],
+    "shape": [
+      2048,
+      26,
+      576
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']": {
+    "partition_spec": [
+      "kv_lora",
+      "moe_layers",
+      "kv_heads",
+      "kv_head_dim"
+    ],
+    "shape": [
+      512,
+      26,
+      16,
+      256
+    ]
+  },
+  ".opt_state/[0]/.nu/['params']/['token_embedder']/['embedding']": {
+    "partition_spec": [
+      "vocab",
+      "embed"
+    ],
+    "shape": [
+      102400,
+      2048
+    ]
+  },
+  ".opt_state/[2]/.count": {
+    "partition_spec": [],
+    "shape": []
+  }
+}

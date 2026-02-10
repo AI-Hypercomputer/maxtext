@@ -20,8 +20,17 @@ import unittest
 from absl.testing import absltest
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
-from MaxText.inference_microbenchmark import run_benchmarks
+from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
+from maxtext.common.gcloud_stub import is_decoupled
+
+pytestmark = [pytest.mark.external_serving]
+
+# Conditional import: only load when not in decoupled mode to avoid collection errors.
+# inference_microbenchmark depends on prefill_packing, which requires JetStream.
+if not is_decoupled():
+  from maxtext.inference.inference_microbenchmark import run_benchmarks
+else:
+  run_benchmarks = None  # Will never be called due to external_serving marker
 
 
 class Inference_Microbenchmark(unittest.TestCase):
@@ -34,8 +43,8 @@ class Inference_Microbenchmark(unittest.TestCase):
     config = pyconfig.initialize(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "tpu_smoke_test.yml"),
-            rf"tokenizer_path={os.path.join('src', MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            os.path.join(MAXTEXT_CONFIGS_DIR, "tpu", "tpu_smoke_test.yml"),
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "ici_autoregressive_parallelism=-1",
             "ici_fsdp_parallelism=1",
             "max_prefill_predict_length=1024",

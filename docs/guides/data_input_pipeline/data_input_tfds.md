@@ -6,7 +6,7 @@
 bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 ```
 
-2. In [`src/MaxText/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/base.yml) or through command line, set the following parameters:
+2. In [`src/maxtext/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/base.yml) or through command line, set the following parameters:
 
 ```yaml
 dataset_type: tfds
@@ -16,5 +16,5 @@ eval_interval: 10000
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
 # TFDS input pipeline only supports tokenizer in spm format
-tokenizer_path: 'src/MaxText/assets/tokenizer.llama2'
+tokenizer_path: 'src/maxtext/assets/tokenizers/tokenizer.llama2'
 ```

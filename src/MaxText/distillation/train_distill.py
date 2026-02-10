@@ -17,7 +17,7 @@
 import sys
 import importlib
 
-from MaxText import max_logging
+from maxtext.utils import max_logging
 
 OLD_MODULE_PATH = "MaxText.distillation.train_distill"
 NEW_MODULE_PATH = "maxtext.trainers.post_train.distillation.train_distill"

@@ -32,7 +32,6 @@ To run the test
 """
 
 
-import os.path
 import math
 from dataclasses import dataclass, asdict
 from typing import Optional
@@ -51,11 +50,11 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 from flax import nnx
 
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
-from MaxText import maxtext_utils
 from MaxText.layers import embeddings, attention_mla
 from MaxText.common_types import MODEL_MODE_TRAIN
+from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
 
 
 # -----------------------------------------------------------------------------
@@ -754,7 +753,7 @@ def get_jax_mla_weights(pt_mla, cfg):
 def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len):
   """Returns MaxText configuration and mesh."""
   cfg = pyconfig.initialize(
-      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      [None, get_test_config_path()],
       run_name=run_name,
       enable_checkpointing=False,
       model_name="default",

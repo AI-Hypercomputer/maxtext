@@ -25,12 +25,18 @@ before running tests locally.
 """
 
 from datetime import datetime
+import glob
 import json
 from math import isclose
 import os.path
+
+import jax
 import pytest
+
+from maxtext.common.gcloud_stub import is_decoupled
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.train import main as train_main
+from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
 
 
 def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention_type, dataset_type, dataset_path):
@@ -48,6 +54,7 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
   Returns:
     A list of strings representing the command line arguments.
   """
+  base_output_directory = get_test_base_output_directory()
   model_params = [
       "base_emb_dim=384",
       "base_num_query_heads=8",
@@ -62,10 +69,18 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
         "enable_single_controller=True",
         "checkpoint_storage_use_zarr3=False",
     ]
+
+  extra_parallelism = []
+  if is_decoupled():  # Match device topology in decoupled/local mode
+    try:
+      extra_parallelism.append(f"ici_fsdp_parallelism={jax.device_count()}")
+    except Exception as e:  # pragma: no cover - defensive  # pylint: disable=broad-exception-caught
+      print(f"Warning: unable to determine jax.device_count(): {e}")
+
   return (
       [
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          get_test_config_path(),
           f"hardware={hardware}",
           f"run_name=runner_{run_date}",
           f"steps={steps}",
@@ -73,7 +88,7 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
           "per_device_batch_size=1",
           f"metrics_file={metrics_file}",
           "checkpoint_period=3",
-          "base_output_directory=gs://runner-maxtext-logs",
+          f"base_output_directory={base_output_directory}",
           f"dataset_path={dataset_path}",
           f"dataset_type={dataset_type}",
           "async_checkpointing=False",
@@ -81,6 +96,7 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
       ]
       + model_params
       + pathways_command
+      + extra_parallelism
   )
 
 
@@ -115,9 +131,27 @@ def run_checkpointing(hardware, attention_type):
     attention_type: The type of attention to use.
   """
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+
+  # Determine dataset path/pattern depending on decoupled mode.
+  gcsfuse_pattern = "/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*"
+  local_decoupled_root = os.path.join(
+      MAXTEXT_PKG_DIR, "..", "tests", "assets", "local_datasets", "c4_en_dataset_minimal", "c4", "en", "3.0.1"
+  )
+  local_pattern = os.path.join(local_decoupled_root, "c4-train.array_record*")
+  selected_pattern = gcsfuse_pattern
+  dataset_path = "/tmp/gcsfuse"
+
+  if is_decoupled():
+    # Prefer local minimal dataset if gcsfuse data absent
+    if not glob.glob(gcsfuse_pattern) and glob.glob(local_pattern):
+      selected_pattern = local_pattern
+      dataset_path = os.path.join(MAXTEXT_PKG_DIR, "..", "tests", "assets", "local_datasets")
+    elif not glob.glob(gcsfuse_pattern) and not glob.glob(local_pattern):
+      pytest.skip("No grain ArrayRecord shards found for checkpointing test in decoupled mode.")
+
   grain_command = [
       "grain_worker_count=0",
-      "grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
+      f"grain_train_files={selected_pattern}",
   ]
   train_main(
       get_checkpointing_command(
@@ -127,7 +161,7 @@ def run_checkpointing(hardware, attention_type):
           metrics_file="saved_metrics.txt",
           attention_type=attention_type,
           dataset_type="grain",
-          dataset_path="/tmp/gcsfuse",
+          dataset_path=dataset_path,
       )
       + grain_command
   )
@@ -140,7 +174,7 @@ def run_checkpointing(hardware, attention_type):
           metrics_file="restored_metrics.txt",
           attention_type=attention_type,
           dataset_type="grain",
-          dataset_path="/tmp/gcsfuse",
+          dataset_path=dataset_path,
       )
       + grain_command
   )

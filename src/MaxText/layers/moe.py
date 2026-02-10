@@ -30,14 +30,14 @@ from jax.sharding import NamedSharding, Mesh
 from jax.sharding import PartitionSpec as P
 import jax.numpy as jnp
 from MaxText import common_types as ctypes
-from MaxText import max_logging
-from MaxText import max_utils
 from MaxText.common_types import ShardMode
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
-from MaxText.kernels import megablox as mblx
 from MaxText.sharding import logical_to_mesh_axes
 from MaxText.layers import attentions, linears, nnx_wrappers, quantizations
 from MaxText.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+from maxtext.kernels import megablox as mblx
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 import numpy as np
 import qwix.pallas as qpl
 import tokamax
@@ -877,7 +877,7 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
-    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes):
+    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count):
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -916,6 +916,7 @@ class RoutedMoE(nnx.Module):
               use_qwix_quantization=self.config.use_qwix_quantization,
               use_tokamax_backend=self.config.use_tokamax_gmm,
               weight_gather_axes=weight_gather_axes,
+              input_buffer_count=input_buffer_count,
           )
         else:
           output = tokamax.ragged_dot(
@@ -950,9 +951,13 @@ class RoutedMoE(nnx.Module):
             # Use full contraction for QWIX quantization to allow quantization
             # fusion (max reduce over contracting dimension).
             tiling = (tiling[0], k, tiling[2])
+
+          is_tpu = self.mesh.devices.flat[0] == "tpu"
+          # TPU needs random mosaic_fusion_group; GPU/CPU needs deterministic ID for autotuner sync
+          mosaic_group_id = f"{random.randint(0, 1000000000)}" if is_tpu else "0"
           with set_xla_metadata(
               ragged_dot_tiling=",".join([str(t) for t in tiling]),
-              mosaic_fusion_group=f"{random.randint(0, 1000000000)}",
+              mosaic_fusion_group=mosaic_group_id,
           ):
             output = jax.lax.ragged_dot(
                 lhs=inputs,
@@ -1216,14 +1221,28 @@ class RoutedMoE(nnx.Module):
           self.config.wo_tile_drhs_embed_dim,
           self.config.wo_tile_drhs_mlp_dim,
       )
-      layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+      wi_input_buffer_count = (
+          self.config.wi_tile_fwd_buffer_count,
+          self.config.wi_tile_dlhs_buffer_count,
+          self.config.wi_tile_drhs_buffer_count,
+      )
+      wo_input_buffer_count = (
+          self.config.wo_tile_fwd_buffer_count,
+          self.config.wo_tile_dlhs_buffer_count,
+          self.config.wo_tile_drhs_buffer_count,
+      )
+      layer_w0 = gmm_fn(
+          x, w0, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes, input_buffer_count=wi_input_buffer_count
+      )
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
 
-      layer_w1 = gmm_fn(x, w1, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+      layer_w1 = gmm_fn(
+          x, w1, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes, input_buffer_count=wi_input_buffer_count
+      )
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       if self.config.mlp_bias:
@@ -1231,7 +1250,13 @@ class RoutedMoE(nnx.Module):
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
 
-      intermediate_output = gmm_fn(intermediate_layer, wo, tiling=wo_tile_size, weight_gather_axes=wo_gather_axes)
+      intermediate_output = gmm_fn(
+          intermediate_layer,
+          wo,
+          tiling=wo_tile_size,
+          weight_gather_axes=wo_gather_axes,
+          input_buffer_count=wo_input_buffer_count,
+      )
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(
             intermediate_output, self._tensor_parallelism_name, scatter_dimension=1, tiled=True

@@ -43,7 +43,6 @@ from benchmarks.benchmark_db_utils import DEFAULT_LOCAL_DIR
 from benchmarks.benchmark_db_utils import Metrics
 from benchmarks.benchmark_db_utils import recover_tuning_params
 from benchmarks.benchmark_db_utils import write_run
-from benchmarks.benchmark_utils import str2bool
 from benchmarks.command_utils import run_command_with_updates
 
 
@@ -180,11 +179,10 @@ def add_parser_arguments(parser: argparse.ArgumentParser):
       help="Dataset of the database",
   )
   parser.add_argument(
-      "--is_test",
-      type=str2bool,
+      "--hardware_num_slices",
+      type=int,
       required=False,
-      default=True,
-      help="Whether to use the testing project or production project",
+      help="hardware slice number",
   )
 
 

@@ -24,12 +24,12 @@ from jax.sharding import Mesh, NamedSharding
 
 from flax import nnx
 
-from MaxText import max_logging
-from MaxText import max_utils
 from MaxText.sharding import logical_to_mesh_axes, create_sharding
 from MaxText.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 
 _MAX_WAVELENGTH = 10_000
 
@@ -319,6 +319,15 @@ class RotaryEmbedding(nnx.Module):
       timescale = timescale * self.rope_linear_scaling_factor
     return timescale
 
+  def _rotate_half(self, x: jax.Array) -> jax.Array:
+    """Rotates half the hidden dims of the input: (x1, x2) -> (-x2, x1)."""
+    x1, x2 = jnp.split(x, 2, axis=-1)
+    return jnp.concatenate((-x2, x1), axis=-1)
+
+  def apply_rotary(self, inputs: jax.Array, cos: jax.Array, sin: jax.Array) -> jax.Array:
+    """Applies the rotary transformation logic."""
+    return (inputs * cos) + (self._rotate_half(inputs) * sin)
+
   def __call__(
       self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
       inputs: jax.Array,
@@ -348,15 +357,16 @@ class RotaryEmbedding(nnx.Module):
 
     position = position[:, :, jnp.newaxis, jnp.newaxis]
     sinusoid_inp = position / self.timescale
-    sin = jnp.sin(sinusoid_inp).astype(inputs.dtype)
-    cos = jnp.cos(sinusoid_inp).astype(inputs.dtype)
-    first_half, second_half = jnp.split(inputs, 2, axis=-1)
-    first_part = first_half * cos - second_half * sin
-    second_part = second_half * cos + first_half * sin
+    sin_half = jnp.sin(sinusoid_inp).astype(inputs.dtype)
+    cos_half = jnp.cos(sinusoid_inp).astype(inputs.dtype)
+
+    sin = jnp.concatenate([sin_half, sin_half], axis=-1)
+    cos = jnp.concatenate([cos_half, cos_half], axis=-1)
+
+    x_out = self.apply_rotary(inputs, cos, sin)
+
     if self.cast_as_fprop_dtype:
-      first_part = first_part.astype(self.fprop_dtype)
-      second_part = second_part.astype(self.fprop_dtype)
-    x_out = jnp.concatenate((first_part, second_part), axis=-1)
+      x_out = x_out.astype(self.fprop_dtype)
     return x_out
 
 
@@ -1539,3 +1549,180 @@ class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
       interpolated = interpolated.astype(self.fprop_dtype)
 
     return interpolated
+
+
+class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
+  """Multi-dimensional Rotary Position Embedding (MRoPE) for Qwen3-Omni Thinker.
+
+  This implements MRoPE which extends standard RoPE to handle 3D position IDs
+  (temporal, height, width) for multimodal sequences containing text and vision tokens.
+
+  For text-only sequences, it uses standard 2D position IDs.
+  For sequences with vision tokens, it uses 3D position IDs where:
+    - Dimension 0: Temporal position
+    - Dimension 1: Height position (spatial)
+    - Dimension 2: Width position (spatial)
+
+  The implementation uses an interleaved pattern that reorganizes frequency
+  components from chunked [TTT...HHH...WWW] to interleaved [THTHWHTHW...].
+  """
+
+  def __init__(
+      self,
+      min_timescale: int,
+      max_timescale: int,
+      embedding_dims: int = 0,
+      cast_as_fprop_dtype: bool = True,
+      fprop_dtype: DType = jnp.bfloat16,
+      mrope_section: tuple[int, int, int] | None = None,
+      attention_scaling: float = 1.0,
+      rngs: nnx.Rngs = None,
+  ):
+    """Initializes the Qwen3OmniMoeThinkerTextRotaryEmbedding module.
+
+    Args:
+      min_timescale: Start of the geometric index (typically 1).
+      max_timescale: End of the geometric index (rope_theta, e.g., 1000000).
+      embedding_dims: Dimension of the embedding (head_dim).
+      cast_as_fprop_dtype: Whether to cast output to fprop dtype.
+      fprop_dtype: The dtype of the output.
+      mrope_section: Tuple of (temporal_dim, height_dim, width_dim) for MRoPE.
+                     Defaults to [24, 20, 20] if None.
+      attention_scaling: Scaling factor applied to cos/sin embeddings. Defaults to 1.0.
+      rngs: rng keys passed in by nnx.bridge.to_linen.
+    """
+    super().__init__(
+        min_timescale=min_timescale,
+        max_timescale=max_timescale,
+        mesh=None,
+        embedding_dims=embedding_dims,
+        cast_as_fprop_dtype=cast_as_fprop_dtype,
+        fprop_dtype=fprop_dtype,
+        rngs=rngs,
+    )
+    self.mrope_section = mrope_section if mrope_section is not None else (24, 20, 20)
+    self.attention_scaling = attention_scaling
+
+    if self.embedding_dims % 2:
+      raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
+
+  def _apply_interleaved_mrope(self, freqs: jax.Array) -> jax.Array:
+    """Apply interleaved MRoPE pattern to 3D rotary embeddings.
+
+    Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
+    interleaved [THTHWHTHW...], preserving frequency continuity.
+
+    Args:
+      freqs: Shape (3, batch, seq_len, head_dim // 2)
+        Dimension 0: temporal frequencies
+        Dimension 1: height frequencies
+        Dimension 2: width frequencies
+
+    Returns:
+      freqs_t: Shape (batch, seq_len, head_dim // 2) with interleaved pattern
+    """
+    # Start with temporal frequencies (dimension 0)
+    freqs_t = freqs[0]  # (batch, seq_len, head_dim // 2)
+
+    # Create interleaved pattern
+    # For each spatial dimension (H, W), place frequencies at positions:
+    # offset=1 for H, offset=2 for W, with stride=3
+    for dim_idx, offset in enumerate([1, 2], start=1):  # H=1, W=2
+      section_size = self.mrope_section[dim_idx] * 3  # Total positions for this dimension
+      # Select positions with stride 3, starting at offset
+      # Use slice syntax to match PyTorch behavior
+      idx = slice(offset, section_size, 3)
+      # Replace those positions with the corresponding spatial frequencies
+      freqs_t = freqs_t.at[..., idx].set(freqs[dim_idx, ..., idx])
+
+    return freqs_t
+
+  def __call__(
+      self,
+      inputs: jax.Array,
+      position: jax.Array,
+  ) -> jax.Array:
+    """Generates rotary position embeddings for multimodal sequences.
+
+    Args:
+      inputs: Input tensor of shape [batch, sequence, heads, head_dim].
+      position: Position IDs with shape:
+        - [batch, sequence] for text-only (2D)
+        - [3, batch, sequence] for multimodal with vision (3D)
+          where dim 0 = temporal, dim 1 = height, dim 2 = width
+
+    Returns:
+      Tensor of shape [batch, sequence, heads, head_dim] with RoPE applied.
+    """
+    if len(inputs.shape) != 4:
+      raise ValueError("Input is assumed to be a rank 4 tensor of shape [batch, sequence, heads, head_dim].")
+    if self.embedding_dims != inputs.shape[3]:
+      raise ValueError(
+          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
+      )
+
+    # Handle both 2D (text-only) and 3D (multimodal) position IDs
+    if position.ndim == 2:
+      # Text-only: expand (batch, seq) -> (3, batch, seq) with same positions
+      position = jnp.broadcast_to(position[jnp.newaxis, ...], (3,) + position.shape)
+    elif position.ndim != 3 or position.shape[0] != 3:
+      raise ValueError(f"Position IDs must be 2D (batch, seq) or 3D (3, batch, seq), got shape {position.shape}")
+
+    # Compute frequencies: (3, batch, seq, 1) @ (head_dim // 2, 1) -> (3, batch, seq, head_dim // 2)
+    inv_freq_expanded = (1.0 / self.timescale)[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (1, 1, 1, head_dim//2)
+    position_expanded = position[..., jnp.newaxis]  # (3, batch, seq, 1)
+    freqs = position_expanded * inv_freq_expanded  # (3, batch, seq, head_dim//2)
+
+    # Apply interleaved MRoPE pattern for 3D positions
+    freqs = self._apply_interleaved_mrope(freqs)  # (batch, seq, head_dim//2)
+
+    # Compute sin and cos
+    # Concatenate to get full head_dim: (batch, seq, head_dim//2) -> (batch, seq, head_dim)
+    emb = jnp.concatenate([freqs, freqs], axis=-1)  # Duplicate for both halves
+    cos_emb = jnp.cos(emb) * self.attention_scaling  # (batch, seq, head_dim)
+    sin_emb = jnp.sin(emb) * self.attention_scaling  # (batch, seq, head_dim)
+
+    # Expand for heads dimension: (batch, seq, head_dim) -> (batch, seq, 1, head_dim)
+    cos_emb = cos_emb[:, :, jnp.newaxis, :]
+    sin_emb = sin_emb[:, :, jnp.newaxis, :]
+
+    x_out = self.apply_rotary(inputs, cos_emb, sin_emb)
+
+    if self.cast_as_fprop_dtype:
+      x_out = x_out.astype(self.fprop_dtype)
+
+    return x_out
+
+
+def qwen3_omni_mrope_embedding_as_linen(
+    *,
+    min_timescale: int,
+    max_timescale: int,
+    embedding_dims: int = 0,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    mrope_section: tuple[int, int, int] | None = None,
+    name: str | None = None,
+):
+  """Initializes Qwen3OmniMoeThinkerTextRotaryEmbedding and returns it as a Linen module.
+
+  Args:
+    min_timescale: Start of the geometric index.
+    max_timescale: End of the geometric index (rope_theta).
+    embedding_dims: Dimension of the embedding (head_dim).
+    cast_as_fprop_dtype: Whether to cast output to fprop dtype.
+    fprop_dtype: The dtype of the output.
+    mrope_section: Tuple of (temporal_dim, height_dim, width_dim) for MRoPE.
+    name: Name of the Linen module.
+  """
+  return nnx_wrappers.to_linen(
+      Qwen3OmniMoeThinkerTextRotaryEmbedding,
+      min_timescale=min_timescale,
+      max_timescale=max_timescale,
+      embedding_dims=embedding_dims,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      mrope_section=mrope_section,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
+  )

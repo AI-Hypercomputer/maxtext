@@ -1,4 +1,4 @@
-# Checkpoint conversion agent 
+# Checkpoint conversion agent
 The agent is used to automate the model-specific mappings of checkpoint conversion.  It is designed to cooperate with the new checkpoint conversion [framework](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/MaxText/utils/ckpt_conversion).
 
 ## Quick starts
@@ -10,15 +10,15 @@ To begin, you'll need:
 ```
 pip install -q -U "google-genai>=1.0.0"
 ```
-4. The target/source models must be implemented in MaxText and Hugging Face and we can retrieve random weights to learn its parameter names and tensor shapes. 
+4. The target/source models must be implemented in MaxText and Hugging Face and we can retrieve random weights to learn its parameter names and tensor shapes.
 
-5. A full run of the agent typically takes about 30 minutes. 
+5. A full run of the agent typically takes about 30 minutes.
 
 ## 1. Prepare the context file
 
 The agent requires context files about the target and source model's parameter names and tensor shapes. You can generate them using the [`save_param.py`](../ckpt_conversion_agent/utils/save_param.py) script. The output directory defined by `config.base_output_directory`. The default is `src/MaxText/experimental/agent/ckpt_conversion_agent/context/<model_name>` folder.
 ```bash
-python3 -m MaxText.experimental.agent.ckpt_conversion_agent.utils.save_param src/MaxText/configs/base.yml \
+python3 -m MaxText.experimental.agent.ckpt_conversion_agent.utils.save_param src/maxtext/configs/base.yml \
   per_device_batch_size=1 run_name=param_<model_name> model_name=<model_name> scan_layers=false \
   --hf_model_config=<hf_model_id>
 ```
@@ -53,30 +53,30 @@ You can automatically verify the output by comparing the generated code against 
 
 ```bash
 python3 -m MaxText.experimental.agent.ckpt_conversion_agent.evaluation --files ground_truth/<model>.py \
-  outputs/hook_fn.py --api_key=<Your-API-KEY> --dir_path=src/MaxText/experimental/agent/ckpt_conversion_agent 
+  outputs/hook_fn.py --api_key=<Your-API-KEY> --dir_path=src/MaxText/experimental/agent/ckpt_conversion_agent
 ```
 
 ### Manual Debugging (No Ground-Truth Code)
 If a ground-truth version isn't available, you'll need to debug the conversion manually. The recommended process is to:
-1. Add the model mappings into [checkpoint conversion framework](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md#adding-support-for-new-models). 
+1. Add the model mappings into [checkpoint conversion framework](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md#adding-support-for-new-models).
 
 2. Execute the conversion process layer-by-layer, using [to_maxtext.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md#hugging-face-to-maxtext) or [to_huggingface.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md#maxtext-to-hugging-face).
-  - If the tensor shape are not matched after conversion, error message will print out the parameter name that caused error. 
+  - If the tensor shape are not matched after conversion, error message will print out the parameter name that caused error.
 
-3. After the conversion is done, run a decode to check the correctness of the generated code. 
+3. After the conversion is done, run a decode to check the correctness of the generated code.
 Example command:
 ```bash
-python3 -m MaxText.decode src/MaxText/configs/base.yml model_name=gemma3-4b tokenizer_path=assets/tokenizer.gemma3 \
+python3 -m maxtext.decode src/maxtext/configs/base.yml model_name=gemma3-4b tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma3 \
   load_parameters_path=<Your-converted-ckpt-path> per_device_batch_size=1 run_name=ht_test \
   max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false scan_layers=true \
   prompt='I love to' attention='dot_product'
 ```
-If outputs are wrong, you can use jax.debug.print() to print the layer-wise mean/max/min values for debugging. 
+If outputs are wrong, you can use jax.debug.print() to print the layer-wise mean/max/min values for debugging.
 
 4. To further validate the converted checkpoint, we recommend to use the [forward_pass_logit_checker.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md#verifying-conversion-correctness) to compare the original ckpt with the converted ckpt:
 ```bash
-python3 -m tests.utils.forward_pass_logit_checker src/MaxText/configs/base.yml \
-    tokenizer_path=assets/<tokenizer> \
+python3 -m tests.utils.forward_pass_logit_checker src/maxtext/configs/base.yml \
+    tokenizer_path=assets/tokenizers/<tokenizer> \
     load_parameters_path=<path-to-maxtext-checkpoint> \
     model_name=<MODEL_NAME> \
     scan_layers=false \
@@ -92,14 +92,14 @@ python3 -m tests.utils.forward_pass_logit_checker src/MaxText/configs/base.yml \
   * `model_name`: The corresponding model name in the MaxText configuration (e.g., `qwen3-4b`).
   * `scan_layers`: Indicates if the output checkpoint is scanned (scan_layers=true) or unscanned (scan_layers=false).
   * `use_multimodal`: Indicates if multimodality is used.
-  * `--run_hf_model`: Indicates if loading Hugging Face model from the hf_model_path. If not set, it will compare the maxtext logits with pre-saved golden logits. 
+  * `--run_hf_model`: Indicates if loading Hugging Face model from the hf_model_path. If not set, it will compare the maxtext logits with pre-saved golden logits.
   * `--hf_model_path`: The path to the Hugging Face checkpoint.
   * `--max_kl_div`: Max KL divergence tolerance during comparisons.
 
 
 ## Debugging tips
 
-1. If a response from Gemini is `None`, wait for a moment and retry. 
+1. If a response from Gemini is `None`, wait for a moment and retry.
 
 
 2. If a converted checkpoint loads without errors but produces incorrect output, consider these common issues:

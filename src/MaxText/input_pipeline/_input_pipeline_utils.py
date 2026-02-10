@@ -17,15 +17,18 @@
 import dataclasses
 import warnings
 from threading import current_thread
-from typing import Any
-import datasets
-from datasets.distributed import split_dataset_by_node
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+  import datasets
+
 import grain.python as grain
 import numpy as np
 import tensorflow as tf
-from MaxText import max_logging
 from MaxText import tokenizer
-from MaxText import multimodal_utils
+from maxtext.multimodal import processor as mm_processor
+from maxtext.multimodal import utils as mm_utils
+from maxtext.utils import max_logging
 
 Features = dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -73,13 +76,13 @@ def reformat_prompt(example, column, image_placeholder, model_name):
     num_images = len(example["images"])
   else:
     num_images = 1
-  example[column] = multimodal_utils.reformat_prompt(example[column], image_placeholder, model_name, num_images)
+  example[column] = mm_processor.reformat_prompt(example[column], image_placeholder, model_name, num_images)
   return example
 
 
 def reformat_response(example, column, model_name):
   """reformat response for multimodal SFT"""
-  example[column] = multimodal_utils.reformat_response(example[column][0], model_name)
+  example[column] = mm_processor.reformat_response(example[column][0], model_name)
   return example
 
 
@@ -101,11 +104,11 @@ def pre_process_image_sft(example, image_column, model_name):
 
   def _process_image_fn(image):
     if isinstance(image, list):
-      image = [np.array(multimodal_utils.convert_to_RGB(img)) for img in image]
+      image = [np.array(mm_utils.convert_to_RGB(img)) for img in image]
     else:
-      image = np.array(multimodal_utils.convert_to_RGB(image))
+      image = np.array(mm_utils.convert_to_RGB(image))
 
-    image = multimodal_utils.pre_process_image(image, model_name)
+    image = mm_processor.preprocess_image_for_training(image, model_name)
     return image
 
   example[image_column] = _process_image_fn(example[image_column])
@@ -114,7 +117,7 @@ def pre_process_image_sft(example, image_column, model_name):
 
 def prepare_text_for_image_fusion(example, column_name, model_name):
   """prepare text for image fusion for multimodal SFT"""
-  example[column_name] = multimodal_utils.prepare_text_for_image_fusion(
+  example[column_name] = mm_processor.prepare_text_for_image_fusion(
       example[column_name], model_name, processor_output=example["images"]
   )
   return example
@@ -144,6 +147,8 @@ def is_conversational(features, data_columns):
   data_columns = ["prompt", "completion"]
   is_conversational(features, data_columns) returns False.
   """
+  import datasets  # pylint: disable=import-outside-toplevel
+
   for column in data_columns:
     messages = features[column]
     if isinstance(messages, datasets.Sequence):
@@ -170,30 +175,37 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
       - The `data_column_name` column will be updated to a list of
         messages, each formatted according to the tokenizer's chat template.
       - A new column named "is_prompt" will be added, where `True`
-        indicates a user message (prompt) and `False` indicates an assistant
+        indicates a system message or a user message (prompt) and `False` indicates an assistant
         message (completion).
   """
   messages = []
   is_prompt = []
-  prompt = None
+  round_msgs = []
   try:
-    for message in example[data_column_name]:
-      if message["role"] == "user":
-        prompt = message
+    for idx, message in enumerate(example[data_column_name]):
+      if message["role"] == "system":
+        if idx != 0:
+          raise ValueError(f"System message found at index {idx}. System messages must be at index 0.")
+        round_msgs.append(message)
+      elif message["role"] == "user":
+        round_msgs.append(message)
         prompt_in_chat_template = tokenizer_model.apply_chat_template(
-            [prompt], add_generation_prompt=False, tokenize=False
+            round_msgs, add_generation_prompt=False, tokenize=False
         )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
       elif message["role"] == "assistant":
+        round_msgs.append(message)
         prompt_completion_tokens = tokenizer_model.apply_chat_template(
-            [prompt, message], add_generation_prompt=False, tokenize=True
+            round_msgs, add_generation_prompt=False, tokenize=True
         )
-        prompt_tokens = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=True)
+        prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=False, tokenize=True)
         completion_tokens = prompt_completion_tokens[len(prompt_tokens) :]
         completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
         messages.append(completion_in_chat_template)
         is_prompt.append(False)
+        # Round ended, clearing the buffer.
+        round_msgs.clear()
   except ValueError as e:
     max_logging.log(f"Unable to apply chat template: {e}")
     raise e
@@ -285,13 +297,16 @@ class HFDataSource(grain.RandomAccessDataSource):
 
   def __init__(
       self,
-      dataset: datasets.IterableDataset,
+      dataset: "datasets.IterableDataset",
       dataloading_host_index: int,
       dataloading_host_count: int,
       num_threads: int,
       max_target_length: int,
       data_column_names: list[str],
   ):
+    from datasets.distributed import split_dataset_by_node  # pylint: disable=import-outside-toplevel
+
+    self._split_dataset_by_node = split_dataset_by_node
     self.dataset = dataset
     self.num_threads = num_threads
     self.dataloading_host_count = dataloading_host_count
@@ -304,7 +319,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       self.n_shards = 1
     self._check_shard_count()
     self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range(self.num_threads)]
-    self.datasets = [split_dataset_by_node(dataset, world_size=self.n_shards, rank=x) for x in self.dataset_shards]
+    self.datasets = [self._split_dataset_by_node(dataset, world_size=self.n_shards, rank=x) for x in self.dataset_shards]
     self.data_iters = []
 
   def _check_shard_count(self):
@@ -325,7 +340,9 @@ class HFDataSource(grain.RandomAccessDataSource):
       )
       max_logging.log(f"New shard is {new_shard}")
       self.dataset_shards[idx] = new_shard
-      self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
+      self.datasets[idx] = self._split_dataset_by_node(
+          self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx]
+      )
       self.data_iters[idx] = iter(self.datasets[idx])
     else:
       raise StopIteration(f"Run out of shards on host {self.dataloading_host_index}, shard {new_shard} is not available")
@@ -471,9 +488,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
     return np.pad(x, pad_amount, constant_values=pad_id)[: self.max_length]
 
-  def _pad_image_and_mask(
-      self, preprocessed_image: multimodal_utils.PreprocessorOutput
-  ) -> multimodal_utils.PreprocessorOutput:
+  def _pad_image_and_mask(self, preprocessed_image: mm_utils.PreprocessorOutput) -> mm_utils.PreprocessorOutput:
     """Pads the input tensors (image and mask) of a PreprocessorOutput to a maximum number of items.
 
     This function unifies padding logic for image tensors (standard or tiled) and
@@ -506,14 +521,14 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       - The dummy images used for padding are based on the image shape for initialization
         of this model (ignoring batch size).
     """
-    if not isinstance(preprocessed_image, multimodal_utils.PreprocessorOutput):
+    if not isinstance(preprocessed_image, mm_utils.PreprocessorOutput):
       raise TypeError(f"Input must be multimodal_utils.PreprocessorOutput, but got {type(preprocessed_image)}")
 
     if preprocessed_image.pixel_values is None:
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
 
     # Determine the maximum number of images/masks allowed.
-    image_offsets = multimodal_utils.get_image_offsets(self.model_name, preprocessed_image)
+    image_offsets = mm_processor.get_image_offsets(self.model_name, preprocessed_image)
     single_image_offset = image_offsets // preprocessed_image.pixel_values.shape[0]
 
     # Reserve space for at least one text token.
@@ -562,13 +577,13 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     return preprocessed_image
 
   def map(
-      self, element: dict[str, np.ndarray | multimodal_utils.PreprocessorOutput]
-  ) -> dict[str, np.ndarray | multimodal_utils.PreprocessorOutput]:
+      self, element: dict[str, np.ndarray | mm_utils.PreprocessorOutput]
+  ) -> dict[str, np.ndarray | mm_utils.PreprocessorOutput]:
     """map to each element"""
     data_columns = list(element.keys())
     for data_column in data_columns:
       if data_column != "images":
-        if isinstance(element[data_column], multimodal_utils.PreprocessorOutput):
+        if isinstance(element[data_column], mm_utils.PreprocessorOutput):
           raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
 
         element[f"{data_column}_segmentation"] = element[data_column] != self.pad_id
@@ -608,7 +623,7 @@ class ExtractImagesAndMasks(grain.MapTransform):
     if preprocessed_image is None:
       return element
 
-    if not isinstance(preprocessed_image, multimodal_utils.PreprocessorOutput):
+    if not isinstance(preprocessed_image, mm_utils.PreprocessorOutput):
       raise TypeError(f"'images' must be of type PreprocessorOutput, but got {type(preprocessed_image)}")
 
     output = element.copy()
@@ -639,7 +654,7 @@ class FoldImagesIntoBatch(grain.MapTransform):
 
   def __post_init__(self):
     """Initializes the target shape after the dataclass is created."""
-    self.target_shape = multimodal_utils.get_dummy_image_shape_for_init(self.model_name)
+    self.target_shape = mm_processor.get_dummy_image_shape_for_init(self.model_name)
 
   def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Applies the folding transformation to the 'images' field if present."""
@@ -688,6 +703,7 @@ def shift_left(x, pad_id, axis=1):
 def shift_and_refine(x, ignored_ids, axis=1):
   """Shift inputs, set segmentation to 0 when target element is in ignored_ids if provided"""
   x["targets"] = shift_left(x["targets"], ignored_ids[0], axis=axis)
+  x["targets_segmentation"] = shift_left(x["targets_segmentation"], 0, axis=axis)
   for ignore_id in ignored_ids:
     x["targets_segmentation"] = np.where(x["targets"] != ignore_id, x["targets_segmentation"], 0)
 
@@ -704,3 +720,89 @@ class ShiftData(grain.MapTransform):
 
   def map(self, element):
     return shift_and_refine(element, ignored_ids=self.ignored_ids, axis=self.axis)
+
+
+@dataclasses.dataclass
+class ComputeQwen3OmniPositions(grain.MapTransform):
+  """Computes 3D position IDs for Qwen3-Omni multimodal sequences.
+
+  This transform replaces the standard 1D sequential positions with 3D
+  positions (temporal, height, width) for multimodal models like Qwen3-Omni.
+
+  For text-only sequences, all 3 dimensions receive the same sequential values.
+  For multimodal sequences with vision/audio, vision tokens get true 3D positions
+  and text tokens continue sequentially from max(vision_pos) + 1.
+
+  The actual position computation is delegated to multimodal_utils.get_rope_index(),
+  which can be tested and modified independently.
+  """
+
+  def __init__(
+      self,
+      data_column: str = "inputs",
+      spatial_merge_size: int = 2,
+      position_id_per_seconds: int = 25,
+      use_audio_in_video: bool = False,
+  ):
+    """Initialize the Qwen3-Omni position computation transform.
+
+    Args:
+      data_column: Name of the data column to compute positions for (default: "inputs").
+      spatial_merge_size: Number of patches merged spatially (e.g., 2 for 2x2→1).
+      position_id_per_seconds: Temporal granularity (tokens per second, typically 25).
+      use_audio_in_video: If True, audio tokens are interleaved with video tokens.
+    """
+    self.data_column = data_column
+    self.spatial_merge_size = spatial_merge_size
+    self.position_id_per_seconds = position_id_per_seconds
+    self.use_audio_in_video = use_audio_in_video
+
+  def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Compute 3D position IDs for the batch element.
+
+    Args:
+      element: Dictionary containing:
+        - {data_column}: Token IDs with shape (batch, seq_len)
+        - {data_column}_segmentation: Attention mask (1=real, 0=padding)
+        - image_grid_thw: Optional (num_images, 3) array
+        - video_grid_thw: Optional (num_videos, 3) array
+        - audio_lengths: Optional (num_audios,) array
+        - second_per_grids: Optional (num_videos,) array
+
+    Returns:
+      element with {data_column}_position updated to shape (3, batch, seq_len)
+      for 3D positions (always 3D, even for text-only sequences).
+    """
+
+    # Extract inputs and metadata
+    input_ids = element[self.data_column]
+    attention_mask = element.get(f"{self.data_column}_segmentation")
+
+    # Extract multimodal metadata (if present)
+    image_grid_thw = element.get("image_grid_thw")
+    video_grid_thw = element.get("video_grid_thw")
+    audio_lengths = element.get("audio_lengths")
+    second_per_grids = element.get("second_per_grids")
+
+    # Call the standalone get_rope_index function from multimodal_utils
+    from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+    # TODO(jfacevedo/hengtaoguo): Now get_rope_index is Qwen3-Omni specific. We should generalize it for other models
+    position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
+        input_ids=input_ids,
+        image_grid_thw=image_grid_thw,
+        video_grid_thw=video_grid_thw,
+        attention_mask=attention_mask,
+        use_audio_in_video=self.use_audio_in_video,
+        audio_lengths=audio_lengths,
+        second_per_grids=second_per_grids,
+        spatial_merge_size=self.spatial_merge_size,
+        position_id_per_seconds=self.position_id_per_seconds,
+    )
+
+    # Update element with 3D positions
+    # Shape: (3, batch, seq_len) for multimodal, or (batch, seq_len) for text-only
+    element[f"{self.data_column}_position"] = position_ids
+    element[f"{self.data_column}_mrope_deltas"] = mrope_position_deltas
+
+    return element

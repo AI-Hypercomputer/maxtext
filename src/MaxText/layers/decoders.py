@@ -30,16 +30,11 @@ from flax.linen.partitioning import ScanIn
 
 from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONTEXT
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText import max_logging
-from MaxText import max_utils
 from MaxText.sharding import create_sharding
-from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
-from MaxText import maxtext_utils
-from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.normalizations import rms_norm
@@ -47,7 +42,6 @@ from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, posit
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers import (
     deepseek,
-    deepseek_batchsplit,
     gemma,
     gemma2,
     gemma3,
@@ -61,6 +55,11 @@ from MaxText.layers import (
     simple_layer,
     olmo3,
 )
+from maxtext.inference import page_manager
+from maxtext.multimodal import utils as mm_utils
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -152,6 +151,8 @@ class DecoderLayer(nn.Module):
         ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
+        use_mrope=cfg.use_mrope,
+        mrope_section=cfg.mrope_section,
         model_mode=model_mode,
     )
 
@@ -405,10 +406,10 @@ class Decoder(nn.Module):
       case DecoderBlockType.MIXTRAL:
         return [mixtral.MixtralDecoderLayerToLinen]
       case DecoderBlockType.DEEPSEEK:
-        if self.config.use_batch_split_schedule:
-          return [deepseek_batchsplit.DeepSeekDenseLayerToLinen, deepseek_batchsplit.DeepSeekMoELayerToLinen]
-        else:
-          return [deepseek.DeepSeekDenseLayerToLinen, deepseek.DeepSeekMoELayerToLinen]
+        return [
+            deepseek.DeepSeekDenseLayerToLinen,
+            deepseek.DeepSeekMoELayerToLinen,
+        ]
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
@@ -586,7 +587,7 @@ class Decoder(nn.Module):
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
       ]:
-        y = multimodal_utils.merge_mm_embeddings(
+        y = mm_utils.merge_mm_embeddings(
             text_embeddings=y,
             multimodal_embeddings=image_embeddings,
             mask=bidirectional_mask,
@@ -598,7 +599,7 @@ class Decoder(nn.Module):
 
     if audio_embeddings is not None and cfg.use_audio:
       if cfg.model_name in ["qwen3-omni-30b-a3b"]:
-        y = multimodal_utils.merge_mm_embeddings(
+        y = mm_utils.merge_mm_embeddings(
             text_embeddings=y,
             multimodal_embeddings=audio_embeddings,
             mask=audio_masks,

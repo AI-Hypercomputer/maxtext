@@ -1,0 +1,75 @@
+# Decoupled base test config: used when DECOUPLE_GCLOUD=TRUE for tests that previously relied on base.yml.
+# Inherit all model defaults (PyDantic already does this) but override any cloud-coupled paths and disable 
+# optional cloud features.
+
+# Output goes to a local relative directory so tests do not require GCS.
+base_output_directory: ./maxtext_local_output/gcloud_decoupled_test_logs
+run_name: test_decoupled
+
+# Disable checkpointing by default for speed unless a test explicitly enables it.
+enable_checkpointing: false
+vertex_tensorboard_project: ""
+use_vertex_tensorboard: false
+vertex_tensorboard_region: ""
+
+# Minimize batch/steps to reduce compilation/test time.
+per_device_batch_size: 1
+steps: 2
+learning_rate_schedule_steps: 2
+
+# Disable profiler to avoid extra setup.
+profiler: ""
+profile_periodically_period: 0
+profiler_steps: 0
+
+# Leave dataset-related keys to be overridden by individual tests.
+dataset_path: "tests/assets/local_datasets/c4_en_dataset_minimal/"
+dataset_name: 'c4/en:3.1.0'
+eval_dataset_name: 'c4/en:3.1.0'
+
+# Use dot_product attention to avoid GPU Pallas shared memory limits on AMD GPUs
+attention: "dot_product"
+
+# Avoid HLO dump overhead.
+dump_hlo: false
+jax_cache_dir: ""
+
+# Neutral parallelism (single device) for local tests.
+ici_data_parallelism: 1
+ici_tensor_parallelism: 1
+ici_pipeline_parallelism: 1
+ici_expert_parallelism: 1
+ici_sequence_parallelism: 1
+ici_context_parallelism: 1
+ici_tensor_transpose_parallelism: 1
+ici_tensor_sequence_parallelism: 1
+ici_autoregressive_parallelism: 1
+ici_fsdp_parallelism: 1
+ici_fsdp_transpose_parallelism: 1
+# Allow higher unsharded parameter percentage for small device count
+sharding_tolerance: 0.3
+
+# DCN dimensions to 1 (no multi-slice expectation locally).
+dcn_data_parallelism: 1
+dcn_tensor_parallelism: 1
+dcn_pipeline_parallelism: 1
+dcn_expert_parallelism: 1
+dcn_sequence_parallelism: 1
+dcn_context_parallelism: 1
+dcn_tensor_transpose_parallelism: 1
+dcn_tensor_sequence_parallelism: 1
+dcn_autoregressive_parallelism: 1
+dcn_fsdp_parallelism: 1
+dcn_fsdp_transpose_parallelism: 1
+
+# Config logging off unless a test overrides.
+log_config: false
+
+# Explicitly disable all Goodput / GCP metric integrations.
+enable_goodput_recording: false
+monitor_goodput: false
+goodput_upload_interval_seconds: 0
+enable_pathways_goodput: false
+enable_gcp_goodput_metrics: false
+
+tensorboard_dir: "./maxtext_local_output/gcloud_decoupled_test_logs/tensorboard"

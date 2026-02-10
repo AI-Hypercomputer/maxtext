@@ -19,11 +19,11 @@ import tempfile
 
 from absl.testing import absltest
 from absl.testing import parameterized
-from MaxText import globals as maxtext_globals
+
+from tests.utils.test_helpers import get_test_config_path
 from MaxText import train
 
 train_main = train.main
-MAXTEXT_PKG_DIR = maxtext_globals.MAXTEXT_PKG_DIR
 gettempdir = tempfile.gettempdir
 
 
@@ -40,7 +40,7 @@ class Train(parameterized.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"base_output_directory={test_tmpdir}",
             "run_name=ragged_dot_smoke_test",
             "base_emb_dim=128",

@@ -11,7 +11,7 @@ MODEL_NAME="gemma2-2b"
 # HF model id as golden model for verification
 HF_MODEL_ID="google/gemma-2-2b-it"
 # Tokenizer path for decoding
-TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}/tokenizer.gemma"
+TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}/tokenizer.gemma"
 
 PER_DEVICE_BATCH_SIZE=1
 ASYNC_CHECKPOINTING=false
@@ -21,21 +21,21 @@ PROMPT="I love to"
 # --- Step 1: Convert Checkpoint to MaxText Format ---
 echo "--- Starting Checkpoint Conversion ---"
 python3 -m MaxText.utils.ckpt_conversion.to_maxtext \
-  "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}configs/base.yml" \
+  "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml" \
   model_name="${MODEL_NAME}" \
   base_output_directory="${OUTPUT_BASE_DIR}" \
   per_device_batch_size="${PER_DEVICE_BATCH_SIZE}" \
   run_name="run_to_mt" \
   async_checkpointing="${ASYNC_CHECKPOINTING}" \
-  scan_layers="${SCAN_LAYERS}" 
+  scan_layers="${SCAN_LAYERS}"
 
 echo "--- Checkpoint Conversion Complete ---"
 
 # --- Step 2 (Optional): Decode using the Converted Checkpoint ---
 
 echo "--- Starting Decoding ---"
-python3 -m MaxText.decode \
-  ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}configs/base.yml \
+python3 -m maxtext.decode \
+  ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
   model_name="${MODEL_NAME}" \
   tokenizer_path="${TOKENIZER_PATH}" \
   load_parameters_path="${OUTPUT_BASE_DIR}/0/items" \
@@ -55,7 +55,7 @@ echo "--- Decoding Complete ---"
 
 echo "--- Starting Comparing Logits and Predicted Tokens ---"
 python3 -m tests.utils.forward_pass_logit_checker \
-    ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml \
+    ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
     tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path="${OUTPUT_BASE_DIR}/0/items"\
     run_name=forward_pass_test_${MODEL_NAME}\

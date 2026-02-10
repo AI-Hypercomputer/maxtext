@@ -10,7 +10,7 @@ DATE=$(date +%Y-%m-%d)
 HF_CHECKPOINT_GCS_PATH="gs://maxtext-model-checkpoints/HuggingFace/gemma2-2b/${DATE}" # (optional)GCS path for HF model
 MAXTEXT_CHECKPOINT_DIR="gs://maxtext-model-checkpoints/gemma2-2b-it/2025-02-20-18-01/unscanned/checkpoints/0/items"
 LOCAL_HF_CHECKPOINT_DIR="/tmp/hf_gemma2-2b_output" # HF requires a local dir
-TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}/tokenizer.gemma"
+TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}/tokenizer.gemma"
 MODEL_NAME="gemma2-2b"
 PER_DEVICE_BATCH_SIZE=1
 SCAN_LAYERS=false
@@ -20,9 +20,9 @@ SCAN_LAYERS=false
 echo "Starting Hugging Face model conversion for gemma2-2b..."
 
 python3 -m MaxText.utils.ckpt_conversion.to_huggingface \
-    "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}configs/base.yml" \
+    "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml" \
     model_name="${MODEL_NAME}" \
-    tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}/tokenizer.gemma" \
+    tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}/tokenizer.gemma" \
     load_parameters_path="${MAXTEXT_CHECKPOINT_DIR}" \
     per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
     max_prefill_predict_length=8 \
@@ -47,7 +47,7 @@ gsutil -m cp -r "${HF_CHECKPOINT_GCS_PATH}/*" "${LOCAL_HF_CHECKPOINT_DIR}/"
 echo "Download complete."
 
 python3 -m tests.utils.forward_pass_logit_checker \
-    "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}configs/base.yml" \
+    "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml" \
     tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path="${MAXTEXT_CHECKPOINT_DIR}"\
     run_name=forward_pass_test_${MODEL_NAME}\

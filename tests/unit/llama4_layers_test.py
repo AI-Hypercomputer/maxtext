@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for Llama4 Vision RoPE """
+"""Tests for Llama4 Vision RoPE."""
 from typing import Callable, NamedTuple
-import os.path
 import sys
 import math
 import torch
@@ -26,12 +25,12 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.common_types import MODEL_MODE_TRAIN, AttentionType
 from MaxText import pyconfig
-from MaxText import maxtext_utils
 from MaxText.layers import attentions, embeddings, llama4
+from maxtext.utils import maxtext_utils
 import numpy as np
+from tests.utils.test_helpers import get_test_config_path
 
 Attention = attentions.Attention
 
@@ -615,7 +614,7 @@ class Llama4VisionAttentionTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
     )
     self.rng = jax.random.PRNGKey(0)
@@ -894,7 +893,7 @@ class Llama4VisionEncoderTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
     )
     self.rng = jax.random.PRNGKey(0)

@@ -18,8 +18,9 @@ import unittest
 import os.path
 import pytest
 
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from MaxText.train import main as train_main
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from tests.utils.test_helpers import get_test_config_path
 
 pytestmark = pytest.mark.integration_test
 
@@ -31,14 +32,14 @@ class SimpleDecoderLayerTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
             "dataset_path=gs://maxtext-dataset",
             "decoder_block=simple",
             "enable_checkpointing=False",
             "enable_goodput_recording=False",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "steps=3",
         ]
     )
@@ -48,14 +49,14 @@ class SimpleDecoderLayerTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
             "dataset_path=gs://maxtext-dataset",
             "decoder_block=simple_mlp",
             "enable_checkpointing=False",
             "enable_goodput_recording=False",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "steps=3",
         ]
     )

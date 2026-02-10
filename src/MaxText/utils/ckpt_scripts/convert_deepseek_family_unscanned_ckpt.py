@@ -40,11 +40,11 @@ import numpy as np
 from safetensors import safe_open
 import torch
 
-from MaxText import max_logging
 from MaxText.utils.ckpt_scripts import convert_deepseek_family_ckpt as ds_ckpt
 from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
-from MaxText.inference_utils import str2bool
-from MaxText.utils.ckpt_conversion.utils.utils import MemoryMonitorTqdm, print_peak_memory
+from maxtext.inference.inference_utils import str2bool
+from maxtext.utils import max_logging
+from safetensors import safe_open
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 

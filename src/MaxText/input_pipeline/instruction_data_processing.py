@@ -14,12 +14,11 @@
 
 """Preprocessing for instruction dataset."""
 
-import datasets
 import json
 import os
 import re
 
-from MaxText import max_logging
+from maxtext.utils import max_logging
 
 
 def load_template_from_file(template_path):
@@ -117,6 +116,8 @@ def convert_to_conversational_format(
     chat_template_path,
 ):
   """Converts instruction dataset to conversational format."""
+  import datasets  # pylint: disable=import-outside-toplevel
+
   template_config = None
   if chat_template_path:
     template_config = load_template_from_file(chat_template_path)

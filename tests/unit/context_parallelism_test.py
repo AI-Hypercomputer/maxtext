@@ -16,19 +16,17 @@
 
 import sys
 import unittest
-import os.path
-
-import pytest
 
 import numpy as np
+import pytest
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec, NamedSharding
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText import maxtext_utils
+from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
 
 
 class ContextParallelismTest(unittest.TestCase):
@@ -62,7 +60,7 @@ class ContextParallelismTest(unittest.TestCase):
 
   def setUp(self):
     config_cp = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
         ici_context_parallelism=4,  # use context parallelism of 4
         context_parallel_load_balance=False,  # set load_balancing to False such that

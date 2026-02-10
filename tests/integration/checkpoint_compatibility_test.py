@@ -87,6 +87,7 @@ def test_autoselected_attention():
   run_checkpoint_compatibility("tpu", "autoselected")
 
 
+@pytest.mark.external_training
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
 def test_with_dot_product():

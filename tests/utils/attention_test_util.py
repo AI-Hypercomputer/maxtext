@@ -13,7 +13,6 @@
 # limitations under the License.
 """Test util for attention tests."""
 
-import os
 import sys
 
 from absl.testing import parameterized
@@ -22,13 +21,14 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-from MaxText import max_utils
-from MaxText import maxtext_utils
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
+from maxtext.common.gcloud_stub import is_decoupled
 from MaxText import pyconfig
 from MaxText.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, EP_AS_CONTEXT, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers.attention_mla import MLA
 from MaxText.sharding import maybe_shard_with_name
+from tests.utils.test_helpers import get_test_config_path
 
 
 class MLATestBase(parameterized.TestCase):
@@ -52,10 +52,23 @@ class MLATestBase(parameterized.TestCase):
   def setUp(self):
     """Initializes the configuration for each test"""
     super().setUp()
-    jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+    config_args = dict(self.config_arguments)
+    if is_decoupled():  # TODO(gulsumgudukbay): remove this after jax is updated.
+      # Older/newer JAX versions may not recognize this flag; ignore if absent.
+      try:
+        jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+      except AttributeError:
+        pass
+      # In decoupled mode, adapt mesh/ICI parallelism to local devices so
+      # fill_unspecified_mesh_axes matches the available device count.
+      config_args.setdefault("mesh_axes", ["data"])
+      config_args.setdefault("ici_data_parallelism", -1)
+    else:
+      jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **self.config_arguments,
+        [sys.argv[0], get_test_config_path()],
+        **config_args,
     )
     self.cfg = config
     self.rng = jax.random.PRNGKey(0)
@@ -66,7 +79,7 @@ class MLATestBase(parameterized.TestCase):
   def init_mla(self, config_arguments, rope_type):
     """Helper function to initialize MLA with different model names."""
     cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **config_arguments,
         rope_type=rope_type,
     )

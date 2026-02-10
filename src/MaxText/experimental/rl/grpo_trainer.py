@@ -67,20 +67,12 @@ import transformers
 from ml_goodput_measurement.src.goodput import GoodputRecorder
 
 import MaxText as mt
-from MaxText import exceptions
-from MaxText import max_logging
-from MaxText import max_utils
-from MaxText import maxtext_utils
 from MaxText import sharding
-from MaxText import train_utils
 from MaxText import pyconfig
-from MaxText.utils import gcs_utils
-from MaxText.inference import offline_engine
 from MaxText.experimental.rl import grpo_input_pipeline
 from MaxText.experimental.rl import grpo_utils
 from MaxText.globals import EPS
 from MaxText.train import get_first_step
-from MaxText.train_utils import validate_train_config
 from maxtext.common import checkpointing, profiler
 from maxtext.common.data_loader import DataLoader
 from maxtext.common.goodput import (
@@ -91,6 +83,13 @@ from maxtext.common.goodput import (
 )
 from maxtext.common.metric_logger import MetricLogger
 from maxtext.common.vertex_tensorboard import VertexTensorboardManager
+from maxtext.inference import offline_engine
+from maxtext.utils import exceptions
+from maxtext.utils import gcs_utils
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
+from maxtext.utils import train_utils
 
 # pylint: disable=too-many-positional-arguments
 
@@ -937,7 +936,7 @@ def main(argv: Sequence[str]) -> None:
     raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
-  validate_train_config(config)
+  train_utils.validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):

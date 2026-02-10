@@ -22,7 +22,6 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
-from MaxText import max_utils
 from MaxText.common_types import MODEL_MODE_PREFILL, Config
 from MaxText.layers import attentions
 from MaxText.layers import initializers
@@ -32,6 +31,7 @@ from MaxText.layers.attentions import Attention
 from MaxText.layers.linears import Dropout, MlpBlock
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext.utils import max_utils
 
 
 # Decoder and Model definitions

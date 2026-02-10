@@ -16,7 +16,7 @@
 Verify the converted safetensor checkpoint (GCS or local) matches the HuggingFace checkpoint reference. 
 
 Usage to compare converted safetensor with remote HF reference:
-JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_conversion.compare_hf_ckpt src/MaxText/configs/base.yml \
+JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_conversion.compare_hf_ckpt src/maxtext/configs/base.yml \
     model_name=<maxtext_model_name> \
     hf_access_token=<your_hf_token> \
     hardware=cpu \
@@ -24,7 +24,7 @@ JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_conversion.compare_hf_ckpt src/M
     --atol=1e-2 --rtol=1e-2 --max_workers=12
 
 Usage to compare converted safetensor with GCS/Local HF reference:
-JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_conversion.compare_hf_ckpt src/MaxText/configs/base.yml \
+JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_conversion.compare_hf_ckpt src/maxtext/configs/base.yml \
     hardware=cpu \
     --candidate_path=<gcs_bucket_path or local_path> \
     --reference_path=<gcs_bucket_path or local_path> \
@@ -47,9 +47,9 @@ from absl import logging
 from safetensors.torch import load as load_safetensors
 from safetensors import safe_open
 
-from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.utils.ckpt_conversion.utils.utils import HF_IDS, print_ram_usage, get_hf_model
+from maxtext.utils import max_logging
 
 
 jax.config.update("jax_platform_name", "cpu")

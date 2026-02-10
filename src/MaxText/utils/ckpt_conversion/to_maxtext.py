@@ -41,7 +41,7 @@ Example Usage:
   To convert a gemma2-2b model and save it to a specific directory:
 
     /usr/bin/time -v python src/MaxText/utils/ckpt_conversion/to_maxtext.py \
-    MaxText/configs/base.yml model_name="gemma2-2b" \
+    maxtext/configs/base.yml model_name="gemma2-2b" \
     base_output_directory="/path/to/your/output/directory" \
     hf_access_token=$HF_TOKEN hardware=cpu skip_jax_distributed_system=True \
     scan_layers=False
@@ -52,7 +52,7 @@ Example Usage:
   To convert a 70B model with minimal RAM usage:
 
    /usr/bin/time -v python src/MaxText/utils/ckpt_conversion/to_maxtext.py \
-    MaxText/configs/base.yml model_name="meta-llama/Llama-3.1-70B" \
+    maxtext/configs/base.yml model_name="meta-llama/Llama-3.1-70B" \
     base_output_directory="gs://my-bucket/maxtext-checkpoints" \
     hf_access_token=$HF_TOKEN hardware=cpu skip_jax_distributed_system=True \
     --lazy_load_tensors=True
@@ -75,25 +75,16 @@ from safetensors import safe_open
 import jax
 import flax.linen as nn
 from orbax.checkpoint import type_handlers
-
-from MaxText import max_logging
-from MaxText import max_utils
-from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.inference_utils import str2bool
 from MaxText.layers import models, quantizations
 from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.utils import (
-    apply_hook_fns,
-    HF_IDS,
-    get_hf_model,
-    validate_and_filter_param_map_keys,
-    MemoryMonitorTqdm,
-    print_ram_usage,
-    print_peak_memory,
-)
+from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model, MemoryMonitorTqdm, print_peak_memory, validate_and_filter_param_map_keys
+from maxtext.inference.inference_utils import str2bool
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log

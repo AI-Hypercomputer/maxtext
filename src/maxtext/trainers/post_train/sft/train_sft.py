@@ -15,11 +15,11 @@
 """
 SFT training script that calls a trainer in Tunix to run SFT on a MaxText model
 using `HuggingFaceH4/ultrachat_200k` dataset. The configurations for the dataset
-are defined inside `src/MaxText/configs/sft.yml`.
+are defined inside `src/maxtext/configs/post_train/sft.yml`.
 
 Example command:
 Training & Evaluation:
-  python3 -m maxtext.trainers.post_train.sft.train_sft src/MaxText/configs/sft.yml \
+  python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml \
     run_name=$RUN_NAME base_output_directory=$BASE_OUTPUT_DIRECTORY \
     model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \
     hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH \
@@ -27,7 +27,7 @@ Training & Evaluation:
     eval_interval=2 eval_steps=2 steps=10 profiler=xplane weight_dtype=bfloat16
 
 Training:
-  python3 -m maxtext.trainers.post_train.sft.train_sft src/MaxText/configs/sft.yml \
+  python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml \
     run_name=$RUN_NAME base_output_directory=$BASE_OUTPUT_DIRECTORY \
     model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \
     hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH \
@@ -49,12 +49,8 @@ from orbax import checkpoint as ocp
 
 from tunix.sft import metrics_logger, peft_trainer, profiler
 
-from MaxText import max_utils
-from MaxText import max_logging
-from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
-from MaxText import model_creation_utils
 from MaxText.train import loss_fn
 from maxtext.common.goodput import (
     GoodputEvent,
@@ -63,6 +59,10 @@ from maxtext.common.goodput import (
     maybe_record_goodput,
 )
 from maxtext.trainers.post_train.sft import hooks
+from maxtext.utils import max_utils
+from maxtext.utils import max_logging
+from maxtext.utils import maxtext_utils
+from maxtext.utils import model_creation_utils
 
 
 def get_tunix_config(mt_config):

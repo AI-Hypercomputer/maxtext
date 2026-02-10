@@ -82,7 +82,7 @@ MaxText provides examples to work with [Common Crawl](https://commoncrawl.org/).
 Run these steps once per project prior to any local development or cluster experiments.
 
 1. Create two gcs buckets in your project, one for downloading and retrieving the dataset and the other for storing the logs.
-1. Download the dataset in your gcs bucket.
+2. Download the dataset in your gcs bucket.
 
 MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them.
 
@@ -101,7 +101,7 @@ Below is a sample training script.
 
 ```sh
 python3 -m MaxText.train \
-  src/MaxText/configs/base.yml \
+  src/maxtext/configs/base.yml \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   load_parameters_path=${MODEL_CKPT_PATH} \
@@ -113,7 +113,7 @@ python3 -m MaxText.train \
   steps=10 per_device_batch_size=1
 ```
 
-You can find some [end to end scripts here](https://github.com/AI-Hypercomputer/maxtext/tree/main/end_to_end/tpu).
+You can find some [end to end scripts here](https://github.com/AI-Hypercomputer/maxtext/tree/main/tests/end_to_end/tpu).
 These scripts can provide a reference point for various scripts.
 
 ## Parameters to achieve high MFU

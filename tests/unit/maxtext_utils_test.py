@@ -16,7 +16,6 @@
 
 from typing import Any
 from collections.abc import Callable
-import os.path
 import unittest
 
 from jax import random, vmap
@@ -32,16 +31,17 @@ from flax import nnx
 
 import optax
 
-from MaxText import max_utils
-from MaxText import maxtext_utils
 from MaxText import sharding
-from MaxText import inference_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
+from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.inference import inference_utils
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
 
 Transformer = models.transformer_as_linen
 
@@ -223,9 +223,7 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
   """test class for multiple collection state in maxutils"""
 
   def setUp(self):
-    self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
-    )
+    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False)
     self.model = ModelWithMultipleCollections(self.config.max_target_length, nnx.Rngs(0))
     self.key = random.key(0)
     self.tx = optax.adam(learning_rate=0.001)
@@ -275,9 +273,9 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
   """Tests initialization of transformer states in max_utils.py"""
 
   def setUp(self):
-    self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
-    )
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
@@ -735,7 +733,7 @@ class TestLearningRateSchedules(unittest.TestCase):
     warmup_steps = int(learning_rate_schedule_steps * warmup_steps_fraction)
 
     config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         enable_checkpointing=False,
         learning_rate=learning_rate,
         learning_rate_schedule_steps=learning_rate_schedule_steps,
@@ -777,7 +775,7 @@ class TestLearningRateSchedules(unittest.TestCase):
     # Test both decay styles: linear and cosine
     for decay_style in ["linear", "cosine"]:
       config = pyconfig.initialize(
-          [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+          [None, get_test_config_path()],
           enable_checkpointing=False,
           learning_rate=learning_rate,
           learning_rate_schedule_steps=learning_rate_schedule_steps,
@@ -815,7 +813,7 @@ class TestLearningRateSchedules(unittest.TestCase):
     # Test invalid fractions - should raise during config initialization
     with self.assertRaises(ValueError) as cm:
       pyconfig.initialize(
-          [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+          [None, get_test_config_path()],
           enable_checkpointing=False,
           learning_rate=learning_rate,
           learning_rate_schedule_steps=learning_rate_schedule_steps,
@@ -827,6 +825,38 @@ class TestLearningRateSchedules(unittest.TestCase):
       )
     self.assertIn("warmup_steps_fraction", str(cm.exception))
     self.assertIn("wsd_decay_steps_fraction", str(cm.exception))
+
+
+class TestGetAbstractState(unittest.TestCase):
+  """Test class for get_abstract_state."""
+
+  def setUp(self):
+    self.config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        model_name="llama3.1-8b",
+        per_device_batch_size=1,
+        max_target_length=16,
+    )
+    devices_array = maxtext_utils.create_device_mesh(self.config)
+    self.mesh = Mesh(devices_array, self.config.mesh_axes)
+    quant = quantizations.configure_quantization(self.config)
+    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    self.rng = jax.random.PRNGKey(0)
+    self.tx = optax.adam(learning_rate=0.001)
+
+  def test_get_abstract_state(self):
+    """Tests that get_abstract_state returns abstract arrays."""
+    # get_abstract_state returns a tuple, the first element is the abstract state.
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(self.model, self.tx, self.config, self.rng, self.mesh, None)
+
+    # Check that params are abstract
+    param_leaves = jax.tree_util.tree_leaves(abstract_state.params)
+    self.assertTrue(all(isinstance(leaf, jax.ShapeDtypeStruct) for leaf in param_leaves))
+
+    # Check that opt_state is abstract
+    opt_state_leaves = jax.tree_util.tree_leaves(abstract_state.opt_state)
+    self.assertTrue(all(isinstance(leaf, jax.ShapeDtypeStruct) for leaf in opt_state_leaves))
 
 
 if __name__ == "__main__":

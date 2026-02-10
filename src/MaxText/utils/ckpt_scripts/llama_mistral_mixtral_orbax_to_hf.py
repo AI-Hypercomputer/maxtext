@@ -23,7 +23,7 @@ To save a ckpt
 python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 
-python3 -m MaxText.utils.ckpt_scripts.llama_mistral_mixtral_orbax_to_hf src/MaxText/configs/base.yml
+python3 -m MaxText.utils.ckpt_scripts.llama_mistral_mixtral_orbax_to_hf src/maxtext/configs/base.yml
             base_output_directory=path/to/saving/intermediate_MaxText_files
             load_parameters_path=/path/to/src/MaxText/checkpoint run_name=<your run name> model_name=<llama2 or mistral>
             hardware=gpu
@@ -48,12 +48,12 @@ from jax.sharding import Mesh
 from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
 
 from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
-from MaxText import max_logging
-from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.generate_param_only_checkpoint import _read_train_checkpoint
-from MaxText.max_utils import unpermute_from_match_maxtext_rope
 from maxtext.common import checkpointing
+from maxtext.utils import max_logging
+from maxtext.utils import maxtext_utils
+from maxtext.utils.max_utils import unpermute_from_match_maxtext_rope
 
 
 def reverse_scale(arr, scale):

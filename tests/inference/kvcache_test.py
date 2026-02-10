@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText.inference import kvcache
+from maxtext.inference import kvcache
 
 
 class MlaKVCacheTest(unittest.TestCase):

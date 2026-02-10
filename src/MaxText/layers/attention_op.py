@@ -32,7 +32,6 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ke
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
-from MaxText import max_utils
 from MaxText.common_types import (
     Array,
     AttentionType,
@@ -69,15 +68,16 @@ from MaxText.common_types import (
     Q_LENGTH,
     Q_LENGTH_NO_EXP,
 )
-from MaxText.inference import page_manager
-from MaxText.inference.kvcache import KVQuant, KVTensor
-from MaxText.kernels import jax_flash_attention
-from MaxText.kernels.ragged_attention import ragged_gqa
-from MaxText.kernels.ragged_attention import ragged_mha
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import variable_to_logically_partitioned
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.sharding import logical_to_mesh_axes, maybe_shard_with_name
+from maxtext.inference import page_manager
+from maxtext.inference.kvcache import KVQuant, KVTensor
+from maxtext.kernels.attention import jax_flash_attention
+from maxtext.kernels.attention.ragged_attention import ragged_gqa
+from maxtext.kernels.attention.ragged_attention import ragged_mha
+from maxtext.utils import max_utils
 import numpy as np
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
@@ -1122,6 +1122,7 @@ class AttentionOp(nnx.Module):
             if config.cost_estimate_flops_bwd >= 0
             else None,
             dq_reduction_steps=config.dq_reduction_steps if config.dq_reduction_steps > 0 else None,
+            use_experimental_scheduler=config.use_splash_scheduler,
         )
       else:
         sa_config = splash_attention_kernel.BlockSizes(

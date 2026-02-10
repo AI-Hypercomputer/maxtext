@@ -19,6 +19,7 @@
 # See github.com/google/maxtext/issues/20 for more
 
 from typing import Any, Sequence
+import contextlib
 import datetime
 import functools
 import os
@@ -37,28 +38,15 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
-
-from MaxText import exceptions
-from MaxText import max_logging
-from MaxText import max_utils
-from MaxText import maxtext_utils
-from MaxText import train_utils
 from MaxText import pyconfig
 from MaxText import sharding
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.common_types import ShardMode
 from MaxText.globals import EPS
-from MaxText.utils import gcs_utils
 # Placeholder: internal
 
 from MaxText.gradient_accumulation import gradient_accumulation_loss_and_grad
 from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
-from MaxText.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
-from MaxText.train_utils import validate_train_config
 # pylint: disable=too-many-positional-arguments
 
 from maxtext.common import checkpointing, profiler
@@ -68,8 +56,20 @@ from maxtext.common.goodput import (
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
+from maxtext.common.gcloud_stub import cloud_diagnostics as _cloud_diag, is_decoupled
+from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common.metric_logger import MetricLogger, record_activation_metrics
-from maxtext.common.vertex_tensorboard import VertexTensorboardManager
+from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
+from maxtext.utils import exceptions
+from maxtext.utils import gcs_utils
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
+from maxtext.utils import train_utils
+
+_diag_modules = _cloud_diag()
+diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = _diag_modules
+VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
 
 def get_first_step(state):
@@ -179,9 +179,13 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   # Zero1+GA to reduce communication overhead.
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
-  if config.gradient_accumulation_steps > 1:
+  if config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation:
     loss = total_loss
   else:
+    # When using Tunix gradient accumulation, we revert to standard normalization.
+    # Unlike the manual accumulation path above, Tunix (via optax.MultiSteps) expects
+    # a normalized loss for each step. It handles the accumulation state
+    # updates and scaling internally.
     loss = total_loss / (total_weights + EPS)
 
   # Calculate and Add MTP Loss
@@ -528,7 +532,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   # or fill in here
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
-  validate_train_config(config)
+  train_utils.validate_train_config(config)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   # update explicit sharding-supported config
   if config.shard_mode == ShardMode.EXPLICIT:
@@ -554,9 +558,22 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
 
 
 def run(config, recorder, diagnostic_config):
-  """Run the job given hyperparameters and utilities"""
+  """Run the job given hyperparameters and utilities.
+
+  In decoupled mode (DECOUPLE_GCLOUD=TRUE) cloud diagnostics may be stubbed; if so, skip wrapping.
+  """
+  # Use nullcontext when diagnostics are stubbed or in decoupled mode
+  diagnostics_context = (
+      contextlib.nullcontext()
+      if is_decoupled() or getattr(diagnostic, "__class__", None).__name__ == "_StubDiag"
+      else diagnostic.diagnose(diagnostic_config)
+  )
+
+  if is_decoupled() or getattr(diagnostic, "__class__", None).__name__ == "_StubDiag":
+    max_logging.log("[DECOUPLED NO-OP] skipping cloud diagnostics wrapper.")
+
   with (
-      diagnostic.diagnose(diagnostic_config),
+      diagnostics_context,
       maybe_record_goodput(recorder, GoodputEvent.JOB),
       max_utils.maybe_get_transformer_engine_context(config),
       maybe_monitor_goodput(config),

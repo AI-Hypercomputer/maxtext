@@ -25,7 +25,7 @@ import argparse
 import pickle
 import numpy as np
 import torch
-from MaxText import max_logging
+from maxtext.utils import max_logging
 
 
 def inspect_weights(left_path, right_path):

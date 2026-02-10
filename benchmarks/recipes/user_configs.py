@@ -70,6 +70,11 @@ class UserConfig:
   selected_model_names: list[str] = dataclasses.field(default_factory=lambda: ["llama3_1_8b_8192"])
   num_slices_list: list[int] = dataclasses.field(default_factory=lambda: [2])
 
+  # BigQuery configuration
+  bq_enable: bool = False
+  bq_db_project: str = ""
+  bq_db_dataset: str = ""
+
   # other configuration
   xpk_path: str = "~/xpk"
   max_restarts: int = 0
