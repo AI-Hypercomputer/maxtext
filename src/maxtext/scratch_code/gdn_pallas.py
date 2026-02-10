@@ -39,9 +39,7 @@ def gdn_scan_kernel_tpu(
         # Term 2: Intra-chunk Attention
         attn = jnp.dot(q.astype(jnp.float32), k.astype(jnp.float32).T)
         
-        # FIX: Use float32 arithmetic mask instead of bool to avoid Mosaic compilation error
-        # ("Unsupported target bitwidth for truncation" i8->i1)
-        # jnp.tri returns 1.0 on/below diagonal, 0.0 above.
+        # Use float32 arithmetic mask instead of bool
         mask_val = jnp.tri(chunk_size, dtype=jnp.float32)
         attn = attn * mask_val
         
@@ -121,15 +119,6 @@ def _gdn_reference(w, u, q, k, v, g, beta):
 # 3. Custom VJP Registration (The Glue)
 # ==============================================================================
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=())
-def gdn_pallas_layer(w, u, q, k, v, g, beta):
-    """
-    Public entry point. 
-    Forward: Uses Pallas Kernel.
-    Backward: Uses JAX Reference VJP.
-    """
-    return _gdn_pallas_forward(w, u, q, k, v, g, beta)
-
 def _gdn_pallas_forward(w, u, q, k, v, g, beta):
     """Invokes the Pallas kernel."""
     B, H, N_chunks, C, Dk = k.shape
@@ -168,6 +157,17 @@ def _gdn_pallas_backward(residuals, grad_out):
     # Compute gradients
     grads = vjp_fn(grad_out)
     return grads
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=())
+def gdn_pallas_layer(w, u, q, k, v, g, beta):
+    """
+    Public entry point. 
+    Forward: Uses Pallas Kernel.
+    Backward: Uses JAX Reference VJP.
+    """
+    # Fix: Unpack to return only the primal output.
+    out, _ = _gdn_pallas_forward(w, u, q, k, v, g, beta)
+    return out
 
 # Register the forward and backward functions
 gdn_pallas_layer.defvjp(_gdn_pallas_forward, _gdn_pallas_backward)
