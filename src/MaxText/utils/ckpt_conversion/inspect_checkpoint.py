@@ -15,7 +15,7 @@ Usage Examples:
 
 cd ~/maxtext
 SCRIPT=~/maxtext/src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py
-python inspect_checkpoint.py hf --path <local_hf_path>
+python inspect_checkpoint.py hf --path <local_hf_path> --format safetensors
 python $SCRIPT maxtext --model_name deepseek3.2-671b --scan_layers False
 python $SCRIPT maxtext --model_name deepseek3.2-671b --scan_layers True
 """
@@ -95,13 +95,11 @@ def inspect_maxtext(args):
   print(f"\n--- Inspecting MaxText Architecture: {args.model_name} (Scan: {args.scan_layers}) ---")
 
   # Lazy imports
-  try:
-    import jax
-    from MaxText import max_utils, maxtext_utils, pyconfig
-    from MaxText.globals import MAXTEXT_PKG_DIR
-    from MaxText.layers import models, quantizations
-  except ImportError:
-    sys.exit("Error: MaxText modules not found. Ensure you are in the MaxText root directory or PYTHONPATH is set.")
+  import jax
+  from maxtext.utils import max_utils, maxtext_utils
+  from MaxText import pyconfig
+  from MaxText.globals import MAXTEXT_PKG_DIR
+  from MaxText.layers import models, quantizations
 
   Transformer = models.transformer_as_linen
 
@@ -190,7 +188,9 @@ def main():
   # Mode 1: HuggingFace / PyTorch
   parser_hf = subparsers.add_parser("hf", help="Inspect .safetensors or .pth files")
   parser_hf.add_argument("--path", type=str, required=True, help="Directory containing checkpoint files")
-  parser_hf.add_argument("--format", type=str, choices=["safetensors", "pth"], default="safetensors", help="File format")
+  parser_hf.add_argument(
+      "--format", type=str, required=False, choices=["safetensors", "pth"], default="safetensors", help="File format"
+  )
 
   # Mode 2: MaxText Architecture
   parser_mt = subparsers.add_parser("maxtext", help="Inspect MaxText theoretical architecture")

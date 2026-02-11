@@ -147,56 +147,68 @@ def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers, num_ma
       "model.norm.weight": "decoder_norm.scale",
   }
 
+  def get_attention(layer_idx, prefix):
+    """
+    layer_idx: from hf
+    prefix: for temporary mapping
+    """
+    return {
+        # norm
+        f"model.layers.{layer_idx}.input_layernorm.weight": f"{prefix}.pre_self_attention_layer_norm.scale",
+        f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"{prefix}.post_self_attention_layer_norm.scale",
+        # attention
+        f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"{prefix}.self_attention.query.kernel",
+        f"model.layers.{layer_idx}.self_attn.q_a_proj.weight": f"{prefix}.self_attention.wq_a.kernel",
+        f"model.layers.{layer_idx}.self_attn.q_a_layernorm.weight": f"{prefix}.self_attention.q_norm.scale",
+        f"model.layers.{layer_idx}.self_attn.q_b_proj.weight": f"{prefix}.self_attention.wq_b.kernel",
+        f"model.layers.{layer_idx}.self_attn.kv_a_proj_with_mqa.weight": f"{prefix}.self_attention.wkv_a.kernel",
+        f"model.layers.{layer_idx}.self_attn.kv_b_proj.weight": f"{prefix}.self_attention.wkv_b.kernel",
+        f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"{prefix}.self_attention.out.kernel",
+        f"model.layers.{layer_idx}.self_attn.kv_a_layernorm.weight": f"{prefix}.self_attention.kv_norm.scale",
+        # Indexer mappings
+        f"model.layers.{layer_idx}.self_attn.indexer.k_norm.weight": f"{prefix}.self_attention.indexer.k_norm.scale",
+        f"model.layers.{layer_idx}.self_attn.indexer.k_norm.bias": f"{prefix}.self_attention.indexer.k_norm.bias",
+        f"model.layers.{layer_idx}.self_attn.indexer.weights_proj.weight": f"{prefix}.self_attention.indexer.weights_proj.kernel",
+        f"model.layers.{layer_idx}.self_attn.indexer.wk.weight": f"{prefix}.self_attention.indexer.wk.kernel",
+        f"model.layers.{layer_idx}.self_attn.indexer.wq_b.weight": f"{prefix}.self_attention.indexer.wq_b.kernel",
+    }
+
   if layer_idx < first_num_dense_layers:
     # Dense layers mapping
+    prefix = f"dense_layers.{layer_idx}"
     mapping.update(
         {
-            f"model.layers.{layer_idx}.input_layernorm.weight": f"dense_layers.{layer_idx}.pre_self_attention_layer_norm.scale",
-            f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"dense_layers.{layer_idx}.post_self_attention_layer_norm.scale",
-            f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"dense_layers.{layer_idx}.self_attention.query.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_proj.weight": f"dense_layers.{layer_idx}.self_attention.wq_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_layernorm.weight": f"dense_layers.{layer_idx}.self_attention.q_norm.scale",
-            f"model.layers.{layer_idx}.self_attn.q_b_proj.weight": f"dense_layers.{layer_idx}.self_attention.wq_b.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_a_proj_with_mqa.weight": f"dense_layers.{layer_idx}.self_attention.wkv_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_b_proj.weight": f"dense_layers.{layer_idx}.self_attention.wkv_b.kernel",
-            f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"dense_layers.{layer_idx}.self_attention.out.kernel",
-            f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"dense_layers.{layer_idx}.mlp.wi_0.kernel",
-            f"model.layers.{layer_idx}.mlp.up_proj.weight": f"dense_layers.{layer_idx}.mlp.wi_1.kernel",
-            f"model.layers.{layer_idx}.mlp.down_proj.weight": f"dense_layers.{layer_idx}.mlp.wo.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_a_layernorm.weight": f"dense_layers.{layer_idx}.self_attention.kv_norm.scale",
+            f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"{prefix}.mlp.wi_0.kernel",
+            f"model.layers.{layer_idx}.mlp.up_proj.weight": f"{prefix}.mlp.wi_1.kernel",
+            f"model.layers.{layer_idx}.mlp.down_proj.weight": f"{prefix}.mlp.wo.kernel",
         }
     )
+    mapping.update(get_attention(layer_idx, prefix))
   elif layer_idx < num_main_layers:
     # MoE layers mapping
     moe_layer_idx_in_maxtext = layer_idx - first_num_dense_layers
+    prefix = f"moe_layers.{moe_layer_idx_in_maxtext}"
     for expert_idx in range(num_experts):
       mapping.update(
           {
-              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wo",
-              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wi_0",
-              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wi_1",
+              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wo",
+              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wi_0",
+              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wi_1",
           }
       )
     mapping.update(
         {
-            f"model.layers.{layer_idx}.mlp.gate.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel",
-            f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias",
-            f"model.layers.{layer_idx}.mlp.shared_experts.down_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.shared_experts.wo.kernel",
-            f"model.layers.{layer_idx}.mlp.shared_experts.gate_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel",
-            f"model.layers.{layer_idx}.mlp.shared_experts.up_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wq_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_layernorm.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.q_norm.scale",
-            f"model.layers.{layer_idx}.self_attn.q_b_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wq_b.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_a_layernorm.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.kv_norm.scale",
-            f"model.layers.{layer_idx}.self_attn.kv_a_proj_with_mqa.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wkv_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_b_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wkv_b.kernel",
-            f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.out.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.query.kernel",
-            f"model.layers.{layer_idx}.input_layernorm.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.pre_self_attention_layer_norm.scale",
-            f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.post_self_attention_layer_norm.scale",
+            f"model.layers.{layer_idx}.mlp.gate.weight": f"{prefix}.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel",
+            f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias": f"{prefix}.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias",
+            f"model.layers.{layer_idx}.mlp.shared_experts.down_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.shared_experts.wo.kernel",
+            f"model.layers.{layer_idx}.mlp.shared_experts.gate_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel",
+            f"model.layers.{layer_idx}.mlp.shared_experts.up_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel",
         }
     )
+    mapping.update(get_attention(layer_idx, prefix))
+  # last layer is mtp
   elif has_mtp and layer_idx == num_main_layers:
+    prefix = "mtp_block.mtp_layer_1.mtp_1_transformer_layer"
     mapping.update(
         {
             f"model.layers.{layer_idx}.enorm.weight": "mtp_block.mtp_layer_1.mtp_1_embedding_norm.scale",
@@ -207,30 +219,21 @@ def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers, num_ma
     for expert_idx in range(num_experts):
       mapping.update(
           {
-              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight": f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wo",
-              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight": f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wi_0",
-              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight": f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wi_1",
+              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wo",
+              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wi_0",
+              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wi_1",
           }
       )
     mapping.update(
         {
-            f"model.layers.{layer_idx}.mlp.gate.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel",
-            f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias",
-            f"model.layers.{layer_idx}.mlp.shared_experts.down_proj.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wo.kernel",
-            f"model.layers.{layer_idx}.mlp.shared_experts.gate_proj.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel",
-            f"model.layers.{layer_idx}.mlp.shared_experts.up_proj.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_proj.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wq_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_layernorm.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.q_norm.scale",
-            f"model.layers.{layer_idx}.self_attn.q_b_proj.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wq_b.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_a_layernorm.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.kv_norm.scale",
-            f"model.layers.{layer_idx}.self_attn.kv_a_proj_with_mqa.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wkv_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_b_proj.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wkv_b.kernel",
-            f"model.layers.{layer_idx}.self_attn.o_proj.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.out.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_proj.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.query.kernel",
-            f"model.layers.{layer_idx}.input_layernorm.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.pre_self_attention_layer_norm.scale",
-            f"model.layers.{layer_idx}.post_attention_layernorm.weight": "mtp_block.mtp_layer_1.mtp_1_transformer_layer.post_self_attention_layer_norm.scale",
+            f"model.layers.{layer_idx}.mlp.gate.weight": f"{prefix}.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel",
+            f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias": f"{prefix}.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias",
+            f"model.layers.{layer_idx}.mlp.shared_experts.down_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.shared_experts.wo.kernel",
+            f"model.layers.{layer_idx}.mlp.shared_experts.gate_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel",
+            f"model.layers.{layer_idx}.mlp.shared_experts.up_proj.weight": f"{prefix}.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel",
         }
     )
+    mapping.update(get_attention(layer_idx, prefix))
   return mapping
 
 
@@ -353,19 +356,18 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
       wkv_a = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_a.kernel"].to(torch.float16).numpy().transpose()
       wkv_b = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_b.kernel"].to(torch.float16).numpy().transpose()
       out = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.out.kernel"].to(torch.float16).numpy().transpose()
-      if q_lora_rank != 0:
-        q_norm = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.q_norm.scale"].to(torch.float16).numpy()
-        wq_a = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_a.kernel"].to(torch.float16).numpy().transpose()
-        wq_b = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_b.kernel"].to(torch.float16).numpy().transpose()
-      else:
-        query = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.query.kernel"].to(torch.float16).numpy().transpose()
 
       # reshape to match maxtext
       wkv_b = np.reshape(wkv_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)])
       out = np.reshape(out, [base_num_query_heads, v_head_dim, base_emb_dim])
+
       if q_lora_rank != 0:
+        q_norm = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.q_norm.scale"].to(torch.float16).numpy()
+        wq_a = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_a.kernel"].to(torch.float16).numpy().transpose()
+        wq_b = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_b.kernel"].to(torch.float16).numpy().transpose()
         wq_b = np.reshape(wq_b, [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
       else:
+        query = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.query.kernel"].to(torch.float16).numpy().transpose()
         query = np.reshape(query, [base_emb_dim, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
 
       # initialization
@@ -392,6 +394,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
           self_attention.update({"query": {"kernel": None}})
           self_attention["query"]["kernel"] = np.zeros(stack_shape + query.shape, dtype=np.float16)
 
+      # assign
       self_attention["kv_norm"]["scale"][layer_idx, ...] = kv_norm
       self_attention["wkv_a"]["kernel"][layer_idx, ...] = wkv_a
       self_attention["wkv_b"]["kernel"][layer_idx, ...] = wkv_b

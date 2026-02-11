@@ -49,6 +49,13 @@ from safetensors import safe_open
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
+def _pt_to_np(pt_weight, transpose=False):
+  np_weight = pt_weight.to(torch.float16).numpy()
+  if transpose:
+    np_weight = np_weight.transpose()
+  return np_weight
+
+
 def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info) -> dict:
   """Convert Huggingface Checkpoint to Jax."""
   base_num_decoder_layers = model_params["num_layers"]
@@ -93,19 +100,17 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
 
   # decoder norm scale ###########################################
   max_logging.log("Processing decoder norm scale")
-  jax_weights["decoder"]["decoder_norm"]["scale"] = chkpt_vars["decoder_norm.scale"].to(torch.float16).numpy()
+  jax_weights["decoder"]["decoder_norm"]["scale"] = _pt_to_np(chkpt_vars["decoder_norm.scale"])
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # logits dense #################################################
   max_logging.log("Processing logits dense")
-  jax_weights["decoder"]["logits_dense"]["kernel"] = (
-      chkpt_vars["logits_dense.kernel"].to(torch.float16).numpy().transpose()
-  )
+  jax_weights["decoder"]["logits_dense"]["kernel"] = _pt_to_np(chkpt_vars["logits_dense.kernel"], transpose=True)
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # token embedding ##############################################
   max_logging.log("Processing token embeddings")
-  jax_weights["token_embedder"]["embedding"] = chkpt_vars["token_embedder.embedding"].to(torch.float16).numpy()
+  jax_weights["token_embedder"]["embedding"] = _pt_to_np(chkpt_vars["token_embedder.embedding"])
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   layers = {
@@ -117,82 +122,69 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
   for layer_key, layer_value in layers.items():
     for layer_idx in MemoryMonitorTqdm(range(layer_value), desc=layer_key, leave=True):
       layer_name = f"{layer_key}_{layer_idx}"
+
+      # dense mlp
       if layer_key == "dense_layers":
-        jax_weights["decoder"].update(
-            {
-                layer_name: {
-                    "mlp": {
-                        "wi_0": {"kernel": None},
-                        "wi_1": {"kernel": None},
-                        "wo": {"kernel": None},
-                    },
-                    "self_attention": {
-                        "kv_norm": {"scale": None},
-                        "wkv_a": {"kernel": None},
-                        "wkv_b": {"kernel": None},
-                        "out": {"kernel": None},
-                    },
-                    "pre_self_attention_layer_norm": {"scale": None},
-                    "post_self_attention_layer_norm": {"scale": None},
-                },
+        mlp = {
+            "mlp": {
+                "wi_0": {"kernel": None},
+                "wi_1": {"kernel": None},
+                "wo": {"kernel": None},
             }
-        )
+        }
+      # sparse mlp
       else:
-        jax_weights["decoder"].update(
-            {
-                layer_name: {
-                    "DeepSeekMoeBlock_0": {
-                        "MoeBlock_0": {
-                            "wi_0": None,
-                            "wi_1": None,
-                            "wo": None,
-                            "gate": {"kernel": None},
-                        },
-                        "shared_experts": {
-                            "wi_0": {"kernel": None},
-                            "wi_1": {"kernel": None},
-                            "wo": {"kernel": None},
-                        },
-                    },
-                    "self_attention": {
-                        "kv_norm": {"scale": None},
-                        "wkv_a": {"kernel": None},
-                        "wkv_b": {"kernel": None},
-                        "out": {"kernel": None},
-                    },
-                    "pre_self_attention_layer_norm": {"scale": None},
-                    "post_self_attention_layer_norm": {"scale": None},
+        mlp = {
+            "DeepSeekMoeBlock_0": {
+                "MoeBlock_0": {
+                    "wi_0": None,
+                    "wi_1": None,
+                    "wo": None,
+                    "gate": {"kernel": None},
+                },
+                "shared_experts": {
+                    "wi_0": {"kernel": None},
+                    "wi_1": {"kernel": None},
+                    "wo": {"kernel": None},
                 },
             }
-        )
-      self_attention = jax_weights["decoder"][layer_name]["self_attention"]
+        }
+
+      jax_weights["decoder"][layer_name] = (
+          {
+              **mlp,
+              "pre_self_attention_layer_norm": {"scale": None},
+              "post_self_attention_layer_norm": {"scale": None},
+              "self_attention": {
+                  "kv_norm": {"scale": None},
+                  "wkv_a": {"kernel": None},
+                  "wkv_b": {"kernel": None},
+                  "out": {"kernel": None},
+              },
+          },
+      )
+
+      # Process norms
       pre_self_attention_layer_norm = jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"]
       post_self_attention_layer_norm = jax_weights["decoder"][layer_name]["post_self_attention_layer_norm"]
 
-      pre_self_attention = (
-          chkpt_vars[f"{layer_key}.{layer_idx}.pre_self_attention_layer_norm.scale"].to(torch.float16).numpy()
-      )
-      post_self_attention = (
-          chkpt_vars[f"{layer_key}.{layer_idx}.post_self_attention_layer_norm.scale"].to(torch.float16).numpy()
-      )
-      kv_norm = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.kv_norm.scale"].to(torch.float16).numpy().transpose()
-      wkv_a = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_a.kernel"].to(torch.float16).numpy().transpose()
-      wkv_b = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_b.kernel"].to(torch.float16).numpy().transpose()
-      out = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.out.kernel"].to(torch.float16).numpy().transpose()
-      if q_lora_rank != 0:
-        q_norm = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.q_norm.scale"].to(torch.float16).numpy()
-        wq_a = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_a.kernel"].to(torch.float16).numpy().transpose()
-        wq_b = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_b.kernel"].to(torch.float16).numpy().transpose()
-      else:
-        query = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.query.kernel"].to(torch.float16).numpy().transpose()
+      pre_self_attention = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.pre_self_attention_layer_norm.scale"])
+      post_self_attention = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.post_self_attention_layer_norm.scale"])
+      pre_self_attention_layer_norm["scale"] = pre_self_attention
+      post_self_attention_layer_norm["scale"] = post_self_attention
 
-      # reshape to match maxtext
+      # Process attention
+      self_attention = jax_weights["decoder"][layer_name]["self_attention"]
+      kv_norm = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.kv_norm.scale"], transpose=True)
+      wkv_a = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_a.kernel"], transpose=True)
+      wkv_b = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_b.kernel"], transpose=True)
+      out = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.out.kernel"], transpose=True)
       wkv_b = np.reshape(wkv_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)])
       out = np.reshape(out, [base_num_query_heads, v_head_dim, base_emb_dim])
-      if q_lora_rank != 0:
-        wq_b = np.reshape(wq_b, [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
-      else:
-        query = np.reshape(query, [base_emb_dim, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
+      self_attention["kv_norm"]["scale"] = kv_norm
+      self_attention["wkv_a"]["kernel"] = wkv_a
+      self_attention["wkv_b"]["kernel"] = wkv_b
+      self_attention["out"]["kernel"] = out
 
       if q_lora_rank != 0:
         self_attention.update(
@@ -202,41 +194,46 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
                 "wq_b": {"kernel": None},
             }
         )
-      else:
-        self_attention.update({"query": {"kernel": None}})
-
-      self_attention["kv_norm"]["scale"] = kv_norm
-      self_attention["wkv_a"]["kernel"] = wkv_a
-      self_attention["wkv_b"]["kernel"] = wkv_b
-      self_attention["out"]["kernel"] = out
-      pre_self_attention_layer_norm["scale"] = pre_self_attention
-      post_self_attention_layer_norm["scale"] = post_self_attention
-      if q_lora_rank != 0:
+        q_norm = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.q_norm.scale"])
+        wq_a = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_a.kernel"], transpose=True)
+        wq_b = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_b.kernel"], transpose=True)
+        wq_b = np.reshape(wq_b, [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
         self_attention["q_norm"]["scale"] = q_norm
         self_attention["wq_a"]["kernel"] = wq_a
         self_attention["wq_b"]["kernel"] = wq_b
       else:
+        query = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.query.kernel"], transpose=True)
+        query = np.reshape(query, [base_emb_dim, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
+        self_attention.update({"query": {"kernel": None}})
         self_attention["query"]["kernel"] = query
 
-      # TODO(shuningjin)
-      # BEGIN CHANGE
       if use_sparse_indexer:
-        # init weight
+        # Initialize the nested structure in self_attention
         self_attention["indexer"] = {
             "wq_b": {"kernel": None},
             "wk": {"kernel": None},
             "weights_proj": {"kernel": None},
             "k_norm": {"scale": None, "bias": None},
         }
-        # read from huggingface ckpt
-        # transform weight
-        # assign
-        self_attention["indexer"]["wq_b"]["kernel"] = None
-        self_attention["indexer"]["wk"]["kernel"] = None
-        self_attention["indexer"]["weights_proj"]["kernel"] = None
-        self_attention["indexer"]["k_norm"]["scale"] = None
-        self_attention["indexer"]["k_norm"]["bias"] = None
-      # END CHANGE
+        # Load and transform weights from chkpt_vars
+        # k_norm: scale and bias, 1D scalar, identity
+        k_norm_scale = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.indexer.k_norm.scale"])
+        k_norm_bias = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.indexer.k_norm.bias"])
+        # weights_proj and wk: 2D linear, transpose
+        weights_proj = _pt_to_np(
+            chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.indexer.weights_proj.kernel"], tranpose=True
+        )
+        wk = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.indexer.wk.kernel"], transpose=True)
+        # wq_b: transpose then reshape
+        # example: HF shape (8192, 1536) -> transpose to (1536, 8192) -> reshape to (1536, 64, 128)
+        wq_b = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.indexer.wq_b.kernel"], tranpose=True)
+        wq_b = np.reshape(wq_b, [1536, 64, 128])
+        # Assign to the JAX weight dictionary
+        self_attention["indexer"]["k_norm"]["scale"] = k_norm_scale
+        self_attention["indexer"]["k_norm"]["bias"] = k_norm_bias
+        self_attention["indexer"]["weights_proj"]["kernel"] = weights_proj
+        self_attention["indexer"]["wk"]["kernel"] = wk
+        self_attention["indexer"]["wq_b"]["kernel"] = wq_b
 
       jax_weights["decoder"][layer_name]["self_attention"] = self_attention
       jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"] = pre_self_attention_layer_norm
@@ -246,49 +243,31 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
   max_logging.log("Processing mlp weights")
   for layer_key, layer_value in layers.items():
     for layer_idx in MemoryMonitorTqdm(range(layer_value), desc=layer_key, leave=True):
+      layer_name = f"{layer_key}_{layer_idx}"
       if layer_key == "dense_layers":
-        layer_name = f"{layer_key}_{layer_idx}"
         mlp = jax_weights["decoder"][layer_name]["mlp"]
-        wi_0 = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_0.kernel"].to(torch.float16).numpy().transpose()
-        wi_1 = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_1.kernel"].to(torch.float16).numpy().transpose()
-        wo = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wo.kernel"].to(torch.float16).numpy().transpose()
+        wi_0 = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_0.kernel"], transpose=True)
+        wi_1 = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_1.kernel"], transpose=True)
+        wo = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wo.kernel"], transpose=True)
         mlp["wi_0"]["kernel"] = wi_0
         mlp["wi_1"]["kernel"] = wi_1
         mlp["wo"]["kernel"] = wo
         jax_weights["decoder"][layer_name]["mlp"] = mlp
       else:
-        layer_name = f"{layer_key}_{layer_idx}"
         moe = jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]
         if q_lora_rank != 0:
-          gate_bias = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
+          gate_bias = _pt_to_np(
+              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias"], tranpose=True
           )
-        gate = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
+        gate = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel"], tranpose=True)
+        shared_wi_0 = _pt_to_np(
+            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel"], tranpose=True
         )
-        shared_wi_0 = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
+        shared_wi_1 = _pt_to_np(
+            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel"], tranpose=True
         )
-        shared_wi_1 = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
-        )
-        shared_wo = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wo.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
+        shared_wo = _pt_to_np(
+            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wo.kernel"], tranpose=True
         )
 
         if q_lora_rank != 0:
@@ -299,24 +278,9 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         moe["shared_experts"]["wo"]["kernel"] = shared_wo
 
         for k in tqdm(range(num_experts), desc="experts", leave=False):
-          wi_0 = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_0"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
-          )
-          wi_1 = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_1"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
-          )
-          wo = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wo"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
-          )
+          wi_0 = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_0"], tranpose=True)
+          wi_1 = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_1"], tranpose=True)
+          wo = _pt_to_np(chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wo"], tranpose=True)
 
           if moe["MoeBlock_0"]["wi_0"] is None:
             stack_shape = (num_experts,)
