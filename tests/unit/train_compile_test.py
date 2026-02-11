@@ -788,7 +788,7 @@ class TrainCompile(unittest.TestCase):
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
-            "model_name=olmo3_7b",
+            "model_name=olmo3-7b",
             "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",

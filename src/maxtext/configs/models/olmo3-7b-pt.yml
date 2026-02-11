@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# AllenAI OLMo 3 7B Configuration
-# https://huggingface.co/allenai/Olmo-3-7B-Instruct
+# AllenAI OLMo 3 7B Configuration for pretraining.
+# It uses default RoPE for both global and sliding window attention.
+# https://huggingface.co/allenai/Olmo-3-1025-7B/tree/stage1-step1413814
 
-model_name: "olmo3_7b"
 decoder_block: "olmo3"
 
 # Model Dimensions
@@ -37,15 +37,15 @@ sliding_window_size: 4096
 inhomogeneous_layer_cycle_interval: 4
 
 # RoPE
-rope_type: "yarn"
+# Default RoPE for both global and sliding window attention.
+rope_type: "default" 
+rope_interleave: False
 rope_max_timescale: 500000 # rope_theta
-rope_factor: 8.0 # factor so 0.1 * ln(rope_factor) + 1.0 = 1.2079441541679836
-original_max_position_embeddings: 8192
-beta_fast: 32.0
-beta_slow: 1.0
-max_position_embeddings: 65536
+max_position_embeddings: 8192
 rope_attention_scaling: True
+rope_truncate: False
 
 # Embeddings
 vocab_size: 100278
 logits_via_embedding: False
+normalize_embedding_logits: False

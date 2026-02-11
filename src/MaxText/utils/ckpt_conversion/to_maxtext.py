@@ -111,9 +111,10 @@ class LazyHFLoader:
   can still occur in parallel.
   """
 
-  def __init__(self, model_id, token):
+  def __init__(self, model_id, token, revision=None):
     self.model_id = model_id
     self.token = token
+    self.revision = revision
     # Whether loads from local directory
     self.is_local = os.path.isdir(self.model_id)
     self.shard_map = {}
@@ -156,7 +157,7 @@ class LazyHFLoader:
     if self.is_local:
       index_path = os.path.join(self.model_id, index_file)
     else:
-      index_path = hf_hub_download(repo_id=self.model_id, filename=index_file, token=self.token)
+      index_path = hf_hub_download(repo_id=self.model_id, filename=index_file, token=self.token, revision=self.revision)
     with open(index_path, "r", encoding="utf-8") as f:
       index_data = json.load(f)
     self.shard_map = index_data["weight_map"]
@@ -186,7 +187,7 @@ class LazyHFLoader:
     else:
       # STEP 1: Download outside the lock.
       # multiple threads can download different shards at the same time.
-      local_path = hf_hub_download(repo_id=self.model_id, filename=shard_name, token=self.token)
+      local_path = hf_hub_download(repo_id=self.model_id, filename=shard_name, token=self.token, revision=self.revision)
 
     # STEP 2: Lock ONLY the reading into RAM.
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
@@ -574,7 +575,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     output_directory = config.base_output_directory
 
   hf_token = config.hf_access_token
-
+  revision = test_args.revision
   use_lazy_load = test_args.lazy_load_tensors
 
   if use_lazy_load and config.use_multimodal:
@@ -586,14 +587,14 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   # Define the appropriate tensor getter based on mode
   if use_lazy_load:
     max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
-    hf_loader = LazyHFLoader(model_id, hf_token)
-    hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
+    hf_loader = LazyHFLoader(model_id, hf_token, revision=revision)
+    hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
     print_ram_usage("After LazyLoader init")
     tensor_getter = hf_loader.get_tensor
   else:
     max_logging.log(f"Lazy loading DISABLED. Loading full HuggingFace model: {model_id}...")
-    hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
-    hf_model = get_hf_model(model_id, token=hf_token)
+    hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
+    hf_model = get_hf_model(model_id, token=hf_token, revision=revision)
     hf_state_dict_numpy = hf_model.state_dict()
     # Convert all to numpy immediately in eager mode
     for k, v in hf_state_dict_numpy.items():
@@ -728,6 +729,10 @@ if __name__ == "__main__":
   #   sharding: None
   #   storage:  chunk_shape=(151936, 1024) <-- Full layer in one chunk
   parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
+
+  parser.add_argument(
+      "--revision", type=str, required=False, default=None, help="Specific Hugging Face revision (branch/tag/commit)"
+  )
 
   # Parse local arguments
   # Parse known args returns the namespace AND the list of remaining arguments
