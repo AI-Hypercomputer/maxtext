@@ -32,11 +32,11 @@ import yaml
 from pydantic import ValidationError
 from yaml import YAMLError
 
-from MaxText.configs import types as pydantic_types
+from maxtext.configs import types as pydantic_types
 from MaxText.globals import MAXTEXT_REPO_ROOT
 
 # Define the root directory where configuration files are located.
-CONFIGS_DIR = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "configs")
+CONFIGS_DIR = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs")
 
 
 @functools.lru_cache(maxsize=None)
@@ -113,14 +113,14 @@ def run_config_validation(config_file_path: str):
 
 BASE_CONFIGS = [
     os.path.join(CONFIGS_DIR, "base.yml"),
-    os.path.join(CONFIGS_DIR, "dpo.yml"),
-    os.path.join(CONFIGS_DIR, "gpu_smoke_test.yml"),
-    os.path.join(CONFIGS_DIR, "rl.yml"),
-    os.path.join(CONFIGS_DIR, "rl_mt_jt.yml"),
-    os.path.join(CONFIGS_DIR, "sft.yml"),
-    os.path.join(CONFIGS_DIR, "sft-vision-chartqa.yml"),
-    os.path.join(CONFIGS_DIR, "sft-vision-slidevqa.yml"),
-    os.path.join(CONFIGS_DIR, "tpu_smoke_test.yml"),
+    os.path.join(CONFIGS_DIR, "post_train", "dpo.yml"),
+    os.path.join(CONFIGS_DIR, "gpu/gpu_smoke_test.yml"),
+    os.path.join(CONFIGS_DIR, "post_train", "rl.yml"),
+    os.path.join(CONFIGS_DIR, "post_train", "rl_mt_jt.yml"),
+    os.path.join(CONFIGS_DIR, "post_train", "sft.yml"),
+    os.path.join(CONFIGS_DIR, "post_train", "sft-vision-chartqa.yml"),
+    os.path.join(CONFIGS_DIR, "post_train", "sft-vision-slidevqa.yml"),
+    os.path.join(CONFIGS_DIR, "tpu/tpu_smoke_test.yml"),
 ]
 
 
@@ -151,11 +151,11 @@ def test_gemma_configs(config_file):
 # --- Test Group 3: Llama Model Family ---
 
 LLAMA_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "gpu", "llama2_7b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "llama2_70b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "llama3_8b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "llama3_70b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "llama3.1_405b.yml"),
+    os.path.join(CONFIGS_DIR, "gpu", "models", "llama2_7b.yml"),
+    os.path.join(CONFIGS_DIR, "gpu", "models", "llama2_70b.yml"),
+    os.path.join(CONFIGS_DIR, "gpu", "models", "llama3_8b.yml"),
+    os.path.join(CONFIGS_DIR, "gpu", "models", "llama3_70b.yml"),
+    os.path.join(CONFIGS_DIR, "gpu", "models", "llama3.1_405b.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama2-7b.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama2-13b.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama2-70b.yml"),
@@ -215,9 +215,9 @@ MISTRAL_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "mistral-7b.yml"),
     os.path.join(CONFIGS_DIR, "models", "mixtral-8x7b.yml"),
     os.path.join(CONFIGS_DIR, "models", "mixtral-8x22b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "mixtral_8x1b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "mixtral_8x2b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpu", "mixtral_8x7b.yml"),
+    os.path.join(CONFIGS_DIR, "gpu", "models", "mixtral_8x1b.yml"),
+    os.path.join(CONFIGS_DIR, "gpu", "models", "mixtral_8x2b.yml"),
+    os.path.join(CONFIGS_DIR, "gpu", "models", "mixtral_8x7b.yml"),
 ]
 
 
@@ -264,30 +264,30 @@ def test_kimi_configs(config_file):
 # --- Test Group 9: Inference-specific Configs ---
 
 INFERENCE_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "inference.yml"),
-    os.path.join(CONFIGS_DIR, "inference_jetstream.yml"),
-    os.path.join(CONFIGS_DIR, "v5e", "llama2_70b_v5e-16.yml"),
-    os.path.join(CONFIGS_DIR, "v5e", "llama3_70b_v5e-16.yml"),
-    os.path.join(CONFIGS_DIR, "v5e", "llama3_405b_v5e-64.yml"),
-    os.path.join(CONFIGS_DIR, "v6e", "inference", "llama4_maverick_v6e-64.yml"),
+    os.path.join(CONFIGS_DIR, "inference", "inference.yml"),
+    os.path.join(CONFIGS_DIR, "inference", "inference_jetstream.yml"),
+    os.path.join(CONFIGS_DIR, "tpu", "v5e", "llama2_70b_v5e-16.yml"),
+    os.path.join(CONFIGS_DIR, "tpu", "v5e", "llama3_70b_v5e-16.yml"),
+    os.path.join(CONFIGS_DIR, "tpu", "v5e", "llama3_405b_v5e-64.yml"),
+    os.path.join(CONFIGS_DIR, "tpu", "v6e", "inference", "llama4_maverick_v6e-64.yml"),
     os.path.join(
         MAXTEXT_REPO_ROOT,
         "src",
         "maxtext",
-        "inference",
         "configs",
-        "multi_host",
+        "inference",
+        "multihost",
         "disaggregation",
         "llama3_405b_v6e-16-16.yml",
     ),
     os.path.join(
-        MAXTEXT_REPO_ROOT, "src", "maxtext", "inference", "configs", "multi_host", "interleaved", "llama2_70b_v5e-16.yml"
+        MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "inference", "multihost", "interleaved", "llama2_70b_v5e-16.yml"
     ),
     os.path.join(
-        MAXTEXT_REPO_ROOT, "src", "maxtext", "inference", "configs", "multi_host", "interleaved", "llama3_70b_v5e-16.yml"
+        MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "inference", "multihost", "interleaved", "llama3_70b_v5e-16.yml"
     ),
     os.path.join(
-        MAXTEXT_REPO_ROOT, "src", "maxtext", "inference", "configs", "multi_host", "interleaved", "llama3_405b_v5e-64.yml"
+        MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "inference", "multihost", "interleaved", "llama3_405b_v5e-64.yml"
     ),
 ]
 

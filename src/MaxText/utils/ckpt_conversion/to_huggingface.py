@@ -40,7 +40,7 @@ Example Usage:
 
   export HF_AUTH_TOKEN="hf_YOUR_TOKEN"
   python src/MaxText/utils/ckpt_conversion/to_huggingface.py \
-    src/MaxText/configs/base.yml \
+    src/maxtext/configs/base.yml \
     model_name="gemma2-2b" \
     load_parameters_path="/path/to/your/maxtext/checkpoint/" \
     base_output_directory="/path/to/your/output/directory" \

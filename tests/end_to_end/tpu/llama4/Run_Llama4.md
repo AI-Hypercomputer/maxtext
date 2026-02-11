@@ -43,7 +43,7 @@ JAX_PLATFORMS=CPU python -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --b
 You can train from scratch to generate a new checkpoint. One example command to run pretraining with Llama4 Maverick on a v5p-128.
 
 ```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+python3 -m MaxText.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     run_name=matmul_pre_training \
     per_device_batch_size=1 \
@@ -65,7 +65,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
 In order to run an example decoding with Llama4 Scout, you can use a command such as the following:
 
 ```sh
-python3 -m maxtext.decode src/MaxText/configs/base.yml \
+python3 -m maxtext.decode src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     run_name=decode \
     model_name=llama4-17b-16e \
