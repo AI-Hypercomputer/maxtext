@@ -1,0 +1,8 @@
+# Project-specific dictionary for spell checking
+# Add one word per line
+CUDA
+JAX
+Kaggle
+MaxText
+MyST
+repo
