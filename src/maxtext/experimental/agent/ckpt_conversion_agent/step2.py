@@ -17,9 +17,9 @@ main script to execute the multi-agent workflow for model-specific mappings gene
 """
 import argparse
 
-from MaxText.experimental.agent.ckpt_conversion_agent.plan import PlanAgent
-from MaxText.experimental.agent.ckpt_conversion_agent.transformation import TransformationAgent
-from MaxText.experimental.agent.ckpt_conversion_agent.mapping import MappingAgent
+from maxtext.experimental.agent.ckpt_conversion_agent.plan import PlanAgent
+from maxtext.experimental.agent.ckpt_conversion_agent.transformation import TransformationAgent
+from maxtext.experimental.agent.ckpt_conversion_agent.mapping import MappingAgent
 
 
 if __name__ == "__main__":

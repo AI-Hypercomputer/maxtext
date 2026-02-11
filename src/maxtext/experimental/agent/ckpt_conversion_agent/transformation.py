@@ -18,8 +18,8 @@ layerwise and bidirectional transformation hook functions between HF & Maxtext
 """
 import argparse
 import os
-from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_text_file, load_json
-from MaxText.experimental.agent.ckpt_conversion_agent.base import BaseAgent
+from maxtext.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_text_file, load_json
+from maxtext.experimental.agent.ckpt_conversion_agent.base import BaseAgent
 
 
 class TransformationAgent(BaseAgent):
