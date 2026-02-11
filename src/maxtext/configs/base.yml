@@ -400,7 +400,7 @@ hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' 
 
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
+mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
@@ -483,6 +483,9 @@ logical_axis_rules: [
                       ['paged_kv_head_dim_size', []],
                       ['dense_layers', []],
                       ['moe_layers', []],
+                      ['engram_dim', ['tensor']],
+                      ['mhc', []],
+                      ['diloco', 'diloco'],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
@@ -495,6 +498,7 @@ sharding_tolerance: 0.02
 # value to auto-shard based on available slices and devices.
 # By default, product of the DCN axes should equal number of slices
 # and product of the ICI axes should equal number of devices per slice.
+dcn_diloco_parallelism: 1
 dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
 dcn_fsdp_transpose_parallelism: 1
@@ -507,6 +511,7 @@ dcn_tensor_sequence_parallelism: 1 # never recommended
 dcn_pipeline_parallelism: 1
 dcn_expert_parallelism: 1
 dcn_autoregressive_parallelism: 1 # never recommended
+ici_diloco_parallelism: 1
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_fsdp_transpose_parallelism: 1
@@ -737,6 +742,12 @@ enable_dropout: True
 enable_data_shuffling: True
 data_shuffle_seed: 0
 init_weights_seed: 0
+
+# DiLoCo params.
+enable_diloco: False
+diloco_sync_period: 36
+diloco_outer_lr: 0.3
+diloco_outer_momentum: 0.9
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0

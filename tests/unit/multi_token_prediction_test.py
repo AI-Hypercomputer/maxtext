@@ -199,6 +199,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    num_devices = jax.device_count()
     extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
@@ -215,7 +216,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
     data_rng, self.init_rng = jax.random.split(self.rng)
 
-    self.batch_size, self.seq_len, self.embed_dim = 2, 8, self.cfg.base_emb_dim
+    self.batch_size, self.seq_len, self.embed_dim = num_devices, 8, self.cfg.base_emb_dim
     key1, key2, key3 = jax.random.split(data_rng, 3)
     self.main_hidden_state = jax.random.normal(key1, (self.batch_size, self.seq_len, self.embed_dim))
     self.input_ids = jax.random.randint(key2, (self.batch_size, self.seq_len), 0, self.cfg.vocab_size)
