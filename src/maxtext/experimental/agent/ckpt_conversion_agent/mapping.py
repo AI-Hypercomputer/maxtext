@@ -19,8 +19,8 @@ import argparse
 import json
 import os
 
-from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_json, load_text_file
-from MaxText.experimental.agent.ckpt_conversion_agent.base import BaseAgent
+from maxtext.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_json, load_text_file
+from maxtext.experimental.agent.ckpt_conversion_agent.base import BaseAgent
 
 
 class MappingAgent(BaseAgent):

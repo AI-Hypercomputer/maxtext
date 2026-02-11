@@ -34,9 +34,9 @@ import transformers
 from datasets import load_dataset
 
 from maxtext.utils import maxtext_utils
+from maxtext.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state
+from maxtext.experimental.rl.grpo_utils import compute_log_probs
 from MaxText import pyconfig
-from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state
-from MaxText.experimental.rl.grpo_utils import compute_log_probs
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models

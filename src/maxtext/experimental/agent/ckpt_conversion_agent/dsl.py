@@ -17,8 +17,8 @@ A DSL agent class, to propose potential new DSL rules/ops based on the previous 
 """
 import argparse
 import os
-from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_text_file
-from MaxText.experimental.agent.ckpt_conversion_agent.base import BaseAgent
+from maxtext.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_text_file
+from maxtext.experimental.agent.ckpt_conversion_agent.base import BaseAgent
 
 
 class DSLAgent(BaseAgent):

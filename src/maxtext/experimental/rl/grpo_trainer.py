@@ -69,8 +69,6 @@ from ml_goodput_measurement.src.goodput import GoodputRecorder
 import MaxText as mt
 from MaxText import sharding
 from MaxText import pyconfig
-from MaxText.experimental.rl import grpo_input_pipeline
-from MaxText.experimental.rl import grpo_utils
 from MaxText.globals import EPS
 from MaxText.train import get_first_step
 from maxtext.common import checkpointing, profiler
@@ -81,6 +79,8 @@ from maxtext.common.goodput import (
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
+from maxtext.experimental.rl import grpo_input_pipeline
+from maxtext.experimental.rl import grpo_utils
 from maxtext.common.metric_logger import MetricLogger
 from maxtext.common.vertex_tensorboard import VertexTensorboardManager
 from maxtext.inference import offline_engine

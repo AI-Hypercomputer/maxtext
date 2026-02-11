@@ -19,8 +19,8 @@ import os
 import json
 import argparse
 
-from MaxText.experimental.agent.ckpt_conversion_agent.base import BaseAgent
-from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template
+from maxtext.experimental.agent.ckpt_conversion_agent.base import BaseAgent
+from maxtext.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template
 
 
 class prompt_chaining_agent(BaseAgent):
