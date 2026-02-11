@@ -178,11 +178,11 @@ class SFTDataHooks(DataHooks):
   def load_next_train_batch(self, train_ctx: peft_trainer.PeftTrainer):  # pylint: disable=unused-argument
     """Loads the next batch of data for training."""
     try:
-      self.train_batch = self.train_data_loader.load_next_batch()
+      self.train_batch, ngram_map = self.train_data_loader.load_next_batch()
     except Exception as e:  # pylint: disable=broad-exception-caught
       max_logging.log(f"Exception in load_next_train_batch: {str(e)}")
       self.train_batch = None
-    return self.train_batch
+    return self.train_batch, ngram_map
 
   @override
   def load_next_eval_batch(self, train_ctx: peft_trainer.PeftTrainer):

@@ -1090,3 +1090,20 @@ force_q_layout: false
 mhc_expansion_rate: 1
 # The number of iterations for the Sinkhorn-Knopp algorithm.
 sinkhorn_iterations: 20
+
+################################## DeepSeek Engram ##################################
+# Indices of transformer layers where Engram heads are integrated; leave empty [] to disable.
+# Example: [1, 4] attaches to the 2nd and 5th layer. 
+engram_layers: []
+# Number of heads dedicated to the Engram.
+engram_num_heads: 8
+# Head dimension size for the Engram.
+engram_head_dim: 1280
+# Vocabulary size for each N-gram predictor.
+engram_vocab_sizes: []
+# The max 'n' in N-gram. Example: n=3 means it covers both 2-grams and 3-grams.
+engram_max_ngram_size: 3
+# The size of convolution kernel.
+engram_kernel_size: 4
+# The seed for Engram hash mapping.
+engram_seed: 0

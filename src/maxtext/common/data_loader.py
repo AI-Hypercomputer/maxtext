@@ -26,6 +26,8 @@ from maxtext.common.goodput import (
 )
 from maxtext.utils import exceptions
 from maxtext.trainers.diloco import diloco
+from MaxText.layers import engram
+import transformers
 
 
 class DataLoader:
@@ -44,6 +46,25 @@ class DataLoader:
       self.data_iterator = data_iterator
     self.last_batch = None
     self.input_data_shardings = get_input_data_sharding(config, mesh)
+
+    if self.config.engram_layers:
+      # 1. Initialize Tokenizer
+      tokenizer = transformers.AutoTokenizer.from_pretrained(
+        config.tokenizer_path,
+        token=config.hf_access_token)
+
+      print(f"tokenizer.pad_token_id: {tokenizer.pad_token_id}")
+
+      # 2. Setup Ngram Mapping
+      self.ngram_mapping = engram.NgramHashMapping(
+        engram_vocab_bases=config.engram_vocab_sizes,
+        max_ngram_size=config.engram_max_ngram_size,
+        engram_num_heads=config.engram_num_heads,
+        layer_ids=config.engram_layers,
+        tokenizer=tokenizer,
+        pad_id=tokenizer.pad_token_id,
+        seed=config.engram_seed,
+      )
 
   def update_data_iterator(self):
     """Update to the next data iterator in the list, if applicable."""
@@ -68,16 +89,40 @@ class DataLoader:
         else:
           raise exceptions.StopTraining(f"`load_next_batch()` failed with {type(e)} exception: ({e}).")
     return self.last_batch
+  
+  def generate_engram_map(self, inputs):
+    """Docstring DeepSeek n-grams hash mapping."""
+    # Generate Map using Dictionary
+    # Structure as {"layer_index": {"vocab_sizes": vocab_sizes, "input_ids": input_ids}}
+    ngram_inputs = self.ngram_mapping(inputs)
+    ngram_layer_map = {
+      layer_id: {
+          "vocab_sizes": self.ngram_mapping.get_vocab_sizes(layer_id),
+          "input_ids": ngram_inputs[layer_id]
+      }
+      for layer_id in self.config.engram_layers
+    }
+    return ngram_layer_map
 
   def load_next_batch(self, *args, **kwargs):
     """Loads the next batch with sharding hint"""
+    pre_sharding_batch = self.load_next_batch_pre_sharding()
+
+    ngram_layer_map = None
+    if self.config.engram_layers:
+      ngram_layer_map = self.generate_engram_map(pre_sharding_batch["inputs"])
+      print("inside of load_next_batch")
+      print(f"ngram_layer_map: {ngram_layer_map}")
+
     example_batch = jax.device_put(
-        self.load_next_batch_pre_sharding(),
+        pre_sharding_batch,
         self.input_data_shardings,
     )
+
     if self.config.enable_diloco:
       example_batch = diloco.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
-    return example_batch
+
+    return example_batch, ngram_layer_map
 
   def check_example_batch(self):
     if self.config.max_checkify:
@@ -157,7 +202,7 @@ class RampUpDataLoader(DataLoader):
       self.buffer_start = slice_end
       output = jax.tree.map(_slice, self.batch_buffer)
     self.rampup_active = rampup_manager.update()
-    return jax.device_put(output, self.input_data_shardings)
+    return jax.device_put(output, self.input_data_shardings), None
 
 
 def create_dataloader(config, mesh, data_iterator, goodput_recorder, rampup_manager):

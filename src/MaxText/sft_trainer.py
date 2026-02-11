@@ -66,6 +66,7 @@ def train_loop(config, recorder, state=None):
       data_iterator,
       _,
       _,
+      _,
       eval_data_iterator,
       state,
   ) = train_utils.setup_train_loop(config, recorder)

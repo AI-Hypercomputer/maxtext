@@ -607,7 +607,7 @@ def generate_completions(
     engine_lock: A lock to ensure thread-safe use of the inference engine.
   """
   with engine_lock:
-    thread_example_batch = worker_data_loader.load_next_batch()
+    thread_example_batch, _ = worker_data_loader.load_next_batch()
     # Trim data for inference processing
     thread_example_batch_trimmed = jax.tree_util.tree_map(
         lambda arr: arr[

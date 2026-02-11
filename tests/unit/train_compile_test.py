@@ -796,9 +796,9 @@ class TrainCompile(unittest.TestCase):
     )
 
   @pytest.mark.cpu_only
-  def test_mhc_integration(self):
+  def test_engram_mhc_integration(self):
     """AOT test for Manifold-onstrained Hyper Connection implementation"""
-    compiled_trainstep_file = "/tmp/test_mhc_integration"
+    compiled_trainstep_file = "/tmp/test_engram_mhc_integration"
     train_compile_main(
         (
             "",
@@ -811,6 +811,7 @@ class TrainCompile(unittest.TestCase):
             "scan_layers=True",
             "max_target_length=1024",
             "mhc_expansion_rate=4",
-            "attention=dot_product",  # TODO: update to flash attention when it's available.
+            "attention=flash",
+            "use_tokamax_splash=True",
         )
     )

@@ -36,6 +36,7 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.layers import nnx_wrappers
 
 
 class CompressedTokenizer:

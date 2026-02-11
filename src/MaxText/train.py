@@ -81,7 +81,7 @@ def get_first_step(state):
 # -----------------------------------------------------------------------------
 
 
-def loss_fn(model, config, data, dropout_rng, params, is_train=True):
+def loss_fn(model, config, data, dropout_rng, params, ngram_map, is_train=True):
   """loss_fn for both train and eval.
 
   Args:
@@ -91,6 +91,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     dropout_rng: A key to use to generate rng for dropout
     params: Model params
     is_train: True for train_step and False for eval_step
+    ngram_map: DeepSeek Engram hash mapping
 
   Returns:
     loss: average loss
@@ -119,6 +120,8 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     rng1, aqt_rng = jax.random.split(dropout_rng)
 
     # Flax Linen model
+    print("NN Module")
+    jax.debug.print("loss_fn nn.Module ngram_map: {x}", x=ngram_map)
     logits, intermediate_outputs = model.apply(
         params,
         data["inputs"],
@@ -131,6 +134,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         mutable=mutable_collections,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
+        ngram_map=ngram_map,
     )
 
     if config.num_vocab_tiling > 1:
@@ -152,6 +156,8 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       total_loss = jnp.sum(xent)
   else:
     # Flax NNX model
+    print("NNX path")
+    jax.debug.print("loss_fn nnx ngram_map: {x}", x=ngram_map)
     logits = model(
         decoder_input_tokens=data["inputs"],
         decoder_positions=data["inputs_position"],
@@ -161,6 +167,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
+        ngram_map=ngram_map,
     )
     intermediate_outputs = {}
     one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
@@ -231,13 +238,14 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
+def train_step(model, config, state_mesh_shardings, params_shardings, state, data, ngram_map, dropout_rng):
   """
 
   Args:
     model: A nn.Module
     state: A pytree of the current state of the model
     data: Batch of data to apply to the model
+    ngram_map: DeepSeek Engram hash mapping
     dropout_rng: A key to use to generate rng for dropout
 
   Returns:
@@ -286,7 +294,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           params_shardings,
       )
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
+    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, ngram_map=ngram_map, *extra_dpo_args, is_train=True)
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
@@ -457,14 +465,14 @@ def train_loop(config, recorder, state=None):
       prof.maybe_activate_profiler(step, state)
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+        example_batch, ngram_layer_map = data_loader.load_next_batch(rampup_manager=rampup_manager)
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             if config.shard_optimizer_over_data:
               state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
-            state, metrics = p_train_step(state, example_batch, nextrng)
+            state, metrics = p_train_step(state, example_batch, ngram_layer_map, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()

@@ -424,6 +424,7 @@ class Transformer(nnx.Module):
       decoder_target_mask: jax.Array | None = None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      ngram_map: dict[int, Any] | None = None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -470,7 +471,8 @@ class Transformer(nnx.Module):
     audio_masks = None
     if audio_embeddings is not None:
       audio_masks = mm_processor.get_bidirectional_mask_audio(self.config, decoder_input_tokens)
-
+    
+    jax.debug.print("Transformer ngram_map: {x}", x=ngram_map)
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,
@@ -488,6 +490,7 @@ class Transformer(nnx.Module):
         audio_masks=audio_masks,
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
+        ngram_map=ngram_map,
     )
 
     # Materialize hidden state when vocab tiling is enabled

@@ -35,6 +35,7 @@ from MaxText.layers import linears
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
+from MaxText.layers import engram
 from MaxText import sharding
 from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.normalizations import rms_norm
@@ -712,6 +713,7 @@ class Decoder(nn.Module):
       attention_metadata=None,
       audio_embeddings: None | jnp.ndarray = None,
       audio_masks: None | jnp.ndarray = None,
+      ngram_map: dict[int, Any] | None = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -874,7 +876,7 @@ class Decoder(nn.Module):
             for index in range(num_layers):
               kv_cache = kv_caches[index] if kv_caches is not None else None
               y, kv_cache = layer(
-                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
+                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode, layer_id=index, ngram_map=ngram_map,
               )(
                   y,
                   decoder_segment_ids,
