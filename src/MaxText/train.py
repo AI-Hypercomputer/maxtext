@@ -40,6 +40,7 @@ from flax.linen import partitioning as nn_partitioning
 
 from MaxText import pyconfig
 from MaxText import sharding
+from MaxText.sharding import get_input_data_sharding
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.common_types import ShardMode
 from MaxText.globals import EPS
@@ -441,7 +442,9 @@ def train_loop(config, recorder, state=None):
     elif config.pre_compile:
       # pre compile graph
       eval_shaped_batch = maxtext_utils.get_shaped_batch_eval(config)
-      p_train_step = p_train_step.lower(state, shaped_batch, init_rng).compile()
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+        p_train_step = p_train_step.lower(state, shaped_batch, init_rng).compile()
+      
       p_eval_step = p_eval_step.lower(state, eval_shaped_batch, init_rng).compile()
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
