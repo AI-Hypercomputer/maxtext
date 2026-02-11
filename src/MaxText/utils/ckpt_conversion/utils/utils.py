@@ -942,7 +942,7 @@ def get_hf_model(model_id: str, token: str, revision: str = None):
   if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
     from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
 
-    model_class = Qwen3OmniMoeForConditionalGeneration.from_pretrained
+    model_class = Qwen3OmniMoeForConditionalGeneration
   else:
     model_class = AutoModelForCausalLM
 

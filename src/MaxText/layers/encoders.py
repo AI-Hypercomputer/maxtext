@@ -64,7 +64,14 @@ class VisionEncoder(nnx.Module):
   def __call__(self, input_images, deterministic=False):
     # vision encoder output, frozen params in many cases
     encoder = getattr(self, self.encoder_name)
-    embeddings = encoder(input_images, deterministic=deterministic)
+    encoder_output = encoder(input_images, deterministic=deterministic)
+
+    deep_feats = None
+    if isinstance(encoder_output, tuple):
+      embeddings = encoder_output[0]
+      deep_feats = encoder_output[1]
+    else:
+      embeddings = encoder_output
 
     if self.config.freeze_vision_encoder_params:
       embeddings = jax.lax.stop_gradient(embeddings)
@@ -73,7 +80,7 @@ class VisionEncoder(nnx.Module):
     projector = getattr(self, self.projector_name)
     embeddings = projector(embeddings)
 
-    return embeddings
+    return embeddings, deep_feats
 
 
 class AudioEncoder(nnx.Module):
