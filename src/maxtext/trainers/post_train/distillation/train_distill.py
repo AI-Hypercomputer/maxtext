@@ -33,7 +33,7 @@ Architecture Overview:
    a standard interface (call signature) that the Tunix `DistillationTrainer` expects.
 """
 
-from typing import Any, Iterator, Sequence, Dict, Tuple
+from typing import Any, Iterator, Sequence, Dict, Tuple, Callable
 
 from absl import app
 import flax
@@ -138,13 +138,13 @@ def create_forward_fn(config: pyconfig.HyperParameters):
     del attention_mask  # Unused
     del cache  # Unused
 
-    logits = model(
+    logits, hidden_state_norm_out = model(
         decoder_input_tokens=input_tokens,
         decoder_positions=positions,
         decoder_segment_ids=decoder_segment_ids,
         enable_dropout=config.enable_dropout,
     )
-    return logits
+    return logits, hidden_state_norm_out
 
   return model_forward_fn
 
@@ -169,24 +169,58 @@ class MaxTextTrainingInput(distillation_trainer.TrainingInput):
 class MonitoredLogitStrategy(logit.LogitStrategy):
   """Logit Strategy that returns detailed metrics for TensorBoard."""
 
+  def __init__(
+      self,
+      student_forward_fn: Callable[..., jax.Array],
+      teacher_forward_fn: Callable[..., jax.Array],
+      labels_fn: Callable[..., jax.Array],
+      temperature: float = 2.0,
+      alpha: float = 0.5,
+      cosine_weight: float = 0.0,
+  ):
+    """Initializes the Logit strategy using tunix logit.LogitStrategy.
+
+    Args:
+        student_forward_fn: Inherited from `logit.LogitStrategy`. Function to compute student model outputs.
+        teacher_forward_fn: Inherited from `logit.LogitStrategy`. Function to compute teacher model outputs.
+        labels_fn: Inherited from `logit.LogitStrategy`. Function to compute labels from model inputs.
+        temperature: Inherited from `logit.LogitStrategy`. Temperature for softening probabilities (> 0).
+        alpha: Inherited from `logit.LogitStrategy`. Weight to balance distillation loss and task loss (0.0 to 1.0).
+        cosine_weight (float): Weight for cosine similarity loss. Set to 0.0 to disable.
+    """
+    super().__init__(
+        student_forward_fn,
+        teacher_forward_fn,
+        labels_fn,
+        temperature,
+        alpha,
+    )
+    self.cosine_weight = cosine_weight
+
   def compute_loss(
       self,
-      student_output: jax.Array,
-      teacher_output: jax.Array,
+      student_output: Tuple[jax.Array, jax.Array],
+      teacher_output: Tuple[jax.Array, jax.Array],
       labels: jax.Array,
   ) -> Tuple[jax.Array, Dict[str, jax.Array]]:
     """Computes Loss and Auxiliary Metrics."""
     # Calculate Distillation Loss (KL Divergence)
     # Scale logits by temperature T for soft targets
     # We use explicit float32 casting for stability in loss calculation
-    s_logits = student_output.astype(jnp.float32)
-    t_logits = teacher_output.astype(jnp.float32)
+    s_logits, s_hidden_state_norm_out = student_output[0].astype(jnp.float32), student_output[1].astype(jnp.float32)
+    t_logits, t_hidden_state_norm_out = teacher_output[0].astype(jnp.float32), teacher_output[1].astype(jnp.float32)
 
     log_student_probs_temp = jax.nn.log_softmax(s_logits / self.temperature, axis=-1)
     teacher_probs_temp = jax.nn.softmax(t_logits / self.temperature, axis=-1)
 
     # KL(Teacher || Student)
     kl_div = optax.kl_divergence(log_student_probs_temp, teacher_probs_temp)
+
+    # Cosine similarity loss
+    cosine_loss = 0
+    if self.cosine_weight > 0:
+      cos_sim = optax.cosine_similarity(s_hidden_state_norm_out, t_hidden_state_norm_out)
+      cosine_loss = self.cosine_weight * (1.0 - jnp.mean(cos_sim))
 
     # Scale gradients by T^2 (Hinton et al.)
     soft_loss = jnp.mean(kl_div) * (self.temperature**2)
@@ -200,13 +234,14 @@ class MonitoredLogitStrategy(logit.LogitStrategy):
     teacher_hard_loss = jnp.mean(ce_loss_teacher)
 
     # 3. Combine losses
-    total_loss = (self.alpha * soft_loss) + ((1.0 - self.alpha) * hard_loss)
+    total_loss = (self.alpha * soft_loss) + ((1.0 - self.alpha) * hard_loss) + cosine_loss
 
     # 4. Return Loss AND Metrics
     metrics = {
         "distill/soft_loss": soft_loss,
         "distill/hard_loss": hard_loss,
         "distill/kl_div": jnp.mean(kl_div),
+        "distill/cosine_loss": cosine_loss,
         "distill/teacher_loss": teacher_hard_loss,
     }
     return total_loss, metrics
@@ -439,6 +474,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
       labels_fn=labels_fn,
       temperature=student_config.distill_temperature,
       alpha=student_config.distill_alpha,
+      cosine_weight=student_config.distill_cosine_weight,
   )
 
   # 4. Optimizer & Config

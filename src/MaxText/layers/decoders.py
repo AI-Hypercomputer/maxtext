@@ -644,6 +644,7 @@ class Decoder(nn.Module):
         kernel_axes=("norm",),
         parameter_memory_host_offload=cfg.parameter_memory_host_offload,
     )(y, out_sharding=norm_out_sharding)
+    hidden_states_norm_out = y
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
@@ -690,7 +691,7 @@ class Decoder(nn.Module):
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
 
-    return logits
+    return logits, hidden_states_norm_out
 
   # TODO(aireenmei, Hengtaoguo): consolidate all multimodal inputs into a class as input to the encoder
   @nn.compact
@@ -930,7 +931,7 @@ class Decoder(nn.Module):
     # When initializing with vLLM RPA attention, we need to run the output head to
     # initialize any parameters associated with it.
     if self.is_initializing() and cfg.attention == "vllm_rpa":
-      _ = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+      _, _ = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
     if cfg.attention == "vllm_rpa":
@@ -943,11 +944,11 @@ class Decoder(nn.Module):
       self.sow("intermediates", "hidden_states", hidden_state)
 
     else:
-      logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+      logits, hidden_state_norm_out = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.
-    return logits, hidden_state, kv_caches
+    return logits, hidden_state, hidden_state_norm_out, kv_caches
 
   def _apply_gemma3_scanned_blocks(
       self,

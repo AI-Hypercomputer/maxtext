@@ -165,7 +165,7 @@ class TransformerLinenPure(nn.Module):
     if audio_embeddings is not None:
       audio_masks = mm_processor.get_bidirectional_mask_audio(self.config, decoder_input_tokens)
 
-    logits, hidden_state, kv_caches = self.decoder(
+    logits, hidden_state, hidden_state_norm_out, kv_caches = self.decoder(
         shared_embedding=self.shared_embedding,
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
@@ -220,7 +220,7 @@ class TransformerLinenPure(nn.Module):
       # In vLLM, logits are computed separately after updating the KV cache.
       return hidden_state, kv_caches
 
-    return logits
+    return logits, hidden_state_norm_out
 
 
 def transformer_as_linen(
@@ -471,7 +471,7 @@ class Transformer(nnx.Module):
     if audio_embeddings is not None:
       audio_masks = mm_processor.get_bidirectional_mask_audio(self.config, decoder_input_tokens)
 
-    logits, hidden_state, kv_caches = self.decoder(
+    logits, hidden_state, hidden_state_norm_out, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
@@ -530,4 +530,4 @@ class Transformer(nnx.Module):
       # In vLLM, logits are computed separately after updating the KV cache.
       return hidden_state, kv_caches
 
-    return logits
+    return logits, hidden_state_norm_out
