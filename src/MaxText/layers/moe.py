@@ -367,7 +367,7 @@ class RoutedMoE(nnx.Module):
       self._tensor_parallelism_name = "tensor"
 
     if self.config.attention == "vllm_rpa":
-      self._expert_parallelism_name = ("expert", "attn_dp_expert")
+      self._expert_parallelism_name = "attn_dp_expert"
     else:
       self._expert_parallelism_name = "expert"
 
@@ -1005,7 +1005,7 @@ class RoutedMoE(nnx.Module):
     # batch_size=1 while decode can have batch_size > 1.
     try:
       is_batch_sharded_by_expert = (
-          "expert"
+          self._expert_parallelism_name
           in tuple(
               filter(
                   lambda tup: tup[0] == "activation_batch",
@@ -1099,10 +1099,7 @@ class RoutedMoE(nnx.Module):
       batch_size, sequence_length, _ = x.shape
       num_expert_parallelism = self.get_expert_parallelism_size()
       if num_expert_parallelism > 1:
-        if self.config.attention == "vllm_rpa":
-          expert_shard_id = jax.lax.axis_index("attn_dp_expert")
-        else:
-          expert_shard_id = jax.lax.axis_index("expert")
+        expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name)
       else:
         expert_shard_id = 0
       num_expert_parallelism = self.get_expert_parallelism_size()
@@ -1137,7 +1134,7 @@ class RoutedMoE(nnx.Module):
         )
 
         if num_expert_parallelism > 1:
-          batch_axis = "expert" if is_batch_sharded_by_expert else "data"
+          batch_axis = self._expert_parallelism_name if is_batch_sharded_by_expert else "data"
           # get group sizes for all shards
           local_expert_size = self.config.num_experts // num_expert_parallelism
           reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
