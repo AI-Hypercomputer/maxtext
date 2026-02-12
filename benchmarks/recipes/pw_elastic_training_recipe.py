@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-This recipe tests the suspend and resume functionality in Pathways.
+"""A recipe for running an elastic training benchmark with disruptions.
 
-It launches a MaxText workload and then uses the DisruptionManager to send a
-SIGTERM signal at a specific training step. This simulates a planned preemption
-event, allowing validation of the framework's ability to gracefully suspend,
-checkpoint, and later resume training.
+This script configures and launches a MaxText workload on a GKE cluster using XPK,
+and then introduces disruptions (e.g., killing pods) to test the resilience
+and recovery capabilities of the training job. It can be configured to run
+with both Pathways and McJAX to compare their elastic training behavior.
 """
+
 import os
 import sys
 
@@ -31,16 +31,18 @@ from . import user_configs
 from benchmarks.disruption_management.disruption_handler import DisruptionMethod
 from .runner_utils import generate_and_run_workloads
 
-user_configs.USER_CONFIG.max_restarts = 3
-DISRUPTION_METHOD = DisruptionMethod.SIGTERM
+user_configs.USER_CONFIG.max_restarts = 10
+COMPARE_WITH_MCJAX = True
+
+DISRUPTION_METHOD = DisruptionMethod.SIGILL
 DISRUPTIONS = {
-    # "time_seconds":[120,600],
-    "step": [3]
+    "time_seconds": [120, 600],
+    # "step":[3]
 }
 
 
-def main():
-  """Main function to run the suspend/resume disruption test."""
+def main() -> None:
+  """Main function to run the elastic training disruption test."""
   user_configs.USER_CONFIG.headless = False
   should_continue = helper.handle_cmd_args(
       user_configs.USER_CONFIG.cluster_config, user_configs.USER_CONFIG.delete, user_configs.USER_CONFIG.user
@@ -58,7 +60,7 @@ def main():
       DISRUPTIONS,
   )
 
-  print("Suspend/Resume disruptions completed. Please check logs for results.")
+  print("Elastic Training disruptions completed. Please check logs for results.")
 
   return return_code
 
