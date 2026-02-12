@@ -259,6 +259,12 @@ def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices)
 
   if ep > 1:
     rollout_kwargs["expert_parallel_size"] = ep
+    rollout_kwargs["enable_expert_parallelism"] = True
+
+  rollout_kwargs["rollout_vllm_async_scheduling"] = True
+
+  if ep > 1:
+    rollout_kwargs["expert_parallel_size"] = ep
     rollout_kwargs["rollout_vllm_enable_expert_parallelism"] = True
 
   rollout_kwargs["rollout_vllm_async_scheduling"] = True

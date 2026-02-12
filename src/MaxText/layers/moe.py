@@ -369,7 +369,7 @@ class RoutedMoE(nnx.Module):
       self._tensor_parallelism_name = "tensor"
 
     if self.config.attention == "vllm_rpa":
-      self._expert_parallelism_name = "attn_dp_expert"
+      self._expert_parallelism_name = ("expert", "attn_dp_expert")
     else:
       self._expert_parallelism_name = "expert"
 
