@@ -903,6 +903,7 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the attention output.",
   )
+  engram: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the engram output.")
 
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")

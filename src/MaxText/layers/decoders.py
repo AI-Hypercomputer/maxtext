@@ -61,6 +61,8 @@ from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+import transformers
+
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -284,6 +286,37 @@ class Decoder(nn.Module):
       self.pipeline_module = pipeline.Pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
       )
+
+    if self.config.engram_layers:
+      # 1. Initialize Tokenizer
+      tokenizer = transformers.AutoTokenizer.from_pretrained(
+        self.config.tokenizer_path,
+        token=self.config.hf_access_token)
+
+      # 2. Setup Ngram Mapping
+      self.ngram_mapping = engram.NgramHashMapping(
+        engram_vocab_bases=self.config.engram_vocab_sizes,
+        max_ngram_size=self.config.engram_max_ngram_size,
+        engram_num_heads=self.config.engram_num_heads,
+        layer_ids=self.config.engram_layers,
+        tokenizer=tokenizer,
+        pad_id=tokenizer.pad_token_id,
+        seed=self.config.engram_seed,
+      )
+
+  def generate_engram_map(self, inputs):
+    """Docstring DeepSeek n-grams hash mapping."""
+    # Generate Map using Dictionary
+    # Structure as {"layer_index": {"vocab_sizes": vocab_sizes, "input_ids": input_ids}}
+    ngram_inputs = self.ngram_mapping(inputs)
+    ngram_layer_map = {
+      layer_id: {
+          "vocab_sizes": self.ngram_mapping.get_vocab_sizes(layer_id),
+          "input_ids": ngram_inputs[layer_id]
+      }
+      for layer_id in self.config.engram_layers
+    }
+    return ngram_layer_map
 
   def minimal_policy(self, with_context=False):
     """Helper for creating minimal checkpoint policies."""
@@ -713,7 +746,6 @@ class Decoder(nn.Module):
       attention_metadata=None,
       audio_embeddings: None | jnp.ndarray = None,
       audio_masks: None | jnp.ndarray = None,
-      ngram_map: dict[int, Any] | None = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -732,6 +764,9 @@ class Decoder(nn.Module):
         audio_embeddings,
         audio_masks,
     )
+
+    if self.config.engram_layers:
+      ngram_layer_map = self.generate_engram_map(decoder_input_tokens)
 
     if cfg.mhc_expansion_rate > 1:
       # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
@@ -875,8 +910,9 @@ class Decoder(nn.Module):
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
               kv_cache = kv_caches[index] if kv_caches is not None else None
+              layer_kwargs = {}
               y, kv_cache = layer(
-                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode, layer_id=index, ngram_map=ngram_map,
+                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode,
               )(
                   y,
                   decoder_segment_ids,
@@ -888,6 +924,7 @@ class Decoder(nn.Module):
                   slot=slot,
                   kv_cache=kv_cache,
                   attention_metadata=attention_metadata,
+                  ngram_layer_map=ngram_layer_map,
               )
               if kv_caches is not None and kv_cache is not None:
                 kv_caches[index] = kv_cache

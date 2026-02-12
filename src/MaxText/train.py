@@ -81,7 +81,7 @@ def get_first_step(state):
 # -----------------------------------------------------------------------------
 
 
-def loss_fn(model, config, data, dropout_rng, params, ngram_map, is_train=True):
+def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   """loss_fn for both train and eval.
 
   Args:
@@ -91,7 +91,6 @@ def loss_fn(model, config, data, dropout_rng, params, ngram_map, is_train=True):
     dropout_rng: A key to use to generate rng for dropout
     params: Model params
     is_train: True for train_step and False for eval_step
-    ngram_map: DeepSeek Engram hash mapping
 
   Returns:
     loss: average loss
@@ -121,7 +120,6 @@ def loss_fn(model, config, data, dropout_rng, params, ngram_map, is_train=True):
 
     # Flax Linen model
     print("NN Module")
-    jax.debug.print("loss_fn nn.Module ngram_map: {x}", x=ngram_map)
     logits, intermediate_outputs = model.apply(
         params,
         data["inputs"],
@@ -134,7 +132,6 @@ def loss_fn(model, config, data, dropout_rng, params, ngram_map, is_train=True):
         mutable=mutable_collections,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
-        ngram_map=ngram_map,
     )
 
     if config.num_vocab_tiling > 1:
@@ -157,7 +154,6 @@ def loss_fn(model, config, data, dropout_rng, params, ngram_map, is_train=True):
   else:
     # Flax NNX model
     print("NNX path")
-    jax.debug.print("loss_fn nnx ngram_map: {x}", x=ngram_map)
     logits = model(
         decoder_input_tokens=data["inputs"],
         decoder_positions=data["inputs_position"],
@@ -167,7 +163,6 @@ def loss_fn(model, config, data, dropout_rng, params, ngram_map, is_train=True):
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
-        ngram_map=ngram_map,
     )
     intermediate_outputs = {}
     one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
@@ -238,14 +233,13 @@ def loss_fn(model, config, data, dropout_rng, params, ngram_map, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state_mesh_shardings, params_shardings, state, data, ngram_map, dropout_rng):
+def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
   """
 
   Args:
     model: A nn.Module
     state: A pytree of the current state of the model
     data: Batch of data to apply to the model
-    ngram_map: DeepSeek Engram hash mapping
     dropout_rng: A key to use to generate rng for dropout
 
   Returns:
@@ -294,7 +288,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           params_shardings,
       )
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, ngram_map=ngram_map, *extra_dpo_args, is_train=True)
+    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
