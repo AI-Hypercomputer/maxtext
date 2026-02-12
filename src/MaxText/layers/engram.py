@@ -349,15 +349,20 @@ class MultiHeadEmbedding(nnx.Module):
       head_dim: Embedding dimension for a single head.
       rngs: Random number generators for initialization.
     """
-    self.num_heads = len(vocab_sizes)
+    # TODO(ranran): check if this is correct
+    # self.num_heads = len(vocab_sizes)
+    self.num_heads = config.engram_num_heads * (config.engram_max_ngram_size - 1)
 
     # Compute starting index for each head's segment in the flattened table.
     # Offsets serve as the "base address" for each head.
-    offsets = np.cumsum([0] + vocab_sizes[:-1])  # prefix sum
+    offsets = jnp.cumsum(jnp.array([0] + vocab_sizes[:-1]))
     self.offsets = jnp.array(offsets, dtype=jnp.int32)
 
     # The total embedding size is the sum of all individual head vocabularies.
-    self.embedding = Embed(num_embeddings=sum(vocab_sizes), num_features=head_dim, config=config, mesh=mesh, rngs=rngs)
+    # TODO(ranran): Is there any other static way for sum?
+    self.embedding = Embed(
+        num_embeddings=sum(vocab_sizes), num_features=head_dim, config=config, mesh=mesh, rngs=rngs
+    )
 
   def __call__(self, input_ids: Array, model_mode: str = MODEL_MODE_TRAIN) -> Array:
     """

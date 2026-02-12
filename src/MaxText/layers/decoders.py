@@ -910,9 +910,12 @@ class Decoder(nn.Module):
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
               kv_cache = kv_caches[index] if kv_caches is not None else None
-              layer_kwargs = {}
+              if layer_prefix == layer_prefixes[0]:
+                layer_kwargs = {"layer_idx": index + 1}
+              else:
+                layer_kwargs = {"layer_idx": index + 1 + cfg.first_num_dense_layers}
               y, kv_cache = layer(
-                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode,
+                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
               )(
                   y,
                   decoder_segment_ids,
