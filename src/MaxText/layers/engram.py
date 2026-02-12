@@ -36,7 +36,6 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers import nnx_wrappers
 
 
 class CompressedTokenizer:
@@ -89,13 +88,13 @@ class CompressedTokenizer:
     )
     return normalizer
 
-  def _build_lookup_table(self, tokenizer: HFTokenizer, normalizer: normalizers.Sequence) -> tuple[np.ndarray, int]:
+  def _build_lookup_table(self, tokenizer: HFTokenizer, normalizer: normalizers.Sequence) -> tuple[jnp.ndarray, int]:
     """
     Builds the mapping from the original vocabulary to the compressed vocabulary.
     """
     vocab_size = len(tokenizer)
     # Mapping: original_tid -> compressed_nid (Many-to-One)
-    old2new = np.empty(vocab_size, dtype=np.int64)
+    old2new = jnp.empty(vocab_size, dtype=jnp.int32)
     # Mapping: normalized_string -> compressed_nid (One-to-One)
     key2new = {}
 
@@ -118,24 +117,31 @@ class CompressedTokenizer:
         nid = len(key2new)
         key2new[key] = nid
 
-      old2new[tid] = nid
+      old2new = old2new.at[tid].set(nid)
 
     return old2new, len(key2new)
 
-  def __call__(self, input_ids) -> np.ndarray:
+  def __call__(self, input_ids) -> Array:
     """
     Maps original token IDs to compressed IDs.
     """
-    input_ids = np.asarray(input_ids, dtype=np.int64)
+    input_ids = jnp.asarray(input_ids, dtype=jnp.int32)
 
     # Identify valid tokens (ignore padding/masks usually marked with negative IDs)
     valid_mask = input_ids >= 0
-    valid_ids = input_ids[valid_mask]
-
-    # Vectorized lookup: O(1) per token
-    output_ids = input_ids.copy()
-    output_ids[valid_mask] = self.lookup_table[valid_ids]
+    safe_indices = jnp.where(valid_mask, input_ids, 0)
+    lookup_values = self.lookup_table[safe_indices]
+    output_ids = jnp.where(valid_mask, lookup_values, input_ids)
     return output_ids
+
+# input_ids = jnp.asarray(input_ids, dtype=jnp.int64)
+# # Identify valid tokens (ignore padding/masks usually marked with negative IDs)
+# valid_mask = input_ids >= 0
+# valid_ids = input_ids[valid_mask]
+# # Vectorized lookup: O(1) per token
+# output_ids = input_ids.copy()
+# output_ids[valid_mask] = self.lookup_table[valid_ids]
+# return output_ids
 
 
 class NgramHashMapping:
@@ -182,7 +188,7 @@ class NgramHashMapping:
     self.compressed_tokenizer = CompressedTokenizer(tokenizer)
     self.tokenizer_vocab_size = len(self.compressed_tokenizer)
     if pad_id is not None:
-      self.pad_id = int(self.compressed_tokenizer.lookup_table[pad_id])
+      self.pad_id = self.compressed_tokenizer.lookup_table[pad_id]
 
     # Pre-calculate odd multipliers for hashing: {layer_id: multipliers}
     self.layer_multipliers = self._calculate_multipliers_across_layers(seed)
@@ -191,7 +197,7 @@ class NgramHashMapping:
     # Structure: {layer_id: [[2gram_head1, ..., 2gram_headH], ..., [Ngram_head1, ..., Ngram_headH]]}
     self.vocab_size_across_layers = self._calculate_vocab_size_across_layers()
 
-  def _calculate_multipliers_across_layers(self, seed: int) -> dict[int, np.ndarray]:
+  def _calculate_multipliers_across_layers(self, seed: int) -> dict[int, jnp.ndarray]:
     """
     Pre-calculates random odd multipliers for each layer and n-gram position.
 
@@ -199,7 +205,7 @@ class NgramHashMapping:
       A dictionary mapping layer_id to a list of `max_ngram_size` multipliers.
     """
     # Pre-calculate bounds for random generation
-    max_long = np.iinfo(np.int64).max
+    max_long = jnp.iinfo(jnp.int32).max
     m_max = int(max_long // self.tokenizer_vocab_size)
     half_bound = max(1, m_max // 2)
     # Hard-code prime number to align with reference
@@ -211,9 +217,9 @@ class NgramHashMapping:
       layer_seed = int(seed + LAYER_PRIME_OFFSET * int(layer_id))
       np_rng = np.random.default_rng(layer_seed)
       # Generate random odd integers
-      random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
+      random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=jnp.int32)
       multipliers = random_value * 2 + 1
-      layer_multipliers[layer_id] = multipliers
+      layer_multipliers[layer_id] = jnp.asarray(multipliers)
     return layer_multipliers
 
   def _calculate_vocab_size_across_layers(self) -> dict[int, List[List[int]]]:
@@ -258,7 +264,7 @@ class NgramHashMapping:
     """
     return [head_size for ngram_size in self.vocab_size_across_layers[layer_id] for head_size in ngram_size]
 
-  def _get_ngram_hashes(self, compressed_ids: np.ndarray, layer_id: int) -> np.ndarray:
+  def _get_ngram_hashes(self, compressed_ids: jnp.ndarray, layer_id: int) -> jnp.ndarray:
     """
     Computes hash indices for all n-grams in the input batch.
 
@@ -269,7 +275,7 @@ class NgramHashMapping:
     Returns:
       hash_ids: [B, S, H_total] where H_total = H * num_ngram_orders
     """
-    x = np.asarray(compressed_ids, dtype=np.int64)
+    x = jnp.asarray(compressed_ids, dtype=jnp.int32)
     B, S = x.shape
 
     # 1. Create Sliding Windows via Shifting
@@ -280,11 +286,11 @@ class NgramHashMapping:
         shifted_inputs.append(x)
       else:
         # Pre-allocate full array with PAD_ID
-        shifted_x = np.full((B, S), self.pad_id, dtype=np.int64)
+        shifted_x = jnp.full((B, S), self.pad_id, dtype=jnp.int32)
         # Fast memory copy, slicing and assignment
         # e.g., k=1, [PAD, The, cat]
         #       k=2, [PAD, PAD, The]
-        shifted_x[:, k:] = x[:, :-k]
+        shifted_x = shifted_x.at[:, k:].set(x[:, :-k])
         shifted_inputs.append(shifted_x)
 
     # 2. Retrieve layer-specific hash multipliers
@@ -303,11 +309,11 @@ class NgramHashMapping:
 
     for n in range(2, self.max_ngram_size + 1):
       # Update hash with next history token
-      ngram_hash = np.bitwise_xor(ngram_hash, shifted_inputs[n - 1] * multipliers[n - 1])
+      ngram_hash = jnp.bitwise_xor(ngram_hash, shifted_inputs[n - 1] * multipliers[n - 1])
 
       # Retrieve prime vocab sizes for all heads of this n-gram order
       vocab_sizes_for_this_gram = vocab_sizes[n - 2]
-      mods = np.array(vocab_sizes_for_this_gram, dtype=np.int64)
+      mods = jnp.array(vocab_sizes_for_this_gram, dtype=jnp.int32)
 
       # Broadcast Modulo: Map hash to valid table indices
       # [B, S, 1] % [H] -> [B, S, H]
@@ -315,9 +321,9 @@ class NgramHashMapping:
       all_hashes.append(head_hashes)
 
     # Concatenate all heads: [B, S, H_total] where H_total = H * num_ngram_orders
-    return np.concatenate(all_hashes, axis=2)
+    return jnp.concatenate(all_hashes, axis=2)
 
-  def __call__(self, input_ids) -> dict[int, np.ndarray]:
+  def __call__(self, input_ids) -> dict[int, jnp.ndarray]:
     # input_ids from standard tokenizer
     compressed_ids = self.compressed_tokenizer(input_ids)
     hash_ids_for_all_layers = {}
@@ -349,17 +355,20 @@ class MultiHeadEmbedding(nnx.Module):
       head_dim: Embedding dimension for a single head.
       rngs: Random number generators for initialization.
     """
-    # TODO(ranran): check if this is correct
-    # self.num_heads = len(vocab_sizes)
-    self.num_heads = config.engram_num_heads * (config.engram_max_ngram_size - 1)
+    if hasattr(vocab_sizes, "values"):
+      # handle this by extracting the list of vocabulary sizes from the FrozenDict before it's used
+      vocab_sizes = list(vocab_sizes.values())[0]
+
+    self.num_heads = len(vocab_sizes)
+    print(f"vocab_sizes: {vocab_sizes}")
+    # self.num_heads = config.engram_num_heads * (config.engram_max_ngram_size - 1)
 
     # Compute starting index for each head's segment in the flattened table.
     # Offsets serve as the "base address" for each head.
-    offsets = jnp.cumsum(jnp.array([0] + vocab_sizes[:-1]))
+    offsets = jnp.cumsum(jnp.array([0] + list(vocab_sizes)[:-1]))
     self.offsets = jnp.array(offsets, dtype=jnp.int32)
 
     # The total embedding size is the sum of all individual head vocabularies.
-    # TODO(ranran): Is there any other static way for sum?
     self.embedding = Embed(
         num_embeddings=sum(vocab_sizes), num_features=head_dim, config=config, mesh=mesh, rngs=rngs
     )
@@ -378,6 +387,8 @@ class MultiHeadEmbedding(nnx.Module):
     # Broadcasting Add: [B, S, H] + [H] -> [B, S, H]
     # Shifts local indices (0..Prime-1) to global table positions.
     shifted_ids = input_ids + self.offsets
+    print(f"input_ids:{input_ids}")
+    print(f"self.offsets:{self.offsets}")
 
     # Embedding lookup: [B, S, H_total] -> [B, S, H_total, D_head]
     return self.embedding(shifted_ids, model_mode=model_mode)

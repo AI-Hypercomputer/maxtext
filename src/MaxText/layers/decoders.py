@@ -307,16 +307,19 @@ class Decoder(nn.Module):
   def generate_engram_map(self, inputs):
     """Docstring DeepSeek n-grams hash mapping."""
     # Generate Map using Dictionary
-    # Structure as {"layer_index": {"vocab_sizes": vocab_sizes, "input_ids": input_ids}}
     ngram_inputs = self.ngram_mapping(inputs)
-    ngram_layer_map = {
-      layer_id: {
-          "vocab_sizes": self.ngram_mapping.get_vocab_sizes(layer_id),
-          "input_ids": ngram_inputs[layer_id]
-      }
+    ngram_vocab_sizes = {
+      layer_id: self.ngram_mapping.get_vocab_sizes(layer_id)
       for layer_id in self.config.engram_layers
     }
-    return ngram_layer_map
+    ngram_input_ids = {
+      layer_id: ngram_inputs[layer_id]
+      for layer_id in self.config.engram_layers
+    }
+    #TODO: only generate needed total vocab_sizes for index
+    # print(f"===generating ngram_vocab_sizes {ngram_vocab_sizes}")
+    # print(f"===generating ngram_input_ids {ngram_input_ids}")
+    return ngram_vocab_sizes, ngram_input_ids
 
   def minimal_policy(self, with_context=False):
     """Helper for creating minimal checkpoint policies."""
@@ -766,7 +769,7 @@ class Decoder(nn.Module):
     )
 
     if self.config.engram_layers:
-      ngram_layer_map = self.generate_engram_map(decoder_input_tokens)
+      ngram_vocab_sizes, ngram_input_ids = self.generate_engram_map(decoder_input_tokens)
 
     if cfg.mhc_expansion_rate > 1:
       # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
@@ -911,9 +914,29 @@ class Decoder(nn.Module):
             for index in range(num_layers):
               kv_cache = kv_caches[index] if kv_caches is not None else None
               if layer_prefix == layer_prefixes[0]:
-                layer_kwargs = {"layer_idx": index + 1}
+                import jax
+                print("this is dense")
+                total_layer_index = index
+                print(f"...ngram_vocab_sizes: {ngram_vocab_sizes}")
+                print(f"......ngram_input_ids.get(total_layer_index): {ngram_input_ids.get(total_layer_index)}")
+                print(f"......ngram_vocab_sizes.get(total_layer_index): {ngram_vocab_sizes.get(total_layer_index)}")
+                print(f"this is total_layer_index: {total_layer_index}")
+                layer_kwargs = {
+                  "layer_idx": total_layer_index,
+                  "ngram_vocab_size": ngram_vocab_sizes.get(total_layer_index),
+                }
               else:
-                layer_kwargs = {"layer_idx": index + 1 + cfg.first_num_dense_layers}
+                import jax
+                print("this is moe")
+                total_layer_index = index + cfg.first_num_dense_layers
+                print(f"......ngram_input_ids.get(total_layer_index): {ngram_input_ids.get(total_layer_index)}")
+                print(f"......ngram_vocab_sizes.get(total_layer_index): {ngram_vocab_sizes.get(total_layer_index)}")
+                print(f"...ngram_vocab_sizes: {ngram_vocab_sizes}")
+                print(f"this is total_layer_index: {total_layer_index}")
+                layer_kwargs = {
+                  "layer_idx": total_layer_index,
+                  "ngram_vocab_size": ngram_vocab_sizes.get(total_layer_index),
+                }
               y, kv_cache = layer(
                   config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
               )(
@@ -927,7 +950,7 @@ class Decoder(nn.Module):
                   slot=slot,
                   kv_cache=kv_cache,
                   attention_metadata=attention_metadata,
-                  ngram_layer_map=ngram_layer_map,
+                  ngram_input_ids=ngram_input_ids.get(total_layer_index),
               )
               if kv_caches is not None and kv_cache is not None:
                 kv_caches[index] = kv_cache

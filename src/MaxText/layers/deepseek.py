@@ -50,8 +50,8 @@ def is_mhc_enabled(expansion_rate):
   return expansion_rate > 1
 
 
-def is_engram_enabled(engram_layers):
-  return engram_layers
+def is_engram_enabled(engram_layers, layer_idx):
+  return engram_layers and layer_idx in engram_layers
 
 
 class DeepSeekGenericLayer(nnx.Module):
@@ -67,6 +67,8 @@ class DeepSeekGenericLayer(nnx.Module):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
+      layer_idx: int=-1,
+      ngram_vocab_size: Optional[list] = None,
       quant: Optional[quantizations.AqtQuantization] = None,
   ) -> None:
 
@@ -75,6 +77,8 @@ class DeepSeekGenericLayer(nnx.Module):
     self.mesh = mesh
     self.quant = quant
     self.rngs = rngs
+    self.ngram_vocab_size = ngram_vocab_size
+    self.layer_idx = layer_idx
 
     batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, self.model_mode)
     self.dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
@@ -136,7 +140,7 @@ class DeepSeekGenericLayer(nnx.Module):
     if is_mhc_enabled(self.config.mhc_expansion_rate):
       self.mhc = mhc.ManifoldConstrainedHyperConnections(self.config, self.config.emb_dim, self.mesh, self.rngs)
 
-    if is_engram_enabled(self.config.engram_layers):
+    if is_engram_enabled(self.config.engram_layers, self.layer_idx):
       self.engram_layer_norm = RMSNorm(
           num_features=self.dummy_inputs_shape[-1],
           dtype=self.config.dtype,
@@ -145,20 +149,17 @@ class DeepSeekGenericLayer(nnx.Module):
           epsilon=self.config.normalization_layer_epsilon,
           rngs=rngs,
       )
-
-    #   engram_vocab_sizes = ngram_map[layer_id]["vocab_sizes"]
-    #   self.engram_input_ids = ngram_map[layer_id]["input_ids"]
-    #   self.engram = engram.Engram(
-    #     config=self.config,
-    #     mesh=mesh,
-    #     vocab_sizes=engram_vocab_sizes,
-    #     engram_num_heads=self.config.engram_num_heads,
-    #     engram_head_dim=self.config.engram_head_dim,
-    #     engram_max_ngram_size=self.config.engram_max_ngram_size,
-    #     engram_kernel_size=self.config.engram_kernel_size,
-    #     mhc_expansion_rate=self.config.mhc_expansion_rate,
-    #     rngs=rngs,
-    #   )
+      self.engram_module = engram.Engram(
+        config=self.config,
+        mesh=mesh,
+        vocab_sizes=self.ngram_vocab_size,
+        engram_num_heads=self.config.engram_num_heads,
+        engram_head_dim=self.config.engram_head_dim,
+        engram_max_ngram_size=self.config.engram_max_ngram_size,
+        engram_kernel_size=self.config.engram_kernel_size,
+        mhc_expansion_rate=self.config.mhc_expansion_rate,
+        rngs=rngs,
+      )
 
   def mlp_op(self, x, deterministic, *args, **kwargs):
     """Executes the MLP operation. To be implemented by subclasses."""
@@ -291,23 +292,10 @@ class DeepSeekGenericLayer(nnx.Module):
     hidden_states = self.post_attention_norm_op(intermediate_inputs)
     return hidden_states, intermediate_inputs
 
-  def engram_op(self, x, ngram_layer_map, layer_idx):
+  def engram_op(self, x, ngram_input_ids):
+    x = x.astype(self.config.dtype)
     normed_x = self.engram_layer_norm(x)
-    engram_vocab_sizes = ngram_layer_map[layer_idx]["vocab_sizes"]
-    engram_input_ids = ngram_layer_map[layer_idx]["input_ids"]
-
-    engram_module = engram.Engram(
-      config=self.config,
-      mesh=self.mesh,
-      vocab_sizes=engram_vocab_sizes,
-      engram_num_heads=self.config.engram_num_heads,
-      engram_head_dim=self.config.engram_head_dim,
-      engram_max_ngram_size=self.config.engram_max_ngram_size,
-      engram_kernel_size=self.config.engram_kernel_size,
-      mhc_expansion_rate=self.config.mhc_expansion_rate,
-      rngs=self.rngs,
-    )
-    return engram_module(normed_x, engram_input_ids)
+    return self.engram_module(normed_x, ngram_input_ids)
 
 class DeepSeekDenseLayer(DeepSeekGenericLayer):
   """DeepSeek-style dense layer with Multi-Head Latent Attention."""
@@ -318,11 +306,11 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
-      layer_idx: int = -1,
+      layer_idx: int=-1,
+      ngram_vocab_size: Optional[list] = None,
       quant: Optional[quantizations.AqtQuantization] = None,
   ) -> None:
-    super().__init__(config, model_mode, mesh, rngs, quant)
-    self.layer_idx = layer_idx
+    super().__init__(config, model_mode, mesh, rngs, layer_idx, ngram_vocab_size, quant)
     self.mlp = linears.MlpBlock(
         in_features=self.dummy_inputs_shape[-1],
         intermediate_dim=self.config.mlp_dim,
@@ -354,7 +342,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
-      ngram_layer_map=None,
+      ngram_input_ids=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -362,8 +350,9 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
     x = self.with_logical_constraint(inputs)
     x = checkpoint_name(x, "decoder_layer_input")
 
-    if is_engram_enabled(self.config.engram_layers):
-      engram_output = self.engram_op(x, ngram_layer_map, self.layer_idx)
+    if is_engram_enabled(self.config.engram_layers, self.layer_idx):
+      engram_output = self.engram_op(x, ngram_input_ids)
+      engram_output = engram_output.astype(self.config.dtype)
       x = x + engram_output
       x = checkpoint_name(x, "engram")
 
@@ -413,12 +402,12 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
-      layer_idx: int = -1,
+      layer_idx: int=-1,
+      ngram_vocab_size: Optional[list] = None,
       quant: Optional[quantizations.AqtQuantization] = None,
   ) -> None:
 
-    super().__init__(config, model_mode, mesh, rngs, quant)
-    self.layer_idx = layer_idx
+    super().__init__(config, model_mode, mesh, rngs, layer_idx, ngram_vocab_size, quant)
     self.DeepSeekMoeBlock_0 = moe.RoutedAndSharedMoE(
         config=self.config,
         mesh=mesh,
@@ -442,12 +431,11 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
-      ngram_layer_map=None,
+      ngram_input_ids=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-
     # If using batch split schedule, call the batch split version of the layer.
     if self.config.use_batch_split_schedule:
       outputs = deepseek_batchsplit.batch_split_schedule(
@@ -465,8 +453,9 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     x = self.with_logical_constraint(inputs)
     x = checkpoint_name(x, "decoder_layer_input")
 
-    if is_engram_enabled(self.config.engram_layers):
-      engram_output = self.engram_op(x, ngram_layer_map, self.layer_idx)
+    if is_engram_enabled(self.config.engram_layers, self.layer_idx):
+      engram_output = self.engram_op(x, ngram_input_ids)
+      engram_output.astype(self.config.dtype)
       x = x + engram_output
       x = checkpoint_name(x, "engram")
 
