@@ -57,7 +57,7 @@ def get_golden_data(model_name):
 def initialize_config():
   """Initialize configurations."""
   return pyconfig.initialize(
-      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs/post_train", "sft.yml")],
       run_name="test-sft-trainer-correctness",
       model_name="default",
       tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer"),
