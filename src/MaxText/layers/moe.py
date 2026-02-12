@@ -366,6 +366,11 @@ class RoutedMoE(nnx.Module):
     else:
       self._tensor_parallelism_name = "tensor"
 
+    if self.config.attention == "vllm_rpa":
+      self._expert_parallelism_name = ("expert", "attn_dp_expert")
+    else:
+      self._expert_parallelism_name = "expert"
+
     self.gate = GateLogit(
         in_features_shape=self.config.emb_dim,
         out_features_shape=self.num_experts,
@@ -463,7 +468,12 @@ class RoutedMoE(nnx.Module):
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=self.config.logical_axis_rules)
 
   def get_expert_parallelism_size(self):
-    return self.mesh.shape.get("expert", 1)
+    if isinstance(self._expert_parallelism_name, tuple):
+      size = 1
+      for axis in self._expert_parallelism_name:
+        size *= self.mesh.shape.get(axis, 1)
+      return size
+    return self.mesh.shape.get(self._expert_parallelism_name, 1)
 
   def get_tensor_parallelism_size(self):
     if isinstance(self._tensor_parallelism_name, tuple):
@@ -1087,10 +1097,9 @@ class RoutedMoE(nnx.Module):
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
-      expert_axis_name = "expert"
       num_expert_parallelism = self.get_expert_parallelism_size()
       if num_expert_parallelism > 1:
-        expert_shard_id = jax.lax.axis_index(expert_axis_name)
+        expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name)
       else:
         expert_shard_id = 0
       num_expert_parallelism = self.get_expert_parallelism_size()
@@ -1100,7 +1109,8 @@ class RoutedMoE(nnx.Module):
 
         # Duplicate inputs to all expert shards.
         x, logits, pre_bias_logits = tuple(
-            jax.lax.all_gather(z, axis_name=expert_axis_name, tiled=True) for z in (x, logits, pre_bias_logits)
+            jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+            for z in (x, logits, pre_bias_logits)
         )
 
         # "Route" tokens within each shard.
@@ -1156,9 +1166,9 @@ class RoutedMoE(nnx.Module):
                 send_sizes,
                 output_offsets,
                 recv_sizes,
-                axis_name=expert_axis_name,
+                axis_name=self._expert_parallelism_name,
             )
-            global_group_sizes = jax.lax.all_gather(group_sizes, axis_name=expert_axis_name)
+            global_group_sizes = jax.lax.all_gather(group_sizes, axis_name=self._expert_parallelism_name)
             x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
                 x,
                 global_group_sizes,
@@ -1289,7 +1299,7 @@ class RoutedMoE(nnx.Module):
 
         # Sum up the partial outputs across the expert shards.
         output = jnp.reshape(output, (-1, sequence_length, self.config.emb_dim))
-        output = jax.lax.psum_scatter(output, expert_axis_name, scatter_dimension=0, tiled=True)
+        output = jax.lax.psum_scatter(output, self._expert_parallelism_name, scatter_dimension=0, tiled=True)
 
       else:
         if num_expert_parallelism > 1:
@@ -1322,7 +1332,7 @@ class RoutedMoE(nnx.Module):
                 send_sizes,
                 output_offsets,
                 recv_sizes,
-                axis_name=expert_axis_name,
+                axis_name=self._expert_parallelism_name,
             )
           else:
             # If bach is replicated across EP shards then each shard should send
@@ -1342,7 +1352,7 @@ class RoutedMoE(nnx.Module):
                 send_sizes,
                 output_offsets,
                 recv_sizes,
-                axis_name=expert_axis_name,
+                axis_name=self._expert_parallelism_name,
             )
 
         output = self.unpermute(

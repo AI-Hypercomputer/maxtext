@@ -236,6 +236,7 @@ def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices)
 
   rollout_kwargs = {}
   tp = sampler_config.rollout_tensor_parallelism
+  ep = sampler_config.rollout_expert_parallelism
 
   if tp == -1:
     if num_sampler_devices % dp != 0:
@@ -245,14 +246,20 @@ def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices)
           f"when rollout_tensor_parallelism is -1."
       )
     tp = num_sampler_devices // dp
-  elif tp * dp != num_sampler_devices:
+  elif tp * dp * ep != num_sampler_devices:
     raise ValueError(
         f"rollout_tensor_parallelism({tp}) * "
-        f"rollout_data_parallelism({dp}) "
+        f"rollout_data_parallelism({dp}) * "
+        f"rollout_expert_parallelism({ep}) "
         f"!= len(sampler_devices)({num_sampler_devices})"
     )
   rollout_kwargs["tensor_parallel_size"] = tp
   rollout_kwargs["data_parallel_size"] = dp
+
+  if ep > 1:
+    rollout_kwargs["expert_parallel_size"] = ep
+    rollout_kwargs["enable_expert_parallelism"] = True
+
   rollout_kwargs["rollout_vllm_async_scheduling"] = True
 
   return rollout_kwargs
@@ -368,7 +375,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   else:
     max_logging.log("Creating policy model with same config as reference model on trainer mesh")
     actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
-
 
   if trainer_config.debug.rl:
     max_logging.log("Policy Model initialized successfully")
