@@ -1099,7 +1099,10 @@ class RoutedMoE(nnx.Module):
       batch_size, sequence_length, _ = x.shape
       num_expert_parallelism = self.get_expert_parallelism_size()
       if num_expert_parallelism > 1:
-        expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name)
+        if self.config.attention == "vllm_rpa":
+          expert_shard_id = jax.lax.axis_index("attn_dp_expert")
+        else:
+          expert_shard_id = jax.lax.axis_index("expert")
       else:
         expert_shard_id = 0
       num_expert_parallelism = self.get_expert_parallelism_size()
