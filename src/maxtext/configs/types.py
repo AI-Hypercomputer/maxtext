@@ -1541,6 +1541,9 @@ class RLHardware(BaseModel):
   rollout_tensor_parallelism: int = Field(
       -1, description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined."
   )
+  rollout_expert_parallelism: int = Field(
+      1, description="Expert parallelism per replica for rollout"
+  )
 
 
 class VLLM(BaseModel):
