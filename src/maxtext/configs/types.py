@@ -680,6 +680,9 @@ class MoEKernels(BaseModel):
   wo_tile_dlhs_buffer_count: int = Field(2, description="bwd pass dlhs tiling buffer count in GMM for wo.")
   wo_tile_drhs_buffer_count: int = Field(2, description="bwd pass drhs tiling buffer count in GMM for wo.")
 
+  wi_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wi.")
+  wo_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wo.")
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
