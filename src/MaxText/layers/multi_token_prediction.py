@@ -199,6 +199,8 @@ class MultiTokenPredictionBlock(nnx.Module):
     self.mtp_preds = mtp_acceptance(jnp.zeros((1,), dtype=jnp.float32))
     self.mtp_mask = mtp_acceptance(jnp.zeros((1,), dtype=jnp.float32))
 
+    nnx.pop(self, (mtp_losses, mtp_acceptance))
+
     # 1-indexed to match paper convention.
     for k in range(1, config.mtp_num_layers + 1):
       layer = MultiTokenPredictionLayer(
@@ -278,11 +280,11 @@ class MultiTokenPredictionBlock(nnx.Module):
         mtp_masks_list.append(rolled_target_mask)
 
     if mtp_losses_list:
-      self.losses.value = jnp.stack(mtp_losses_list)
-      self.weights.value = jnp.stack(mtp_weights_list)
+      self.losses = mtp_losses(jnp.stack(mtp_losses_list))
+      self.weights = mtp_losses(jnp.stack(mtp_weights_list))
     if mtp_preds_list:
-      self.mtp_preds.value = jnp.stack(mtp_preds_list)
-      self.mtp_mask.value = jnp.stack(mtp_masks_list)
+      self.mtp_preds = mtp_acceptance(jnp.stack(mtp_preds_list))
+      self.mtp_mask = mtp_acceptance(jnp.stack(mtp_masks_list))
 
     return {}
 
