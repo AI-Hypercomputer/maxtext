@@ -128,6 +128,40 @@ class MultiTokenPredictionLayer(nnx.Module):
         model_mode=MODEL_MODE_TRAIN,
     )
 
+
+  @property
+  def embedding_norm(self):
+    return getattr(self, f"mtp_{self.layer_number}_embedding_norm")
+
+  @embedding_norm.setter
+  def embedding_norm(self, module):
+    setattr(self, f"mtp_{self.layer_number}_embedding_norm", module)
+
+  @property
+  def hidden_state_norm(self):
+    return getattr(self, f"mtp_{self.layer_number}_hidden_state_norm")
+
+  @hidden_state_norm.setter
+  def hidden_state_norm(self, module):
+    setattr(self, f"mtp_{self.layer_number}_hidden_state_norm", module)
+
+  @property
+  def projection_layer(self):
+    return getattr(self, f"mtp_{self.layer_number}_projection")
+
+  @projection_layer.setter
+  def projection_layer(self, module):
+    setattr(self, f"mtp_{self.layer_number}_projection", module)
+
+  @property
+  def transformer_layer(self):
+    return getattr(self, f"mtp_{self.layer_number}_transformer_layer")
+
+  @transformer_layer.setter
+  def transformer_layer(self, module):
+    setattr(self, f"mtp_{self.layer_number}_transformer_layer", module)
+
+
   def __call__(
       self,
       prev_hidden_state: jnp.ndarray,
@@ -191,13 +225,6 @@ class MultiTokenPredictionBlock(nnx.Module):
     self.transformer_layer_module = transformer_layer_module
     self.decoder = decoder
     self.rngs = rngs if rngs is not None else nnx.Rngs(0)
-
-    # NNX Variables are exposed as Linen mutable collections by ToLinen wrapper.
-    self.losses = mtp_losses(jnp.zeros((config.mtp_num_layers,), dtype=jnp.float32))
-    self.weights = mtp_losses(jnp.zeros((config.mtp_num_layers,), dtype=jnp.float32))
-    # Float32 used to avoid gradient errors; converted to int32 in acceptance rate calculation.
-    self.mtp_preds = mtp_acceptance(jnp.zeros((1,), dtype=jnp.float32))
-    self.mtp_mask = mtp_acceptance(jnp.zeros((1,), dtype=jnp.float32))
 
     # 1-indexed to match paper convention.
     for k in range(1, config.mtp_num_layers + 1):
@@ -278,11 +305,13 @@ class MultiTokenPredictionBlock(nnx.Module):
         mtp_masks_list.append(rolled_target_mask)
 
     if mtp_losses_list:
-      self.losses.value = jnp.stack(mtp_losses_list)
-      self.weights.value = jnp.stack(mtp_weights_list)
+      # Not part of checkpoints, don't declare in __init__
+      self.losses = mtp_losses(jnp.stack(mtp_losses_list))
+      self.weights = mtp_losses(jnp.stack(mtp_weights_list))
     if mtp_preds_list:
-      self.mtp_preds.value = jnp.stack(mtp_preds_list)
-      self.mtp_mask.value = jnp.stack(mtp_masks_list)
+      # Not part of checkpoints, don't declare in __init__
+      self.mtp_preds = mtp_acceptance(jnp.stack(mtp_preds_list))
+      self.mtp_mask = mtp_acceptance(jnp.stack(mtp_masks_list))
 
     return {}
 

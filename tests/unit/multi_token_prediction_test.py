@@ -231,22 +231,6 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         rngs=self.rngs,
     )
 
-  def test_no_sow_during_init(self):
-    """Verifies losses/weights are initialized with zeros (NNX behavior)."""
-    # NNX pre-initializes Variables with zeros to avoid checkpointing errors.
-    # Unlike Linen which sows during forward pass, NNX creates Variables in __init__.
-    initial_state = nnx.state(self.test_model)
-    self.assertTrue(hasattr(initial_state.mtp_block, "losses"))
-    self.assertTrue(hasattr(initial_state.mtp_block, "weights"))
-
-    # Verify they're initialized with zeros of correct shape.
-    losses_val = initial_state.mtp_block.losses.value
-    weights_val = initial_state.mtp_block.weights.value
-    self.assertEqual(losses_val.shape, (self.cfg.mtp_num_layers,))
-    self.assertEqual(weights_val.shape, (self.cfg.mtp_num_layers,))
-    self.assertTrue(jnp.all(losses_val == 0.0))
-    self.assertTrue(jnp.all(weights_val == 0.0))
-
   def test_sow_functionality(self):
     """Verifies that the block correctly sows losses and weights."""
     _ = self.test_model(
