@@ -76,9 +76,21 @@ def get_test_base_output_directory(cloud_path=None):
   return cloud_path or "gs://runner-maxtext-logs"
 
 
+def get_test_config_path_for(relative_path: str):
+  """Return absolute path for a config under the configs directory.
+
+  Uses the same decoupled-vs-non-decoupled selection logic as
+  `get_test_config_path()` when `relative_path` is `base.yml`.
+  """
+  if relative_path == "base.yml":
+    return get_test_config_path()
+  return os.path.join(MAXTEXT_CONFIGS_DIR, relative_path)
+
+
 __all__ = [
     "get_test_base_output_directory",
     "get_test_config_path",
     "get_post_train_test_config_path",
+    "get_test_config_path_for",
     "get_test_dataset_path",
 ]
