@@ -20,7 +20,7 @@ import threading
 from typing import Any
 import grain.python as grain
 import numpy as np
-from MaxText import tokenizer
+from maxtext.input_pipeline import tokenizer
 
 
 @dataclasses.dataclass
