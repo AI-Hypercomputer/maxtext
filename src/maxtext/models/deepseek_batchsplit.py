@@ -803,7 +803,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       input_buffer_count,
       combine_scopes,
   ):
-    if config.use_qwix_quantization:
+    if config.use_qwix_quantization or config.using_pipeline_parallelism:
       output = megablox.gmm(
           lhs=inputs,
           rhs=kernel,
