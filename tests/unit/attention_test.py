@@ -1285,7 +1285,10 @@ class MLATest(attention_test_util.MLATestBase):
     mla_extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     mla_config_args.update(mla_extra_args)
     _, mla_layer = self.init_mla(mla_config_args, rope_type="default")
-    _, mla_layer = self.init_mla(self.config_arguments, rope_type="default")
+    # Also test the baseline init path; in decoupled mode inject mesh override.
+    mla_baseline_args = self.config_arguments.copy()
+    mla_baseline_args.update(mla_extra_args)
+    _, mla_layer = self.init_mla(mla_baseline_args, rope_type="default")
 
     # 4. Assert that the MLA layer DOES NOT HAVE the base projections
     self.assertFalse(hasattr(mla_layer, "query"), "MLA should not have 'query' projection.")
