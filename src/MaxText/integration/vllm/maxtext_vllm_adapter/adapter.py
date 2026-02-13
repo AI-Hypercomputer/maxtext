@@ -23,7 +23,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_AUTOREGRESSIVE
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
 
@@ -73,7 +73,7 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
     raise ValueError("hf_config_path must be provided when using MaxTextForCausalLM.")
 
   # Add base config path to positional args
-  base_config_path = os.path.join(MAXTEXT_PKG_DIR, "configs", "vllm.yml")
+  base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "vllm.yml")
   argv_list = ["", str(base_config_path)]
 
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
