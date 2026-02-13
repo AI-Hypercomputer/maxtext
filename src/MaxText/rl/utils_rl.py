@@ -22,6 +22,7 @@ from maxtext.utils import max_logging
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
+from math_verify import parse
 
 # initialize math_verify_func once
 math_verify_func = math_metric(
@@ -205,23 +206,6 @@ def normalize_final_answer(final_answer: str) -> str:
   return final_answer
 
 
-def parse_number_or_fraction(text: str) -> float | str:
-  """Parses a string that might be a float or a LaTeX fraction."""
-  # Check for fraction format: frac{num}{den}
-  match = re.search(r"frac\{(.+?)\}\{(.+?)\}", text)
-  if match:
-    try:
-      numerator = float(match.group(1))
-      denominator = float(match.group(2))
-      return numerator / denominator
-    except ValueError:
-      pass
-  try:
-    return float(text)
-  except ValueError:
-    return text
-
-
 def check_answer(prompts, completions, answer, tmvp_config, **kargs):
   """
   Reward the model if the answer is correct. A reward is also given if the answer
@@ -231,28 +215,52 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
   match_format = get_match_format_regex(tmvp_config)
   extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
 
+  boxed = lambda x: "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
+
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
     score = 0
     if guess is None:
       scores.append(0)
       continue
+    # Normalize for certain datasets
     if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
       guess = normalize_final_answer(guess)
       true_answer = normalize_final_answer(true_answer)
+    # Try math_verify first for robust comparison
+    verified_correct = False
+    mv_output = None
+    true_answer_fixed = true_answer
+    guess_fixed = guess
+    try:
+      # Fix LaTeX escaping issues for both ground truth and extracted answer
+      true_answer_fixed = fix_latex_escaping(true_answer)
+      guess_fixed = fix_latex_escaping(guess)
+      
+      mv_output = math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)])
+      if mv_output and mv_output[0] > 0.1:
+        verified_correct = True
+    except (TimeoutException, Exception):
+      pass
+
+    
     # Correct answer gets tmvp_config.reward_exact_format_match points!
-    if guess == true_answer or parse_number_or_fraction(guess) == parse_number_or_fraction(true_answer):
+    if guess == true_answer:
       score += tmvp_config.reward_exact_format_match
-    # Match if spaces are seen
-    elif guess.strip() == true_answer.strip() or parse_number_or_fraction(guess.strip()) == parse_number_or_fraction(true_answer.strip()):
+    # Give credit if spaces are seen but otherwise the answers match (useful for simple datasets like gsm8k)
+    elif guess.strip() == true_answer.strip():
       score += tmvp_config.reward_white_space_format_match
+    # Answers match upon robust comparison with math_verify
+    elif verified_correct:
+      score += tmvp_config.reward_exact_format_match
     else:
       # We also reward it if the answer is close via ratios!
       # Ie if the answer is within some range, reward it!
       try:
-        val_guess = parse_number_or_fraction(guess.strip())
-        val_true = parse_number_or_fraction(true_answer.strip())
-        ratio = (val_guess + EPSILON) / (val_true + EPSILON)
+        val_guess = parse(guess_fixed.strip())
+        val_true = parse(true_answer_fixed.strip())
+
+        ratio = (val_guess[0] + EPSILON) / (val_true[0] + EPSILON)
         if ratio >= 0.9 and ratio <= 1.1:
           score += tmvp_config.reward_ratio_guess_to_answer_high
         elif ratio >= 0.8 and ratio <= 1.2:

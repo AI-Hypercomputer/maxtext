@@ -588,6 +588,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       ],
       algo_config=grpo_config,
   )
+
   # Before we train the model, let's evaluate the model on the test set so we can
   # see the improvement post training.
   #
