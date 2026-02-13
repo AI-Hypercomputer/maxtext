@@ -68,6 +68,7 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
+from MaxText.globals import MAXTEXT_PKG_DIR
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -245,7 +246,7 @@ def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices)
           f"rollout_data_parallelism({dp}) "
           f"when rollout_tensor_parallelism is -1."
       )
-    tp = num_sampler_devices // dp
+    tp = num_sampler_devices // dp // ep
   elif tp * dp * ep != num_sampler_devices:
     raise ValueError(
         f"rollout_tensor_parallelism({tp}) * "
