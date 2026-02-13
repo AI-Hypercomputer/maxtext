@@ -72,6 +72,8 @@ import absl
 from transformers import AutoConfig
 from huggingface_hub import hf_hub_download, list_repo_files
 from safetensors import safe_open
+import torch
+
 import jax
 import flax.linen as nn
 from orbax.checkpoint import type_handlers
@@ -607,6 +609,24 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
       if key not in hf_state_dict_numpy:
         raise ValueError(f"HuggingFace key {key} not found in state_dict.")
       return hf_state_dict_numpy[key]
+    
+     def _eager_getter(key):
+      if key not in hf_state_dict_numpy:
+        raise ValueError(f"HuggingFace key {key} not found in state_dict.")   
+      if args.mode == "before":
+        return hf_state_dict_numpy[key]
+      elif args.mode == "bloat16":
+        # torch.bfloat16 -> torch.float32 -> np.float32 -> jax.bfloat16
+        return hf_state_dict_numpy[key].to(torch.float32).numpy().astype(jax.bfloat16)
+      elif args.mode == "float16":
+        # torch.bfloat16 -> torch.float16 -> np.float16
+        return hf_state_dict_numpy[key].to(torch.float16).numpy()
+      elif args.mode == "bloat16-2":
+        # View as int16 (same bit-width) to trick NumPy, then view as bfloat16
+        # This is zero-copy on CPU
+        assert tensor.dtype == torch.bfloat16
+        tensor = hf_state_dict_numpy[key]
+        return tensor.view(torch.int16).numpy().view(jax.bfloat16)
 
     tensor_getter = _eager_getter
 
@@ -732,6 +752,9 @@ if __name__ == "__main__":
 
   parser.add_argument(
       "--revision", type=str, required=False, default=None, help="Specific Hugging Face revision (branch/tag/commit)"
+  )
+  parser.add_argument(
+      "--mode", type=str, required=True, default="", choices=["before", "float16", "bfloat16", "bfloat16-2"], help=""
   )
 
   # Parse local arguments
