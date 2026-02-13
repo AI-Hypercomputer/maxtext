@@ -21,12 +21,16 @@ import math
 
 import jax
 import jax.nn
+from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
 from flax import nnx
+
+from jax.sharding import PartitionSpec as P
+from jax.experimental.shard_map import shard_map
 
 from MaxText.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED, MODEL_MODE_TRAIN
 from MaxText.layers import attentions
@@ -43,243 +47,360 @@ from MaxText.layers.moe import RoutedMoE
 from MaxText.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 from maxtext.inference import page_manager
 from maxtext.utils import max_utils
+from maxtext.scratch_code import gdn_pallas
 
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
 # -----------------------------------------
 
 
-def jax_chunk_gated_delta_rule(
-    query: Array,
-    key: Array,
-    value: Array,
-    g: Array,
-    beta: Array,
+import jax
+import jax.numpy as jnp
+from jax import lax
+
+def pallas_chunk_gated_delta_rule(
+    query: jax.Array,
+    key: jax.Array,
+    value: jax.Array,
+    g: jax.Array,
+    beta: jax.Array,
     chunk_size: int = 64,
-    initial_state: None | Array = None,
+    initial_state: None | jax.Array = None,
     use_qk_norm_in_gdn: bool = False,
-) -> tuple[Array, None | Array]:
+    compute_dtype: jnp.dtype = jnp.bfloat16,
+    mesh: Mesh | None = None,
+) -> tuple[jax.Array, None | jax.Array]:
   """
-  A JAX implementation of the chunked Gated Delta Rule, a parallel scan algorithm.
-  This function implements the core recurrent logic of the Gated Delta Network in
-  a hardware-efficient way by splitting the sequence into chunks and using
-  jax.lax.scan for the recurrent part.
-
-  Tensor Shape Abbreviations:
-    B: batch_size, S: sequence_length, H: num_heads,
-    D_k: key/query_head_dim, D_v: value_head_dim,
-    N: num_chunks, C: chunk_size
-
-  Args:
-    query: Query tensor. Shape (B, S, H, D_k)
-    key: Key tensor. Shape (B, S, H, D_k)
-    value: Value tensor. Shape (B, S, H, D_v)
-    g: Log decay tensor. Shape (B, S, H)
-    beta: Gate tensor. Shape (B, S, H)
-    chunk_size: The size of each chunk for processing.
-    initial_state: Optional initial state for the recurrence. Shape (B, H, D_k, D_v)
-    use_qk_norm_in_gdn: Whether to apply L2 normalization to query and key.
-
-  Returns:
-    Output tensor. Shape (B, S, H, D_v)
-    Final recurrent state. Shape (B, H, D_k, D_v) or None
+  Pallas-accelerated version of Gated Delta Rule.
   """
-
   # =========================================================================
   # STAGE 1: PREPARATION & PADDING
   # =========================================================================
   initial_dtype = query.dtype
   if use_qk_norm_in_gdn:
+    from MaxText.layers.normalizations import l2norm 
     query = l2norm(query, dim=-1, eps=1e-6)
     key = l2norm(key, dim=-1, eps=1e-6)
 
-  # Transpose (B, S, H, D) -> (B, H, S, D)
-  query = jnp.transpose(query, (0, 2, 1, 3)).astype(jnp.float32)
-  key = jnp.transpose(key, (0, 2, 1, 3)).astype(jnp.float32)
-  value = jnp.transpose(value, (0, 2, 1, 3)).astype(jnp.float32)
-  # Transpose (B, S, H) -> (B, H, S)
-  beta = jnp.transpose(beta, (0, 2, 1)).astype(jnp.float32)
-  g = jnp.transpose(g, (0, 2, 1)).astype(jnp.float32)
+  g = g.astype(jnp.float32)
+  query = query.astype(compute_dtype)
+  key = key.astype(compute_dtype)
+  value = value.astype(compute_dtype)
+  beta = beta.astype(compute_dtype)
 
-  batch_size, num_heads, sequence_length, k_head_dim = key.shape
-  v_head_dim = value.shape[-1]
-  pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size
-
-  # Padding to make sequence_length divisible by chunk_size
-  if pad_size > 0:
-    query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_size), (0, 0)))  # (B, H, S_padded, D_k)
-    key = jnp.pad(key, ((0, 0), (0, 0), (0, pad_size), (0, 0)))  # (B, H, S_padded, D_k)
-    value = jnp.pad(value, ((0, 0), (0, 0), (0, pad_size), (0, 0)))  # (B, H, S_padded, D_v)
-    beta = jnp.pad(beta, ((0, 0), (0, 0), (0, pad_size)))  # (B, H, S_padded)
-    g = jnp.pad(g, ((0, 0), (0, 0), (0, pad_size)))  # (B, H, S_padded)
-
-  total_sequence_length = sequence_length + pad_size
-  # query shape: (B, H, S_padded, D_k)
-  scale = jax.lax.rsqrt(jnp.array(query.shape[-1]).astype(jnp.float32))
+  scale = jax.lax.rsqrt(jnp.array(query.shape[-1], dtype=jnp.float32)).astype(compute_dtype)
   query = query * scale
 
-  v_beta = value * jnp.expand_dims(beta, -1)  # (B, H, S_padded, D_v)
-  k_beta = key * jnp.expand_dims(beta, -1)  # (B, H, S_padded, D_k)
+  B, S, H, K_dim = key.shape
+  V_dim = value.shape[-1]
+  
+  pad_len = (chunk_size - (S % chunk_size)) % chunk_size
+  if pad_len > 0:
+    pad_fn = lambda x, val=0.0: jnp.pad(x, ((0,0), (0, pad_len)) + ((0,0),)*(x.ndim-2), constant_values=val)
+    query = pad_fn(query)
+    key = pad_fn(key)
+    value = pad_fn(value)
+    g = pad_fn(g)
+    beta = pad_fn(beta)
 
-  # Reshape to chunks
-  num_chunks = total_sequence_length // chunk_size
-  # query_c shape: (B, H, N, C, D_k)
-  query_c = query.reshape(batch_size, num_heads, num_chunks, chunk_size, k_head_dim)
-  key_c = key.reshape(batch_size, num_heads, num_chunks, chunk_size, k_head_dim)
-  k_beta_c = k_beta.reshape(batch_size, num_heads, num_chunks, chunk_size, k_head_dim)
-  v_beta_c = v_beta.reshape(batch_size, num_heads, num_chunks, chunk_size, v_head_dim)
-  g_c = g.reshape(batch_size, num_heads, num_chunks, chunk_size)  # (B, H, N, C)
+  num_chunks = query.shape[1] // chunk_size
 
-  mask = jnp.triu(jnp.ones((chunk_size, chunk_size), dtype=bool), k=0)  # (C, C)
+  def to_chunk(x):
+    return x.reshape(B, num_chunks, chunk_size, H, -1).transpose(0, 1, 3, 2, 4)
+  def to_chunk_scalar(x):
+    return x.reshape(B, num_chunks, chunk_size, H).transpose(0, 1, 3, 2)
+
+  q_c = to_chunk(query)
+  k_c = to_chunk(key)
+  v_c = to_chunk(value)
+  g_c = to_chunk_scalar(g)
+  beta_c = to_chunk_scalar(beta)
 
   # =========================================================================
-  # STAGE 2: INTRA-CHUNK CALCULATION (PARALLEL)
+  # STAGE 2: INTRA-CHUNK PRE-COMPUTATION
   # =========================================================================
-  # g_cumsum shape: (B, H, N, C)
   g_cumsum = jnp.cumsum(g_c, axis=-1)
-  # g_diff shape: (B, H, N, C, C)
-  g_diff = jnp.expand_dims(g_cumsum, -1) - jnp.expand_dims(g_cumsum, -2)
+  k_beta = k_c * beta_c[..., None]
+  
+  S = jnp.matmul(k_c, k_beta.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
+  S = S.astype(jnp.float32)
+  g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
+  mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
+  g_diff = jnp.where(mask, g_diff, -1e30) 
+  S = S * jnp.exp(g_diff)
+  S = jnp.where(mask, S, 0.0)
+  
+  identity = jnp.eye(chunk_size, dtype=jnp.float32)
+  identity_broadcasted = jnp.broadcast_to(identity, S.shape)
+  A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
 
-  # Apply tril to zero out the upper triangle of g_diff. This is crucial because
-  # the upper triangle contains large positive values that would cause exp() to overflow.
-  g_diff_tril = jnp.tril(g_diff)
+  v_beta = v_c * beta_c[..., None]
+  u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
+  u_chunks = u_chunks.astype(compute_dtype)
+  
+  k_beta_g = k_beta.astype(jnp.float32) * jnp.exp(g_cumsum)[..., None]
+  w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
+  w_chunks = w_chunks.astype(compute_dtype)
 
-  # Exponentiate the lower triangular g_diff. Since these values are non-positive,
-  # exp() will not overflow and will produce values between 0 and 1.
-  g_diff_exp = jnp.exp(g_diff_tril).astype(jnp.float32)
+  # =========================================================================
+  # STAGE 3: INTER-CHUNK RECURRENCE (Pallas Kernel + shard_map)
+  # =========================================================================
+  # Transpose to (Batch, Heads, NumChunks, ChunkSize, Dim) for Pallas
+  w_p = w_chunks.transpose(0, 2, 1, 3, 4)
+  u_p = u_chunks.transpose(0, 2, 1, 3, 4)
+  q_p = q_c.transpose(0, 2, 1, 3, 4)
+  k_p = k_c.transpose(0, 2, 1, 3, 4)
+  v_p = v_c.transpose(0, 2, 1, 3, 4)
+  g_p = g_cumsum.transpose(0, 2, 1, 3) 
+  beta_p = beta_c.transpose(0, 2, 1, 3)
 
-  # The result g_diff_exp is already lower triangular and serves as the decay_mask.
-  # decay_mask shape: (B, H, N, C, C)
-  decay_mask = g_diff_exp
-
-  # --- Precompute within-chunk attention ---
-  # NOTE: Precision set to HIGHEST for numerical accuracy.
-  prec = jax.lax.Precision.HIGHEST
-  # attn shape: (B, H, N, C, C)
-  attn = -jnp.matmul(k_beta_c, jnp.swapaxes(key_c, -1, -2), precision=prec) * decay_mask
-  attn = jnp.where(mask, 0.0, attn)
-
-  # Iterative refinement of the intra-chunk attention.
-  # This loop is equivalent to inverting (I - A) where A is the lower triangular part of attn.
-  def inner_attn_body(i, attn_val):
-    # indices: (C,)
-    indices = jnp.arange(chunk_size)
-    # col_mask: (C,)
-    col_mask = indices < i
-    # row: (B, H, N, C)
-    row = attn_val[..., i, :] * col_mask
-    # sub_mask: (C, C)
-    sub_mask = jnp.expand_dims(indices < i, -1) & (indices < i)
-    # sub: (B, H, N, C, C)
-    sub = attn_val * sub_mask
-    # row_exp: (B, H, N, C, 1)
-    row_exp = jnp.expand_dims(row, -1)
-    # term: (B, H, N, C, C)
-    term = row_exp * sub
-    # summed: (B, H, N, C)
-    summed = jnp.sum(term, axis=-2)
-    # update_val: (B, H, N, C)
-    update_val = row + summed
-    # original_row: (B, H, N, C)
-    original_row = attn_val[..., i, :]
-    # new_row: (B, H, N, C)
-    new_row = jnp.where(col_mask, update_val, original_row)
-    return attn_val.at[..., i, :].set(new_row)
-
-  attn = jax.lax.fori_loop(1, chunk_size, inner_attn_body, attn)
-
-  attn = attn + jnp.eye(chunk_size, dtype=attn.dtype)  # (B, H, N, C, C)
-  # value_intra shape: (B, H, N, C, D_v)
-  value_intra = jnp.matmul(attn, v_beta_c, precision=prec)
-  # k_cumdecay shape: (B, H, N, C, D_k)
-  k_cumdecay = jnp.matmul(attn, (k_beta_c * jnp.expand_dims(jnp.exp(g_cumsum), -1)), precision=prec)
-  # --- End Precompute ---
-
-  output_final_state = initial_state is not None
+  # Handle initial state
   if initial_state is None:
-    # last_recurrent_state shape: (B, H, D_k, D_v)
-    last_recurrent_state = jnp.zeros((batch_size, num_heads, k_head_dim, v_head_dim), dtype=value_intra.dtype)
+      h_init = jnp.zeros((B, H, K_dim, V_dim), dtype=compute_dtype)
   else:
-    last_recurrent_state = initial_state.astype(value_intra.dtype)
+      h_init = initial_state.astype(compute_dtype)
 
-  # mask_inter shape: (C, C)
-  mask_inter = jnp.triu(jnp.ones((chunk_size, chunk_size), dtype=bool), k=1)
+  # Invoke Kernel
+  if mesh is not None:
+      # Mesh Partitioning
+      axis_names = mesh.axis_names
+      batch_axes = [ax for ax in ('data', 'fsdp', 'fsdp_transpose', 'expert') if ax in axis_names]
+      batch_spec = tuple(batch_axes) if batch_axes else None
+      head_axes = [ax for ax in ('tensor', 'model') if ax in axis_names]
+      head_spec = tuple(head_axes) if head_axes else None
+      
+      # Specs: B, H, ...
+      # h_init is (B, H, K, V)
+      in_specs = P(batch_spec, head_spec, None, None, None)
+      scalar_specs = P(batch_spec, head_spec, None, None)
+      state_spec = P(batch_spec, head_spec, None, None)
 
-  # Transpose for scan: (B, H, N, C, D) -> (N, B, H, C, D)
-  query_scan = jnp.transpose(query_c, (2, 0, 1, 3, 4))
-  key_scan = jnp.transpose(key_c, (2, 0, 1, 3, 4))
-  value_scan = jnp.transpose(value_intra, (2, 0, 1, 3, 4))
-  k_cumdecay_scan = jnp.transpose(k_cumdecay, (2, 0, 1, 3, 4))
-  # Transpose for scan: (B, H, N, C) -> (N, B, H, C)
-  g_scan = jnp.transpose(g_cumsum, (2, 0, 1, 3))
-  decay_mask_scan = jnp.transpose(decay_mask, (2, 0, 1, 3, 4))
+      sharded_gdn = shard_map(
+          gdn_pallas.gdn_pallas_layer,
+          mesh=mesh,
+          in_specs=(in_specs, in_specs, in_specs, in_specs, in_specs, scalar_specs, scalar_specs, state_spec),
+          out_specs=(in_specs, state_spec), # Returns (out, final_state)
+          check_rep=False 
+      )
+      
+      o_pallas, h_final = sharded_gdn(w_p, u_p, q_p, k_p, v_p, g_p, beta_p, h_init)
+  else:
+      # Single Device
+      o_pallas, h_final = gdn_pallas.gdn_pallas_layer(w_p, u_p, q_p, k_p, v_p, g_p, beta_p, h_init)
 
-  xs = (query_scan, key_scan, value_scan, k_cumdecay_scan, g_scan, decay_mask_scan)
-
-  # =========================================================================
-  # STAGE 3: INTER-CHUNK RECURRENCE (SEQUENTIAL VIA SCAN)
-  # =========================================================================
-  def scan_body(prev_state, x):
-    q_i, k_i, v_i, k_cumdecay_i, g_i, decay_mask_i = x
-    # prev_state shape: (B, H, D_k, D_v)
-    last_recurrent_state = prev_state
-    prec = jax.lax.Precision.HIGHEST
-
-    # Intra-chunk attention for the current chunk
-    # attn_i shape: (B, H, C, C)
-    attn_i = jnp.matmul(q_i, jnp.swapaxes(k_i, -1, -2), precision=prec) * decay_mask_i
-    attn_i = jnp.where(mask_inter, 0.0, attn_i)
-
-    # Interaction with the recurrent state
-    # v_prime shape: (B, H, C, D_v)
-    v_prime = jnp.matmul(k_cumdecay_i, last_recurrent_state, precision=prec)
-    # v_new shape: (B, H, C, D_v)
-    v_new = v_i - v_prime
-
-    # g_i is cumulative sum, so exp(g_i) is the decay factor
-    g_i_exp = jnp.exp(g_i)
-    # attn_inter shape: (B, H, C, D_v)
-    attn_inter = jnp.matmul(q_i * jnp.expand_dims(g_i_exp, -1), last_recurrent_state, precision=prec)
-
-    # core_attn_out_i shape: (B, H, C, D_v)
-    core_attn_out_i = attn_inter + jnp.matmul(attn_i, v_new, precision=prec)
-
-    # Update the recurrent state
-    # g_i_last_exp shape: (B, H, 1, 1)
-    g_i_last_exp = jnp.exp(g_i[..., -1, None, None])
-    # new_last_recurrent_state shape: (B, H, D_k, D_v)
-    new_last_recurrent_state = last_recurrent_state * g_i_last_exp
-
-    # g_diff_exp shape: (B, H, C, 1)
-    g_diff_exp = jnp.expand_dims(jnp.exp(jnp.expand_dims(g_i[..., -1], -1) - g_i), -1)
-    # k_i_g_diff shape: (B, H, C, D_k)
-    k_i_g_diff = k_i * g_diff_exp
-
-    # Update term shape: (B, H, D_k, D_v)
-    update_term = jnp.matmul(jnp.swapaxes(k_i_g_diff, -1, -2), v_new, precision=prec)
-    new_last_recurrent_state = new_last_recurrent_state + update_term
-
-    return new_last_recurrent_state, core_attn_out_i
-
-  # final_state shape: (B, H, D_k, D_v)
-  # core_attn_out_stacked shape: (N, B, H, C, D_v)
-  final_state, core_attn_out_stacked = jax.lax.scan(scan_body, last_recurrent_state, xs)
+  o_chunks = o_pallas.transpose(0, 2, 1, 3, 4)
 
   # =========================================================================
   # STAGE 4: FINALIZATION
   # =========================================================================
-  # core_attn_out shape: (B, H, N, C, D_v)
-  core_attn_out = jnp.transpose(core_attn_out_stacked, (1, 2, 0, 3, 4))
+  o = o_chunks.reshape(B, -1, H, V_dim)
+  
+  if pad_len > 0:
+    o = o[:, :S, :, :]
+  
+  o = o.astype(initial_dtype)
+    
+  return o, h_final
 
-  # core_attn_out shape: (B, H, S_padded, D_v)
-  core_attn_out = core_attn_out.reshape(batch_size, num_heads, -1, v_head_dim)
-  # Trim padding: (B, H, S, D_v)
-  core_attn_out = core_attn_out[:, :, :sequence_length, :]
+def jax_chunk_gated_delta_rule(
+    query: jax.Array,
+    key: jax.Array,
+    value: jax.Array,
+    g: jax.Array,
+    beta: jax.Array,
+    chunk_size: int = 64,
+    initial_state: None | jax.Array = None,
+    use_qk_norm_in_gdn: bool = False,
+    compute_dtype: jnp.dtype = jnp.bfloat16,
+) -> tuple[jax.Array, None | jax.Array]:
+  """
+  Optimized JAX implementation of Gated Delta Rule (Mixed Precision + Stability Fix).
+  
+  Precision Strategy:
+  - Inputs (q, k, v, beta): 'compute_dtype' (e.g. bfloat16) for tensor core usage.
+  - Gates (g) & State (h): float32 (forced) for numerical stability.
+  - Matmuls: compute_dtype inputs -> float32 accumulation/output.
+  """
+  # =========================================================================
+  # STAGE 1: PREPARATION & PADDING
+  # =========================================================================
+  initial_dtype = query.dtype
+  
+  if use_qk_norm_in_gdn:
+    from MaxText.layers.normalizations import l2norm 
+    query = l2norm(query, dim=-1, eps=1e-6)
+    key = l2norm(key, dim=-1, eps=1e-6)
 
-  # Transpose back to (B, S, H, D_v)
-  core_attn_out = jnp.transpose(core_attn_out, (0, 2, 1, 3)).astype(initial_dtype)
+  # [MIXED PRECISION START]
+  # 1. Force Gates 'g' to float32 immediately (crucial for exp/cumsum stability)
+  g = g.astype(jnp.float32)
+  
+  # 2. Cast inputs to the requested compute_dtype (likely bf16) to save memory/compute
+  query = query.astype(compute_dtype)
+  key = key.astype(compute_dtype)
+  value = value.astype(compute_dtype)
+  beta = beta.astype(compute_dtype)
 
-  return core_attn_out, final_state if output_final_state else None
+  # Scale Query (keep in compute_dtype)
+  scale = jax.lax.rsqrt(jnp.array(query.shape[-1], dtype=jnp.float32)).astype(compute_dtype)
+  query = query * scale
+
+  B, S, H, K_dim = key.shape
+  V_dim = value.shape[-1]
+  
+  # Pad sequence
+  pad_len = (chunk_size - (S % chunk_size)) % chunk_size
+  if pad_len > 0:
+    pad_fn = lambda x, val=0.0: jnp.pad(x, ((0,0), (0, pad_len)) + ((0,0),)*(x.ndim-2), constant_values=val)
+    query = pad_fn(query)
+    key = pad_fn(key)
+    value = pad_fn(value)
+    g = pad_fn(g)
+    beta = pad_fn(beta)
+
+  num_chunks = query.shape[1] // chunk_size
+
+  # Helper: (B, S, H, D) -> (B, N, H, C, D)
+  def to_chunk(x):
+    return x.reshape(B, num_chunks, chunk_size, H, -1).transpose(0, 1, 3, 2, 4)
+  
+  # Helper for scalars: (B, S, H) -> (B, N, H, C)
+  def to_chunk_scalar(x):
+    return x.reshape(B, num_chunks, chunk_size, H).transpose(0, 1, 3, 2)
+
+  q_c = to_chunk(query)   # compute_dtype
+  k_c = to_chunk(key)     # compute_dtype
+  v_c = to_chunk(value)   # compute_dtype
+  g_c = to_chunk_scalar(g)       # float32
+  beta_c = to_chunk_scalar(beta) # compute_dtype
+
+  # =========================================================================
+  # STAGE 2: INTRA-CHUNK PRE-COMPUTATION (Parallel)
+  # =========================================================================
+  
+  # 1. Cumulative decay (Must be float32)
+  g_cumsum = jnp.cumsum(g_c, axis=-1)
+  
+  # 2. k_beta preparation (bf16 * bf16 -> bf16)
+  k_beta = k_c * beta_c[..., None]
+  
+  # 3. S Matrix Calculation
+  # Matmul: bf16 @ bf16 -> Accumulate in float32 (via HIGHEST)
+  S = jnp.matmul(k_c, k_beta.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
+  
+  # [CRITICAL] Promote S to float32 immediately for interaction with exp(g)
+  S = S.astype(jnp.float32)
+
+  # [CRITICAL FIX] Apply mask BEFORE exp to prevent 'inf' gradients
+  g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
+  mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
+  g_diff = jnp.where(mask, g_diff, -1e30) 
+  
+  S = S * jnp.exp(g_diff)
+  S = jnp.where(mask, S, 0.0)
+  
+  # 4. Inversion (A) - Strictly float32
+  identity = jnp.eye(chunk_size, dtype=jnp.float32)
+  identity_broadcasted = jnp.broadcast_to(identity, S.shape)
+  
+  A = jax.scipy.linalg.solve_triangular(
+      identity + S, 
+      identity_broadcasted, 
+      lower=True, 
+      unit_diagonal=True
+  )
+
+  # 5. WY Factors (Keep as float32 to preserve accuracy of the Inverse)
+  # u: f32 @ bf16 -> f32 -> cast to compute_dtype (storage optimization)
+  v_beta = v_c * beta_c[..., None]
+  u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
+  u_chunks = u_chunks.astype(compute_dtype)
+  
+  # w: f32 @ bf16 -> f32 -> cast to compute_dtype (storage optimization)
+  k_beta_g = k_beta.astype(jnp.float32) * jnp.exp(g_cumsum)[..., None]
+  w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
+  w_chunks = w_chunks.astype(compute_dtype)
+
+  # =========================================================================
+  # STAGE 3: INTER-CHUNK RECURRENCE (Scan)
+  # =========================================================================
+  scan_perm_vec = (1, 0, 2, 3, 4)
+  scan_perm_scl = (1, 0, 2, 3)
+  
+  w_scan = w_chunks.transpose(scan_perm_vec) # f32
+  u_scan = u_chunks.transpose(scan_perm_vec) # f32
+  k_scan = k_c.transpose(scan_perm_vec)      # compute_dtype
+  q_scan = q_c.transpose(scan_perm_vec)      # compute_dtype
+  v_scan = v_c.transpose(scan_perm_vec)      # compute_dtype
+  g_scan = g_cumsum.transpose(scan_perm_scl) # f32
+  beta_scan = beta_c.transpose(scan_perm_scl)# compute_dtype
+  
+  chunk_decay_all = jnp.exp(g_cumsum[..., -1]).transpose(1, 0, 2) # f32
+
+  # State MUST be float32 for linear RNNs
+  if initial_state is None:
+    h_init = jnp.zeros((B, H, K_dim, V_dim), dtype=jnp.float32)
+  else:
+    h_init = initial_state.astype(jnp.float32)
+
+  xs = (w_scan, u_scan, q_scan, k_scan, v_scan, g_scan, beta_scan, chunk_decay_all)
+
+  def scan_body(h, args):
+    w, u, q, k, v, g, beta, decay_val = args
+    
+    # --- Output Computation ---
+    # 1. Inter-chunk: q(bf16) * exp(g)(f32) -> f32
+    #    f32 @ h(f32) -> f32
+    q_g = q.astype(jnp.float32) * jnp.exp(g)[..., None]
+    term1 = jnp.matmul(q_g, h, precision=jax.lax.Precision.HIGHEST)
+    
+    # 2. Intra-chunk: q(bf16) @ k(bf16) -> bf16/f32
+    attn = jnp.matmul(q, k.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
+    
+    # [CRITICAL] Promote to f32 before exp mask
+    attn = attn.astype(jnp.float32)
+    
+    # [CRITICAL FIX] Mask before exp
+    g_diff = g[..., :, None] - g[..., None, :]
+    mask_intra = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool))
+    g_diff = jnp.where(mask_intra, g_diff, -1e30)
+    
+    attn = attn * jnp.exp(g_diff)
+    attn = jnp.where(mask_intra, attn, 0.0)
+    
+    # beta is compute_dtype, cast to f32 for mixing
+    attn = attn * beta.astype(jnp.float32)[..., None, :]
+    
+    # attn(f32) @ v(bf16) -> f32
+    term2 = jnp.matmul(attn, v.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
+    
+    o_c = term1 + term2
+    
+    # --- State Update ---
+    decay_expanded = decay_val[..., None, None] 
+    
+    # w(f32) @ u(f32) -> f32
+    update = jnp.matmul(w.swapaxes(-1, -2), u, precision=jax.lax.Precision.HIGHEST)
+    update = update.astype(jnp.float32)
+    
+    h_new = h * decay_expanded + update
+    
+    return h_new, o_c
+
+  final_h, o_chunks = lax.scan(scan_body, h_init, xs)
+
+  # =========================================================================
+  # STAGE 4: FINALIZATION
+  # =========================================================================
+  o = o_chunks.transpose(1, 0, 2, 3, 4)
+  o = o.reshape(B, -1, H, V_dim)
+  
+  if pad_len > 0:
+    o = o[:, :S, :, :]
+  
+  o = o.astype(initial_dtype)
+    
+  return o, (final_h if initial_state is not None else None)
 
 
 class Qwen3NextGatedDeltaNet(nnx.Module):
@@ -306,13 +427,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
   2. output = Linear_out(y)
   """
 
-  def __init__(self, config: Config, *, rngs: nnx.Rngs):
+  def __init__(self, config: Config, *, rngs: nnx.Rngs, mesh: Mesh=None):
     """
     Args:
       config: MaxText configuration object.
       rngs: The random number generators for initialization, passed by the nnx.to_linen wrapper.
     """
     self.config = config
+    self.mesh = mesh
     cfg = self.config
 
     in_features = cfg.emb_dim
@@ -477,8 +599,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # STEP C: Gated Delta Rule Recurrence
     # =========================================================================
-    A_log = self.A_log.value
-    dt_bias = self.dt_bias.value
+    A_log = self.A_log[...]
+    dt_bias = self.dt_bias[...]
     # beta shape: (B, S, H_v)
     beta = jax.nn.sigmoid(b)
     # g shape: (B, S, H_v)
@@ -497,8 +619,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # TODO(parambole): Pass and update cache state for jax_chunk_gated_delta_rule
     # core_attn_out shape: (B, S, H_v, D_v)
-    core_attn_out, _ = jax_chunk_gated_delta_rule(
-        query, key, value, g, beta, chunk_size=cfg.gdn_chunk_size, use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn
+    # core_attn_out, _ = jax_chunk_gated_delta_rule(
+    #     query, key, value, g, beta, chunk_size=cfg.gdn_chunk_size, use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn, compute_dtype=cfg.dtype
+    # )
+    core_attn_out, _ = pallas_chunk_gated_delta_rule(
+        query, key, value, g, beta, 
+        chunk_size=cfg.gdn_chunk_size, 
+        use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn, 
+        compute_dtype=cfg.dtype,
+        mesh=self.mesh
     )
 
     # =========================================================================
@@ -664,7 +793,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
         dtype=cfg.dtype,
         kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", "vocab"),
+        kernel_axes=("embed", None),
         matmul_precision=cfg.matmul_precision,
         rngs=rngs,
     )
@@ -830,7 +959,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
           rngs=rngs,
       )
     else:
-      self.attention = Qwen3NextGatedDeltaNet(config=cfg, rngs=rngs)
+      self.attention = Qwen3NextGatedDeltaNet(config=cfg, rngs=rngs, mesh=self.mesh)
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
