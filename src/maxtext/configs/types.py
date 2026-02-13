@@ -2304,9 +2304,7 @@ class MaxTextConfig(
         assert (
             self.num_layers_per_pipeline_stage == 1
         ), "Pipeline weight prefetching currently only supports one layer per pipeline stage."
-        assert (
-            not self.pipeline_delay_activation_forwarding
-        ), "Pipeline weight prefetching does not support pipeline delay."
+        assert not self.pipeline_delay_activation_forwarding, "Pipeline weight prefetching does not support pipeline delay."
         assert not self.quantization, "Quantization is currently not supported for pipeline prefetching."
         assert not self.scan_layers_per_stage, "Pipeline weight prefetching currently does not support scan."
 
