@@ -32,6 +32,7 @@ math_verify_func = math_metric(
         LatexExtractionConfig(),
     ),
 )
+boxed = lambda x: "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
 
 
 EPSILON = 1e-6
@@ -215,8 +216,6 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
   match_format = get_match_format_regex(tmvp_config)
   extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
 
-  boxed = lambda x: "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
-
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
     score = 0
@@ -257,8 +256,11 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
       # We also reward it if the answer is close via ratios!
       # Ie if the answer is within some range, reward it!
       try:
-        val_guess = parse(guess_fixed.strip())
-        val_true = parse(true_answer_fixed.strip())
+        # Fix LaTeX escaping issues for both ground truth and extracted answer
+        true_answer_fixed = fix_latex_escaping(true_answer)
+        guess_fixed = fix_latex_escaping(guess)
+        val_true = parse(boxed(true_answer_fixed.strip()))
+        val_guess = parse(boxed(guess_fixed.strip()))
 
         ratio = (val_guess[0] + EPSILON) / (val_true[0] + EPSILON)
         if ratio >= 0.9 and ratio <= 1.1:
@@ -326,8 +328,6 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
   # Extract full answer content from solution tags (not just first number)
   match_format = get_match_format_regex(tmvp_config)
   extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
-
-  boxed = lambda x: "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
 
   scores = []
   if tmvp_config.debug.rl:
