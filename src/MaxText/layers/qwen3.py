@@ -79,11 +79,9 @@ def jax_chunk_gated_delta_rule(
     query = l2norm(query, dim=-1, eps=1e-6)
     key = l2norm(key, dim=-1, eps=1e-6)
 
-  # [MIXED PRECISION START]
-  # 1. Force Gates 'g' to float32 immediately (crucial for exp/cumsum stability)
   g = g.astype(jnp.float32)
   
-  # 2. Cast inputs to the requested compute_dtype (likely bf16) to save memory/compute
+  # 2. Cast inputs to the requested compute_dtype (cfg.dtype) to save memory/compute
   query = query.astype(compute_dtype)
   key = key.astype(compute_dtype)
   value = value.astype(compute_dtype)
@@ -96,7 +94,6 @@ def jax_chunk_gated_delta_rule(
   B, S, H, K_dim = key.shape
   V_dim = value.shape[-1]
   
-  # Pad sequence
   pad_len = (chunk_size - (S % chunk_size)) % chunk_size
   if pad_len > 0:
     pad_fn = lambda x, val=0.0: jnp.pad(x, ((0,0), (0, pad_len)) + ((0,0),)*(x.ndim-2), constant_values=val)
@@ -116,30 +113,25 @@ def jax_chunk_gated_delta_rule(
   def to_chunk_scalar(x):
     return x.reshape(B, num_chunks, chunk_size, H).transpose(0, 1, 3, 2)
 
-  q_c = to_chunk(query)   # compute_dtype
-  k_c = to_chunk(key)     # compute_dtype
-  v_c = to_chunk(value)   # compute_dtype
-  g_c = to_chunk_scalar(g)       # float32
-  beta_c = to_chunk_scalar(beta) # compute_dtype
+  q_c = to_chunk(query)
+  k_c = to_chunk(key)
+  v_c = to_chunk(value)
+  g_c = to_chunk_scalar(g)
+  beta_c = to_chunk_scalar(beta)
 
   # =========================================================================
   # STAGE 2: INTRA-CHUNK PRE-COMPUTATION (Parallel)
   # =========================================================================
   
-  # 1. Cumulative decay (Must be float32)
+  # Cumulative decay (Must be float32)
   g_cumsum = jnp.cumsum(g_c, axis=-1)
-  
-  # 2. k_beta preparation (bf16 * bf16 -> bf16)
   k_beta = k_c * beta_c[..., None]
   
-  # 3. S Matrix Calculation
-  # Matmul: bf16 @ bf16 -> Accumulate in float32 (via HIGHEST)
+  # S Matrix Calculation
   S = jnp.matmul(k_c, k_beta.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
-  
-  # [CRITICAL] Promote S to float32 immediately for interaction with exp(g)
   S = S.astype(jnp.float32)
 
-  # [CRITICAL FIX] Apply mask BEFORE exp to prevent 'inf' gradients
+  # Apply mask BEFORE exp to prevent 'inf' gradients
   g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
   mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
   g_diff = jnp.where(mask, g_diff, -1e30) 
@@ -147,7 +139,7 @@ def jax_chunk_gated_delta_rule(
   S = S * jnp.exp(g_diff)
   S = jnp.where(mask, S, 0.0)
   
-  # 4. Inversion (A) - Strictly float32
+  # Inversion (A) - Strictly float32
   identity = jnp.eye(chunk_size, dtype=jnp.float32)
   identity_broadcasted = jnp.broadcast_to(identity, S.shape)
   
@@ -158,13 +150,11 @@ def jax_chunk_gated_delta_rule(
       unit_diagonal=True
   )
 
-  # 5. WY Factors (Keep as float32 to preserve accuracy of the Inverse)
-  # u: f32 @ bf16 -> f32 -> cast to compute_dtype (storage optimization)
+  # 5. WY Factors
   v_beta = v_c * beta_c[..., None]
   u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
   u_chunks = u_chunks.astype(compute_dtype)
   
-  # w: f32 @ bf16 -> f32 -> cast to compute_dtype (storage optimization)
   k_beta_g = k_beta.astype(jnp.float32) * jnp.exp(g_cumsum)[..., None]
   w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
   w_chunks = w_chunks.astype(compute_dtype)
@@ -175,17 +165,16 @@ def jax_chunk_gated_delta_rule(
   scan_perm_vec = (1, 0, 2, 3, 4)
   scan_perm_scl = (1, 0, 2, 3)
   
-  w_scan = w_chunks.transpose(scan_perm_vec) # f32
-  u_scan = u_chunks.transpose(scan_perm_vec) # f32
-  k_scan = k_c.transpose(scan_perm_vec)      # compute_dtype
-  q_scan = q_c.transpose(scan_perm_vec)      # compute_dtype
-  v_scan = v_c.transpose(scan_perm_vec)      # compute_dtype
-  g_scan = g_cumsum.transpose(scan_perm_scl) # f32
-  beta_scan = beta_c.transpose(scan_perm_scl)# compute_dtype
+  w_scan = w_chunks.transpose(scan_perm_vec)
+  u_scan = u_chunks.transpose(scan_perm_vec)
+  k_scan = k_c.transpose(scan_perm_vec)
+  q_scan = q_c.transpose(scan_perm_vec)
+  v_scan = v_c.transpose(scan_perm_vec)
+  g_scan = g_cumsum.transpose(scan_perm_scl)
+  beta_scan = beta_c.transpose(scan_perm_scl)
   
-  chunk_decay_all = jnp.exp(g_cumsum[..., -1]).transpose(1, 0, 2) # f32
+  chunk_decay_all = jnp.exp(g_cumsum[..., -1]).transpose(1, 0, 2)
 
-  # State MUST be float32 for linear RNNs
   if initial_state is None:
     h_init = jnp.zeros((B, H, K_dim, V_dim), dtype=jnp.float32)
   else:
@@ -197,18 +186,15 @@ def jax_chunk_gated_delta_rule(
     w, u, q, k, v, g, beta, decay_val = args
     
     # --- Output Computation ---
-    # 1. Inter-chunk: q(bf16) * exp(g)(f32) -> f32
-    #    f32 @ h(f32) -> f32
+    # 1. Inter-chunk: q(dtype) * exp(g)(f32) -> f32
     q_g = q.astype(jnp.float32) * jnp.exp(g)[..., None]
     term1 = jnp.matmul(q_g, h, precision=jax.lax.Precision.HIGHEST)
     
-    # 2. Intra-chunk: q(bf16) @ k(bf16) -> bf16/f32
+    # 2. Intra-chunk: q(dtype) @ k(dtype) -> dtype/f32
     attn = jnp.matmul(q, k.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
-    
-    # [CRITICAL] Promote to f32 before exp mask
     attn = attn.astype(jnp.float32)
-    
-    # [CRITICAL FIX] Mask before exp
+
+    # Mask before exp
     g_diff = g[..., :, None] - g[..., None, :]
     mask_intra = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool))
     g_diff = jnp.where(mask_intra, g_diff, -1e30)
@@ -216,10 +202,9 @@ def jax_chunk_gated_delta_rule(
     attn = attn * jnp.exp(g_diff)
     attn = jnp.where(mask_intra, attn, 0.0)
     
-    # beta is compute_dtype, cast to f32 for mixing
     attn = attn * beta.astype(jnp.float32)[..., None, :]
     
-    # attn(f32) @ v(bf16) -> f32
+    # attn(f32) @ v(dtype) -> f32
     term2 = jnp.matmul(attn, v.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
     
     o_c = term1 + term2
@@ -227,7 +212,7 @@ def jax_chunk_gated_delta_rule(
     # --- State Update ---
     decay_expanded = decay_val[..., None, None] 
     
-    # w(f32) @ u(f32) -> f32
+    # w(f32) @ u(dtype) -> f32
     update = jnp.matmul(w.swapaxes(-1, -2), u, precision=jax.lax.Precision.HIGHEST)
     update = update.astype(jnp.float32)
     
