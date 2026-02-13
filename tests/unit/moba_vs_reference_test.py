@@ -32,7 +32,7 @@ import torch
 from jax.sharding import Mesh
 
 from MaxText import maxtext_utils, pyconfig
-from MaxText.layers.attention_op import AttentionOp
+from maxtext.layers.attention_op import AttentionOp
 from tests.utils.test_helpers import get_test_config_path
 
 # pylint: disable=missing-function-docstring,protected-access

@@ -39,26 +39,22 @@ import gc
 import os
 import sys
 
-from psutil import Process
-
-import numpy as np
-
 import jax
 from jax import random
 from jax.sharding import Mesh
-
-import tensorstore as ts
-
 from MaxText import optimizers
 from MaxText import pyconfig
+from maxtext.common import checkpointing
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import quantizations
-from MaxText.layers.models import transformer_as_linen
-from maxtext.common import checkpointing
+from maxtext.layers import quantizations
+from maxtext.models.models import transformer_as_linen
 from maxtext.utils import max_logging
-from maxtext.utils import maxtext_utils
 from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
+import numpy as np
+from psutil import Process
+import tensorstore as ts
 
 
 def fmt_size(num_bytes: int) -> str:

@@ -25,28 +25,26 @@ Usage:
 """
 
 import os.path
-
-import jsonlines
-import pytest
 import subprocess
 import sys
 import unittest
-import numpy as np
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from transformers import AutoTokenizer
-
+import jsonlines
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
-from MaxText.layers import models
-from MaxText.layers import quantizations
 from maxtext.input_pipeline import input_pipeline_utils
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import maxtext_utils
+import numpy as np
+import pytest
+from transformers import AutoTokenizer
 
 
 def get_golden_data(model_name):

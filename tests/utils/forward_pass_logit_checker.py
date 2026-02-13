@@ -38,29 +38,24 @@
 
 import argparse
 import os
-import sys
 from pathlib import Path
+import sys
 import absl
-
-import numpy as np
+from google.cloud import storage
 import jax
 import jax.numpy as jnp
-
-import torch.nn.functional as F
-import torch
-
-from google.cloud import storage
-
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from MaxText import pyconfig
+from maxtext.checkpoint_conversion.utils.hf_utils import convert_jax_weight_to_torch
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
-from MaxText.layers import models
-from MaxText.layers import quantizations
-from maxtext.checkpoint_conversion.utils.hf_utils import convert_jax_weight_to_torch
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
+import numpy as np
+import torch
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 

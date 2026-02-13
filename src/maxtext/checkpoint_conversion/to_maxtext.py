@@ -59,32 +59,32 @@ Example Usage:
 """
 
 import argparse
-import os
-import time
-import sys
-import json
-import threading
 from functools import partial
-from typing import Sequence, List, Any, Callable
-import numpy as np
+import json
+import os
+import sys
+import threading
+import time
+from typing import Any, Callable, List, Sequence
 import absl
-
-from transformers import AutoConfig
-from huggingface_hub import hf_hub_download, list_repo_files
-from safetensors import safe_open
-import jax
 import flax.linen as nn
-from orbax.checkpoint import type_handlers
+from huggingface_hub import hf_hub_download, list_repo_files
+import jax
 from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.layers import models, quantizations
 from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from maxtext.checkpoint_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model, MemoryMonitorTqdm, print_peak_memory, validate_and_filter_param_map_keys
+from maxtext.checkpoint_conversion.utils.utils import HF_IDS, MemoryMonitorTqdm, apply_hook_fns, get_hf_model, print_peak_memory, print_ram_usage, validate_and_filter_param_map_keys
+from MaxText.common_types import MODEL_MODE_TRAIN
 from maxtext.inference.inference_utils import str2bool
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+import numpy as np
+from orbax.checkpoint import type_handlers
+from safetensors import safe_open
+from transformers import AutoConfig
 
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log

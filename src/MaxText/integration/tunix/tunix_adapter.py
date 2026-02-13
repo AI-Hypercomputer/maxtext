@@ -21,13 +21,13 @@ It also handles weight mapping for compatibility with Hugging Face models.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, Any
+from typing import Any, Optional, Tuple
 
-from jax import Array
 from flax import nnx
-from MaxText.layers.models import Transformer
-from MaxText.integration.tunix.utils import VllmWeightMapping
+from jax import Array
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS  # pylint: disable=ungrouped-imports
+from MaxText.integration.tunix.utils import VllmWeightMapping
+from maxtext.models.models import Transformer
 
 
 class TunixMaxTextAdapter(nnx.Module):

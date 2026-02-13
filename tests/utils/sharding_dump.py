@@ -12,26 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Dump sharding of models implementing in linen with various topology to serve as baselines for comparison against
+"""Dump sharding of models implementing in linen with various topology to serve as baselines for comparison against
+
 sharding strategies during migration to NNX.
 """
 
-import os
-import json
 import itertools
+import json
+import os
 from pathlib import Path
-from typing import List, Sequence, Union, Any
-import jax
+from typing import Any, List, Sequence, Union
 from absl import app
-from jax.tree_util import tree_flatten_with_path
+import jax
 from jax.sharding import NamedSharding, PartitionSpec
-from MaxText import pyconfig
+from jax.tree_util import tree_flatten_with_path
 from MaxText import maxtext_utils
 from MaxText import optimizers
+from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_REPO_ROOT
+from maxtext.models import models
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
-from MaxText.layers import models
 
 
 Transformer = models.Transformer
@@ -361,8 +361,8 @@ def named_shardings_to_json(train_state, shape_tree) -> dict[str, dict]:
 
 
 def partition_specs_to_json(logical_tree, shape_tree) -> dict[str, Any]:
-  """
-  Extract PartitionSpecs (Logical) from the logical tree.
+  """Extract PartitionSpecs (Logical) from the logical tree.
+
   Leaf nodes are expected to be PartitionSpec (or None).
   """
   logical_dict = {}
@@ -376,7 +376,10 @@ def partition_specs_to_json(logical_tree, shape_tree) -> dict[str, Any]:
       # Extract shape
       shape = list(leaf_sh.shape) if hasattr(leaf_sh, "shape") else None
 
-      logical_dict[name] = {"partition_spec": _json_spec(leaf_l), "shape": shape}
+      logical_dict[name] = {
+          "partition_spec": _json_spec(leaf_l),
+          "shape": shape,
+      }
   print(f"Got {len(logical_dict)} Logical entries.")
   return logical_dict
 
@@ -400,7 +403,8 @@ def main(argv: Sequence[str]) -> None:
   """Load a config that describes a model with topology and slices to be dumped."""
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["LIBTPU_INIT_ARGS"] = (
-      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+      os.environ.get("LIBTPU_INIT_ARGS", "")
+      + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   )
   print("Starting sharding_tests.py...", flush=True)
 
@@ -418,7 +422,9 @@ def main(argv: Sequence[str]) -> None:
     topology_mesh = get_topology_mesh(config)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
     optimizers.get_optimizer(config, learning_rate_schedule)
-    shaped_train_args, _, state_mesh_shardings, logical_annotations, _ = get_shaped_inputs(topology_mesh, config)
+    shaped_train_args, _, state_mesh_shardings, logical_annotations, _ = (
+        get_shaped_inputs(topology_mesh, config)
+    )
   except Exception as e:  # pylint: disable=broad-except
     print(f"Error generating inputs: {e}")
     return
@@ -429,11 +435,18 @@ def main(argv: Sequence[str]) -> None:
 
   # 1. Generate New Output
   # Physical: Tree of NamedSharding
-  named_shardings = named_shardings_to_json(state_mesh_shardings, shaped_train_args[0])
+  named_shardings = named_shardings_to_json(
+      state_mesh_shardings, shaped_train_args[0]
+  )
   # Logical: Tree of PartitionSpec (direct from get_shaped_inputs)
-  logical_shardings = partition_specs_to_json(logical_annotations, shaped_train_args[0])
+  logical_shardings = partition_specs_to_json(
+      logical_annotations, shaped_train_args[0]
+  )
 
-  print(f"Got {len(named_shardings)} Physical entries and {len(logical_shardings)} Logical entries.")
+  print(
+      f"Got {len(named_shardings)} Physical entries and"
+      f" {len(logical_shardings)} Logical entries."
+  )
 
   # 2. Save New Output (Overwrite)
   print(f"\nSaving updated shardings to {base_path}...")

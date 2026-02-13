@@ -49,11 +49,11 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
 from MaxText import maxtext_utils
 
-from MaxText.layers.engram import CompressedTokenizer as CompressedTokenizerJAX
-from MaxText.layers.engram import NgramHashMapping as NgramHashMappingJAX
-from MaxText.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX
-from MaxText.layers.engram import ShortConv as ShortConvJAX
-from MaxText.layers.engram import Engram as EngramJAX
+from maxtext.layers.engram import CompressedTokenizer as CompressedTokenizerJAX
+from maxtext.layers.engram import NgramHashMapping as NgramHashMappingJAX
+from maxtext.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX
+from maxtext.layers.engram import ShortConv as ShortConvJAX
+from maxtext.layers.engram import Engram as EngramJAX
 
 
 # -----------------------------------------------------------------------------

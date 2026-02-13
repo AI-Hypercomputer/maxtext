@@ -23,40 +23,43 @@ import os
 from typing import Sequence
 
 from absl import app
-
-import numpy as np
-
+from flax.linen import partitioning as nn_partitioning
 import jax
 from jax import numpy as jnp
-
-from flax.linen import partitioning as nn_partitioning
-
 from MaxText import pyconfig
-from MaxText.train import get_first_step
-from MaxText.layers import models
 from maxtext.common import checkpointing
+from maxtext.models import models
+from MaxText.train import get_first_step
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import train_utils
 from maxtext.utils.model_creation_utils import from_config
+import numpy as np
 
 Transformer = models.transformer_as_linen
 
 
 def checkpoint_loop(config, state=None):
   """Main Checkpointing loop.
+
   Saves checkpoints.
+
   Args:
     config:
     state:
     ckpt_path:
+
   Returns:
   """
   model = from_config(config)
   mesh = model.mesh
-  init_rng, checkpoint_manager, _, tx = train_utils.create_training_tools(config, model, mesh)
+  init_rng, checkpoint_manager, _, tx = train_utils.create_training_tools(
+      config, model, mesh
+  )
 
-  unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+  unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(
+      model, tx, config, init_rng, mesh, is_training=True
+  )
   # A barrier to sync all hosts before starting to restore checkpoint
   jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
   checkpoint_load_start = datetime.datetime.now()
@@ -78,9 +81,14 @@ def checkpoint_loop(config, state=None):
   checkpoint_load_end = datetime.datetime.now()
   if state is not None:  # Checkpoint was available for restore
     if jax.process_index() == 0:
-      max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in : {checkpoint_load_end - checkpoint_load_start}")
+      max_logging.log(
+          "STANDALONE CHECKPOINTER : Checkpoint restored in :"
+          f" {checkpoint_load_end - checkpoint_load_start}"
+      )
   else:  # Checkpoint was unavailable, state needs to be initialized
-    state, _, _, _ = maxtext_utils.setup_training_state(model, None, tx, config, init_rng, mesh, checkpoint_manager)
+    state, _, _, _ = maxtext_utils.setup_training_state(
+        model, None, tx, config, init_rng, mesh, checkpoint_manager
+    )
   state = add_entropy_to_checkpoint(state)
 
   start_step = get_first_step(state)  # this is the start_step for training
@@ -88,28 +96,39 @@ def checkpoint_loop(config, state=None):
     if checkpoint_manager is not None:
       start_time = datetime.datetime.now()
       # A barrier to sync all hosts before starting to save checkpoint
-      jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
+      jax.experimental.multihost_utils.sync_global_devices(
+          "Barrier before save"
+      )
       if checkpointing.save_checkpoint(checkpoint_manager, int(step), state):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
         if jax.process_index() == 0:
           max_logging.log(
-              f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0"
+              "STANDALONE CHECKPOINTER : Checkpoint saved in"
+              f" {end_time - start_time} ,step {step}, on host 0"
           )
 
   return state
 
 
 def add_entropy_to_checkpoint(state):
-  """Introduce randomness in checkpoints. This is useful to simulate real checkpoints, without training.
+  """Introduce randomness in checkpoints.
+
+  This is useful to simulate real checkpoints, without training.
+
   Args:
     state: Initial state
+
   Returns:
     state: Returns state with entropy added to the optimizer state.
   """
   opt_0 = state.opt_state[0]
-  opt_0 = opt_0._replace(mu=jax.tree_util.tree_map(lambda k: jnp.cos(1000 * k), state.params))
-  opt_0 = opt_0._replace(nu=jax.tree_util.tree_map(lambda k: jnp.sin(1000 * k), state.params))
+  opt_0 = opt_0._replace(
+      mu=jax.tree_util.tree_map(lambda k: jnp.cos(1000 * k), state.params)
+  )
+  opt_0 = opt_0._replace(
+      nu=jax.tree_util.tree_map(lambda k: jnp.sin(1000 * k), state.params)
+  )
   new_opt = [opt_0] + list(state.opt_state[1:])
   state = state.replace(opt_state=new_opt)
   return state
