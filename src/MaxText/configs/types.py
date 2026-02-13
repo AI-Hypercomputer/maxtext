@@ -592,6 +592,14 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  te_permutation_impl: bool = Field(
+      False,
+      description="Whether to use TransformerEngine permutation kernels for MoE token dispatch/combine.",
+  )
+  te_permutation_align_size: int = Field(
+      128,
+      description="Alignment size for TE permutation padding. Set to 0 to disable padding.",
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   expert_shard_attention_option: Literal["fsdp", "context"] = Field(
