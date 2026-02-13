@@ -117,15 +117,19 @@ def score_responses(tmvp_config, question, responses, answer):
   for response in responses:
     # Extract numerical response
     extracted_response = guess.group(1) if (guess := match_format.search(response)) is not None else "-1000000"
-
+    boxed = lambda x: "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
     if tmvp_config.debug.rl:
       max_logging.log(f"Evaluation extracted_response: {extracted_response}")
 
     # Check exact correctness
     try:
-      # Normalize and parse
-      norm_extracted = utils_rl.normalize_final_answer(extracted_response).strip()
-      norm_answer = utils_rl.normalize_final_answer(answer).strip()
+      # Fix LaTeX escaping issues for both ground truth and extracted answer
+      norm_answer = utils_rl.fix_latex_escaping(answer)
+      norm_extracted = utils_rl.fix_latex_escaping(extracted_response)
+      # Normalize Normalize for certain datasets and parse
+      if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name: 
+        norm_extracted = utils_rl.normalize_final_answer(norm_extracted).strip()
+        norm_answer = utils_rl.normalize_final_answer(answer).strip()
       is_correct = utils_rl.math_verify_func([boxed(norm_answer)], [boxed(norm_extracted)])[0] > 0.1
 
       val_extracted = parse(norm_extracted)
