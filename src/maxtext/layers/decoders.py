@@ -1005,11 +1005,11 @@ class Decoder(nn.Module):
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
       logits = sharding.maybe_shard_with_logical(
-        logits,
-        ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab"),
-        mesh=self.mesh,
-        shard_mode=self.config.shard_mode,
-        debug_sharding=self.config.debug_sharding,
+          logits,
+          ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab"),
+          mesh=self.mesh,
+          shard_mode=self.config.shard_mode,
+          debug_sharding=self.config.debug_sharding,
       )
 
     # The API of the Decoder is now a tuple, providing both the main output

@@ -14,11 +14,10 @@
 
 """Pipeline layer wrapping a decoder layer(s). Supports circular pipelining"""
 
-# import functools
 from typing import Any
-import functools
 
 import numpy as np
+from maxtext.utils import pipeline_utils
 
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
@@ -28,7 +27,6 @@ from jax._src.lax.parallel import all_gather_invariant
 
 from flax.core import meta
 from flax import linen as nn
-from flax.linen.spmd import LogicallyPartitioned
 
 from maxtext.common.common_types import Config, MODEL_MODE_TRAIN, EP_AS_CONTEXT, ShardMode
 from maxtext.utils.sharding import (
@@ -214,7 +212,7 @@ class Pipeline(nn.Module):
     if self.is_initializing():
       bsw = None
     else:
-      variables = self._remove_logically_partition(self.layers.variables)
+      variables = pipeline_utils.remove_logically_partition(self.layers.variables)
       bsw = _init_bsw_from_weights(variables)
 
     init_loop_state = {
@@ -285,14 +283,11 @@ class Pipeline(nn.Module):
     repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
     return microbatch_ids, repeat_ids
 
-  def vmap_parallel_gather(
-      self, weights, physical_partition_spec, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights
-  ):
+  def vmap_parallel_gather(self, weights, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights):
     """Use vmap to implement a sharded parallel gather.
     Parallel gather means each stage has its own weights, and gets one slice from it.
     Args:
       weights: Per-stage data to be gathered from.
-      physical_partition_spec: Physical partition spec of the input weight.
       repeat_ids: Integer tensor of shape [num_stages], the repeats of the stages.
       repeat_dim_in_weights: The dimension in weights where repeat_ids are applied. The output will not
         have this dimension.
@@ -461,6 +456,15 @@ class Pipeline(nn.Module):
     return new_loop_state
 
   def permute_output_micro_per_stage_dim(self, output):
+    """
+    Permutes the output microbatches to match the input order.
+
+    The pipeline execution introduces a delay (bubble) for each stage.
+    Consequently, the first microbatch (index 0) finishes after a certain number of iterations
+    and lands at a shifted position in the output buffer (`state_io`).
+    This function calculates the offset (`microbatch_0_idx`) and permutes the output
+    along the microbatch dimension so that microbatch 0 is at index 0, microbatch 1 at index 1, etc.
+    """
     # The first real output (microbatch 0) takes a certain amount of loop iterations to finish and be pushed to
     # state_io - it will land on a different index of state_io depending on the number of iterations.
     microbatch_0_idx = self.iterations_to_complete_first_microbatch() % self.microbatches_per_stage
@@ -480,7 +484,7 @@ class Pipeline(nn.Module):
     For non-circular pipelines, this simply returns all weights - every weight is used in every iteraiton. However
     for circular pipelines each stage grabs only the weights corresponding to the current repeat.
     """
-    pipeline_weights = self._remove_logically_partition(pipeline_weights)
+    pipeline_weights = pipeline_utils.remove_logically_partition(pipeline_weights)
     if self.config.num_pipeline_repeats > 1:
       pipeline_weights = self.get_current_weights_from_bsw(
           bsw, loop_iteration, physical_partition_spec=physical_partition_spec, is_initializing=is_initializing
@@ -489,7 +493,7 @@ class Pipeline(nn.Module):
 
   def get_current_weights_from_bsw(self, bsw, loop_iteration, physical_partition_spec, is_initializing=None):
     """Collect and gather weights from given bsw (buffer sliding window)"""
-    bsw_pps = jax.tree.map(self._remove_fsdp_from_physical_partition_spec, physical_partition_spec)
+    bsw_pps = jax.tree.map(pipeline_utils.remove_fsdp_from_physical_partition_spec, physical_partition_spec)
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
     target_repeat_id = repeat_ids[0]
 
@@ -527,46 +531,14 @@ class Pipeline(nn.Module):
 
     return weights
 
-  @staticmethod
-  def get_fsdp_index_pytree(physical_partition_spec):
-    """
-    Finds the index of 'fsdp' within each PartitionSpec in a Pytree.
-
-    Args:
-      physical_partition_spec: A Pytree where leaves are PartitionSpecs.
-
-    Returns:
-      A Pytree of the same structure where leaves are the integer index
-      of 'fsdp' or -1 if not found.
-    """
-
-    def find_fsdp(pspec):
-      # Ensure we are handling a PartitionSpec or a tuple/list of strings
-      if pspec is None:
-        return -1
-
-      # PartitionSpecs are essentially tuples (e.g., PartitionSpec('data', 'fsdp'))
-      for i, axis in enumerate(pspec):
-        # Handle cases where an axis might be a tuple itself (e.g., ('fsdp', 'tensor'))
-        if isinstance(axis, (list, tuple)):
-          if "fsdp" in axis:
-            return i
-        elif axis == "fsdp":
-          return i
-      return -1
-
-    return jax.tree.map(find_fsdp, physical_partition_spec)
-
   def from_all_variables_to_repeat_weights(self, weights, loop_iteration, physical_partition_spec):
     """Generate one single repeat weight from all variables."""
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
 
     def gather_weights_for_stages_in(w, spec):
-      return self.vmap_parallel_gather(
-          w, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1, physical_partition_spec=spec
-      )
+      return self.vmap_parallel_gather(w, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1)
 
-    weights = self._remove_logically_partition(weights)
+    weights = pipeline_utils.remove_logically_partition(weights)
     if physical_partition_spec is None:
       weights = jax.tree.map(gather_weights_for_stages_in, weights)
     else:
@@ -586,7 +558,7 @@ class Pipeline(nn.Module):
     repeat_weights = self.from_all_variables_to_repeat_weights(weights, loop_iteration, physical_partition_spec)
     bsw_pps = self._generate_bsw_pps_from_pps(physical_partition_spec)
     repeat_weights_pps = jax.tree.map(lambda p: P(*p[1:]), physical_partition_spec)
-    fsdp_idx = self.get_fsdp_index_pytree(physical_partition_spec)
+    fsdp_idx = pipeline_utils.get_fsdp_index_pytree(physical_partition_spec)
 
     @jax.shard_map(
         mesh=self.mesh,
@@ -677,13 +649,19 @@ class Pipeline(nn.Module):
       segment_ids,
       deterministic,
       model_mode,
-      decoder_layer_instance,
       logical_partition_spec,
-      vmap_func=None,
-      is_initializing=None,
   ):
     """Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel,
-    and update the loop state."""
+    and update the loop state.
+
+    Args:
+      loop_state: Dictionary containing the current state of the pipeline (state_io, shift, etc.)
+      positions: Positional encodings.
+      segment_ids: Segment IDs for packed sequences.
+      deterministic: Boolean indicating if execution should be deterministic (e.g. for dropout).
+      model_mode: Current model mode (train/predict).
+      logical_partition_spec: Logical partition specification for weights.
+    """
     state_io = loop_state["state_io"]
     shift = loop_state["shift"]
     circ_storage = loop_state["circ_storage"]
@@ -702,19 +680,18 @@ class Pipeline(nn.Module):
     stages_positions = self.vmap_gather(positions, microbatch_ids, 0) if positions is not None else None
     stages_segment_ids = self.vmap_gather(segment_ids, microbatch_ids, 0) if segment_ids is not None else None
 
-    if vmap_func is None:
-      vmap_func = self.get_main_vmap_func_for_iterations()
+    vmap_func = self.get_main_vmap_func_for_iterations()
 
     stage_weights = self.get_current_stage_weights(
         pipeline_weights,
         loop_state["bsw"],
         loop_iteration,
         physical_partition_spec=physical_partition_spec,
-        is_initializing=is_initializing,
+        is_initializing=self.is_initializing(),
     )
 
     stages_output = vmap_func(
-        decoder_layer_instance,
+        self.layers,
         stage_weights,
         stages_inputs,
         stages_segment_ids,
@@ -763,57 +740,10 @@ class Pipeline(nn.Module):
     logical_partition_spec = {"params": partition_spec_with_extra_layer["params"]["layers"]}
     return logical_partition_spec
 
-  @staticmethod
-  def get_logical_spec_repeats_removed(full_logical):
-    if full_logical is None:
-      return None
-
-    def _remove_from_spec(spec):
-      return jax.sharding.PartitionSpec(*[dim for dim in spec if dim != "circular_repeats"])
-
-    return jax.tree.map(_remove_from_spec, full_logical)
-
-  # TODO(chengnuojin) Remove this function and its usage after pipeline nnx migration
-  @staticmethod
-  def _remove_logically_partition(weights):
-    def _remove_logically_partition_leaf(v):
-      return getattr(v, "value") if isinstance(v, LogicallyPartitioned) else v
-
-    return jax.tree.map(
-        _remove_logically_partition_leaf,
-        weights,
-        is_leaf=lambda v: isinstance(v, LogicallyPartitioned),
-    )
-
-  @staticmethod
-  def _remove_fsdp_from_physical_partition_spec(pps):
-    """Removes 'fsdp' and 'fsdp_transpose' from a physical PartitionSpec."""
-    if isinstance(pps, P):
-      new_spec = []
-      # Iterate through each axis in the original PartitionSpec.
-      for axis in pps:
-        if axis is None:
-          new_spec.append(None)
-        elif isinstance(axis, str):
-          # If the axis is 'fsdp', replace it with None to signify replication.
-          if axis not in ("fsdp", "fsdp_transpose"):
-            new_spec.append(axis)
-          else:
-            new_spec.append(None)
-        elif isinstance(axis, (list, tuple)):
-          # If the axis is a collection, filter out 'fsdp'.
-          new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
-          new_spec.append(tuple(new_axis))
-        else:
-          raise ValueError(f"Unsupported_axis_type: {type(axis)}")
-        # Return a new sharding object with the modified spec.
-      return P(*new_spec)
-    return pps
-
   def _generate_bsw_pps_from_pps(self, physical_partition_spec):
     """Create bsw physical partition spec from weight physical partition spec."""
     return jax.tree.map(
-        lambda pps: P(*self._remove_fsdp_from_physical_partition_spec(pps)[1:]),
+        lambda pps: P(*pipeline_utils.remove_fsdp_from_physical_partition_spec(pps)[1:]),
         physical_partition_spec,
     )
 
@@ -882,8 +812,6 @@ class Pipeline(nn.Module):
     # Thus the total iterations is num_micro * repeat + num_stages - 1, & we may consider the num_stages - 1 as bubble.
     # The bubble doubles when we use forwarding delay.
     bubble_iterations = self.forwarding_delay * (self.num_stages - 1)
-    # real_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats
-    # total_iterations = real_iterations + bubble_iterations
 
     if self.is_initializing():
       vmap_func = self.get_vmap_func_for_init()
@@ -945,7 +873,7 @@ class Pipeline(nn.Module):
           out_sharding=self.output_sharding,
       )
 
-    logical_partition_spec = self.get_logical_spec_repeats_removed(logical_partition_spec)
+    logical_partition_spec = pipeline_utils.get_logical_spec_repeats_removed(logical_partition_spec)
 
     def run_iteration_scannable(model, loop_state):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we
@@ -957,7 +885,6 @@ class Pipeline(nn.Module):
               segment_ids,
               deterministic,
               model_mode,
-              model.layers,
               logical_partition_spec=logical_partition_spec,
           ),
           None,
@@ -976,96 +903,21 @@ class Pipeline(nn.Module):
       )
 
       if model.config.scan_pipeline_iterations:
-        run_one_repeat_scanned = nn.scan(
-            run_iteration_scannable,
+        run_one_repeat_scanned_custom = pipeline_utils.create_scanned_function(
+            model=model,
+            run_iteration_scannable=run_iteration_scannable,
+            length=model.config.num_pipeline_microbatches,
             variable_axes={
                 "summaries": 0,
                 "aux_loss": 0,
                 "intermediates": 0,
                 "hyper_params": 0,
             },
-            # Dropout/aqt keys will be split for each iteration.
             split_rngs={"random": True},
-            length=model.config.num_pipeline_microbatches,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            logical_partition_spec=logical_partition_spec,
         )
-
-        @functools.partial(jax.custom_vjp)
-        def run_one_repeat_scanned_custom(loop_state, positions, segment_ids):
-          final_state, _ = run_one_repeat_scanned(model, loop_state)
-          return final_state
-
-        def run_one_repeat_scanned_custom_fwd(loop_state, positions, segment_ids):
-          final_state, _ = run_one_repeat_scanned(model, loop_state)
-          # We return loop_state as residual. model is passed to bwd as arg.
-          return final_state, (
-              loop_state,
-              positions,
-              segment_ids,
-          )
-
-        def run_one_repeat_scanned_custom_bwd(residuals, g_final_state):
-          init_loop_state, positions, segment_ids = residuals
-
-          # Re-run forward pass to get saved states (checkpointing)
-          def scan_body_fwd(carry, _):
-            new_state = model.run_one_iteration(
-                carry,
-                positions,
-                segment_ids,
-                deterministic,
-                model_mode,
-                model.layers,
-                logical_partition_spec=logical_partition_spec,
-            )
-            # Return lightweight state for saving (exclude bsw/weights)
-            saved = {k: v for k, v in carry.items() if k not in ["bsw", "weights"]}
-            return new_state, saved
-
-          _, saved_states = jax.lax.scan(
-              scan_body_fwd,
-              init_loop_state,
-              None,
-              length=model.config.num_pipeline_microbatches,
-          )
-
-          # Backward scan to accumulate gradients
-          def scan_body_bwd(carry, saved_slice):
-            d_next_state = carry
-
-            # Reconstruct current loop_state (input to step)
-            curr_loop_state = {
-                **saved_slice,
-                "bsw": init_loop_state["bsw"],
-                "weights": init_loop_state["weights"],
-            }
-
-            # Define function to differentiate w.r.t loop_state
-            def step_fn(s):
-              out = model.run_one_iteration(
-                  s,
-                  positions,
-                  segment_ids,
-                  deterministic,
-                  model_mode,
-                  model.layers,
-                  logical_partition_spec=logical_partition_spec,
-              )
-              return out
-
-            _, vjp_fun = jax.vjp(step_fn, curr_loop_state)
-
-            # Backprop d_next_state
-            (d_curr_state,) = vjp_fun(d_next_state)
-
-            return d_curr_state, None
-
-          # Run backward scan
-          d_init_state, _ = jax.lax.scan(scan_body_bwd, g_final_state, saved_states, reverse=True)
-
-          return (d_init_state, None, None)
-
-        run_one_repeat_scanned_custom.defvjp(run_one_repeat_scanned_custom_fwd, run_one_repeat_scanned_custom_bwd)
-
         loop_state = run_one_repeat_scanned_custom(loop_state, positions, segment_ids)
       else:
         for _ in range(model.config.num_pipeline_microbatches):
@@ -1084,97 +936,22 @@ class Pipeline(nn.Module):
       )
 
       if model.config.scan_pipeline_iterations:
-        run_one_repeat_scanned = nn.scan(
-            run_iteration_scannable,
+        run_bubbles_scanned_custom = pipeline_utils.create_scanned_function(
+            model=model,
+            run_iteration_scannable=run_iteration_scannable,
+            length=bubble_iterations,
             variable_axes={
                 "summaries": 0,
                 "aux_loss": 0,
                 "intermediates": 0,
                 "hyper_params": 0,
             },
-            # Dropout/aqt keys will be split for each iteration.
             split_rngs={"random": True},
-            length=bubble_iterations,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            logical_partition_spec=logical_partition_spec,
         )
-
-        @functools.partial(jax.custom_vjp)
-        def run_one_repeat_scanned_custom(loop_state, positions, segment_ids):
-          final_state, _ = run_one_repeat_scanned(model, loop_state)
-          return final_state
-
-        def run_one_repeat_scanned_custom_fwd(loop_state, positions, segment_ids):
-          final_state, _ = run_one_repeat_scanned(model, loop_state)
-          # We return loop_state as residual. model is passed to bwd as arg.
-          return final_state, (
-              loop_state,
-              positions,
-              segment_ids,
-          )
-
-        def run_one_repeat_scanned_custom_bwd(residuals, g_final_state):
-          init_loop_state, positions, segment_ids = residuals
-
-          # Re-run forward pass to get saved states (checkpointing)
-          def scan_body_fwd(carry, _):
-            new_state = model.run_one_iteration(
-                carry,
-                positions,
-                segment_ids,
-                deterministic,
-                model_mode,
-                model.layers,
-                logical_partition_spec=logical_partition_spec,
-            )
-            # Return lightweight state for saving (exclude bsw/weights)
-            saved = {k: v for k, v in carry.items() if k not in ["bsw", "weights"]}
-            return new_state, saved
-
-          _, saved_states = jax.lax.scan(
-              scan_body_fwd,
-              init_loop_state,
-              None,
-              length=bubble_iterations,
-          )
-
-          # Backward scan to accumulate gradients
-          def scan_body_bwd(carry, saved_slice):
-            d_next_state = carry
-
-            # Reconstruct current loop_state (input to step)
-            curr_loop_state = {
-                **saved_slice,
-                "bsw": init_loop_state["bsw"],
-                "weights": init_loop_state["weights"],
-            }
-
-            # Define function to differentiate w.r.t loop_state
-            def step_fn(s):
-              out = model.run_one_iteration(
-                  s,
-                  positions,
-                  segment_ids,
-                  deterministic,
-                  model_mode,
-                  model.layers,
-                  logical_partition_spec=logical_partition_spec,
-              )
-              return out
-
-            _, vjp_fun = jax.vjp(step_fn, curr_loop_state)
-
-            # Backprop d_next_state
-            (d_curr_state,) = vjp_fun(d_next_state)
-
-            return d_curr_state, None
-
-          # Run backward scan
-          d_init_state, _ = jax.lax.scan(scan_body_bwd, g_final_state, saved_states, reverse=True)
-
-          return (d_init_state, None, None)
-
-        run_one_repeat_scanned_custom.defvjp(run_one_repeat_scanned_custom_fwd, run_one_repeat_scanned_custom_bwd)
-
-        loop_state = run_one_repeat_scanned_custom(loop_state, positions, segment_ids)
+        loop_state = run_bubbles_scanned_custom(loop_state, positions, segment_ids)
       else:
         for _ in range(model.config.num_pipeline_microbatches):
           loop_state, _ = run_iteration_scannable(model, loop_state)

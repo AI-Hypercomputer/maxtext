@@ -462,7 +462,8 @@ class RoutedMoE(nnx.Module):
     )
 
   def _logical_to_mesh_axes(self, logical_name):
-    return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=self.config.logical_axis_rules)
+    logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
+    return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
   def get_expert_parallelism_size(self):
     return self.mesh.shape.get("expert", 1)
