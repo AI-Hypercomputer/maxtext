@@ -68,7 +68,7 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -259,10 +259,9 @@ def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices)
 
   if ep > 1:
     rollout_kwargs["expert_parallel_size"] = ep
-    rollout_kwargs["enable_expert_parallelism"] = True
+    rollout_kwargs["rollout_vllm_enable_expert_parallelism"] = True
 
   rollout_kwargs["rollout_vllm_async_scheduling"] = True
-
   return rollout_kwargs
 
 
@@ -338,7 +337,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       data_files=trainer_config.hf_eval_files,
       dataset_name=eval_dataset_name,
   ).batch(trainer_config.batch_size)[: trainer_config.num_test_batches]
-
+  asd = get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices))
   # Let's see how one batch of the dataset looks like!
   if trainer_config.debug.rl:
     for ele in train_dataset[:1]:
@@ -501,8 +500,8 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
       )
 
-  configs_dir = os.environ.get("MAXTEXT_CONFIGS_DIR", os.path.join(MAXTEXT_PKG_DIR, "configs"))
-  vllm_config_path = epath.Path(configs_dir) / "vllm.yml"
+  # configs_dir = os.environ.get("MAXTEXT_CONFIGS_DIR", os.path.join(MAXTEXT_PKG_DIR, "configs"))
+  vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "vllm.yml")
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
