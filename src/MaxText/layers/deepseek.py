@@ -19,11 +19,12 @@
 from typing import Optional
 
 from flax import nnx
+from jax import core
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText.common_types import Config
-from MaxText.common_types import MODEL_MODE_PREFILL
+from MaxText.common_types import Config, Array
+from MaxText.common_types import MODEL_MODE_PREFILL, HyperConnectionType
 from MaxText.layers import attention_mla
 from MaxText.layers import deepseek_batchsplit
 from MaxText.layers import initializers
@@ -31,6 +32,8 @@ from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
+from MaxText.layers import mhc
+from MaxText.layers import engram
 from MaxText.layers.linears import Dropout
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.sharding import create_sharding
@@ -41,6 +44,14 @@ from maxtext.inference import page_manager
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
 # -----------------------------------------
+
+
+def is_mhc_enabled(expansion_rate):
+  return expansion_rate > 1
+
+
+def is_engram_enabled(engram_layers, layer_idx):
+  return engram_layers and layer_idx in engram_layers
 
 
 class DeepSeekGenericLayer(nnx.Module):
@@ -56,6 +67,8 @@ class DeepSeekGenericLayer(nnx.Module):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
+      layer_idx: int=-1,
+      ngram_vocab_size: Optional[list] = None,
       quant: Optional[quantizations.AqtQuantization] = None,
   ) -> None:
 
@@ -64,6 +77,8 @@ class DeepSeekGenericLayer(nnx.Module):
     self.mesh = mesh
     self.quant = quant
     self.rngs = rngs
+    self.ngram_vocab_size = ngram_vocab_size
+    self.layer_idx = layer_idx
 
     batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, self.model_mode)
     self.dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
@@ -122,6 +137,29 @@ class DeepSeekGenericLayer(nnx.Module):
     )
 
     self.dropout = Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      self.mhc = mhc.ManifoldConstrainedHyperConnections(self.config, self.config.emb_dim, self.mesh, self.rngs)
+
+    if is_engram_enabled(self.config.engram_layers, self.layer_idx):
+      self.engram_layer_norm = RMSNorm(
+          num_features=self.dummy_inputs_shape[-1],
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          kernel_axes=("norm",),
+          epsilon=self.config.normalization_layer_epsilon,
+          rngs=rngs,
+      )
+      self.engram_module = engram.Engram(
+        config=self.config,
+        mesh=mesh,
+        vocab_sizes=self.ngram_vocab_size,
+        engram_num_heads=self.config.engram_num_heads,
+        engram_head_dim=self.config.engram_head_dim,
+        engram_max_ngram_size=self.config.engram_max_ngram_size,
+        engram_kernel_size=self.config.engram_kernel_size,
+        mhc_expansion_rate=self.config.mhc_expansion_rate,
+        rngs=rngs,
+      )
 
   def mlp_op(self, x, deterministic, *args, **kwargs):
     """Executes the MLP operation. To be implemented by subclasses."""
@@ -172,31 +210,21 @@ class DeepSeekGenericLayer(nnx.Module):
 
   @property
   def logical_axis_names(self):
-    if self.model_mode == MODEL_MODE_PREFILL:
-      return (
-          "activation_batch",
-          "prefill_activation_norm_length",
-          "activation_embed",
-      )
-    return (
-        "activation_batch",
-        "activation_norm_length",
-        "activation_embed",
-    )
+    """Generate logical names for activations generally."""
+    length_name = "prefill_activation_norm_length" if self.model_mode == MODEL_MODE_PREFILL else "activation_norm_length"
+    axis_names = ["activation_batch", length_name, "activation_embed"]
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      axis_names.insert(2, "mhc")
+    return axis_names
 
   @property
   def mlp_logical_axis_names(self):
-    if self.model_mode == MODEL_MODE_PREFILL:
-      return (
-          "activation_batch",
-          "prefill_activation_norm_length",
-          "activation_mlp",
-      )
-    return (
-        "activation_batch",
-        "activation_norm_length",
-        "activation_mlp",
-    )
+    """Generate logical names for activations in MLP."""
+    length_name = "prefill_activation_norm_length" if self.model_mode == MODEL_MODE_PREFILL else "activation_norm_length"
+    axis_names = ["activation_batch", length_name, "activation_mlp"]
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      axis_names.insert(2, "mhc")
+    return axis_names
 
   def post_process(self, layer_output, load_balance_loss, moe_bias_updates, kv_cache=None):
     """postprocessing."""
@@ -233,20 +261,41 @@ class DeepSeekGenericLayer(nnx.Module):
     """self-attention with normalization"""
     lnx = self.pre_attention_norm_op(inputs)
 
-    attention_lnx = self.attention_op(
-        lnx,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        previous_chunk,
-        page_state,
-        slot,
-    )
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      inputs, attention_lnx, _ = self.mhc(
+          self.self_attention,
+          residual_x=inputs,
+          layer_x=lnx,
+          mhc_type=HyperConnectionType.ATTENTION,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=self.model_mode,
+          out_sharding=self.out_sharding,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+      )
+    else:
+      attention_lnx = self.attention_op(
+          lnx,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          previous_chunk,
+          page_state,
+          slot,
+      )
+
     intermediate_inputs = inputs + attention_lnx
+
     # Normalization
     hidden_states = self.post_attention_norm_op(intermediate_inputs)
     return hidden_states, intermediate_inputs
 
+  def engram_op(self, x, ngram_input_ids):
+    x = x.astype(self.config.dtype)
+    normed_x = self.engram_layer_norm(x)
+    return self.engram_module(normed_x, ngram_input_ids)
 
 class DeepSeekDenseLayer(DeepSeekGenericLayer):
   """DeepSeek-style dense layer with Multi-Head Latent Attention."""
@@ -257,9 +306,11 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
+      layer_idx: int=-1,
+      ngram_vocab_size: Optional[list] = None,
       quant: Optional[quantizations.AqtQuantization] = None,
   ) -> None:
-    super().__init__(config, model_mode, mesh, rngs, quant)
+    super().__init__(config, model_mode, mesh, rngs, layer_idx, ngram_vocab_size, quant)
     self.mlp = linears.MlpBlock(
         in_features=self.dummy_inputs_shape[-1],
         intermediate_dim=self.config.mlp_dim,
@@ -291,12 +342,19 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
+      ngram_input_ids=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
     x = self.with_logical_constraint(inputs)
     x = checkpoint_name(x, "decoder_layer_input")
+
+    if is_engram_enabled(self.config.engram_layers, self.layer_idx):
+      engram_output = self.engram_op(x, ngram_input_ids)
+      engram_output = engram_output.astype(self.config.dtype)
+      x = x + engram_output
+      x = checkpoint_name(x, "engram")
 
     hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
         x,
@@ -308,7 +366,16 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         slot,
     )
 
-    mlp_lnx = self.mlp_op(hidden_states, deterministic)
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      intermediate_inputs, mlp_lnx, _ = self.mhc(
+          self.mlp,
+          residual_x=intermediate_inputs,
+          layer_x=hidden_states,
+          mhc_type=HyperConnectionType.MLP_DENSE,
+          deterministic=deterministic,
+      )
+    else:
+      mlp_lnx = self.mlp_op(hidden_states, deterministic)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
@@ -335,10 +402,12 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
+      layer_idx: int=-1,
+      ngram_vocab_size: Optional[list] = None,
       quant: Optional[quantizations.AqtQuantization] = None,
   ) -> None:
 
-    super().__init__(config, model_mode, mesh, rngs, quant)
+    super().__init__(config, model_mode, mesh, rngs, layer_idx, ngram_vocab_size, quant)
     self.DeepSeekMoeBlock_0 = moe.RoutedAndSharedMoE(
         config=self.config,
         mesh=mesh,
@@ -362,11 +431,11 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
+      ngram_input_ids=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-
     # If using batch split schedule, call the batch split version of the layer.
     if self.config.use_batch_split_schedule:
       outputs = deepseek_batchsplit.batch_split_schedule(
@@ -384,6 +453,12 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     x = self.with_logical_constraint(inputs)
     x = checkpoint_name(x, "decoder_layer_input")
 
+    if is_engram_enabled(self.config.engram_layers, self.layer_idx):
+      engram_output = self.engram_op(x, ngram_input_ids)
+      engram_output.astype(self.config.dtype)
+      x = x + engram_output
+      x = checkpoint_name(x, "engram")
+
     hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
         x,
         decoder_segment_ids,
@@ -394,7 +469,17 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         slot,
     )
 
-    mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(hidden_states, deterministic)
+    if is_mhc_enabled(self.config.mhc_expansion_rate):
+      intermediate_inputs, mlp_lnx, metadata = self.mhc(
+          self.DeepSeekMoeBlock_0,
+          residual_x=intermediate_inputs,
+          layer_x=hidden_states,
+          mhc_type=HyperConnectionType.MLP_MOE,
+      )
+      load_balance_loss = metadata["load_balance_loss"]
+      moe_bias_updates = metadata["moe_bias_updates"]
+    else:
+      mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(hidden_states, deterministic)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)

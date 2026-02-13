@@ -35,6 +35,7 @@ from MaxText.layers import linears
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
+from MaxText.layers import engram
 from MaxText import sharding
 from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.normalizations import rms_norm
@@ -60,6 +61,8 @@ from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+import transformers
+
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -283,6 +286,40 @@ class Decoder(nn.Module):
       self.pipeline_module = pipeline.Pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
       )
+
+    if self.config.engram_layers:
+      # 1. Initialize Tokenizer
+      tokenizer = transformers.AutoTokenizer.from_pretrained(
+        self.config.tokenizer_path,
+        token=self.config.hf_access_token)
+
+      # 2. Setup Ngram Mapping
+      self.ngram_mapping = engram.NgramHashMapping(
+        engram_vocab_bases=self.config.engram_vocab_sizes,
+        max_ngram_size=self.config.engram_max_ngram_size,
+        engram_num_heads=self.config.engram_num_heads,
+        layer_ids=self.config.engram_layers,
+        tokenizer=tokenizer,
+        pad_id=tokenizer.pad_token_id,
+        seed=self.config.engram_seed,
+      )
+
+  def generate_engram_map(self, inputs):
+    """Docstring DeepSeek n-grams hash mapping."""
+    # Generate Map using Dictionary
+    ngram_inputs = self.ngram_mapping(inputs)
+    ngram_vocab_sizes = {
+      layer_id: self.ngram_mapping.get_vocab_sizes(layer_id)
+      for layer_id in self.config.engram_layers
+    }
+    ngram_input_ids = {
+      layer_id: ngram_inputs[layer_id]
+      for layer_id in self.config.engram_layers
+    }
+    #TODO: only generate needed total vocab_sizes for index
+    # print(f"===generating ngram_vocab_sizes {ngram_vocab_sizes}")
+    # print(f"===generating ngram_input_ids {ngram_input_ids}")
+    return ngram_vocab_sizes, ngram_input_ids
 
   def minimal_policy(self, with_context=False):
     """Helper for creating minimal checkpoint policies."""
@@ -731,6 +768,14 @@ class Decoder(nn.Module):
         audio_masks,
     )
 
+    if self.config.engram_layers:
+      ngram_vocab_sizes, ngram_input_ids = self.generate_engram_map(decoder_input_tokens)
+
+    if cfg.mhc_expansion_rate > 1:
+      # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
+      y = y[:, :, None, :]
+      y = jnp.repeat(y, cfg.mhc_expansion_rate, axis=2).astype(y.dtype)
+
     policy = self.get_remat_policy()
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
     # scan does not support kwargs in layer call, passing broadcast_args as positional arg
@@ -868,8 +913,32 @@ class Decoder(nn.Module):
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
               kv_cache = kv_caches[index] if kv_caches is not None else None
+              if layer_prefix == layer_prefixes[0]:
+                import jax
+                print("this is dense")
+                total_layer_index = index
+                print(f"...ngram_vocab_sizes: {ngram_vocab_sizes}")
+                print(f"......ngram_input_ids.get(total_layer_index): {ngram_input_ids.get(total_layer_index)}")
+                print(f"......ngram_vocab_sizes.get(total_layer_index): {ngram_vocab_sizes.get(total_layer_index)}")
+                print(f"this is total_layer_index: {total_layer_index}")
+                layer_kwargs = {
+                  "layer_idx": total_layer_index,
+                  "ngram_vocab_size": ngram_vocab_sizes.get(total_layer_index),
+                }
+              else:
+                import jax
+                print("this is moe")
+                total_layer_index = index + cfg.first_num_dense_layers
+                print(f"......ngram_input_ids.get(total_layer_index): {ngram_input_ids.get(total_layer_index)}")
+                print(f"......ngram_vocab_sizes.get(total_layer_index): {ngram_vocab_sizes.get(total_layer_index)}")
+                print(f"...ngram_vocab_sizes: {ngram_vocab_sizes}")
+                print(f"this is total_layer_index: {total_layer_index}")
+                layer_kwargs = {
+                  "layer_idx": total_layer_index,
+                  "ngram_vocab_size": ngram_vocab_sizes.get(total_layer_index),
+                }
               y, kv_cache = layer(
-                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
+                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
               )(
                   y,
                   decoder_segment_ids,
@@ -881,6 +950,7 @@ class Decoder(nn.Module):
                   slot=slot,
                   kv_cache=kv_cache,
                   attention_metadata=attention_metadata,
+                  ngram_input_ids=ngram_input_ids.get(total_layer_index),
               )
               if kv_caches is not None and kv_cache is not None:
                 kv_caches[index] = kv_cache
@@ -927,7 +997,11 @@ class Decoder(nn.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    hidden_state = y
+    if cfg.mhc_expansion_rate > 1:
+      # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
+      hidden_state = jnp.sum(y, axis=2, dtype=y.dtype)
+    else:
+      hidden_state = y
 
     # When initializing with vLLM RPA attention, we need to run the output head to
     # initialize any parameters associated with it.

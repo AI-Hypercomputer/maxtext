@@ -464,6 +464,18 @@ class Logits(BaseModel):
   )
 
 
+class Engram(BaseModel):
+  """Configuration for the DeepSeek Engram."""
+
+  engram_layers: list = Field([], description="Indices of layers to apply Engram.")
+  engram_num_heads: int = Field(8, description="Number of heads dedicated to the Engram.")
+  engram_head_dim: int = Field(1280, description="Head dimension size for the Engram.")
+  engram_vocab_sizes: list = Field([], description="Vocabulary size for each N-gram predictor.")
+  engram_max_ngram_size: int = Field(3, description="The max 'n' in N-gram.")
+  engram_kernel_size: int = Field(4, description="The size of convolution kernel.")
+  engram_seed: int = Field(0, description="The seed for Engram hash mapping.")
+
+
 class Attention(BaseModel):
   """General configuration for the attention mechanism."""
 
@@ -895,6 +907,7 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the attention output.",
   )
+  engram: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the engram output.")
 
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
@@ -1085,7 +1098,7 @@ class TrainingLoop(BaseModel):
 class ManifoldConstrainedHyperConnections(BaseModel):
   """Configuration for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
-  mhc_expansion_rate: int = Field(0, description="The number of parallel streams in Hyper Connection.")
+  mhc_expansion_rate: PositiveInt = Field(1, description="The number of parallel streams in Hyper Connection.")
   sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
 
 
@@ -1777,6 +1790,7 @@ class MaxTextConfig(
     ModelArchitecture,
     MTP,
     Logits,
+    Engram,
     # Attention Mechanisms
     Attention,
     MlaAttention,
@@ -2247,6 +2261,17 @@ class MaxTextConfig(
         and self.gradient_accumulation_steps > 1
     ):
       raise ValueError("FP8 quantization is not compatible with gradient accumulation.")
+    if self.engram_layers:
+      if not self.hf_access_token or not self.tokenizer_path:
+        assert ValueError(
+          "Engram requires both 'hf_access_token' and 'tokenizer_path' "
+          "to load the Hugging Face tokenizer."
+        )
+      if self.enable_rampup_batch_size:
+        raise NotImplementedError(
+          "Engram does not support the ramp up batch size feature. "
+          "Please set 'enable_rampup_batch_size' to False."
+        )
     if self.num_experts > 1:
       is_fully_moe = (
           self.interleave_moe_layer_step == 1

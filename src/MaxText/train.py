@@ -119,6 +119,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     rng1, aqt_rng = jax.random.split(dropout_rng)
 
     # Flax Linen model
+    print("NN Module")
     logits, intermediate_outputs = model.apply(
         params,
         data["inputs"],
@@ -152,6 +153,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       total_loss = jnp.sum(xent)
   else:
     # Flax NNX model
+    print("NNX path")
     logits = model(
         decoder_input_tokens=data["inputs"],
         decoder_positions=data["inputs_position"],
@@ -197,8 +199,16 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   # get MoE load balance loss
   moe_lb_loss = 0.0
   if config.num_experts > 1:
-    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
-    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+    # Note: the key is affected by the model implementation
+    possible_keys = [
+        ("intermediates", "decoder", "layers", "moe_lb_loss"),
+        ("intermediates", "decoder", "moe_layers", "moe_lb_loss"),
+    ]
+    for nested_key in possible_keys:
+      total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+      if total_moe_lb_loss != 0.0:
+        break
+      max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
     moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
     loss += moe_lb_loss
 
@@ -277,7 +287,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           params,
           params_shardings,
       )
-    grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
+    grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True, allow_int=True)
+    print(f"data: {data}")
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
 
   raw_grads = jax.tree_util.tree_map(
@@ -449,14 +460,14 @@ def train_loop(config, recorder, state=None):
       prof.maybe_activate_profiler(step, state)
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+        example_batch, ngram_layer_map = data_loader.load_next_batch(rampup_manager=rampup_manager)
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             if config.shard_optimizer_over_data:
               state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
-            state, metrics = p_train_step(state, example_batch, nextrng)
+            state, metrics = p_train_step(state, example_batch, ngram_layer_map, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()

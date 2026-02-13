@@ -471,7 +471,7 @@ class Transformer(nnx.Module):
     audio_masks = None
     if audio_embeddings is not None:
       audio_masks = mm_processor.get_bidirectional_mask_audio(self.config, decoder_input_tokens)
-
+    
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,

@@ -26,6 +26,8 @@ from maxtext.common.goodput import (
 )
 from maxtext.utils import exceptions
 from maxtext.trainers.diloco import diloco
+from MaxText.layers import engram
+import transformers
 
 
 class DataLoader:
@@ -44,6 +46,25 @@ class DataLoader:
       self.data_iterator = data_iterator
     self.last_batch = None
     self.input_data_shardings = get_input_data_sharding(config, mesh)
+
+    # if self.config.engram_layers:
+    #   # 1. Initialize Tokenizer
+    #   tokenizer = transformers.AutoTokenizer.from_pretrained(
+    #     config.tokenizer_path,
+    #     token=config.hf_access_token)
+
+    #   print(f"tokenizer.pad_token_id: {tokenizer.pad_token_id}")
+
+    #   # 2. Setup Ngram Mapping
+    #   self.ngram_mapping = engram.NgramHashMapping(
+    #     engram_vocab_bases=config.engram_vocab_sizes,
+    #     max_ngram_size=config.engram_max_ngram_size,
+    #     engram_num_heads=config.engram_num_heads,
+    #     layer_ids=config.engram_layers,
+    #     tokenizer=tokenizer,
+    #     pad_id=tokenizer.pad_token_id,
+    #     seed=config.engram_seed,
+    #   )
 
   def update_data_iterator(self):
     """Update to the next data iterator in the list, if applicable."""
@@ -75,6 +96,7 @@ class DataLoader:
         self.load_next_batch_pre_sharding(),
         self.input_data_shardings,
     )
+
     if self.config.enable_diloco:
       example_batch = diloco.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
     return example_batch
