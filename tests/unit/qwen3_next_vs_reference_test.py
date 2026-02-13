@@ -766,6 +766,105 @@ class TestQwen3Next(unittest.TestCase):
     )
     print("test_l2norm passed!")
 
+  def test_chunk_gated_delta_rule_logic_kl(self):
+    """
+    Directly tests the `jax_chunk_gated_delta_rule` against the PyTorch reference
+    using KL Divergence instead of strict atol/rtol.
+    """
+    print("Running test_chunk_gated_delta_rule_logic with KL Divergence check...")
+    
+    # Use config parameters
+    num_heads = self.cfg.gdn_num_value_heads
+    k_head_dim = self.cfg.gdn_key_head_dim
+    v_head_dim = self.cfg.gdn_value_head_dim
+    chunk_size = self.cfg.gdn_chunk_size
+
+    # Initialize Inputs
+    key = jax.random.PRNGKey(42)
+    key_q, key_k, key_v, key_g, key_beta = jax.random.split(key, 5)
+
+    # Shapes are (B, S, H, D)
+    q_jax = (jax.random.normal(key_q, (self.batch_size, self.seq_len, num_heads, k_head_dim), dtype=jnp.float32) * 0.1)
+    k_jax = (jax.random.normal(key_k, (self.batch_size, self.seq_len, num_heads, k_head_dim), dtype=jnp.float32) * 0.1)
+    v_jax = (jax.random.normal(key_v, (self.batch_size, self.seq_len, num_heads, v_head_dim), dtype=jnp.float32) * 0.1)
+    g_jax = jax.random.normal(key_g, (self.batch_size, self.seq_len, num_heads), dtype=jnp.float32) * 0.1
+    beta_jax = jax.random.uniform(key_beta, (self.batch_size, self.seq_len, num_heads), dtype=jnp.float32)
+
+    q_torch = torch.from_numpy(np.asarray(q_jax).copy())
+    k_torch = torch.from_numpy(np.asarray(k_jax).copy())
+    v_torch = torch.from_numpy(np.asarray(v_jax).copy())
+    g_torch = torch.from_numpy(np.asarray(g_jax).copy())
+    beta_torch = torch.from_numpy(np.asarray(beta_jax).copy())
+
+    def compute_kl_divergence(p_logits, q_logits):
+        """
+        Computes KL(P || Q) where P is PyTorch (Reference) and Q is JAX (Target).
+        We treat the last dimension (Head Dim) as the feature distribution.
+        """
+        # 1. Convert to probabilities along the feature dimension
+        p_log_probs = jax.nn.log_softmax(p_logits, axis=-1)
+        p_probs = jax.nn.softmax(p_logits, axis=-1)
+        q_log_probs = jax.nn.log_softmax(q_logits, axis=-1)
+        
+        # 2. KL Divergence Formula: sum(p * (log(p) - log(q)))
+        # Result shape: (Batch, Seq, Heads)
+        kl = jnp.sum(p_probs * (p_log_probs - q_log_probs), axis=-1)
+        
+        # 3. Return mean KL across the batch/sequence/heads
+        return jnp.mean(kl)
+
+    # ----------------------------------------------------------------------
+    # CASE 1: Test without L2Norm
+    # ----------------------------------------------------------------------
+    torch_output, _ = torch_chunk_gated_delta_rule(
+        q_torch.clone(), k_torch.clone(), v_torch.clone(), g_torch.clone(), beta_torch.clone(),
+        chunk_size=chunk_size, output_final_state=False, use_qk_l2norm_in_kernel=False,
+    )
+    jax_output, _ = qwen3.jax_chunk_gated_delta_rule(
+        q_jax, k_jax, v_jax, g_jax, beta_jax, chunk_size=chunk_size, 
+        initial_state=None, use_qk_norm_in_gdn=False,
+    )
+    
+    kl_no_norm = compute_kl_divergence(
+        jnp.array(torch_output.detach().numpy()), 
+        jnp.array(jax_output)
+    )
+    
+    print(f"KL Divergence (No Norm): {kl_no_norm:.6f}")
+    
+    # We use a threshold of 0.5 as discussed (though ideally for unit tests < 0.05 is better)
+    kl_threshold = 1e-6
+    self.assertTrue(
+        kl_no_norm < kl_threshold, 
+        f"KL Divergence (No Norm) {kl_no_norm} exceeded threshold {kl_threshold}"
+    )
+
+    # ----------------------------------------------------------------------
+    # CASE 2: Test with L2Norm
+    # ----------------------------------------------------------------------
+    torch_output_norm, _ = torch_chunk_gated_delta_rule(
+        q_torch.clone(), k_torch.clone(), v_torch.clone(), g_torch.clone(), beta_torch.clone(),
+        chunk_size=chunk_size, output_final_state=False, use_qk_l2norm_in_kernel=True,
+    )
+    jax_output_norm, _ = qwen3.jax_chunk_gated_delta_rule(
+        q_jax, k_jax, v_jax, g_jax, beta_jax, chunk_size=chunk_size,
+        initial_state=None, use_qk_norm_in_gdn=True,
+    )
+
+    kl_with_norm = compute_kl_divergence(
+        jnp.array(torch_output_norm.detach().numpy()), 
+        jnp.array(jax_output_norm)
+    )
+
+    print(f"KL Divergence (With Norm): {kl_with_norm:.6f}")
+
+    self.assertTrue(
+        kl_with_norm < kl_threshold, 
+        f"KL Divergence (With Norm) {kl_with_norm} exceeded threshold {kl_threshold}"
+    )
+    
+    print("test_chunk_gated_delta_rule_logic passed with KL check!")
+
   def test_chunk_gated_delta_rule_logic(self):
     """
     Directly tests the `jax_chunk_gated_delta_rule` against the original PyTorch reference.
