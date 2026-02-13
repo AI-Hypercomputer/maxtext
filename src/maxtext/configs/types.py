@@ -1544,6 +1544,7 @@ class RLHardware(BaseModel):
   rollout_tensor_parallelism: int = Field(
       -1, description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined."
   )
+  rollout_expert_parallelism: int = Field(1, description="Expert parallelism per replica for rollout")
 
 
 class VLLM(BaseModel):
@@ -1558,6 +1559,9 @@ class VLLM(BaseModel):
   vllm_additional_config: dict[str, Any] = Field(default_factory=dict, description="Additional vLLM config options.")
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
   stop_strings: Optional[list[str]] = Field(None, description="List of strings to stop generation.")
+  vllm_config_path: str = Field(
+      "src/maxtext/configs/inference/vllm.yml", description="path to yaml file for loading vLLM config."
+  )
 
 
 class RL(BaseModel):
@@ -2448,6 +2452,7 @@ class MaxTextConfig(
           "expert": self.ici_expert_parallelism,
           "autoregressive": self.ici_autoregressive_parallelism,
           "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+          "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
       }
       self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
@@ -2467,6 +2472,7 @@ class MaxTextConfig(
           "expert": self.dcn_expert_parallelism,
           "autoregressive": self.dcn_autoregressive_parallelism,
           "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+          "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
       }
       self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 

@@ -1083,6 +1083,8 @@ use_jax_splash: false
 # vLLM Adapter Configurations
 # Path to the HuggingFace-style config directory for the adapter (e.g. src/MaxText/integration/vllm/maxtext_vllm_adapter)
 vllm_hf_config_path: ""
+# Path to yaml file for loading vLLM config
+vllm_config_path: ""
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
 # When use_jax_splash=True, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]

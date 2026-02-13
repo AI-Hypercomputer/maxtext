@@ -81,6 +81,10 @@ flags.DEFINE_string("load_parameters_path", None, "Path to load model parameters
 flags.DEFINE_integer("max_target_length", 1024, "Maximum total context length (MCL).")
 flags.DEFINE_float("gpu_memory_utilization", 0.72, "Fraction of GPU memory to be used for the model executor.")
 
+# vllm config variables
+flags.DEFINE_integer("vllm_swap_space", 2, "per device swap space in GB")
+flags.DEFINE_integer("vllm_async_scheduling", 1, "Async DP Scheduler for vLLM")
+
 # Decoding
 flags.DEFINE_bool("use_tunix", False, "Whether to use Tunix for vLLM decoding.")
 flags.DEFINE_bool("use_chat_template", False, "Whether to format the prompt using chat template.")
@@ -93,6 +97,11 @@ flags.DEFINE_integer("seed", 42, "Random seed for sampling.")
 # Set mandatory flags
 flags.mark_flag_as_required("model_name")
 flags.mark_flag_as_required("hf_model_name")
+flags.DEFINE_string(
+    "vllm_config_path",
+    "src/MaxText/configs/vllm.yml",
+    "Path to vLLM config file. Defaults to MAXTEXT_PKG_DIR/configs/vllm.yml.",
+)
 
 
 def decode_with_vllm(
@@ -336,6 +345,7 @@ def main(argv: Sequence[str]) -> None:
         decode_sampling_nucleus_p=FLAGS.decode_sampling_nucleus_p,
         decode_sampling_top_k=FLAGS.decode_sampling_top_k,
         debug_sharding=FLAGS.debug_sharding,
+        vllm_config_path=FLAGS.vllm_config_path,
         seed=FLAGS.seed,
     )
 
