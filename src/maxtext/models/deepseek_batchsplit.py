@@ -809,7 +809,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
         group_sizes,
         representative_value=max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
     )
-    if config.use_qwix_quantization:
+    if config.use_qwix_quantization or config.using_pipeline_parallelism:
       output = megablox.gmm(
           lhs=inputs,
           rhs=kernel,
