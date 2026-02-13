@@ -24,25 +24,23 @@ numbers for a specific model. Example:
   python3 -m MaxText.muon_utils qwen3-4b True
 """
 
-
 import os
 import sys
 from typing import Optional, Tuple
 
 import flax.linen as nn
+from flax import nnx
 import jax
 from optax.contrib._muon import MuonDimensionNumbers as mdn
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models, quantizations
-from maxtext.utils import maxtext_utils
-
-
-Transformer = models.transformer_as_linen
+from maxtext.utils import maxtext_utils, model_creation_utils
 
 
 def _is_path_contain_any(tuples, path):
+  """Checks if any element in 'tuples' is present in 'path'."""
   return any(x in path for x in tuples)
 
 
@@ -107,10 +105,25 @@ def get_transform_tree(tree, path=()):
 
 def get_muon_weight_dimension_numbers(model, config, verbose=False):
   """Extract muon dimension number from model structure."""
-  # quickly get param structure without materialization
-  abstract_param = maxtext_utils.get_abstract_param(model, config)
-  # get muon dimension number from param
-  muon_weight_dimension_numbers = get_transform_tree(abstract_param)
+
+  if isinstance(model, nnx.Module):
+    _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
+
+    def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], leaf):
+      # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
+      path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
+      return transform_logic(path_strings)
+
+    # Use jax.tree_util.tree_map_with_path for NNX's potentially complex PyTree structure.
+    # This is different with linen where abstract_param is a dict-based tree with nn.LogicallyPartitioned leaves.
+    muon_weight_dimension_numbers = jax.tree_util.tree_map_with_path(apply_transform_nnx, abstract_param)
+
+  else:  # Linen
+    # quickly get param structure without materialization
+    abstract_param = maxtext_utils.get_abstract_param(model, config)
+    # get muon dimension number from param
+    muon_weight_dimension_numbers = get_transform_tree(abstract_param)
+
   if verbose:
     _print_structure_debug(abstract_param, muon_weight_dimension_numbers)
   return muon_weight_dimension_numbers
@@ -118,19 +131,30 @@ def get_muon_weight_dimension_numbers(model, config, verbose=False):
 
 def _print_structure_debug(abstract_param, muon_weight_dimension_numbers):
   """Prints the model structure and the resulting Muon config."""
-  # Access the shape from the inner ShapeDtypeStruct and names from the wrapper
-  # Return a new tree with the same structure containing only shapes/names
+
+  def get_leaf_info(leaf):
+    # For linen:
+    # Access the shape from the inner ShapeDtypeStruct and names from the wrapper
+    # Return a new tree with the same structure containing only shapes/names
+    if isinstance(leaf, nn.LogicallyPartitioned):
+      return {"shape": leaf.value.shape, "names": leaf.names}
+    # For nnx:
+    # Only return the shape because it doesn't have a wrapper.
+    elif isinstance(leaf, jax.ShapeDtypeStruct):
+      return {"shape": leaf.shape}
+    return {"shape": "N/A"}
+
   info_tree = jax.tree_util.tree_map(
-      lambda leaf: {"shape": leaf.value.shape, "names": leaf.names},
+      get_leaf_info,
       abstract_param,
-      is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
+      is_leaf=lambda x: isinstance(x, (nn.LogicallyPartitioned, jax.ShapeDtypeStruct)),
   )
   print(f"\n=== Model Structure ===\n{info_tree}")
   print(f"\n=== Muon Dimension Numbers ===\n{muon_weight_dimension_numbers}")
   print("\nIs this reasonable?")
 
 
-def get_model_mdn(model_name, scan_layers=True, verbose=False):
+def get_model_mdn(model_name, scan_layers=True, verbose=False, pure_nnx=False):
   """Initializes a model and retrieves its Muon dimension numbers.
 
   This function sets up the configuration for a given model, initializes the
@@ -154,13 +178,17 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False):
       f"model_name={model_name}",
       f"scan_layers={scan_layers}",
       "attention=dot_product",
+      f"pure_nnx={pure_nnx}",
   ]
   config = pyconfig.initialize(argv)
   # Setup model
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh=mesh, quant=quant)
+  if pure_nnx:
+    _, model = model_creation_utils.create_nnx_abstract_model(config, mesh)
+  else:
+    model = models.transformer_as_linen(config, mesh=mesh, quant=quant)
   # Get dimension number
   muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config, verbose=verbose)
   return muon_weight_dimension_numbers
@@ -172,4 +200,4 @@ if __name__ == "__main__":
     sys.exit(1)
   model_name_arg = sys.argv[1]
   scan_layers_arg = sys.argv[2].lower() == "true"
-  get_model_mdn(model_name_arg, scan_layers_arg, verbose=True)
+  get_model_mdn(model_name_arg, scan_layers_arg, verbose=True, pure_nnx=False)
