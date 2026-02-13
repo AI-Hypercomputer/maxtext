@@ -287,6 +287,7 @@ class Checkpointing(BaseModel):
 
   load_parameters_path: PathStr = Field("", description="Loads only model parameters from a specific checkpoint path.")
   lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
+  hf_lora_adapter_path: PathStr = Field("", description="HuggingFace LoRA adapter repo ID (e.g., 'username/adapter-repo') or local path to directory containing adapter_model.safetensors.")
   load_full_state_path: PathStr = Field("", description="Loads the complete training state from a checkpoint path.")
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
