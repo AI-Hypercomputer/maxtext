@@ -26,10 +26,9 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
 from MaxText import pyconfig
 from MaxText import maxtext_utils
-from MaxText.layers import models
-from MaxText.layers import quantizations
 from MaxText import optimizers
-
+from maxtext.models import models
+from maxtext.layers import quantizations
 from tests.utils.sharding_dump import load_json, TEST_CASES, named_shardings_to_json, partition_specs_to_json
 
 Transformer = models.transformer_as_linen

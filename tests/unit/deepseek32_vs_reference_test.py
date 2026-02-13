@@ -51,7 +51,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from MaxText import pyconfig
-from MaxText.layers import embeddings, attention_mla
+from maxtext.layers import embeddings, attention_mla
 from MaxText.common_types import MODEL_MODE_TRAIN
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
