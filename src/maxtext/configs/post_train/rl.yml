@@ -149,6 +149,8 @@ enable_dp_attention: False
 # Performance tuning for samplers
 max_num_batched_tokens: null
 max_num_seqs: null
+# path to initialize vllm config
+vllm_config_path: 'src/maxtext/configs/inference/vllm.yml'
 
 # ====== Checkpoint Configuration ======
 enable_checkpointing: True
