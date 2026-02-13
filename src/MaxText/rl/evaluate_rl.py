@@ -16,11 +16,14 @@
 """
 RL Evaluation Module.
 """
+from math_verify import parse
 from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from MaxText.rl import utils_rl
 from maxtext.utils import max_logging
+
+boxed = lambda x: "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
 
 # ## Evaluate
 # We evaluate it in two ways:
@@ -99,7 +102,6 @@ def score_responses(tmvp_config, question, responses, answer):
       Tuple of (is_correct, is_partially_correct, has_correct_format)
   """
   match_format = utils_rl.get_match_format_regex(tmvp_config)
-  match_numbers = utils_rl.get_match_numbers_regex(tmvp_config)
 
   if tmvp_config.debug.rl:
     max_logging.log("========================================")
@@ -114,7 +116,7 @@ def score_responses(tmvp_config, question, responses, answer):
 
   for response in responses:
     # Extract numerical response
-    extracted_response = guess.group(1) if (guess := match_numbers.search(response)) is not None else "-1000000"
+    extracted_response = guess.group(1) if (guess := match_format.search(response)) is not None else "-1000000"
 
     if tmvp_config.debug.rl:
       max_logging.log(f"Evaluation extracted_response: {extracted_response}")
@@ -124,12 +126,14 @@ def score_responses(tmvp_config, question, responses, answer):
       # Normalize and parse
       norm_extracted = utils_rl.normalize_final_answer(extracted_response).strip()
       norm_answer = utils_rl.normalize_final_answer(answer).strip()
-      val_extracted = utils_rl.parse_number_or_fraction(norm_extracted)
-      val_answer = utils_rl.parse_number_or_fraction(norm_answer)
-      is_correct = val_extracted == val_answer
+      is_correct = utils_rl.math_verify_func([boxed(norm_answer)], [boxed(norm_extracted)])[0] > 0.1
 
-      # Check partial correctness (within 10%)
+      val_extracted = parse(norm_extracted)[0]
+      val_answer = parse(norm_answer)[0]
       ratio = (val_extracted + utils_rl.EPSILON) / (val_answer + utils_rl.EPSILON)
+      max_logging.log(f"Parsed response: {val_extracted}, Parsed label: {val_answer}")
+      max_logging.log(f"Ratio: {ratio}")
+      # Check partial correctness (within 10%)
       if 0.9 <= ratio <= 1.1:
         is_partially_correct = True
 
