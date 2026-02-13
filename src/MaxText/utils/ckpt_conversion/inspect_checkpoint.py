@@ -1,24 +1,31 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 """
 A unified tool to inspect checkpoint structures for:
-1. HuggingFace/PyTorch source files (.safetensors, .pth)
-2. MaxText Model Architecture (on-the-fly, no weights loaded)
-3. Saved Orbax Checkpoints (metadata only)
+1. HuggingFace/PyTorch (need load weight)
+2. MaxText Model Architecture (lightweight, no weights loaded)
+3. Orbax Checkpoints (lightweight, no weights loaded)
 
 Usage Examples:
 [Mode 1: HF/PyTorch]   
-   python inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
+   python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
 [Mode 2: MaxText Arch] 
-  python inspect_checkpoint.py maxtext --model_name <maxtext_model_name> --scan_layers <True | False>
+  python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py maxtext --model_name <maxtext_model_name> --scan_layers <True | False>
 [Mode 3: Orbax]        
-  python inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
-
-
-cd ~/maxtext
-SCRIPT=~/maxtext/src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py
-python inspect_checkpoint.py hf --path <local_hf_path> --format safetensors
-python $SCRIPT maxtext --model_name deepseek3.2-671b --scan_layers False
-python $SCRIPT maxtext --model_name deepseek3.2-671b --scan_layers True
+  python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
 """
 
 import argparse
