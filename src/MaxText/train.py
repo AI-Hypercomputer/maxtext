@@ -590,10 +590,22 @@ def main(argv: Sequence[str]) -> None:
   if pathwaysutils.is_pathways_backend_used():
     max_utils.elastic_manager = manager.Manager()
 
-    train = max_utils.elastic_manager.replica_resize(
-        max_resizes=100,
-        poll_interval=10,
-    )(train)
+    elastic_mode = os.getenv("ELASTIC_MODE", "").lower()
+    if elastic_mode == "replica-resize":
+      max_logging.log("Using replica-resize elasticity mode")
+      train = max_utils.elastic_manager.replica_resize(
+          max_resizes=10,  # Handle up to 10 slice up or slice down transitions
+          poll_interval=300,  # Monitor thread checks inactive slice health every 5 minutes
+      )(train)
+    elif elastic_mode == "pause-resume":
+      max_logging.log("Using pause-resume elasticity mode")
+      train = max_utils.elastic_manager.pause_resume(
+          max_retries=10,  # Handle up to 10 disruptions before restarting
+          poll_interval=10,  # While paused, checks every 10 seconds for health
+          timeout=300,  # Waits for slices to rejoin for 5 minutes
+      )(train)
+    else:
+      max_logging.log("Not using any elasticity mode")
 
   train()
 
