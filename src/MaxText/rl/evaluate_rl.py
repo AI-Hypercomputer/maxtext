@@ -128,14 +128,13 @@ def score_responses(tmvp_config, question, responses, answer):
       norm_answer = utils_rl.normalize_final_answer(answer).strip()
       is_correct = utils_rl.math_verify_func([boxed(norm_answer)], [boxed(norm_extracted)])[0] > 0.1
 
-      val_extracted = parse(norm_extracted)[0]
-      val_answer = parse(norm_answer)[0]
-      ratio = (val_extracted + utils_rl.EPSILON) / (val_answer + utils_rl.EPSILON)
-      max_logging.log(f"Parsed response: {val_extracted}, Parsed label: {val_answer}")
-      max_logging.log(f"Ratio: {ratio}")
-      # Check partial correctness (within 10%)
-      if 0.9 <= ratio <= 1.1:
-        is_partially_correct = True
+      val_extracted = parse(norm_extracted)
+      val_answer = parse(norm_answer)
+
+      # Check partial correctness if values can be extracted (within 10%)
+      if val_extracted and val_answer:
+        ratio = (val_extracted[0] + utils_rl.EPSILON) / (val_answer[0] + utils_rl.EPSILON)
+        is_partially_correct = True if 0.9 <= ratio <= 1.1 else False
 
     except Exception as e:
       if tmvp_config.debug.rl:
