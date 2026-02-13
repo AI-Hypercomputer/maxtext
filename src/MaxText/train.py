@@ -287,7 +287,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           params,
           params_shardings,
       )
-    grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
+    grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True, allow_int=True)
+    print(f"data: {data}")
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
 
   raw_grads = jax.tree_util.tree_map(

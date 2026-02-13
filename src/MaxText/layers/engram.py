@@ -38,7 +38,7 @@ from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
-class CompressedTokenizer:
+class CompressedTokenizer(nnx.Module):
   """
   A canonicalizing wrapper that reduces vocabulary sparsity for n-gram lookup.
 
@@ -52,6 +52,7 @@ class CompressedTokenizer:
   """
 
   def __init__(self, tokenizer: HFTokenizer):
+    super().__init__()
     normalizer = self._build_normalizer()
     self.lookup_table, self.num_new_token = self._build_lookup_table(tokenizer, normalizer)
 
@@ -134,17 +135,8 @@ class CompressedTokenizer:
     output_ids = jnp.where(valid_mask, lookup_values, input_ids)
     return output_ids
 
-# input_ids = jnp.asarray(input_ids, dtype=jnp.int64)
-# # Identify valid tokens (ignore padding/masks usually marked with negative IDs)
-# valid_mask = input_ids >= 0
-# valid_ids = input_ids[valid_mask]
-# # Vectorized lookup: O(1) per token
-# output_ids = input_ids.copy()
-# output_ids[valid_mask] = self.lookup_table[valid_ids]
-# return output_ids
 
-
-class NgramHashMapping:
+class NgramHashMapping(nnx.Module):
   """
   Deterministically maps token indices to n-gram hash indices for embedding lookups.
 
@@ -179,6 +171,7 @@ class NgramHashMapping:
       pad_id: Padding token ID.
       seed: Random seed for hash multiplier generation.
     """
+    super().__init__()
     self.min_head_vocab_size_per_ngram = engram_vocab_bases
     self.max_ngram_size = max_ngram_size
     self.n_head_per_ngram = engram_num_heads
@@ -191,7 +184,7 @@ class NgramHashMapping:
       self.pad_id = self.compressed_tokenizer.lookup_table[pad_id]
 
     # Pre-calculate odd multipliers for hashing: {layer_id: multipliers}
-    self.layer_multipliers = self._calculate_multipliers_across_layers(seed)
+    self.layer_multipliers = nnx.data(self._calculate_multipliers_across_layers(seed))
 
     # Pre-calculate unique prime vocab sizes for every head
     # Structure: {layer_id: [[2gram_head1, ..., 2gram_headH], ..., [Ngram_head1, ..., Ngram_headH]]}

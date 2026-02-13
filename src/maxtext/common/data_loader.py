@@ -89,39 +89,16 @@ class DataLoader:
         else:
           raise exceptions.StopTraining(f"`load_next_batch()` failed with {type(e)} exception: ({e}).")
     return self.last_batch
-  
-  # def generate_engram_map(self, inputs):
-  #   """Docstring DeepSeek n-grams hash mapping."""
-  #   # Generate Map using Dictionary
-  #   # Structure as {"layer_index": {"vocab_sizes": vocab_sizes, "input_ids": input_ids}}
-  #   ngram_inputs = self.ngram_mapping(inputs)
-  #   ngram_layer_map = {
-  #     layer_id: {
-  #         "vocab_sizes": self.ngram_mapping.get_vocab_sizes(layer_id),
-  #         "input_ids": ngram_inputs[layer_id]
-  #     }
-  #     for layer_id in self.config.engram_layers
-  #   }
-  #   return ngram_layer_map
 
   def load_next_batch(self, *args, **kwargs):
     """Loads the next batch with sharding hint"""
-    pre_sharding_batch = self.load_next_batch_pre_sharding()
-
-    # ngram_layer_map = None
-    # if self.config.engram_layers:
-    #   ngram_layer_map = self.generate_engram_map(pre_sharding_batch["inputs"])
-    #   print("inside of load_next_batch")
-    #   print(f"ngram_layer_map: {ngram_layer_map}")
-
     example_batch = jax.device_put(
-        pre_sharding_batch,
+        self.load_next_batch_pre_sharding(),
         self.input_data_shardings,
     )
 
     if self.config.enable_diloco:
       example_batch = diloco.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
-
     return example_batch
 
   def check_example_batch(self):
