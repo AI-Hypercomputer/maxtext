@@ -81,6 +81,10 @@ flags.DEFINE_string("load_parameters_path", None, "Path to load model parameters
 flags.DEFINE_integer("max_target_length", 1024, "Maximum total context length (MCL).")
 flags.DEFINE_float("gpu_memory_utilization", 0.72, "Fraction of GPU memory to be used for the model executor.")
 
+# vllm config variables
+flags.DEFINE_integer("vllm_swap_space", 2, "per device swap space in GB")
+flags.DEFINE_integer("vllm_async_scheduling", 1, "Async DP Scheduler for vLLM")
+
 # Decoding
 flags.DEFINE_bool("use_tunix", False, "Whether to use Tunix for vLLM decoding.")
 flags.DEFINE_bool("use_chat_template", False, "Whether to format the prompt using chat template.")
