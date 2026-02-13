@@ -289,15 +289,38 @@ def get_match_numbers_regex(tmvp_config):
 
 def fix_latex_escaping(text: str) -> str:
     """Fix common LaTeX commands that lost their backslashes due to Python string escaping.
-    
+
     This handles cases where someone writes "\frac" in a regular string and it becomes "frac".
-    Also handles cases where escape sequences like \f, \n, \t were interpreted by Python.
+    Also handles cases where escape sequences like \f, \n, \t, \r, \b, \a, \v were interpreted by Python.
     """
-    # First, try to recover from Python escape sequences
-    # \f becomes form feed (\x0c), replace it back
-    if '\x0c' in text:
-        text = text.replace('\x0crac', r'\frac')
-    
+    # First, try to recover from Python escape sequences that were interpreted
+    # Map of (escape_char, LaTeX_suffix) -> LaTeX_command
+    escape_fixes = [
+        ('\f', 'rac', r'\frac'),           # \f (form feed) → \frac
+        ('\n', 'ewline', r'\newline'),     # \n (newline) → \newline
+        ('\n', 'e', r'\ne'),               # \n (newline) → \ne (not equal)
+        ('\t', 'heta', r'\theta'),         # \t (tab) → \theta
+        ('\t', 'an', r'\tan'),             # \t (tab) → \tan
+        ('\t', 'o', r'\to'),               # \t (tab) → \to
+        ('\t', 'imes', r'\times'),         # \t (tab) → \times
+        ('\t', 'ext', r'\text'),           # \t (tab) → \text
+        ('\t', 'extbf', r'\textbf'),       # \t (tab) → \textbf
+        ('\t', 'extit', r'\textit'),       # \t (tab) → \textit
+        ('\r', 'ightarrow', r'\rightarrow'),  # \r (carriage return) → \rightarrow
+        ('\r', 'ightarrow', r'\Rightarrow'),  # \r (carriage return) → \Rightarrow (capital R handled separately)
+        ('\b', 'eta', r'\beta'),           # \b (backspace) → \beta
+        ('\b', 'ar', r'\bar'),             # \b (backspace) → \bar
+        ('\b', 'inom', r'\binom'),         # \b (backspace) → \binom
+        ('\b', 'oxed', r'\boxed'),         # \b (backspace) → \boxed
+        ('\a', 'lpha', r'\alpha'),         # \a (bell) → \alpha
+        ('\a', 'pprox', r'\approx'),       # \a (bell) → \approx
+        ('\v', 'ec', r'\vec'),             # \v (vertical tab) → \vec
+    ]
+
+    for escape_char, suffix, latex_cmd in escape_fixes:
+        if escape_char in text:
+            text = text.replace(escape_char + suffix, latex_cmd)
+
     # Common LaTeX commands that might have lost their backslashes
     latex_commands = [
         'frac', 'sqrt', 'pi', 'theta', 'alpha', 'beta', 'gamma', 'delta',
@@ -308,13 +331,13 @@ def fix_latex_escaping(text: str) -> str:
         'vec', 'dot', 'ddot', 'mathbb', 'mathbf', 'mathrm', 'text',
         'textbf', 'textit', 'boxed', 'left', 'right', 'choose', 'binom'
     ]
-    
+
     # Add backslashes to commands that appear to be missing them
     for cmd in latex_commands:
         # Match the command if it appears as a word boundary (not already escaped)
         # and not already preceded by a backslash
         text = re.sub(rf'(?<!\\)\b{cmd}\b', rf'\\{cmd}', text)
-    
+
     return text
 
 
