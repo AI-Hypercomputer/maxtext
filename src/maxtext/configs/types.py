@@ -248,7 +248,7 @@ ModelName = Literal[
     "llama4-17b-16e",
     "llama4-17b-128e",
     "olmo3-7b",
-    'olmo3-7b-pt',
+    "olmo3-7b-pt",
     "olmo3-32b",
 ]
 
@@ -1024,11 +1024,8 @@ class GrainDataset(BaseModel):
 
 
 class FineTuning(BaseModel):
-  """Configuration for fine-tuning methods like DPO, SFT, and GRPO."""
+  """Configuration for fine-tuning methods like SFT and GRPO."""
 
-  use_dpo: bool = Field(False, description="If True, enables Direct Preference Optimization training.")
-  dpo_label_smoothing: float = Field(0.0, ge=0.0, le=1.0, description="Label smoothing for DPO.")
-  dpo_beta: float = Field(0.1, description="Beta parameter for DPO.")
   use_sft: bool = Field(False, description="If True, enables Supervised Fine-Tuning.")
   sft_train_on_completion_only: bool = Field(
       False, description="If True, trains only on the completion part of the text."

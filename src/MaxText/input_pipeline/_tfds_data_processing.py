@@ -92,19 +92,15 @@ def preprocessing_pipeline(
     shift: bool = True,
     drop_remainder: bool = True,
     prefetch_size=tf.data.experimental.AUTOTUNE,
-    use_dpo: bool = False,
     hf_access_token: str = "",
 ):
   """pipeline for preprocessing TFDS dataset."""
-  if not use_dpo:
-    assert len(data_column_names) == 1
-    dataset = dataset.map(
-        lambda x: _input_pipeline_utils.normalize_features(x, data_column_names[0]), num_parallel_calls=AUTOTUNE
-    )
-  else:
-    dataset = dataset.map(lambda x: {col: x[col] for col in data_column_names}, num_parallel_calls=AUTOTUNE)
+  assert len(data_column_names) == 1
+  dataset = dataset.map(
+      lambda x: _input_pipeline_utils.normalize_features(x, data_column_names[0]), num_parallel_calls=AUTOTUNE
+  )
 
-  data_column_names = data_column_names if use_dpo else ("inputs", "targets")
+  data_column_names = ("inputs", "targets")
 
   tokenizer_model = _input_pipeline_utils.get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
   if tokenizer_model.pad_id is not None:
@@ -123,7 +119,7 @@ def preprocessing_pipeline(
   if max_target_length > 0:
     # in pre-training we can take upto max_length+1 because there would be truncation by
     # 1 token for both inputs and targets
-    extra_tokens = 1 if not use_dpo else 0
+    extra_tokens = 1
     dataset = dataset.map(
         lambda x: _input_pipeline_utils.truncate_to_max_allowable_length(x, max_target_length + extra_tokens),
         num_parallel_calls=AUTOTUNE,
@@ -136,13 +132,13 @@ def preprocessing_pipeline(
   dataset = dataset.repeat(num_epochs)
 
   # Shift inputs for teacher-forced training
-  if shift and not use_dpo:
+  if shift:
     dataset = dataset.map(
         _input_pipeline_utils.shift_data_by_truncation, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True
     )
 
   # Perform greedy sequence packing and batching
-  if pack_examples and not use_dpo:
+  if pack_examples:
     dataset = sequence_packing.pack_dataset(dataset, max_target_length, pad_id)
     dataset = dataset.batch(global_batch_size // jax.process_count(), drop_remainder=drop_remainder)
   else:
@@ -202,7 +198,6 @@ def make_tfds_train_iterator(
         add_eos=config.add_eos,
         num_epochs=config.num_epoch,
         pack_examples=config.packing,
-        use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
     return multihost_dataloading.MultiHostDataLoadIterator(
@@ -227,7 +222,6 @@ def make_tfds_train_iterator(
         add_eos=config.add_eos,
         num_epochs=config.num_epoch,
         pack_examples=config.packing,
-        use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
@@ -265,7 +259,6 @@ def make_tfds_eval_iterator(
         add_bos=config.add_bos,
         add_eos=config.add_eos,
         pack_examples=config.packing,
-        use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
     return multihost_dataloading.MultiHostDataLoadIterator(
@@ -292,7 +285,6 @@ def make_tfds_eval_iterator(
         add_bos=config.add_bos,
         add_eos=config.add_eos,
         pack_examples=config.packing,
-        use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
     return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, config, global_mesh)

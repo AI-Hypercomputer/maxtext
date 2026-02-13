@@ -59,7 +59,6 @@ from maxtext.common.goodput import (
 from maxtext.common.gcloud_stub import cloud_diagnostics as _cloud_diag, is_decoupled
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common.metric_logger import MetricLogger, record_activation_metrics
-from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -238,47 +237,27 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     rng2: A new rng key that can be used in future calls.
 
   """
-  reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = (
-      [],
-      [],
-      [],
-      loss_fn,
-  )
-  if config.use_dpo:
-    state, reference_params = _split_dpo_state(state)
-    state_mesh_shardings, reference_params_sharding = _split_dpo_state(state_mesh_shardings)
-    extra_dpo_args = [reference_params]
-    _loss_fn = dpo_loss_fn
-
   params = state.params
 
   if config.gradient_accumulation_steps > 1:
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
-        _loss_fn,
+        loss_fn,
         config,
         model,
         params,
         params_shardings,
         data,
         dropout_rng,
-        extra_dpo_args,
     )
   else:
-    if config.optimizer_memory_host_offload:
-      if config.use_dpo:
-        reference_params = jax.device_put(
-            reference_params,
-            max_utils.with_memory_kind(reference_params_sharding, "device"),
-        )
-        extra_dpo_args = [reference_params]
     if config.shard_optimizer_over_data:
       params = jax.tree.map(
           functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
           params,
           params_shardings,
       )
-    grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
+    grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
+    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, is_train=True)
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
@@ -338,8 +317,6 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
     scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
-  if config.use_dpo:
-    scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
   metrics = {
       "scalar": scalar_metrics,
       "scalars": {},
@@ -348,23 +325,14 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
-  if config.use_dpo:
-    new_state = _merge_dpo_state(new_state, reference_params)
-
   return new_state, metrics
 
 
 def eval_step(model, config, state, data, dropout_rng):
   """eval_step no backprop and new state compared with train_step."""
 
-  reference_params, extra_dpo_args, _loss_fn = [], [], loss_fn
-  if config.use_dpo:
-    state, reference_params = _split_dpo_state(state)
-    extra_dpo_args = [reference_params]
-    _loss_fn = dpo_loss_fn
-
-  eval_loss_fn = functools.partial(_loss_fn, model, config, data, dropout_rng, is_train=False)
-  loss, aux = eval_loss_fn(state.params, *extra_dpo_args)
+  eval_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=False)
+  loss, aux = eval_loss_fn(state.params)
 
   mtp_acceptance_rate = 0.0
   if config.mtp_eval_target_module > 0:
@@ -384,8 +352,6 @@ def eval_step(model, config, state, data, dropout_rng):
           "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
       },
   }
-  if config.use_dpo:
-    metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux["reward_accuracy"]
 
   return metrics
 
@@ -405,12 +371,6 @@ def train_loop(config, recorder, state=None):
       eval_data_iterator,
       state,
   ) = train_utils.setup_train_loop(config, recorder)
-
-  if config.use_dpo:
-    if "reference_params" not in state.params:
-      reference_params = jax.tree.map(jnp.copy, state.params["params"])
-      state = _merge_dpo_state(state, reference_params)
-    state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
@@ -461,8 +421,7 @@ def train_loop(config, recorder, state=None):
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()
 
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
       if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
         jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -503,8 +462,7 @@ def train_loop(config, recorder, state=None):
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
     if config.save_checkpoint_on_completion:
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
       checkpoint_manager.wait_until_finished()

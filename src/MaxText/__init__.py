@@ -31,7 +31,6 @@ from jax.sharding import Mesh
 
 from MaxText import pyconfig
 from MaxText.layers import models
-from maxtext.trainers.post_train.dpo import dpo_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 
