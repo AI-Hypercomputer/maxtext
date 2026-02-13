@@ -454,6 +454,11 @@ def _verify_lora_parameters(lora_model, mt_config):
 
 def maybe_apply_lora(model, mesh, mt_config):
   """Optionally applies LoRA/QLoRA to a MaxText model using Qwix."""
+  # Skip Qwix LoRA if MaxText LoRA adapters are loaded
+  if hasattr(mt_config, 'lora_input_adapters_path') and mt_config.lora_input_adapters_path:
+    max_logging.log("MaxText LoRA adapters loaded, skipping Qwix LoRA application")
+    return model
+    
   if not getattr(mt_config, "enable_lora", False):
     return model
 

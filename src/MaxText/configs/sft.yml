@@ -30,6 +30,10 @@ lora_module_path: ""
 lora_weight_qtype: null
 lora_tile_size: null
 
+# -------------- HF LoRA Adapter --------------
+# HuggingFace LoRA adapter repo ID (e.g., 'username/adapter-repo') or local path to directory containing adapter_model.safetensors
+hf_lora_adapter_path: ""
+
 # -------------- HF pipeline --------------
 dataset_type: hf
 hf_path: 'HuggingFaceH4/ultrachat_200k'
