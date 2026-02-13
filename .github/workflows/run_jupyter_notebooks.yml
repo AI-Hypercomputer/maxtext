@@ -1,0 +1,145 @@
+# Copyright 2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This file defines a module for running jupyter notebooks against the built maxtext package.
+
+name: Run Jupyter Notebooks
+
+on:
+  workflow_call:
+    inputs:
+      device_type:
+        required: true
+        type: string
+      device_name:
+        required: true
+        type: string
+      base_image:
+        required: true
+        type: string
+      cloud_runner:
+        required: false
+        type: string
+      maxtext_sha:
+        required: false
+        type: string
+      # Flag to skip source checkout and wheel installation
+      maxtext_installed:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      HF_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
+    container:
+      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }}
+    steps:
+      - name: Checkout MaxText
+        if: ${{ !inputs.maxtext_installed }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.maxtext_sha }}
+      - name: Download the MaxText wheel
+        if: ${{ !inputs.maxtext_installed }}
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: maxtext-wheel
+      - name: Install MaxText and Dependencies
+        if: ${{ !inputs.maxtext_installed }}
+        shell: bash
+        run: |
+          python3 -m uv venv --seed
+          source .venv/bin/activate
+
+          # Install MaxText package
+          maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
+          uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
+          uv pip install -r src/install_maxtext_extra_deps/extra_deps_from_github.txt
+
+          # Install Tunix for post-training notebooks
+          git clone https://github.com/google/tunix
+          uv pip install ./tunix
+          
+          # Install vllm for post-training notebooks
+          git clone https://github.com/vllm-project/vllm.git
+          VLLM_TARGET_DEVICE="tpu" uv pip install ./vllm
+
+          # Install tpu-inference for post-training notebooks
+          git clone https://github.com/vllm-project/tpu-inference.git
+          uv pip install ./tpu-inference
+
+          uv pip install --no-deps qwix==0.1.4
+          uv pip install --no-deps protobuf==5.29.5
+          python3 -m pip freeze
+      - name: Run Post-Training Notebooks
+        shell: bash
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src"
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ "${{ inputs.maxtext_installed }}" == "true" ]; then
+            # Move to the directory where code is baked into the image. See the Dockerfile.
+            # This is necessary because GHA sets an empty workspace by default.
+            cd /deps
+            PYTHON_EXE="python3"
+            PAPERMILL_EXE="papermill"
+          else
+            PYTHON_EXE=".venv/bin/python3"
+            PAPERMILL_EXE=".venv/bin/papermill"
+          fi
+
+          export MAXTEXT_REPO_ROOT=$(pwd)
+          export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
+          export MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
+
+          # Install dependencies for running notebooks
+          $PYTHON_EXE -m pip install papermill ipykernel ipywidgets
+          $PYTHON_EXE -m ipykernel install --user --name maxtext_venv
+
+          for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
+            filename=$(basename "$notebook")
+            output_name="${filename%.ipynb}_output.ipynb"
+
+            echo "------------------------------------------------------"
+            echo "Running $filename ..."
+            echo "------------------------------------------------------"
+
+            $PAPERMILL_EXE "$notebook" "$output_name" -k maxtext_venv
+          done
+      - name: Record Commit IDs
+        shell: bash
+        run: |
+          echo "--- MaxText and Post-Training Repositories Commit IDs ---"
+          echo "maxtext: ${GITHUB_SHA:0:7}"
+
+          declare -a repos=("tunix" "vllm" "tpu-inference")
+          for repo_dir in "${repos[@]}"; do
+            if [ -d "$repo_dir" ]; then
+              echo "$repo_dir: $(git -C "$repo_dir" rev-parse --short HEAD)"
+            else
+              echo "Warning: $repo_dir directory not found."
+            fi
+          done
+      - name: Upload Outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notebook-outputs-${{ inputs.device_name }}
+          path: ./*_output.ipynb

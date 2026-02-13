@@ -1,5 +1,5 @@
 <!--
- Copyright 2024 Google LLC
+ Copyright 2023–2025 Google LLC
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -54,8 +54,8 @@ Key concepts including checkpointing strategies, quantization, tiling, and Mixtu
 :hidden:
 :maxdepth: 1
 
-reference/performance_metrics.md
-reference/models.md
-reference/architecture.md
-reference/core_concepts.md
+reference/performance_metrics
+reference/models
+reference/architecture
+reference/core_concepts
 ```

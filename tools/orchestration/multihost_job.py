@@ -43,7 +43,7 @@ import subprocess
 from datetime import datetime
 import os
 import shutil
-from MaxText.inference_utils import str2bool
+from maxtext.inference.inference_utils import str2bool
 
 
 def get_project():

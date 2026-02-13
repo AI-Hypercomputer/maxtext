@@ -34,8 +34,8 @@ from MaxText.common_types import (
     D_KV,
     AxisNames,
     AxisIdxes,
-    LENGTH,
-    LENGTH_NO_EXP,
+    ATTN_LENGTH,
+    ATTN_LENGTH_NO_EXP,
     DType,
     Config,
     Array,
@@ -46,7 +46,7 @@ from MaxText.common_types import (
     KV_HEAD_DIM,
     KV_BATCH,
     KV_BATCH_NO_EXP,
-    EMBED,
+    ATTN_EMBED,
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_TRAIN,
     MODEL_MODE_PREFILL,
@@ -54,15 +54,12 @@ from MaxText.common_types import (
     AttentionType,
 )
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
-from MaxText.inference import kvcache
-from MaxText.inference import page_manager
-from MaxText.inference import paged_attention
-from MaxText.inference.kvcache import KVQuant
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.attention_op import AttentionOp
 from MaxText.layers.embeddings import (
     LLaMARotaryEmbedding,
     LlamaVisionRotaryEmbedding,
+    Qwen3OmniMoeThinkerTextRotaryEmbedding,
     Qwen3OmniMoeVisionRotaryEmbedding,
     RotaryEmbedding,
     YarnRotaryEmbedding,
@@ -70,8 +67,10 @@ from MaxText.layers.embeddings import (
 )
 from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
-from MaxText.layers.normalizations import RMSNorm, Qwen3NextRMSNorm
+from MaxText.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext.inference import kvcache, page_manager, paged_attention
+from maxtext.inference.kvcache import KVQuant
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -141,18 +140,18 @@ def attention_as_linen(
     prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
     prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
     prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-    key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-    value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-    ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
-    ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
-    out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
-    ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
-    prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
-    decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
+    query_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    key_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    value_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
+    ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
+    ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
+    input_axis_names: AxisNames = (BATCH, ATTN_LENGTH_NO_EXP, ATTN_EMBED),
+    ep_input_axis_names: AxisNames = (BATCH_NO_EXP, ATTN_LENGTH, ATTN_EMBED),
+    out_axis_names: AxisNames = (BATCH, ATTN_LENGTH_NO_EXP, HEAD, D_KV),
+    ep_out_axis_names: AxisNames = (BATCH_NO_EXP, ATTN_LENGTH, HEAD, D_KV),
+    prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, ATTN_EMBED),
+    decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, ATTN_EMBED),
     prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
     decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
     prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
@@ -162,7 +161,10 @@ def attention_as_linen(
     is_nope_layer: bool = False,
     is_vision: bool = False,
     model_mode: str = MODEL_MODE_TRAIN,
+    use_mrope: bool = False,
+    mrope_section: tuple[int, int, int] | None = None,
     name: str | None = None,
+    rope_type: str | None = None,
 ):
   """A factory function to create an Attention as a Linen module.
 
@@ -224,7 +226,10 @@ def attention_as_linen(
       is_nope_layer=is_nope_layer,
       is_vision=is_vision,
       model_mode=model_mode,
+      use_mrope=use_mrope,
+      mrope_section=mrope_section,
       name=name,
+      rope_type=rope_type,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
   )
@@ -300,18 +305,18 @@ class Attention(nnx.Module):
       prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
       prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
       prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
-      ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
-      out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
-      ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
-      prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
-      decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
+      query_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+      key_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+      value_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+      ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
+      ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
+      ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
+      input_axis_names: AxisNames = (BATCH, ATTN_LENGTH_NO_EXP, ATTN_EMBED),
+      ep_input_axis_names: AxisNames = (BATCH_NO_EXP, ATTN_LENGTH, ATTN_EMBED),
+      out_axis_names: AxisNames = (BATCH, ATTN_LENGTH_NO_EXP, HEAD, D_KV),
+      ep_out_axis_names: AxisNames = (BATCH_NO_EXP, ATTN_LENGTH, HEAD, D_KV),
+      prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, ATTN_EMBED),
+      decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, ATTN_EMBED),
       prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
       decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
       prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
@@ -322,7 +327,10 @@ class Attention(nnx.Module):
       is_vision: bool = False,
       model_mode: str = MODEL_MODE_TRAIN,
       base_kv_cache: bool = True,
+      use_mrope: bool = False,
+      mrope_section: tuple[int, int, int] | None = None,
       name: str | None = None,
+      rope_type: str | None = None,
       rngs: Optional[nnx.Rngs] = None,
   ):
     """Initializes the Attention module.
@@ -362,6 +370,8 @@ class Attention(nnx.Module):
       is_vision: Whether this is a vision attention layer.
       model_mode: The model's operational mode (e.g., 'train', 'prefill').
       base_kv_cache: Whether to use base (non-MLA) kv cache, if KVCache is used
+      rope_type: Optional override for the RoPE type (e.g., 'default', 'yarn').
+          If provided, this takes precedence over `config.rope_type`.
       rngs: RNG state for initialization, passed by the nnx.to_linen wrapper.
     """
 
@@ -416,7 +426,11 @@ class Attention(nnx.Module):
     self.is_nope_layer = is_nope_layer
     self.is_vision = is_vision
     self.model_mode = model_mode
+    self.use_mrope = use_mrope
+    self.mrope_section = mrope_section
     self.rngs = rngs
+    # Use the rope type specified in the arguments if provided, otherwise fall back to the one in the config.
+    self.rope_type = (rope_type or self.config.rope_type).lower()
 
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
 
@@ -483,9 +497,19 @@ class Attention(nnx.Module):
       self.sinks = None
 
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
+
     if self.use_qk_norm and not is_llama4_decoder_block:
-      self.query_norm = RMSNorm(
-          num_features=self.head_dim,
+      # Check if this is Olmo3, which uses a unique "Global" QK Norm strategy.
+      # GlobalRMSNorm flattens (Heads, Dim) to normalize across the entire hidden state.
+      use_global_qk_norm = self.config.model_name.startswith("olmo3")
+      qk_norm_cls = GlobalRMSNorm if use_global_qk_norm else RMSNorm
+
+      # For RMSNorm use `head_dim` (per-head normalization), while for GlobalRMSNorm use `num_heads * head_dim` (global normalization).
+      q_features = (self.num_query_heads * self.head_dim) if use_global_qk_norm else self.head_dim
+      k_features = (self.num_kv_heads * self.head_dim) if use_global_qk_norm else self.head_dim
+
+      self.query_norm = qk_norm_cls(
+          num_features=q_features,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           shard_mode=self.config.shard_mode,
@@ -493,8 +517,8 @@ class Attention(nnx.Module):
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
-      self.key_norm = RMSNorm(
-          num_features=self.head_dim,
+      self.key_norm = qk_norm_cls(
+          num_features=k_features,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           shard_mode=self.config.shard_mode,
@@ -719,7 +743,7 @@ class Attention(nnx.Module):
     else:
       rope_embedding_dims = self.head_dim
 
-    rope_type = self.config.rope_type.lower()
+    rope_type = self.rope_type
     rope_use_scale = self.config.rope_use_scale
     if self.is_vision:
       if self.config.model_name.startswith("qwen3-omni"):
@@ -744,6 +768,17 @@ class Attention(nnx.Module):
         )
       else:
         raise ValueError(f"Unsupported model type for vision rotary embedding: {self.config.model_name}")
+
+    elif self.use_mrope:
+      rotary_embedding = Qwen3OmniMoeThinkerTextRotaryEmbedding(
+          min_timescale=self.config.rope_min_timescale,
+          max_timescale=self.config.rope_max_timescale,
+          embedding_dims=rope_embedding_dims,
+          cast_as_fprop_dtype=True,
+          fprop_dtype=self.dtype,
+          mrope_section=self.mrope_section,
+          rngs=self.rngs,
+      )
 
     elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
       rotary_embedding = LLaMARotaryEmbedding(
@@ -1114,6 +1149,7 @@ class Attention(nnx.Module):
           bidirectional_mask,
           self.sinks,
       )
+    out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
     if model_mode == MODEL_MODE_PREFILL:
       out = self._maybe_shard_with_logical(out, self.prefill_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:

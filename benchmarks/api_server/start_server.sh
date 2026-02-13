@@ -20,7 +20,7 @@
 #
 # Example:
 # bash benchmarks/api_server/start_server.sh \
-#     MaxText/configs/base.yml \
+#     maxtext/configs/base.yml \
 #     model_name="qwen3-30b-a3b" \
 #     tokenizer_path="Qwen/Qwen3-30B-A3B-Thinking-2507" \
 #     load_parameters_path="<path_to_your_checkpoint>" \

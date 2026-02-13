@@ -13,11 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
  -->
+
 # MaxText
 
 ```{raw} html
 :file: index.html
 ```
+
+:link: reference/api
 
 <div class="doc-body">
 <section class="latest-news">
@@ -34,11 +37,11 @@
 :maxdepth: 2
 :hidden:
 
-install_maxtext.md
-tutorials.md
-run_maxtext.md
-guides.md
-reference.md
-development.md
-release_notes.md
+install_maxtext
+tutorials
+run_maxtext
+guides
+reference
+development
+release_notes
 ```

@@ -30,16 +30,11 @@ from flax.linen.partitioning import ScanIn
 
 from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONTEXT
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText import max_logging
-from MaxText import max_utils
 from MaxText.sharding import create_sharding
-from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
-from MaxText import maxtext_utils
-from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.normalizations import rms_norm
@@ -47,7 +42,6 @@ from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, posit
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers import (
     deepseek,
-    deepseek_batchsplit,
     gemma,
     gemma2,
     gemma3,
@@ -59,7 +53,13 @@ from MaxText.layers import (
     mixtral,
     qwen3,
     simple_layer,
+    olmo3,
 )
+from maxtext.inference import page_manager
+from maxtext.multimodal import utils as mm_utils
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -151,6 +151,8 @@ class DecoderLayer(nn.Module):
         ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
+        use_mrope=cfg.use_mrope,
+        mrope_section=cfg.mrope_section,
         model_mode=model_mode,
     )
 
@@ -404,10 +406,10 @@ class Decoder(nn.Module):
       case DecoderBlockType.MIXTRAL:
         return [mixtral.MixtralDecoderLayerToLinen]
       case DecoderBlockType.DEEPSEEK:
-        if self.config.use_batch_split_schedule:
-          return [deepseek_batchsplit.DeepSeekDenseLayerToLinen, deepseek_batchsplit.DeepSeekMoELayerToLinen]
-        else:
-          return [deepseek.DeepSeekDenseLayerToLinen, deepseek.DeepSeekMoELayerToLinen]
+        return [
+            deepseek.DeepSeekDenseLayerToLinen,
+            deepseek.DeepSeekMoELayerToLinen,
+        ]
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
@@ -430,6 +432,9 @@ class Decoder(nn.Module):
         return [simple_layer.SimpleMlpDecoderLayerToLinen]
       case DecoderBlockType.LLAMA4:
         return [llama4.Llama4ScannableBlockToLinen] if self.config.scan_layers else [llama4.Llama4DecoderLayerToLinen]
+      case DecoderBlockType.OLMO3:
+        return [olmo3.Olmo3ScannableBlockToLinen] if self.config.scan_layers else [olmo3.Olmo3DecoderLayerToLinen]
+
       case _:
         # Default case to handle any unknown decoder block types.
         raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
@@ -479,6 +484,7 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
+        DecoderBlockType.OLMO3,
     ):
       return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
@@ -563,6 +569,8 @@ class Decoder(nn.Module):
       image_embeddings=None,
       bidirectional_mask=None,
       image_masks=None,
+      audio_embeddings=None,
+      audio_masks=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
@@ -579,21 +587,32 @@ class Decoder(nn.Module):
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
       ]:
-        y = multimodal_utils.merge_mm_embeddings(
+        y = mm_utils.merge_mm_embeddings(
             text_embeddings=y,
-            vision_embeddings=image_embeddings,
+            multimodal_embeddings=image_embeddings,
             mask=bidirectional_mask,
-            image_masks=image_masks,
+            token_masks=image_masks,
         )
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       else:
         raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
+    if audio_embeddings is not None and cfg.use_audio:
+      if cfg.model_name in ["qwen3-omni-30b-a3b"]:
+        y = mm_utils.merge_mm_embeddings(
+            text_embeddings=y,
+            multimodal_embeddings=audio_embeddings,
+            mask=audio_masks,
+            token_masks=None,
+        )
+      else:
+        raise ValueError(f"Unsupported model_name for audio: {cfg.model_name}")
+
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
     if cfg.use_untrainable_positional_embedding:
-      y = positional_embedding_as_linen(embedding_dims=cfg.base_emb_dim)(y, decoder_positions)
+      y += positional_embedding_as_linen(embedding_dims=cfg.base_emb_dim)(y.shape[1], decoder_positions)
 
     if cfg.trainable_position_size > 0:
       y += embed_as_linen(
@@ -673,6 +692,7 @@ class Decoder(nn.Module):
 
     return logits
 
+  # TODO(aireenmei, Hengtaoguo): consolidate all multimodal inputs into a class as input to the encoder
   @nn.compact
   def __call__(
       self,
@@ -690,6 +710,8 @@ class Decoder(nn.Module):
       image_masks: None | jnp.ndarray = None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
+      audio_embeddings: None | jnp.ndarray = None,
+      audio_masks: None | jnp.ndarray = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -705,6 +727,8 @@ class Decoder(nn.Module):
         image_embeddings,
         bidirectional_mask,
         image_masks,
+        audio_embeddings,
+        audio_masks,
     )
 
     policy = self.get_remat_policy()
@@ -878,6 +902,8 @@ class Decoder(nn.Module):
               layer_kwargs = {"layer_idx": lyr}
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
+            if cfg.decoder_block == DecoderBlockType.OLMO3:
+              layer_kwargs = {"attention_type": olmo3.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )

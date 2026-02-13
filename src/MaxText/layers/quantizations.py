@@ -37,7 +37,7 @@ from flax.linen import initializers as flax_initializers
 import flax.linen as nn
 
 from MaxText.common_types import DType, Config
-from MaxText.inference.kvcache import KVQuant
+from maxtext.inference.kvcache import KVQuant
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -223,18 +223,15 @@ class _Fp8EinsumWrapper(nn.Module):
 
 
 class Fp8Einsum(nn.Module):
-  """An fp8 einsum op.
+  """An fp8 einsum op."""
 
-  Attributes:
-    amax_history_length: size of the amax history.
-    e4m3_dtype: e4m3 variants, e.g., e4m3fn, e4m3fnuz.
-    e5m2_dtype: e5m2 variants, e.g., e5m2, e5m2fnuz.
-    dtype: computation dtype.
-  """
-
+  #: size of the amax history.
   amax_history_length: int = 1024
+  #: e4m3 variants, e.g., e4m3fn, e4m3fnuz.
   e4m3_dtype: DType = jnp.float8_e4m3fn
+  #: e5m2 variants, e.g., e5m2, e5m2fnuz.
   e5m2_dtype: DType = jnp.float8_e5m2
+  #: computation dtype.
   dtype: DType = jnp.float32
 
   def setup(self) -> None:
@@ -752,6 +749,7 @@ class TransformerEngineQuantization(Quantization):
         "te_fp8_currentscaling": recipe.Float8CurrentScaling,
         "te_mxfp8": recipe.MXFP8BlockScaling,
         "te_nvfp4": recipe.NVFP4BlockScaling,  # pytype: disable=module-attr
+        "te_nvfp4_no_rht": functools.partial(recipe.NVFP4BlockScaling, disable_rht=True),  # pytype: disable=module-attr
     }
     if recipe_name not in RECIPES:
       raise ValueError(f"Invalid TransformerEngine recipe: {recipe_name}")

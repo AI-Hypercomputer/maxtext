@@ -40,7 +40,7 @@ Set `--remove-local-dataset-files` to remove dataset files created locally after
 For more information, check out `python3 -m MaxText.generate_distillation_data --help`.
 Note:
 Make sure to run maxengine server in a new terminal before executing this command. Example command to run maxengine server:
-  python3 -m MaxText.maxengine_server src/MaxText/configs/base.yml \
+  python3 -m MaxText.maxengine_server src/maxtext/configs/base.yml \
     model_name=deepseek2-16b tokenizer_path=deepseek-ai/DeepSeek-V2-Lite-chat tokenizer_type=huggingface \
     load_parameters_path=<unscanned checkpoint path> \
     max_target_length=2048 max_prefill_predict_length=256 \
@@ -58,9 +58,9 @@ import transformers
 from datasets import Dataset
 from huggingface_hub import create_repo, get_full_repo_name, repo_exists, upload_file
 
-from MaxText import max_logging
+from maxtext.utils import gcs_utils
+from maxtext.utils import max_logging
 from MaxText.input_pipeline import _distillation_data_processing
-from MaxText.utils import gcs_utils
 
 from jetstream.core.proto import jetstream_pb2
 from jetstream.core.proto import jetstream_pb2_grpc

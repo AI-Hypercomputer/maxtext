@@ -29,11 +29,11 @@ from jax.tree_util import register_pytree_node_class
 import omegaconf
 
 from MaxText import accelerator_to_spec_map
-from MaxText import max_logging
-from MaxText import max_utils
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT, MAXTEXT_PKG_DIR
 from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode
-from MaxText.utils import gcs_utils
+from maxtext.utils import gcs_utils
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 
 
 # pylint: disable=line-too-long
@@ -358,6 +358,7 @@ def validate_tokamax_usage(keys):
     raise ValueError(f"Invalid tokamax's megablox kernel usage for hardware {keys['hardware']}. Only TPU is supported.")
 
 
+# All data input validations have been migrated to config/types.py
 def validate_data_input(keys):
   """validate provided parameters for data input"""
   if not keys["hf_access_token"]:

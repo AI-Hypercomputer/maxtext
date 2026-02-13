@@ -31,6 +31,7 @@ NdInitializer = Callable[[PRNGKey, Shape, DType, InitializerAxis, InitializerAxi
 default_embed_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
 
 default_bias_init = jax.nn.initializers.constant(0.0)
+default_scalar_init = jax.nn.initializers.constant(0.01)
 
 
 def nd_dense_init(scale, mode, distribution):
@@ -63,9 +64,9 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
   """Wraps an NNX variable's value in `nn.LogicallyPartitioned`.
 
   This function inspects the metadata of an `nnx.VariableState` object. If
-  sharding information ('sharding' or 'sharding_names') is present, it wraps
-  the variable's value in `nn.LogicallyPartitioned` to apply the specified
-  sharding constraints.
+  sharding information ('out_sharding', 'sharding' or 'sharding_names') is
+  present, it wraps the variable's value in `nn.LogicallyPartitioned` to apply
+  the specified sharding constraints.
 
   It handles special cases for `aqt_tensor.QTensor` and variables of type
   `_overwrite_with_gradient` by returning their values directly without
@@ -84,14 +85,18 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
     return variable.value
 
   metadata = variable.get_metadata()
-  if "sharding" in metadata or "sharding_names" in metadata:
-    if "sharding_names" in metadata:
-      sharding_names = metadata["sharding_names"]
-    else:
-      sharding_names = metadata["sharding"]
+  out_sharding = None
+  if "out_sharding" in metadata:
+    out_sharding = metadata["out_sharding"]
+  elif "sharding_names" in metadata:
+    out_sharding = metadata["sharding_names"]
+  elif "sharding" in metadata:
+    out_sharding = metadata["sharding"]
+
+  if out_sharding is not None:
     return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
         variable.value,
-        sharding_names,  # type: ignore[arg-type]
+        out_sharding,  # type: ignore[arg-type]
         mesh=metadata.get("mesh"),
         rules=metadata.get("rules"),
     )

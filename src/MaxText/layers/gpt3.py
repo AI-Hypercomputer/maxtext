@@ -27,8 +27,6 @@ from jax.sharding import Mesh, NamedSharding
 from flax import linen as nn
 from flax import nnx
 
-from MaxText import max_logging
-from MaxText import max_utils
 from MaxText.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
 from MaxText.layers import initializers, nnx_wrappers
 from MaxText.layers.linears import DenseGeneral, MlpBlock, canonicalize_tuple, normalize_axes
@@ -38,6 +36,8 @@ from MaxText.layers import linears
 from MaxText.layers.attentions import AttentionOp, KVQuant
 from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 
 # -----------------------------------------
 # The Normalization Layer specific for GPT3

@@ -1,7 +1,8 @@
 *__pycache__*
 tmp/
 logs/
-
+.venvs
+venv*
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -75,7 +76,6 @@ instance/
 # Sphinx documentation
 docs/_build/
 
-# src/MaxText/experimental/agent/integrative_rag_agent
 *.db
 
 # PyBuilder

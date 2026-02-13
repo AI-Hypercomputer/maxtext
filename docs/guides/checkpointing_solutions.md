@@ -1,4 +1,5 @@
 (checkpointing_solutions)=
+
 # Checkpointing
 
 ::::{grid} 1 2 2 2
@@ -24,13 +25,22 @@ Handle preemption and recover training progress.
 
 Optimize storage costs and performance with multi-tier usage.
 :::
+
+:::{grid-item-card} 🔁 Checkpoint conversion utilities
+:link: checkpointing_solutions/convert_checkpoint
+:link-type: doc
+
+Convenient tools to convert between Hugging Face and MaxText checkpoint.
+:::
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 checkpointing_solutions/gcs_checkpointing.md
 checkpointing_solutions/emergency_checkpointing.md
 checkpointing_solutions/multi_tier_checkpointing.md
+checkpointing_solutions/convert_checkpoint.md
 ```

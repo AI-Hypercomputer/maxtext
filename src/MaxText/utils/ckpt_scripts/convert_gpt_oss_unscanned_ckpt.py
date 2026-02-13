@@ -36,9 +36,9 @@ from safetensors import safe_open
 import torch
 from tqdm import tqdm
 
-from MaxText import max_logging
-from MaxText.inference_utils import str2bool
 from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
+from maxtext.inference.inference_utils import str2bool
+from maxtext.utils import max_logging
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
@@ -303,7 +303,7 @@ def convert_to_jax_weights(base_model_path: str, model_size: str):
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and output jax_weights ready for MaxText
 
-  Attributes:
+  Args:
     base_model_path: checkpoint path
     model_size: gpt-oss-20b, gpt-oss-120b
   """

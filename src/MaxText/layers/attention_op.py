@@ -32,7 +32,6 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ke
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
-from MaxText import max_utils
 from MaxText.common_types import (
     Array,
     AttentionType,
@@ -69,15 +68,16 @@ from MaxText.common_types import (
     Q_LENGTH,
     Q_LENGTH_NO_EXP,
 )
-from MaxText.inference import page_manager
-from MaxText.inference.kvcache import KVQuant, KVTensor
-from MaxText.kernels import jax_flash_attention
-from MaxText.kernels.ragged_attention import ragged_gqa
-from MaxText.kernels.ragged_attention import ragged_mha
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import variable_to_logically_partitioned
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.sharding import logical_to_mesh_axes, maybe_shard_with_name
+from maxtext.inference import page_manager
+from maxtext.inference.kvcache import KVQuant, KVTensor
+from maxtext.kernels.attention import jax_flash_attention
+from maxtext.kernels.attention.ragged_attention import ragged_gqa
+from maxtext.kernels.attention.ragged_attention import ragged_mha
+from maxtext.utils import max_utils
 import numpy as np
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
@@ -149,11 +149,9 @@ class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disab
   This mask class inherits from splash_attention_mask._ComputableMask and is designed to be used with Splash Attention.
   It allows the mask logic to be computed on-the-fly or fused into the attention kernel, avoiding the memory cost of
   materializing the full (sequence_length, sequence_length) boolean mask array, which can be prohibitive for long sequences.
-
-  Attributes:
-    chunk_size: The size of each attention chunk.
   """
 
+  #: The size of each attention chunk.
   chunk_size: int
 
   def __init__(
@@ -606,12 +604,14 @@ class AttentionOp(nnx.Module):
           logical OR.
 
     Returns:
-      An `Array` representing the attention mask, broadcastable to the shape
-      `[batch_size, num_heads, q_sequence_length, kv_sequence_length]`.
+      An `Array` representing the attention mask, with shape
+       `[batch_size, 1, 1, q_sequence_length, kv_sequence_length]`.
+      It is broadcastable to the shape
+       `[batch_size, num_kv_heads, group_size=n_q // n_kv, q_sequence_length, kv_sequence_length]`.
       Positions with `0.0` allow attention, while positions with
-      `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
+       `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
       Returns `None` if no masking is determined to be necessary based on
-      the inputs and configuration.
+       the inputs and configuration.
 
     References:
       [1] JAX Pallas MHA Flash Attention:
@@ -824,6 +824,7 @@ class AttentionOp(nnx.Module):
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
       sinks: Array | None = None,
+      index_mask: Array | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -863,6 +864,7 @@ class AttentionOp(nnx.Module):
           previous_chunk,
           bidirectional_mask=bidirectional_mask,
           sinks=sinks,
+          index_mask=index_mask,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -879,7 +881,9 @@ class AttentionOp(nnx.Module):
                               Use `dot_product` instead."""
           )
         return (
-            self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, sinks),
+            self.tpu_flash_attention(
+                query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, sinks, index_mask
+            ),
             None,
             None,
         )
@@ -1036,6 +1040,7 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids: Array | None,
       attn_logits_soft_cap: float | None = None,
       sinks: Array | None = None,
+      index_mask: Array | None = None,
   ) -> Array:
     """TPU Flash Attention."""
 
@@ -1061,10 +1066,12 @@ class AttentionOp(nnx.Module):
       axis_names_splash_kernel = self._logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
       axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q_ep)
       axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv_ep)
+      index_mask_axis_names = self._logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH, KV_LENGTH))
     else:
       axis_names_splash_kernel = self._logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
       axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
       axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
+      index_mask_axis_names = self._logical_to_mesh_axes((BATCH, Q_LENGTH, KV_LENGTH))
 
     global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
     global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
@@ -1120,6 +1127,7 @@ class AttentionOp(nnx.Module):
             if config.cost_estimate_flops_bwd >= 0
             else None,
             dq_reduction_steps=config.dq_reduction_steps if config.dq_reduction_steps > 0 else None,
+            use_experimental_scheduler=config.use_splash_scheduler,
         )
       else:
         sa_config = splash_attention_kernel.BlockSizes(
@@ -1250,10 +1258,12 @@ class AttentionOp(nnx.Module):
             axis_names_kv,
             segment_axis_names_q,
             segment_axis_names_kv,
+            None,  # no sharding for config
             segment_axis_names_splash_kernel,
             None,  # no sharding for cp_size
             None,  # no sharding for load_balanced_context_parallel
             sink_axis_names,  # sharding align with query heads
+            index_mask_axis_names,
         ),
         out_specs=axis_names_q,
         check_vma=False,
@@ -1264,10 +1274,12 @@ class AttentionOp(nnx.Module):
         value,
         decoder_segment_ids_q,
         decoder_segment_ids_kv,
+        sa_config,
         splash_kernel,
         cp_size,
         load_balanced_context_parallel,
         sinks,
+        index_mask,
     ):
       # If load_balanced_context_parallel is enabled, reorder the key and value tensors
       # to ensure that they are contiguous in memory.
@@ -1293,10 +1305,25 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_tuple = None
 
       if self.config.use_tokamax_splash:
-        kernel = partial(splash_kernel, max_logit_value=max_logit_value)
-        attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
-            query, key, value, decoder_segment_ids_tuple, sinks
-        )
+        if self.config.use_sparse_indexer and index_mask is not None:
+          # Construct the splash kernel call with dynamic mask
+          def dynamic_mask_splash_kernel(q, k, v, segment, sinks, index_mask):
+            splash_kernel = tokamax_splash_kernel.make_dynamic_splash_mha(
+                mask=index_mask,
+                config=sa_config,
+            )
+            kernel = partial(splash_kernel, max_logit_value=max_logit_value)
+            return kernel(q, k, v, segment, sinks=sinks)
+
+          # Iterate over batch dimension for (query, key, value, segment, sinks, mask)
+          attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, 0, None, 0))
+          index_mask = jnp.isclose(index_mask, 0.0)
+          attention_output = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, index_mask)
+        else:
+          kernel = partial(splash_kernel, max_logit_value=max_logit_value)
+          attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
+              query, key, value, decoder_segment_ids_tuple, sinks
+          )
       elif self.config.use_jax_splash:
         materialized_mask = jnp.asarray(mask[:, :])
         attention_output = jax_flash_attention.flash_attention_block_masked(
@@ -1334,6 +1361,7 @@ class AttentionOp(nnx.Module):
     decoder_segment_ids_q = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
     decoder_segment_ids_kv = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
     sinks = _maybe_shard_with_pspec(sinks, sink_axis_names)
+    index_mask = _maybe_shard_with_pspec(index_mask, index_mask_axis_names)
 
     x = wrap_flash_attention(
         query,
@@ -1341,10 +1369,12 @@ class AttentionOp(nnx.Module):
         value,
         decoder_segment_ids_q,
         decoder_segment_ids_kv,
+        sa_config,
         None if self.config.use_jax_splash else splash_kernel,
         cp_size,
         load_balanced_context_parallel,
         sinks,
+        index_mask,
     )
 
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
@@ -1561,6 +1591,7 @@ class AttentionOp(nnx.Module):
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
       sinks: Array | None = None,
+      index_mask: Array | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1614,6 +1645,7 @@ class AttentionOp(nnx.Module):
     attn_mask = self.generate_attention_mask(
         query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
     )
+
     if self.config.moba:
       kv_seq_len = key.shape[1]
       # This logic for `next_pos` is duplicated from `generate_attention_mask`.
@@ -1630,6 +1662,14 @@ class AttentionOp(nnx.Module):
       # is scale-invariant, we can use the scaled query directly.
       moba_mask = self._generate_moba_mask(query, key, q_positions)
       attn_weights += moba_mask
+
+    # Apply index mask, deepseek sparse attention
+    # index mask contains 0.0 for kept tokens and large negative for masked tokens.
+    if index_mask is not None:
+      # index_mask: from [b, q_len, kv_len] to [b, 1, 1, q_len, kv_len]
+      index_mask = index_mask[:, None, None, :, :]
+      # attn_weights: [b, n_kv, n_q // n_kv, q_len, kv_len]
+      attn_weights = apply_mask_to_logits(attn_weights, index_mask)
 
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
@@ -1778,6 +1818,7 @@ class AttentionOp(nnx.Module):
       previous_chunk=None,
       bidirectional_mask=None,
       sinks=None,
+      index_mask: Optional[Array] = None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
@@ -1800,6 +1841,7 @@ class AttentionOp(nnx.Module):
         previous_chunk=previous_chunk,
         bidirectional_mask=bidirectional_mask,
         sinks=sinks,
+        index_mask=index_mask,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
     )

@@ -1,0 +1,18 @@
+# .coveragerc
+
+[run]
+source = MaxText
+branch = True
+omit =
+    tests/*
+    .venv/*
+
+[paths]
+source =
+    src/MaxText
+    src/MaxText
+    */site-packages/MaxText
+    */site-packages/maxtext
+
+[report]
+show_missing = True

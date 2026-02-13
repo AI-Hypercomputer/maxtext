@@ -21,13 +21,21 @@ from flax import nnx
 import flax.linen as nn
 from jax import numpy as jnp
 from jax.sharding import Mesh
-from MaxText import model_creation_utils
-from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_AUTOREGRESSIVE
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.utils import max_logging
+from maxtext.utils import model_creation_utils
 
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+
+try:
+  from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+except ImportError:
+  # Mock for documentation build or environments without tpu_inference
+  class AttentionMetadata:
+    input_positions: jax.Array
+
+
 from vllm.config import VllmConfig
 
 
@@ -65,7 +73,7 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
     raise ValueError("hf_config_path must be provided when using MaxTextForCausalLM.")
 
   # Add base config path to positional args
-  base_config_path = os.path.join(MAXTEXT_PKG_DIR, "configs", "vllm.yml")
+  base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
   argv_list = ["", str(base_config_path)]
 
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
@@ -143,7 +151,7 @@ class MaxTextForCausalLM(nnx.Module):
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
-      hidden, updated_kv_caches = self.model(
+      hidden, kv_caches = self.model(
           decoder_input_tokens=input_ids,
           decoder_positions=input_positions,
           kv_caches=kv_caches,
@@ -155,7 +163,7 @@ class MaxTextForCausalLM(nnx.Module):
       # To be compatible with vLLM, we reshape to (batch * seq, dim).
       hidden = hidden.reshape((-1, hidden.shape[-1]))
 
-    return updated_kv_caches, hidden, aux_hidden_states
+    return kv_caches, hidden, aux_hidden_states
 
   def forward(self, *args, **kwargs):
     """Alias for __call__ for compatibility.

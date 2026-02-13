@@ -23,9 +23,7 @@ from jax.sharding import Mesh
 
 from flax import nnx
 
-from MaxText.inference import page_manager
 from MaxText.common_types import Config
-from MaxText import max_utils
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from MaxText.layers.linears import Dropout, MlpBlock
 from MaxText.layers import initializers
@@ -35,6 +33,8 @@ from MaxText.layers.attentions import Attention
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.common_types import MODEL_MODE_PREFILL
+from maxtext.inference import page_manager
+from maxtext.utils import max_utils
 
 
 # -----------------------------------------
@@ -101,6 +101,7 @@ class LlamaDecoderLayer(nnx.Module):
         use_ragged_attention=config.use_ragged_attention,
         ragged_block_size=config.ragged_block_size,
         model_mode=model_mode,
+        attn_logits_soft_cap=config.attn_logits_soft_cap,
         rngs=rngs,
     )
 

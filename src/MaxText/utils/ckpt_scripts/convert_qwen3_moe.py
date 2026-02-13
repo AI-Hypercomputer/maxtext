@@ -32,9 +32,9 @@ import torch
 from safetensors import safe_open
 from tqdm import tqdm
 
-from MaxText import max_logging
-from MaxText.inference_utils import str2bool
 from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
+from maxtext.inference.inference_utils import str2bool
+from maxtext.utils import max_logging
 
 # Static model parameters dictionary
 MODEL_PARAMS_DICT = {

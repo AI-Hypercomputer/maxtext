@@ -72,11 +72,14 @@ ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS = (
     " --xla_sc_enable_instruction_fusion=false"
     " --xla_sc_disjoint_spmem=false"
     " --xla_sc_disable_megacore_partitioning=true"
-    " --2a886c8_chip_config_name=megachip_tccontrol"
 )
 
 
 # Enable SparseCore All Gather (1D), Reduce Scatter (1D) and All Reduce (ND)
+# On Ironwood, by default:
+# xla_tpu_enable_sparse_core_collective_offload_all_gather as True
+# xla_tpu_enable_sparse_core_collective_offload_reduce_scatter as True
+# xla_tpu_enable_sparse_core_collective_offload_all_reduce as True
 ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR = (
     " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
     " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false"
@@ -91,6 +94,8 @@ ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR = (
 
 # Enable SparseCore Reduce Scatter (SC RS)
 # Either one of CF or SC can be enabled at a time.
+# On Ironwood, by default:
+# xla_tpu_enable_sparse_core_collective_offload_reduce_scatter as True
 ENABLE_SPARSECORE_OFFLOADING_FOR_REDUCE_SCATTER = (
     " --xla_tpu_enable_async_collective_fusion_fuse_reduce_scatter=false"
     " --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
@@ -99,6 +104,8 @@ ENABLE_SPARSECORE_OFFLOADING_FOR_REDUCE_SCATTER = (
 
 # Enable SparseCore All Gather (SC AG).
 # Either one of CF or SC can be enabled at a time.
+# On Ironwood, by default:
+# xla_tpu_enable_sparse_core_collective_offload_all_gather as True
 ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER = (
     " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
     " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
@@ -109,6 +116,8 @@ ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER = (
 # Either one of CF or SC can be enabled at a time.
 # This is useful for reducing the gradient reduction all-reduce time with
 # overlapping with compute during that time.
+# On Ironwood, by default:
+# xla_tpu_enable_sparse_core_collective_offload_all_reduce as True
 ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE = (
     " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false"
     " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"

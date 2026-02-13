@@ -20,7 +20,7 @@ from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from MaxText.rl import utils_rl
-from MaxText import max_logging
+from maxtext.utils import max_logging
 
 # ## Evaluate
 # We evaluate it in two ways:
