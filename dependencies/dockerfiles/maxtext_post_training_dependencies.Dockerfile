@@ -35,6 +35,8 @@ RUN pip install vllm-tpu
 
 RUN pip install --no-deps qwix==0.1.4
 
+RUN pip install math-verify
+
 RUN if [ "$MODE" = "post-training-experimental" ]; then \
     pip uninstall -y jax jaxlib libtpu && \
     pip install --pre -U jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ && \
