@@ -402,13 +402,17 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   if trainer_config.debug.rl:
     # Let's see how one batch of the dataset looks like!
-    print(f"train with {len(train_dataset)=}")
+    # print(f"train with {len(train_dataset)=}")
     if trainer_config.debug.rl:
-      for ele in train_dataset[:5]:
+      for i, ele in enumerate(train_dataset):
+        if i >= 5:
+          break
         pprint(ele)
-    print(f"test with {len(test_dataset)=}")
+    # print(f"test with {len(test_dataset)=}")
     if trainer_config.debug.rl:
-      for ele in test_dataset[:5]:
+      for i, ele in enumerate(test_dataset):
+        if i >= 5:
+          break
         pprint(ele)
 
   # Load reference model
