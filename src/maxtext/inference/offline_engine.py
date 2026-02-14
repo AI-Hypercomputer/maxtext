@@ -54,7 +54,8 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 from MaxText.maxengine import MaxEngine
-from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
+from maxtext.input_pipeline.packing.prefill_packing import PrefillProcessor
+from maxtext.input_pipeline.packing.prefill_packing import BatchedPrefillProcessor
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 

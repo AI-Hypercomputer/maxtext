@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 import grain.python as grain
 import numpy as np
 import tensorflow as tf
-from MaxText import tokenizer
+from maxtext.input_pipeline import tokenizer
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging
