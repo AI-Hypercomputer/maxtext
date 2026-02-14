@@ -5,7 +5,7 @@ cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
 drjax
-flax
+flax>=0.12.4
 gcsfs
 google-api-python-client
 google-cloud-aiplatform
@@ -39,7 +39,7 @@ tensorflow-datasets
 tensorflow-text
 tensorflow
 tiktoken
-tokamax
+tokamax!=0.1.0
 transformers
 qwix
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
