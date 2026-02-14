@@ -24,6 +24,7 @@ import os.path
 from tempfile import gettempdir
 
 import pytest
+import absl.flags
 
 from MaxText.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
@@ -792,5 +793,35 @@ class TrainCompile(unittest.TestCase):
             "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_qwen3_next_tokamax(self):
+    """AOT test for Qwen3-Next with Tokamax GMM on v5p-128"""
+
+    absl.flags.FLAGS.mark_as_parsed()
+
+    compiled_trainstep_file = "/tmp/test_qwen3_next_tokamax.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-64",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3-next-80b-a3b",
+            "max_target_length=4096",
+            "per_device_batch_size=8",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "sparse_matmul=True",
+            "ici_fsdp_parallelism=-1",
+            "ici_expert_parallelism=1",
+            "ici_tensor_parallelism=2",
+            "scan_layers=True",
+            "dataset_type=synthetic",
+            "tokenizer_type=huggingface",
+            "tokenizer_path=Qwen/Qwen3-Next-80B-A3B-Instruct",
         )
     )

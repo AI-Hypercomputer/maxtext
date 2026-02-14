@@ -913,8 +913,8 @@ class TestQwen3Next(unittest.TestCase):
     g_torch = torch.from_numpy(np.asarray(g_jax).copy())
     beta_torch = torch.from_numpy(np.asarray(beta_jax).copy())
 
-    target_atol = 0.1
-    target_rtol = 0.1
+    target_atol = 1e-6
+    target_rtol = 1e-6
 
     # Test without L2Norm (pass False using the original PT arg name)
     torch_output, _ = torch_chunk_gated_delta_rule(
