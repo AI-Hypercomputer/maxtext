@@ -60,3 +60,14 @@ repos:
         additional_dependencies: [mdformat-myst, mdformat-ruff]
         files: (docs/.)
         exclude: docs/guides/checkpointing_solutions.md
+
+  - repo: local
+    hooks:
+      - id: aspell-md
+        name: MD checker via GNU aspell
+        entry: docs/.md_spellcheck/bin/aspell-check-wrapper.sh
+        args: ['--project-dict=docs/.md_spellcheck/.aspell-dict.txt']
+        language: script
+        types: [markdown]
+        pass_filenames: true
+        require_serial: true
