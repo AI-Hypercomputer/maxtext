@@ -65,6 +65,7 @@ HF_IDS = {
     "gemma3-12b": "google/gemma-3-12b-it",
     "gemma3-27b": "google/gemma-3-27b-it",
     "qwen3-0.6b": "Qwen/Qwen3-0.6B",
+    "qwen3-1.7b": "Qwen/Qwen3-1.7B",
     "qwen3-4b": "Qwen/Qwen3-4B",
     "qwen3-4b-thinking-2507": "Qwen/Qwen3-4B-Thinking-2507",
     "qwen3-8b": "Qwen/Qwen3-8B",

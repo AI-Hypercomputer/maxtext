@@ -185,7 +185,7 @@ LLAMA2_DIMENSION_NUMBER = {
 
 
 # qwen3, specific: logits_via_embedding=True
-# applicable: qwen3-0.6b, qwen3-4b, but not: qwen3-8b, qwen3-14b (logits_via_embedding=False)
+# applicable: qwen3-0.6b, qwen3-1.7b, qwen3-4b, but not: qwen3-8b, qwen3-14b (logits_via_embedding=False)
 QWEN3_DIMENSION_NUMBER = {
     "params": {
         "decoder": {
