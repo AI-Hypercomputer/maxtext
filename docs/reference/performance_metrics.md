@@ -47,7 +47,7 @@ MFU = \frac{\text{theoretically optimal step time}}
            {\text{measured step time}}
 $$
 
-Finally, we can also look at throughput utilization. In each training step, the model processes $(batch_size x seq_length)$ tokens. Since the (optimal or measured) number of tokens per second is just the number of tokens per step divided by step time (optimal or measured, respectively), we get that:
+Finally, we can also look at throughput utilization. In each training step, the model processes $\text{batch\_size} \times \text{seq\_length}$ tokens. Since the (optimal or measured) number of tokens per second is just the number of tokens per step divided by step time (optimal or measured, respectively), we get that:
 
 $$
 MFU = \frac{\text{theoretically optimal step time}}
@@ -63,7 +63,7 @@ In MaxText, we sum all of the matmuls performed in one step, see [calculate_tflo
 and divide it by the measured (via python `time.time()`) step time. In each step we print the resulting Model Flops per second [`per_device_tflops_per_sec`](https://github.com/AI-Hypercomputer/maxtext/blob/fafdeaa14183a8f5ca7b9f7b7542ce1655237574/src/MaxText/metric_logger.py#L211-L213). One can calculate the MFU by dividing this number by the peak tflops of the hardware (e.g., $918e^{12}$ FLOPS/s for Trillium).
 
 ### Causal attention
-Due to causality only half of the (query, key) pairs need to be computed, those with query_idx >= key_idx. This accounts for the fact only prior tokens can be used to predict future ones. Prior to https://github.com/AI-Hypercomputer/maxtext/pull/1988 MaxText did not account for sparsity for theoretical flops, and used
+Due to causality only half of the (query, key) pairs need to be computed, those with $\text{query\_idx} \geq \text{key\_idx}$. This accounts for the fact only prior tokens can be used to predict future ones. Prior to https://github.com/AI-Hypercomputer/maxtext/pull/1988 MaxText did not account for sparsity for theoretical flops, and used
 
 Attention Flops ~= 4 * sequence^2 * batch * heads * head_dim
 
@@ -87,7 +87,7 @@ MFU is a very useful metric to understand your systems performance, but like ste
 * Generalizable across hardwares, model, configs (e.g. batch sizes)
 
 **Cons**
-* Care needs to be token to compare MFU across codebases that the model flops calculation are identcail (e.g. was causality taken into account in both code bases?)
+* When comparing MFU across different codebases, it is important to ensure that the model FLOPS calculations are equivalent, for example, by verifying whether both implementations account for causal masking.
 
 Step time, tokens/s, and MFU all can be used to calculate how long training will take (e.g. how long will it take to train my model on $T$ tokens given $C$ chips?)
 
