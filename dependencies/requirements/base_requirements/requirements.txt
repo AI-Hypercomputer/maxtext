@@ -12,7 +12,8 @@ google-cloud-aiplatform
 google-cloud-mldiagnostics
 google-cloud-monitoring
 grain[parquet]
-huggingface_hub
+huggingface_hub==0.36.0
+hf-xet!=1.2.1
 jax
 jaxlib
 jaxtyping
