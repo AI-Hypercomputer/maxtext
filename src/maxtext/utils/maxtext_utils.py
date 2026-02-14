@@ -533,33 +533,28 @@ def calculate_gated_delta_net_flops_per_device(config):
   # 2 * B * S * Channels * Kernel
   flops_conv = 2 * B * S * (2 * K_dim + V_dim) * K_conv
 
-  # 3. Core Gated Delta Net (Attention-like operations)
-  # Assumptions:
-  # H = H_v (broadcasting K to V heads if H_v > H_k)
-  # N = num_chunks & N * C ~ S
-  #
-  # Query (Q): [B, S, H_v, D_k]
-  # Keys (K): [B, S, H_v, D_k]
-  # Values (V): [B, S, H_v, D_v]
-  # Intra-Chunk Attention (A): [B, N, H_v, C, C]
-  # Recurrent State (S): [B, N, H_v, D_k, D_v]
+  # 3. Core Gated Delta Net (Optimized WY Representation)
+  # The implementation broadcasts K heads to V heads if H_v > H_k
+  H_eff = max(H_k, H_v) 
 
-  # - Intra-chunk terms (per chunk C):
-  #   - attn (K*K): 2 * B * S * H_v * C * D_k
-  #   - val_intra (A*V): 2 * B * S * H_v * C * D_v
-  #   - k_cum (A*K): 2 * B * S * H_v * C * D_k
-  #   - inner_attn_body loop (iterative refinement): ≈ (C - 1) * B * H * N * C^2 ≈ B * H * S * C^2
-  flops_intra = 2 * B * S * H_v * C * (2 * D_k + D_v) + (B * H_v * S * C**2)
-
-  # - Inter-chunk terms (Recurrent State D_k * D_v):
-  #   - attn_i (Q*K): 2 * B * S * H_v * C * D_k
-  #   - v_prime (K*S): 2 * B * S * H_v * D_k * D_v
-  #   - attn_inter (Q*S): 2 * B * S * H_v * D_k * D_v
-  #   - core_out (A*V): 2 * B * S * H_v * C * D_v
-  #   - update (K*V): 2 * B * S * H_v * D_k * D_v
-  flops_inter = (2 * B * S * H_v * C * (D_k + D_v)) + (6 * B * S * H_v * D_k * D_v)
-
-  flops_core = flops_intra + flops_inter
+  # Per-token costs derived from jax_chunk_gated_delta_rule:
+  # Intra-chunk Pre-computation:
+  #   S = K @ K.T: 2 * C * D_k
+  #   A = (I+S)^-1: ~ C^2 (Triangular solve approximation)
+  #   U = A @ V: 2 * C * D_v
+  #   W = A @ K: 2 * C * D_k
+  # Scan / Output:
+  #   Out_Inter (Q @ h): 2 * D_k * D_v
+  #   Out_Intra_QK (Q @ K.T): 2 * C * D_k
+  #   Out_Intra_AV (Attn @ V): 2 * C * D_v
+  #   State_Update (W.T @ U): 2 * D_k * D_v
+  
+  # Summing per-token factors: 
+  # (2*C*D_k) + C^2 + (2*C*D_v) + (2*C*D_k) + (2*D_k*D_v) + (2*C*D_k) + (2*C*D_v) + (2*D_k*D_v)
+  # = 6*C*D_k + 4*C*D_v + 4*D_k*D_v + C^2
+  
+  flops_core_per_token = H_eff * (6 * C * D_k + 4 * C * D_v + 4 * D_k * D_v + C**2)
+  flops_core = B * S * flops_core_per_token
 
   # Weights part: Projections + Conv
   gdn_weight_flops = flops_projections + flops_conv
