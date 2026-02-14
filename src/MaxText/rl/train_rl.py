@@ -62,7 +62,6 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 from jax.sharding import Mesh
 from orbax import checkpoint as ocp
-from pprint import pprint
 from transformers import AutoTokenizer
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
@@ -304,20 +303,28 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
 
   # Load datasets
-  dataset = get_dataset(
+  train_dataset = get_dataset(
       model_tokenizer,
       trainer_config,
       train_data_dir,
       trainer_config.train_split,
       data_files=trainer_config.hf_train_files,
       dataset_name=trainer_config.dataset_name,
-  ).batch(trainer_config.batch_size)[: trainer_config.num_batches]
+  )
 
-  if trainer_config.train_fraction == 1.0:
-    train_dataset = dataset.repeat(trainer_config.num_epoch)
-  else:
-    train_dataset = dataset[: int(len(dataset) * trainer_config.train_fraction)]
-    train_dataset = train_dataset.repeat(trainer_config.num_epoch)
+  def _filter_long_prompts(x):
+    tokens = model_tokenizer.tokenize(x["prompts"])
+    return len(tokens) <= trainer_config.max_prefill_predict_length
+
+  train_dataset = train_dataset.filter(_filter_long_prompts)
+  dataset_size = int(trainer_config.num_batches * trainer_config.batch_size * trainer_config.train_fraction)
+  train_dataset = train_dataset[:dataset_size]
+  train_dataset = train_dataset.repeat(trainer_config.num_epoch)
+
+  train_dataset = (
+      train_dataset.to_iter_dataset()
+      .batch(trainer_config.batch_size)
+  )
 
   eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
   if not eval_dataset_name:
@@ -330,12 +337,15 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       trainer_config.eval_split,
       data_files=trainer_config.hf_eval_files,
       dataset_name=eval_dataset_name,
-  ).batch(trainer_config.batch_size)[: trainer_config.num_test_batches]
+  )
 
-  # Let's see how one batch of the dataset looks like!
-  if trainer_config.debug.rl:
-    for ele in train_dataset[:1]:
-      pprint(ele)
+  test_dataset = test_dataset.filter(_filter_long_prompts)
+  test_dataset = test_dataset[: trainer_config.num_test_batches * trainer_config.batch_size]
+
+  test_dataset = (
+      test_dataset.to_iter_dataset()
+      .batch(trainer_config.batch_size)
+  )
 
   # Load reference model
   max_logging.log("Creating reference model and also meshes for reference and rollout")
