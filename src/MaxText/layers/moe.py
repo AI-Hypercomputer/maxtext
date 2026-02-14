@@ -452,13 +452,14 @@ class RoutedMoE(nnx.Module):
       self.wi_1_bias = None
       self.wo_bias = None
 
-  def _maybe_shard_with_logical(self, inputs, logical_name):
+  def _maybe_shard_with_logical(self, inputs, logical_name, sharding_desc="moe/inputs"):
     return maybe_shard_with_logical(
         inputs,
         logical_name,
         mesh=self.mesh,
         shard_mode=self.config.shard_mode,
         debug_sharding=self.config.debug_sharding,
+        sharding_desc=sharding_desc,
     )
 
   def _logical_to_mesh_axes(self, logical_name):
@@ -1377,11 +1378,17 @@ class RoutedMoE(nnx.Module):
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
-      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp"))
-      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp"))
+      w0_kernel = self._maybe_shard_with_logical(
+          w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp"), sharding_desc="moe/w0_kernel"
+      )
+      w1_kernel = self._maybe_shard_with_logical(
+          w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp"), sharding_desc="moe/w1_kernel"
+      )
 
       # Unshard on fsdp_transpose axis
-      wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp", "embed_tensor_transpose"))
+      wo_kernel = self._maybe_shard_with_logical(
+          wo_kernel, ("exp_with_fsdp", "mlp", "embed_tensor_transpose"), sharding_desc="moe/wo_kernel"
+      )
 
       # Make sure XLA does not optimize by combining above All-Gather to unshard
       # on FSDP axis and the subsequent unshard on fsdp_transpose axis
@@ -1390,9 +1397,15 @@ class RoutedMoE(nnx.Module):
       wo_kernel = jax.lax.optimization_barrier(wo_kernel)
 
       # Unshard on both fsdp and fsdp_transpose transpose
-      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp_no_fsdp", "embed_tensor_transpose"))
+      w0_kernel = self._maybe_shard_with_logical(
+          w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp_no_fsdp"), sharding_desc="moe/w0_kernel"
+      )
+      w1_kernel = self._maybe_shard_with_logical(
+          w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp_no_fsdp"), sharding_desc="moe/w1_kernel"
+      )
+      wo_kernel = self._maybe_shard_with_logical(
+          wo_kernel, ("exp_with_fsdp", "mlp_no_fsdp", "embed_tensor_transpose"), sharding_desc="moe/wo_kernel"
+      )
 
     if self.get_tensor_transpose_parallelism_size() > 1:
       input_axes = (batch_logical_axis, "activation_norm_length", "activation_embed")
@@ -1405,9 +1418,11 @@ class RoutedMoE(nnx.Module):
     else:
       pre_bias_logits_axes = None
 
-    inputs = self._maybe_shard_with_logical(inputs, input_axes)
-    gate_logits = self._maybe_shard_with_logical(gate_logits, gate_logits_axes)
-    pre_bias_logits = self._maybe_shard_with_logical(pre_bias_logits, pre_bias_logits_axes)
+    inputs = self._maybe_shard_with_logical(inputs, input_axes, sharding_desc="moe/inputs")
+    gate_logits = self._maybe_shard_with_logical(gate_logits, gate_logits_axes, sharding_desc="moe/gate_logits")
+    pre_bias_logits = self._maybe_shard_with_logical(
+        pre_bias_logits, pre_bias_logits_axes, sharding_desc="moe/pre_bias_logits"
+    )
 
     return wrapper(
         inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, self.rngs
@@ -1906,7 +1921,9 @@ class RoutedMoE(nnx.Module):
           )
       return output, lb_loss, bias_updates
     else:
-      inputs = self._maybe_shard_with_logical(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+      inputs = self._maybe_shard_with_logical(
+          inputs, ("activation_batch", "activation_norm_length", "activation_embed"), sharding_desc="moe/inputs"
+      )
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision

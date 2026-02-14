@@ -1342,7 +1342,7 @@ class AttentionOp(nnx.Module):
         )
       return attention_output
 
-    def _maybe_shard_with_pspec(inputs, pspec: jax.sharding.PartitionSpec | None):
+    def _maybe_shard_with_pspec(inputs, pspec: jax.sharding.PartitionSpec | None, sharding_desc: str = ""):
       # decoder_segment_ids can be None
       if pspec is None:
         return None
@@ -1353,15 +1353,20 @@ class AttentionOp(nnx.Module):
           shard_mode=self.config.shard_mode,
           debug_sharding=self.config.debug_sharding,
           extra_stack_level=1,
+          sharding_desc=sharding_desc,
       )
 
-    query = _maybe_shard_with_pspec(query, axis_names_q)
-    key = _maybe_shard_with_pspec(key, axis_names_kv)
-    value = _maybe_shard_with_pspec(value, axis_names_kv)
-    decoder_segment_ids_q = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
-    decoder_segment_ids_kv = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
-    sinks = _maybe_shard_with_pspec(sinks, sink_axis_names)
-    index_mask = _maybe_shard_with_pspec(index_mask, index_mask_axis_names)
+    query = _maybe_shard_with_pspec(query, axis_names_q, sharding_desc="attention_op/query")
+    key = _maybe_shard_with_pspec(key, axis_names_kv, sharding_desc="attention_op/key")
+    value = _maybe_shard_with_pspec(value, axis_names_kv, sharding_desc="attention_op/value")
+    decoder_segment_ids_q = _maybe_shard_with_pspec(
+        decoder_segment_ids, segment_axis_names_q, sharding_desc="attention_op/decoder_segment_ids"
+    )
+    decoder_segment_ids_kv = _maybe_shard_with_pspec(
+        decoder_segment_ids, segment_axis_names_kv, sharding_desc="attention_op/decoder_segment_ids"
+    )
+    sinks = _maybe_shard_with_pspec(sinks, sink_axis_names, sharding_desc="attention_op/sinks")
+    index_mask = _maybe_shard_with_pspec(index_mask, index_mask_axis_names, sharding_desc="attention_op/index_mask")
 
     x = wrap_flash_attention(
         query,

@@ -65,7 +65,13 @@ def gradient_accumulation_loss_and_grad(
 
   def _maybe_shard_with_name(inputs, sharding_names):
     """Wrapper of maybe_shard_with_name with fixed shard_mode"""
-    return maybe_shard_with_name(inputs, sharding_names, config.shard_mode, debug_sharding=config.debug_sharding)
+    return maybe_shard_with_name(
+        inputs,
+        sharding_names,
+        config.shard_mode,
+        debug_sharding=config.debug_sharding,
+        sharding_desc="gradient_accumulation/inputs",
+    )
 
   # For more efficient DP/ZeRO-1 + GA
   if config.shard_mode == ShardMode.EXPLICIT and config.ici_data_parallelism > 1:

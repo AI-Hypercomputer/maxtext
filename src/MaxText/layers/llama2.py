@@ -156,11 +156,11 @@ class LlamaDecoderLayer(nnx.Module):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names, sharding_desc="llama2/inputs")
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx_sharding = create_sharding(self.mesh, self.activation_axis_names)
     lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=lnx_sharding)
-    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names, sharding_desc="llama2/lnx")
 
     # Self-attention block
     attention_lnx, kv_cache = self.self_attention(
@@ -178,12 +178,16 @@ class LlamaDecoderLayer(nnx.Module):
         attention_metadata=attention_metadata,
     )
 
-    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
+    attention_lnx = self._maybe_shard_with_logical(
+        attention_lnx, self.activation_axis_names, sharding_desc="llama2/attention_lnx"
+    )
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
     hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=lnx_sharding)
-    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+    hidden_states = self._maybe_shard_with_logical(
+        hidden_states, self.activation_axis_names, sharding_desc="llama2/hidden_states"
+    )
 
     # MLP block.
     mlp_intermediate_sharding = create_sharding(
@@ -195,11 +199,13 @@ class LlamaDecoderLayer(nnx.Module):
         intermediate_sharding=mlp_intermediate_sharding,
         out_sharding=lnx_sharding,
     )
-    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names, sharding_desc="llama2/mlp_lnx")
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout(layer_output, deterministic=deterministic)
-    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
+    layer_output = self._maybe_shard_with_logical(
+        layer_output, self.activation_axis_names, sharding_desc="llama2/layer_output"
+    )
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))

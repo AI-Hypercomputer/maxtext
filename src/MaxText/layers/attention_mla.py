@@ -796,13 +796,13 @@ class MLA(Attention):
     # Partial RoPE: Split into non-positional and rotary parts.
     # last dimension: qk_nope_head_dim, qk_rope_head_dim
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
-    q_nope = self._maybe_shard_with_logical(q_nope, query_logical_name)
+    q_nope = self._maybe_shard_with_logical(q_nope, query_logical_name, sharding_desc="attention_mla/q_nope")
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions)
-    q_pe = self._maybe_shard_with_logical(q_pe, query_logical_name)
+    q_pe = self._maybe_shard_with_logical(q_pe, query_logical_name, sharding_desc="attention_mla/q_pe")
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
-    query = self._maybe_shard_with_logical(query, query_logical_name)
+    query = self._maybe_shard_with_logical(query, query_logical_name, sharding_desc="attention_mla/query")
     return query, low_rank_q
 
   def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
@@ -823,13 +823,13 @@ class MLA(Attention):
     # Split kv_out into key_nope and value parts.
     key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
     key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
-    key_nope = self._maybe_shard_with_logical(key_nope, key_logical_name)
-    key_rope = self._maybe_shard_with_logical(key_rope, key_logical_name)
+    key_nope = self._maybe_shard_with_logical(key_nope, key_logical_name, sharding_desc="attention_mla/key_nope")
+    key_rope = self._maybe_shard_with_logical(key_rope, key_logical_name, sharding_desc="attention_mla/key_rope")
 
     key = jnp.concatenate([key_nope, key_rope], axis=-1)
 
-    key = self._maybe_shard_with_logical(key, key_logical_name)
-    value = self._maybe_shard_with_logical(value, value_logical_name)
+    key = self._maybe_shard_with_logical(key, key_logical_name, sharding_desc="attention_mla/key")
+    value = self._maybe_shard_with_logical(value, value_logical_name, sharding_desc="attention_mla/value")
     return key, value
 
   def init_mla_kv_caches(self, inputs_kv_shape: Tuple):
@@ -986,16 +986,24 @@ class MLA(Attention):
       MLA-attended outputs.
     """
     if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = self._maybe_shard_with_logical(inputs_q, self.prefill_input_axis_names)
-      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.prefill_input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(
+          inputs_q, self.prefill_input_axis_names, sharding_desc="attention_mla/input_q"
+      )
+      inputs_kv = self._maybe_shard_with_logical(
+          inputs_kv, self.prefill_input_axis_names, sharding_desc="attention_mla/inputs_kv"
+      )
       out_logical_name = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      inputs_q = self._maybe_shard_with_logical(inputs_q, self.ep_input_axis_names)
-      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.ep_input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.ep_input_axis_names, sharding_desc="attention_mla/input_q")
+      inputs_kv = self._maybe_shard_with_logical(
+          inputs_kv, self.ep_input_axis_names, sharding_desc="attention_mla/inputs_kv"
+      )
       out_logical_name = (BATCH_NO_EXP, LENGTH, HEAD, D_KV)
     else:
-      inputs_q = self._maybe_shard_with_logical(inputs_q, self.input_axis_names)
-      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.input_axis_names, sharding_desc="attention_mla/inputs_q")
+      inputs_kv = self._maybe_shard_with_logical(
+          inputs_kv, self.input_axis_names, sharding_desc="attention_mla/inputs_kv"
+      )
       out_logical_name = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
 
     query, low_rank_q = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
@@ -1038,9 +1046,9 @@ class MLA(Attention):
 
     out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
     if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.ep_out_axis_names, sharding_desc="attention_mla/out")
     else:
-      out = self._maybe_shard_with_logical(out, self.out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.out_axis_names, sharding_desc="attention_mla/out")
 
     out_sharding = create_sharding(self.mesh, out_logical_name)
     out = self.out_projection(out, out_sharding=out_sharding)
