@@ -11,6 +11,7 @@ The following models are supported:
 | **Gemma2**              | 2B, 9B, 27B            |           √            |            √             |           √            |            √             |
 | **Gemma3** (Multimodal) | 4B, 12B, 27B           |           -            |            √             |           -            |            √             |
 | **Llama3.1**            | 8B, 70B, 450B          |           √            |            √             |           √            |            √             |
+| **Qwen2.5**             | 7B, 14B                |           √            |            √             |           √            |            √             |
 | **Qwen3**               | 0.6B, 4B, 8B, 14B, 32B |           √            |            √             |           √            |            √             |
 | **Qwen3 MoE**           | 30B, 235B, 480B        |           √            |            √             |           √            |            √             |
 | **Mixtral**             | 8x7B, 8x22B            |           √            |            √             |           √            |            √             |

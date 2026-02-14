@@ -52,6 +52,7 @@ from MaxText.layers import (
     llama4,
     mistral,
     mixtral,
+    qwen2,
     qwen3,
     simple_layer,
     olmo3,
@@ -421,6 +422,8 @@ class Decoder(nn.Module):
         return [gpt3.Gpt3DecoderLayerToLinen]
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlockToLinen] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayerToLinen]
+      case DecoderBlockType.QWEN2:
+        return [qwen2.Qwen2DecoderLayerToLinen]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
@@ -479,6 +482,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
+        DecoderBlockType.QWEN2,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.GPT_OSS,

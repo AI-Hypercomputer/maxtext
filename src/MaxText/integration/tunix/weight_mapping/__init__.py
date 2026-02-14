@@ -21,6 +21,7 @@ model name. This allows for easy extension to support new models.
 from MaxText.integration.tunix.weight_mapping.deepseek3 import DEEPSEEK_VLLM_MAPPING
 from MaxText.integration.tunix.weight_mapping.gpt_oss import GPT_OSS_VLLM_MAPPING
 from MaxText.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
+from MaxText.integration.tunix.weight_mapping.qwen2 import QWEN2_VLLM_MAPPING
 from MaxText.integration.tunix.weight_mapping.qwen3 import QWEN3_VLLM_MAPPING
 
 
@@ -30,6 +31,8 @@ class StandaloneVllmWeightMapping:
   def __getattr__(self, name):
     if name.startswith("llama3.1"):
       return LLAMA3_VLLM_MAPPING
+    elif name.startswith("qwen2"):
+      return QWEN2_VLLM_MAPPING
     elif name.startswith("qwen3"):
       return QWEN3_VLLM_MAPPING
     elif name.startswith("deepseek3"):
