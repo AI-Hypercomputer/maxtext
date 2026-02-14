@@ -111,6 +111,7 @@ def compare_sharding_jsons(json1: dict, model1_name: str, json2: dict, model2_na
 
 
 @pytest.mark.parametrize("model_name, topology, num_slice", TEST_CASES)
+@pytest.mark.tpu_only
 def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str) -> None:
   """
   Test sharding configurations from train_compile.get_shaped_inputs.
@@ -193,7 +194,14 @@ def abstract_state_and_shardings(request):
   config = pyconfig.initialize(params)
   validate_config(config)
 
-  topology_mesh = get_topology_mesh(config)
+  try:
+    topology_mesh = get_topology_mesh(config)
+  except RuntimeError as e:
+    if "JAX TPU support not installed" in str(e):
+      pytest.skip("Skipping test because JAX TPU support is not installed.")
+    else:
+      raise e
+
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh=topology_mesh, quant=quant)
 
