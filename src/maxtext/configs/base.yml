@@ -1090,6 +1090,6 @@ force_q_layout: false
 
 ################################## DeepSeek Manifold-Constrained Hyper Connections (mHC) ##################################
 # The number of parallel streams in Hyper Connection.
-mhc_expansion_rate: 0
+mhc_expansion_rate: 1
 # The number of iterations for the Sinkhorn-Knopp algorithm.
 sinkhorn_iterations: 20
