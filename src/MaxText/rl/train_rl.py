@@ -236,6 +236,7 @@ def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices)
 
   rollout_kwargs = {}
   tp = sampler_config.rollout_tensor_parallelism
+  ep = sampler_config.rollout_expert_parallelism
 
   if tp == -1:
     if num_sampler_devices % dp != 0:
@@ -244,17 +245,22 @@ def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices)
           f"rollout_data_parallelism({dp}) "
           f"when rollout_tensor_parallelism is -1."
       )
-    tp = num_sampler_devices // dp
-  elif tp * dp != num_sampler_devices:
+    tp = num_sampler_devices // dp // ep
+  elif tp * dp * ep != num_sampler_devices:
     raise ValueError(
         f"rollout_tensor_parallelism({tp}) * "
-        f"rollout_data_parallelism({dp}) "
+        f"rollout_data_parallelism({dp}) * "
+        f"rollout_expert_parallelism({ep}) "
         f"!= len(sampler_devices)({num_sampler_devices})"
     )
   rollout_kwargs["tensor_parallel_size"] = tp
   rollout_kwargs["data_parallel_size"] = dp
-  rollout_kwargs["rollout_vllm_async_scheduling"] = True
 
+  if ep > 1:
+    rollout_kwargs["expert_parallel_size"] = ep
+    rollout_kwargs["rollout_vllm_enable_expert_parallelism"] = True
+
+  rollout_kwargs["rollout_vllm_async_scheduling"] = True
   return rollout_kwargs
 
 
@@ -321,10 +327,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   train_dataset = train_dataset[:dataset_size]
   train_dataset = train_dataset.repeat(trainer_config.num_epoch)
 
-  train_dataset = (
-      train_dataset.to_iter_dataset()
-      .batch(trainer_config.batch_size)
-  )
+  train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size)
 
   eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
   if not eval_dataset_name:
@@ -342,10 +345,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   test_dataset = test_dataset.filter(_filter_long_prompts)
   test_dataset = test_dataset[: trainer_config.num_test_batches * trainer_config.batch_size]
 
-  test_dataset = (
-      test_dataset.to_iter_dataset()
-      .batch(trainer_config.batch_size)
-  )
+  test_dataset = test_dataset.to_iter_dataset().batch(trainer_config.batch_size)
 
   # Load reference model
   max_logging.log("Creating reference model and also meshes for reference and rollout")
