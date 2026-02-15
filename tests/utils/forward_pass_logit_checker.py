@@ -41,6 +41,7 @@ import os
 import sys
 from pathlib import Path
 import absl
+import logging
 
 import numpy as np
 import jax
@@ -173,7 +174,7 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
       log_target=False,
   )
 
-  max_logging.log(f"\nAverage KL divergence per token (D_KL(P_golden || Q_model)): {kl_div_value.item():.6f}")
+  max_logging.log(f"\nAverage KL divergence per token (D_KL(P_golden || Q_model)): {kl_div_value.item():.2e}")
 
   # To find the max KL divergence for any single token in the set
   # use reduction='none'.
@@ -184,13 +185,13 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
   )  # Sum over the vocab dim to get a single KL value per token
 
   # Log per-token KL divergences
-  formatted_list = [f"{x:.6f}" for x in kl_divs_per_token.tolist()]
+  formatted_list = [f"{x:.2e}" for x in kl_divs_per_token.tolist()]
   max_logging.log(f"Per-token KL Divergences: \n{formatted_list}")
 
   max_kl_div = kl_divs_per_token.max()
-  max_logging.log(f"\nMax KL divergence for a single token in the set: {max_kl_div.item():.6f}")
+  max_logging.log(f"\nMax KL divergence for a single token in the set: {max_kl_div.item():.2e}")
 
-  assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.6f} exceed the threshold {atol}"
+  assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.2e} exceed the threshold {atol}"
 
 
 def get_data(golden_data_point, config):
@@ -239,269 +240,281 @@ def get_data(golden_data_point, config):
   return ids, decoder_segment_ids, decoder_positions, logits, seq_len, pixel_values
 
 
+def init_maxtext_model(config):
+  max_logging.log("Initializing MaxText model")
+  init_rng = jax.random.PRNGKey(config.init_weights_seed)
+  init_rng, rng1 = jax.random.split(init_rng)
+  devices_array = maxtext_utils.create_device_mesh(config)
+  mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
+  quant = quantizations.configure_quantization(config)
+  model = models.transformer_as_linen(config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
+  return init_rng, model, state
+
+
+def test_golden_logits(config, test_args):
+  """Comparing maxtext/huggingface model with pre-loaded golden logitis"""
+  # Initialize MaxText model
+  init_rng, model, state = init_maxtext_model(config)
+
+  if test_args.golden_logits_path == "":
+    input_golden_data_path = os.path.join(
+        MAXTEXT_TEST_ASSETS_ROOT,
+        "golden_logits",
+        f"golden_data_{config.model_name}.jsonl",
+    )
+  else:
+    input_golden_data_path = test_args.golden_logits_path
+  input_golden_data_path = Path(input_golden_data_path)
+  if input_golden_data_path.suffix == ".jsonl":
+    max_logging.log("loading hf goldens from jsonl file")
+    import jsonlines  # pylint: disable=import-outside-toplevel
+
+    with jsonlines.open(input_golden_data_path, "r") as f:
+      golden_data = list(f)
+  elif input_golden_data_path.suffix in [".pickle", ".pkl"]:
+    max_logging.log("loading hf goldens from pickle file")
+    import pickle  # pylint: disable=import-outside-toplevel
+
+    with open(input_golden_data_path, "rb") as f:
+      golden_data = pickle.load(f)
+  else:
+    raise ValueError("golden_logits_path must end with .jsonl or .pickle/.pkl")
+  max_logging.log(f"loaded {len(golden_data)} golden data points")
+  all_data_to_save = []
+  for golden_data_index, golden_data_point in enumerate(golden_data):
+    max_logging.log(f"\n--- Comparing forward pass for golden data index: {golden_data_index} ---")
+    ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
+    max_logging.log("maxtext forward pass")
+    full_train_logits = model.apply(
+        state.params,
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        encoder_images=images,
+        enable_dropout=False,
+        rngs={"aqt": init_rng},
+    )
+
+    full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits, tiled=True)
+    # if full_train_logits shape is [num_hosts, batch_size, seq_len, vocab_size]
+    if full_train_logits.ndim == 4:
+      full_train_logits = jnp.reshape(full_train_logits, (-1, config.max_target_length, config.vocab_size))
+    # Slice to original sequence length, [num_hosts * batch_size, seq_len, vocab_size]
+    full_train_logits = full_train_logits[:, :seq_len, :]
+
+    token_size = int(test_args.token_size) if test_args.token_size else seq_len
+    if full_train_logits.shape[-1] != golden_logits.shape[-1]:
+      max_logging.log(
+          f"Vocab size mismatch: train logits vocab size {full_train_logits.shape[-1]}, "
+          f"golden logits vocab size {golden_logits.shape[-1]}. "
+          "Comparing up to the smaller vocab size."
+      )
+    min_vocab_size = min(full_train_logits.shape[-1], golden_logits.shape[-1])
+
+    start_index = 1 if test_args.skip_first_token else 0
+    # shape [seq_len, vocab_size]
+    train_logits_slice = full_train_logits[0, start_index:token_size, :min_vocab_size]
+    golden_logits_slice = golden_logits[start_index:token_size, :min_vocab_size]
+
+    if train_logits_slice.shape[0] > 2:
+      max_logging.log(f"\n[logits: token {start_index + 2}]")
+      max_logging.log(f"{golden_logits_slice[2]=}")
+      max_logging.log(f"{train_logits_slice[2]=}")
+
+    # Calculate absolute and relative differences for detailed reporting
+    abs_diff = jnp.abs(train_logits_slice - golden_logits_slice)
+
+    # To avoid division by zero, add a small epsilon where golden_logits_slice is zero
+    safe_golden_logits = jnp.where(golden_logits_slice == 0, 1e-8, golden_logits_slice)
+    rel_diff = abs_diff / jnp.abs(safe_golden_logits)
+
+    max_abs_diff_idx = jnp.unravel_index(jnp.argmax(abs_diff), abs_diff.shape)
+    max_rel_diff_idx = jnp.unravel_index(jnp.argmax(rel_diff), rel_diff.shape)
+
+    max_abs_diff_val = abs_diff[max_abs_diff_idx]
+    max_rel_diff_val = rel_diff[max_rel_diff_idx]
+    msg = (
+        "\n[numerical difference]\n"
+        f"Max absolute difference: {max_abs_diff_val:.6f} at index {max_abs_diff_idx}\n"
+        f"  (Train: {train_logits_slice[max_abs_diff_idx]:.6f}, Golden: {golden_logits_slice[max_abs_diff_idx]:.6f})\n"
+        f"Max relative difference: {max_rel_diff_val:.6f} at index {max_rel_diff_idx}\n"
+        f"  (Train: {train_logits_slice[max_rel_diff_idx]:.6f}, Golden: {golden_logits_slice[max_rel_diff_idx]:.6f})"
+    )
+    max_logging.log(msg)
+
+    if test_args.clip_logits_epsilon is not None:
+      model_probabilities = jnp.clip(jax.nn.softmax(train_logits_slice, axis=-1), a_min=test_args.clip_logits_epsilon)
+      golden_probabilities = jnp.clip(jax.nn.softmax(golden_logits_slice, axis=-1), a_min=test_args.clip_logits_epsilon)
+    else:
+      model_probabilities = jax.nn.softmax(train_logits_slice, axis=-1)
+      golden_probabilities = jax.nn.softmax(golden_logits_slice, axis=-1)
+
+    if golden_probabilities.shape[0] > 1:
+      max_logging.log(f"\n[probability: token {start_index + 1}]")
+      max_logging.log(f"{golden_probabilities[1]=}")
+      max_logging.log(f"{model_probabilities[1]=}")
+
+    kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
+    max_kl_div_val = jax.numpy.max(kl_div)
+    max_kl_div_idx = jax.numpy.argmax(kl_div)
+    max_logging.log(
+        f"\n[KL divergence]\n"
+        f"KL divergence = {kl_div}, max KL divergence = {max_kl_div_val} at index {max_kl_div_idx}, "
+        f"the corresponding token id is {ids[0, max_kl_div_idx + start_index]}"
+    )
+
+    if jax.process_index() == 0 and test_args.output_logits_path:
+      data_to_save = {
+          "prompt": golden_data[golden_data_index]["prompt"],
+          "tokens": ids[0, :seq_len].tolist(),
+          "logits": full_train_logits[0].tolist(),
+      }
+      all_data_to_save.append(data_to_save)
+
+    if test_args.atol is not None:
+      max_logging.log("\n[test criteria]")
+      max_logging.log(
+          f"Checking Numerical Differences between train logits and golden logits against "
+          f"atol={test_args.rtol} rtol={test_args.atol}."
+      )
+      rtol_val = float(test_args.rtol)
+      atol_val = float(test_args.atol)
+      assert jax.numpy.allclose(
+          train_logits_slice, golden_logits_slice, rtol=rtol_val, atol=atol_val, equal_nan=False
+      ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."
+
+    if test_args.max_kl_div is not None:
+      max_logging.log(
+          f"Checking KL Divergence between train distribution and golden distribution against "
+          f"threshold {test_args.max_kl_div}."
+      )
+      assert jax.numpy.all(
+          kl_div < test_args.max_kl_div,
+      ), (
+          f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. "
+          f"Max divergence: {jax.numpy.max(kl_div)}"
+      )
+  return all_data_to_save
+
+
+def test_on_fly(config, test_args):
+  """Comparing maxtext model with HF model on-the-fly"""
+  if test_args.hf_model_path == "":
+    raise ValueError("run_hf_model requires hf_model_path")
+
+  hf_token = config.hf_access_token
+  # Map MaxText config.dtype to PyTorch dtype
+  dtype_mapping = {
+      "bfloat16": torch.bfloat16,
+      "float32": torch.float32,
+      "float16": torch.float16,
+      jnp.bfloat16: torch.bfloat16,
+      jnp.float32: torch.float32,
+      jnp.float16: torch.float16,
+  }
+
+  # Default to bfloat16 if dtype is unrecognized
+  torch_dtype = dtype_mapping.get(config.dtype.name, torch.bfloat16)
+  max_logging.log(f"Loading HF model with dtype: {torch_dtype} (derived from config.dtype: {config.dtype})")
+
+  hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch_dtype, token=hf_token)
+
+  if os.path.isdir(test_args.hf_model_path):
+    # local hf directory may not contain tokenizer, read from remote tokenizer
+    tokenizer_path = config.tokenizer_path
+  else:
+    tokenizer_path = test_args.hf_model_path
+
+  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, token=hf_token)
+
+  # maxtext model prefix, use eos token as pad token
+  pad_token_prefixes = ["llama3.1", "mixtral"]
+  if any(config.model_name.startswith(prefix) for prefix in pad_token_prefixes):
+    tokenizer.pad_token = tokenizer.eos_token
+
+  # Initialize MaxText model
+  init_rng, maxtext_model, maxtext_state = init_maxtext_model(config)
+
+  prompts = ["I love to", "Today is a", "What is the"]
+  all_data_to_save = []
+  for input_text in prompts:
+    max_logging.log(f"\n--- Prompt: {input_text} ---")
+
+    # Tokenize for HF
+    inputs = tokenizer(
+        input_text, return_tensors="pt", padding=True, max_length=config.max_target_length, truncation=True
+    )
+    actual_seq_len = inputs["input_ids"].shape[1]
+
+    # Tokenize for MaxText
+    mt_ids = jnp.asarray(inputs["input_ids"], dtype=jnp.int32)
+
+    if mt_ids.shape[0] != config.global_batch_size_to_train_on:  # Ensure batch size matches
+      mt_ids = jnp.repeat(mt_ids, config.global_batch_size_to_train_on // mt_ids.shape[0], axis=0)
+
+    s = (config.global_batch_size_to_train_on, config.max_target_length)
+    mt_decoder_segment_ids_full = jnp.zeros(s, dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+
+    mt_decoder_segment_ids = mt_decoder_segment_ids_full[:, :actual_seq_len]
+
+    # Create full decoder positions up to max_target_length
+    mt_decoder_positions_full = jnp.stack(
+        [jnp.arange(config.max_target_length, dtype=jnp.int32) for _ in range(config.global_batch_size_to_train_on)]
+    )
+    mt_decoder_positions = mt_decoder_positions_full[:, :actual_seq_len]
+
+    # --- HF Forward Pass ---
+    with torch.no_grad():
+      hf_logits_torch = hf_model(**inputs).logits
+
+    # --- MaxText Forward Pass ---
+    mt_logits_jax = maxtext_model.apply(
+        maxtext_state.params,
+        mt_ids,
+        mt_decoder_positions,
+        mt_decoder_segment_ids,
+        enable_dropout=False,
+        rngs={"aqt": init_rng},
+    )
+    mt_logits_jax_sliced = mt_logits_jax[:, :actual_seq_len, :]
+    mt_logits_torch = convert_jax_weight_to_torch(mt_logits_jax_sliced)
+
+    # --- Compare logits for the last token prediction ---
+    hf_last_token_logits = hf_logits_torch[:, -1, :]
+    mt_last_token_logits = mt_logits_torch[:, -1, :]  # MaxText output already sliced to actual_seq_len
+
+    tokens_maxtext = get_top_k_tokens_scores(mt_last_token_logits, tokenizer, k=10, description="MaxText model")
+    tokens_hf = get_top_k_tokens_scores(hf_last_token_logits, tokenizer, k=10, description="HF model")
+    compare_top_tokens(converted_tokens=tokens_maxtext, golden_tokens=tokens_hf)
+
+    # --- Compare all logits in the sequence (for the first batch item) ---
+    # Unsqueeze to add batch dimension for check_kl_divergence: [1, seq, vocab]
+    start_index = 1 if test_args.skip_first_token else 0
+    check_kl_divergence(
+        mt_logits_torch[0, start_index:].unsqueeze(0),
+        hf_logits_torch[0, start_index:].unsqueeze(0),
+        atol=test_args.max_kl_div,
+    )
+    if jax.process_index() == 0 and test_args.output_logits_path:
+      data_to_save = {
+          "mt_logits": mt_logits_torch[0].tolist(),
+          "hf_logits": hf_logits_torch[0].tolist(),
+      }
+      all_data_to_save.append(data_to_save)
+  return all_data_to_save
+
+
 def main(config, test_args):  # pylint: disable=W0621
   """Test the Whole Model of model_name"""
   if not test_args.run_hf_model:
-    """Comparing maxtext/huggingface model with pre-loaded golden logitis"""
-    max_logging.log("Initializing MaxText model")
-    init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    init_rng, rng1 = jax.random.split(init_rng)
-    devices_array = maxtext_utils.create_device_mesh(config)
-    mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
-    quant = quantizations.configure_quantization(config)
-    model = models.transformer_as_linen(config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-    state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
-
-    if test_args.golden_logits_path == "":
-      input_golden_data_path = os.path.join(
-          MAXTEXT_TEST_ASSETS_ROOT,
-          "golden_logits",
-          f"golden_data_{config.model_name}.jsonl",
-      )
-    else:
-      input_golden_data_path = test_args.golden_logits_path
-    input_golden_data_path = Path(input_golden_data_path)
-    if input_golden_data_path.suffix == ".jsonl":
-      max_logging.log("loading hf goldens from jsonl file")
-      import jsonlines  # pylint: disable=import-outside-toplevel
-
-      with jsonlines.open(input_golden_data_path, "r") as f:
-        golden_data = list(f)
-    elif input_golden_data_path.suffix in [".pickle", ".pkl"]:
-      max_logging.log("loading hf goldens from pickle file")
-      import pickle  # pylint: disable=import-outside-toplevel
-
-      with open(input_golden_data_path, "rb") as f:
-        golden_data = pickle.load(f)
-    else:
-      raise ValueError("golden_logits_path must end with .jsonl or .pickle/.pkl")
-    max_logging.log(f"loaded {len(golden_data)} golden data points")
-    all_data_to_save = []
-    for golden_data_index, golden_data_point in enumerate(golden_data):
-      max_logging.log(f"\n--- Comparing forward pass for golden data index: {golden_data_index} ---")
-      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
-      max_logging.log("maxtext forward pass")
-      full_train_logits = model.apply(
-          state.params,
-          ids,
-          decoder_positions,
-          decoder_segment_ids,
-          encoder_images=images,
-          enable_dropout=False,
-          rngs={"aqt": init_rng},
-      )
-
-      full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits, tiled=True)
-      # if full_train_logits shape is [num_hosts, batch_size, seq_len, vocab_size]
-      if full_train_logits.ndim == 4:
-        full_train_logits = jnp.reshape(full_train_logits, (-1, config.max_target_length, config.vocab_size))
-      # Slice to original sequence length, [num_hosts * batch_size, seq_len, vocab_size]
-      full_train_logits = full_train_logits[:, :seq_len, :]
-
-      token_size = int(test_args.token_size) if test_args.token_size else seq_len
-      if full_train_logits.shape[-1] != golden_logits.shape[-1]:
-        max_logging.log(
-            f"Vocab size mismatch: train logits vocab size {full_train_logits.shape[-1]}, "
-            f"golden logits vocab size {golden_logits.shape[-1]}. "
-            "Comparing up to the smaller vocab size."
-        )
-      min_vocab_size = min(full_train_logits.shape[-1], golden_logits.shape[-1])
-
-      start_index = 1 if test_args.skip_first_token else 0
-      # shape [seq_len, vocab_size]
-      train_logits_slice = full_train_logits[0, start_index:token_size, :min_vocab_size]
-      golden_logits_slice = golden_logits[start_index:token_size, :min_vocab_size]
-
-      if train_logits_slice.shape[0] > 2:
-        max_logging.log(f"\n[logits: token {start_index + 2}]")
-        max_logging.log(f"{golden_logits_slice[2]=}")
-        max_logging.log(f"{train_logits_slice[2]=}")
-
-      # Calculate absolute and relative differences for detailed reporting
-      abs_diff = jnp.abs(train_logits_slice - golden_logits_slice)
-
-      # To avoid division by zero, add a small epsilon where golden_logits_slice is zero
-      safe_golden_logits = jnp.where(golden_logits_slice == 0, 1e-8, golden_logits_slice)
-      rel_diff = abs_diff / jnp.abs(safe_golden_logits)
-
-      max_abs_diff_idx = jnp.unravel_index(jnp.argmax(abs_diff), abs_diff.shape)
-      max_rel_diff_idx = jnp.unravel_index(jnp.argmax(rel_diff), rel_diff.shape)
-
-      max_abs_diff_val = abs_diff[max_abs_diff_idx]
-      max_rel_diff_val = rel_diff[max_rel_diff_idx]
-      msg = (
-          "\n[numerical difference]\n"
-          f"Max absolute difference: {max_abs_diff_val:.6f} at index {max_abs_diff_idx}\n"
-          f"  (Train: {train_logits_slice[max_abs_diff_idx]:.6f}, Golden: {golden_logits_slice[max_abs_diff_idx]:.6f})\n"
-          f"Max relative difference: {max_rel_diff_val:.6f} at index {max_rel_diff_idx}\n"
-          f"  (Train: {train_logits_slice[max_rel_diff_idx]:.6f}, Golden: {golden_logits_slice[max_rel_diff_idx]:.6f})"
-      )
-      max_logging.log(msg)
-
-      if test_args.clip_logits_epsilon is not None:
-        model_probabilities = jnp.clip(jax.nn.softmax(train_logits_slice, axis=-1), a_min=test_args.clip_logits_epsilon)
-        golden_probabilities = jnp.clip(jax.nn.softmax(golden_logits_slice, axis=-1), a_min=test_args.clip_logits_epsilon)
-      else:
-        model_probabilities = jax.nn.softmax(train_logits_slice, axis=-1)
-        golden_probabilities = jax.nn.softmax(golden_logits_slice, axis=-1)
-
-      if golden_probabilities.shape[0] > 1:
-        max_logging.log(f"\n[probability: token {start_index + 1}]")
-        max_logging.log(f"{golden_probabilities[1]=}")
-        max_logging.log(f"{model_probabilities[1]=}")
-
-      kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
-      max_kl_div_val = jax.numpy.max(kl_div)
-      max_kl_div_idx = jax.numpy.argmax(kl_div)
-      max_logging.log(
-          f"\n[KL divergence]\n"
-          f"KL divergence = {kl_div}, max KL divergence = {max_kl_div_val} at index {max_kl_div_idx}, "
-          f"the corresponding token id is {ids[0, max_kl_div_idx + start_index]}"
-      )
-
-      if jax.process_index() == 0 and test_args.output_logits_path:
-        data_to_save = {
-            "prompt": golden_data[golden_data_index]["prompt"],
-            "tokens": ids[0, :seq_len].tolist(),
-            "logits": full_train_logits[0].tolist(),
-        }
-        all_data_to_save.append(data_to_save)
-
-      if test_args.atol is not None:
-        max_logging.log("\n[test criteria]")
-        max_logging.log(
-            f"Checking Numerical Differences between train logits and golden logits against "
-            f"atol={test_args.rtol} rtol={test_args.atol}."
-        )
-        rtol_val = float(test_args.rtol)
-        atol_val = float(test_args.atol)
-        assert jax.numpy.allclose(
-            train_logits_slice, golden_logits_slice, rtol=rtol_val, atol=atol_val, equal_nan=False
-        ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."
-
-      if test_args.max_kl_div is not None:
-        max_logging.log(
-            f"Checking KL Divergence between train distribution and golden distribution against "
-            f"threshold {test_args.max_kl_div}."
-        )
-        assert jax.numpy.all(
-            kl_div < test_args.max_kl_div,
-        ), (
-            f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. "
-            f"Max divergence: {jax.numpy.max(kl_div)}"
-        )
-
+    all_data_to_save = test_golden_logits(config, test_args)
   else:
-    """Comparing maxtext model with HF model on-the-fly"""
-    if test_args.hf_model_path == "":
-      raise ValueError("run_hf_model requires hf_model_path")
-
-    hf_token = config.hf_access_token
-    # Map MaxText config.dtype to PyTorch dtype
-    dtype_mapping = {
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
-        "float16": torch.float16,
-        jnp.bfloat16: torch.bfloat16,
-        jnp.float32: torch.float32,
-        jnp.float16: torch.float16,
-    }
-
-    # Default to bfloat16 if dtype is unrecognized
-    torch_dtype = dtype_mapping.get(config.dtype.name, torch.bfloat16)
-    max_logging.log(f"Loading HF model with dtype: {torch_dtype} (derived from config.dtype: {config.dtype})")
-
-    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch_dtype, token=hf_token)
-
-    if os.path.isdir(test_args.hf_model_path):
-      # local hf directory may not contain tokenizer, read from remote tokenizer
-      tokenizer_path = config.tokenizer_path
-    else:
-      tokenizer_path = test_args.hf_model_path
-
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, token=hf_token)
-
-    # maxtext model prefix, use eos token as pad token
-    pad_token_prefixes = ["llama3.1", "mixtral"]
-    if any(config.model_name.startswith(prefix) for prefix in pad_token_prefixes):
-      tokenizer.pad_token = tokenizer.eos_token
-
-    init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    init_rng, rng1 = jax.random.split(init_rng)
-    devices_array = maxtext_utils.create_device_mesh(config)
-    mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
-    quant = quantizations.configure_quantization(config)
-    maxtext_model = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-    maxtext_state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
-
-    prompts = ["I love to", "Today is a", "What is the"]
-    all_data_to_save = []
-    for input_text in prompts:
-      max_logging.log(f"\n--- Prompt: {input_text} ---")
-
-      # Tokenize for HF
-      inputs = tokenizer(
-          input_text, return_tensors="pt", padding=True, max_length=config.max_target_length, truncation=True
-      )
-      actual_seq_len = inputs["input_ids"].shape[1]
-
-      # Tokenize for MaxText
-      mt_ids = jnp.asarray(inputs["input_ids"], dtype=jnp.int32)
-
-      if mt_ids.shape[0] != config.global_batch_size_to_train_on:  # Ensure batch size matches
-        mt_ids = jnp.repeat(mt_ids, config.global_batch_size_to_train_on // mt_ids.shape[0], axis=0)
-
-      s = (config.global_batch_size_to_train_on, config.max_target_length)
-      mt_decoder_segment_ids_full = jnp.zeros(s, dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
-
-      mt_decoder_segment_ids = mt_decoder_segment_ids_full[:, :actual_seq_len]
-
-      # Create full decoder positions up to max_target_length
-      mt_decoder_positions_full = jnp.stack(
-          [jnp.arange(config.max_target_length, dtype=jnp.int32) for _ in range(config.global_batch_size_to_train_on)]
-      )
-      mt_decoder_positions = mt_decoder_positions_full[:, :actual_seq_len]
-
-      # --- HF Forward Pass ---
-      with torch.no_grad():
-        hf_logits_torch = hf_model(**inputs).logits
-
-      # --- MaxText Forward Pass ---
-      mt_logits_jax = maxtext_model.apply(
-          maxtext_state.params,
-          mt_ids,
-          mt_decoder_positions,
-          mt_decoder_segment_ids,
-          enable_dropout=False,
-          rngs={"aqt": init_rng},
-      )
-      mt_logits_jax_sliced = mt_logits_jax[:, :actual_seq_len, :]
-      mt_logits_torch = convert_jax_weight_to_torch(mt_logits_jax_sliced)
-
-      # --- Compare logits for the last token prediction ---
-      hf_last_token_logits = hf_logits_torch[:, -1, :]
-      mt_last_token_logits = mt_logits_torch[:, -1, :]  # MaxText output already sliced to actual_seq_len
-
-      tokens_maxtext = get_top_k_tokens_scores(mt_last_token_logits, tokenizer, k=10, description="MaxText model")
-      tokens_hf = get_top_k_tokens_scores(hf_last_token_logits, tokenizer, k=10, description="HF model")
-      compare_top_tokens(converted_tokens=tokens_maxtext, golden_tokens=tokens_hf)
-
-      # --- Compare all logits in the sequence (for the first batch item) ---
-      # Unsqueeze to add batch dimension for check_kl_divergence: [1, seq, vocab]
-      start_index = 1 if test_args.skip_first_token else 0
-      check_kl_divergence(
-          mt_logits_torch[0, start_index:].unsqueeze(0),
-          hf_logits_torch[0, start_index:].unsqueeze(0),
-          atol=test_args.max_kl_div,
-      )
-      if jax.process_index() == 0 and test_args.output_logits_path:
-        data_to_save = {
-            "mt_logits": mt_logits_torch[0].tolist(),
-            "hf_logits": hf_logits_torch[0].tolist(),
-        }
-        all_data_to_save.append(data_to_save)
+    all_data_to_save = test_on_fly(config, test_args)
 
   if jax.process_index() == 0 and test_args.output_logits_path:
+    import jsonlines  # pylint: disable=import-outside-toplevel
+
     os.makedirs(os.path.dirname(test_args.output_logits_path), exist_ok=True)
     with jsonlines.open(test_args.output_logits_path, "a") as f:
       f.write(all_data_to_save)
@@ -539,25 +552,11 @@ if __name__ == "__main__":
       default=False,
       help="Skip the first token during comparison to ignore BOS/init mismatches.",
   )
-  test_args, _ = parser.parse_known_args()
 
-  # Remove args defined in this test file to avoid error from pyconfig
-  model_args = sys.argv
-  to_remove_args = [
-      "--atol",
-      "--rtol",
-      "--token_size",
-      "--max_kl_div",
-      "--golden_logits_path",
-      "--hf_model_path",
-      "--run_hf_model",
-      "--output_logits_path",
-      "--gcs_output_logits_path",
-      "--clip_logits_epsilon",
-      "--skip_first_token",
-  ]
-  for arg in to_remove_args:
-    model_args = [s for s in model_args if not s.startswith(arg)]
+  # Parse known args returns the namespace AND the list of remaining arguments
+  test_args, remaining_args = parser.parse_known_args()
+  # Reconstruct model_args (script name + the args MaxText needs)
+  model_args = [sys.argv[0]] + remaining_args
 
   cfg = pyconfig.initialize(model_args)
   assert (
