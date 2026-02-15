@@ -947,8 +947,9 @@ def get_hf_model(model_id: str, token: str, revision: str = None, dtype=None):
   else:
     model_class = AutoModelForCausalLM
 
-  if dtype:
-    hf_model = model_class.from_pretrained(model_id, token=token, revision=revision, dtype=dtype)
-  else:
+  if dtype is None:
     hf_model = model_class.from_pretrained(model_id, token=token, revision=revision)
+  else:
+    hf_model = model_class.from_pretrained(model_id, token=token, revision=revision, dtype=dtype)
+
   return hf_model

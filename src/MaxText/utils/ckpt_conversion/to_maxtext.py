@@ -616,7 +616,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     #   tensor_getter = _eager_getter
 
     # AFTER
-    if args.mode == "default":
+    if test_args.mode == "default":
       # get_hf_model uses model.from_pretrained
       # by default, dtype is float32?
       hf_model = get_hf_model(model_id, token=hf_token)
@@ -626,7 +626,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     hf_state_dict_numpy = hf_model.state_dict()
     del hf_model
 
-    if args.mode == "default":
+    if test_args.mode == "default":
       # Convert all to numpy immediately in eager mode
       for k, v in hf_state_dict_numpy.items():
         hf_state_dict_numpy[k] = v.numpy()
@@ -636,18 +636,18 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     def _eager_getter(key):
       if key not in hf_state_dict_numpy:
         raise ValueError(f"HuggingFace key {key} not found in state_dict.")
-      if args.mode == "default":
+      if test_args.mode == "default":
         return hf_state_dict_numpy[key]
-      elif args.mode == "float16":
+      elif test_args.mode == "float16":
         # torch.bfloat16 -> torch.float16 -> np.float16
         return hf_state_dict_numpy[key].to(torch.float16).numpy()
-      elif args.mode == "bfloat16":
+      elif test_args.mode == "bfloat16":
         # View as int16 (same bit-width) to trick NumPy, then view as bfloat16
         # This is zero-copy on CPU
-        assert tensor.dtype == torch.bfloat16
         tensor = hf_state_dict_numpy[key]
+        assert tensor.dtype == torch.bfloat16
         return tensor.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
-      elif args.mode == "bfloat16-2":
+      elif test_args.mode == "bfloat16-2":
         # torch.bfloat16 -> torch.float32 -> np.float32 -> ml_dtypes.bfloat16
         return hf_state_dict_numpy[key].to(torch.float32).numpy().astype(ml_dtypes.bfloat16)
 
@@ -779,7 +779,7 @@ if __name__ == "__main__":
   parser.add_argument(
       "--mode",
       type=str,
-      required=True,
+      required=False,
       default="default",
       choices=["default", "float16", "bfloat16", "bfloat16-2"],
       help="",
