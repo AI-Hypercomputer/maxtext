@@ -594,6 +594,8 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
     print_ram_usage("After LazyLoader init")
     tensor_getter = hf_loader.get_tensor
+    max_logging.log("Starting weight transformation...")
+    start = time.time()
   else:
     max_logging.log(f"Lazy loading DISABLED. Loading full HuggingFace model: {model_id}...")
     hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
@@ -628,6 +630,9 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
 
     unique_dtypes = {tensor.dtype for tensor in hf_state_dict_numpy.values()}
     max_logging.log(f"load dtypes: {unique_dtypes}")
+
+    max_logging.log("Starting weight transformation...")
+    start = time.time()
 
     if test_args.mode == "default":
       # Convert all to numpy immediately in eager mode
@@ -671,8 +676,6 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(config)
 
   # Weight transformation
-  max_logging.log("Starting weight transformation...")
-  start = time.time()
   # Stores MaxText weights: numpy.ndarray
   final_mt_weights = [None] * len(maxtext_abstract_dict)
 
