@@ -68,6 +68,7 @@ from functools import partial
 from typing import Sequence, List, Any, Callable
 import numpy as np
 import absl
+import ml_dtypes
 
 from transformers import AutoConfig
 from huggingface_hub import hf_hub_download, list_repo_files
@@ -596,37 +597,59 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   else:
     max_logging.log(f"Lazy loading DISABLED. Loading full HuggingFace model: {model_id}...")
     hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
-    hf_model = get_hf_model(model_id, token=hf_token, revision=revision)
+
+    # BEFORE
+    # hf_model = get_hf_model(model_id, token=hf_token)
+    # hf_state_dict_numpy = hf_model.state_dict()
+    # # Convert all to numpy immediately in eager mode
+    # for k, v in hf_state_dict_numpy.items():
+    #   hf_state_dict_numpy[k] = v.numpy()
+    # del hf_model
+    # max_logging.log("HuggingFace model loaded and converted to NumPy.")
+    # print_ram_usage("After full HF model load")
+
+    # def _eager_getter(key):
+    #   if key not in hf_state_dict_numpy:
+    #     raise ValueError(f"HuggingFace key {key} not found in state_dict.")
+    #   return hf_state_dict_numpy[key]
+
+    #   tensor_getter = _eager_getter
+
+    # AFTER
+    if args.mode == "default":
+      # get_hf_model uses model.from_pretrained
+      # by default, dtype is float32?
+      hf_model = get_hf_model(model_id, token=hf_token)
+    else:
+      hf_model = get_hf_model(model_id, token=hf_token, dtype=torch.bfloat16)
+
     hf_state_dict_numpy = hf_model.state_dict()
-    # Convert all to numpy immediately in eager mode
-    for k, v in hf_state_dict_numpy.items():
-      hf_state_dict_numpy[k] = v.numpy()
     del hf_model
-    max_logging.log("HuggingFace model loaded and converted to NumPy.")
-    print_ram_usage("After full HF model load")
+
+    if args.mode == "default":
+      # Convert all to numpy immediately in eager mode
+      for k, v in hf_state_dict_numpy.items():
+        hf_state_dict_numpy[k] = v.numpy()
+      max_logging.log("HuggingFace model loaded and converted to NumPy.")
+      print_ram_usage("After full HF model load")
 
     def _eager_getter(key):
       if key not in hf_state_dict_numpy:
         raise ValueError(f"HuggingFace key {key} not found in state_dict.")
-      return hf_state_dict_numpy[key]
-    
-     def _eager_getter(key):
-      if key not in hf_state_dict_numpy:
-        raise ValueError(f"HuggingFace key {key} not found in state_dict.")   
-      if args.mode == "before":
+      if args.mode == "default":
         return hf_state_dict_numpy[key]
-      elif args.mode == "bloat16":
-        # torch.bfloat16 -> torch.float32 -> np.float32 -> jax.bfloat16
-        return hf_state_dict_numpy[key].to(torch.float32).numpy().astype(jax.bfloat16)
       elif args.mode == "float16":
         # torch.bfloat16 -> torch.float16 -> np.float16
         return hf_state_dict_numpy[key].to(torch.float16).numpy()
-      elif args.mode == "bloat16-2":
+      elif args.mode == "bfloat16":
         # View as int16 (same bit-width) to trick NumPy, then view as bfloat16
         # This is zero-copy on CPU
         assert tensor.dtype == torch.bfloat16
         tensor = hf_state_dict_numpy[key]
-        return tensor.view(torch.int16).numpy().view(jax.bfloat16)
+        return tensor.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
+      # elif args.mode == "bfloat16":
+      #   # torch.bfloat16 -> torch.float32 -> np.float32 -> ml_dtypes.bfloat16
+      #   return hf_state_dict_numpy[key].to(torch.float32).numpy().astype(ml_dtypes.bfloat16)
 
     tensor_getter = _eager_getter
 
@@ -754,7 +777,12 @@ if __name__ == "__main__":
       "--revision", type=str, required=False, default=None, help="Specific Hugging Face revision (branch/tag/commit)"
   )
   parser.add_argument(
-      "--mode", type=str, required=True, default="", choices=["before", "float16", "bfloat16", "bfloat16-2"], help=""
+      "--mode",
+      type=str,
+      required=True,
+      default="default",
+      choices=["default", "float16", "bfloat16"],  # "bfloat16-2"
+      help="",
   )
 
   # Parse local arguments
