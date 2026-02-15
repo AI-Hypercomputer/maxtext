@@ -53,7 +53,6 @@ def yaml_key_to_env_key(s: str) -> str:
 
 def resolve_config_path(param: str) -> str:
   """Resolve config path to auto rewrite to use new src folder."""
-  print(param)
   if os.path.isfile(param):
     return param
   elif "MaxText" in param:
@@ -90,15 +89,12 @@ def _apply_rules(base_rules, new_rules, config):
 def _load_config(config_name: str) -> omegaconf.DictConfig:
   """Loads a YAML file and its base_configs recursively using OmegaConf."""
   cfg = omegaconf.OmegaConf.load(config_name)
-  print( _BASE_CONFIG_ATTR)
   if _BASE_CONFIG_ATTR in cfg:
     base_path = cfg[_BASE_CONFIG_ATTR]
     if not os.path.isabs(base_path):
-      print(1)
       # Search relative to current config, then in the default configs folder
       loaded_parent_config_filename = os.path.join(os.path.dirname(config_name), base_path)
       if not os.path.isfile(loaded_parent_config_filename):
-        print(2)
         loaded_parent_config_filename = os.path.join(MAXTEXT_CONFIGS_DIR, base_path)
     else:
       loaded_parent_config_filename = base_path
@@ -214,7 +210,6 @@ class HyperParameters:
 
 def initialize(argv: list[str], **kwargs) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
-  print("hi")
   pydantic_config = initialize_pydantic(argv, **kwargs)
   config = HyperParameters(pydantic_config)
   return config
@@ -225,9 +220,7 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   Returns pydantic MaxTextConfig class whereas `initialize` returns the og `HyperParameters`
   """
   # 1. Load base and inherited configs from file(s)
-  print("hi2")
   config_path = resolve_config_path(argv[1])
-  print("hi3", config_path )
   base_yml_config = _load_config(config_path)
 
   # 2. Get overrides from CLI and kwargs

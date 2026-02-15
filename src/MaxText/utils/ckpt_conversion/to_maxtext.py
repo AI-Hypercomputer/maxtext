@@ -626,6 +626,9 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     hf_state_dict_numpy = hf_model.state_dict()
     del hf_model
 
+    unique_dtypes = {tensor.dtype for tensor in hf_state_dict_numpy.values()}
+    max_logging.log(f"load dtypes: {unique_dtypes}")
+
     if test_args.mode == "default":
       # Convert all to numpy immediately in eager mode
       for k, v in hf_state_dict_numpy.items():
