@@ -647,9 +647,9 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
         assert tensor.dtype == torch.bfloat16
         tensor = hf_state_dict_numpy[key]
         return tensor.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
-      # elif args.mode == "bfloat16":
-      #   # torch.bfloat16 -> torch.float32 -> np.float32 -> ml_dtypes.bfloat16
-      #   return hf_state_dict_numpy[key].to(torch.float32).numpy().astype(ml_dtypes.bfloat16)
+      elif args.mode == "bfloat16-2":
+        # torch.bfloat16 -> torch.float32 -> np.float32 -> ml_dtypes.bfloat16
+        return hf_state_dict_numpy[key].to(torch.float32).numpy().astype(ml_dtypes.bfloat16)
 
     tensor_getter = _eager_getter
 
@@ -781,7 +781,7 @@ if __name__ == "__main__":
       type=str,
       required=True,
       default="default",
-      choices=["default", "float16", "bfloat16"],  # "bfloat16-2"
+      choices=["default", "float16", "bfloat16", "bfloat16-2"],
       help="",
   )
 
