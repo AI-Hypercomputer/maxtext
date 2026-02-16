@@ -20,6 +20,9 @@ import sys
 from typing import Any
 import copy
 
+# Disable dill to avoid conflict with gfile (dill requires buffering=0, which gfile forbids)
+os.environ["HF_DATASETS_DISABLE_DILL"] = "1"
+
 import jax
 import jax.numpy as jnp
 
@@ -230,6 +233,10 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   if model_name != "default":
     # First try relative to base config path
     model_config_path = os.path.join(os.path.dirname(config_path), "models", f"{model_name}.yml")
+    # Try looking for "models" under "src/maxtext/configs/"
+    if not os.path.isfile(model_config_path):
+      model_config_path = os.path.join(os.path.dirname(os.path.dirname(config_path)), "models", f"{model_name}.yml")
+
     if not os.path.isfile(model_config_path):
       # Fallback to default location within package
       dir_path = os.path.dirname(os.path.realpath(__file__))

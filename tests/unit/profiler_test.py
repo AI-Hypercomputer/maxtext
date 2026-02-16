@@ -13,18 +13,98 @@
 # limitations under the License.
 
 """Profiler tests."""
+import os
 import sys
 import unittest
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from MaxText import pyconfig
+from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.configs import types
 from maxtext.common import profiler
 from tests.utils.test_helpers import get_test_config_path
 
 
 class ProfilerTest(unittest.TestCase):
   """Test for profiler."""
+
+  def setUp(self):
+    super().setUp()
+    # Mock jax.devices() to be deterministic and avoid runtime initialization errors
+    self.mock_devices = [MagicMock(slice_index=0) for _ in range(1)]
+    self.jax_patcher = patch("jax.devices", return_value=self.mock_devices)
+    self.jax_patcher.start()
+    self.jax_process_index_patcher = patch("jax.process_index", return_value=0)
+    self.jax_process_index_patcher.start()
+
+  def tearDown(self):
+    self.jax_patcher.stop()
+    self.jax_process_index_patcher.stop()
+    super().tearDown()
+
+  @pytest.mark.tpu_only
+  def test_profiler_options_populated_from_config(self):
+    """Verifies that Profiler initializes jax.profiler.ProfileOptions from config."""
+    config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        enable_checkpointing=False,
+        run_name="test_profiler_options",
+        base_output_directory="/tmp",
+        profiler="xplane",
+        xprof_tpu_power_trace_level=1,
+        xprof_e2e_enable_fw_throttle_event=True,
+        xprof_e2e_enable_fw_power_level_event=True,
+        xprof_e2e_enable_fw_thermal_event=True,
+    )
+
+    with patch("jax.profiler.ProfileOptions") as mock_options_cls:
+      # Setup mock return value
+      mock_options_instance = MagicMock()
+      mock_options_cls.return_value = mock_options_instance
+
+      prof = profiler.Profiler(config)
+
+      # Check if ProfileOptions was instantiated
+      mock_options_cls.assert_called_once()
+
+      # Verify advanced_configuration was populated
+      expected_advanced_config = {
+          "tpu_power_trace_level": types.XProfTPUPowerTraceMode.POWER_TRACE_NORMAL,
+          "e2e_enable_fw_throttle_event": True,
+          "e2e_enable_fw_power_level_event": True,
+          "e2e_enable_fw_thermal_event": True,
+      }
+      self.assertEqual(prof.profiling_options.advanced_configuration, expected_advanced_config)
+
+  @pytest.mark.tpu_only
+  @patch("jax.profiler.start_trace")
+  def test_profiler_activate_passes_options(self, mock_start_trace):
+    """Verifies that activate() passes the profiling_options to jax.profiler.start_trace."""
+    config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        enable_checkpointing=False,
+        run_name="test_profiler_options",
+        base_output_directory="/tmp",
+        profiler="xplane",
+        xprof_tpu_power_trace_level=2,
+    )
+
+    # We need to mock ProfileOptions as well to check identity or value
+    with patch("jax.profiler.ProfileOptions"):
+      prof = profiler.Profiler(config)
+      prof.activate()
+
+      # Verify start_trace was called with profiler_options
+      mock_start_trace.assert_called_once()
+      _, kwargs = mock_start_trace.call_args
+      self.assertIn("profiler_options", kwargs)
+      self.assertEqual(kwargs["profiler_options"], prof.profiling_options)
+      self.assertEqual(
+          prof.profiling_options.advanced_configuration["tpu_power_trace_level"],
+          types.XProfTPUPowerTraceMode.POWER_TRACE_SPI,
+      )
 
   # These periodic proilfer tests can run on any platform (cpu, gpu or tpu)
   @pytest.mark.tpu_only

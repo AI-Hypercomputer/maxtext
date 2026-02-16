@@ -16,28 +16,36 @@
 
 # pylint: disable=too-many-lines
 
-from enum import Enum
-from math import prod
-from tempfile import gettempdir
-from typing import Any, NewType, Literal, Optional
 import datetime
+import enum
+from enum import Enum
 import logging
 import math
+from math import prod
 import os
+from tempfile import gettempdir
+from typing import Any, Literal, NewType, Optional
 
 import jax
-
-from pydantic.config import ConfigDict
-from pydantic.fields import Field
-from pydantic.functional_validators import model_validator, field_validator
-from pydantic.main import BaseModel
-from pydantic.types import PositiveInt, NonNegativeFloat, NonNegativeInt
-
 from MaxText import accelerator_to_spec_map
 from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
+from pydantic.config import ConfigDict
+from pydantic.fields import Field
+from pydantic.functional_validators import field_validator, model_validator
+from pydantic.main import BaseModel
+from pydantic.types import NonNegativeFloat, NonNegativeInt, PositiveInt
+
+
+class XProfTPUPowerTraceMode(enum.IntEnum):  # pylint: disable=invalid-name
+  """Enum for XProfTPUPowerTraceMode."""
+
+  POWER_TRACE_NONE = 0
+  POWER_TRACE_NORMAL = 1
+  POWER_TRACE_SPI = 2
+
 
 logger = logging.getLogger(__name__)
 
@@ -240,8 +248,9 @@ ModelName = Literal[
     "gpt-oss-120b",
     "llama4-17b-16e",
     "llama4-17b-128e",
-    "olmo3_7b",
-    "olmo3_32b",
+    "olmo3-7b",
+    "olmo3-7b-pt",
+    "olmo3-32b",
 ]
 
 
@@ -281,6 +290,7 @@ class Checkpointing(BaseModel):
   lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
   load_full_state_path: PathStr = Field("", description="Loads the complete training state from a checkpoint path.")
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
+  load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
   async_checkpointing: bool = Field(True, description="If True, uses an asynchronous checkpointer for performance.")
   checkpoint_period: int = Field(10_000, description="The frequency (in steps) at which to save checkpoints.")
   max_num_checkpoints_to_keep: int | None = Field(None, description="Maximum number of checkpoints to keep.")
@@ -671,6 +681,9 @@ class MoEKernels(BaseModel):
   wo_tile_dlhs_buffer_count: int = Field(2, description="bwd pass dlhs tiling buffer count in GMM for wo.")
   wo_tile_drhs_buffer_count: int = Field(2, description="bwd pass drhs tiling buffer count in GMM for wo.")
 
+  wi_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wi.")
+  wo_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wo.")
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
@@ -777,6 +790,7 @@ class LayoutAndSharding(BaseModel):
 class DcnParallelism(BaseModel):
   """Parallelism dimensions across the DCN (Data Center Network)."""
 
+  dcn_diloco_parallelism: int = Field(1, description="DCN axis for Diloco parallelism.")
   dcn_data_parallelism: int = Field(-1, description="DCN axis for data parallelism.")
   dcn_fsdp_parallelism: int = Field(1, description="DCN axis for FSDP.")
   dcn_fsdp_transpose_parallelism: int = Field(1, description="DCN axis for FSDP transpose.")
@@ -796,6 +810,7 @@ class DcnParallelism(BaseModel):
 class IciParallelism(BaseModel):
   """Parallelism dimensions within the ICI (Inter-Chip Interconnect)."""
 
+  ici_diloco_parallelism: int = Field(1, description="ICI axis for Diloco parallelism.")
   ici_data_parallelism: int = Field(1, description="ICI axis for data parallelism.")
   ici_fsdp_parallelism: int = Field(-1, description="ICI axis for FSDP.")
   ici_fsdp_transpose_parallelism: int = Field(1, description="ICI axis for FSDP transpose.")
@@ -1071,8 +1086,17 @@ class TrainingLoop(BaseModel):
 class ManifoldConstrainedHyperConnections(BaseModel):
   """Configuration for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
-  mhc_expansion_rate: int = Field(0, description="The number of parallel streams in Hyper Connection.")
+  mhc_expansion_rate: PositiveInt = Field(1, description="The number of parallel streams in Hyper Connection.")
   sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
+
+
+class DilocoParams(BaseModel):
+  """Diloco Hyperparameters"""
+
+  enable_diloco: bool = Field(False, description="Enable Diloco parallelism")
+  diloco_sync_period: int = Field(36, description="Diloco sync period.")
+  diloco_outer_lr: float = Field(0.3, description="learning rate for outer optimizer.")
+  diloco_outer_momentum: float = Field(0.9, description="momentum for outer optimizer.")
 
 
 class Optimizer(BaseModel):
@@ -1317,6 +1341,16 @@ class Profiling(BaseModel):
   hide_profiler_step_metric: bool = Field(False, description="Whether to enable profiler step metric.")
   enable_jax_profiler: bool = Field(False, description="Enable the JAX live profiler.")
   jax_profiler_port: int = Field(9999, description="Port for the JAX profiler.")
+  xprof_tpu_power_trace_level: XProfTPUPowerTraceMode = Field(
+      XProfTPUPowerTraceMode.POWER_TRACE_NONE,
+      description=(
+          "TPU power trace level. The value should be 0 (POWER_TRACE_NONE), 1"
+          " (POWER_TRACE_NORMAL), or 2 (POWER_TRACE_SPI)"
+      ),
+  )
+  xprof_e2e_enable_fw_throttle_event: bool = Field(False, description="Enable FW throttle event.")
+  xprof_e2e_enable_fw_power_level_event: bool = Field(False, description="Enable FW power level event.")
+  xprof_e2e_enable_fw_thermal_event: bool = Field(False, description="Enable FW thermal event.")
 
 
 class HloDump(BaseModel):
@@ -1615,6 +1649,11 @@ class DerivedValues(BaseModel):
       description="Effective number of query heads, scaled by `global_parameter_scale`.",
   )
 
+  num_diloco_replicas: None | int = Field(
+      None,
+      description="The number of diloco replicas, derived from ICI and DCN values.",
+  )
+
   ici_parallelism: None | list[int] = Field(
       None,
       description="Aggregated list of all ICI parallelism values for legacy compatibility.",
@@ -1762,6 +1801,7 @@ class MaxTextConfig(
     RematAndOffload,
     TrainingLoop,
     ManifoldConstrainedHyperConnections,
+    DilocoParams,
     Optimizer,
     AdamW,
     Muon,
@@ -2187,8 +2227,12 @@ class MaxTextConfig(
     if self.use_sparse_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
-      if self.attention not in ("dot_product"):
-        raise ValueError("Sparse indexer is only supported dot_product attention")
+      supports_dot_product = self.attention == "dot_product"
+      supports_flash_splash = self.attention == "flash" and self.use_tokamax_splash
+      if not (supports_dot_product or supports_flash_splash):
+        raise NotImplementedError(
+            "Sparse indexer is only supported dot_product attention or flash attention with tokamax splash."
+        )
     if self.attention_type == AttentionType.CHUNK.value and (
         not isinstance(self.chunk_attn_window_size, int) or self.chunk_attn_window_size <= 0
     ):
@@ -2358,6 +2402,7 @@ class MaxTextConfig(
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
     if self.using_pipeline_parallelism and self.mesh_axes and self.mesh_axes[0] == "stage":
       self.ici_parallelism = [
+          self.ici_diloco_parallelism,
           self.ici_pipeline_parallelism,
           self.ici_data_parallelism,
           self.ici_fsdp_parallelism,
@@ -2372,6 +2417,7 @@ class MaxTextConfig(
           self.ici_autoregressive_parallelism,
       ]
       self.dcn_parallelism = [
+          self.dcn_diloco_parallelism,
           self.dcn_pipeline_parallelism,
           self.dcn_data_parallelism,
           self.dcn_fsdp_parallelism,
@@ -2387,6 +2433,7 @@ class MaxTextConfig(
       ]
     else:
       ici_map = {
+          "diloco": self.ici_diloco_parallelism,
           "data": self.ici_data_parallelism,
           "stage": self.ici_pipeline_parallelism,
           "fsdp": self.ici_fsdp_parallelism,
@@ -2405,6 +2452,7 @@ class MaxTextConfig(
       self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
       dcn_map = {
+          "diloco": self.dcn_diloco_parallelism,
           "data": self.dcn_data_parallelism,
           "stage": self.dcn_pipeline_parallelism,
           "fsdp": self.dcn_fsdp_parallelism,
@@ -2421,6 +2469,9 @@ class MaxTextConfig(
           "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
       }
       self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+
+    # Diloco params
+    self.num_diloco_replicas = int(self.ici_diloco_parallelism * self.dcn_diloco_parallelism)
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):

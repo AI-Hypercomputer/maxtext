@@ -85,6 +85,9 @@ HF_IDS = {
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
     "mixtral-8x7b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
     "mixtral-8x22b": "mistralai/Mixtral-8x22B-Instruct-v0.1",
+    "olmo3-7b": "allenai/Olmo-3-7B-Instruct",
+    "olmo3-7b-pt": "allenai/Olmo-3-1025-7B",
+    "olmo3-32b": "allenai/Olmo-3-32B-Think",
 }
 
 
@@ -935,14 +938,14 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
     return extract_linen_weights(actual_weights_dict)
 
 
-def get_hf_model(model_id: str, token: str):
+def get_hf_model(model_id: str, token: str, revision: str = None):
   """Loads the HuggingFace model based on model_id (Eager mode only), used in to_maxtext"""
   if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
     from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
 
-    model_class = Qwen3OmniMoeForConditionalGeneration.from_pretrained
+    model_class = Qwen3OmniMoeForConditionalGeneration
   else:
     model_class = AutoModelForCausalLM
 
-  hf_model = model_class.from_pretrained(model_id, token=token)
+  hf_model = model_class.from_pretrained(model_id, token=token, revision=revision)
   return hf_model

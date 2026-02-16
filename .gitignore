@@ -76,7 +76,6 @@ instance/
 # Sphinx documentation
 docs/_build/
 
-# src/MaxText/experimental/agent/integrative_rag_agent
 *.db
 
 # PyBuilder

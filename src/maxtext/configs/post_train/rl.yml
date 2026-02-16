@@ -15,7 +15,7 @@
 # RL Configuration
 # This config consolidates common parameters for RL training across different model sizes
 
-base_config: "base.yml"
+base_config: "../base.yml"
 
 # ====== Hardware =====
 trainer_devices_fraction: 0.5

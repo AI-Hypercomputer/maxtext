@@ -62,7 +62,6 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 from jax.sharding import Mesh
 from orbax import checkpoint as ocp
-from pprint import pprint
 from transformers import AutoTokenizer
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
@@ -73,11 +72,11 @@ from tunix.sft import metrics_logger, profiler
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from MaxText.rl.evaluate_rl import evaluate
 from MaxText.rl import utils_rl
-from MaxText.input_pipeline.instruction_data_processing import load_template_from_file
+from maxtext.input_pipeline.instruction_data_processing import load_template_from_file
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 
 
@@ -304,20 +303,28 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
 
   # Load datasets
-  dataset = get_dataset(
+  train_dataset = get_dataset(
       model_tokenizer,
       trainer_config,
       train_data_dir,
       trainer_config.train_split,
       data_files=trainer_config.hf_train_files,
       dataset_name=trainer_config.dataset_name,
-  ).batch(trainer_config.batch_size)[: trainer_config.num_batches]
+  )
 
-  if trainer_config.train_fraction == 1.0:
-    train_dataset = dataset.repeat(trainer_config.num_epoch)
-  else:
-    train_dataset = dataset[: int(len(dataset) * trainer_config.train_fraction)]
-    train_dataset = train_dataset.repeat(trainer_config.num_epoch)
+  def _filter_long_prompts(x):
+    tokens = model_tokenizer.tokenize(x["prompts"])
+    return len(tokens) <= trainer_config.max_prefill_predict_length
+
+  train_dataset = train_dataset.filter(_filter_long_prompts)
+  dataset_size = int(trainer_config.num_batches * trainer_config.batch_size * trainer_config.train_fraction)
+  train_dataset = train_dataset[:dataset_size]
+  train_dataset = train_dataset.repeat(trainer_config.num_epoch)
+
+  train_dataset = (
+      train_dataset.to_iter_dataset()
+      .batch(trainer_config.batch_size)
+  )
 
   eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
   if not eval_dataset_name:
@@ -330,12 +337,15 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       trainer_config.eval_split,
       data_files=trainer_config.hf_eval_files,
       dataset_name=eval_dataset_name,
-  ).batch(trainer_config.batch_size)[: trainer_config.num_test_batches]
+  )
 
-  # Let's see how one batch of the dataset looks like!
-  if trainer_config.debug.rl:
-    for ele in train_dataset[:1]:
-      pprint(ele)
+  test_dataset = test_dataset.filter(_filter_long_prompts)
+  test_dataset = test_dataset[: trainer_config.num_test_batches * trainer_config.batch_size]
+
+  test_dataset = (
+      test_dataset.to_iter_dataset()
+      .batch(trainer_config.batch_size)
+  )
 
   # Load reference model
   max_logging.log("Creating reference model and also meshes for reference and rollout")
@@ -358,10 +368,17 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     )
 
   # TODO: @mazumdera: change this to use lora
-  # TODO: @xfgu: instead of restoring a second time from GCS, can we just copy reference_model
-  # Load policy model
-  max_logging.log("Creating policy model with same config as reference model on trainer mesh")
-  actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
+  if trainer_config.load_checkpoint_only_once:
+    max_logging.log("Creating policy model by copying reference model instead of restoring from checkpoint again.")
+    with reference_mesh:
+      actor_base_model = nnx.clone(reference_model.base)
+      use_no_op_mappings = "maxtext_config" in trainer_config.vllm_additional_config
+      actor_model = TunixMaxTextAdapter(base_model=actor_base_model, use_no_op_mappings=use_no_op_mappings)
+      actor_model.config = None
+    actor_mesh = reference_mesh
+  else:
+    max_logging.log("Creating policy model with same config as reference model on trainer mesh")
+    actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
 
   if trainer_config.debug.rl:
     max_logging.log("Policy Model initialized successfully")
@@ -487,8 +504,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
       )
 
-  configs_dir = os.environ.get("MAXTEXT_CONFIGS_DIR", os.path.join(MAXTEXT_PKG_DIR, "configs"))
-  vllm_config_path = epath.Path(configs_dir) / "vllm.yml"
+  vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
@@ -530,10 +546,22 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   # Start training
 
+  if trainer_config.load_checkpoint_only_once:
+    max_logging.log("Capturing reference model state before training.")
+    ref_state_before = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
+
   max_logging.warning("Starting RL training...")
 
   with reference_mesh, nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
     rl_trainer.train(train_dataset)
+
+  if trainer_config.load_checkpoint_only_once:
+    max_logging.log("Checking if reference model state changed during training.")
+    ref_state_after = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
+    check = jax.tree_util.tree_map(jax.numpy.array_equal, ref_state_before, ref_state_after)
+    if not jax.tree_util.tree_all(check):
+      raise ValueError("Reference model parameters changed during training!")
+    max_logging.log("Reference model parameters verified to be unchanged during training.")
 
   max_logging.warning("RL Training Completed Successfully!")
 

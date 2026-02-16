@@ -67,7 +67,7 @@ from MaxText.layers.embeddings import (
 )
 from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
-from MaxText.layers.normalizations import RMSNorm, Qwen3NextRMSNorm
+from MaxText.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache, page_manager, paged_attention
 from maxtext.inference.kvcache import KVQuant
@@ -164,6 +164,7 @@ def attention_as_linen(
     use_mrope: bool = False,
     mrope_section: tuple[int, int, int] | None = None,
     name: str | None = None,
+    rope_type: str | None = None,
 ):
   """A factory function to create an Attention as a Linen module.
 
@@ -228,6 +229,7 @@ def attention_as_linen(
       use_mrope=use_mrope,
       mrope_section=mrope_section,
       name=name,
+      rope_type=rope_type,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
   )
@@ -328,6 +330,7 @@ class Attention(nnx.Module):
       use_mrope: bool = False,
       mrope_section: tuple[int, int, int] | None = None,
       name: str | None = None,
+      rope_type: str | None = None,
       rngs: Optional[nnx.Rngs] = None,
   ):
     """Initializes the Attention module.
@@ -367,6 +370,8 @@ class Attention(nnx.Module):
       is_vision: Whether this is a vision attention layer.
       model_mode: The model's operational mode (e.g., 'train', 'prefill').
       base_kv_cache: Whether to use base (non-MLA) kv cache, if KVCache is used
+      rope_type: Optional override for the RoPE type (e.g., 'default', 'yarn').
+          If provided, this takes precedence over `config.rope_type`.
       rngs: RNG state for initialization, passed by the nnx.to_linen wrapper.
     """
 
@@ -424,6 +429,8 @@ class Attention(nnx.Module):
     self.use_mrope = use_mrope
     self.mrope_section = mrope_section
     self.rngs = rngs
+    # Use the rope type specified in the arguments if provided, otherwise fall back to the one in the config.
+    self.rope_type = (rope_type or self.config.rope_type).lower()
 
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
 
@@ -490,9 +497,19 @@ class Attention(nnx.Module):
       self.sinks = None
 
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
+
     if self.use_qk_norm and not is_llama4_decoder_block:
-      self.query_norm = RMSNorm(
-          num_features=self.head_dim,
+      # Check if this is Olmo3, which uses a unique "Global" QK Norm strategy.
+      # GlobalRMSNorm flattens (Heads, Dim) to normalize across the entire hidden state.
+      use_global_qk_norm = self.config.model_name.startswith("olmo3")
+      qk_norm_cls = GlobalRMSNorm if use_global_qk_norm else RMSNorm
+
+      # For RMSNorm use `head_dim` (per-head normalization), while for GlobalRMSNorm use `num_heads * head_dim` (global normalization).
+      q_features = (self.num_query_heads * self.head_dim) if use_global_qk_norm else self.head_dim
+      k_features = (self.num_kv_heads * self.head_dim) if use_global_qk_norm else self.head_dim
+
+      self.query_norm = qk_norm_cls(
+          num_features=q_features,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           shard_mode=self.config.shard_mode,
@@ -500,8 +517,8 @@ class Attention(nnx.Module):
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
-      self.key_norm = RMSNorm(
-          num_features=self.head_dim,
+      self.key_norm = qk_norm_cls(
+          num_features=k_features,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           shard_mode=self.config.shard_mode,
@@ -726,7 +743,7 @@ class Attention(nnx.Module):
     else:
       rope_embedding_dims = self.head_dim
 
-    rope_type = self.config.rope_type.lower()
+    rope_type = self.rope_type
     rope_use_scale = self.config.rope_use_scale
     if self.is_vision:
       if self.config.model_name.startswith("qwen3-omni"):
