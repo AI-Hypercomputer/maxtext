@@ -683,7 +683,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   filtered_map_keys = validate_and_filter_param_map_keys(param_map_mt_to_hf.keys(), maxtext_abstract_dict.keys())
 
   for mt_param_key_or_keys in MemoryMonitorTqdm(
-      filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
+      filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True, smoothing=0
   ):
     if not use_lazy_load:
       max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
