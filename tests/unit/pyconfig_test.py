@@ -20,7 +20,7 @@ import os.path
 from MaxText import pyconfig
 from MaxText.pyconfig import resolve_config_path
 from MaxText.globals import MAXTEXT_PKG_DIR
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
 
 
 class PyconfigTest(unittest.TestCase):
@@ -84,6 +84,18 @@ class PyconfigTest(unittest.TestCase):
 
     self.assertEqual(config.base_emb_dim, 1024)
     self.assertEqual(config.base_mlp_dim, 24576)
+
+  def test_overriding_model_in_sft(self):
+    # TODO: Update MAXTEXT_PKG_DIR after repo restructuring is complete.
+    config = pyconfig.initialize(
+        [os.path.join("maxtext.trainers.post_train.sft.train_sft"), get_post_train_test_config_path("sft")],
+        skip_jax_distributed_system=True,
+        model_name="llama3.1-8b",
+        override_model_config=True,
+    )
+
+    self.assertEqual(config.base_emb_dim, 4096)
+    self.assertEqual(config.base_mlp_dim, 14336)
 
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))

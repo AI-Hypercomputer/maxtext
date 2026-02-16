@@ -29,7 +29,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from flax import nnx
 
-from MaxText.tokenizer import HFTokenizer
+from maxtext.input_pipeline.tokenizer import HFTokenizer
 from MaxText.common_types import MODEL_MODE_TRAIN, Array, Config
 from MaxText.layers.embeddings import Embed
 from MaxText.layers.initializers import nd_dense_init, NdInitializer

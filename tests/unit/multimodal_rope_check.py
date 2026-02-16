@@ -30,19 +30,19 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
     apply_rotary_pos_emb,
 )
 
-from MaxText import multimodal_utils
-from MaxText.input_pipeline._input_pipeline_utils import ComputeQwen3OmniPositions
+from maxtext.multimodal import processor_qwen3_omni
+from maxtext.input_pipeline.input_pipeline_utils import ComputeQwen3OmniPositions
 from MaxText.layers.embeddings import Qwen3OmniMoeThinkerTextRotaryEmbedding as JaxMRoPE
 
 
 # Qwen3-Omni special token IDs
-VISION_START = multimodal_utils.QWEN3_OMNI_VISION_START_TOKEN
-VISION_END = multimodal_utils.QWEN3_OMNI_VISION_END_TOKEN
-AUDIO_START = multimodal_utils.QWEN3_OMNI_AUDIO_START_TOKEN
-AUDIO_END = multimodal_utils.QWEN3_OMNI_AUDIO_END_TOKEN
-IMAGE_TOKEN = multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
-VIDEO_TOKEN = multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN
-AUDIO_TOKEN = multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN
+VISION_START = processor_qwen3_omni.QWEN3_OMNI_VISION_START_TOKEN
+VISION_END = processor_qwen3_omni.QWEN3_OMNI_VISION_END_TOKEN
+AUDIO_START = processor_qwen3_omni.QWEN3_OMNI_AUDIO_START_TOKEN
+AUDIO_END = processor_qwen3_omni.QWEN3_OMNI_AUDIO_END_TOKEN
+IMAGE_TOKEN = processor_qwen3_omni.QWEN3_OMNI_IMAGE_TOKEN
+VIDEO_TOKEN = processor_qwen3_omni.QWEN3_OMNI_VIDEO_TOKEN
+AUDIO_TOKEN = processor_qwen3_omni.QWEN3_OMNI_AUDIO_TOKEN
 
 
 def create_pytorch_config(head_dim=128, mrope_section=(24, 20, 20), rope_max_timescale=1_000_000):
@@ -109,7 +109,7 @@ def create_audio_in_video_sequence(
     np.ndarray of interleaved token IDs for audio-in-video.
   """
   # Compute token counts
-  expected_audio_tokens = int(multimodal_utils._get_feat_extract_output_lengths(jnp.array(audio_lengths[0])).item())  # pylint: disable=protected-access
+  expected_audio_tokens = int(processor_qwen3_omni._get_feat_extract_output_lengths(jnp.array(audio_lengths[0])).item())  # pylint: disable=protected-access
 
   # Video tokens
   video_tokens_per_frame = (video_grid_thw[0, 1] // spatial_merge_size) * (video_grid_thw[0, 2] // spatial_merge_size)
@@ -255,7 +255,7 @@ class GetRopeIndexComparisonTest(unittest.TestCase):
     Returns:
       Tuple of (jax_position_ids, pytorch_position_ids, match_status)
     """
-    jax_position_ids_np, jax_deltas_np = multimodal_utils.get_rope_index(
+    jax_position_ids_np, jax_deltas_np = processor_qwen3_omni.get_rope_index(
         input_ids=input_ids,
         image_grid_thw=image_grid_thw,
         video_grid_thw=video_grid_thw,
@@ -435,7 +435,7 @@ class GetRopeIndexComparisonTest(unittest.TestCase):
     # Compute expected audio tokens from raw length
     audio_lengths = np.array([1600])
     # pylint: disable=protected-access
-    expected_tokens = int(multimodal_utils._get_feat_extract_output_lengths(jnp.array(1600)).item())
+    expected_tokens = int(processor_qwen3_omni._get_feat_extract_output_lengths(jnp.array(1600)).item())
 
     audio_tokens = [AUDIO_TOKEN] * expected_tokens
     input_ids = np.array([[AUDIO_START, *audio_tokens, AUDIO_END]])
@@ -645,7 +645,7 @@ class ComputeQwen3OmniPositionsTest(unittest.TestCase):
     self.assertIn("inputs_mrope_deltas", result)
 
     # Verify it matches direct get_rope_index call
-    expected_pos, expected_deltas = multimodal_utils.get_rope_index(
+    expected_pos, expected_deltas = processor_qwen3_omni.get_rope_index(
         input_ids=jnp.array(element["inputs"]),
         image_grid_thw=jnp.array(element["image_grid_thw"]),
         video_grid_thw=None,

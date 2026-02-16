@@ -31,7 +31,6 @@ from jax import numpy as jnp
 
 from flax.linen import partitioning as nn_partitioning
 
-import MaxText as mt
 from MaxText import pyconfig
 from MaxText.train import get_first_step
 from MaxText.layers import models
@@ -39,6 +38,7 @@ from maxtext.common import checkpointing
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import train_utils
+from maxtext.utils.model_creation_utils import from_config
 
 Transformer = models.transformer_as_linen
 
@@ -52,7 +52,7 @@ def checkpoint_loop(config, state=None):
     ckpt_path:
   Returns:
   """
-  model = mt.from_config(config)
+  model = from_config(config)
   mesh = model.mesh
   init_rng, checkpoint_manager, _, tx = train_utils.create_training_tools(config, model, mesh)
 

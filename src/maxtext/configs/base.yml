@@ -211,6 +211,9 @@ wo_tile_fwd_buffer_count: 2
 wo_tile_dlhs_buffer_count: 2
 wo_tile_drhs_buffer_count: 2
 
+wi_combine_scopes: False
+wo_combine_scopes: False
+
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
 # how the expert axis is used to shard attention weights and activations
@@ -556,7 +559,7 @@ add_eos: True
 # If False, use chunking for long sequences instead of truncation.
 # Note: use_truncation=False is only available in grain's pretrain preprocessing pipeline.
 # See the TokenizeAndTrim and TokenizeAndChunk classes in
-# `src/MaxText/input_pipeline/_grain_tokenizer.py` for implementation details.
+# `src/maxtext/input_pipeline/_grain_tokenizer.py` for implementation details.
 use_truncation: True
 
 # Dataset
@@ -1087,6 +1090,6 @@ force_q_layout: false
 
 ################################## DeepSeek Manifold-Constrained Hyper Connections (mHC) ##################################
 # The number of parallel streams in Hyper Connection.
-mhc_expansion_rate: 0
+mhc_expansion_rate: 1
 # The number of iterations for the Sinkhorn-Knopp algorithm.
 sinkhorn_iterations: 20

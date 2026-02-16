@@ -15,16 +15,93 @@
 
 """Alternative DeepSeek model definition with batch-split schedule."""
 
+import dataclasses
 import functools
 import math
-from typing import Sequence
+from typing import Any, Sequence
 
 import jax
 import jax.numpy as jnp
-from maxtext.kernels import megablox
-from maxtext.kernels import sort_activations
+import qwix.pallas as qpl
+import tokamax
+from flax import linen as nn
+
+from maxtext.kernels import megablox, sort_activations
 from MaxText.layers import attention_op
+from MaxText.layers import moe as moe_lib
 from MaxText.layers import quantizations
+
+
+@functools.partial(
+    jax.custom_vjp,
+    nondiff_argnums=(
+        1,
+        2,
+        3,
+    ),
+)
+def quantized_psum_scatter(x: jax.Array, axis_name: str, scatter_dimension: int, tiled: bool) -> jax.Array:
+  """Forward: Standard BF16 Reduce-Scatter.
+
+  Backward: Quantized FP8 All-Gather (DeepSeek optimization).
+
+  Args:
+    x: The input tensor.
+    axis_name: The axis name for the psum_scatter/all_gather operation.
+    scatter_dimension: The dimension along which to scatter.
+    tiled: Whether the scatter/gather is tiled.
+
+  Returns:
+    The result of the reduce-scatter operation.
+  """
+  return _q_psum_scatter_fwd(x, axis_name, scatter_dimension, tiled)[0]
+
+
+def _q_psum_scatter_fwd(x: jax.Array, axis_name: str, scatter_dimension: int, tiled: bool) -> tuple[jax.Array, None]:
+  out = jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled)
+  return out, None
+
+
+def _q_psum_scatter_bwd(
+    axis_name: str,
+    scatter_dimension: int,
+    tiled: bool,
+    res: Any,
+    grads: jax.Array,
+) -> tuple[jax.Array]:  # pylint: disable=g-one-element-tuple
+  """Backward pass for quantized_psum_scatter.
+
+  Performs a quantized All-Gather of the gradients.
+
+  Args:
+    axis_name: The axis name for the all_gather operation.
+    scatter_dimension: The dimension along which the scatter occurred in the
+      forward pass.
+    tiled: Whether the gather is tiled.
+    res: The residuals from the forward pass (_q_psum_scatter_fwd), containing
+      (axis_name, scatter_dimension, tiled).
+    grads: The gradients from the next layer, which are in BF16.
+
+  Returns:
+    The dequantized and all-gathered gradients.
+  """
+  del res
+  # --- BACKWARD PASS (Dispatch) ---
+  # 'grads' is the BF16 gradient arriving from the next layer.
+  # We need to broadcast it back to all devices (All-Gather).
+
+  grads_q = qpl.quantize(
+      grads,
+      jnp.float8_e5m2,
+      channelwise_axes=[0],
+  )
+
+  gathered_qvals = jax.lax.all_gather(grads_q.qvalue, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
+
+  return (qpl.dequantize(dataclasses.replace(grads_q, qvalue=gathered_qvals)),)
+
+
+quantized_psum_scatter.defvjp(_q_psum_scatter_fwd, _q_psum_scatter_bwd)
 
 
 def fetch_weights(params, dtype):
@@ -164,29 +241,7 @@ def batch_split_schedule(
       routed_scaling_factor=cfg.routed_scaling_factor,
       expert_axis_name="expert",
       use_gather_mosaic_kernel=False,
-      wi_tile_size=(
-          cfg.wi_tile_fwd_batch_seq,
-          cfg.wi_tile_fwd_embed_dim,
-          cfg.wi_tile_fwd_mlp_dim,
-          cfg.wi_tile_dlhs_batch_seq,
-          cfg.wi_tile_dlhs_embed_dim,
-          cfg.wi_tile_dlhs_mlp_dim,
-          cfg.wi_tile_drhs_batch_seq,
-          cfg.wi_tile_drhs_embed_dim,
-          cfg.wi_tile_drhs_mlp_dim,
-      ),
-      wo_tile_size=(
-          cfg.wo_tile_fwd_batch_seq,
-          cfg.wo_tile_fwd_embed_dim,
-          cfg.wo_tile_fwd_mlp_dim,
-          cfg.wo_tile_dlhs_batch_seq,
-          cfg.wo_tile_dlhs_embed_dim,
-          cfg.wo_tile_dlhs_mlp_dim,
-          cfg.wo_tile_drhs_batch_seq,
-          cfg.wo_tile_drhs_embed_dim,
-          cfg.wo_tile_drhs_mlp_dim,
-      ),
-      dtype=cfg.dtype,
+      config=cfg,
   )
   xs = jax.shard_map(
       functools.partial(merge, split_factor=cfg.batch_split_factor),
@@ -581,9 +636,7 @@ def moe(
     routed_scaling_factor,
     expert_axis_name,
     use_gather_mosaic_kernel,
-    wi_tile_size,
-    wo_tile_size,
-    dtype,
+    config,
 ):
   """Performs dropless MoE with tensor/expert parallelism."""
   xs, ys = list(zip(*inputs))
@@ -597,9 +650,7 @@ def moe(
           routed_scaling_factor=routed_scaling_factor,
           expert_axis_name=expert_axis_name,
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
-          wi_tile_size=wi_tile_size,
-          wo_tile_size=wo_tile_size,
-          dtype=dtype,
+          config=config,
       ),
       mesh,
   )
@@ -691,20 +742,133 @@ def unroute(
   return jax.lax.psum_scatter(x, expert_axis_name, scatter_dimension=0, tiled=True)
 
 
-def compute(x, w0, w1, wo, group_sizes, weights, *, wi_tile_size, wo_tile_size, dtype):
+def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
   """Processes routed tokens through the MLP."""
-  gmm_fn = functools.partial(
-      megablox.gmm,
-      group_sizes=group_sizes,
-      preferred_element_type=dtype,
+
+  def gmm(
+      inputs,
+      kernel,
+      tiling,
+      group_sizes,
+      preferred_element_type,
+      weight_gather_axes,
+      input_buffer_count,
+      combine_scopes,
+  ):
+    if config.use_qwix_quantization:
+      output = megablox.gmm(
+          lhs=inputs,
+          rhs=kernel,
+          group_sizes=group_sizes,
+          preferred_element_type=preferred_element_type,
+          tiling=tiling,
+          use_qwix_quantization=config.use_qwix_quantization,
+          use_tokamax_backend=config.use_tokamax_gmm,
+          weight_gather_axes=weight_gather_axes,
+          input_buffer_count=input_buffer_count,
+          combine_scopes=combine_scopes,
+      )
+    else:
+      output = tokamax.ragged_dot(
+          lhs=inputs,
+          rhs=kernel,
+          group_sizes=group_sizes,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=preferred_element_type,
+          implementation="mosaic",
+      )
+    return output
+
+  gmm_fn = functools.partial(gmm, group_sizes=group_sizes, preferred_element_type=config.dtype)
+  wi_gather_axes = []
+  wo_gather_axes = []
+
+  wi_tile_size = (
+      config.wi_tile_fwd_batch_seq,
+      config.wi_tile_fwd_embed_dim,
+      config.wi_tile_fwd_mlp_dim,
+      config.wi_tile_dlhs_batch_seq,
+      config.wi_tile_dlhs_embed_dim,
+      config.wi_tile_dlhs_mlp_dim,
+      config.wi_tile_drhs_batch_seq,
+      config.wi_tile_drhs_embed_dim,
+      config.wi_tile_drhs_mlp_dim,
   )
-  layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size)
-  layer_w1 = gmm_fn(x, w1, tiling=wi_tile_size)
+  wo_tile_size = (
+      config.wo_tile_fwd_batch_seq,
+      config.wo_tile_fwd_embed_dim,
+      config.wo_tile_fwd_mlp_dim,
+      config.wo_tile_dlhs_batch_seq,
+      config.wo_tile_dlhs_embed_dim,
+      config.wo_tile_dlhs_mlp_dim,
+      config.wo_tile_drhs_batch_seq,
+      config.wo_tile_drhs_embed_dim,
+      config.wo_tile_drhs_mlp_dim,
+  )
+  wi_input_buffer_count = (
+      config.wi_tile_fwd_buffer_count,
+      config.wi_tile_dlhs_buffer_count,
+      config.wi_tile_drhs_buffer_count,
+  )
+  wo_input_buffer_count = (
+      config.wo_tile_fwd_buffer_count,
+      config.wo_tile_dlhs_buffer_count,
+      config.wo_tile_drhs_buffer_count,
+  )
+
+  wi_combine_scopes = config.wi_combine_scopes
+  wo_combine_scopes = config.wo_combine_scopes
+  if config.use_qwix_quantization:
+    gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
+    w0_pspec = nn.logical_to_mesh_axes(gating_pspec)
+    wo_pspec = nn.logical_to_mesh_axes(linear_pspec)
+    ignored_axes = ("expert", "tensor", "tensor_transpose")
+
+    def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
+      if pspec_dim_axes is None:
+        return []
+      axes = (pspec_dim_axes,) if isinstance(pspec_dim_axes, str) else pspec_dim_axes
+      active = []
+      for ax in axes:
+        if ax and ax not in ignored_axes and mesh.shape.get(ax, 1) > 1:
+          active.append((ax, tensor_dim_index))
+      return active
+
+    wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
+    wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
+
+    wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
+    wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
+
+  layer_w0 = gmm_fn(
+      x,
+      w0,
+      tiling=wi_tile_size,
+      weight_gather_axes=wi_gather_axes,
+      input_buffer_count=wi_input_buffer_count,
+      combine_scopes=wi_combine_scopes,
+  )
+  layer_w1 = gmm_fn(
+      x,
+      w1,
+      tiling=wi_tile_size,
+      weight_gather_axes=wi_gather_axes,
+      input_buffer_count=wi_input_buffer_count,
+      combine_scopes=wi_combine_scopes,
+  )
   layer_w0 = jax.ad_checkpoint.checkpoint_name(layer_w0, "mlpwi_0")
   layer_w1 = jax.ad_checkpoint.checkpoint_name(layer_w1, "mlpwi_1")
   intermediate_layer = jax.nn.silu(layer_w0) * layer_w1
   intermediate_layer *= weights[:, None]
-  return gmm_fn(intermediate_layer, wo, tiling=wo_tile_size)
+  layer_wo = gmm_fn(
+      intermediate_layer,
+      wo,
+      tiling=wo_tile_size,
+      weight_gather_axes=wo_gather_axes,
+      input_buffer_count=wo_input_buffer_count,
+      combine_scopes=wo_combine_scopes,
+  )
+  return layer_wo
 
 
 def route_compute_unroute(
@@ -716,9 +880,8 @@ def route_compute_unroute(
     routed_scaling_factor,
     expert_axis_name,
     use_gather_mosaic_kernel,
-    wi_tile_size,
-    wo_tile_size,
-    dtype,
+    config,
+    mesh,
 ):
   """Routes, processes, and unroutes activations."""
   orig_shape = xs[0].shape
@@ -760,9 +923,8 @@ def route_compute_unroute(
         routed_wo,
         group_sizes,
         weights,
-        wi_tile_size=wi_tile_size,
-        wo_tile_size=wo_tile_size,
-        dtype=dtype,
+        config=config,
+        mesh=mesh,
     )
     return x, y, selected_experts
 
@@ -792,9 +954,7 @@ def process_activations(
     routed_scaling_factor,
     expert_axis_name,
     use_gather_mosaic_kernel,
-    wi_tile_size,
-    wo_tile_size,
-    dtype,
+    config,
 ):
   """Processes activations, which are fully sharded on the batch axis, with tensor/expert sharded weights."""
   activation_pspec = jax.sharding.PartitionSpec(
@@ -802,11 +962,13 @@ def process_activations(
       None,
       None,
   )
-  gating_pspec, linear_pspec = (
-      jax.sharding.PartitionSpec(None, None, expert_axis_name),
-      jax.sharding.PartitionSpec(None, expert_axis_name, None),
-  )
-
+  if config.use_qwix_quantization:
+    gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
+    gating_pspec = nn.logical_to_mesh_axes(gating_pspec)
+    linear_pspec = nn.logical_to_mesh_axes(linear_pspec)
+  else:
+    gating_pspec = jax.sharding.PartitionSpec(None, None, expert_axis_name)
+    linear_pspec = jax.sharding.PartitionSpec(None, expert_axis_name, None)
   return jax.shard_map(
       functools.partial(
           route_compute_unroute,
@@ -815,9 +977,8 @@ def process_activations(
           routed_scaling_factor=routed_scaling_factor,
           expert_axis_name=expert_axis_name,
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
-          wi_tile_size=wi_tile_size,
-          wo_tile_size=wo_tile_size,
-          dtype=dtype,
+          config=config,
+          mesh=mesh,
       ),
       mesh=mesh,
       in_specs=(
@@ -841,4 +1002,4 @@ def process_activations(
       ),
       out_specs=activation_pspec,
       check_vma=False,
-  )([x.astype(dtype) for x in xs], weights)
+  )([x.astype(config.dtype) for x in xs], weights)

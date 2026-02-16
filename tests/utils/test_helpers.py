@@ -35,6 +35,15 @@ def get_test_config_path():
   return os.path.join(MAXTEXT_CONFIGS_DIR, base_cfg)
 
 
+def get_post_train_test_config_path(sub_type="sft"):
+  """Return absolute path to the chosen test config file.
+
+  Returns `decoupled_base_test.yml` when decoupled, otherwise `base.yml`.
+  """
+  base_cfg = "rl.yml" if sub_type == "rl" else "sft.yml"
+  return os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", base_cfg)
+
+
 def get_test_dataset_path(cloud_path=None):
   """Return the dataset path for tests.
 
@@ -70,5 +79,6 @@ def get_test_base_output_directory(cloud_path=None):
 __all__ = [
     "get_test_base_output_directory",
     "get_test_config_path",
+    "get_post_train_test_config_path",
     "get_test_dataset_path",
 ]

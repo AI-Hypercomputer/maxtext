@@ -248,7 +248,7 @@ ModelName = Literal[
     "llama4-17b-16e",
     "llama4-17b-128e",
     "olmo3-7b",
-    'olmo3-7b-pt',
+    "olmo3-7b-pt",
     "olmo3-32b",
 ]
 
@@ -680,6 +680,9 @@ class MoEKernels(BaseModel):
   wo_tile_dlhs_buffer_count: int = Field(2, description="bwd pass dlhs tiling buffer count in GMM for wo.")
   wo_tile_drhs_buffer_count: int = Field(2, description="bwd pass drhs tiling buffer count in GMM for wo.")
 
+  wi_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wi.")
+  wo_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wo.")
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
@@ -1082,7 +1085,7 @@ class TrainingLoop(BaseModel):
 class ManifoldConstrainedHyperConnections(BaseModel):
   """Configuration for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
-  mhc_expansion_rate: int = Field(0, description="The number of parallel streams in Hyper Connection.")
+  mhc_expansion_rate: PositiveInt = Field(1, description="The number of parallel streams in Hyper Connection.")
   sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
 
 

@@ -34,11 +34,11 @@ def get_functions(expansion_rate: int):
 
   def expand(x: Array):
     # (batch, length, dim) -> (batch, length, streams, dim)
-    return jnp.repeat(jnp.expand_dims(x, axis=2), expansion_rate, axis=2)
+    return jnp.repeat(jnp.expand_dims(x, axis=2), expansion_rate, axis=2).astype(x.dtype)
 
   def reduce(x: Array):
     # (batch, length, streams, dim) -> (batch, length, dim)
-    return jnp.sum(x, axis=2)
+    return jnp.sum(x, axis=2, dtype=x.dtype)
 
   return expand, reduce
 
@@ -93,7 +93,9 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.dim = dim
     self.rngs = rngs
     self.mesh = mesh
+    self.dtype = self.config.dtype
     self.weight_dtype = self.config.weight_dtype
+    self.matmul_precision = jax.lax.Precision(self.config.matmul_precision)
 
     # Norm layer
     self.mhc_norm = RMSNorm(
@@ -162,33 +164,42 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     )
     self.pre_beta = nnx.Param(
         default_bias_init(self.rngs.params(), (self.k,), self.weight_dtype),
-        sharding=(None, None),
+        sharding=(None,),
     )
     self.post_beta = nnx.Param(
         default_bias_init(self.rngs.params(), (self.k,), self.weight_dtype),
-        sharding=(None, None),
+        sharding=(None,),
     )
 
   def res_mapping(self, x: Array):
     """Helper function for residual mapping."""
+    # In MaxText, we match weight precision to activations before Matmul
+    res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
+    res_beta = jnp.asarray(self.res_beta[...], self.dtype)
+    res_alpha_scale = jnp.asarray(self.res_alpha_scale[...], self.dtype)
     # Apply projection: (b, s, k*d) @ (k*d, k*k) -> (b, s, k*k)
-    h_res = jnp.einsum("bsm,mn -> bsn", x, self.res_alpha[...], precision=self.config.matmul_precision)
+    h_res = jnp.einsum("bsm,mn -> bsn", x, res_alpha, precision=self.matmul_precision)
     b, s, _ = h_res.shape
     h_res = jnp.reshape(h_res, (b, s, self.k, self.k))
-    intermediate = self.res_alpha_scale * h_res + self.res_beta[...][None, None, :, :]
+    intermediate = res_alpha_scale * h_res + res_beta[None, None, :, :]
     output = sinkhorn(intermediate, self.sinkhorn_iterations)
     return output
 
   def mapping(self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: int):
     """Helper function for both pre and post mappings."""
+    # In MaxText, we match weight precision to activations before Matmul
+    alpha = jnp.asarray(alpha, self.dtype)
+    beta = jnp.asarray(beta, self.dtype)
+    alpha_scale = jnp.asarray(alpha_scale, self.dtype)
     # Apply projection: (b, s, k*d) @ (k*d, k) -> (b, s, k)
-    h = jnp.einsum("bsm,mk -> bsk", x, alpha, precision=self.config.matmul_precision)
+    h = jnp.einsum("bsm,mk -> bsk", x, alpha, precision=self.matmul_precision)
     intermediate = alpha_scale * h + beta[None, None, :]
     output = scale * jax.nn.sigmoid(intermediate)
     return output
 
   def __call__(
       self,
+      norm_fn: Callable,
       branch_fn: Callable,
       x: Array,
       mhc_type: HyperConnectionType,
@@ -197,6 +208,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     """Applying manifold-constrained hyper connection based on callable function.
 
     Args:
+        norm_fn: The pre-normalization function to be applied.
         branch_fn: The function to be wrapped by the hyper-connection.
         x: Input tensor of shape `(batch..., dim)`.
         mhc_type: The variant of the connection to apply.
@@ -212,24 +224,30 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
 
     # 2. Pre mapping
-    pre_mapping = self.mapping(norm_x, self.pre_alpha_scale, self.pre_alpha[...], self.pre_beta[...], 1.0)
-    layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.config.matmul_precision)
+    pre_mapping = self.mapping(norm_x, self.pre_alpha_scale[...], self.pre_alpha[...], self.pre_beta[...], 1.0)
+    layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.matmul_precision)
 
-    # 3. Attention or MLP
+    # 3. Pre-norm
+    layer_input = norm_fn(layer_input)
+
+    # 4. Attention or MLP
+    metadata = {}
     if mhc_type == HyperConnectionType.ATTENTION:
       layer_out, _ = branch_fn(inputs_q=layer_input, inputs_kv=layer_input, **kwargs)
     elif mhc_type == HyperConnectionType.MLP_DENSE:
       layer_out = branch_fn(inputs=layer_input, **kwargs)
     elif mhc_type == HyperConnectionType.MLP_MOE:
-      layer_out, _, _ = branch_fn(inputs=layer_input, **kwargs)
+      layer_out, load_balance_loss, moe_bias_updates = branch_fn(inputs=layer_input, **kwargs)
+      metadata["load_balance_loss"] = load_balance_loss
+      metadata["moe_bias_updates"] = moe_bias_updates
     else:
       raise ValueError(f"Unsupported type: {mhc_type}")
 
-    # 4. Post mapping
-    post_mapping = self.mapping(norm_x, self.post_alpha_scale, self.post_alpha[...], self.post_beta[...], 2.0)
-    post_out = jnp.einsum("bsd,bsk -> bskd", layer_out, post_mapping, precision=self.config.matmul_precision)
+    # 5. Post mapping
+    post_mapping = self.mapping(norm_x, self.post_alpha_scale[...], self.post_alpha[...], self.post_beta[...], 2.0)
+    post_out = jnp.einsum("bsd,bsk -> bskd", layer_out, post_mapping, precision=self.matmul_precision)
 
-    # 5. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
+    # 6. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
     res_mapping = self.res_mapping(norm_x)
-    res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.config.matmul_precision)
-    return res_out + post_out
+    res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.matmul_precision)
+    return res_out + post_out, metadata
