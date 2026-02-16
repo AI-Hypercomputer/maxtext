@@ -174,7 +174,7 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
       log_target=False,
   )
 
-  max_logging.log(f"\nAverage KL divergence per token (D_KL(P_golden || Q_model)): {kl_div_value.item():.2e}")
+  max_logging.log(f"\nAverage KL divergence per token (D_KL(P_golden || Q_model)): {kl_div_value.item():.4e}")
 
   # To find the max KL divergence for any single token in the set
   # use reduction='none'.
@@ -185,13 +185,13 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
   )  # Sum over the vocab dim to get a single KL value per token
 
   # Log per-token KL divergences
-  formatted_list = [f"{x:.2e}" for x in kl_divs_per_token.tolist()]
+  formatted_list = [f"{x:.4e}" for x in kl_divs_per_token.tolist()]
   max_logging.log(f"Per-token KL Divergences: \n{formatted_list}")
 
   max_kl_div = kl_divs_per_token.max()
-  max_logging.log(f"\nMax KL divergence for a single token in the set: {max_kl_div.item():.2e}")
+  max_logging.log(f"\nMax KL divergence for a single token in the set: {max_kl_div.item():.4e}")
 
-  assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.2e} exceed the threshold {atol}"
+  assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.4e} exceed the threshold {atol}"
 
 
 def get_data(golden_data_point, config):

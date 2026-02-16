@@ -853,7 +853,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
       "DeepSeekMoeBlock_0-MoeBlock_0-wo": "down_proj.weight",
   }
 
-  # scanned
+  # scan
   if scan_layers:
     for maxtext_key, hf_key in dense_layer_keys.items():
       mapping[f"params-decoder-dense_layers-{maxtext_key}"] = [
@@ -867,10 +867,10 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
 
     for maxtext_key, hf_key in moe_expert_keys.items():
       mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [
-          [f"model.layers.{l}.mlp.experts.{e}.{hf_key}" for l in range(first_num_dense_layers, num_main_layers)]
+          [f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for i in range(first_num_dense_layers, num_main_layers)]
           for e in range(num_experts)
       ]
-  # unscanned
+  # unscan
   else:
     for maxtext_key, hf_key in dense_layer_keys.items():
       for i in range(first_num_dense_layers):
@@ -878,11 +878,11 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
 
     for maxtext_key, hf_key in moe_layer_keys.items():
       for i in range(first_num_dense_layers, num_main_layers):
-        mapping[f"params-decoder-moe_layers_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+        mapping[f"params-decoder-moe_layers_{i - first_num_dense_layers}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
 
     for maxtext_key, hf_key in moe_expert_keys.items():
       for i in range(first_num_dense_layers, num_main_layers):
-        mapping[f"params-decoder-moe_layers_{i}-{maxtext_key}"] = [
+        mapping[f"params-decoder-moe_layers_{i - first_num_dense_layers}-{maxtext_key}"] = [
             f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for e in range(num_experts)
         ]
 
@@ -938,12 +938,13 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       "DeepSeekMoeBlock_0-MoeBlock_0-wo",
   }
 
+  # scan
   if scan_layers:
     for key in dense_need_reshape:
       mapping[f"params-decoder-dense_layers-{key}"] = reshape_kernel
     for key in moe_need_reshape:
       mapping[f"params-decoder-moe_layers-{key}"] = reshape_kernel
-
+  # unscan
   else:
     for key in dense_need_reshape:
       for i in range(first_num_dense_layers):
@@ -951,7 +952,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 
     for key in moe_need_reshape:
       for i in range(first_num_dense_layers, num_main_layers):
-        mapping[f"params-decoder-moe_layers_{i}-{key}"] = reshape_kernel
+        mapping[f"params-decoder-moe_layers_{i - first_num_dense_layers}-{key}"] = reshape_kernel
 
   return mapping
 

@@ -1649,7 +1649,8 @@ def shard_checkpoint(jax_weights, device_count, mem_info):
         "WARNING: hardware/simulated device mismatch. "
         f"Actual JAX devices: {len(jax.devices())}, Requested count: {device_count}."
     )
-  max_logging.log(f"shard weights across {len(jax.devices())} devices")
+  max_logging.log(f"Shard weights across {len(jax.devices())} devices")
+  max_logging.log("Note: Axis 0 sharding is the default and will not be logged individually.")
   # Pre-define sharding specs
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   # Sharding along axis 0
@@ -1673,7 +1674,7 @@ def shard_checkpoint(jax_weights, device_count, mem_info):
       arr = np.array(arr)
 
     if arr.shape[0] % device_count == 0:
-      max_logging.log("sharding axis 0")
+      # Sharding axis 0: Omit log for brevity per the summary log above.
       return jax.device_put(arr, device=s1)
     elif len(arr.shape) > 1 and arr.shape[1] % device_count == 0:
       max_logging.log("sharding axis 1")
