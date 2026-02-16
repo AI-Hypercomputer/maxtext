@@ -649,7 +649,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
       elif test_args.mode == "float16":
         # torch.bfloat16 -> torch.float16 -> np.float16
         return hf_state_dict_numpy[key].to(torch.float16).numpy()
-      elif test_args.mode == "bfloat16":
+      elif test_args.mode == "bfloat16-1":
         # View as int16 (same bit-width) to trick NumPy, then view as bfloat16
         # This is zero-copy on CPU
         tensor = hf_state_dict_numpy[key]
@@ -787,7 +787,7 @@ if __name__ == "__main__":
       type=str,
       required=False,
       default="default",
-      choices=["default", "float16", "bfloat16", "bfloat16-2"],
+      choices=["default", "float16", "bfloat16-1", "bfloat16-2"],
       help="",
   )
 
