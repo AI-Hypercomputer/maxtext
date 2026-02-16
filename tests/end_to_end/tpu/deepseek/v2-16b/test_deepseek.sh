@@ -33,7 +33,7 @@ BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
 echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 
 # Step 1: Checkpoint conversion
-# You can use the HuggingFace checkpoint at https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite, and dequantize it to bf16
+# You can use the HuggingFace checkpoint at https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite (bf16)
 # Assume HF checkpoints are uploaded to GCS bucket at CKPT_BUCKET
 # Non-Googlers please remember to point `CKPT_BUCKET` to GCS buckets that you own
 # Copying the HF checkpoint into a local directory `/tmp` -- you are free to use a different directory
