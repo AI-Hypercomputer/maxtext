@@ -900,7 +900,7 @@ xprof_e2e_enable_fw_throttle_event: False
 xprof_e2e_enable_fw_power_level_event: False
 xprof_e2e_enable_fw_thermal_event: False
 
-log_config: True # Prints the config (after defaults have been set by pyconfig logic)
+log_config: False # Prints the config (after defaults have been set by pyconfig logic)
 debug_sharding: False # Prints model weights sharding info
 
 # Checkpoint Structured logging
