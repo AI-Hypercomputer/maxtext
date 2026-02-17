@@ -47,7 +47,7 @@ PRE_TRAINED_MODEL_TOKENIZER=meta-llama/Llama-3.1-8B-Instruct
 if [ -z "${PRE_TRAINED_MODEL_CKPT_PATH}" ]; then
   echo "PRE_TRAINED_MODEL_CKPT_PATH is not set. Converting Hugging Face checkpoint to MaxText format."
   CONVERTED_CKPT_DIR=${BASE_OUTPUT_DIRECTORY}/${PRE_TRAINED_MODEL}/${RUN_NAME}/maxtext-checkpoint
-  python3 -m MaxText.utils.ckpt_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
+  python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
       model_name=${PRE_TRAINED_MODEL} \
       hf_access_token=${HF_TOKEN} \
       base_output_directory=${CONVERTED_CKPT_DIR} \

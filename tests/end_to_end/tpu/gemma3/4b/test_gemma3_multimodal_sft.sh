@@ -31,7 +31,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 export MODEL_BUCKET=gs://maxtext-gemma/unified/gemma3
 
 # 1. Convert the HuggingFace checkpoint to MaxText unscanned ckpt:
-python3 -m MaxText.utils.ckpt_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
     hf_access_token=${HF_TOKEN} \
     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx} \
@@ -66,7 +66,7 @@ python3 -m maxtext.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src
 # 5. Convert the SFT checkpoint back to HuggingFace format.
 export LOCAL_PATH=./tmp/hf/${MODEL_NAME}/${idx}
 export CKPT_PATH="gs://maxtext-gemma/unified/gemma3/4b/unscanned/sft/2025-08-08-18-28/2025-08-08-18-28/checkpoints/9/items"
-python3 -m MaxText.utils.ckpt_conversion.to_huggingface "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+python3 -m maxtext.checkpoint_conversion.to_huggingface "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
     hf_access_token=${HF_TOKEN} \
     load_parameters_path=${CKPT_PATH} \

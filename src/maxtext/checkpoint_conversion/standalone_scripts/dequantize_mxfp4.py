@@ -16,9 +16,11 @@
 
 Example cmd:
 
-python3 -m MaxText.utils.ckpt_scripts.dequantize_mxfp4 --input-path=<input_path> --output-path=<output_path>
-python3 -m MaxText.utils.ckpt_scripts.dequantize_mxfp4 --input-path=<input_path> --output-path=<output_path> \
-                                                       --dtype-str=bf16 --cache-size=2
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.dequantize_mxfp4 \
+    --input-path=<input_path> --output-path=<output_path>
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.dequantize_mxfp4 \
+    --input-path=<input_path> --output-path=<output_path> \
+    --dtype-str=bf16 --cache-size=2
 """
 
 import os

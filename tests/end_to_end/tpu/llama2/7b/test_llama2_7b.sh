@@ -19,21 +19,21 @@ export BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
 export DATASET_PATH=gs://maxtext-dataset
 export ASYNC_CHECKPOINTING=false
 
-# We install torch CPU because the checkpoint conversion script MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt does not need a TPU/GPU
+# We install torch CPU because the checkpoint conversion script maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt does not need a TPU/GPU
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # We define a var for the path to the Meta checkpoint. Non-Googlers please remember to update the source `META_CHECKPOINT_PATH` to the GCS bucket where you have your Meta checkpoint
 export META_CHECKPOINT_PATH=gs://maxtext-llama/llama2-7b/meta-ckpt
 
 # In the following command, we are copying Meta's checkpoint into a local directory `tmp`.
-# You can use a different local directory than /tmp/, if you do so, please use the same local path for `base-model-path` when running `python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt`
+# You can use a different local directory than /tmp/, if you do so, please use the same local path for `base-model-path` when running `python3 -m maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt`
 gcloud storage cp -r ${META_CHECKPOINT_PATH} /tmp/
 
 # `CONVERTED_CHECKPOINT_PATH` is the path to the GCS bucket where we want to save our converted (Orbax) checkpoint. Non-Googlers please remember to point `CONVERTED_CHECKPOINT_PATH` to a GCS bucket that you own
 export CONVERTED_CHECKPOINT_PATH=gs://maxtext-llama/test/${idx}/decode-ckpt-maxtext
 
-# Next, run the conversion script `MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt` to convert Meta's PyTorch checkpoint in `base-model-path` and save the new converted (Orbax) checkpoint in the `maxtext-model-path`
-python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --base-model-path /tmp/meta-ckpt --model-size llama2-7b --maxtext-model-path ${CONVERTED_CHECKPOINT_PATH}
+# Next, run the conversion script `maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt` to convert Meta's PyTorch checkpoint in `base-model-path` and save the new converted (Orbax) checkpoint in the `maxtext-model-path`
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt --base-model-path /tmp/meta-ckpt --model-size llama2-7b --maxtext-model-path ${CONVERTED_CHECKPOINT_PATH}
 
 # We define `CONVERTED_CHECKPOINT` to refer to the checkpoint subdirectory exactly inside `CONVERTED_CHECKPOINT_PATH`. This way it is easier to use this path in the `train` and `decode` commands
 export CONVERTED_CHECKPOINT=${CONVERTED_CHECKPOINT_PATH}/0/items
@@ -76,7 +76,7 @@ python3 -m maxtext.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src
 python3 -m tests.utils.forward_pass_logit_checker  "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test per_device_batch_size=1 model_name=llama2-7b ici_tensor_parallelism=4 max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic  dtype=float32 scan_layers=false --rtol=0.1 --atol=0.1
 
 # Converting MaxText orbax checkpoint to HF
-JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.llama_mistral_mixtral_orbax_to_hf "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml base_output_directory=gs://runner-maxtext-logs load_parameters_path=${CONVERTED_CHECKPOINT} run_name=convert_to_hf model_name=llama2-7b hf_model_path=/tmp/hf_llama2
+JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.llama_mistral_mixtral_orbax_to_hf "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml base_output_directory=gs://runner-maxtext-logs load_parameters_path=${CONVERTED_CHECKPOINT} run_name=convert_to_hf model_name=llama2-7b hf_model_path=/tmp/hf_llama2
 
 # Test whether the forward pass logits match the golden logits for Huggingface checkpoint converted from MaxText orbax checkpoint
 # We run this with context parallelism and the `ici_context_parallelism` flag as an integration test for context parallelism

@@ -49,7 +49,7 @@ RUN_NAME=$(date +%Y-%m-%d-%H-%M-%S)
 if [ -z "${PRE_TRAINED_MODEL_CKPT_PATH}" ]; then
   echo "PRE_TRAINED_MODEL_CKPT_PATH is not set. Converting Hugging Face checkpoint to MaxText format."
   CONVERTED_CKPT_DIR=${BASE_OUTPUT_DIRECTORY}/${PRE_TRAINED_MODEL}/${RUN_NAME}/maxtext-checkpoint
-  python3 -m MaxText.utils.ckpt_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+  python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
       model_name=${PRE_TRAINED_MODEL} \
       hf_access_token=${HF_TOKEN} \
       base_output_directory=${CONVERTED_CKPT_DIR} \
@@ -82,7 +82,7 @@ echo "Fine-tuned model checkpoint: ${FINE_TUNED_MODEL_CKPT_PATH}"
 
 # Convert the fine-tuned MaxText checkpoint to Hugging Face checkpoint
 export LOCAL_PATH=./tmp/hf/${PRE_TRAINED_MODEL}/${RUN_NAME}
-python3 -m MaxText.utils.ckpt_conversion.to_huggingface "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+python3 -m maxtext.checkpoint_conversion.to_huggingface "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${PRE_TRAINED_MODEL} \
     hf_access_token=${HF_TOKEN} \
     load_parameters_path=${FINE_TUNED_MODEL_CKPT_PATH} \

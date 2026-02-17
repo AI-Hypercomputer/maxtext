@@ -17,8 +17,8 @@
 import re
 
 import MaxText.integration.tunix.weight_mapping as weight_mapping  # pylint: disable=consider-using-from-import
-from MaxText.utils.ckpt_conversion.utils.param_mapping import PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.param_mapping import VLLM_HOOK_FNS
+from maxtext.checkpoint_conversion.utils.param_mapping import PARAM_MAPPING
+from maxtext.checkpoint_conversion.utils.param_mapping import VLLM_HOOK_FNS
 
 STANDALONE_VLLM_WEIGHT_MAPPING = weight_mapping.StandaloneVllmWeightMapping()
 

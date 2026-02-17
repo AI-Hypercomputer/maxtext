@@ -20,7 +20,7 @@ PROMPT="I love to"
 
 # --- Step 1: Convert Checkpoint to MaxText Format ---
 echo "--- Starting Checkpoint Conversion ---"
-python3 -m MaxText.utils.ckpt_conversion.to_maxtext \
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
   "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml" \
   model_name="${MODEL_NAME}" \
   base_output_directory="${OUTPUT_BASE_DIR}" \
