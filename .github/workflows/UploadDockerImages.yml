@@ -78,13 +78,15 @@ jobs:
         id: check
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.target_device }}" != "all" && "${{ github.event.inputs.target_device }}" != "${{ matrix.device }}" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${GITHUB_EVENT_INPUTS_TARGET_DEVICE}" != "all" && "${GITHUB_EVENT_INPUTS_TARGET_DEVICE}" != "${{ matrix.device }}" ]]; then
             echo "should_run=false" >> $GITHUB_OUTPUT
             echo "Skipping build for device: ${{ matrix.device }} in ${{ matrix.build_mode }} mode."
           else
             echo "should_run=true" >> $GITHUB_OUTPUT
             echo "Building for device: ${{ matrix.device }} in ${{ matrix.build_mode }} mode."
-          fi
+          fi        env:
+          GITHUB_EVENT_INPUTS_TARGET_DEVICE: ${{ github.event.inputs.target_device }}        env:
+          GITHUB_EVENT_INPUTS_TARGET_DEVICE: ${{ github.event.inputs.target_device }}
 
       - name: Checkout git repository
         uses: actions/checkout@v5
