@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,21 +15,31 @@
 
 """Unit tests for the Distillation Trainer."""
 
+import shutil
+import tempfile
 import unittest
 from unittest import mock
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import orbax.checkpoint as ocp
 from absl.testing import absltest
 
 # Import the module under test
 from maxtext.trainers.post_train.distillation import train_distill
+from maxtext.trainers.post_train.distillation import distillation_utils
 from MaxText import pyconfig
 
 
 # pylint: disable=protected-access
 class TrainDistillTest(unittest.TestCase):
+
+  def setUp(self):
+    self.test_dir = tempfile.mkdtemp()
+
+  def tearDown(self):
+    shutil.rmtree(self.test_dir)
 
   def test_maxtext_to_tunix_iterator(self):
     """Verifies the adapter correctly converts dictionary batches to dataclasses."""
@@ -45,13 +55,13 @@ class TrainDistillTest(unittest.TestCase):
     dummy_iter = iter([dummy_batch])
 
     # 2. Initialize Adapter
-    adapter = train_distill.MaxTextToTunixIterator(dummy_iter)
+    adapter = distillation_utils.MaxTextToTunixIterator(dummy_iter)
 
     # 3. Fetch Batch
     tunix_input = next(adapter)
 
     # 4. Verify Fields
-    self.assertIsInstance(tunix_input, train_distill.MaxTextTrainingInput)
+    self.assertIsInstance(tunix_input, distillation_utils.MaxTextTrainingInput)
     np.testing.assert_array_equal(tunix_input.input_tokens, dummy_batch["inputs"])
     np.testing.assert_array_equal(tunix_input.positions, dummy_batch["inputs_position"])
     np.testing.assert_array_equal(tunix_input.decoder_segment_ids, dummy_batch["inputs_segmentation"])
@@ -69,7 +79,7 @@ class TrainDistillTest(unittest.TestCase):
         "targets": np.array([[11, 12]]),
     }
     dummy_iter = iter([dummy_batch])
-    adapter = train_distill.MaxTextToTunixIterator(dummy_iter)
+    adapter = distillation_utils.MaxTextToTunixIterator(dummy_iter)
     tunix_input = next(adapter)
 
     self.assertIsNone(tunix_input.decoder_segment_ids)
@@ -90,7 +100,7 @@ class TrainDistillTest(unittest.TestCase):
 
     # 2. Setup Input
     # pylint: disable=unexpected-keyword-arg
-    input_data = train_distill.MaxTextTrainingInput(
+    input_data = distillation_utils.MaxTextTrainingInput(
         input_tokens=jnp.array([[1]]),
         input_mask=jnp.array([[True]]),
         positions=jnp.array([[0]]),
@@ -147,7 +157,7 @@ class TrainDistillTest(unittest.TestCase):
 
   def test_monitored_strategy(self):
     """Verifies the strategy calculates metrics and returns the correct tuple."""
-    strategy = train_distill.MonitoredLogitStrategy(
+    strategy = distillation_utils.MonitoredLogitStrategy(
         student_forward_fn=lambda m, **k: None,
         teacher_forward_fn=lambda m, **k: None,
         labels_fn=lambda t: t,
@@ -177,6 +187,92 @@ class TrainDistillTest(unittest.TestCase):
 
     # Since inputs match perfectly, KL should be near 0
     self.assertLess(metrics["distill/kl_div"], 1e-5)
+
+  def test_strategy_compute_eval_loss(self):
+    """Covers MonitoredLogitStrategy.compute_eval_loss."""
+    strategy = distillation_utils.MonitoredLogitStrategy(
+        student_forward_fn=mock.Mock(), teacher_forward_fn=mock.Mock(), labels_fn=mock.Mock(), temperature=1.0, alpha=0.5
+    )
+    logits = jnp.array([[[10.0, 0.0]]])
+    labels = jnp.array([[[1.0, 0.0]]])
+
+    loss, aux = strategy.compute_eval_loss(logits, labels)
+    self.assertTrue(isinstance(loss, jax.Array))
+    self.assertEqual(aux, {})
+
+  def test_setup_pipeline_grain_enabled(self):
+    """Covers _setup_and_restore_input_pipeline when Grain IS detected."""
+    mock_trainer = mock.Mock()
+    mock_trainer.checkpoint_manager = mock.Mock()
+    # Mock restore returning None (no checkpoint yet)
+    mock_trainer.checkpoint_manager.restore_iterator.return_value = None
+
+    mock_iter = mock.Mock()
+    mock_iter.save = mock.Mock()  # Has save method
+
+    config = mock.Mock()
+    config.dataset_type = "grain"
+
+    # Use real options to avoid Orbax validation errors caused by Mocks
+    train_config = mock.Mock()
+    train_config.checkpoint_root_directory = self.test_dir
+    train_config.checkpointing_options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
+
+    # Run function
+    result = train_distill._setup_and_restore_input_pipeline(mock_trainer, mock_iter, config, train_config)
+
+    # Verify manager was swapped
+    self.assertIsInstance(mock_trainer.checkpoint_manager, distillation_utils.MaxTextCheckpointManager)
+    self.assertEqual(result, mock_iter)
+
+  def test_setup_pipeline_restored(self):
+    """Covers _setup_and_restore_input_pipeline when restore succeeds."""
+    mock_trainer = mock.Mock()
+
+    # Mock successful restore
+    restored_iter = mock.Mock()
+    mock_manager = mock.Mock()
+    mock_manager.restore_iterator.return_value = restored_iter
+
+    # We need to mock the constructor of MaxTextCheckpointManager to return our mock
+    with mock.patch(
+        "maxtext.trainers.post_train.distillation.distillation_utils.MaxTextCheckpointManager", return_value=mock_manager
+    ):
+
+      mock_iter = mock.Mock()
+      mock_iter.save = mock.Mock()
+      config = mock.Mock()
+      config.dataset_type = "grain"
+
+      # Use real options
+      train_config = mock.Mock()
+      train_config.checkpoint_root_directory = self.test_dir
+      train_config.checkpointing_options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
+
+      result = train_distill._setup_and_restore_input_pipeline(mock_trainer, mock_iter, config, train_config)
+
+      # Verify it returned the restored iterator, NOT the raw one
+      self.assertEqual(result, restored_iter)
+
+  def test_setup_pipeline_disabled(self):
+    """Covers _setup_and_restore_input_pipeline when checkpoiting is disabled."""
+    mock_trainer = mock.Mock()
+    mock_iter = object()  # No save method
+
+    config = mock.Mock()
+    config.dataset_type = "tfds"  # Not grain
+
+    # Use real options
+    train_config = mock.Mock()
+    train_config.checkpoint_root_directory = self.test_dir
+    train_config.checkpointing_options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
+
+    result = train_distill._setup_and_restore_input_pipeline(mock_trainer, mock_iter, config, train_config)
+
+    # Should still swap manager (to MaxTextCheckpointManager) but with None iterator
+    self.assertIsInstance(mock_trainer.checkpoint_manager, distillation_utils.MaxTextCheckpointManager)
+    # Result should be original iterator
+    self.assertEqual(result, mock_iter)
 
   def test_post_process_train_step(self):
     """Verifies metrics are moved from aux dict to the trainer buffer."""
