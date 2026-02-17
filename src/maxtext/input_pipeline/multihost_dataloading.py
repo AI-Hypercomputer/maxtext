@@ -125,7 +125,7 @@ class MultiHostDataLoadIterator:
             # expansion_loading_factor_for_grain times to get the
             # right batch_size for the host that is loading real data.
             local_data_list = [local_data]
-            for _ in range(1, self.expansion_loading_factor_for_grain):
+            for _ in range(1, int(self.expansion_loading_factor_for_grain)):
               next_batch = next(self.local_iterator)
               local_data_list.append(next_batch)
             local_data = jtu.tree_map(lambda *xs: np.concatenate(xs, axis=0), *local_data_list)
