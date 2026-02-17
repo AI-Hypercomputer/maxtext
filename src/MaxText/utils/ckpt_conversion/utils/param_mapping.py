@@ -820,16 +820,22 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
   attention_keys = {
       "pre_self_attention_layer_norm-scale": "input_layernorm.weight",
       "post_self_attention_layer_norm-scale": "post_attention_layernorm.weight",
-      "self_attention-wkv_a-kernel": "self_attn.kv_a_proj_with_mqa.weight",
       "self_attention-kv_norm-scale": "self_attn.kv_a_layernorm.weight",
+      "self_attention-wkv_a-kernel": "self_attn.kv_a_proj_with_mqa.weight",
       "self_attention-wkv_b-kernel": "self_attn.kv_b_proj.weight",
       "self_attention-out-kernel": "self_attn.o_proj.weight",
-      # v3
-      "self_attention-wq_a-kernel": "self_attn.q_a_proj.weight",
-      "self_attention-q_norm-scale": "self_attn.q_a_layernorm.weight",
-      "self_attention-wq_b-kernel": "self_attn.q_b_proj.weight",
       # v2
       "self_attention-query-kernel": "self_attn.q_proj.weight",
+      # v3
+      "self_attention-q_norm-scale": "self_attn.q_a_layernorm.weight",
+      "self_attention-wq_a-kernel": "self_attn.q_a_proj.weight",
+      "self_attention-wq_b-kernel": "self_attn.q_b_proj.weight",
+      # v3.2
+      "self_attention-indexer-k_norm-bias": "self_attn.indexer.k_norm.bias",
+      "self_attention-indexer-k_norm-scale": "self_attn.indexer.k_norm.weight",
+      "self_attention-indexer-weights_proj-kernel": "self_attn.indexer.weights_proj.weight",
+      "self_attention-indexer-wk-kernel": "self_attn.indexer.wk.weight",
+      "self_attention-indexer-wq_b-kernel": "self_attn.indexer.wq_b.weight",
   }
   # Dense Layers
   dense_layer_keys = attention_keys | {
@@ -914,28 +920,34 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
   }
 
   attention_need_reshape = {
-      "self_attention-query-kernel",
-      "self_attention-wq_a-kernel",
-      "self_attention-wq_b-kernel",
-      "self_attention-wkv_a-kernel",
+      "self_attention-wkv_a-kernel",  # transpose
       "self_attention-wkv_b-kernel",
       "self_attention-out-kernel",
+      # v2
+      "self_attention-query-kernel",
+      # v3
+      "self_attention-wq_a-kernel",  # transpose
+      "self_attention-wq_b-kernel",
+      # v3.2
+      "self_attention-indexer-weights_proj-kernel",  # transpose
+      "self_attention-indexer-wk-kernel",  # transpose
+      "self_attention-indexer-wq_b-kernel",
   }
 
   dense_need_reshape = attention_need_reshape | {
-      "mlp-wi_0-kernel",
-      "mlp-wi_1-kernel",
-      "mlp-wo-kernel",
+      "mlp-wi_0-kernel",  # transpose
+      "mlp-wi_1-kernel",  # transpose
+      "mlp-wo-kernel",  # transpose
   }
 
   moe_need_reshape = attention_need_reshape | {
-      "DeepSeekMoeBlock_0-shared_experts-wi_0-kernel",
-      "DeepSeekMoeBlock_0-shared_experts-wi_1-kernel",
-      "DeepSeekMoeBlock_0-shared_experts-wo-kernel",
-      "DeepSeekMoeBlock_0-MoeBlock_0-gate-kernel",
-      "DeepSeekMoeBlock_0-MoeBlock_0-wi_0",
-      "DeepSeekMoeBlock_0-MoeBlock_0-wi_1",
-      "DeepSeekMoeBlock_0-MoeBlock_0-wo",
+      "DeepSeekMoeBlock_0-shared_experts-wi_0-kernel",  # transpose
+      "DeepSeekMoeBlock_0-shared_experts-wi_1-kernel",  # transpose
+      "DeepSeekMoeBlock_0-shared_experts-wo-kernel",  # transpose
+      "DeepSeekMoeBlock_0-MoeBlock_0-gate-kernel",  # transpose
+      "DeepSeekMoeBlock_0-MoeBlock_0-wi_0",  # transpose
+      "DeepSeekMoeBlock_0-MoeBlock_0-wi_1",  # transpose
+      "DeepSeekMoeBlock_0-MoeBlock_0-wo",  # transpose
   }
 
   # scan
@@ -2130,6 +2142,7 @@ PARAM_MAPPING = {
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek2-16b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -2162,6 +2175,7 @@ HOOK_FNS = {
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek2-16b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,

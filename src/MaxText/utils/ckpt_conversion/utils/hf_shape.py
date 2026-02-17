@@ -209,28 +209,18 @@ def GEMMA2_HF_WEIGHTS_TO_SHAPE(config):
 
 
 def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
-  """Returns mapping between HuggingFace DeepseekV3 weights path and their shape.
-
-  This mapping is derived by matching the provided config dictionary against
-  the model's parameter dump.
-
-  To check this mapping, dump the huggingface model shapes:
-  from transformers import AutoModelForCausalLM
-  model_name = "deepseek-ai/DeepSeek-V3"
-  model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
-  for name, val in model.named_parameters():
-    print(name, val.shape)
+  """Returns mapping between HuggingFace weights path and their shape derived from HF config.
 
   Args:
-      config (dict): Model configuration dictionary (from HF DeepseekV3Config.to_dict())
-                     Expected keys: https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json
+      config (dict): HF configuration dictionary
+        e.g., https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json
 
   Returns:
       dict: A mapping where:
           - Keys are HuggingFace model parameter paths
           - Values are parameter shape as a list
   """
-  # --- Extract Core Config Values ---
+  # --- Core Config Values ---
   hidden_size = config["hidden_size"]
   num_hidden_layers = config["num_hidden_layers"]
   vocab_size = config["vocab_size"]
@@ -240,13 +230,14 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
   q_lora_rank = config["q_lora_rank"]
   kv_lora_rank = config["kv_lora_rank"]
   num_attention_heads = config["num_attention_heads"]
+
   # Q projection dim
   q_dim = num_attention_heads * config["qk_head_dim"]
-  # KV_b_proj output dim.
+  # kv_b_proj output dim
   kv_b_dim = num_attention_heads * (config["qk_nope_head_dim"] + config["v_head_dim"])
   # Output projection dim (input)
   o_proj_in_dim = num_attention_heads * config["v_head_dim"]
-  # kv_a_proj_with_mqa output dim.
+  # kv_a_proj_with_mqa output dim
   kv_a_proj_out_dim = config["kv_lora_rank"] + config["qk_rope_head_dim"]
 
   # --- MLP-related Dimensions ---
@@ -257,7 +248,11 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
   # This key determines which layers are dense vs. MoE
   first_k_dense = config.get("first_k_dense_replace", 0)
 
-  # --- Initialize Mapping ---
+  # --- Indexer Configuration (Optional) ---
+  index_head_dim = config.get("index_head_dim")
+  index_n_heads = config.get("index_n_heads")
+
+  # --- Non-layer-specific weights ---
   mapping = {
       "model.embed_tokens.weight": [vocab_size, hidden_size],
       "model.norm.weight": [hidden_size],
@@ -268,18 +263,20 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
   for layer_idx in range(num_hidden_layers):
     layer_prefix = f"model.layers.{layer_idx}"
 
-    # Common layer components
+    # --- Attention weights ---
     layer_mapping = {
+        # norm
         f"{layer_prefix}.input_layernorm.weight": [hidden_size],
         f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
-        # --- Attention projections ---
+        # kv projection
         f"{layer_prefix}.self_attn.kv_a_proj_with_mqa.weight": [kv_a_proj_out_dim, hidden_size],
         f"{layer_prefix}.self_attn.kv_a_layernorm.weight": [kv_lora_rank],
         f"{layer_prefix}.self_attn.kv_b_proj.weight": [kv_b_dim, kv_lora_rank],
+        # output projection
         f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, o_proj_in_dim],
     }
 
-    # --- Q-Projection (Conditional on LoRA) ---
+    # query projection
     if q_lora_rank is None:
       layer_mapping[f"{layer_prefix}.self_attn.q_proj.weight"] = [q_dim, hidden_size]
     else:
@@ -291,7 +288,7 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
           }
       )
 
-    # --- Add conditional biases ---
+    # bias
     if attention_bias:
       if q_lora_rank is not None:
         layer_mapping[f"{layer_prefix}.self_attn.q_a_proj.bias"] = [q_lora_rank]
@@ -302,9 +299,23 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
           }
       )
 
-    # --- Add MLP weights (Dense vs. MoE) ---
+    # indexer for sparse attention
+    if index_head_dim is not None and index_n_heads is not None and q_lora_rank is not None:
+      wq_b_dim_out = index_n_heads * index_head_dim
+      indexer_prefix = f"{layer_prefix}.self_attn.indexer"
+      layer_mapping.update(
+          {
+              f"{indexer_prefix}.k_norm.bias": [index_head_dim],
+              f"{indexer_prefix}.k_norm.weight": [index_head_dim],
+              f"{indexer_prefix}.weights_proj.weight": [index_n_heads, hidden_size],
+              f"{indexer_prefix}.wk.weight": [index_head_dim, hidden_size],
+              f"{indexer_prefix}.wq_b.weight": [wq_b_dim_out, q_lora_rank],
+          }
+      )
+
+    # --- MLP weights (Dense vs. MoE) ---
     if layer_idx < first_k_dense:
-      # This is a DENSE MLP layer (DeepseekV3MLP)
+      # This is a DENSE MLP layer
       layer_mapping.update(
           {
               f"{layer_prefix}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
@@ -313,8 +324,8 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
           }
       )
     else:
-      # This is a MoE MLP layer (DeepseekV3MoE)
-      # Add the router gate (DeepseekV3TopkRouter)
+      # This is a MoE MLP layer
+      # Add the router gate
       layer_mapping.update(
           {
               f"{layer_prefix}.mlp.gate.weight": [n_routed_experts, hidden_size],
@@ -322,7 +333,7 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
           }
       )
 
-      # Add routed experts (DeepseekV3NaiveMoe)
+      # Add routed experts
       for expert_j in range(n_routed_experts):
         expert_prefix = f"{layer_prefix}.mlp.experts.{expert_j}"
         layer_mapping.update(
@@ -674,6 +685,7 @@ HF_SHAPE = {
     "qwen3-480b-a35b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "deepseek2-16b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "deepseek3-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
+    "deepseek3.2-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
