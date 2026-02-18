@@ -913,6 +913,30 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
+def get_intermediate_value(model, nested_key, default=None):
+  """
+  Retrieves an intermediate value from an NNX model. This functions has context about
+  where the intermediate value is located.
+
+  Args:
+    model: The NNX model.
+    nested_key: A string representing the nested key, e.g., hidden_states_norm_out
+    default: The value to return if the nested key is not found.
+
+  Returns:
+    The value associated with the nested key, or the default value if not found.
+  """
+  match nested_key:
+    case "hidden_states_norm_out":
+      if hasattr(model.decoder, nested_key):
+        return getattr(model.decoder, nested_key).get_value()
+      else:
+        return default
+    case _:
+      # Default case to handle any unknown nested keys
+      raise ValueError(f"Incorrect nested_key: {nested_key}")
+
+
 def update_state_param(state, target_path, value):
   """
   Updates a specific parameter in state.params at the given path.

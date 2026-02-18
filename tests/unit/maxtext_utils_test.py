@@ -17,6 +17,7 @@
 from typing import Any
 from collections.abc import Callable
 import unittest
+from unittest.mock import MagicMock, Mock
 
 from jax import random, vmap
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -74,6 +75,46 @@ class TestGradientClipping(unittest.TestCase):
     # Then check all fp8 parameters were not clipped at all
     for param_name, raw_value in raw_grads[maxtext_utils.OVERWRITE_WITH_GRADIENT].items():
       self.assertTrue(jnp.array_equal(raw_value, clipped_grads[maxtext_utils.OVERWRITE_WITH_GRADIENT][param_name]))
+
+
+class TestIntermediateValueRetrieval(unittest.TestCase):
+  """test class for IntermediateValueRetrieval"""
+
+  def setUp(self):
+    self.mock_model = MagicMock(name="Transformer")
+
+    # 2. Create the Decoder Mock
+    self.mock_decoder = MagicMock(name="Decoder")
+    self.mock_model.decoder = self.mock_decoder
+
+  def test_valid_intermediate_key(self):
+    expected_sowed_data = [0.1, 0.5, 0.9]
+    mock_sowed_variable = Mock(name="hidden_states_norm_out")
+    mock_sowed_variable.get_value.return_value = expected_sowed_data
+
+    self.mock_decoder.hidden_states_norm_out = mock_sowed_variable
+
+    result = maxtext_utils.get_intermediate_value(self.mock_model, "hidden_states_norm_out")
+
+    self.assertEqual(result, expected_sowed_data)
+
+  def test_returns_default_if_sow_did_not_happen(self):
+    """
+    Simulate a scenario where the model ran, but this specific key
+    was NOT sowed (or the layer was skipped).
+    """
+    # Ensure the attribute does not exist on the decoder
+    del self.mock_decoder.hidden_states_norm_out
+
+    result = maxtext_utils.get_intermediate_value(self.mock_model, "hidden_states_norm_out", default="MyDefault")
+
+    self.assertEqual(result, "MyDefault")
+
+  def test_unknown_key_raises_value_error(self):
+    with self.assertRaises(ValueError) as cm:
+      maxtext_utils.get_intermediate_value(self.mock_model, "some_random_layer_name")
+
+    self.assertEqual(str(cm.exception), "Incorrect nested_key: some_random_layer_name")
 
 
 class TestNestedValueRetrieval(unittest.TestCase):

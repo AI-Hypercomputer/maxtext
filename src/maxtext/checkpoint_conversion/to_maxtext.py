@@ -40,7 +40,7 @@ Environment Variables:
 Example Usage:
   To convert a gemma2-2b model and save it to a specific directory:
 
-    /usr/bin/time -v python src/MaxText/checkpoint_conversion/to_maxtext.py \
+    /usr/bin/time -v python src/maxtext/checkpoint_conversion/to_maxtext.py \
     maxtext/configs/base.yml model_name="gemma2-2b" \
     base_output_directory="/path/to/your/output/directory" \
     hf_access_token=$HF_TOKEN hardware=cpu skip_jax_distributed_system=True \

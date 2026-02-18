@@ -137,7 +137,6 @@ jobs:
           maxtext_hash=$(git rev-parse --short HEAD)
           gcloud container images add-tag "$SOURCE_IMAGE:latest" "$SOURCE_IMAGE:maxtext_${maxtext_hash}_${clean_date}" --quiet
 
-
           # Add post-training dependencies tags
           if [ "${{ inputs.is_post_training }}" == "true" ]; then
             for dir in tunix vllm tpu-inference; do

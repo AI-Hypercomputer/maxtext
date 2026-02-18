@@ -18,7 +18,7 @@ This module contains adapter classes that bridge MaxText's data loading and
 model structures with Tunix's training interfaces.
 """
 
-from typing import Any, Iterator
+from typing import Any, Iterator, Callable, Tuple, Dict
 
 import flax
 from flax import nnx
@@ -113,24 +113,60 @@ class MaxTextToTunixIterator:
 class MonitoredLogitStrategy(logit.LogitStrategy):
   """Logit Strategy that returns detailed metrics for TensorBoard."""
 
+  def __init__(
+      self,
+      student_forward_fn: Callable[..., jax.Array],
+      teacher_forward_fn: Callable[..., jax.Array],
+      labels_fn: Callable[..., jax.Array],
+      temperature: float = 2.0,
+      alpha: float = 0.5,
+      cosine_weight: float = 0.0,
+  ):
+    """Initializes the Logit strategy using tunix logit.LogitStrategy.
+
+    Args:
+        student_forward_fn: Inherited from `logit.LogitStrategy`. Function to compute student model outputs.
+        teacher_forward_fn: Inherited from `logit.LogitStrategy`. Function to compute teacher model outputs.
+        labels_fn: Inherited from `logit.LogitStrategy`. Function to compute labels from model inputs.
+        temperature: Inherited from `logit.LogitStrategy`. Temperature for softening probabilities (> 0).
+        alpha: Inherited from `logit.LogitStrategy`. Weight to balance distillation loss and task loss (0.0 to 1.0).
+        cosine_weight (float): Weight for cosine similarity loss. Set to 0.0 to disable.
+    """
+    super().__init__(
+        student_forward_fn,
+        teacher_forward_fn,
+        labels_fn,
+        temperature,
+        alpha,
+    )
+    self.cosine_weight = cosine_weight
+
   def compute_loss(
       self,
-      student_output: jax.Array,
-      teacher_output: jax.Array,
+      student_output: Tuple[jax.Array, jax.Array],
+      teacher_output: Tuple[jax.Array, jax.Array],
       labels: jax.Array,
-  ) -> tuple[jax.Array, dict[str, jax.Array]]:
+  ) -> Tuple[jax.Array, Dict[str, jax.Array]]:
     """Computes Loss and Auxiliary Metrics."""
     # Calculate Distillation Loss (KL Divergence)
     # Scale logits by temperature T for soft targets
     # We use explicit float32 casting for stability in loss calculation
-    s_logits = student_output.astype(jnp.float32)
-    t_logits = teacher_output.astype(jnp.float32)
+    s_logits, s_hidden_state_norm_out = student_output[0].astype(jnp.float32), student_output[1]
+    t_logits, t_hidden_state_norm_out = teacher_output[0].astype(jnp.float32), teacher_output[1]
 
     log_student_probs_temp = jax.nn.log_softmax(s_logits / self.temperature, axis=-1)
     teacher_probs_temp = jax.nn.softmax(t_logits / self.temperature, axis=-1)
 
     # KL(Teacher || Student)
     kl_div = optax.kl_divergence(log_student_probs_temp, teacher_probs_temp)
+
+    # Cosine similarity loss
+    cosine_loss = 0.0
+    if self.cosine_weight > 0.0:
+      s_hidden_state_norm_out = s_hidden_state_norm_out.astype(jnp.float32)
+      t_hidden_state_norm_out = t_hidden_state_norm_out.astype(jnp.float32)
+      cos_sim = optax.cosine_similarity(s_hidden_state_norm_out, t_hidden_state_norm_out)
+      cosine_loss = self.cosine_weight * (1.0 - jnp.mean(cos_sim))
 
     # Scale gradients by T^2 (Hinton et al.)
     soft_loss = jnp.mean(kl_div) * (self.temperature**2)
@@ -144,13 +180,14 @@ class MonitoredLogitStrategy(logit.LogitStrategy):
     teacher_hard_loss = jnp.mean(ce_loss_teacher)
 
     # 3. Combine losses
-    total_loss = (self.alpha * soft_loss) + ((1.0 - self.alpha) * hard_loss)
+    total_loss = (self.alpha * soft_loss) + ((1.0 - self.alpha) * hard_loss) + cosine_loss
 
     # 4. Return Loss AND Metrics
     metrics = {
         "distill/soft_loss": soft_loss,
         "distill/hard_loss": hard_loss,
         "distill/kl_div": jnp.mean(kl_div),
+        "distill/cosine_loss": cosine_loss,
         "distill/teacher_loss": teacher_hard_loss,
     }
     return total_loss, metrics
@@ -244,7 +281,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
 
     if self._iterator is not None:
       # Follow MaxText's logic to handle multi-process saving
-      # Logic extracted from src/MaxText/common/checkpointing.py:save_checkpoint
+      # Logic extracted from src/maxtext/common/checkpointing.py:save_checkpoint
       data_iterator = self._iterator
       if not isinstance(data_iterator, list):
         data_iterator = [data_iterator]

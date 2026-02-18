@@ -28,10 +28,9 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 from MaxText import pyconfig
-from maxtext.input_pipeline import grain_data_processing
-from maxtext.input_pipeline import input_pipeline_interface
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.input_pipeline import grain_data_processing, input_pipeline_interface
 from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
 
 

@@ -1051,6 +1051,9 @@ class Distillation(BaseModel):
 
   # --- Loss Params ---
   distill_alpha: float = Field(0.5, description="Weight for the distillation loss component.")
+  distill_cosine_weight: float = Field(
+      0.0, description="Weight for the distillation cosine similarity loss. Set to 0.0 to disable."
+  )
   distill_temperature: float = Field(1.0, description="Temperature for distillation softening.")
 
 

@@ -645,6 +645,14 @@ class Decoder(nn.Module):
         kernel_axes=("norm",),
         parameter_memory_host_offload=cfg.parameter_memory_host_offload,
     )(y, out_sharding=norm_out_sharding)
+    if cfg.distill_cosine_weight > 0.0:
+      self.sow(
+          "intermediates",
+          "hidden_states_norm_out",
+          y,
+          init_fn=lambda: None,
+          reduce_fn=lambda _, new: new,
+      )
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):

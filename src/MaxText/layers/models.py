@@ -472,6 +472,12 @@ class Transformer(nnx.Module):
     if audio_embeddings is not None:
       audio_masks = mm_processor.get_bidirectional_mask_audio(self.config, decoder_input_tokens)
 
+    mutable_collections = []
+    if self.config.record_internal_nn_metrics:
+      mutable_collections.append("intermediates")
+    if self.config.distill_cosine_weight > 0.0 and "intermediates" not in mutable_collections:
+      mutable_collections.append("intermediates")
+
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,
@@ -489,6 +495,7 @@ class Transformer(nnx.Module):
         audio_masks=audio_masks,
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
+        mutable=mutable_collections,
     )
 
     # Materialize hidden state when vocab tiling is enabled

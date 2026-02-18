@@ -84,9 +84,9 @@ def get_maxtext_model(config, devices=None):
   """
   Load MaxText model with Tunix adapter.
   # Note: pass the path to your scanned checkpoint for 'load_parameters_path'.
-  # To create a scanned checkpoint, you can use /maxtext/src/MaxText/checkpoint_conversion/to_maxtext.py and if
+  # To create a scanned checkpoint, you can use /maxtext/src/maxtext/checkpoint_conversion/to_maxtext.py and if
   # using Pathways, please set `checkpoint_storage_use_ocdbt=False checkpoint_storage_use_zarr3=False`
-  # python src/MaxText/checkpoint_conversion/to_maxtext.py \
+  # python src/maxtext/checkpoint_conversion/to_maxtext.py \
   #  --model_name="gemma2-2b" \
   #  --base_output_directory="/path/to/your/output/directory" \
   #  --scan_layers=True \

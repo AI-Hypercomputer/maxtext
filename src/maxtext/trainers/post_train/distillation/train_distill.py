@@ -142,7 +142,8 @@ def create_forward_fn(config: pyconfig.HyperParameters):
         decoder_segment_ids=decoder_segment_ids,
         enable_dropout=config.enable_dropout,
     )
-    return logits
+    hidden_states_norm_out = maxtext_utils.get_intermediate_value(model, "hidden_states_norm_out", None)
+    return logits, hidden_states_norm_out
 
   return model_forward_fn
 
@@ -363,6 +364,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
       labels_fn=labels_fn,
       temperature=student_config.distill_temperature,
       alpha=student_config.distill_alpha,
+      cosine_weight=student_config.distill_cosine_weight,
   )
 
   # 4. Optimizer & Config

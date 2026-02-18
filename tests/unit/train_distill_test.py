@@ -163,6 +163,7 @@ class TrainDistillTest(unittest.TestCase):
         labels_fn=lambda t: t,
         temperature=1.0,
         alpha=0.5,
+        cosine_weight=1.0,
     )
 
     # Dummy inputs (batch=1, seq=2, vocab=4)
@@ -285,7 +286,11 @@ class TrainDistillTest(unittest.TestCase):
     trainer._buffered_train_metrics = mock_buffer
 
     # Simulate auxiliary output from strategy
-    aux_metrics = {"distill/kl_div": jnp.array(0.5), "distill/soft_loss": jnp.array(1.2)}
+    aux_metrics = {
+        "distill/kl_div": jnp.array(0.5),
+        "distill/soft_loss": jnp.array(1.2),
+        "distill/cosine_loss": jnp.array(0.01),
+    }
 
     # Run Hook
     trainer._post_process_train_step(aux_metrics)
@@ -293,6 +298,7 @@ class TrainDistillTest(unittest.TestCase):
     # Verify buffer updated
     self.assertIn("distill/kl_div", mock_buffer.additional_metrics)
     self.assertIn("distill/soft_loss", mock_buffer.additional_metrics)
+    self.assertIn("distill/cosine_loss", mock_buffer.additional_metrics)
 
     # Verify value appended to list
     values_list = mock_buffer.additional_metrics["distill/kl_div"][0]
