@@ -16,14 +16,14 @@ set -ex
 MODEL_VARIATION='llama2-13b'
 
 
-# We install torch CPU because the checkpoint conversion script MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt does not need a TPU/GPU
+# We install torch CPU because the checkpoint conversion script maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt does not need a TPU/GPU
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # We define a var for the path to the Meta checkpoint. Non-Googlers please remember to update the source `META_CHECKPOINT_PATH` to the GCS bucket where you have your Meta checkpoint
 export META_CHECKPOINT_PATH=gs://maxtext-llama/llama2-13b/meta-ckpt
 
 # In the following command, we are copying Meta's checkpoint into a local directory `tmp`. 
-# You can use a different local directory than /tmp/, if you do so, please use the same local path for `base-model-path` when running `python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt`
+# You can use a different local directory than /tmp/, if you do so, please use the same local path for `base-model-path` when running `python3 -m maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt`
 gcloud storage cp -r ${META_CHECKPOINT_PATH} /tmp/
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
@@ -35,8 +35,8 @@ fi
 
 echo "Converted checkpoints are stored at ${BASE_OUTPUT_PATH}"
 
-#Next, run the conversion script `MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt` to convert Meta's PyTorch checkpoint in `base-model-path` and save the new converted (Orbax) checkpoint in the `maxtext-model-path`
-JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --base-model-path /tmp/meta-ckpt --maxtext-model-path ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_chkpt --model-size ${MODEL_VARIATION}
+#Next, run the conversion script `maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt` to convert Meta's PyTorch checkpoint in `base-model-path` and save the new converted (Orbax) checkpoint in the `maxtext-model-path`
+JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt --base-model-path /tmp/meta-ckpt --maxtext-model-path ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_chkpt --model-size ${MODEL_VARIATION}
 
 echo "Wrote MaxText compatible checkpoint to ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_chkpt"
 

@@ -18,7 +18,7 @@ required for generating a MaxText checkpoint compatible with scanned model layer
 
 Example cmd:
 
-python3 -m MaxText.utils.ckpt_scripts.convert_qwen3_moe --base_model_path <path/to/hf/ckpt> \
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_qwen3_moe --base_model_path <path/to/hf/ckpt> \
     --maxtext_model_path gs://<gcs_bucket>/<path/to/save/ckpt> --model_size qwen3-235b-a22b
 """
 
@@ -32,7 +32,7 @@ import torch
 from safetensors import safe_open
 from tqdm import tqdm
 
-from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
+from maxtext.checkpoint_conversion.standalone_scripts import llama_or_mistral_ckpt
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging
 

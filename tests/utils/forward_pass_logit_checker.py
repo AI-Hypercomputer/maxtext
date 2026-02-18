@@ -53,14 +53,12 @@ from google.cloud import storage
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from MaxText.utils.ckpt_conversion.utils.hf_utils import (
-    convert_jax_weight_to_torch,
-)
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
 from MaxText.layers import models
 from MaxText.layers import quantizations
+from maxtext.checkpoint_conversion.utils.hf_utils import convert_jax_weight_to_torch
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 

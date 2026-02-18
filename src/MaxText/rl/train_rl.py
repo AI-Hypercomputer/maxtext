@@ -84,9 +84,9 @@ def get_maxtext_model(config, devices=None):
   """
   Load MaxText model with Tunix adapter.
   # Note: pass the path to your scanned checkpoint for 'load_parameters_path'.
-  # To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py and if
+  # To create a scanned checkpoint, you can use /maxtext/src/MaxText/checkpoint_conversion/to_maxtext.py and if
   # using Pathways, please set `checkpoint_storage_use_ocdbt=False checkpoint_storage_use_zarr3=False`
-  # python src/MaxText/utils/ckpt_conversion/to_maxtext.py \
+  # python src/MaxText/checkpoint_conversion/to_maxtext.py \
   #  --model_name="gemma2-2b" \
   #  --base_output_directory="/path/to/your/output/directory" \
   #  --scan_layers=True \
@@ -321,10 +321,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   train_dataset = train_dataset[:dataset_size]
   train_dataset = train_dataset.repeat(trainer_config.num_epoch)
 
-  train_dataset = (
-      train_dataset.to_iter_dataset()
-      .batch(trainer_config.batch_size)
-  )
+  train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size)
 
   eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
   if not eval_dataset_name:
@@ -342,10 +339,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   test_dataset = test_dataset.filter(_filter_long_prompts)
   test_dataset = test_dataset[: trainer_config.num_test_batches * trainer_config.batch_size]
 
-  test_dataset = (
-      test_dataset.to_iter_dataset()
-      .batch(trainer_config.batch_size)
-  )
+  test_dataset = test_dataset.to_iter_dataset().batch(trainer_config.batch_size)
 
   # Load reference model
   max_logging.log("Creating reference model and also meshes for reference and rollout")

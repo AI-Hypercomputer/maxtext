@@ -25,7 +25,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 export CHKPT_BUCKET=gs://maxtext-gemma/gemma3/flax
 export MODEL_BUCKET=gs://maxtext-gemma/gemma3
 
-python3 -m MaxText.utils.ckpt_scripts.convert_gemma3_chkpt --base_model_path ${CHKPT_BUCKET}/${MODEL_VARIATION} --maxtext_model_path ${MODEL_BUCKET}/${MODEL_VARIATION}/${idx} --model_size ${MODEL_VARIATION}
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gemma3_chkpt --base_model_path ${CHKPT_BUCKET}/${MODEL_VARIATION} --maxtext_model_path ${MODEL_BUCKET}/${MODEL_VARIATION}/${idx} --model_size ${MODEL_VARIATION}
 
 # Current MaxText.generate_param_only_checkpoint will need to skip on GPU due to cpu process error. reuse the unscanned ckpt generated separately.
 

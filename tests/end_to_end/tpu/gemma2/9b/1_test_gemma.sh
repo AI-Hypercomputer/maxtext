@@ -31,7 +31,7 @@ fi
 echo "Converted checkpoints are stored at ${BASE_OUTPUT_PATH}"
 
 
-JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_gemma2_chkpt --base_model_path ${CHKPT_BUCKET}/${MODEL_VARIATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_chkpt --model_size ${MODEL_VARIATION}
+JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gemma2_chkpt --base_model_path ${CHKPT_BUCKET}/${MODEL_VARIATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_chkpt --model_size ${MODEL_VARIATION}
 echo "Wrote MaxText compatible checkpoint to ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_chkpt"
 
 # We define `CONVERTED_CHECKPOINT` to refer to the checkpoint subdirectory.

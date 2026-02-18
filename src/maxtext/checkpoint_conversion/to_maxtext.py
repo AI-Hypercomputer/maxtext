@@ -18,7 +18,7 @@ Orbax checkpoint.
 
 Key Parameters (to be set in the config file or as command-line overrides):
   model_name: (Required) The name of the model to convert (e.g., "gemma2-2b").
-              Must be a key in `MaxText.utils.ckpt_conversion.utils.utils.HF_IDS`.
+              Must be a key in `maxtext.checkpoint_conversion.utils.utils.HF_IDS`.
   base_output_directory: (Optional) The directory where the converted HuggingFace
                          checkpoint will be saved. Can be a local path, a GCS
                          path (gs://...), or a HuggingFace Hub repo ID (hf://...).
@@ -40,7 +40,7 @@ Environment Variables:
 Example Usage:
   To convert a gemma2-2b model and save it to a specific directory:
 
-    /usr/bin/time -v python src/MaxText/utils/ckpt_conversion/to_maxtext.py \
+    /usr/bin/time -v python src/MaxText/checkpoint_conversion/to_maxtext.py \
     maxtext/configs/base.yml model_name="gemma2-2b" \
     base_output_directory="/path/to/your/output/directory" \
     hf_access_token=$HF_TOKEN hardware=cpu skip_jax_distributed_system=True \
@@ -78,9 +78,9 @@ from orbax.checkpoint import type_handlers
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models, quantizations
-from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
-from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model, MemoryMonitorTqdm, print_peak_memory, validate_and_filter_param_map_keys
+from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
+from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
+from maxtext.checkpoint_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model, MemoryMonitorTqdm, print_peak_memory, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -711,7 +711,7 @@ if __name__ == "__main__":
       default=False,
       help="Whether to use lazy loading of HF tensors.",
   )
-  # If not specified, default to MaxText.utils.ckpt_conversion.utils.utils.HF_IDS[model_name]
+  # If not specified, default to maxtext.checkpoint_conversion.utils.utils.HF_IDS[model_name]
   parser.add_argument(
       "--hf_model_path", type=str, required=False, default="", help="local path to hf model, or custom remote hf repo"
   )

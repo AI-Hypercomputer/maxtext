@@ -19,7 +19,7 @@ file and can override parameters on the command line.
 
 Key Parameters (to be set in the config file or as command-line overrides):
   model_name: (Required) The name of the model to convert (e.g., "gemma2-2b").
-              Must be a key in `MaxText.utils.ckpt_conversion.utils.utils.HF_IDS`.
+              Must be a key in `maxtext.checkpoint_conversion.utils.utils.HF_IDS`.
   load_parameters_path: (Required) Path to the MaxText checkpoint directory
                         containing the parameter-only checkpoint.
   base_output_directory: (Optional) The directory where the converted HuggingFace
@@ -44,7 +44,7 @@ Example Usage:
   To convert a gemma2-2b MaxText checkpoint and save it to a local directory:
 
   export HF_AUTH_TOKEN="hf_YOUR_TOKEN"
-  python src/MaxText/utils/ckpt_conversion/to_huggingface.py \
+  python src/MaxText/checkpoint_conversion/to_huggingface.py \
     src/maxtext/configs/base.yml \
     model_name="gemma2-2b" \
     load_parameters_path="/path/to/your/maxtext/checkpoint/" \
@@ -67,13 +67,13 @@ from absl import app
 from absl import flags
 
 from MaxText import pyconfig
-from MaxText.utils.ckpt_conversion.utils.param_mapping import (
+from maxtext.checkpoint_conversion.utils.param_mapping import (
     HOOK_FNS,
     PARAM_MAPPING,
 )
-from MaxText.utils.ckpt_conversion.utils.hf_shape import HF_SHAPE
-from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
-from MaxText.utils.ckpt_conversion.utils.utils import (
+from maxtext.checkpoint_conversion.utils.hf_shape import HF_SHAPE
+from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
+from maxtext.checkpoint_conversion.utils.utils import (
     validate_and_filter_param_map_keys,
     process_maxtext_param,
     save_model_files,

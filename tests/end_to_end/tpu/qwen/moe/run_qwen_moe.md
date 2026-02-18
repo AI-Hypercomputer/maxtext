@@ -29,7 +29,7 @@ To get started, you first need a MaxText-compatible checkpoint.
 2.  **Convert the Checkpoint**: Run the `convert_qwen3_moe.py` script to convert the downloaded Hugging Face weights into the Orbax format required by MaxText.
 
     ```
-    python3 -m MaxText.utils.ckpt_scripts.convert_qwen3_moe\
+    python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_qwen3_moe\
       --base_model_path /path/to/qwen3_hf_checkpoint\
       --maxtext_model_path gs://your-gcs-bucket/qwen3_maxtext_ckpt\
       --model_size <qwen3-30b-a3b|qwen3-235b-a22b|qwen3-480b-a35b>

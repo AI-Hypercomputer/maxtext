@@ -27,7 +27,7 @@ from jax import Array
 from flax import nnx
 from MaxText.layers.models import Transformer
 from MaxText.integration.tunix.utils import VllmWeightMapping
-from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS  # pylint: disable=ungrouped-imports
+from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS  # pylint: disable=ungrouped-imports
 
 
 class TunixMaxTextAdapter(nnx.Module):
