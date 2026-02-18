@@ -26,4 +26,5 @@ function remove_trailing_slash {
   fi
 }
 
-gsutil -u $1 -m cp 'gs://allennlp-tensorflow-datasets/c4/en/3.0.1/*' $(remove_trailing_slash $2)/c4/en/3.0.1
+# The gsutil top-level flag '-u' is not supported by the migration guide and has been removed.
+gcloud storage cp 'gs://allennlp-tensorflow-datasets/c4/en/3.0.1/*' $(remove_trailing_slash $2)/c4/en/3.0.1
