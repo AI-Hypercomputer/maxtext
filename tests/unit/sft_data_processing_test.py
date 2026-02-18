@@ -288,7 +288,7 @@ QWEN_DATA = {
         {"test_data": QWEN_DATA},
     ]
 )
-@pytest.mark.external_training  # Uses gsutil to pull tokenizer.
+@pytest.mark.external_training  # Uses gcloud storage to pull tokenizer.
 class SFTDataProcessingTest(unittest.TestCase):
   test_data = {}
 
@@ -297,15 +297,16 @@ class SFTDataProcessingTest(unittest.TestCase):
     super().setUpClass()
     exit_code = subprocess.call(
         [
-            "gsutil",
+            "gcloud",
+            "storage",
             "cp",
-            "-r",
+            "--recursive",
             "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
             os.path.join(MAXTEXT_ASSETS_ROOT, ""),
         ]
     )
     if exit_code != 0:
-      raise ValueError(f"Download tokenizer with gsutil cp failed with exit code: {exit_code}")
+      raise ValueError(f"Download tokenizer with gcloud storage cp failed with exit code: {exit_code}")
 
   def setUp(self):
     super().setUp()

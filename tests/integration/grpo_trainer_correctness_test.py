@@ -106,9 +106,10 @@ class GrpoTrainerTest(unittest.TestCase):
     super().setUp()
     jax.config.update("jax_default_prng_impl", "unsafe_rbg")
     command = [
-        "gsutil",
+        "gcloud",
+        "storage",
         "cp",
-        "-r",
+        "--recursive",
         "gs://maxtext-dataset/hf/llama3.1-tokenizer",
         os.path.join(MAXTEXT_ASSETS_ROOT, ""),
     ]

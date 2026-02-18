@@ -182,7 +182,7 @@ install_custom_libtpu() {
     # Install 'crcmod' to download 'libtpu.so' from GCS reliably
     python3 -m uv pip install -U crcmod
     # Copy libtpu.so from GCS path
-    gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+    gcloud storage cp "$LIBTPU_GCS_PATH" "$libtpu_path"
 }
 
 install_maxtext_with_deps() {
