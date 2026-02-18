@@ -95,10 +95,10 @@ jobs:
       - name: Run Tests
         shell: bash
         run: |
-          if [ "${{ inputs.is_scheduled_run }}" == "true" ]; then
-            FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
+          if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
+            FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
           else
-            FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
+            FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and not scheduled_only"
           fi
           # TODO: Use package data for testing and remove the env vars
           export MAXTEXT_REPO_ROOT=$(pwd)
@@ -106,7 +106,7 @@ jobs:
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # omit this libtpu init args for gpu tests
-          if [ "${{ inputs.device_type }}" != "cuda12" ]; then
+          if [ "${INPUTS_DEVICE_TYPE}" != "cuda12" ]; then
             export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
           fi
           if [ "${{ inputs.total_workers }}" -gt 1 ]; then
@@ -116,7 +116,7 @@ jobs:
             SPLIT_ARGS=""
           fi
           # TODO: Fix the skipped tests and remove the deselect flags
-          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} \
+          .venv/bin/python3 -m pytest ${INPUTS_PYTEST_ADDOPTS} \
             -v \
             -m "${FINAL_PYTEST_MARKER}" \
             --durations=0 \
@@ -124,6 +124,11 @@ jobs:
             --cov=src/MaxText \
             --cov-report=xml \
             $SPLIT_ARGS
+        env:
+          INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
+          INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
+          INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
+          INPUTS_PYTEST_ADDOPTS: ${{ inputs.pytest_addopts }}
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5
         continue-on-error: true
