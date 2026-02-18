@@ -559,7 +559,7 @@ add_eos: True
 # If False, use chunking for long sequences instead of truncation.
 # Note: use_truncation=False is only available in grain's pretrain preprocessing pipeline.
 # See the TokenizeAndTrim and TokenizeAndChunk classes in
-# `src/MaxText/input_pipeline/_grain_tokenizer.py` for implementation details.
+# `src/maxtext/input_pipeline/_grain_tokenizer.py` for implementation details.
 use_truncation: True
 
 # Dataset

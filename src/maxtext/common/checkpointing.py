@@ -23,7 +23,8 @@ from etils import epath
 from flax.training import train_state
 import jax
 from MaxText.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
-from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator, RemoteIterator
+from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
+from maxtext.input_pipeline.multihost_dataloading import RemoteIterator
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
 from maxtext.utils import exceptions
 from maxtext.utils import max_logging

@@ -21,7 +21,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 
 from tests.utils.test_helpers import get_test_config_path
-from MaxText import globals as train
+from MaxText import train
 
 train_main = train.main
 gettempdir = tempfile.gettempdir

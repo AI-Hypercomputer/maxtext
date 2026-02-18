@@ -120,7 +120,7 @@ def build_abstract_diloco_state(
     abstract_state: PyTree,
     state_mesh_shardings: PyTree,
     mesh: jax.sharding.Mesh,
-) -> tuple[DiLoCoTrainState, DiLoCoTrainState]:
+) -> tuple[DiLoCoTrainState, DiLoCoTrainState, PyTree]:
   """Build abstract DiLoCo state and shardings for AOT compilation.
 
   This function creates abstract (shape-only) DiLoCo state suitable for

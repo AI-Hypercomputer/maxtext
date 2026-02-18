@@ -1307,9 +1307,9 @@ class AttentionOp(nnx.Module):
       if self.config.use_tokamax_splash:
         if self.config.use_sparse_indexer and index_mask is not None:
           # Construct the splash kernel call with dynamic mask
-          def dynamic_mask_splash_kernel(q, k, v, segment, sinks, mask):
+          def dynamic_mask_splash_kernel(q, k, v, segment, sinks, index_mask):
             splash_kernel = tokamax_splash_kernel.make_dynamic_splash_mha(
-                mask=mask,
+                mask=index_mask,
                 config=sa_config,
             )
             kernel = partial(splash_kernel, max_logit_value=max_logit_value)
@@ -1317,8 +1317,8 @@ class AttentionOp(nnx.Module):
 
           # Iterate over batch dimension for (query, key, value, segment, sinks, mask)
           attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, 0, None, 0))
-          mask = jnp.isclose(index_mask, 0.0)
-          attention_output = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, mask)
+          index_mask = jnp.isclose(index_mask, 0.0)
+          attention_output = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, index_mask)
         else:
           kernel = partial(splash_kernel, max_logit_value=max_logit_value)
           attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(

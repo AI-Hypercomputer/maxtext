@@ -90,7 +90,8 @@ from MaxText.globals import MAXTEXT_REPO_ROOT
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.input_pipeline import instruction_data_processing
 from maxtext.trainers.post_train.sft import train_sft
-from maxtext.utils import max_logging, max_utils
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 
 # Suppress vLLM logging with a severity level below ERROR
 os.environ["VLLM_LOGGING_LEVEL"] = "ERROR"

@@ -1,5 +1,5 @@
 # Checkpoint conversion agent
-The agent is used to automate the model-specific mappings of checkpoint conversion.  It is designed to cooperate with the new checkpoint conversion [framework](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/checkpoint_conversion).
+The agent is used to automate the model-specific mappings of checkpoint conversion.  It is designed to cooperate with the new checkpoint conversion [framework](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/MaxText/checkpoint_conversion).
 
 ## Quick starts
 To begin, you'll need:
@@ -16,7 +16,7 @@ pip install -q -U "google-genai>=1.0.0"
 
 ## 1. Prepare the context file
 
-The agent requires context files about the target and source model's parameter names and tensor shapes. You can generate them using the [`save_param.py`](../ckpt_conversion_agent/utils/save_param.py) script. The output directory defined by `config.base_output_directory`. The default is `src/maxtext/experimental/agent/ckpt_conversion_agent/context/<model_name>` folder.
+The agent requires context files about the target and source model's parameter names and tensor shapes. You can generate them using the [`save_param.py`](../ckpt_conversion_agent/utils/save_param.py) script. The output directory defined by `config.base_output_directory`. The default is `src/MaxText/experimental/agent/ckpt_conversion_agent/context/<model_name>` folder.
 ```bash
 python3 -m maxtext.experimental.agent.ckpt_conversion_agent.utils.save_param src/maxtext/configs/base.yml \
   per_device_batch_size=1 run_name=param_<model_name> model_name=<model_name> scan_layers=false \
@@ -30,16 +30,16 @@ After it, you can get two `*.json` files in `config.base_output_directory` folde
 
 ```bash
 python3 -m maxtext.experimental.agent.ckpt_conversion_agent.step1 --target_model=<model_name> \
-  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
+  --dir_path=src/MaxText/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
 ```
 
-Our engineer should check the `src/maxtext/experimental/agent/ckpt_conversion_agent/outputs/proposed_dsl.txt` for potential new DSL and assess if it's needed. Then we need to add this ops into `src/maxtext/experimental/agent/ckpt_conversion_agent/context/dsl.txt`.
+Our engineer should check the `src/MaxText/experimental/agent/ckpt_conversion_agent/outputs/proposed_dsl.txt` for potential new DSL and assess if it's needed. Then we need to add this ops into `src/MaxText/experimental/agent/ckpt_conversion_agent/context/dsl.txt`.
 
 ### 2.2 Step 2: Generate mappings
 
 ```bash
 python3 -m maxtext.experimental.agent.ckpt_conversion_agent.step2 --target_model=<model_name> \
-  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
+  --dir_path=src/MaxText/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
 ```
 
 ## Evaluation and Debugging
@@ -53,14 +53,14 @@ You can automatically verify the output by comparing the generated code against 
 
 ```bash
 python3 -m maxtext.experimental.agent.ckpt_conversion_agent.evaluation --files ground_truth/<model>.py \
-  outputs/hook_fn.py --api_key=<Your-API-KEY> --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent
+  outputs/hook_fn.py --api_key=<Your-API-KEY> --dir_path=src/MaxText/experimental/agent/ckpt_conversion_agent
 ```
 
 ### Manual Debugging (No Ground-Truth Code)
 If a ground-truth version isn't available, you'll need to debug the conversion manually. The recommended process is to:
-1. Add the model mappings into [checkpoint conversion framework](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/README.md#adding-support-for-new-models).
+1. Add the model mappings into [checkpoint conversion framework](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/README.md#adding-support-for-new-models).
 
-2. Execute the conversion process layer-by-layer, using [to_maxtext.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/README.md#hugging-face-to-maxtext) or [to_huggingface.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/README.md#maxtext-to-hugging-face).
+2. Execute the conversion process layer-by-layer, using [to_maxtext.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/README.md#hugging-face-to-maxtext) or [to_huggingface.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/README.md#maxtext-to-hugging-face).
   - If the tensor shape are not matched after conversion, error message will print out the parameter name that caused error.
 
 3. After the conversion is done, run a decode to check the correctness of the generated code.
@@ -73,7 +73,7 @@ python3 -m maxtext.decode src/maxtext/configs/base.yml model_name=gemma3-4b toke
 ```
 If outputs are wrong, you can use jax.debug.print() to print the layer-wise mean/max/min values for debugging.
 
-4. To further validate the converted checkpoint, we recommend to use the [forward_pass_logit_checker.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/README.md#verifying-conversion-correctness) to compare the original ckpt with the converted ckpt:
+4. To further validate the converted checkpoint, we recommend to use the [forward_pass_logit_checker.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/README.md#verifying-conversion-correctness) to compare the original ckpt with the converted ckpt:
 ```bash
 python3 -m tests.utils.forward_pass_logit_checker src/maxtext/configs/base.yml \
     tokenizer_path=assets/tokenizers/<tokenizer> \
@@ -121,5 +121,5 @@ Run the [One-shot agent Jyputer notebook](./baselines/one-shot-agent.ipynb)
 ### Prompt-chain Agent:
 ```bash
 python3 -m maxtext.experimental.agent.ckpt_conversion_agent.prompt_chain --target_model=<model_name> \
-  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
+  --dir_path=src/MaxText/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
 ```

@@ -35,7 +35,7 @@ ignore:
   - "src/maxtext/assets"
   - "src/maxtext/configs"
   - "src/maxtext/examples"
-  - "src/maxtext/experimental"
+  - "src/MaxText/experimental"
   - "src/maxtext/inference"
   - "src/maxtext/scratch_code"
   - "src/MaxText/distillation" # code moved to src/maxtext/trainers/post_train/distillation
