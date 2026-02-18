@@ -87,10 +87,10 @@ jobs:
       - name: Run Tests
         shell: bash
         run: |
-          if [ "${{ inputs.is_scheduled_run }}" == "true" ]; then
-            FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
+          if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
+            FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
           else
-            FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
+            FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and not scheduled_only"
           fi
           # TODO: Use package data for testing and remove the env vars
           export MAXTEXT_REPO_ROOT=$(pwd)
@@ -98,4 +98,8 @@ jobs:
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # TODO: Fix the skipped tests and remove the deselect flags
-          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
+          .venv/bin/python3 -m pytest ${INPUTS_PYTEST_ADDOPTS} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
+        env:
+          INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
+          INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
+          INPUTS_PYTEST_ADDOPTS: ${{ inputs.pytest_addopts }}
