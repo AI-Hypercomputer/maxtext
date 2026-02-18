@@ -58,25 +58,26 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string("model_name", None, "Specific model name to dump.")
 flags.DEFINE_string("topology", None, "Specific topology to dump.")
 flags.DEFINE_string("num_slice", None, "Specific number of slices to dump.")
+flags.DEFINE_bool("pure_nnx", False, "Use pure NNX model.")
 
 
-def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
+def run_single_dump(model_name: str, topology: str, num_slice: str, pure_nnx: bool = False) -> None:
   """Generate sharding json file for one specific model, topology and slice."""
-  subprocess.run(
-      [
-          "python3",
-          "-m",
-          "tests.utils.sharding_dump",
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-          f"compile_topology={topology}",
-          f"compile_topology_num_slices={num_slice}",
-          f"model_name={model_name}",
-          "weight_dtype=float32",
-          "log_config=false",
-          "debug_sharding=true",
-      ],
-      check=True,
-  )
+  cmd = [
+      "python3",
+      "-m",
+      "tests.utils.sharding_dump",
+      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      f"compile_topology={topology}",
+      f"compile_topology_num_slices={num_slice}",
+      f"model_name={model_name}",
+      "weight_dtype=float32",
+      "log_config=false",
+      "debug_sharding=true",
+  ]
+  if pure_nnx:
+    cmd.append("pure_nnx=true")
+  subprocess.run(cmd, check=True)
 
 
 def main(argv: Sequence[str]) -> None:
@@ -106,7 +107,7 @@ def main(argv: Sequence[str]) -> None:
       print("  -> Sharding files already exist. Regenerating to overwrite.")
 
     try:
-      run_single_dump(model_name, topology, str(num_slice))
+      run_single_dump(model_name, topology, str(num_slice), pure_nnx=FLAGS.pure_nnx)
     except subprocess.CalledProcessError:
       print(f"!!! FAILED: {model_name} {topology} {num_slice}")
 
