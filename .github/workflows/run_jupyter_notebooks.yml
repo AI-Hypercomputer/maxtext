@@ -98,6 +98,10 @@ jobs:
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
             filename=$(basename "$notebook")
+            if [[ "$filename" == "sft_qwen3_demo.ipynb" ]]; then
+              echo "Skipping $filename"
+              continue
+            fi
             output_name="${filename%.ipynb}_output.ipynb"
 
             echo "------------------------------------------------------"

@@ -11,19 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Shim for RL Evaluation in `src/maxtext/trainers/post_train/rl`."""
-
-import importlib
-
-from maxtext.utils import max_logging
-
-OLD_MODULE_PATH = "MaxText.rl.evaluate_rl"
-NEW_MODULE_PATH = "maxtext.trainers.post_train.rl.evaluate_rl"
-
-max_logging.warning(f"'{OLD_MODULE_PATH}' is deprecated; use '{NEW_MODULE_PATH}' instead.\n")
-_new_module = importlib.import_module(NEW_MODULE_PATH)
-
-evaluate = _new_module.evaluate
-generate_responses = _new_module.generate_responses
-score_responses = _new_module.score_responses

@@ -208,7 +208,7 @@ xpk workload create-pathways --workload $WORKLOAD \
 --tpu-type=$TPU_TYPE --num-slices=1 \
 --project=$PROJECT_ID --priority=high \
 --command "HF_TOKEN=${HF_TOKEN} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-python3 -m src.MaxText.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL} \
   tokenizer_path=${TOKENIZER} \
   load_parameters_path=${MAXTEXT_CKPT_PATH} \
@@ -225,7 +225,7 @@ xpk workload create-pathways --workload $WORKLOAD \
 --tpu-type=$TPU_TYPE --num-slices=1 \
 --project=$PROJECT_ID --priority=high \
 --command "HF_TOKEN=${HF_TOKEN} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-python3 -m src.MaxText.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL} \
   tokenizer_path=${TOKENIZER} \
   load_parameters_path=${MAXTEXT_CKPT_PATH} \
