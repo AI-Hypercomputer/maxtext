@@ -19,6 +19,11 @@ This config defines the architectural configurations of the Hugging Face version
 
 import transformers
 
+if transformers.__version__ >= "5.0.0":
+  from transformers.configuration_utils import PreTrainedConfig as PTConfig
+else:
+  from transformers.configuration_utils import PretrainedConfig as PTConfig
+
 gemma3_4b_config = transformers.Gemma3Config(
     architectures=["Gemma3ForConditionalGeneration"],
     boi_token_index=255999,
@@ -645,7 +650,8 @@ deepseek32_671b_dict = {
     "v_head_dim": 128,
     "vocab_size": 129280,
 }
-deepseek32_671b_config = transformers.DeepseekV3Config(**deepseek32_671b_dict)
+# TODO(shuningjin): replace with DeepseekV32Config when available on HF
+deepseek32_671b_config = PTConfig(**deepseek32_671b_dict)
 
 # from https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json
 # remove mxfp4 quantization_config, since we are using bf16

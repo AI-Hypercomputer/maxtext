@@ -48,7 +48,7 @@ from safetensors.torch import load as load_safetensors
 from safetensors import safe_open
 
 from MaxText import pyconfig
-from MaxText.utils.ckpt_conversion.utils.utils import HF_IDS, print_ram_usage, get_hf_model
+from MaxText.utils.ckpt_conversion.utils.utils import HF_IDS, print_ram_usage, get_hf_dict_from_pretrained
 from maxtext.utils import max_logging
 
 
@@ -134,8 +134,7 @@ def get_hf_model_state_dict(model_id: str, token: str) -> Dict[str, np.ndarray]:
   """Loads the HuggingFace model state dict and converts to numpy."""
   max_logging.log(f"Loading reference model from HuggingFace: {model_id}...")
 
-  hf_model = get_hf_model(model_id, token)
-  state_dict = hf_model.state_dict()
+  state_dict = get_hf_dict_from_pretrained(model_id, token)
   numpy_state_dict = {k: v.numpy() for k, v in state_dict.items()}
 
   return numpy_state_dict
@@ -260,12 +259,9 @@ if __name__ == "__main__":
       help="Absolute tolerance for numpy.allclose",
   )
 
-  local_args, _ = parser.parse_known_args()
   logging.set_verbosity(logging.INFO)
 
-  # Filter args for MaxText config parsing
-  model_args = sys.argv
-  to_remove_args = ["--candidate_path", "--reference_path", "--max_workers", "--rtol", "--atol"]
-  model_args = [s for s in model_args if not any(s.startswith(a) for a in to_remove_args)]
+  local_args, remaining_args = parser.parse_known_args()
+  model_args = [sys.argv[0]] + remaining_args
 
   main(model_args, local_args)

@@ -69,6 +69,8 @@ from typing import Sequence, List, Any, Callable
 import numpy as np
 import absl
 import ml_dtypes
+from tqdm import tqdm
+import pathlib
 
 from transformers import AutoConfig
 from huggingface_hub import hf_hub_download, list_repo_files
@@ -83,7 +85,8 @@ from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models, quantizations
 from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_model, MemoryMonitorTqdm, print_peak_memory, validate_and_filter_param_map_keys
+from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS, print_ram_usage, get_hf_dict_from_pretrained, MemoryMonitorTqdm, print_peak_memory, validate_and_filter_param_map_keys
+from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -91,6 +94,31 @@ from maxtext.utils import maxtext_utils
 
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
+
+
+def get_hf_dict_from_safetensor(local_path):
+  """
+  If the safetensor contains more HF keys than MaxText model,
+  these HF keys will be loaded but ignored during conversion.
+  For example, if maxtext has deepseek3 with mtp=false,
+  then safetensor weight with prefix `model.layers.61` will be the extra keys.
+  """
+
+  ckpt_paths = sorted(pathlib.Path(local_path).glob("[!.]*.safetensors"))
+  hf_state_dict = {}
+  max_logging.log(f"Loading {len(ckpt_paths)} checkpoints")
+  for i, ckpt_path in tqdm(enumerate(ckpt_paths), total=len(ckpt_paths)):
+    # max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+    with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+      for key in f.keys():
+        if key.endswith("_scale_inv"):
+          raise ValueError("fp8 checkpoint is not supported.")
+        # skip mtp layer for deepseek3, deepseek3.2
+        # if key.startswith("model.layers.61"):
+        #   continue
+        hf_state_dict[key] = f.get_tensor(key)
+
+  return hf_state_dict
 
 
 class LazyHFLoader:
@@ -587,18 +615,23 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   hf_state_dict_numpy = None
   hf_loader = None
 
+  # if test_args.use_from_pretrained_api:
+  #   hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
+  #   hf_config_dict = hf_config_obj.to_dict()
+  # else:
+  #   raise NotImplementedError
+
   # Define the appropriate tensor getter based on mode
   if use_lazy_load:
     max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
     hf_loader = LazyHFLoader(model_id, hf_token, revision=revision)
-    hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
+
     print_ram_usage("After LazyLoader init")
     tensor_getter = hf_loader.get_tensor
     max_logging.log("Starting weight transformation...")
     start = time.time()
   else:
     max_logging.log(f"Lazy loading DISABLED. Loading full HuggingFace model: {model_id}...")
-    hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
 
     # BEFORE
     # hf_model = get_hf_model(model_id, token=hf_token)
@@ -617,16 +650,18 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
 
     #   tensor_getter = _eager_getter
 
-    # AFTER
-    if test_args.mode == "default":
-      # get_hf_model uses model.from_pretrained
-      # by default, dtype is float32?
-      hf_model = get_hf_model(model_id, token=hf_token)
+    if test_args.use_from_pretrained_api:
+      max_logging.log(f"Loading with `from_pretrained`")
+      # AFTER
+      if test_args.mode == "default":
+        # model.from_pretrained: dtype default to float32
+        hf_state_dict_numpy = get_hf_dict_from_pretrained(model_id, token=hf_token)
+      else:
+        hf_state_dict_numpy = get_hf_dict_from_pretrained(model_id, token=hf_token, dtype=torch.bfloat16)
     else:
-      hf_model = get_hf_model(model_id, token=hf_token, dtype=torch.bfloat16)
-
-    hf_state_dict_numpy = hf_model.state_dict()
-    del hf_model
+      max_logging.log(f"Loading with `safe_open`")
+      hf_state_dict_numpy = get_hf_dict_from_safetensor(model_id)
+      # print(hf_state_dict_numpy)
 
     unique_dtypes = {tensor.dtype for tensor in hf_state_dict_numpy.values()}
     max_logging.log(f"load dtypes: {unique_dtypes}")
@@ -662,15 +697,16 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     tensor_getter = _eager_getter
 
   # Get parameter mappings and hooks
+  model_key = config.model_name
+  hf_config_obj = HF_MODEL_CONFIGS[model_key]
+  hf_config_dict = hf_config_obj.to_dict()
   # example of param mapping (gemma2, maxtext:huggingface):
   # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
   #   f"model.layers.{global_layer_idx}.input_layernorm.weight",
-  model_key = config.model_name
-  param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_obj.to_dict(), config, config.scan_layers)
-
+  param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_dict, config, config.scan_layers)
   # Example of Hook FN mapping, to perform reshape:
   # f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": reshape_kernel,
-  hook_fn_map_mt = HOOK_FNS[model_key](hf_config_obj.to_dict(), config, config.scan_layers, saving_to_hf=False)
+  hook_fn_map_mt = HOOK_FNS[model_key](hf_config_dict, config, config.scan_layers, saving_to_hf=False)
   max_logging.log("Parameter mappings and hooks obtained.")
 
   maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(config)
@@ -764,6 +800,13 @@ if __name__ == "__main__":
   parser.add_argument(
       "--hf_model_path", type=str, required=False, default="", help="local path to hf model, or custom remote hf repo"
   )
+  parser.add_argument(
+      "--use_from_pretrained_api",
+      type=str2bool,
+      required=False,
+      default=True,
+      help="load HF weights via from_pretrained or safe_open",
+  )
   # Determines the logical sharding of the output checkpoint by partitioning
   # weights across virtual XLA devices.
   # - Even on a single CPU host, JAX can simulate multiple devices (e.g., 16)
@@ -796,6 +839,10 @@ if __name__ == "__main__":
   local_args, remaining_args = parser.parse_known_args()
   # Reconstruct model_args (script name + the args MaxText needs)
   model_args = [sys.argv[0]] + remaining_args
+
+  if local_args.use_from_pretrained_api:
+    assert local_args.hf_model_path != ""
+    assert local_args.mode != "default"
 
   # Set jax environment
   jax.config.update("jax_platforms", "cpu")
