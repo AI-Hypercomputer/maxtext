@@ -20,7 +20,7 @@ pip install torch==2.4.1 safetensors==0.4.5
 
 Example cmd:
 
-python3 -m MaxText.utils.ckpt_scripts.deepseek_fp8_to_bf16 --input-fp8-hf-path <path/to/fp8/ckpt> \
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.deepseek_fp8_to_bf16 --input-fp8-hf-path <path/to/fp8/ckpt> \
     --output-bf16-hf-path <local/path/to/save/new/bf16/ckpt>
 """
 

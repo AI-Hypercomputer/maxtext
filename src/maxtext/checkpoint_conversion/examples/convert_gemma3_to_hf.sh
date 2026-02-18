@@ -18,7 +18,7 @@ SCAN_LAYERS=false
 # --- Step 1: Run the Hugging Face Conversion ---
 echo "Starting Hugging Face model conversion for gemma3-4b..."
 
-python3 -m MaxText.utils.ckpt_conversion.to_huggingface \
+python3 -m maxtext.checkpoint_conversion.to_huggingface \
     "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml" \
     model_name="gemma3-4b" \
     tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}/tokenizer.gemma3" \

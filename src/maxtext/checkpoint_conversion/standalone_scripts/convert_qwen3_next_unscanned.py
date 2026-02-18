@@ -16,7 +16,8 @@
 
 Example cmd:
 
-python3 -m MaxText.utils.ckpt_scripts.convert_qwen3_next_unscanned --base-model-path <path/to/hf/ckpt> \
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_qwen3_next_unscanned \
+    --base-model-path <path/to/hf/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size qwen3-next-80b-a3b
 """
 
@@ -37,8 +38,8 @@ import torch
 from tqdm import tqdm
 from typing import Any, Dict
 
-from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
-from MaxText.utils.ckpt_scripts.convert_qwen3_next_scanned import MODEL_PARAMS_DICT
+from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
+from maxtext.checkpoint_conversion.standalone_scripts.convert_qwen3_next_scanned import MODEL_PARAMS_DICT
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging
 

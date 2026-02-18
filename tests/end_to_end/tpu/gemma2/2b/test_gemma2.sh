@@ -23,7 +23,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 #   https://www.kaggle.com/models/google/gemma-2/flax/gemma2-2b-it
 export CHKPT_BUCKET=gs://maxtext-gemma/gemma2/flax
 export MODEL_BUCKET=gs://maxtext-gemma/gemma2
-python3 -m MaxText.utils.ckpt_scripts.convert_gemma2_chkpt --base_model_path ${CHKPT_BUCKET}/${MODEL_VARIATION} --maxtext_model_path ${MODEL_BUCKET}/${MODEL_VARIATION}/${idx} --model_size ${MODEL_VARIATION}
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gemma2_chkpt --base_model_path ${CHKPT_BUCKET}/${MODEL_VARIATION} --maxtext_model_path ${MODEL_BUCKET}/${MODEL_VARIATION}/${idx} --model_size ${MODEL_VARIATION}
 
 
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data

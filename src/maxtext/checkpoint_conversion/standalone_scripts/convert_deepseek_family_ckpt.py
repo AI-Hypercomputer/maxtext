@@ -18,7 +18,8 @@ This script now includes support for converting Multi-Token Prediction (MTP) wei
 
 Example cmd:
 
-python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_ckpt --base_model_path <path/to/meta/ckpt> \
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_deepseek_family_ckpt \
+    --base_model_path <path/to/meta/ckpt> \
     --maxtext_model_path <GCS/path/to/save/new/maxtext/ckpt> --model_size deepseek3-671b --enable_mtp
 """
 
@@ -40,7 +41,7 @@ from tqdm import tqdm
 
 from safetensors import safe_open
 
-from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
+from maxtext.checkpoint_conversion.standalone_scripts import llama_or_mistral_ckpt
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging
 
