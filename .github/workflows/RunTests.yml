@@ -227,8 +227,9 @@ jobs:
           env:
             GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             GH_REPO: ${{ github.repository }}
+            STEPS_FIND_ISSUE_OUTPUTS_ISSUE_NUMBER: ${{ steps.find_issue.outputs.issue_number }}
           run: |
-            ISSUE_NUMBER=${{ steps.find_issue.outputs.issue_number }}
+            ISSUE_NUMBER=${STEPS_FIND_ISSUE_OUTPUTS_ISSUE_NUMBER}
             LABELS=$(gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name')
 
             if echo "$LABELS" | grep -q "success-run-2"; then
