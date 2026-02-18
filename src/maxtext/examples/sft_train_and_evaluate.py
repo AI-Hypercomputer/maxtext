@@ -301,6 +301,7 @@ def create_vllm_rollout(config, model, mesh, tokenizer):
           rollout_vllm_hbm_utilization=0.2,
           rollout_vllm_init_with_random_weights=True,
           rollout_vllm_tpu_backend_type="jax",
+          data_type="bfloat16",
       ),
   )
 
