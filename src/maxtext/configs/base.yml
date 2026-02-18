@@ -315,6 +315,7 @@ out_proj: 'remat'
 mla_q: 'remat'
 mla_kv: 'remat'
 attention_out: 'remat'
+engram: 'remat'
 
 optimizer_memory_host_offload: False
 parameter_memory_host_offload: False
@@ -1095,3 +1096,20 @@ force_q_layout: false
 mhc_expansion_rate: 1
 # The number of iterations for the Sinkhorn-Knopp algorithm.
 sinkhorn_iterations: 20
+
+################################## DeepSeek Engram ##################################
+# Indices of transformer layers where Engram are integrated; leave empty [] to disable.
+# Example: [1, 4] attaches to the 2nd and 5th layer. 
+engram_layers: []
+# The max 'n' in N-gram. Example: n=3 means it covers both 2-grams and 3-grams.
+engram_max_ngram_size: 3
+# Number of heads dedicated to the Engram.
+engram_num_heads: 8
+# Head dimension for heads.
+engram_head_dim: 1280
+# List of minimum head vocab sizes for each n-gram order.
+engram_vocab_bases: []
+# Temporal window size for Engram convolution.
+engram_kernel_size: 4
+# The seed for Engram hash mapping.
+engram_seed: 0
