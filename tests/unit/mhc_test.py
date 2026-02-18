@@ -107,6 +107,7 @@ class TestMHC(unittest.TestCase):
         attention="dot_product",
         routed_bias_update_rate=0.01,
         load_balance_loss_weight=0.02,
+        engram_layers=[],
     )
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
