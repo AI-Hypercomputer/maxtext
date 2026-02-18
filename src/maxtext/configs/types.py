@@ -895,6 +895,7 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the attention output.",
   )
+  engram: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the engram output.")
 
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
@@ -1625,6 +1626,23 @@ class SpecialTokens(BaseModel):
   solution_end_token: str = Field("</answer>", description="Token to mark the end of a solution section.")
 
 
+class Engram(BaseModel):
+  """Configuration for DeepSeek Engram (https://www.arxiv.org/pdf/2601.07372)."""
+
+  engram_layers: list[int] = Field(
+      default_factory=list,
+      description="Indices of transformer layers where Engram are integrated.",
+  )
+  engram_num_heads: int = Field(8, description="Number of heads dedicated to the Engram.")
+  engram_head_dim: int = Field(1280, description="Head dimension for heads.")
+  engram_vocab_bases: list[int] = Field(
+      default_factory=list, description="List of minimum head vocab sizes for each n-gram order."
+  )
+  engram_max_ngram_size: int = Field(3, description="The max 'n' in N-gram.")
+  engram_kernel_size: int = Field(4, description="Temporal window size for Engram convolution.")
+  engram_seed: int = Field(0, description="The seed for Engram hash mapping.")
+
+
 class DerivedValues(BaseModel):
   """Holds all fields that are derived from other config values for perfect legacy compatibility."""
 
@@ -1777,6 +1795,7 @@ class MaxTextConfig(
     Quantization,
     # Core Model Architecture
     ModelArchitecture,
+    Engram,
     MTP,
     Logits,
     # Attention Mechanisms
@@ -2250,6 +2269,18 @@ class MaxTextConfig(
         and self.gradient_accumulation_steps > 1
     ):
       raise ValueError("FP8 quantization is not compatible with gradient accumulation.")
+    if self.engram_layers:
+      if not self.hf_access_token or not self.tokenizer_path:
+        assert ValueError(
+            "Engram requires both 'hf_access_token' and 'tokenizer_path' " "to load the Hugging Face tokenizer."
+        )
+      if self.scan_layers:
+        assert NotImplementedError("Currently Engram only supports unscanned version. Please set scan_layers=False.")
+      if len(self.engram_vocab_bases) != (self.engram_max_ngram_size - 1):
+        raise ValueError(
+            f"Engram vocab size mismatch: expected {self.engram_max_ngram_size - 1} (max_ngram_size - 1), "
+            f"but got {self.engram_vocab_bases}."
+        )
     if self.num_experts > 1:
       is_fully_moe = (
           self.interleave_moe_layer_step == 1

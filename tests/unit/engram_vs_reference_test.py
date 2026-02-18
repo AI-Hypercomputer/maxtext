@@ -56,6 +56,14 @@ from maxtext.layers.engram import ShortConv as ShortConvJAX
 from maxtext.layers.engram import Engram as EngramJAX
 
 
+def setUpModule():
+  """
+  Enable 64-bit precision for JAX in test. Set before JAX operations
+  to prevent downcasting from int64 to int32 for correctness comparison.
+  """
+  jax.config.update("jax_enable_x64", True)
+
+
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
@@ -68,17 +76,16 @@ class Config:
   base_emb_dim: int = 1024
   tokenizer_path: str = "deepseek-ai/DeepSeek-V3"
   mhc_expansion_rate: int = 4
-  # TODO (ranran, shuningjin): add configs to base.yml during engram integration
   # Engram
   engram_max_ngram_size: int = 3  # max_ngram_size >=2, use 2...N
   # List of minimum head vocab sizes for each n-gram order
   engram_vocab_bases: List[int] = field(default_factory=lambda: [129280 * 5, 129280 * 5])
-  engram_layer_ids: List[int] = field(default_factory=lambda: [1, 15])
+  engram_layers: List[int] = field(default_factory=lambda: [1, 15])
   engram_kernel_size: int = 4  # conv kernel size
   engram_head_dim: int = 32
   engram_num_heads: int = 8  # num heads per n-gram
   # Hashing
-  # TODO(shuningjin): double check whether this can be replaced with tokenizer.pad_id
+  # This can be replaced with tokenizer.pad_token_id
   engram_pad_id: int = 2
   engram_seed: int = 0
 
@@ -92,7 +99,7 @@ class EngramConfig:
     self.max_ngram_size = config.engram_max_ngram_size
     self.n_embed_per_ngram = config.engram_head_dim * config.engram_num_heads
     self.n_head_per_ngram = config.engram_num_heads
-    self.layer_ids = config.engram_layer_ids
+    self.layer_ids = config.engram_layers
     self.pad_id = config.engram_pad_id
     self.seed = config.engram_seed
     self.kernel_size = config.engram_kernel_size
@@ -537,7 +544,7 @@ class NgramHashMappingTest(parameterized.TestCase):
         engram_vocab_bases=self.config.engram_vocab_bases,
         max_ngram_size=self.config.engram_max_ngram_size,
         engram_num_heads=self.config.engram_num_heads,
-        layer_ids=self.config.engram_layer_ids,
+        layer_ids=self.config.engram_layers,
         tokenizer=tokenizer,
         pad_id=self.config.engram_pad_id,
         seed=self.config.engram_seed,
@@ -605,7 +612,10 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
 
     # 3. Compare
     # Check offsets
-    np.testing.assert_array_equal(jax_model.offsets, to_jax(pt_model.offsets))
+    jax_offsets = jax_model.offsets
+    if hasattr(jax_offsets, "val"):
+      jax_offsets = jax_offsets.val
+    np.testing.assert_array_equal(jax_offsets, to_jax(pt_model.offsets))
     # Check outputs
     np.testing.assert_allclose(y_jax, to_jax(y_pt), rtol=1e-5, atol=1e-5)
 
@@ -723,7 +733,7 @@ class EngramTest(parameterized.TestCase):
     torch.manual_seed(42)
     np.random.seed(42)
     self.nnx_rng = nnx.Rngs(params=0)
-    self.layer_id = 1  # must belong to config.engram_layer_ids
+    self.layer_id = 1  # must belong to config.engram_layers
 
   @parameterized.named_parameters(
       {"testcase_name": "multi_branch", "mhc_expansion_rate": 4},
@@ -759,7 +769,7 @@ class EngramTest(parameterized.TestCase):
         engram_vocab_bases=self.config.engram_vocab_bases,
         max_ngram_size=self.config.engram_max_ngram_size,
         engram_num_heads=self.config.engram_num_heads,
-        layer_ids=self.config.engram_layer_ids,
+        layer_ids=self.config.engram_layers,
         tokenizer=tokenizer,
         pad_id=self.config.engram_pad_id,
         seed=self.config.engram_seed,
