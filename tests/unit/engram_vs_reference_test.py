@@ -56,6 +56,14 @@ from MaxText.layers.engram import ShortConv as ShortConvJAX
 from MaxText.layers.engram import Engram as EngramJAX
 
 
+def setUpModule():
+  """
+  Enable 64-bit precision for JAX in test. Set before JAX operations
+  to prevent downcasting from int64 to int32 for correctness comparison.
+  """
+  jax.config.update("jax_enable_x64", True)
+
+
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
@@ -68,7 +76,6 @@ class Config:
   base_emb_dim: int = 1024
   tokenizer_path: str = "deepseek-ai/DeepSeek-V3"
   mhc_expansion_rate: int = 4
-  # TODO (ranran, shuningjin): add configs to base.yml during engram integration
   # Engram
   engram_max_ngram_size: int = 3  # max_ngram_size >=2, use 2...N
   # List of minimum head vocab sizes for each n-gram order
@@ -78,7 +85,7 @@ class Config:
   engram_head_dim: int = 32
   engram_num_heads: int = 8  # num heads per n-gram
   # Hashing
-  # TODO(shuningjin): double check whether this can be replaced with tokenizer.pad_id
+  # This can be replaced with tokenizer.pad_token_id
   engram_pad_id: int = 2
   engram_seed: int = 0
 
@@ -605,7 +612,10 @@ class MultiHeadEmbeddingTest(parameterized.TestCase):
 
     # 3. Compare
     # Check offsets
-    np.testing.assert_array_equal(jax_model.offsets, to_jax(pt_model.offsets))
+    jax_offsets = jax_model.offsets
+    if hasattr(jax_offsets, "val"):
+      jax_offsets = jax_offsets.val
+    np.testing.assert_array_equal(jax_offsets, to_jax(pt_model.offsets))
     # Check outputs
     np.testing.assert_allclose(y_jax, to_jax(y_pt), rtol=1e-5, atol=1e-5)
 

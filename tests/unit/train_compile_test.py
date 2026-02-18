@@ -813,5 +813,28 @@ class TrainCompile(unittest.TestCase):
             "mhc_expansion_rate=4",
             "attention=flash",
             "use_tokamax_splash=True",
+            "engram_layers=[]",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_engram_integration(self):
+    """AOT test for Engram implementation"""
+    compiled_trainstep_file = "/tmp/test_engram_integration"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek-custom",
+            "per_device_batch_size=4",
+            "scan_layers=False",  # TODO(ranran): update to scan_layers=True after support with Engram
+            "max_target_length=1024",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "tokenizer_type=huggingface",
+            "tokenizer_path=deepseek-ai/DeepSeek-V3.2",
         )
     )

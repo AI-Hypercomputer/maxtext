@@ -871,11 +871,19 @@ class Decoder(nn.Module):
           num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
           num_layers_list = [cfg.first_num_dense_layers, num_moe_layers]
           # Iterate over the two layer groups (dense and MoE) and apply layer transformation
+          global_layer_idx_offset = 0
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
+              global_layer_idx = global_layer_idx_offset + index
               kv_cache = kv_caches[index] if kv_caches is not None else None
+              input_tokens = decoder_input_tokens if cfg.engram_layers else None
               y, kv_cache = layer(
-                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
+                  config=cfg,
+                  mesh=mesh,
+                  name=f"{layer_prefix}_{index}",
+                  quant=self.quant,
+                  model_mode=self.model_mode,
+                  layer_idx=global_layer_idx,
               )(
                   y,
                   decoder_segment_ids,
@@ -887,9 +895,11 @@ class Decoder(nn.Module):
                   slot=slot,
                   kv_cache=kv_cache,
                   attention_metadata=attention_metadata,
+                  decoder_input_tokens=input_tokens,
               )
               if kv_caches is not None and kv_cache is not None:
                 kv_caches[index] = kv_cache
+            global_layer_idx_offset += num_layers
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
