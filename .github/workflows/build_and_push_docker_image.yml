@@ -66,13 +66,18 @@ jobs:
         id: check
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.target_device }}" != "all" && "${{ github.event.inputs.target_device }}" != "${{ inputs.device }}" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${GITHUB_EVENT_INPUTS_TARGET_DEVICE}" != "all" && "${GITHUB_EVENT_INPUTS_TARGET_DEVICE}" != "${INPUTS_DEVICE}" ]]; then
             echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Skipping ${{ inputs.image_name }} build for device: ${{ inputs.device }} in ${{ inputs.build_mode }} mode."
+            echo "Skipping ${INPUTS_IMAGE_NAME} build for device: ${INPUTS_DEVICE} in ${INPUTS_BUILD_MODE} mode."
           else
             echo "should_run=true" >> $GITHUB_OUTPUT
-            echo "Building ${{ inputs.image_name }} for device: ${{ inputs.device }} in ${{ inputs.build_mode }} mode."
+            echo "Building ${INPUTS_IMAGE_NAME} for device: ${INPUTS_DEVICE} in ${INPUTS_BUILD_MODE} mode."
           fi
+        env:
+          GITHUB_EVENT_INPUTS_TARGET_DEVICE: ${{ github.event.inputs.target_device }}
+          INPUTS_DEVICE: ${{ inputs.device }}
+          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
+          INPUTS_BUILD_MODE: ${{ inputs.build_mode }}
 
       - name: Checkout MaxText
         uses: actions/checkout@v5
@@ -125,13 +130,13 @@ jobs:
         if: steps.check.outputs.should_run == 'true'
         shell: bash
         run: |
-          SOURCE_IMAGE="gcr.io/tpu-prod-env-multipod/${{ inputs.image_name }}"
+          SOURCE_IMAGE="gcr.io/tpu-prod-env-multipod/${INPUTS_IMAGE_NAME}"
 
           # Add date tag
-          gcloud container images add-tag "$SOURCE_IMAGE:latest" "$SOURCE_IMAGE:${{ inputs.image_date }}" --quiet
+          gcloud container images add-tag "$SOURCE_IMAGE:latest" "$SOURCE_IMAGE:${INPUTS_IMAGE_DATE}" --quiet
 
           # Convert date to YYYYMMDD format
-          clean_date=$(echo "${{ inputs.image_date }}" | sed 's/[-:]//g' | cut -c1-8)
+          clean_date=$(echo "${INPUTS_IMAGE_DATE}" | sed 's/[-:]//g' | cut -c1-8)
 
           # Add MaxText tag
           maxtext_hash=$(git rev-parse --short HEAD)
@@ -146,3 +151,6 @@ jobs:
               fi
             done
           fi
+        env:
+          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
+          INPUTS_IMAGE_DATE: ${{ inputs.image_date }}
