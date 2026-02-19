@@ -40,16 +40,15 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MA
 
 export UNSCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx}/0/items
 
-# # To get scanned ckpt, flip the scan_layers.
-# ToDo: gemma3 multimodal scanned ckpt
-# python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
-#     model_name=${MODEL_NAME} \
-#     hf_access_token=${HF_TOKEN} \
-#     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/scanned/${idx} \
-#     use_multimodal=${USE_MULTIMODAL} \
-#     scan_layers=true
+# To get scanned ckpt, flip the scan_layers.
+python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+    model_name=${MODEL_NAME} \
+    hf_access_token=${HF_TOKEN} \
+    base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/scanned/${idx} \
+    use_multimodal=${USE_MULTIMODAL} \
+    scan_layers=true
 
-# export SCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/scanned/${idx}/0/items
+export SCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/scanned/${idx}/0/items
 
 # We also test whether the forward pass logits match the original HF model
 # to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`
