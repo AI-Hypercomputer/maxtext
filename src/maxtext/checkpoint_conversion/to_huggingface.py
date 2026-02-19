@@ -200,12 +200,6 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: Command-line arguments, which are parsed by `pyconfig`.
   """
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-
-  jax.config.update("jax_platforms", "cpu")
-  os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
-
   # Initialize maxtext config
   config = pyconfig.initialize(argv)
   assert (
@@ -298,4 +292,10 @@ def main(argv: Sequence[str]) -> None:
 
 
 if __name__ == "__main__":
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+
+  jax.config.update("jax_platforms", "cpu")
+  os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=1"
+
   app.run(main)
