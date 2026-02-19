@@ -408,7 +408,6 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
       add_bos=student_config.add_bos,
       add_eos=student_config.add_eos,
       hf_access_token=student_config.hf_access_token,
-      dataset_type=student_config.dataset_type,
   )
   pad_id = tok.pad_id if tok.pad_id is not None else 0
 

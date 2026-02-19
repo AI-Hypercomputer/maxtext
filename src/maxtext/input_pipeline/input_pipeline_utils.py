@@ -17,7 +17,7 @@
 import dataclasses
 import warnings
 from threading import current_thread
-from typing import Any, TYPE_CHECKING
+from typing import Any, Iterable, TYPE_CHECKING
 
 if TYPE_CHECKING:
   import datasets
@@ -40,11 +40,9 @@ def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, dataset_type="tfds"):
+def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None):
   # Load tokenizer
-  tokenizer_model = tokenizer.build_tokenizer(
-      tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type
-  )
+  tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
   return tokenizer_model
 
 
@@ -65,6 +63,21 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
         tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :], x[data_column].shape
     )
   return x
+
+
+def TokenizeOp(tokenizer_model, features: Features, data_keys: Iterable[str] = ("inputs", "targets")) -> Features:
+  """Op for tokenization"""
+
+  def _process_string(string_tensor):
+    # Extract string value and decode it if necessary
+    string_value = string_tensor.numpy().decode("utf-8")
+    # encode and extract the tokenized integers
+    modified_string = tokenizer_model.encode(string_value)
+    return [modified_string]
+
+  for k in data_keys:
+    features[k] = tf.py_function(_process_string, [features[k]], Tout=[tf.int32])[0]
+  return features
 
 
 ########## Functions used by HF pipeline

@@ -67,7 +67,7 @@ class TokenizerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_tokenize(self):
     text = "This is a test"
-    self.assertTrue(np.array_equal(self.source_tokenizer.encode(text).numpy(), self.test_tokenizer.encode(text).numpy()))
+    self.assertTrue(np.array_equal(self.source_tokenizer.encode(text), self.test_tokenizer.encode(text)))
 
   @pytest.mark.tpu_only
   def test_detokenize(self):
