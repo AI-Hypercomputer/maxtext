@@ -28,10 +28,10 @@ Key Parameters (to be set in the config file or as command-line overrides):
   lazy_load: (bool) If True, uses an on-demand loading strategy to minimize RAM
              usage during conversion. Recommended if, 2 * model_size (GB) >= system RAM
              Defaults to False.
-  --hf_model_path: (Optional) Specifies a local or remote directory containing the model weights. 
-      If unspecified, we use the default Hugging Face repository ID 
+  --hf_model_path: (Optional) Specifies a local or remote directory containing the model weights.
+      If unspecified, we use the default Hugging Face repository ID
       (e.g., openai/gpt-oss-20b; see `HF_IDS[model_name]` in `utils/ckpt_conversion/utils`).
-      This is necessary for locally dequantized models like GPT-OSS or DeepSeek. 
+      This is necessary for locally dequantized models like GPT-OSS or DeepSeek.
 
 Environment Variables:
   HF_AUTH_TOKEN: (Required) HuggingFace authentication token, needed to
@@ -40,7 +40,7 @@ Environment Variables:
 Example Usage:
   To convert a gemma2-2b model and save it to a specific directory:
 
-    /usr/bin/time -v python src/MaxText/checkpoint_conversion/to_maxtext.py \
+    /usr/bin/time -v python src/maxtext/checkpoint_conversion/to_maxtext.py \
     maxtext/configs/base.yml model_name="gemma2-2b" \
     base_output_directory="/path/to/your/output/directory" \
     hf_access_token=$HF_TOKEN hardware=cpu skip_jax_distributed_system=True \
@@ -51,8 +51,8 @@ Example Usage:
 
   To convert a 70B model with minimal RAM usage:
 
-   /usr/bin/time -v python src/MaxText/utils/ckpt_conversion/to_maxtext.py \
-    maxtext/configs/base.yml model_name="meta-llama/Llama-3.1-70B" \
+   /usr/bin/time -v python src/maxtext/checkpoint_conversion/to_maxtext.py \
+    maxtext/configs/base.yml model_name="llama3.1-70b" \
     base_output_directory="gs://my-bucket/maxtext-checkpoints" \
     hf_access_token=$HF_TOKEN hardware=cpu skip_jax_distributed_system=True \
     --lazy_load_tensors=True
@@ -71,16 +71,14 @@ import flax.linen as nn
 from huggingface_hub import hf_hub_download, list_repo_files
 import jax
 from MaxText import pyconfig
+from MaxText.common_types import MODEL_MODE_TRAIN
 from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.utils import HF_IDS, MemoryMonitorTqdm, apply_hook_fns, get_hf_model, print_peak_memory, print_ram_usage, validate_and_filter_param_map_keys
-from MaxText.common_types import MODEL_MODE_TRAIN
 from maxtext.inference.inference_utils import str2bool
 from maxtext.layers import quantizations
 from maxtext.models import models
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
+from maxtext.utils import max_logging, max_utils, maxtext_utils
 import numpy as np
 from orbax.checkpoint import type_handlers
 from safetensors import safe_open
@@ -543,7 +541,13 @@ def _get_maxtext_weight(
         )
 
 
-def main(args: Sequence[str], test_args: Sequence[str]) -> None:
+def main(
+    args: Sequence[str],
+    hf_model_path: str | None = None,
+    revision: str | None = None,
+    lazy_load_tensors: bool = False,
+    simulated_cpu_devices_count: int = 16,
+) -> None:
   overall_start = time.time()
   # Check if the user is using an Instruct version. If so, use the base model architecture
   for i, arg in enumerate(args):
@@ -560,10 +564,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   if model_name_original not in HF_IDS:
     raise ValueError(f"Unsupported model name: {model_name_original}. Supported models are: {list(HF_IDS.keys())}")
 
-  if not test_args.hf_model_path:
-    model_id = HF_IDS[model_name_original]
-  else:
-    model_id = test_args.hf_model_path
+  model_id = hf_model_path or HF_IDS[model_name_original]
 
   # Initialize maxtext config
   config = pyconfig.initialize(args)
@@ -575,17 +576,15 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     output_directory = config.base_output_directory
 
   hf_token = config.hf_access_token
-  revision = test_args.revision
-  use_lazy_load = test_args.lazy_load_tensors
 
-  if use_lazy_load and config.use_multimodal:
+  if lazy_load_tensors and config.use_multimodal:
     raise ValueError("lazy loading of HF tensors is not supported for multimodal models yet.")
 
   hf_state_dict_numpy = None
   hf_loader = None
 
   # Define the appropriate tensor getter based on mode
-  if use_lazy_load:
+  if lazy_load_tensors:
     max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
     hf_loader = LazyHFLoader(model_id, hf_token, revision=revision)
     hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
@@ -636,7 +635,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   for mt_param_key_or_keys in MemoryMonitorTqdm(
       filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
   ):
-    if not use_lazy_load:
+    if not lazy_load_tensors:
       max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
 
     hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
@@ -663,7 +662,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
         mt_param_key_or_keys,
         final_mt_weights,
         config,
-        use_lazy_load,
+        lazy_load_tensors,
     )
 
   del hf_state_dict_numpy
@@ -676,7 +675,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   del final_mt_weights, abstract_params_treedef
 
   print_ram_usage("Before saving")
-  if use_lazy_load:
+  if lazy_load_tensors:
     max_logging.log("Starting checkpoint save (loading weights just-in-time)...")
   else:
     max_logging.log("Starting checkpoint save...")
@@ -687,7 +686,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   save_weights_to_checkpoint(
       output_directory,
       jax_weights,
-      test_args.simulated_cpu_devices_count,
+      simulated_cpu_devices_count,
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,
   )
@@ -743,4 +742,10 @@ if __name__ == "__main__":
   # Set jax environment
   jax.config.update("jax_platforms", "cpu")
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={local_args.simulated_cpu_devices_count}"
-  main(model_args, local_args)
+  main(
+      args=model_args,
+      hf_model_path=local_args.hf_model_path,
+      revision=local_args.revision,
+      lazy_load_tensors=local_args.lazy_load_tensors,
+      simulated_cpu_devices_count=local_args.simulated_cpu_devices_count,
+  )
