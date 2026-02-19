@@ -219,6 +219,19 @@ class ToNNX(Module):
     """A shortcut of calling `nnx.bridge.lazy_init()` upon this module."""
     return lazy_init(self, *args, **kwargs)
 
+  def _setattr(self, name, value):
+    if not nnx.is_data(value):
+      visited: set[int] = set()
+      def _is_leaf(x):
+        if id(x) in visited:
+          return True
+        visited.add(id(x))
+        return nnx.is_data(x)
+      leaves = jax.tree.leaves(value, is_leaf=_is_leaf)
+      if any(nnx.is_data(leaf) for leaf in leaves):
+        value = nnx.data(value)
+    super()._setattr(name, value)
+
   def __getattr__(self, name: str):
     if hasattr(super(), name):
       return super().__getattribute__(name)
