@@ -1192,7 +1192,7 @@ class MLATest(attention_test_util.MLATestBase):
       {"testcase_name": "Default_Autoregression", "rope_type": "default"},
   )
   @pytest.mark.tpu_only
-  def test_autoregression(self, rope_type):
+  def test_mla_autoregression(self, rope_type):
     cfg, mla = self.init_mla(self.config_arguments, rope_type)
     prefill_length = cfg.max_prefill_predict_length
     decode_total_length = cfg.max_target_length
@@ -1237,8 +1237,71 @@ class MLATest(attention_test_util.MLATestBase):
 
       mla_full_this_idx = mla_full[:, idx : idx + 1, :]
       self.assertEqual(mla_full_this_idx.shape, mla_idx.shape)
-      # TODO (b/394626702) uncomment last check when decode and kv_cache are implemented for MLA
-      # self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
+      self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=2e-02, atol=2e-02, equal_nan=False))
+
+  @parameterized.named_parameters(
+      {"testcase_name": "prefill_less_than_topk", "prefill_len": 4, "target_len": 12},
+      {"testcase_name": "prefill_greater_than_topk", "prefill_len": 12, "target_len": 16},
+  )
+  @pytest.mark.tpu_only
+  def test_indexer_autoregression(self, prefill_len, target_len):
+    config_arguments = self.config_arguments.copy()
+    config_arguments.update(
+        {
+            "use_sparse_indexer": True,
+            "index_n_heads": 4,
+            "index_head_dim": 64,
+            "index_topk": 8,
+            "attention": "dot_product",
+            "max_target_length": target_len,
+            "max_prefill_predict_length": prefill_len,
+            "per_device_batch_size": 1,
+        }
+    )
+    cfg, mla = self.init_mla(config_arguments, "yarn")
+    prefill_length = cfg.max_prefill_predict_length
+    decode_total_length = cfg.max_target_length
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
+    mla_full, _ = mla(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+
+    mla_prefill, _ = mla(
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(mla_prefill, mla_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
+    )
+
+    for idx in range(prefill_length, decode_total_length):
+      lnx_idx = lnx[:, idx : idx + 1, :]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
+      mla_idx, _ = mla(
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+
+      mla_full_this_idx = mla_full[:, idx : idx + 1, :]
+      self.assertEqual(mla_full_this_idx.shape, mla_idx.shape)
+      self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=2e-02, atol=2e-02, equal_nan=False))
 
   def test_projection_initialization(self):
     """Tests that MLA and Attention layers initialize the correct projection weights."""
