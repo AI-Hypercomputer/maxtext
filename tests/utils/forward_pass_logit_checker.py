@@ -59,6 +59,7 @@ from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from maxtext.checkpoint_conversion.utils.hf_utils import convert_jax_weight_to_torch
+from maxtext.checkpoint_conversion.utils.utils import load_orbax_checkpoint
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 
@@ -430,7 +431,61 @@ def main(config, test_args):  # pylint: disable=W0621
     mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
     quant = quantizations.configure_quantization(config)
     maxtext_model = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-    maxtext_state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
+    # maxtext_state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
+    
+    # Unwrap NNX 'value' layer from checkpoint
+    def unwrap_nnx_values(tree):
+      """Recursively unwrap NNX value wrappers from a pytree, skipping RNG state."""
+      if isinstance(tree, dict):
+        # Skip any keys containing 'to_nnx__rngs' (NNX RNG state)
+        filtered_tree = {k: v for k, v in tree.items() if 'to_nnx__rngs' not in k}
+        
+        # Check if this is a value wrapper (single 'value' key with array data)
+        if len(filtered_tree) == 1 and 'value' in filtered_tree and isinstance(filtered_tree['value'], (jax.Array, np.ndarray)):
+          return filtered_tree['value']
+        # Otherwise recursively process all keys
+        return {k: unwrap_nnx_values(v) for k, v in filtered_tree.items()}
+      else:
+        return tree
+    
+    # Get abstract state with proper sharding specs
+    unboxed_abstract_state, state_mesh_annotations, _ = maxtext_utils.get_abstract_state(
+        maxtext_model, None, config, rng1, mesh, False
+    )
+    
+    # Load checkpoint and unwrap NNX value layer
+    loaded_params = load_orbax_checkpoint(config)
+    loaded_params = unwrap_nnx_values(loaded_params)
+    loaded_params = {'params': loaded_params['base']}
+    
+    # Convert all arrays to numpy to strip old sharding information
+    def to_numpy(tree):
+      """Convert all JAX arrays to numpy arrays to remove sharding info."""
+      def convert_leaf(x):
+        if isinstance(x, jax.Array):
+          return np.array(x)
+        return x
+      return jax.tree_util.tree_map(convert_leaf, tree)
+    
+    loaded_params = to_numpy(loaded_params)
+    
+    # Reshard loaded params to match expected sharding from abstract state
+    def reshard_to_match(target_tree, source_tree):
+      """Reshard source arrays to match target's sharding."""
+      def copy_sharding(target_leaf, source_leaf):
+        if isinstance(source_leaf, (jax.Array, np.ndarray)):
+          if isinstance(target_leaf, jax.Array) and hasattr(target_leaf, 'sharding'):
+            # Reshard source to match target's sharding
+            return jax.device_put(source_leaf, target_leaf.sharding)
+          return source_leaf
+        return source_leaf
+      
+      return jax.tree_util.tree_map(copy_sharding, target_tree, source_tree)
+    
+    # Apply the proper sharding to loaded params
+    params = reshard_to_match(unboxed_abstract_state.params, loaded_params)
+    
+    maxtext_state = maxtext_utils.init_decode_state(maxtext_model.apply, params)
 
     prompts = ["I love to", "Today is a", "What is the"]
     all_data_to_save = []
