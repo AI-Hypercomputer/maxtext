@@ -94,7 +94,7 @@ xpk workload create-pathways \
   --project=$PROJECT \
   --zone=$ZONE \
   --docker-image=${DOCKER_IMAGE} \
-  --command="python3 -m MaxText.train src/maxtext/configs/base.yml \
+  --command="python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=gs://${BUCKET_NAME} \
     per_device_batch_size=1 \
     enable_checkpointing=false \
@@ -152,7 +152,7 @@ export JAX_PLATFORMS=proxy
 export JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 
 # Run the training script
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
   base_output_directory=gs://${BUCKET_NAME} \
   per_device_batch_size=1 \
   enable_checkpointing=false \

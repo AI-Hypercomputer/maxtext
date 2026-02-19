@@ -23,7 +23,7 @@ When you run a training job, MaxText produces detailed output logs. This guide s
 To start, run a simple pretraining job on a single-host TPU. For instance, we can run the following command on TPU v5p-8. The resulting log is used as an example throughout this guide.
 
 ```bash
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 base_output_directory=gs://runner-maxtext-logs run_name=demo \
 model_name=deepseek2-16b \
 per_device_batch_size=24 max_target_length=2048 steps=10 dataset_type=synthetic enable_checkpointing=false
@@ -123,7 +123,7 @@ To generate all optional artifacts in one run, you can set the corresponding fla
 This command enables tensorboard, profiler, text metrics, config saving, and checkpointing:
 
 ```bash
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 base_output_directory=gs://runner-maxtext-logs run_name=demo2 \
 model_name=deepseek2-16b \
 per_device_batch_size=24 max_target_length=2048 steps=10 dataset_type=synthetic \

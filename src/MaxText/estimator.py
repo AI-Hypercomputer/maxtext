@@ -466,7 +466,7 @@ def main(argv_list: Sequence[str]) -> None:
     for pdb_result, policy_result in suggested_list:
       # Build the full, runnable command string
       final_argv = build_argv(base_argv[1:], policy_result, pdb_result)
-      command = "python -m MaxText.train " + " ".join(final_argv)
+      command = "python -m maxtext.trainers.pre_train.train " + " ".join(final_argv)
 
       f.write(command + "\n")
       print(f"  - Found valid combo: pdb={pdb_result}, policy={policy_result}")

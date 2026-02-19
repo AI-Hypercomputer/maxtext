@@ -58,7 +58,7 @@ bash tools/setup/setup.sh DEVICE={tpu|gpu}
 After the installation is complete, run a short training job using synthetic data to confirm everything is working correctly. This command trains a model for just 10 steps. Remember to replace `$YOUR_JOB_NAME` with a unique name for your run and `gs://<my-bucket>` with the path to the GCS bucket you configured in the prerequisites.
 
 ```bash
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -92,7 +92,7 @@ To use a pre-configured model for TPUs, you override the `model_name` parameter,
 <summary><strong>llama3-8b (TPU)</strong></summary>
 
 ```bash
-python3 -m MaxText.train maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
   model_name=llama3-8b \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
@@ -106,7 +106,7 @@ python3 -m MaxText.train maxtext/configs/base.yml \
 <summary><strong>qwen3-4b (TPU)</strong></summary>
 
 ```bash
-python3 -m MaxText.train maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
   model_name=qwen3-4b \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
@@ -124,7 +124,7 @@ To use a GPU-optimized configuration, you should specify the path to the model's
 <summary><strong>mixtral-8x7b (GPU)</strong></summary>
 
 ```bash
-python3 -m MaxText.train src/maxtext/configs/gpu/models/mixtral_8x7b.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/mixtral_8x7b.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -139,7 +139,7 @@ This will load `gpu/mixtral_8x7b.yml`, which inherits from `base.yml`.
 <summary><strong>llama3-8b (GPU)</strong></summary>
 
 ```bash
-python3 -m MaxText.train src/maxtext/configs/gpu/models/llama3-8b.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/llama3-8b.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \

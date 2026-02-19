@@ -51,7 +51,7 @@ from tunix.sft import metrics_logger, peft_trainer, profiler
 
 from MaxText import optimizers
 from MaxText import pyconfig
-from MaxText.train import loss_fn
+from maxtext.trainers.pre_train.train import loss_fn
 from maxtext.common.goodput import (
     GoodputEvent,
     create_goodput_recorder,

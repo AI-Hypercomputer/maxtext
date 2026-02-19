@@ -29,7 +29,7 @@ from jax import numpy as jnp
 from MaxText import pyconfig
 from maxtext.common import checkpointing
 from maxtext.models import models
-from MaxText.train import get_first_step
+from maxtext.trainers.pre_train.train import get_first_step
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import train_utils

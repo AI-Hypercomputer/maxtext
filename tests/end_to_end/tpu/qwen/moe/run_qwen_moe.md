@@ -44,7 +44,7 @@ Pre-training and Fine-tuning
 After converting the checkpoint, you can use it for fine-tuning or start a pre-training run from scratch. The command below is an example for fine-tuning on a v5p-512 slice. To pre-train, simply remove the `load_parameters_path` argument.
 
 ```
-python3 -m MaxText.train src/maxtext/configs/base.yml\
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml\
     base_output_directory=${BASE_OUTPUT_DIRECTORY}\
     dataset_path=${DATASET_PATH}\
     load_parameters_path=gs://your-gcs-bucket/qwen3_maxtext_ckpt/0/items\
