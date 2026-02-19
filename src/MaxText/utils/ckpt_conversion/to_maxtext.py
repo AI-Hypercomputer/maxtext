@@ -840,7 +840,7 @@ if __name__ == "__main__":
   # Reconstruct model_args (script name + the args MaxText needs)
   model_args = [sys.argv[0]] + remaining_args
 
-  if local_args.use_from_pretrained_api:
+  if not local_args.use_from_pretrained_api:
     assert local_args.hf_model_path != ""
     assert local_args.mode != "default"
 
