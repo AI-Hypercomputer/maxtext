@@ -26,6 +26,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
@@ -34,7 +35,6 @@ from MaxText.layers import deepseek
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import pipeline
 from MaxText.layers import simple_layer
-from MaxText.train import main as train_main
 import pytest
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 

@@ -58,7 +58,7 @@ uv pip install -e .[tpu] --resolution=lowest
 install_maxtext_github_deps
 ```
 
-After installation, you can verify the package is available with `python3 -c "import MaxText"` and run training jobs with `python3 -m MaxText.train ...`.
+After installation, you can verify the package is available with `python3 -c "import maxtext"` and run training jobs with `python3 -m maxtext.trainers.pre_train.train ...`.
 
 # Update MaxText dependencies
 

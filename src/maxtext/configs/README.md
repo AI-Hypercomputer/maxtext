@@ -21,7 +21,7 @@ These configurations do 3 things:
 * Sets various XLA compiler flags (see [below](/src/maxtext/configs#xla-flags-used-by-maxtext)) as `LIBTPU_INIT_ARGS` to optimize runtime performance.
 * Runs [rto_setup.sh](https://github.com/google/maxtext/blob/main/rto_setup.sh) to optimize communication protocols for network performance.
 (This only needs to be run once on each worker)
-* Runs [train.py](https://github.com/google/maxtext/blob/main/src/MaxText/train.py) with specific hyper-parameters (batch size, etc.)
+* Runs [train.py](https://github.com/google/maxtext/blob/main/src/maxtext/trainers/pre_train/train.py) with specific hyper-parameters (batch size, etc.)
 
 
 ## Reproduction Instructions

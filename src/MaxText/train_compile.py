@@ -36,17 +36,17 @@ from jax.experimental.serialize_executable import serialize
 from flax.linen import partitioning as nn_partitioning
 
 from MaxText import accelerator_to_spec_map
-from MaxText import train
 from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText import sharding
 from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
 from MaxText.layers import models
 from MaxText.layers import quantizations
+from maxtext.trainers.diloco import diloco
+from maxtext.trainers.pre_train import train
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.trainers.diloco import diloco
 
 # pylint: disable=too-many-positional-arguments
 

@@ -58,7 +58,7 @@ python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt_oss_unsc
 You can train from scratch to generate a new checkpoint. One example command to run pretraining with gpt-oss-20b on v5p-8.
 
 ```sh
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=megablox_pre_training \
     model_name=gpt-oss-20b \
@@ -84,7 +84,7 @@ After you have a MaxText-compatible scanned checkpoint, you could finetune it wi
 One example command to run general finetuning with gpt-oss-20b on v5p-8.
 
 ```sh
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=megablox_fine_tuning \
     model_name=gpt-oss-20b \

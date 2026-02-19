@@ -31,14 +31,14 @@ from jax import numpy as jnp
 
 from flax.linen import partitioning as nn_partitioning
 
-from MaxText import pyconfig
-from MaxText.train import get_first_step
-from MaxText.layers import models
 from maxtext.common import checkpointing
+from maxtext.trainers.pre_train.train import get_first_step
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import train_utils
 from maxtext.utils.model_creation_utils import from_config
+from MaxText import pyconfig
+from MaxText.layers import models
 
 Transformer = models.transformer_as_linen
 

@@ -35,7 +35,7 @@ We can use this **command** for pretraining:
 
 ```bash
 # replace base_output_directory with your bucket
-python3 -m MaxText.train maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
 base_output_directory=gs://runner-maxtext-logs run_name=demo \
 model_name=deepseek2-16b per_device_batch_size=1 steps=10 max_target_length=2048 enable_checkpointing=false \
 dataset_type=hf hf_path=allenai/c4 hf_data_dir=en train_split=train \
@@ -102,7 +102,7 @@ This **command** shows pretraining with Grain pipeline, along with evaluation:
 
 ```bash
 # replace DATASET_GCS_BUCKET and base_output_directory with your buckets
-python3 -m MaxText.train maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
 base_output_directory=gs://runner-maxtext-logs run_name=demo \
 model_name=deepseek2-16b per_device_batch_size=1 steps=10 max_target_length=2048 enable_checkpointing=false \
 dataset_type=grain grain_file_type=arrayrecord grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record* grain_worker_count=2 \
@@ -139,7 +139,7 @@ This **command** shows pretraining with TFDS pipeline, along with evaluation:
 
 ```bash
 # replace base_output_directory and dataset_path with your buckets
-python3 -m MaxText.train maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
 base_output_directory=gs://runner-maxtext-logs run_name=demo \
 model_name=deepseek2-16b per_device_batch_size=1 steps=10 max_target_length=2048 enable_checkpointing=false \
 dataset_type=tfds dataset_path=gs://maxtext-dataset dataset_name='c4/en:3.0.1' train_split=train \
