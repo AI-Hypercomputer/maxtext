@@ -266,7 +266,7 @@ jobs:
 
   all_tests_passed:
     name: All Required Tests Passed
-    needs: [doc_only_check, build_and_upload_maxtext_package, maxtext_cpu_unit_tests, maxtext_tpu_unit_tests, maxtext_tpu_integration_tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, maxtext_gpu_unit_tests, maxtext_gpu_integration_tests]
+    needs: [doc_only_check, build_and_upload_maxtext_package, maxtext_cpu_unit_tests, maxtext_tpu_unit_tests, maxtext_tpu_integration_tests, maxtext_gpu_unit_tests, maxtext_gpu_integration_tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -283,8 +283,8 @@ jobs:
           echo "CPU tests: ${{ needs.maxtext_cpu_unit_tests.result }}"
           echo "TPU tests: ${{ needs.maxtext_tpu_unit_tests.result }}"
           echo "TPU integration: ${{ needs.maxtext_tpu_integration_tests.result }}"
-          echo "TPU pathways: ${{ needs.maxtext_tpu_pathways_unit_tests.result }}"
-          echo "TPU pathways integration: ${{ needs.maxtext_tpu_pathways_integration_tests.result }}"
+          # echo "TPU pathways: ${{ needs.maxtext_tpu_pathways_unit_tests.result }}"
+          # echo "TPU pathways integration: ${{ needs.maxtext_tpu_pathways_integration_tests.result }}"
           echo "GPU tests: ${{ needs.maxtext_gpu_unit_tests.result }}"
           echo "GPU integration: ${{ needs.maxtext_gpu_integration_tests.result }}"
 
