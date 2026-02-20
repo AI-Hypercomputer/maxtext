@@ -26,7 +26,7 @@ from typing import Any, Optional, Tuple
 from flax import nnx
 from jax import Array
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS  # pylint: disable=ungrouped-imports
-from MaxText.integration.tunix.utils import VllmWeightMapping
+from maxtext.integration.tunix.utils import VllmWeightMapping
 from maxtext.models.models import Transformer
 
 

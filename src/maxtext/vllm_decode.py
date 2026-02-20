@@ -49,7 +49,7 @@ from maxtext.utils import max_logging
 from MaxText import pyconfig
 from MaxText.common_types import Config
 from MaxText.globals import MAXTEXT_CONFIGS_DIR
-from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
 from vllm import LLM
