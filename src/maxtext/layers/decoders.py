@@ -264,6 +264,31 @@ class SequentialBlockDecoderLayers(nn.Module):
       return inputs
 
 
+def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
+  """Process deepstack visual embeddings by adding them to hidden states at visual token positions.
+
+  Args:
+    hidden_states: [batch, seq_len, hidden_dim] decoder hidden states
+    bidirectional_mask: [batch, seq_len] boolean mask marking visual token positions
+    visual_embeds: [batch, num_visual_tokens, hidden_dim] visual features from encoder layer
+
+  Returns:
+    Updated hidden_states with visual features added at visual positions
+  """
+  # Expand mask to [batch, seq_len, 1] for broadcasting
+  mask_expanded = bidirectional_mask[:, :, jnp.newaxis]
+  # Use cumsum to map each True position in mask to its index in visual_embeds
+  visual_token_idx = jnp.cumsum(bidirectional_mask, axis=1) - 1  # [batch, seq_len], 0-indexed
+
+  # Gather visual tokens: for each position, get the corresponding visual token
+  batch_idx = jnp.arange(hidden_states.shape[0])[:, jnp.newaxis]  # [batch, 1]
+  visual_embeds_scattered = visual_embeds[batch_idx, visual_token_idx, :]  # [batch, seq_len, hidden]
+
+  # Only add where mask is True: hidden_states += visual_embeds * mask
+  hidden_states = hidden_states + visual_embeds_scattered * mask_expanded
+  return hidden_states
+
+
 class Decoder(nn.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture."""
 
@@ -711,6 +736,7 @@ class Decoder(nn.Module):
       attention_metadata=None,
       audio_embeddings: None | jnp.ndarray = None,
       audio_masks: None | jnp.ndarray = None,
+      deepstack_visual_embeds: None | list[jnp.ndarray] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -927,6 +953,12 @@ class Decoder(nn.Module):
             )
             if kv_caches is not None and kv_cache is not None:
               kv_caches[lyr] = kv_cache
+
+            if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
+              visual_embeds = deepstack_visual_embeds[lyr]
+              # Use bidirectional_mask to identify visual token positions
+              if bidirectional_mask is not None and visual_embeds is not None:
+                y = deepstack_process(y, bidirectional_mask, visual_embeds)
 
     assert isinstance(y, jax.Array)
 

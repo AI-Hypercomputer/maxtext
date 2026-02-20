@@ -1928,6 +1928,13 @@ class MaxTextConfig(
     if self.steps == -1:
       self.steps = self.learning_rate_schedule_steps
 
+    # Validate deepstack + scan_layers incompatibility
+    if self.deepstack_visual_indexes_for_vit and self.scan_layers:
+      raise ValueError(
+          "Deepstack visual embedding injection requires scan_layers=False. "
+          "Set scan_layers=False in your config to use deepstack features."
+      )
+
     # Validate WSD learning rate schedule fractions
     if self.lr_schedule_type == LearningRateScheduleType.WSD:
       total_fraction = self.warmup_steps_fraction + self.wsd_decay_steps_fraction
