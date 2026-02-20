@@ -21,27 +21,26 @@ before having to use the target hardware - you will see the same OOM error messa
 as you would on the target hardware.
 """
 
-from typing import Sequence
+import functools
 import os
 import pickle
+from typing import Sequence
 
 from absl import app
-
-import jax
-from jax.experimental.topologies import get_topology_desc
-from jax.sharding import Mesh, AxisType
-from jax.experimental.serialize_executable import serialize
-
 from flax.linen import partitioning as nn_partitioning
-
+import jax
+from jax.experimental.serialize_executable import serialize
+from jax.experimental.topologies import get_topology_desc
+from jax.sharding import AxisType, Mesh
 from MaxText import accelerator_to_spec_map
-from MaxText import train
 from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText import sharding
 from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import quantizations
+from maxtext.models import models
+from maxtext.trainers.diloco import diloco
+from maxtext.trainers.pre_train import train
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -235,13 +234,32 @@ def main(argv: Sequence[str]) -> None:
 
   # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
+  if config.enable_diloco:
+    # Build abstract DiLoCo state and shardings for AOT compilation
+    abstract_state = shaped_train_args[0]
+    diloco_state, state_mesh_shardings, inner_state_shardings = diloco.build_abstract_diloco_state(
+        config, abstract_state, state_mesh_shardings, topology_mesh
+    )
+    shaped_train_args = (diloco_state, shaped_train_args[1], shaped_train_args[2])
 
-  # Get function to compile and shardings
-  func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
-      maxtext_utils.get_functional_train_with_signature(
-          train.train_step, data_sharding, state_mesh_shardings, model, config
-      )
-  )
+    # Wrap train_step with diloco
+    train_step_partial = functools.partial(train.train_step, model, config, inner_state_shardings, None)
+    train_step_fn = diloco.build_diloco_train_step(config, train_step_partial)
+
+    # For DiLoCo, the train_step_fn is already fully wrapped and takes (state, batch, prng)
+    func_to_compile = train_step_fn
+    func_to_compile.__name__ = "train_step"
+    in_shard = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+    out_shard = (state_mesh_shardings, None)  # State, metrics
+    static_argnums = ()
+    donate_argnums = 0
+  else:
+    # Get function to compile and shardings
+    func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
+        maxtext_utils.get_functional_train_with_signature(
+            train.train_step, data_sharding, state_mesh_shardings, model, config
+        )
+    )
 
   # print weights sharding info under debug sharding mode
   if config.debug_sharding:

@@ -31,12 +31,12 @@ from typing import Optional, Tuple
 
 import flax.linen as nn
 import jax
-from optax.contrib._muon import MuonDimensionNumbers as mdn
-
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import models, quantizations
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import maxtext_utils
+from optax.contrib._muon import MuonDimensionNumbers as mdn
 
 
 Transformer = models.transformer_as_linen

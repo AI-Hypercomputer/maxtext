@@ -15,7 +15,7 @@
 """Implementation of Engine API for MaxText."""
 
 from collections import defaultdict
-from typing import Any, Callable, Union
+from typing import Any, Callable
 import functools
 import os.path
 import uuid
@@ -36,23 +36,22 @@ from flax import struct
 from flax.linen import partitioning as nn_partitioning
 import flax
 
-from jetstream.core import config_lib
-from jetstream.engine import engine_api
-from jetstream.engine import token_utils
-from jetstream.engine import tokenizer_api
-from jetstream.engine.tokenizer_pb2 import TokenizerParameters
-from jetstream.engine.tokenizer_pb2 import TokenizerType
-
-from MaxText import multimodal_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import models, quantizations
+from maxtext.models import models
+from maxtext.layers import quantizations
 from maxtext.inference import inference_utils
 from maxtext.inference.page_manager import PageManager, PageState
+from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import lora_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.common.gcloud_stub import jetstream, is_decoupled
+
+config_lib, engine_api, token_utils, tokenizer_api, _token_params_ns = jetstream()
+TokenizerParameters = getattr(_token_params_ns, "TokenizerParameters", object)  # type: ignore[assignment]
+TokenizerType = getattr(_token_params_ns, "TokenizerType", object)  # type: ignore[assignment]
 
 
 warnings.simplefilter("ignore", category=FutureWarning)
@@ -95,14 +94,17 @@ class MaxEngineConfig:
     return self.keys
 
 
-class MaxEngine(engine_api.Engine):
+_BaseEngine = engine_api.Engine if (not is_decoupled() and hasattr(engine_api, "Engine")) else object
+
+
+class MaxEngine(_BaseEngine):
   """The computational core of the generative model server.
 
   Engine defines an API that models must adhere to as they plug into the
   JetStream efficient serving infrastructure.
   """
 
-  def __init__(self, config: Any, devices: Union[config_lib.Devices, None] = None):
+  def __init__(self, config: Any, devices: Any | None = None):
     self.config = config
 
     # Mesh definition
@@ -139,7 +141,7 @@ class MaxEngine(engine_api.Engine):
 
   def generate_aot(
       self, params: Params, decode_state: DecodeState, rng: PRNGKeyType | None = None
-  ) -> tuple[DecodeState, engine_api.ResultTokens]:
+  ):  # returns (new_decode_state, result_tokens)
     """Wrapper to generate for ahead of time compilation."""
 
     return self.generate(params=params, decode_state=decode_state, rng=rng)
@@ -324,12 +326,11 @@ class MaxEngine(engine_api.Engine):
 
     @jax.jit
     def model_apply(_p, _rng):
-      image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-          self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+      image_shape = mm_processor.get_dummy_image_shape_for_init(
+          model_name=self.config.model_name,
+          batch_size=self.config.micro_batch_size_to_train_on,
       )
-      audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-          self.config.model_name, config=self.config, batch_size=self.config.micro_batch_size_to_train_on
-      )
+      audio_shape = mm_processor.get_dummy_audio_shape_for_init(self.config)
       return self.model.apply(
           _p | {"aqt": {}},
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
@@ -393,7 +394,7 @@ class MaxEngine(engine_api.Engine):
       padded_tokens: jax.Array,
       true_length: int,
       rng: PRNGKeyType | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ):  # returns (new_prefix, result_tokens)
     """Wrapper for prefill for ahead-of-time compilation."""
 
     return self.prefill(
@@ -412,6 +413,8 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
+      positions: jax.Array | None = None,
+      mrope_deltas: jax.Array | None = None,
       images: jax.Array | None = None,
       image_masks: jax.Array | None = None,
       audio_values: jax.Array | None = None,
@@ -426,7 +429,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ):  # returns (new_prefix, result_tokens)
     """Performs a JIT-compiled prefill operation on a sequence of tokens.
 
     This function processes an input sequence (prompt) through the model to compute
@@ -479,8 +482,13 @@ class MaxEngine(engine_api.Engine):
 
     full_true_length = start_position + true_length
 
-    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
+    input_tokens = jnp.expand_dims(padded_tokens, 0)
+
+    if positions is not None:
+      if positions.ndim == 2:
+        positions = jnp.expand_dims(positions, 1)
+    else:
+      positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
     if self.config.use_multimodal and images is not None:
       if images.ndim == 3:
@@ -562,7 +570,12 @@ class MaxEngine(engine_api.Engine):
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
-    next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
+
+    if mrope_deltas is not None:
+      next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32) + mrope_deltas
+    else:
+      next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
+
     return {
         "logits": selected_logits,
         "cache": cache,
@@ -580,6 +593,8 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
+      positions: jax.Array | None = None,
+      mrope_deltas: jax.Array | None = None,
       images: jax.Array | None = None,
       image_masks: jax.Array | None = None,
       audio_values: jax.Array | None = None,
@@ -594,7 +609,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ):  # returns (new_prefix, result_tokens)
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
     if self.config.attention == "paged" and self.page_manager is not None and self.page_state is not None:
@@ -615,6 +630,8 @@ class MaxEngine(engine_api.Engine):
         params=params,
         existing_prefix=existing_prefix,
         padded_tokens=padded_tokens,
+        positions=positions,
+        mrope_deltas=mrope_deltas,
         images=images,
         image_masks=image_masks,
         audio_values=audio_values,
@@ -643,7 +660,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ):  # returns (new_prefix, result_tokens)
     """Wrapper for multi-sampling prefill for ahead-of-time compilation."""
     return self.prefill_multisampling(
         params=params,
@@ -672,7 +689,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ):  # returns (new_prefix, result_tokens)
     """Public API for prefill multisampling."""
 
     # Sample rng before JIT call
@@ -709,7 +726,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ) -> tuple[Prefix, Any]:
     """Computes a kv-cache for a new generate request.
 
     With multi-sampling, the engine will generate multiple first tokens in the
@@ -816,7 +833,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Any, PackedPrefix, list[engine_api.ResultTokens]]:
+  ):  # returns (maybe_batch, packed_prefix, list_of_result_tokens)
     """Computes a kv-cache for a new packed generate request, which is a
     concatenation of several shorter prompts. Experimentation shows that
     longer prefill sequences gives approximately 15% boost in time per prefilled
@@ -933,7 +950,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[DecodeState, engine_api.ResultTokens]:
+  ):  # returns (decode_state, result_tokens)
     """Public API for generate that updates page state outside JIT."""
 
     # Update page state before JIT call
@@ -976,7 +993,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[DecodeState, engine_api.ResultTokens]:
+  ):  # returns (decode_state, result_tokens)
     """Performs a single, JIT-compiled autoregressive decoding step.
 
     This function takes the current decoding state, which includes the KV cache
@@ -1497,8 +1514,19 @@ class MaxEngine(engine_api.Engine):
         "token_logp": self.replicated_sharding,
     }
 
-  def get_tokenizer(self) -> TokenizerParameters:
-    """Return a protobuf of tokenizer info, callable from Py or C++."""
+  def get_tokenizer(self) -> Any:
+    """Return tokenizer parameters; requires JetStream when decoupled.
+
+    When DECOUPLE_GCLOUD is FALSE we provide a clear error instead of failing
+    cryptically on attribute access.
+    """
+    token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
+    engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+    if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
+      raise RuntimeError(
+          "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; get_tokenizer is unsupported. "
+          "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
+      )
     try:
       tokenizer_type_val = TokenizerType.DESCRIPTOR.values_by_name[self.config.tokenizer_type].number
       return TokenizerParameters(
@@ -1511,8 +1539,15 @@ class MaxEngine(engine_api.Engine):
     except KeyError as _:
       raise KeyError(f"Unsupported tokenizer type: {self.config.tokenizer_type}") from None
 
-  def build_tokenizer(self, metadata: TokenizerParameters) -> tokenizer_api.Tokenizer:
+  def build_tokenizer(self, metadata: Any):  # return type depends on JetStream
     """Return a tokenizer"""
+    token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
+    engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+    if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
+      raise RuntimeError(
+          "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; build_tokenizer is unsupported. "
+          "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
+      )
     if metadata.tokenizer_type == TokenizerType.tiktoken:
       return token_utils.TikToken(metadata)
     elif metadata.tokenizer_type == TokenizerType.sentencepiece:
@@ -1549,15 +1584,13 @@ class MaxEngine(engine_api.Engine):
           dtype=jnp.int32,
       )
       dummy_image = jnp.ones(
-          multimodal_utils.get_dummy_image_shape_for_init(
-              self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+          mm_processor.get_dummy_image_shape_for_init(
+              model_name=self.config.model_name, batch_size=self.config.per_device_batch_size
           ),
           dtype=jnp.int32,
       )
       dummy_audio = jnp.ones(
-          multimodal_utils.get_dummy_audio_shape_for_init(
-              self.config.model_name, config=self.config, batch_size=self.config.micro_batch_size_to_train_on
-          ),
+          mm_processor.get_dummy_audio_shape_for_init(self.config),
           dtype=jnp.float32,
       )
       _, cache = self.model.apply(

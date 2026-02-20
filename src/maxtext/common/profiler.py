@@ -21,7 +21,9 @@ import shutil
 
 import jax
 
-import google_cloud_mldiagnostics as mldiag
+from maxtext.common.gcloud_stub import mldiagnostics_modules
+
+mldiag, _ = mldiagnostics_modules()
 
 from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics
 from maxtext.utils import max_logging
@@ -47,6 +49,15 @@ class Profiler:
     self.managed_mldiagnostics = config.managed_mldiagnostics
     if config.managed_mldiagnostics:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
+
+    self.profiling_options = jax.profiler.ProfileOptions()
+    if self.mode == "xplane" and not self.managed_mldiagnostics:
+      self.profiling_options.advanced_configuration = {
+          "tpu_power_trace_level": config.xprof_tpu_power_trace_level,
+          "e2e_enable_fw_throttle_event": config.xprof_e2e_enable_fw_throttle_event,
+          "e2e_enable_fw_power_level_event": config.xprof_e2e_enable_fw_power_level_event,
+          "e2e_enable_fw_thermal_event": config.xprof_e2e_enable_fw_thermal_event,
+      }
 
   def maybe_activate_profiler(self, step, state):
     """Conditionally activates the profiler based on the current step.
@@ -85,7 +96,7 @@ class Profiler:
         return
       self.libcudart.cudaProfilerStart()
     elif self.mode == "xplane":
-      jax.profiler.start_trace(self.output_path)
+      jax.profiler.start_trace(self.output_path, profiler_options=self.profiling_options)
 
   def maybe_deactivate_profiler(self, step, state):
     """Conditionally deactivates the profiler based on the current step.

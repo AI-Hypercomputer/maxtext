@@ -25,26 +25,26 @@ Usage:
 """
 
 import os.path
-
-import jsonlines
-import pytest
 import subprocess
 import sys
 import unittest
-import numpy as np
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from transformers import AutoTokenizer
-
-from maxtext.utils import maxtext_utils
+import jsonlines
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
-from MaxText.input_pipeline import _input_pipeline_utils
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.input_pipeline import input_pipeline_utils
+from maxtext.layers import quantizations
+from maxtext.models import models
+from maxtext.utils import maxtext_utils
+import numpy as np
+import pytest
+from transformers import AutoTokenizer
 
 
 def get_golden_data(model_name):
@@ -57,7 +57,7 @@ def get_golden_data(model_name):
 def initialize_config():
   """Initialize configurations."""
   return pyconfig.initialize(
-      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs/post_train", "sft.yml")],
       run_name="test-sft-trainer-correctness",
       model_name="default",
       tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer"),
@@ -80,15 +80,15 @@ def prepare_maxtext_inputs(maxtext_data, config):
       add_eos_token=False,
       model_max_length=config.max_target_length,
   )
-  data = _input_pipeline_utils.apply_chat_template(maxtext_data, tokenizer, "messages")
-  tokenized_data = _input_pipeline_utils.tokenization(
+  data = input_pipeline_utils.apply_chat_template(maxtext_data, tokenizer, "messages")
+  tokenized_data = input_pipeline_utils.tokenization(
       data,
       hf_tokenizer=tokenizer,
       truncation=False,
       max_length=config.max_target_length,
       column_names=["messages"],
   )
-  masked_inputs = _input_pipeline_utils.SFTPromptMasking(
+  masked_inputs = input_pipeline_utils.SFTPromptMasking(
       text_column_name="messages",
       completion_only=False,
       max_target_length=config.max_target_length,
@@ -145,6 +145,7 @@ def get_token_log_probs(logits, inputs):
   return token_log_probs
 
 
+@pytest.mark.external_training  # setUpClass does gsutil tokenizer
 class SFTTrainerCorrectnessTest(unittest.TestCase):
 
   @classmethod

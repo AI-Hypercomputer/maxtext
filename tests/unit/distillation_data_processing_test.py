@@ -18,13 +18,14 @@ import argparse
 import os
 import subprocess
 import unittest
+import pytest
 
 import transformers
 
 from datasets import Dataset
 
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
-from MaxText.input_pipeline import _distillation_data_processing
+from maxtext.input_pipeline import distillation_data_processing
 
 PROMPT_DATA = [
     [
@@ -70,6 +71,7 @@ def add_arguments_to_parser(parser):
   return parser
 
 
+@pytest.mark.external_training  # Calls gsutil to pull tokenizer.
 class DistillationDataProcessingTest(unittest.TestCase):
 
   @classmethod
@@ -99,7 +101,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
     config = self.parser.parse_args(["--data-columns", "messages"])
     dataset = Dataset.from_dict({"messages": MESSAGES_DATA})
 
-    processed_dataset = _distillation_data_processing.process_dataset(config, dataset)
+    processed_dataset = distillation_data_processing.process_dataset(config, dataset)
 
     expected_prompts = [
         ["What color is the sky?", "Why is the sky blue?"],
@@ -124,8 +126,8 @@ class DistillationDataProcessingTest(unittest.TestCase):
     config = self.parser.parse_args(["--data-columns", "messages", "--use-chat-template"])
     dataset = Dataset.from_dict({"messages": MESSAGES_DATA})
 
-    processed_dataset = _distillation_data_processing.process_dataset(config, dataset)
-    filtered_dataset = _distillation_data_processing.filter_dataset(config, processed_dataset, self.tokenizer)
+    processed_dataset = distillation_data_processing.process_dataset(config, dataset)
+    filtered_dataset = distillation_data_processing.filter_dataset(config, processed_dataset, self.tokenizer)
 
     self.assertEqual(len(filtered_dataset), 1)
     self.assertEqual(filtered_dataset[0].prompt, "What color is the sky?")
@@ -135,7 +137,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
     config = self.parser.parse_args(["--data-columns", "prompt", "completion"])
     dataset = Dataset.from_dict({"prompt": PROMPT_DATA, "completion": COMPLETION_DATA})
 
-    processed_dataset = _distillation_data_processing.process_dataset(config, dataset)
+    processed_dataset = distillation_data_processing.process_dataset(config, dataset)
 
     expected_prompts = [
         ["What color is the sky?", "Why is the sky blue?"],
@@ -160,8 +162,8 @@ class DistillationDataProcessingTest(unittest.TestCase):
     config = self.parser.parse_args(["--data-columns", "prompt", "completion", "--use-chat-template"])
     dataset = Dataset.from_dict({"prompt": PROMPT_DATA, "completion": COMPLETION_DATA})
 
-    processed_dataset = _distillation_data_processing.process_dataset(config, dataset)
-    filtered_dataset = _distillation_data_processing.filter_dataset(config, processed_dataset, self.tokenizer)
+    processed_dataset = distillation_data_processing.process_dataset(config, dataset)
+    filtered_dataset = distillation_data_processing.filter_dataset(config, processed_dataset, self.tokenizer)
 
     self.assertEqual(len(filtered_dataset), 1)
     self.assertEqual(filtered_dataset[0].prompt, "What color is the sky?")

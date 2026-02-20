@@ -14,22 +14,19 @@
 
 """ Tests for GPT3. """
 
-import os.path
 import sys
 import unittest
 
-import pytest
-
-from jax.sharding import Mesh
-import jax.numpy as jnp
 import jax
-
-from maxtext.utils import maxtext_utils
+import jax.numpy as jnp
+from jax.sharding import Mesh
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import quantizations
+from maxtext.models import models
+from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
+import pytest
 
 
 def init_random_model_vars(model, rng, example_batch):
@@ -59,7 +56,7 @@ class GPT3(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         run_name="test",
         enable_checkpointing=False,
         model_name="gpt3-52k",

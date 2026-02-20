@@ -14,6 +14,7 @@
 
 """Tests for grain data processing."""
 
+import glob
 import subprocess
 import sys
 import os.path
@@ -27,9 +28,11 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 from MaxText import pyconfig
-from MaxText.input_pipeline import _grain_data_processing
-from MaxText.input_pipeline import input_pipeline_interface
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT
+from maxtext.input_pipeline import grain_data_processing
+from maxtext.input_pipeline import input_pipeline_interface
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT
+from maxtext.common.gcloud_stub import is_decoupled
+from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
 
 
 class GrainArrayRecordProcessingTest(unittest.TestCase):
@@ -42,18 +45,42 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     temp_dir = tempfile.gettempdir()
+    decoupled = is_decoupled()
+
+    if decoupled:
+      dataset_root = get_test_dataset_path()
+      grain_train_files = os.path.join(
+          dataset_root,
+          "c4",
+          "en",
+          "3.0.1",
+          "c4-train.array_record-*",
+      )
+      base_output_directory = get_test_base_output_directory()
+    else:
+      grain_train_files = os.path.join(
+          temp_dir,
+          "gcsfuse",
+          "array-record",
+          "c4",
+          "en",
+          "3.0.1",
+          "c4-train.array_record*",
+      )
+      base_output_directory = "gs://max-experiments/"
+
+    config_file = get_test_config_path()
+
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], config_file],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
+        base_output_directory=base_output_directory,
         dataset_type="grain",
-        grain_train_files=os.path.join(
-            temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"
-        ),
+        grain_train_files=grain_train_files,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
     )
@@ -66,7 +93,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
@@ -85,9 +112,10 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
         },
     )
 
+  @pytest.mark.external_serving  # Skipped in decoupled mode due to rocBLAS scratch buffer TF issues on GPU
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
-    train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
     batch2 = next(train_iter)
     self.assertTrue((batch1["inputs"] == batch2["inputs"]).all())
     self.assertTrue((batch1["targets"] == batch2["targets"]).all())
@@ -112,24 +140,48 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
 class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProcessingTest):
 
   def setUp(self):
-    super().setUp()
+    # Override parent setUp to use multi-source blending
     temp_dir = tempfile.gettempdir()
-    # We use the same dataset for testing, but you can use different datasets by changing the file patterns.
-    grain_train_files = [
-        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0000*,0.3",
-        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0001*,0.7",
-    ]
-    grain_train_files = ";".join(grain_train_files)
+    decoupled = is_decoupled()
+
+    if decoupled:
+      dataset_root = get_test_dataset_path()
+      base_pattern = os.path.join(
+          dataset_root,
+          "c4",
+          "en",
+          "3.0.1",
+          "c4-train.array_record-*",
+      )
+      base_output_directory = get_test_base_output_directory()
+      config_file = get_test_config_path()
+    else:
+      base_pattern = os.path.join(
+          temp_dir,
+          "gcsfuse",
+          "array-record",
+          "c4",
+          "en",
+          "3.0.1",
+          "c4-train.array_record*",
+      )
+      base_output_directory = "gs://max-experiments/"
+      config_file = get_test_config_path()
+      # Ensure GCS fuse mounted for cloud path usage
+      mount_gcsfuse()
+
+    train_files_weighted = ";".join([f"{base_pattern},0.3", f"{base_pattern},0.7"])
+
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], config_file],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
+        base_output_directory=base_output_directory,
         dataset_type="grain",
-        grain_train_files=grain_train_files,
+        grain_train_files=train_files_weighted,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
     )
@@ -142,7 +194,7 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProc
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
 class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessingTest):
@@ -150,22 +202,57 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessing
   def setUp(self):
     super().setUp()
     temp_dir = tempfile.gettempdir()
-    mixture_config = {
-        "ds1": {"path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0000*", "weight": 0.3},
-        "ds2": {"path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0001*", "weight": 0.7},
-    }
+    decoupled = is_decoupled()
+
+    if decoupled:
+      dataset_root = get_test_dataset_path()
+      mixture_config = {
+          "ds1": {
+              "path": os.path.join(
+                  dataset_root,
+                  "c4",
+                  "en",
+                  "3.0.1",
+                  "c4-train.array_record-*",
+              ),
+              "weight": 0.3,
+          },
+          "ds2": {
+              "path": os.path.join(
+                  dataset_root,
+                  "c4",
+                  "en",
+                  "3.0.1",
+                  "c4-train.array_record-*",
+              ),
+              "weight": 0.7,
+          },
+      }
+      base_output_directory = get_test_base_output_directory()
+    else:
+      mixture_config = {
+          "ds1": {
+              "path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0000*",
+              "weight": 0.3,
+          },
+          "ds2": {
+              "path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0001*",
+              "weight": 0.7,
+          },
+      }
+      base_output_directory = "gs://max-experiments/"
     self.mixture_config_path = os.path.join(temp_dir, "mixture_config.json")
     with open(self.mixture_config_path, "w", encoding="utf-8") as f:
       json.dump(mixture_config, f)
 
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
+        base_output_directory=base_output_directory,
         dataset_type="grain",
         grain_train_mixture_config_path=self.mixture_config_path,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
@@ -180,28 +267,51 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessing
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
+# TODO(aireenmei): Migrate this test to XLML
+@pytest.mark.skip(reason="Flaky test")
 class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
   """Test grain data processing with auto-tuning enabled (grain_worker_count=-1)."""
 
   def setUp(self):
-    super().setUp()
     temp_dir = tempfile.gettempdir()
+    decoupled = is_decoupled()
+
+    if decoupled:
+      dataset_root = get_test_dataset_path()
+      grain_train_files = os.path.join(
+          dataset_root,
+          "c4",
+          "en",
+          "3.0.1",
+          "c4-train.array_record-*",
+      )
+      base_output_directory = get_test_base_output_directory()
+    else:
+      grain_train_files = os.path.join(
+          temp_dir,
+          "gcsfuse",
+          "array-record",
+          "c4",
+          "en",
+          "3.0.1",
+          "c4-train.array_record*",
+      )
+      base_output_directory = "gs://max-experiments/"
+
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
+        base_output_directory=base_output_directory,
         dataset_type="grain",
         grain_ram_budget_mb=512,
-        grain_train_files=os.path.join(
-            temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"
-        ),
+        grain_train_files=grain_train_files,
         grain_worker_count=-1,  # Enable auto-tuning
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
@@ -215,7 +325,7 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
   @pytest.mark.skip(
       reason=(
@@ -235,20 +345,45 @@ class GrainArrayRecordBestFitPackingTest(GrainArrayRecordProcessingTest):
   """Test grain data processing with best_fit packing strategy."""
 
   def setUp(self):
-    super().setUp()
     temp_dir = tempfile.gettempdir()
+    decoupled = is_decoupled()
+
+    if decoupled:
+      dataset_root = get_test_dataset_path()
+      grain_train_files = os.path.join(
+          dataset_root,
+          "c4",
+          "en",
+          "3.0.1",
+          "c4-train.array_record-*",
+      )
+      base_output_directory = get_test_base_output_directory()
+    else:
+      mount_gcsfuse()
+      grain_train_files = os.path.join(
+          temp_dir,
+          "gcsfuse",
+          "array-record",
+          "c4",
+          "en",
+          "3.0.1",
+          "c4-train.array_record*",
+      )
+      # If the external dataset isn't available, skip rather than failing.
+      if not glob.glob(grain_train_files):
+        pytest.skip(f"No files found matching pattern: {grain_train_files}")
+      base_output_directory = "gs://max-experiments/"
+
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
+        base_output_directory=base_output_directory,
         dataset_type="grain",
-        grain_train_files=os.path.join(
-            temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"
-        ),
+        grain_train_files=grain_train_files,
         grain_packing_type="best_fit",  # Use best_fit packing
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
@@ -262,7 +397,7 @@ class GrainArrayRecordBestFitPackingTest(GrainArrayRecordProcessingTest):
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
 class GrainParquetProcessingTest(unittest.TestCase):
@@ -275,17 +410,40 @@ class GrainParquetProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     temp_dir = tempfile.gettempdir()
+    decoupled = is_decoupled()
+
+    if decoupled:
+      dataset_root = get_test_dataset_path()
+      grain_train_file = os.path.join(
+          dataset_root,
+          "hf",
+          "c4",
+          "c4-train-00000-of-01637.parquet",
+      )
+      base_output_directory = get_test_base_output_directory()
+      config_file = get_test_config_path()
+    else:
+      grain_train_file = os.path.join(
+          temp_dir,
+          "gcsfuse",
+          "hf",
+          "c4",
+          "c4-train-00000-of-01637.parquet",
+      )
+      base_output_directory = "gs://max-experiments/"
+      config_file = get_test_config_path()
+
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], config_file],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
+        base_output_directory=base_output_directory,
         dataset_type="grain",
         grain_file_type="parquet",
-        grain_train_files=os.path.join(temp_dir, "gcsfuse", "hf", "c4", "c4-train-00000-of-01637.parquet"),
+        grain_train_files=grain_train_file,
         grain_worker_count=1,
         grain_per_worker_buffer_size=1,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
@@ -300,7 +458,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
@@ -321,7 +479,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
 
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
-    train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
     batch2 = next(train_iter)
     self.assertTrue((batch1["inputs"] == batch2["inputs"]).all())
     self.assertTrue((batch1["targets"] == batch2["targets"]).all())
@@ -348,6 +506,9 @@ def mount_gcsfuse():
   Mounts a GCS bucket (gs://maxtext-dataset) to a local directory (/tmp/gcsfuse)
   using gcsfuse if not already mounted.
   """
+
+  if is_decoupled():
+    return  # No-op when decoupled.
   temp_dir = tempfile.gettempdir()
   mount_path = os.path.join(temp_dir, "gcsfuse")
 

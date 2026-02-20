@@ -13,7 +13,7 @@ Before you can begin a training run, you need to configure your storage environm
 You'll need a GCS bucket to store all your training artifacts, such as logs, metrics, and model checkpoints.
 
 1. In your Google Cloud project, create a new storage bucket.
-1. Your TPU or GPU VMs require read/write access to this bucket. The simplest way to grant this is by assigning the `Storage Admin` (`roles/storage.admin`) role to the service account associated with your VMs.
+2. Your TPU or GPU VMs require read/write access to this bucket. The simplest way to grant this is by assigning the `Storage Admin` (`roles/storage.admin`) role to the service account associated with your VMs.
 
 ### Setup MaxText
 
@@ -36,14 +36,14 @@ Local development on a single host TPU/GPU VM is a convenient way to run MaxText
 
 1. Create and SSH to the single host VM of your choice. You can use any available single host TPU, such as `v5litepod-8`, `v5p-8`, or `v4-8`. For GPUs, you can use `nvidia-h100-mega-80gb`, `nvidia-h200-141gb`, or `nvidia-b200`. For setting up a TPU VM, use the Cloud TPU documentation available at https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm. For a GPU setup, refer to the guide at https://cloud.google.com/compute/docs/gpus/create-vm-with-gpus.
 
-1. Clone MaxText onto that VM.
+2. Clone MaxText onto that VM.
 
    ```bash
    git clone https://github.com/google/maxtext.git
    cd maxtext
    ```
 
-1. Once you have cloned the repository, you have two primary options for setting up the necessary dependencies on your VM: Installing in a Python Environment, or building a Docker container. For single host workloads, we recommend to install dependencies in a python environment, and for multihost workloads we recommend the containerized approach.
+3. Once you have cloned the repository, you have two primary options for setting up the necessary dependencies on your VM: Installing in a Python Environment, or building a Docker container. For single host workloads, we recommend to install dependencies in a python environment, and for multihost workloads we recommend the containerized approach.
 
 Within the root directory of the cloned repo, create a virtual environment and install dependencies and the pre-commit hook by running:
 
@@ -58,7 +58,7 @@ bash tools/setup/setup.sh DEVICE={tpu|gpu}
 After the installation is complete, run a short training job using synthetic data to confirm everything is working correctly. This command trains a model for just 10 steps. Remember to replace `$YOUR_JOB_NAME` with a unique name for your run and `gs://<my-bucket>` with the path to the GCS bucket you configured in the prerequisites.
 
 ```bash
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -72,7 +72,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
 To demonstrate model output, run the following command:
 
 ```bash
-python3 -m maxtext.decode src/MaxText/configs/base.yml \
+python3 -m maxtext.decode src/maxtext/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
@@ -82,17 +82,17 @@ python3 -m maxtext.decode src/MaxText/configs/base.yml \
 
 ### Running models using provided configs
 
-MaxText provides many OSS model configs that you can use directly to run training jobs on those model-specific architectures. These model-specific YAML files are located in `src/MaxText/configs/models` for TPU-oriented defaults, and `src/MaxText/configs/models/gpu` for GPU-oriented defaults.
+MaxText provides many OSS model configs that you can use directly to run training jobs on those model-specific architectures. These model-specific YAML files are located in `src/maxtext/configs/models` for TPU-oriented defaults, and `src/maxtext/configs/models/gpu` for GPU-oriented defaults.
 
 #### Training on TPUs
 
-To use a pre-configured model for TPUs, you override the `model_name` parameter, and MaxText will automatically load the corresponding configuration from the `src/MaxText/configs/models` directory and merge it with the settings from `src/MaxText/configs/base.yml`.
+To use a pre-configured model for TPUs, you override the `model_name` parameter, and MaxText will automatically load the corresponding configuration from the `src/maxtext/configs/models` directory and merge it with the settings from `src/maxtext/configs/base.yml`.
 
 <details open>
 <summary><strong>llama3-8b (TPU)</strong></summary>
 
 ```bash
-python3 -m MaxText.train MaxText/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
   model_name=llama3-8b \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
@@ -106,7 +106,7 @@ python3 -m MaxText.train MaxText/configs/base.yml \
 <summary><strong>qwen3-4b (TPU)</strong></summary>
 
 ```bash
-python3 -m MaxText.train MaxText/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
   model_name=qwen3-4b \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
@@ -118,13 +118,13 @@ python3 -m MaxText.train MaxText/configs/base.yml \
 
 #### Training on GPUs
 
-To use a GPU-optimized configuration, you should specify the path to the model's YAML file within the `src/MaxText/configs/models/gpu` directory as the main config file in the command. These files typically inherit from `base.yml` and set the appropriate `model_name` internally, as well as GPU-specific settings.
+To use a GPU-optimized configuration, you should specify the path to the model's YAML file within the `src/maxtext/configs/models/gpu` directory as the main config file in the command. These files typically inherit from `base.yml` and set the appropriate `model_name` internally, as well as GPU-specific settings.
 
 <details open>
 <summary><strong>mixtral-8x7b (GPU)</strong></summary>
 
 ```bash
-python3 -m MaxText.train src/MaxText/configs/models/gpu/mixtral_8x7b.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/mixtral_8x7b.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -139,7 +139,7 @@ This will load `gpu/mixtral_8x7b.yml`, which inherits from `base.yml`.
 <summary><strong>llama3-8b (GPU)</strong></summary>
 
 ```bash
-python3 -m MaxText.train src/MaxText/configs/models/gpu/llama3-8b.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/llama3-8b.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \

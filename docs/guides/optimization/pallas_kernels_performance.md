@@ -62,8 +62,8 @@ To maximize performance, MaxText uses custom Pallas kernels for memory-bandwidth
 
 - **Serving Attention (Paged & Ragged):** For high-throughput inference, this kernel efficiently fetches non-contiguous "pages" of the KV cache from memory. It is a key optimization for our serving stack and is used for models running on MaxText's inference engine.
 
-  - [`src/MaxText/inference/paged_attention.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/inference/paged_attention.py)
-  - [`src/MaxText/inference/paged_attention_kernel_v2.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/inference/paged_attention_kernel_v2.py)
+  - [`src/maxtext/inference/paged_attention.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/inference/paged_attention.py)
+  - [`src/maxtext/inference/paged_attention_kernel_v2.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/inference/paged_attention_kernel_v2.py)
 
 - **MoE Grouped Matmul (Megablox GMM):** Sparse/irregular grouped GEMMs driven by host-built metadata.
 
@@ -214,11 +214,11 @@ Dispatch a kernel on multiple devices with `jax.shard_map`. It’s usually simpl
 ## ✅ Putting it all together (checklist)
 
 1. **Profile** the baseline using `named_scope` and `block_until_ready`.
-1. **Tile arrays into smaller chunks using BlockSpecs** (virtually always necessary, even for simple kernels).
-1. Build a **sweep harness** for block shapes (and optionally scalar prefetch grid choices).
-1. **Validate** end-to-end performance in the model, not just microbenchmarks.
-1. Consider **maintainability** and guard the new kernel with tests.
-1. Consider applying **`jax.vmap`** to a Pallas kernel to simplify implementation; think of it as prepending grid dimensions automatically.
+2. **Tile arrays into smaller chunks using BlockSpecs** (virtually always necessary, even for simple kernels).
+3. Build a **sweep harness** for block shapes (and optionally scalar prefetch grid choices).
+4. **Validate** end-to-end performance in the model, not just microbenchmarks.
+5. Consider **maintainability** and guard the new kernel with tests.
+6. Consider applying **`jax.vmap`** to a Pallas kernel to simplify implementation; think of it as prepending grid dimensions automatically.
 
 ## 📚 References
 

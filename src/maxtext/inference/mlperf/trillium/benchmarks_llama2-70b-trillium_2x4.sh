@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# NOTE: please check the README located at src/MaxText/inference_mlperf/README.md for instructions on how
+# NOTE: please check the README located at src/maxtext/inference/mlperf/README.md for instructions on how
 # to set up the environment before running this script.
 # Run command:
 # bash benchmarks_llama2-70b-trillium_2x4.sh [-b benchmark_type]
@@ -74,7 +74,7 @@ if [[ -z ${QUANTIZATION} ]] ; then
   export QUANT_PATH=""
 #   export QUANTIZATION="intmp"
 #   export QUANT_MP="qkv_subchannel_512"
-#   export QUANT_PATH="/home/${USER}/maxtext/MaxText/configs/quantization/${QUANT_MP}.json"
+#   export QUANT_PATH="/home/${USER}/maxtext/maxtext/configs/quantization/${QUANT_MP}.json"
 fi
 
 if [[ -z ${KV_QUANT_DTYPE} ]] ; then

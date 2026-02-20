@@ -15,27 +15,29 @@
 """CLI utility for running inference on a single/multi stream(s)."""
 
 import os
-from typing import Sequence
+from typing import Sequence, Any
+import numpy as np
 import jax
 import jax.numpy as jnp
 
 from absl import app
 
-from jetstream.engine import engine_api
-
 from MaxText import maxengine
 from MaxText import pyconfig
-from MaxText import multimodal_utils
-from MaxText.multimodal import preprocessor
 from maxtext.common import profiler
+from maxtext.common.gcloud_stub import jetstream, is_decoupled
+from maxtext.multimodal import processor as mm_processor
+from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_utils
+
+_config_lib, engine_api, _token_utils, _tokenizer_api, _token_params_ns = jetstream()
 # Placeholder: internal
 
 # Number of text sequences to process in a single batch.
 _NUM_STREAMS = 1
 
 
-def _batch_first_result_token(first_tokens: list[engine_api.ResultTokens], batch_size: int):
+def _batch_first_result_token(first_tokens: list[Any], batch_size: int):
   """Batches together a list of first result tokens from prefill calls.
 
   This is needed because prefill currently returns the first token as a batch of size 1
@@ -99,14 +101,14 @@ def main(argv: Sequence[str]) -> None:
 
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
-  processor_outputs = multimodal_utils.PreprocessorOutput()
+  processor_outputs = mm_utils.PreprocessorOutput()
   if config.use_multimodal:
-    processor_outputs = preprocessor.preprocess_mm_data(config)
-    image_offsets = multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_outputs)
+    processor_outputs = mm_processor.preprocess_mm_data(config)
+    image_offsets = mm_processor.get_image_offsets(config.model_name, processor_output=processor_outputs)
 
     prefill_length -= image_offsets
-    text = multimodal_utils.reformat_prompt(
-        text,
+    text = mm_processor.reformat_prompt(
+        prompt=config.prompt,
         image_placeholder=config.image_placeholder,
         model_name=config.model_name,
         num_images=processor_outputs.num_images,
@@ -114,17 +116,44 @@ def main(argv: Sequence[str]) -> None:
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
+  token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
+  engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+  if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
+    raise RuntimeError(
+        "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; decode requires the JetStream tokenizer. "
+        "Unset DECOUPLE_GCLOUD or install JetStream to run decode."
+    )
+
   try:
     # TODO: update jetstream.engine.tokenizer_api.Tokenizer to maintain tokenizer state.
     has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)  # pytype: disable=attribute-error
   except AttributeError as _:
     has_chat_template = False
   tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
+
+  position_ids = None
+  mrope_position_deltas = None
+
   if config.use_multimodal:
-    tokens = multimodal_utils.prepare_text_for_image_fusion(
+    tokens = mm_processor.prepare_text_for_image_fusion(
         tokens, model_name=config.model_name, processor_output=processor_outputs
     )
     true_length += image_offsets
+
+    if config.use_mrope:
+      from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+      position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
+          input_ids=tokens,
+          image_grid_thw=processor_outputs.pixel_grid_thw,  # pytype: disable=attribute-error
+          video_grid_thw=processor_outputs.video_grid_thw,  # pytype: disable=attribute-error
+          attention_mask=np.ones_like(tokens),
+          use_audio_in_video=config.use_audio and processor_outputs.num_videos > 0,  # pytype: disable=attribute-error
+          audio_lengths=processor_outputs.audio_lengths,  # pytype: disable=attribute-error
+          second_per_grids=processor_outputs.video_second_per_grid,  # pytype: disable=attribute-error
+          spatial_merge_size=config.spatial_merge_size_for_vit,  # pytype: disable=attribute-error
+          position_id_per_seconds=config.position_id_per_seconds,
+      )
 
   assert (
       true_length <= config.max_prefill_predict_length
@@ -150,6 +179,8 @@ def main(argv: Sequence[str]) -> None:
       prefill_result, first_token = engine.prefill(
           params=params,
           padded_tokens=tokens,
+          positions=position_ids,
+          mrope_deltas=mrope_position_deltas,
           images=processor_outputs.pixel_values if config.use_multimodal else None,
           image_masks=processor_outputs.pixel_mask if config.use_multimodal and "llama4" in config.model_name else None,
           audio_values=processor_outputs.audio_values if config.use_audio else None,

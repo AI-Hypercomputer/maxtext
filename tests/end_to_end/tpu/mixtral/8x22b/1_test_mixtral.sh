@@ -29,7 +29,7 @@ gcsfuse --implicit-dirs maxtext-external "$PARAM_DIR"
 # alternatively: $ gcloud storage cp -r "gs://maxtext-external/$MODEL_NAME" $PARAM_DIR
 
 # Convert it to MaxText(orbax) format - scanned ckpt
-JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --base-model-path="$PARAM_DIR/$MODEL_NAME" --model-size=mixtral-8x22b --maxtext-model-path=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/
+JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt --base-model-path="$PARAM_DIR/$MODEL_NAME" --model-size=mixtral-8x22b --maxtext-model-path=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/
 echo "Wrote MaxText compatible scanned checkpoint to ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt"
 
 # unmount the gcsfuse directory

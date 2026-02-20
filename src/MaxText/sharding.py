@@ -36,7 +36,13 @@ _LOGGED_LOGICAL_AXES = set()
 
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
-  return create_sharding(mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules)
+  if config.enable_diloco:
+    data_sharding = create_sharding(
+        mesh, ["diloco"] + config.input_data_sharding_logical_axes, rules=config.logical_axis_rules
+    )
+  else:
+    data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules)
+  return data_sharding
 
 
 def maybe_shard_with_name(inputs, named_sharding, shard_mode, debug_sharding=False, extra_stack_level=0):
@@ -72,7 +78,7 @@ def maybe_shard_with_logical(
   named_sharding = create_sharding(mesh, logical_axes, rules=rules)
 
   if debug_sharding and isinstance(inputs, Tracer):
-    log_key = (str(jax.typeof(inputs)), logical_axes, extra_stack_level)
+    log_key = (str(jax.typeof(inputs)), tuple(logical_axes), extra_stack_level)
 
     if log_key not in _LOGGED_LOGICAL_AXES:
       max_logging.info(f"Logical:  {log_key[0]:.<60} {log_key[1]}", stacklevel=3 + extra_stack_level)

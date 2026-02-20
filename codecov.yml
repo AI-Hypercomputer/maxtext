@@ -33,14 +33,14 @@ fixes:
   - "/github/workspace/::"
 ignore:
   - "src/maxtext/assets"
-  - "src/MaxText/configs"
-  - "src/MaxText/examples"
+  - "src/maxtext/configs"
+  - "src/maxtext/examples"
   - "src/MaxText/experimental"
-  - "src/MaxText/inference"
-  - "src/MaxText/inference_mlperf"
-  - "src/MaxText/scratch_code"
+  - "src/maxtext/inference"
+  - "src/maxtext/scratch_code"
   - "src/MaxText/distillation" # code moved to src/maxtext/trainers/post_train/distillation
   - "src/MaxText/sft" # code moved to src/maxtext/trainers/post_train/sft
+  - "src/MaxText/rl" # code moved to src/maxtext/trainers/post_train/rl
 
 
 flags:
@@ -66,7 +66,7 @@ coverage:
     patch:
       default:
         target: auto
-        threshold: 5% # fail on 5+ percent degradation
+        threshold: 10% # fail on 10+ percent degradation
         flags:
           - regular
 

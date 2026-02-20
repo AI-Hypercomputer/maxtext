@@ -15,24 +15,23 @@
 """ Tests for the maxengine """
 
 import functools
-import pytest
 import sys
 import unittest
-import os.path
-
-import numpy as np
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
-from maxtext.utils import maxtext_utils
-from MaxText import pyconfig, maxengine
+from MaxText import maxengine, pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import quantizations
 from MaxText.maxengine import MaxEngine
+from maxtext.models import models
+from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
+import numpy as np
+import pytest
+
+pytestmark = [pytest.mark.external_serving]
 
 
 class MaxEngineTest(unittest.TestCase):
@@ -61,7 +60,7 @@ class MaxEngineTest(unittest.TestCase):
         "return_log_prob": True,
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **init_kwargs,
     )
     return config
@@ -79,7 +78,7 @@ class MaxEngineTest(unittest.TestCase):
 
   def test_stack_and_unstack_prefill_cache(self):
     config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         enable_checkpointing=False,
         stack_prefill_result_cache=True,
     )

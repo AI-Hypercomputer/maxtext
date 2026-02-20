@@ -11,35 +11,31 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-GRPO correctness tests
-"""
+"""GRPO correctness tests"""
 
 import os
 import unittest
 
-import numpy as np
-
+from datasets import load_dataset
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
+from MaxText import pyconfig
+from MaxText.common_types import MODEL_MODE_TRAIN
+from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn
+from maxtext.experimental.rl.grpo_utils import compute_log_probs
+from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.models import models
+from maxtext.utils import maxtext_utils
+import numpy as np
+import pytest
 import torch
+import transformers
 # from datasets import Dataset
 
 from trl import GRPOConfig, GRPOTrainer
 
-import transformers
-
-from datasets import load_dataset
-
-from maxtext.utils import maxtext_utils
-from MaxText import pyconfig
-from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state
-from MaxText.experimental.rl.grpo_utils import compute_log_probs
-from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import models
+pytestmark = [pytest.mark.external_training]  # uses pre-generated checkpoint
 
 
 class GRPOTest(unittest.TestCase):
@@ -64,8 +60,12 @@ class GRPOTest(unittest.TestCase):
     self.rng = jax.random.PRNGKey(42)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    self.model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
-    self.state, _ = maxtext_utils.setup_decode_state(self.model, self.cfg, self.rng, mesh, None)
+    self.model = models.transformer_as_linen(
+        config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN
+    )
+    self.state, _ = maxtext_utils.setup_decode_state(
+        self.model, self.cfg, self.rng, mesh, None
+    )
     self.tokenizer_model = transformers.AutoTokenizer.from_pretrained(
         "meta-llama/Llama-3.1-8B",
         add_bos_token=False,
@@ -104,27 +104,52 @@ class GRPOTest(unittest.TestCase):
     """prepare maxtext inputs"""
     prompt = self.tokenizer_model.encode(self.input_str)
     input_ids = jnp.pad(
-        jnp.tile(jnp.concat([jnp.array(prompt), jnp.array(prompt)], axis=-1), (4, 1)),
+        jnp.tile(
+            jnp.concat([jnp.array(prompt), jnp.array(prompt)], axis=-1), (4, 1)
+        ),
         ((0, 0), (0, 4)),
         constant_values=0,
     )  # pad some tokens at the end of input prompt
     input_segmentation = (input_ids > 0).astype(jnp.int32)
-    input_position = jnp.where(input_segmentation, jnp.arange(input_segmentation.shape[1]), 0)
-    completion_segmentation = jnp.tile(
-        jnp.pad(jnp.array([0] * len(prompt) + [1] * len(prompt)), (0, input_ids.shape[1] - 2 * len(prompt))), (4, 1)
+    input_position = jnp.where(
+        input_segmentation, jnp.arange(input_segmentation.shape[1]), 0
     )
-    return input_ids, input_segmentation, input_position, completion_segmentation
+    completion_segmentation = jnp.tile(
+        jnp.pad(
+            jnp.array([0] * len(prompt) + [1] * len(prompt)),
+            (0, input_ids.shape[1] - 2 * len(prompt)),
+        ),
+        (4, 1),
+    )
+    return (
+        input_ids,
+        input_segmentation,
+        input_position,
+        completion_segmentation,
+    )
 
   def _prepare_trl_inputs(self):
-    tokenized_inputs = self.tokenizer_model([self.input_str], return_tensors="pt")
-    input_ids = torch.cat((tokenized_inputs["input_ids"], tokenized_inputs["input_ids"]), axis=-1)
-    attention_mask = torch.cat((tokenized_inputs["attention_mask"], tokenized_inputs["attention_mask"]), axis=-1)
+    tokenized_inputs = self.tokenizer_model(
+        [self.input_str], return_tensors="pt"
+    )
+    input_ids = torch.cat(
+        (tokenized_inputs["input_ids"], tokenized_inputs["input_ids"]), axis=-1
+    )
+    attention_mask = torch.cat(
+        (
+            tokenized_inputs["attention_mask"],
+            tokenized_inputs["attention_mask"],
+        ),
+        axis=-1,
+    )
     logits_to_keep = tokenized_inputs["input_ids"].size()[1]
     return input_ids, attention_mask, logits_to_keep
 
   def test_logits(self):
     def _prepare_inputs():
-      input_ids = jnp.tile(jnp.array(self.tokenizer_model.encode(self.input_str)), (4, 1))
+      input_ids = jnp.tile(
+          jnp.array(self.tokenizer_model.encode(self.input_str)), (4, 1)
+      )
       input_segmentation = (input_ids > 0).astype(jnp.int32)
       input_position = jnp.tile(jnp.arange(input_ids.shape[1]), (4, 1))
 
@@ -142,16 +167,25 @@ class GRPOTest(unittest.TestCase):
     )
 
     hf_logits = (
-        self.hf_model(input_ids=torch.tensor(inputs.tolist()), attention_mask=torch.tensor(inputs_segmentation.tolist()))
+        self.hf_model(
+            input_ids=torch.tensor(inputs.tolist()),
+            attention_mask=torch.tensor(inputs_segmentation.tolist()),
+        )
         .logits.detach()
         .numpy()
     )
     print(f"Max Diff {np.max(np.abs(logits - hf_logits))}")
-    self.assertTrue(jax.numpy.allclose(hf_logits, logits, rtol=1e-2, atol=2e-1, equal_nan=False))
+    self.assertTrue(
+        jax.numpy.allclose(
+            hf_logits, logits, rtol=1e-2, atol=2e-1, equal_nan=False
+        )
+    )
 
   def test_logps(self):
 
-    input_ids, input_segmentation, input_position, completion_segmentation = self._prepare_maxtext_inputs()
+    input_ids, input_segmentation, input_position, completion_segmentation = (
+        self._prepare_maxtext_inputs()
+    )
     maxtext_per_token_logps, _ = compute_log_probs(
         self.model,
         self.state.params,
@@ -168,7 +202,12 @@ class GRPOTest(unittest.TestCase):
 
     print(
         "Max Diff",
-        np.max(np.abs(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0])),
+        np.max(
+            np.abs(
+                np.trim_zeros(np.asarray(maxtext_per_token_logps)[0])
+                - hf_per_token_logps.detach().numpy()[0]
+            )
+        ),
     )
     self.assertTrue(
         jax.numpy.allclose(
@@ -188,14 +227,28 @@ class GRPOTest(unittest.TestCase):
     # hf_inputs = self.trainer._prepare_inputs([{'prompt':self.input_str}]*4)
 
     completions = [{"prompt": self.input_str}] * 4
-    rewards = torch.tensor([self.trainer.reward_funcs[0](completion) for completion in completions], dtype=torch.float32)
+    rewards = torch.tensor(
+        [
+            self.trainer.reward_funcs[0](completion)
+            for completion in completions
+        ],
+        dtype=torch.float32,
+    )
     # Compute grouped-wise rewards
-    mean_grouped_rewards = rewards.view(-1, self.trainer.num_generations).mean(dim=1)
-    std_grouped_rewards = rewards.view(-1, self.trainer.num_generations).std(dim=1)
+    mean_grouped_rewards = rewards.view(-1, self.trainer.num_generations).mean(
+        dim=1
+    )
+    std_grouped_rewards = rewards.view(-1, self.trainer.num_generations).std(
+        dim=1
+    )
 
     # Normalize the rewards to compute the advantages
-    mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.trainer.num_generations, dim=0)
-    std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.trainer.num_generations, dim=0)
+    mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(
+        self.trainer.num_generations, dim=0
+    )
+    std_grouped_rewards = std_grouped_rewards.repeat_interleave(
+        self.trainer.num_generations, dim=0
+    )
     # since we are using the same completion, so advantages = 0 for every sequence
     # but we can keep it this way since our on-policy implementation
     # gets average advantage which becomes zero anyway
@@ -220,7 +273,9 @@ class GRPOTest(unittest.TestCase):
 
     self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
-    input_ids, input_segmentation, input_position, completion_segmentation = self._prepare_maxtext_inputs()
+    input_ids, input_segmentation, input_position, completion_segmentation = (
+        self._prepare_maxtext_inputs()
+    )
     maxtext_per_token_logps, _ = compute_log_probs(
         self.model,
         self.state.params,
@@ -240,7 +295,14 @@ class GRPOTest(unittest.TestCase):
         "prompt_completions_segmentation": input_segmentation,
         "ar_completions_segmentation": completion_segmentation,
     }
-    maxtext_loss, aux = grpo_loss_fn(self.model, self.cfg, data, self.rng, self.state.params, reference_params)
+    maxtext_loss, aux = grpo_loss_fn(
+        self.model,
+        self.cfg,
+        data,
+        self.rng,
+        self.state.params,
+        reference_params,
+    )
     self.assertEqual(self.trainer._metrics["train"]["kl"][0], aux.avg_kl.tolist())  # pylint: disable=protected-access
     self.assertEqual(hf_loss.item(), maxtext_loss.tolist())
     # since this is on-policy

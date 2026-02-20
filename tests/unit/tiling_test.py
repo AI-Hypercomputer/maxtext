@@ -19,22 +19,20 @@ Tests for verifying losses and gradients match using/without using tiling method
 """
 
 import unittest
-import pytest
-import os
+from flax import linen as nn
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from flax import linen as nn
-
-from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
-from MaxText.common_types import Config
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
+from MaxText.common_types import Config
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
+from tests.utils.test_helpers import get_test_config_path
+import pytest
 
 
 def compute_loss_linen(intermediate_outputs, logits, data, config, model, params, is_train):
@@ -66,7 +64,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
     """
     Set up common configurations and dummy data for the tests.
     """
-    self.base_config = [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")]
+    self.base_config = [None, get_test_config_path()]
     self.rng = jax.random.PRNGKey(1234)
     self.batch_size = 1
     self.seq_len = 64

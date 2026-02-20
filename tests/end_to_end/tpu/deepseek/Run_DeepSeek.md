@@ -34,7 +34,7 @@ DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The
 You can train from scratch to generate a new checkpoint. One example command to run pretraining with V3 on v5p-256.
 
 ```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     run_name=matmul_pre_training \
     per_device_batch_size=4 \
@@ -68,7 +68,7 @@ After you have a MaxText compatible checkpoint, you could fine-tune it with diff
 One example command to run general finetuning with V3 on v5p-256.
 
 ```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     dataset_path=${DATASET_PATH} \
     load_parameters_path=${CONVERTED_CHECKPOINT} \
@@ -93,7 +93,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
 Fine-tuning with MTP on v5p-256
 
 ```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=gs://your-output-bucket/ \
     dataset_path=gs://your-dataset-bucket/ \
     load_parameters_path=gs://your-bucket/deepseek-v3/0/items \
@@ -114,7 +114,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
 One example command to run supervised finetuning with V3 on v5p-256. Supervised fine-tuning is only working with HuggingFace conversational datasets. And, you can customize the dataset path using the `hf_path` config and provide your access token with `hf_access_token` config.
 
 ```sh
-python3 -m MaxText.sft_trainer src/MaxText/configs/sft.yml \
+python3 -m MaxText.sft_trainer src/maxtext/configs/post_train/sft.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     load_parameters_path=${CONVERTED_CHECKPOINT} \
     run_name=matmul_supervised_fine_tuning \
@@ -140,7 +140,7 @@ python3 -m MaxText.sft_trainer src/MaxText/configs/sft.yml \
 One example command to run decoding with V3 on v5p-256 with unscanned checkpoint for fast decoding.
 
 ```sh
-python3 -m maxtext.decode src/MaxText/configs/base.yml \
+python3 -m maxtext.decode src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     load_parameters_path=${CONVERTED_CHECKPOINT} \
     run_name=decode \
@@ -171,7 +171,7 @@ To verify the correctness of the model implementation, we perform two primary ch
 One example command to generate golden logits from HuggingFace for V2-Lite.
 
 ```sh
-python3 -m MaxText.scratch_code.generate_hf_golden_logits \
+python3 -m tests.assets.logits_generation.generate_hf_golden_logits \
     --model-id=deepseek-ai/DeepSeek-V2-Lite \
     --output-path=golden_DeepSeek-V2-Lite.jsonl \
     --prompts='I love to;Today is a;What is the'
@@ -188,7 +188,7 @@ Run command below to compare logits between HuggingFace and MaxText.
 
 ```sh
 python3 -m tests.utils.forward_pass_logit_checker \
-    src/MaxText/configs/base.yml \
+    src/maxtext/configs/base.yml \
     tokenizer_type=huggingface \
     tokenizer_path=deepseek-ai/DeepSeek-V2-Lite \
     load_parameters_path=${CONVERTED_CHECKPOINT} \

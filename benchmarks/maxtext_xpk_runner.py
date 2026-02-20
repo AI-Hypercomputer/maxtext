@@ -35,7 +35,7 @@ import time
 import omegaconf
 
 import benchmarks.maxtext_trillium_model_configs as model_configs
-from benchmarks.globals import MAXTEXT_PKG_DIR
+from benchmarks.globals import MAXTEXT_CONFIGS_DIR
 from benchmarks.command_utils import run_command_with_updates
 import benchmarks.xla_flags_library as xla_flags
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
@@ -107,12 +107,11 @@ class WorkloadConfig:
   generate_metrics_and_upload_to_big_query: bool = True
   hardware_id: str = "v6e"
   metrics_gcs_file: str = ""
-  base_config: str = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
+  base_config: str = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
   topology: str = dataclasses.field(init=False)
   num_devices_per_slice: int = dataclasses.field(init=False)
   db_project: str = ""
   db_dataset: str = ""
-  db_is_test: bool = True
   disruption_configs: DisruptionConfig = None
   xpk_storage: None | list[str] = None
   hlo_dump: None | bool = None
@@ -126,12 +125,12 @@ class WorkloadConfig:
           "device_type is None and generate_metrics_and_upload_to_big_query is enabled. "
           "Device_type is required for uploading run results to BigQuery"
       )
+    size = int(self.device_type.split("-")[-1])
     if (
         self.device_type.startswith("v6e")
         or self.device_type.startswith("v5e")
         or self.device_type.startswith("v5litepod")
     ):
-      size = int(self.device_type.split("-")[-1])
       if size == 256:
         self.num_devices_per_slice = 256
         self.topology = "16x16"
@@ -156,8 +155,11 @@ class WorkloadConfig:
       else:
         raise ValueError(f"Unsupported v5e or v6e size: {size}")
     else:
-      self.num_devices_per_slice = int(self.device_type.split("-")[1]) / 2
+      self.num_devices_per_slice = size / 2
       self.topology = ""
+    self.hardware_id = self.device_type.split("-")[0]
+    if self.hardware_id == "v5litepod":
+      self.hardware_id = "v5e"
 
 
 def wait_for_xpk_workload_completion(cluster_config: XpkClusterConfig, workload_name, xpk_path) -> int:
@@ -341,6 +343,7 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
       "model_id": wl_config.model.model_type,
       "hardware_id": wl_config.hardware_id,
       "software_id": "jax_maxtext",
+      "hardware_num_slices": wl_config.num_slices,
       "number_of_chips": wl_config.num_devices_per_slice * wl_config.num_slices,
       "container_image_name": wl_config.base_docker_image,
       "global_batch_size": per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices,
@@ -351,12 +354,11 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
       "xla_flags": f"'{xla_flags_str}'",
       "dataset": dataset,
       "run_type": "maxtext-xpk",
-      "config_file": os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      "config_file": os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
       "topology": wl_config.topology,
       "tuning_params": f"'{tuning_params_str}'",
       "db_project": wl_config.db_project,
       "db_dataset": wl_config.db_dataset,
-      "is_test": wl_config.db_is_test,
   }
 
 
@@ -438,14 +440,15 @@ def build_user_command(
           f"export JAX_PLATFORMS={jax_platforms} &&",
           "export ENABLE_PJRT_COMPATIBILITY=true &&",
           "export MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets MAXTEXT_PKG_DIR=/deps/src/MaxText MAXTEXT_REPO_ROOT=/deps &&"
-          f'{hlo_dump} python3 -m MaxText.train {os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")}',
+          f'{hlo_dump} python3 -m maxtext.trainers.pre_train.train {os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")}',
           f"{config_tuning_params}",
           f"steps={wl_config.num_steps}",
           f"model_name={wl_config.model.model_type}",
           f"base_output_directory={wl_config.base_output_directory}",
           f"{vertex_tensorboard}",
           f"{run_name_command}",
-          f"{enable_metrics_cmd}" f"{upload_hlo_dump}",
+          f"{enable_metrics_cmd}",
+          f"{upload_hlo_dump}",
       ]
   )
   return command
@@ -583,6 +586,8 @@ def generate_xpk_workload_cmd(
     cluster_config: XpkClusterConfig,
     wl_config: WorkloadConfig,
     workload_name=None,
+    user=os.environ["USER"],
+    temp_key=None,
     exp_name=None,
 ):
   """Generates a command to run a maxtext model on XPK."""
@@ -592,15 +597,19 @@ def generate_xpk_workload_cmd(
 
   time.localtime()
   length_of_random_str = 3
-  temp_post_fix = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(length_of_random_str))
+  # Allow DAG to resolve workload name for cleanup, preventing reliance on random IDs
+  if temp_key is not None:
+    temp_post_fix = temp_key
+  else:
+    temp_post_fix = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(length_of_random_str))
 
   truncate_model_name = 10
   truncate_prefix = 3
   post_fix = f"-{wl_config.num_slices}-{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
-  common_prefix = os.environ["USER"]
+  common_prefix = user
   pw_prefix = "pw-"
 
-  if workload_name is None:  # Generate name if not provided
+  if workload_name is None:
     if is_pathways_enabled:
       post_fix = f"-{wl_config.num_slices}-{temp_post_fix}"
       name = f"{pw_prefix}{wl_config.model.model_name.replace('_', '-')[:truncate_model_name - len(pw_prefix)]}"
@@ -710,6 +719,7 @@ def run_xpk_workload(
 def xpk_benchmark_runner(
     cluster_config: XpkClusterConfig,
     workload_configs: list[WorkloadConfig],
+    user=os.environ["USER"],
     disruption_manager: DisruptionManager = DisruptionManager(),
     exp_name: str = None,
 ):
@@ -731,7 +741,12 @@ def xpk_benchmark_runner(
   xpk_workload_names = []
   xpk_workload_cmds = []
   for wl_config in workload_configs:
-    command, name = generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config, exp_name=exp_name)
+    command, name = generate_xpk_workload_cmd(
+        cluster_config=cluster_config,
+        wl_config=wl_config,
+        user=user,
+        exp_name=exp_name,
+    )
 
     print(f"Name of the workload is: {name} \n")
     xpk_workload_names.append(name)

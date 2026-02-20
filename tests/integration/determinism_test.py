@@ -21,13 +21,12 @@ the same.
 
 import datetime
 import json
-import os
 import unittest
 
 import pytest
 
-from MaxText.train import main as train_main
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.trainers.pre_train.train import main as train_main
+from tests.utils.test_helpers import get_test_config_path
 
 pytestmark = pytest.mark.integration_test
 
@@ -52,7 +51,7 @@ class DeterminismTests(unittest.TestCase):
     run_name = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     common_config = [
         None,
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        get_test_config_path(),
         "steps=5",
         "enable_checkpointing=False",
         "enable_data_shuffling=True",

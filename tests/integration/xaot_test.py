@@ -24,9 +24,9 @@ import pytest
 import os
 import shutil
 import jax
-from MaxText.globals import MAXTEXT_PKG_DIR
+from tests.utils.test_helpers import get_test_config_path
 from MaxText import train_compile
-from MaxText import train
+from maxtext.trainers.pre_train import train
 
 
 class CompileThenLoadTest(unittest.TestCase):
@@ -94,9 +94,7 @@ class CompileThenLoadTest(unittest.TestCase):
         f"compiled_trainstep_file={self.pickle_file}",
     ]
 
-    compile_argv = (
-        (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")) + tuple(shared_args) + tuple(compile_specific_args)
-    )
+    compile_argv = (None, get_test_config_path()) + tuple(shared_args) + tuple(compile_specific_args)
 
     print(f"\n--- Starting Compilation Step for {test_name} ---")
     # Clear caches before compile to ensure clean state
@@ -112,9 +110,7 @@ class CompileThenLoadTest(unittest.TestCase):
         f"compiled_trainstep_file={self.pickle_file}",
     ]
 
-    train_argv = (
-        (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")) + tuple(shared_args) + tuple(load_specific_args)
-    )
+    train_argv = (None, get_test_config_path()) + tuple(shared_args) + tuple(load_specific_args)
 
     print(f"\n--- Starting Load/Train Step for {test_name} ---")
     # Clear caches before train to ensure we are actually loading from the pickle

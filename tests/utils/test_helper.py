@@ -20,7 +20,7 @@ returned.
 """
 
 import os
-from MaxText.gcloud_stub import is_decoupled
+from maxtext.common.gcloud_stub import is_decoupled
 from MaxText.globals import MAXTEXT_PKG_DIR
 
 

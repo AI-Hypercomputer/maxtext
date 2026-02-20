@@ -38,31 +38,24 @@
 
 import argparse
 import os
-import sys
 from pathlib import Path
+import sys
 import absl
-
-import numpy as np
+from google.cloud import storage
 import jax
 import jax.numpy as jnp
-
-import torch.nn.functional as F
-import torch
-
-from google.cloud import storage
-
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-from MaxText.utils.ckpt_conversion.utils.hf_utils import (
-    convert_jax_weight_to_torch,
-)
 from MaxText import pyconfig
+from maxtext.checkpoint_conversion.utils.hf_utils import convert_jax_weight_to_torch
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
+import numpy as np
+import torch
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
@@ -183,6 +176,10 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
       dim=-1
   )  # Sum over the vocab dim to get a single KL value per token
 
+  # Log per-token KL divergences
+  formatted_list = [f"{x:.6f}" for x in kl_divs_per_token.tolist()]
+  max_logging.log(f"Per-token KL Divergences: \n{formatted_list}")
+
   max_kl_div = kl_divs_per_token.max()
   max_logging.log(f"\nMax KL divergence for a single token in the set: {max_kl_div.item():.6f}")
 
@@ -302,12 +299,16 @@ def main(config, test_args):  # pylint: disable=W0621
             "Comparing up to the smaller vocab size."
         )
       min_vocab_size = min(full_train_logits.shape[-1], golden_logits.shape[-1])
+
+      start_index = 1 if test_args.skip_first_token else 0
       # shape [seq_len, vocab_size]
-      train_logits_slice = full_train_logits[0, :token_size, :min_vocab_size]
-      golden_logits_slice = golden_logits[:token_size, :min_vocab_size]
-      max_logging.log("\n[logits: token 2]")
-      max_logging.log(f"{golden_logits_slice[2]=}")
-      max_logging.log(f"{train_logits_slice[2]=}")
+      train_logits_slice = full_train_logits[0, start_index:token_size, :min_vocab_size]
+      golden_logits_slice = golden_logits[start_index:token_size, :min_vocab_size]
+
+      if train_logits_slice.shape[0] > 2:
+        max_logging.log(f"\n[logits: token {start_index + 2}]")
+        max_logging.log(f"{golden_logits_slice[2]=}")
+        max_logging.log(f"{train_logits_slice[2]=}")
 
       # Calculate absolute and relative differences for detailed reporting
       abs_diff = jnp.abs(train_logits_slice - golden_logits_slice)
@@ -337,9 +338,10 @@ def main(config, test_args):  # pylint: disable=W0621
         model_probabilities = jax.nn.softmax(train_logits_slice, axis=-1)
         golden_probabilities = jax.nn.softmax(golden_logits_slice, axis=-1)
 
-      max_logging.log("\n[probability: token 1]")
-      max_logging.log(f"{golden_probabilities[1]=}")
-      max_logging.log(f"{model_probabilities[1]=}")
+      if golden_probabilities.shape[0] > 1:
+        max_logging.log(f"\n[probability: token {start_index + 1}]")
+        max_logging.log(f"{golden_probabilities[1]=}")
+        max_logging.log(f"{model_probabilities[1]=}")
 
       kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
       max_kl_div_val = jax.numpy.max(kl_div)
@@ -347,7 +349,7 @@ def main(config, test_args):  # pylint: disable=W0621
       max_logging.log(
           f"\n[KL divergence]\n"
           f"KL divergence = {kl_div}, max KL divergence = {max_kl_div_val} at index {max_kl_div_idx}, "
-          f"the corresponding token id is {ids[0, max_kl_div_idx]}"
+          f"the corresponding token id is {ids[0, max_kl_div_idx + start_index]}"
       )
 
       if jax.process_index() == 0 and test_args.output_logits_path:
@@ -388,7 +390,21 @@ def main(config, test_args):  # pylint: disable=W0621
       raise ValueError("run_hf_model requires hf_model_path")
 
     hf_token = config.hf_access_token
-    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch.bfloat16, token=hf_token)
+    # Map MaxText config.dtype to PyTorch dtype
+    dtype_mapping = {
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+        "float16": torch.float16,
+        jnp.bfloat16: torch.bfloat16,
+        jnp.float32: torch.float32,
+        jnp.float16: torch.float16,
+    }
+
+    # Default to bfloat16 if dtype is unrecognized
+    torch_dtype = dtype_mapping.get(config.dtype.name, torch.bfloat16)
+    max_logging.log(f"Loading HF model with dtype: {torch_dtype} (derived from config.dtype: {config.dtype})")
+
+    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch_dtype, token=hf_token)
 
     if os.path.isdir(test_args.hf_model_path):
       # local hf directory may not contain tokenizer, read from remote tokenizer
@@ -465,7 +481,12 @@ def main(config, test_args):  # pylint: disable=W0621
 
       # --- Compare all logits in the sequence (for the first batch item) ---
       # Unsqueeze to add batch dimension for check_kl_divergence: [1, seq, vocab]
-      check_kl_divergence(mt_logits_torch[0].unsqueeze(0), hf_logits_torch[0].unsqueeze(0), atol=test_args.max_kl_div)
+      start_index = 1 if test_args.skip_first_token else 0
+      check_kl_divergence(
+          mt_logits_torch[0, start_index:].unsqueeze(0),
+          hf_logits_torch[0, start_index:].unsqueeze(0),
+          atol=test_args.max_kl_div,
+      )
       if jax.process_index() == 0 and test_args.output_logits_path:
         data_to_save = {
             "mt_logits": mt_logits_torch[0].tolist(),
@@ -504,6 +525,13 @@ if __name__ == "__main__":
   parser.add_argument("--output_logits_path", type=str, required=False, default="")
   parser.add_argument("--gcs_output_logits_path", type=str, required=False, default="")
   parser.add_argument("--clip_logits_epsilon", type=float, required=False, default=None)
+  parser.add_argument(
+      "--skip_first_token",
+      action="store_true",
+      required=False,
+      default=False,
+      help="Skip the first token during comparison to ignore BOS/init mismatches.",
+  )
   test_args, _ = parser.parse_known_args()
 
   # Remove args defined in this test file to avoid error from pyconfig
@@ -519,6 +547,7 @@ if __name__ == "__main__":
       "--output_logits_path",
       "--gcs_output_logits_path",
       "--clip_logits_epsilon",
+      "--skip_first_token",
   ]
   for arg in to_remove_args:
     model_args = [s for s in model_args if not s.startswith(arg)]
@@ -527,6 +556,10 @@ if __name__ == "__main__":
   assert (
       test_args.atol is not None or test_args.max_kl_div is not None
   ), "At least one of --atol or --max_kl_div must be specified to define the test criteria."
+
+  if test_args.run_hf_model and test_args.clip_logits_epsilon is not None:
+    raise ValueError("--clip_logits_epsilon is not supported when running HF model on-the-fly (run_hf_model=True).")
+
   if cfg.use_multimodal:
     assert not test_args.run_hf_model, (
         "Multimodal does not support running hf model on-the-fly, please generate hf golden logits "

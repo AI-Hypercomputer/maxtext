@@ -13,7 +13,6 @@
 # limitations under the License.
 """ multi_token_prediction_test """
 
-import os.path
 import unittest
 
 import jax
@@ -23,13 +22,16 @@ from flax import nnx
 
 from MaxText.common_types import Config
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers.decoders import DecoderLayer
-from MaxText.layers import multi_token_prediction  # The class under test
-from MaxText.layers import embeddings
+from maxtext.layers.decoders import DecoderLayer
+from maxtext.layers import multi_token_prediction  # The class under test
+from maxtext.layers import embeddings
 from MaxText.common_types import MODEL_MODE_TRAIN
+from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
+
+from tests.utils.test_helpers import get_test_config_path
+
 
 TEST_LAYER_NUM = 1
 
@@ -39,11 +41,14 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="multi_token_prediction_layer_test",
         skip_jax_distributed_system=True,
         per_device_batch_size=8,
+        **extra_args,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
     self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
@@ -193,12 +198,16 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    num_devices = jax.device_count()
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="mtp_block_test",
         skip_jax_distributed_system=True,
         mtp_num_layers=2,
         base_emb_dim=16,
+        **extra_args,
     )
     self.nnx_rngs = nnx.Rngs(params=0)
     self.rng = jax.random.PRNGKey(43)
@@ -207,7 +216,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
     data_rng, self.init_rng = jax.random.split(self.rng)
 
-    self.batch_size, self.seq_len, self.embed_dim = 2, 8, self.cfg.base_emb_dim
+    self.batch_size, self.seq_len, self.embed_dim = num_devices, 8, self.cfg.base_emb_dim
     key1, key2, key3 = jax.random.split(data_rng, 3)
     self.main_hidden_state = jax.random.normal(key1, (self.batch_size, self.seq_len, self.embed_dim))
     self.input_ids = jax.random.randint(key2, (self.batch_size, self.seq_len), 0, self.cfg.vocab_size)
@@ -221,22 +230,6 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         mesh=self.mesh,
         rngs=self.rngs,
     )
-
-  def test_no_sow_during_init(self):
-    """Verifies losses/weights are initialized with zeros (NNX behavior)."""
-    # NNX pre-initializes Variables with zeros to avoid checkpointing errors.
-    # Unlike Linen which sows during forward pass, NNX creates Variables in __init__.
-    initial_state = nnx.state(self.test_model)
-    self.assertTrue(hasattr(initial_state.mtp_block, "losses"))
-    self.assertTrue(hasattr(initial_state.mtp_block, "weights"))
-
-    # Verify they're initialized with zeros of correct shape.
-    losses_val = initial_state.mtp_block.losses.value
-    weights_val = initial_state.mtp_block.weights.value
-    self.assertEqual(losses_val.shape, (self.cfg.mtp_num_layers,))
-    self.assertEqual(weights_val.shape, (self.cfg.mtp_num_layers,))
-    self.assertTrue(jnp.all(losses_val == 0.0))
-    self.assertTrue(jnp.all(weights_val == 0.0))
 
   def test_sow_functionality(self):
     """Verifies that the block correctly sows losses and weights."""

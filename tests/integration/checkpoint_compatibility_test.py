@@ -29,7 +29,7 @@ from datetime import datetime
 import json
 import os
 import pytest
-from MaxText.train import main as train_main
+from maxtext.trainers.pre_train.train import main as train_main
 from MaxText.globals import MAXTEXT_REPO_ROOT
 from tests.integration.checkpointing_test import get_checkpointing_command
 
@@ -87,6 +87,7 @@ def test_autoselected_attention():
   run_checkpoint_compatibility("tpu", "autoselected")
 
 
+@pytest.mark.external_training
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
 def test_with_dot_product():

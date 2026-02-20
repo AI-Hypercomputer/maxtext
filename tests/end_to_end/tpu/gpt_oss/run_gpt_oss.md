@@ -34,7 +34,7 @@ hf download [openai/gpt-oss-20b|openai/gpt-oss-120b] --local-dir <local_mxfp4_pa
 2. Please convert it from MXFP4 to BF16 using script [dequantize_mxfp4.py](../../../src/MaxText/utils/ckpt_scripts/dequantize_mxfp4.py) on gpu.
 
 ```
-python3 -m MaxText.utils.ckpt_scripts.dequantize_mxfp4 --input-path=<local_mxfp4_path> --output-path=<local_bf16_path> --dtype-str=bf16
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.dequantize_mxfp4 --input-path=<local_mxfp4_path> --output-path=<local_bf16_path> --dtype-str=bf16
 ```
 
 
@@ -42,14 +42,14 @@ python3 -m MaxText.utils.ckpt_scripts.dequantize_mxfp4 --input-path=<local_mxfp4
 * run [convert_gpt_oss_ckpt.py](../../../src/MaxText/utils/ckpt_scripts/convert_gpt_oss_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) scanned format for training and fine-tuning.
 
 ```
-python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_ckpt --base-model-path <local_bf16_path> \
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt_oss_ckpt --base-model-path <local_bf16_path> \
     --maxtext-model-path <GCS/path/to/scanned/maxtext/ckpt> --model-size [gpt-oss-20b|gpt-oss-120b]
 ```
 
 * run [convert_gpt_oss_unscanned_ckpt.py](../../../src/MaxText/utils/ckpt_scripts/convert_gpt_oss_unscanned_ckpt.py) to convert the checkpoint to unscanned format in Orbax for decoding.
 
 ```
-python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_unscanned_ckpt --base-model-path <local_bf16_path> \
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt_oss_unscanned_ckpt --base-model-path <local_bf16_path> \
     --maxtext-model-path <GCS/path/to/unscanned/maxtext/ckpt> --model-size [gpt-oss-20b|gpt-oss-120b]
 ```
 
@@ -58,7 +58,7 @@ python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_unscanned_ckpt --base-mode
 You can train from scratch to generate a new checkpoint. One example command to run pretraining with gpt-oss-20b on v5p-8.
 
 ```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=megablox_pre_training \
     model_name=gpt-oss-20b \
@@ -84,7 +84,7 @@ After you have a MaxText-compatible scanned checkpoint, you could finetune it wi
 One example command to run general finetuning with gpt-oss-20b on v5p-8.
 
 ```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=megablox_fine_tuning \
     model_name=gpt-oss-20b \
@@ -110,7 +110,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
 One example command to run supervised finetuning with gpt-oss-20b on v5p-8. Supervised finetuning is only working with HuggingFace conversational datasets. And, you can customize the dataset path using the `hf_path` config. If using [gated dataset](https://huggingface.co/docs/hub/en/datasets-gated) or [gated model](https://huggingface.co/docs/hub/en/models-gated), you need additionally provide the access token with `hf_access_token` config.
 
 ```sh
-python3 -m MaxText.sft_trainer src/MaxText/configs/sft.yml \
+python3 -m MaxText.sft_trainer src/maxtext/configs/post_train/sft.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=megablox_supervised_fine_tuning \
     model_name=gpt-oss-20b \
@@ -137,7 +137,7 @@ python3 -m MaxText.sft_trainer src/MaxText/configs/sft.yml \
 One example command to run decoding with gpt-oss-20b on v5p-8 with unscanned checkpoint for fast decoding.
 
 ```sh
-python3 -m maxtext.decode src/MaxText/configs/base.yml \
+python3 -m maxtext.decode src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=decode \
     model_name=gpt-oss-20b \
@@ -165,7 +165,7 @@ To verify the correctness of the model implementation, we perform Logit Comparis
 One example command to generate golden logits from HuggingFace for gpt-oss-20b:
 
 ```sh
-python3 -m MaxText.scratch_code.generate_hf_golden_logits \
+python3 -m tests.assets.logits_generation.generate_hf_golden_logits \
     --model-id=openai/gpt-oss-20b \
     --output-path=golden_data_gpt-oss-20b.jsonl \
     --prompts='I love to;Today is a;What is the' \
@@ -182,7 +182,7 @@ Run command below to compare logits between HuggingFace and MaxText.
 
 ```sh
 python3 -m tests.utils.forward_pass_logit_checker \
-    src/MaxText/configs/base.yml \
+    src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=forward_logits_check \
     model_name=gpt-oss-20b \

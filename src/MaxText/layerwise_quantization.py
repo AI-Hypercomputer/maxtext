@@ -19,7 +19,7 @@ Provides a utility to load and quantize a checkpoint layer by layer. Currently, 
 
 Example cmd:
 
-python3 -m MaxText.layerwise_quantization  src/MaxText/configs/base.yml \
+python3 -m MaxText.layerwise_quantization  src/maxtext/configs/base.yml \
   tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${LOAD_PARAMS_PATH} \
   model_name=deepseek2-16b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 \
   ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 \
@@ -33,24 +33,22 @@ python3 -m MaxText.layerwise_quantization  src/MaxText/configs/base.yml \
 import os
 from typing import Any, Sequence
 
-from tqdm import tqdm
-
-import jax
-import jax.numpy as jnp
 from absl import app
 from aqt.jax.v2 import aqt_tensor
-
-from flax.linen import partitioning as nn_partitioning
 from flax import nnx
-
+from flax.linen import partitioning as nn_partitioning
+import jax
+import jax.numpy as jnp
 from MaxText import common_types
 from MaxText import pyconfig
-from MaxText.layers import models, quantizations, deepseek
 from maxtext.common import checkpointing
+from maxtext.layers import quantizations
+from maxtext.models import deepseek, models
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 import orbax.checkpoint as ocp
+from tqdm import tqdm
 
 IGNORE = ocp.PLACEHOLDER
 PRNGKeyType = Any

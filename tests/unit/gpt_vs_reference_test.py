@@ -22,7 +22,6 @@ https://github.com/huggingface/transformers/blob/31ab7168ff7e07f61c90134e5238c4d
 from types import SimpleNamespace
 from typing import Optional
 import math
-import os.path
 import unittest
 
 import numpy as np
@@ -35,11 +34,11 @@ from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
 
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
-from MaxText.layers import attentions, moe, embeddings
-from MaxText.layers.initializers import nd_dense_init
+from maxtext.layers import attentions, moe, embeddings
+from maxtext.layers.initializers import nd_dense_init
 from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
 
 
 # Reference implementation
@@ -295,7 +294,7 @@ class GptOssMLPTest(unittest.TestCase):
 
     # MaxText model
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="gpt_oss_mlp_test",
         enable_checkpointing=False,
         model_name="default",
@@ -402,7 +401,7 @@ class GptOssAttentionTest(unittest.TestCase):
     )
 
     cfg_dot = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="gpt_oss_attention_test_dot",
         enable_checkpointing=False,
         model_name="default",
@@ -465,7 +464,7 @@ class GptOssAttentionTest(unittest.TestCase):
     )
 
     cfg_flash = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="gpt_oss_attention_test_flash",
         enable_checkpointing=False,
         model_name="default",

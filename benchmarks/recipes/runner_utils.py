@@ -44,6 +44,9 @@ def _create_workload_config(
       "xpk_path": user_config.xpk_path,
       "num_steps": num_steps,
       "priority": priority,
+      "generate_metrics_and_upload_to_big_query": user_config.bq_enable,
+      "db_project": user_config.bq_db_project,
+      "db_dataset": user_config.bq_db_dataset,
   }
   # Add any extra arguments, like disruption_configs, if they exist
   config_args.update(kwargs)
@@ -81,6 +84,10 @@ def generate_and_run_workloads(
   """
   Generates and executes XPK workloads, with or without disruptions.
   """
+  if user_config.bq_enable and (not user_config.bq_db_project or not user_config.bq_db_dataset):
+    logging.error("Validation FAILED: BigQuery is enabled, but 'bq_db_project' or 'bq_db_dataset' is missing.")
+    return 1
+
   workload_configs = list(
       _generate_workloads(
           user_config,
@@ -99,6 +106,7 @@ def generate_and_run_workloads(
   disruption_manager = mxr.xpk_benchmark_runner(
       cluster_config=user_config.cluster_config,
       workload_configs=workload_configs,
+      user=user_config.user,
   )
 
   if disruptions:

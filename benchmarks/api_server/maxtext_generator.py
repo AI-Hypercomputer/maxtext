@@ -34,7 +34,9 @@ import numpy as np
 
 from dataclasses import dataclass, field
 
-from MaxText import maxengine, pyconfig, multimodal_utils
+from MaxText import maxengine, pyconfig
+from maxtext.multimodal import processor as mm_processor
+from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils
 
 # Set TF log level to avoid verbose startup messages.
@@ -493,23 +495,25 @@ class MaxTextGenerator:
 
   def _preprocess_inputs(self, text, prefill_length, image_path):
     """Helper to preprocess a single text and optional image input."""
-    processor_output = multimodal_utils.PreprocessorOutput()
+    processor_output = mm_utils.PreprocessorOutput()
     images = None
     if self.config.use_multimodal and image_path:
-      text = multimodal_utils.reformat_prompt(
-          text, image_placeholder=self.config.image_placeholder, model_name=self.config.model_name, num_images=1
+      text = mm_processor.reformat_prompt(
+          prompt=self.config.prompt,
+          image_placeholder=self.config.image_placeholder,
+          model_name=self.config.model_name,
+          num_images=1,
       )
-      loaded_images = multimodal_utils.load_image_from_path(image_path)
-      processor_output = multimodal_utils.pre_process_image(loaded_images, model_name=self.config.model_name)
-      prefill_length -= multimodal_utils.get_image_offsets(self.config.model_name, processor_output=processor_output)
+      processor_output = mm_processor.preprocess_mm_data(self.config)
+      prefill_length -= mm_processor.get_image_offsets(self.config.model_name, processor_output=processor_output)
       images = processor_output.pixel_values
 
     tokens, true_length = self.tokenizer.encode(text, is_bos=not self.has_chat_template, prefill_lengths=[prefill_length])
     if self.config.use_multimodal and image_path:
-      tokens = multimodal_utils.prepare_text_for_image_fusion(
+      tokens = mm_processor.prepare_text_for_image_fusion(
           tokens, model_name=self.config.model_name, processor_output=processor_output
       )
-      true_length += multimodal_utils.get_image_offsets(self.config.model_name, processor_output=processor_output)
+      true_length += mm_processor.get_image_offsets(self.config.model_name, processor_output=processor_output)
 
     return tokens, true_length, images
 

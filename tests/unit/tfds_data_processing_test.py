@@ -25,28 +25,41 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
-from MaxText.input_pipeline import _tfds_data_processing
-from MaxText.input_pipeline import input_pipeline_interface
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.input_pipeline import tfds_data_processing
+from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.common.gcloud_stub import is_decoupled
+from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
 
 class TfdsDataProcessingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1,
-        run_name="test",
-        mesh_axes=["data"],
-        logical_axis_rules=[["batch", "data"]],
-        data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
-        dataset_path="gs://maxtext-dataset/",
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
-        enable_checkpointing=False,
-        eval_interval=10,
-    )
+    decoupled = is_decoupled()
+    if decoupled:
+      local_dataset_name = "c4/en:3.1.0"
+    else:
+      local_dataset_name = None
+
+    _dataset_path = get_test_dataset_path()
+    _base_output_directory = get_test_base_output_directory(cloud_path="gs://max-experiments/")
+    config_kwargs = {
+        "per_device_batch_size": 1,
+        "run_name": "test",
+        "mesh_axes": ["data"],
+        "logical_axis_rules": [["batch", "data"]],
+        "data_sharding": ["data"],
+        "base_output_directory": _base_output_directory,
+        "dataset_path": _dataset_path,
+        "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
+        "enable_checkpointing": False,
+        "eval_interval": 10,
+    }
+
+    if decoupled and local_dataset_name:
+      config_kwargs["dataset_name"] = local_dataset_name
+    config = pyconfig.initialize([sys.argv[0], get_test_config_path()], **config_kwargs)
     os.environ["TFDS_DATA_DIR"] = config.dataset_path
     self.config = config
     self.mesh_shape_1d = (len(jax.devices()),)
@@ -63,8 +76,8 @@ class TfdsDataProcessingTest(unittest.TestCase):
     )
     self.read_config.add_tfds_id = True
     self.train_ds = self._get_datasets()
-    self.train_iter = _tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
-    self.eval_iter = _tfds_data_processing.make_tfds_eval_iterator(self.config, self.mesh, self.process_indices)
+    self.train_iter = tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
+    self.eval_iter = tfds_data_processing.make_tfds_eval_iterator(self.config, self.mesh, self.process_indices)
 
   def _get_datasets(self):
     ds_builder = tfds.builder(self.config.dataset_name)
@@ -107,7 +120,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
-    train_iter = _tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
+    train_iter = tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
     batch2 = next(train_iter)
     self.assertTrue(tf.reduce_all(tf.equal(batch1["inputs"], batch2["inputs"])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1["targets"], batch2["targets"])))

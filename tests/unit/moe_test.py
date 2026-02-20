@@ -13,36 +13,33 @@
 # limitations under the License.
 """ Mixture of Experts (MoE) tests. """
 
-import os.path
 import unittest
 
-import pytest
-
+from flax import nnx
+import flax.linen as nn
+from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
-import flax.linen as nn
-from flax import nnx
-from flax.linen import partitioning as nn_partitioning
-
-from maxtext.utils import maxtext_utils
 from MaxText import pyconfig
+from maxtext.common.gcloud_stub import is_decoupled
 from MaxText.common_types import Config, DType
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import linears
-from MaxText.layers import moe
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
-from MaxText.layers.quantizations import Fp8Quantization
-from MaxText.layers import nnx_wrappers
-
+from maxtext.layers import linears
+from maxtext.layers import moe
+from maxtext.layers import nnx_wrappers
+from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
+from maxtext.layers.quantizations import Fp8Quantization
+from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
+import pytest
 
 class TokenDroppingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="token_dropping_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -52,6 +49,7 @@ class TokenDroppingTest(unittest.TestCase):
         max_target_length=80,
         per_device_batch_size=1,
         capacity_factor=2,
+        **extra_args,
     )
     self.rngs = nnx.Rngs(params=0)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
@@ -166,7 +164,7 @@ class MlpBlockTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="mlp_block_init_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -194,6 +192,7 @@ class MlpBlockTest(unittest.TestCase):
         use_bias=True,
     )
 
+  @pytest.mark.external_serving
   def test_init(self):
     x = jnp.array([1.0, 2.0]).reshape((1, 1, 2))  # TODO(bug): need reshape due to error
     self.model.init({"params": self.rng, "dropout": self.rng}, x)
@@ -203,8 +202,10 @@ class DeepSeekRoutingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="deepseek_routing_test",
         enable_checkpointing=False,
         decoder_block="deepseek",
@@ -217,6 +218,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
         num_experts=16,
         num_experts_per_tok=4,
         sparse_matmul=True,
+        **extra_args,
     )
     self.rngs = nnx.Rngs(params=0)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
@@ -452,7 +454,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -481,7 +483,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_ragged_dot(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_ragged_dot_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -510,7 +512,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_dense(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_dense_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -539,7 +541,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_expert_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_ep_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -570,7 +572,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_moe_fsdp_two_stage_parallelism_tpu_only(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_ep_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -603,7 +605,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_tp_transpose_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_tp_transpose_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -616,7 +618,7 @@ class RoutedMoeTest(unittest.TestCase):
     )
 
     cfg2 = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_tp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -648,7 +650,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_context_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_cp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -679,7 +681,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_expert_context_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_ep_cp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -712,7 +714,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_expert_tensor_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_ep_tp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",

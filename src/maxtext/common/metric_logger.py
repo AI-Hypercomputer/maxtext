@@ -26,16 +26,18 @@ import numpy as np
 
 import jax
 
-import google_cloud_mldiagnostics as mldiag
-
 from MaxText.globals import EPS
-from maxtext.common.gcp_workload_monitor import GCPWorkloadMonitor
+from maxtext.common.gcloud_stub import mldiagnostics_modules
+from maxtext.common.gcloud_stub import workload_monitor
 from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from collections import defaultdict
+
+mldiag, _ = mldiagnostics_modules()
+GCPWorkloadMonitor, _monitor_is_stub = workload_monitor()
 
 # Mapping MaxText metrics to managed profiler metrics
 _METRICS_TO_MANAGED = {
@@ -301,6 +303,13 @@ class MetricLogger:
   def get_performance_metric_queue(self, config):
     """Records heartbeat metrics and performance metrics to GCP."""
     performance_metric_queue = None
+
+    # Early return if monitoring is stubbed
+    if _monitor_is_stub:
+      if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
+        max_logging.log("[DECOUPLED NO-OP] skipping GCP workload monitoring threads.")
+      return performance_metric_queue
+
     if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
       gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
       if config.report_heartbeat_metric_for_gcp_monitoring:

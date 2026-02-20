@@ -15,7 +15,6 @@
 # pylint: disable=missing-module-docstring, missing-function-docstring
 import sys
 import unittest
-import os.path
 
 import pytest
 
@@ -29,24 +28,27 @@ from jax.sharding import PartitionSpec
 import tensorflow as tf
 
 from MaxText import pyconfig
-from MaxText import multihost_dataloading
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.input_pipeline import multihost_dataloading
+from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
 
 class MultihostDataloadingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # Note: this test uses gs://max-experiments/ (not gs://runner-maxtext-logs) in cloud mode
+    base_output_directory = get_test_base_output_directory(cloud_path="gs://max-experiments/")
+    dataset_path = get_test_dataset_path(cloud_path="gs://maxtext-dataset/")
     batch_size = 4
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
+        base_output_directory=base_output_directory,
+        dataset_path=dataset_path,
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
-        dataset_path="gs://maxtext-dataset/",
         enable_checkpointing=False,
     )
     global_data_shape = PartitionSpec(batch_size, config.max_target_length)

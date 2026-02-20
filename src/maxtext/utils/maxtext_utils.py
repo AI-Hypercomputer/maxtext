@@ -36,12 +36,12 @@ import optax
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
-from MaxText import multimodal_utils
 from MaxText import sharding
-from MaxText.configs import types
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from maxtext.configs import types
 from maxtext.inference.page_manager import PageState
 from maxtext.common import checkpointing
+from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -128,7 +128,14 @@ def get_reorder_callable(cp_size, shard_mode):
 def get_shaped_batch(config):
   """Return the shape of the batch - this is what eval_shape would return for the
   output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
-  batch_shape = (config.global_batch_size_to_load, config.max_target_length)
+  if config.enable_diloco:
+    batch_shape = (
+        config.num_diloco_replicas,
+        config.global_batch_size_to_load // config.num_diloco_replicas,
+        config.max_target_length,
+    )
+  else:
+    batch_shape = (config.global_batch_size_to_load, config.max_target_length)
   shaped_batch = {}
   shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
@@ -137,15 +144,13 @@ def get_shaped_batch(config):
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   if config.use_multimodal:
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+    image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
     shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32)
   if config.use_audio:
-    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
-    )
+    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
     shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32)
   return shaped_batch
 
@@ -488,10 +493,64 @@ def get_dense_moe_layers(config):
   elif config.decoder_block == DecoderBlockType.LLAMA4:
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
+  elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+    num_moe_layers = config.num_decoder_layers
+    num_dense_layers = 0
   else:
-    raise ValueError("Currently we only support DeepSeek and Llama4 calculation.")
+    raise ValueError("Currently we only support DeepSeek, Llama4, and Qwen3-Next calculation.")
 
   return num_dense_layers, num_moe_layers
+
+
+def calculate_gated_delta_net_flops_per_device(config):
+  """
+  - Calculates the FLOPs for a single Gated Delta Net (Linear Attention) layer.
+  - Ref: Megatron calculation for the gated delta net:
+    - https://github.com/NVIDIA/Megatron-LM/blob/8f1c2f8ae53b4e3f32c0ae7f397d8b38a675eaa2/megatron/training/training.py#L513
+  - Core complexity is based on the recurrent state update view (4 ops * 2 FLOPs = 8).
+  """
+  B = config.per_device_batch_size
+  S = config.max_target_length
+  E = config.emb_dim
+
+  H_k = config.gdn_num_key_heads
+  H_v = config.gdn_num_value_heads
+  D_k = config.gdn_key_head_dim
+  D_v = config.gdn_value_head_dim
+  K_conv = config.gdn_conv_kernel_dim
+
+  K_dim = H_k * D_k
+  V_dim = H_v * D_v
+
+  # 1. Projections (Learnable Weights)
+  # Represents: in_proj_qkvz (2*K + 2*V) + in_proj_ba (2*H_v)
+  # We multiply by 2 for FMA (Multiply + Add)
+  flops_qkvz_ba = 2 * B * S * E * (2 * K_dim + 2 * V_dim + 2 * H_v)
+
+  # Represents: out_proj
+  flops_out = 2 * B * S * E * V_dim
+
+  flops_projections = flops_qkvz_ba + flops_out
+
+  # 2. Convolution (Learnable Weights)
+  # We multiply by 2 for FMA
+  flops_conv = 2 * B * S * K_conv * (2 * K_dim + V_dim)
+
+  # 3. Core Gated Delta Net
+  # This counts 4 distinct O(D^2) operations in the recurrent update:
+  #   KK^T, VK^T, S(a(I-bKK^T)), and SQ.
+  # We multiply by 2 for FMA.
+  # Total Core FLOPs = 2 (FMA) * 4 (Ops) * H * D^2 = 8 * H * D^2 per token.
+  # We use D_k * D_v to generalize D^2 for potentially differing head dimensions.
+  flops_core_per_token = H_v * (D_k * D_v) * 8
+  flops_core = B * S * flops_core_per_token
+
+  # Weights part: Projections + Conv
+  gdn_weight_flops = flops_projections + flops_conv
+  # Attention part: Core
+  gdn_attn_flops = flops_core
+
+  return gdn_weight_flops, gdn_attn_flops
 
 
 def calculate_gemma3_vision_layers_tflops_per_device(config):
@@ -634,7 +693,7 @@ def calculate_tflops_training_per_device(config, log=True):
   # MLP flops
   if config.num_experts > 1:
     # calculation based on dropless implementation
-    if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
+    if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4, DecoderBlockType.QWEN3_NEXT):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
@@ -702,6 +761,24 @@ def calculate_tflops_training_per_device(config, log=True):
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
+  elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+    gdn_weight_flops_per_layer, gdn_attn_flops_per_layer = calculate_gated_delta_net_flops_per_device(config)
+    cycle_interval = config.inhomogeneous_layer_cycle_interval
+    num_full_attn_layers = config.num_decoder_layers // cycle_interval
+    num_linear_attn_layers = config.num_decoder_layers - num_full_attn_layers
+
+    # Weights TFLOPs:
+    total_weights = (
+        total_ffn_flops
+        + embedding_flops
+        + (qkv_flops + projection_flops) * num_full_attn_layers
+        + gdn_weight_flops_per_layer * num_linear_attn_layers
+    )
+    learnable_weight_tflops = total_weights * 3 / 10**12
+
+    # Attention TFLOPs:
+    total_attn = (causal_attention_flops * num_full_attn_layers) + (gdn_attn_flops_per_layer * num_linear_attn_layers)
+    attention_tflops = total_attn * 3 / 10**12
   else:
     # multiply by 3 for both feed forward and back propagation flops
     learnable_weight_tflops = (
@@ -867,12 +944,10 @@ def init_initial_state(model, tx, config, is_training, key):
   Args: model, tx, config, is_training, key
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+  image_shape = mm_processor.get_dummy_image_shape_for_init(
       config.model_name, batch_size=config.micro_batch_size_to_train_on
   )
-  audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-      config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
-  )
+  audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
   # Split the master key into independent keys for each RNG collection
   # Reference: https://flax-linen.readthedocs.io/en/latest/guides/flax_fundamentals/rng_guide.html
   params_key, dropout_key, aqt_key = jax.random.split(key, 3)
@@ -895,12 +970,10 @@ def get_abstract_param(model, config):
   with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     key = jax.random.PRNGKey(0)
     input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+    image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
-    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
-    )
+    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
   abstract_vars = jax.eval_shape(
       model.init,
       {"params": key, "dropout": key, "aqt": key},
@@ -1104,12 +1177,10 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
         config.micro_batch_size_to_train_on,
         config.max_prefill_predict_length,
     )
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+    image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
-    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
-    )
+    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
@@ -1137,12 +1208,10 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
 
   def init_kv_cache(model, config):
     input_shape = (config.micro_batch_size_to_train_on, 1)
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+    image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
-    audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
-        config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
-    )
+    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},

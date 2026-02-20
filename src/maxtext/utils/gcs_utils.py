@@ -21,16 +21,29 @@ from pathlib import Path
 
 import yaml
 
-from google.cloud import storage
-
 import jax
 
 from maxtext.utils import max_logging
+from maxtext.common.gcloud_stub import is_decoupled, gcs_storage
+
+storage = gcs_storage()
+
+
+def _gcs_guard(operation_name: str) -> bool:
+  """Check GCS availability for an operation."""
+  if getattr(storage, "_IS_STUB", False):
+    if is_decoupled():
+      max_logging.log(f"[GCS NO-OP] {operation_name}")
+      return False
+    raise RuntimeError(f"google-cloud-storage missing for {operation_name}. Install or set DECOUPLE_GCLOUD=TRUE.")
+  return True
 
 
 def write_config_raw_keys_for_gcs(raw_keys):
-  """Writes config raw keys to GCS"""
-  if not raw_keys["save_config_to_gcs"] or jax.process_index() != 0:
+  """Writes config raw keys to GCS (no-op if disabled or decoupled)."""
+  if not raw_keys.get("save_config_to_gcs") or jax.process_index() != 0:
+    return
+  if not _gcs_guard("write_config_raw_keys_for_gcs"):
     return
   max_logging.log("Writing config to GCS...")
 
@@ -60,7 +73,9 @@ def add_trailing_slash(path):
 
 
 def upload_blob(destination_gcs_name, source_file_name):
-  """Uploads a file to a GCS location"""
+  """Uploads a file to a GCS location (no-op if not found and decoupled)."""
+  if not _gcs_guard("upload_blob"):
+    return
   bucket_name, prefix_name = parse_gcs_bucket_and_prefix(destination_gcs_name)
   storage_client = storage.Client()
   bucket = storage_client.get_bucket(bucket_name)
@@ -69,8 +84,10 @@ def upload_blob(destination_gcs_name, source_file_name):
 
 
 def upload_dump(local_dir, target_dir, module_name=None, delete_local_after=True, all_host_upload=False):
-  """Uploads a directory to a GCS location, with an optional filter"""
+  """Uploads a directory to a GCS location, with an optional filter (no-op if not found and decoupled)."""
   if not all_host_upload and jax.process_index() != 0:
+    return
+  if not _gcs_guard("upload_dump"):
     return
   storage_client = storage.Client()
   bucket_name, prefix_name = parse_gcs_bucket_and_prefix(target_dir)
@@ -97,7 +114,9 @@ def upload_dump(local_dir, target_dir, module_name=None, delete_local_after=True
 
 
 def gcs_path_exists(file_path):
-  """Checks if a GCS file_path exits."""
+  """Checks if a GCS file_path exists (no-op if not found and decoupled)."""
+  if not _gcs_guard("gcs_path_exists"):
+    return False
   try:
     storage_client = storage.Client()
     bucket_name, file_name = parse_gcs_bucket_and_prefix(file_path)
@@ -120,6 +139,8 @@ def gcs_list_directories(directory_path):
   Returns:
       A list of "directory" names (prefixes).
   """
+  if not _gcs_guard("gcs_list_directories"):
+    return []
   storage_client = storage.Client()
   bucket_name, directory_prefix = parse_gcs_bucket_and_prefix(directory_path)
   bucket = storage_client.bucket(bucket_name)
@@ -166,6 +187,8 @@ def read_json_from_gcs(file_path):
   Returns:
     A dictionary with content from json file.
   """
+  if not _gcs_guard("read_json_from_gcs"):
+    return None
   try:
     storage_client = storage.Client()
     bucket_name, file_prefix = parse_gcs_bucket_and_prefix(file_path)
@@ -190,6 +213,8 @@ def write_dict_to_gcs_json(data_dict, file_path):
     data_dict: The Python dictionary to write
     file_path: GCS path (Bucket + blob) to create the json file
   """
+  if not _gcs_guard("write_dict_to_gcs_json"):
+    return
   try:
     storage_client = storage.Client()
     bucket_name, file_prefix = parse_gcs_bucket_and_prefix(file_path)

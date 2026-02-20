@@ -20,11 +20,12 @@ from datetime import datetime
 import os
 import pytest
 
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
-from MaxText.train import main as train_main
-from MaxText.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
 from maxtext.decode import main as decode_main
+from maxtext.trainers.pre_train.train import main as train_main
+from MaxText.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from tests.integration.checkpointing_test import get_checkpointing_command
+from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
 
 def get_model_params(quantization):
@@ -41,11 +42,13 @@ def get_model_params(quantization):
 
 def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", state_path=None):
   """Helper function to run training, generate parameter-only checkpoint, and decode."""
+  base_output_directory = get_test_base_output_directory()
+  dataset_path = get_test_dataset_path()
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   test_config = [
       None,
-      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-      "base_output_directory=gs://runner-maxtext-logs",
+      get_test_config_path(),
+      f"base_output_directory={base_output_directory}",
       "async_checkpointing=False",
       f"hardware={hardware}",
       f"attention={attention_type}",
@@ -67,10 +70,10 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
             metrics_file="run_metrics.txt",
             attention_type=attention_type,
             dataset_type="tfds",
-            dataset_path="gs://maxtext-dataset",
+            dataset_path=dataset_path,
         )
     )
-    state_path = f"gs://runner-maxtext-logs/runner_{run_date}/checkpoints/0/items"
+    state_path = f"{base_output_directory}/runner_{run_date}/checkpoints/0/items"
 
   # Generate parameter-only checkpoint
   generate_param_only_ckpt_config = (
@@ -88,7 +91,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
       test_config
       + [
           f"run_name=decode_{run_date}",
-          f"load_parameters_path=gs://runner-maxtext-logs/generate_param_{run_date}/checkpoints/0/items",
+          f"load_parameters_path={base_output_directory}/generate_param_{run_date}/checkpoints/0/items",
       ]
       + pathways_command
   )
@@ -107,6 +110,7 @@ def test_param_ckpt_generation_with_autoselected_attention(quantization, capsys)
   assert expected_output in captured.out
 
 
+@pytest.mark.external_serving
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
@@ -123,6 +127,7 @@ def test_param_ckpt_generation_with_dot_product(quantization, capsys):
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 @pytest.mark.scheduled_only
+@pytest.mark.external_serving  # Requires pre-generated checkpoint (Gemma-2b)
 def test_param_ckpt_generation_with_pre_generated_ckpt(capsys):
   """Tests the parameter-only checkpoint generation and decode flow with a pre-generated Gemma-2b model checkpoint."""
   model_config = [
