@@ -19,7 +19,7 @@ RL Evaluation Module.
 from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
-from MaxText.rl import utils_rl
+from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.utils import max_logging
 
 # ## Evaluate
