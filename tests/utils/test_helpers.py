@@ -21,7 +21,7 @@ of Google Cloud Storage paths.
 
 import os
 from maxtext.common.gcloud_stub import is_decoupled
-from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 
 
 def get_test_config_path():
@@ -32,7 +32,16 @@ def get_test_config_path():
   base_cfg = "base.yml"
   if is_decoupled():
     base_cfg = "decoupled_base_test.yml"
-  return os.path.join(MAXTEXT_PKG_DIR, "configs", base_cfg)
+  return os.path.join(MAXTEXT_CONFIGS_DIR, base_cfg)
+
+
+def get_post_train_test_config_path(sub_type="sft"):
+  """Return absolute path to the chosen test config file.
+
+  Returns `decoupled_base_test.yml` when decoupled, otherwise `base.yml`.
+  """
+  base_cfg = "rl.yml" if sub_type == "rl" else "sft.yml"
+  return os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", base_cfg)
 
 
 def get_test_dataset_path(cloud_path=None):
@@ -70,5 +79,6 @@ def get_test_base_output_directory(cloud_path=None):
 __all__ = [
     "get_test_base_output_directory",
     "get_test_config_path",
+    "get_post_train_test_config_path",
     "get_test_dataset_path",
 ]

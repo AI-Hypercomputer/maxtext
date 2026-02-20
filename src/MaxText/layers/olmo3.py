@@ -98,6 +98,10 @@ class Olmo3DecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
+    current_rope_type = config.rope_type.lower()
+    if self.attention_type == attentions.AttentionType.LOCAL_SLIDING:
+      current_rope_type = "default"
+
     # Self-attention block
     self.attention = Attention(
         config=config,
@@ -121,6 +125,7 @@ class Olmo3DecoderLayer(nnx.Module):
         query_pre_attn_scalar=(config.head_dim**-0.5),
         model_mode=model_mode,
         use_qk_norm=config.use_qk_norm,
+        rope_type=current_rope_type,
         rngs=rngs,
     )
 

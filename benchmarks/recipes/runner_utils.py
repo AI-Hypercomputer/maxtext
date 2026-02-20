@@ -106,6 +106,7 @@ def generate_and_run_workloads(
   disruption_manager = mxr.xpk_benchmark_runner(
       cluster_config=user_config.cluster_config,
       workload_configs=workload_configs,
+      user=user_config.user,
   )
 
   if disruptions:

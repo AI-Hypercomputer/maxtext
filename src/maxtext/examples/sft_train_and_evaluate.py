@@ -35,7 +35,7 @@ export TOKENIZER_PATH=meta-llama/Llama-3.1-8B-Instruct
 export MODEL_CHECKPOINT_PATH=<GCS path to model checkpoint>
 export HF_ACCESS_TOKEN=<Hugging Face access token>
 
-python3 -m maxtext.examples.sft_train_and_evaluate MaxText/configs/sft.yml \
+python3 -m maxtext.examples.sft_train_and_evaluate maxtext/configs/post_train/sft.yml \
   run_name=$RUN_NAME base_output_directory=$OUTPUT_PATH \
   model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH \
   hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH
@@ -67,7 +67,7 @@ xpk workload create \
 --workload=sft-${RUN_NAME} \
 --tpu-type ${TPU_TYPE} --num-slices=1 --zone=${ZONE} \
 --project=${PROJECT} \
---command "HF_TOKEN=$HF_ACCESS_TOKEN python3 -m maxtext.examples.sft_train_and_evaluate MaxText/configs/sft.yml \
+--command "HF_TOKEN=$HF_ACCESS_TOKEN python3 -m maxtext.examples.sft_train_and_evaluate maxtext/configs/post_train/sft.yml \
   run_name=$RUN_NAME base_output_directory=$OUTPUT_PATH \
     model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH \
       hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH"
@@ -78,7 +78,6 @@ from absl import app
 from tqdm.auto import tqdm
 from typing import Sequence
 
-import datasets
 import grain
 import os
 import re
@@ -86,10 +85,10 @@ import transformers
 
 from flax import nnx
 
-from MaxText.globals import MAXTEXT_REPO_ROOT
 from MaxText import pyconfig
-from MaxText.input_pipeline import instruction_data_processing
+from MaxText.globals import MAXTEXT_REPO_ROOT
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.input_pipeline import instruction_data_processing
 from maxtext.trainers.post_train.sft import train_sft
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -140,6 +139,8 @@ def get_test_dataset(config, tokenizer):
     A grain.MapDataset instance for the test split, with prompts and target
     answers.
   """
+  import datasets  # pylint: disable=import-outside-toplevel
+
   template_config = instruction_data_processing.load_template_from_file(config.chat_template_path)
   dataset = datasets.load_dataset(
       DATASET_NAME,

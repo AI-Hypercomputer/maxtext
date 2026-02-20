@@ -838,6 +838,7 @@ class TestQwen3Next(unittest.TestCase):
         chunk_size=chunk_size,
         initial_state=None,
         use_qk_norm_in_gdn=False,
+        compute_dtype=jnp.float32,
     )
     np.testing.assert_allclose(
         torch_output.detach().numpy(),
@@ -869,6 +870,7 @@ class TestQwen3Next(unittest.TestCase):
         chunk_size=chunk_size,
         initial_state=None,
         use_qk_norm_in_gdn=True,
+        compute_dtype=jnp.float32,
     )
     np.testing.assert_allclose(
         torch_output_norm.detach().numpy(),

@@ -80,6 +80,28 @@ class RMSNorm(nnx.Module):
     return jnp.einsum("i...k,...k->i...k", y, effective_scale, out_sharding=out_sharding)
 
 
+class GlobalRMSNorm(RMSNorm):
+  """
+  Applies RMSNorm over the last two dimensions (Heads * HeadDim).
+  Used for Olmo3 which normalizes across all heads combined.
+  """
+
+  def __call__(self, x: jnp.ndarray, out_sharding: NamedSharding | None = None) -> jnp.ndarray:
+    # x shape: [..., Heads, HeadDim]
+    input_shape = x.shape
+
+    # Flatten the last two dimensions: [..., Heads * HeadDim]
+    # We use -2 and -1 to ensure we capture the last two dims regardless of rank
+    flattened_shape = input_shape[:-2] + (input_shape[-2] * input_shape[-1],)
+    x_flat = x.reshape(flattened_shape)
+
+    # Apply standard RMSNorm (which normalizes over the last axis)
+    y_flat = super().__call__(x_flat, out_sharding)
+
+    # Reshape back to [..., Heads, HeadDim]
+    return y_flat.reshape(input_shape)
+
+
 def Qwen3NextRMSNorm(num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
   """
   Used for input and post attention layernorms

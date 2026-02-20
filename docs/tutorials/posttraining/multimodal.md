@@ -25,7 +25,7 @@ Multimodal Large Language Models (LLMs) extend traditional text-only models by i
 
 ## Checkpoint Conversion
 
-Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace ([README](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md)).
+Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace ([README](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/README.md)).
 
 Install pytorch:
 
@@ -38,7 +38,7 @@ Then use this command to convert an unscanned checkpoint from HuggingFace to Max
 ```shell
 export HF_ACCESS_TOKEN=hf_...
 export MAXTEXT_CKPT_GCS_PATH=gs://...
-python -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
+python -m maxtext.checkpoint_conversion.to_maxtext maxtext/configs/base.yml \
     model_name=gemma3-4b \
     hf_access_token=$HF_ACCESS_TOKEN \
     base_output_directory=$MAXTEXT_CKPT_GCS_PATH \
@@ -51,7 +51,7 @@ For the Llama4 model family, we are using a separate checkpoint conversion scrip
 ```shell
 export LOCAL_HF_MODEL_PATH=...  # Need to pre-download the safetensors from HuggingFace
 export MAXTEXT_CKPT_GCS_PATH=gs://...
-python -m MaxText.utils.ckpt_scripts.llama4_ckpt_unscanned \
+python -m maxtext.checkpoint_conversion.standalone_scripts.llama4_ckpt_unscanned \
     --model-size=llama4-17b-16e \
     --huggingface-checkpoint=True \
     --base-model-path=$LOCAL_HF_MODEL_PATH \
@@ -73,7 +73,7 @@ To run a forward pass and verify the model's output, use the following command:
 ```shell
 # Gemma3 decode
 python -m maxtext.decode \
-    MaxText/configs/base.yml \
+    maxtext/configs/base.yml \
     model_name=gemma3-4b \
     hf_access_token=$HF_ACCESS_TOKEN \
     tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma3 \
@@ -109,7 +109,7 @@ export TARGET_LENGTH=...  # Adjust to fit expected output length
 export PREDICT_LENGTH=...  # Adjust to fit image tokens + text prompt
 
 python -m maxtext.decode \
-    MaxText/configs/base.yml \
+    maxtext/configs/base.yml \
     model_name=gemma3-4b \
     ... \
     max_prefill_predict_length=$PREDICT_LENGTH  # Adjust to fit image tokens + text prompt \
@@ -123,14 +123,14 @@ For larger models such as Llama4-Scout/Maverick, we suggest to run the decoding 
 
 ## Supervised Fine-Tuning
 
-Supervised Fine-Tuning (SFT) of multimodal LLMs in MaxText focuses specifically on post-training; we don't yet support pre-training multimodal models from scratch. The SFT process typically involves training on Visual Question Answering (VQA) datasets where the model learns to generate accurate text responses based on both visual and textual inputs. During this fine-tuning phase, we recommend to freeze the pre-trained encoder layers (such as vision transformers) to preserve their learned visual representations, while the projection layers and LLM decoder components remain trainable. This selective training strategy allows the model to adapt the cross-modal alignment and text generation capabilities without disrupting the robust feature extraction abilities of the encoders, ultimately leading to improved performance on multimodal understanding and reasoning tasks while maintaining computational efficiency. This is achieved by setting `freeze_vision_encoder_params=True` in [sft-vision-chartqa.yml](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/sft-vision-chartqa.yml).
+Supervised Fine-Tuning (SFT) of multimodal LLMs in MaxText focuses specifically on post-training; we don't yet support pre-training multimodal models from scratch. The SFT process typically involves training on Visual Question Answering (VQA) datasets where the model learns to generate accurate text responses based on both visual and textual inputs. During this fine-tuning phase, we recommend to freeze the pre-trained encoder layers (such as vision transformers) to preserve their learned visual representations, while the projection layers and LLM decoder components remain trainable. This selective training strategy allows the model to adapt the cross-modal alignment and text generation capabilities without disrupting the robust feature extraction abilities of the encoders, ultimately leading to improved performance on multimodal understanding and reasoning tasks while maintaining computational efficiency. This is achieved by setting `freeze_vision_encoder_params=True` in [sft-vision-chartqa.yml](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/post_train/sft-vision-chartqa.yml).
 
 Here, we use [ChartQA](https://huggingface.co/datasets/HuggingFaceM4/ChartQA) as an example to demonstrate SFT functionality:
 
 ```shell
 export UNSCANNED_CKPT_PATH=...  # either set to an already available MaxText ckpt or to the one we just converted in the previous step
 python -m MaxText.sft_trainer \
-    src/MaxText/configs/sft-vision-chartqa.yml \
+    src/maxtext/configs/post_train/sft-vision-chartqa.yml \
     run_name="chartqa-sft" \
     model_name=gemma3-4b \
     tokenizer_path="google/gemma-3-4b-it" \

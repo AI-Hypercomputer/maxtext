@@ -32,7 +32,6 @@ To run the test
 """
 
 
-import os.path
 import math
 from dataclasses import dataclass, asdict
 from typing import Optional
@@ -51,11 +50,11 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 from flax import nnx
 
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText import pyconfig
 from MaxText.layers import embeddings, attention_mla
 from MaxText.common_types import MODEL_MODE_TRAIN
 from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
 
 
 # -----------------------------------------------------------------------------
@@ -83,6 +82,7 @@ class Config:
   qk_nope_head_dim: int = 128
   qk_rope_head_dim: int = 64
   v_head_dim: int = 128
+  use_tokamax_splash: bool = True
   # yarn
   rope_type: str = "yarn"
   original_max_position_embeddings: int = 4096
@@ -99,7 +99,6 @@ class Config:
   use_sparse_indexer: bool = True
   index_n_heads: int = 64
   index_head_dim: int = 128  # > qk_rope_head_dim
-  index_topk: int = 4
 
 
 class ModelArgs:
@@ -108,7 +107,7 @@ class ModelArgs:
   Maps MaxText Config keys to the specific variable names expected by the reference implementation.
   """
 
-  def __init__(self, config: Config, max_batch_size: int = 8):
+  def __init__(self, config: Config, max_batch_size: int = 8, index_topk: int = 4):
     self.max_batch_size = max_batch_size
     self.scale_fmt = None
     self.max_seq_len = config.max_position_embeddings
@@ -120,6 +119,7 @@ class ModelArgs:
     self.qk_nope_head_dim = config.qk_nope_head_dim
     self.qk_rope_head_dim = config.qk_rope_head_dim
     self.v_head_dim = config.v_head_dim
+    self.use_tokamax_splash = config.use_tokamax_splash
     # yarn
     self.original_seq_len = config.original_max_position_embeddings
     self.rope_theta = float(config.rope_max_timescale)
@@ -130,7 +130,7 @@ class ModelArgs:
     # indexer
     self.index_n_heads = config.index_n_heads
     self.index_head_dim = config.index_head_dim
-    self.index_topk = config.index_topk
+    self.index_topk = index_topk
 
 
 # -----------------------------------------------------------------------------
@@ -458,14 +458,14 @@ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
 
 class Indexer(torch.nn.Module):  # pylint: disable=missing-class-docstring
 
-  def __init__(self, args: ModelArgs):
+  def __init__(self, args: ModelArgs, index_topk: int = 4):
     super().__init__()
     self.dim: int = args.dim
     self.n_heads: int = args.index_n_heads
     self.n_local_heads = args.index_n_heads // world_size
     self.head_dim: int = args.index_head_dim
     self.rope_head_dim: int = args.qk_rope_head_dim
-    self.index_topk: int = args.index_topk
+    self.index_topk: int = index_topk
     self.q_lora_rank: int = args.q_lora_rank
     self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim)
     self.wk = Linear(self.dim, self.head_dim)
@@ -581,7 +581,7 @@ class MLA(nn.Module):
       softmax_scale (float): Scaling factor for softmax in attention computation.
   """
 
-  def __init__(self, args: ModelArgs):
+  def __init__(self, args: ModelArgs, index_topk: int):
     super().__init__()
     self.dim = args.dim
     self.n_heads = args.n_heads
@@ -606,7 +606,7 @@ class MLA(nn.Module):
       mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
-    self.indexer = Indexer(args)
+    self.indexer = Indexer(args, index_topk)
 
     self.register_buffer(
         "kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False
@@ -751,10 +751,10 @@ def get_jax_mla_weights(pt_mla, cfg):
   }
 
 
-def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len):
+def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len, attention, index_topk):
   """Returns MaxText configuration and mesh."""
   cfg = pyconfig.initialize(
-      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      [None, get_test_config_path()],
       run_name=run_name,
       enable_checkpointing=False,
       model_name="default",
@@ -767,7 +767,8 @@ def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len):
       per_device_batch_size=batch_size,
       max_target_length=seq_len,
       max_prefill_predict_length=seq_len,
-      attention="dot_product",
+      attention=attention,
+      index_topk=index_topk,
       **asdict(config),
   )
   devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -786,7 +787,7 @@ class DeepseekTestBase(parameterized.TestCase):
     np.random.seed(42)
 
     self.dtype = "float32"
-    self.batch_size = 2
+    self.batch_size = 4
     self.start_pos = 0
     self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
     # jax config
@@ -862,6 +863,8 @@ class DeepseekV32IndexerTest(DeepseekTestBase):
         dtype=self.dtype,
         batch_size=self.batch_size,
         seq_len=self.seq_len,
+        attention="dot_product",
+        index_topk=4,
     )
 
     # Indexer specific RoPE (interleave=False)
@@ -907,17 +910,53 @@ class DeepseekV32MLATest(DeepseekTestBase):
   """Tests for MLA Attention with Sparse Indexing."""
 
   @parameterized.named_parameters(
-      {"testcase_name": "seq_len=2 (index_topk=4)", "seq_len": 2},
-      {"testcase_name": "seq_len=8 (index_topk=4)", "seq_len": 8},
+      {
+          "testcase_name": "dot_product_s2_k4",
+          "attention": "dot_product",
+          "seq_len": 2,
+          "index_topk": 4,
+      },
+      {
+          "testcase_name": "dot_product_s8_k4",
+          "attention": "dot_product",
+          "seq_len": 8,
+          "index_topk": 4,
+      },
+      {
+          "testcase_name": "dot_product_s128_k4",
+          "attention": "dot_product",
+          "seq_len": 128,
+          "index_topk": 4,
+          "check_norm": True,
+      },
+      {
+          "testcase_name": "dot_product_s128_k128",
+          "attention": "dot_product",
+          "seq_len": 128,
+          "index_topk": 128,
+          "check_norm": True,
+      },
+      {
+          "testcase_name": "flash_s128_k4",
+          "attention": "flash",
+          "seq_len": 128,
+          "index_topk": 4,
+          "check_norm": True,
+      },
+      {
+          "testcase_name": "flash_s128_k128",
+          "attention": "flash",
+          "seq_len": 128,
+          "index_topk": 128,
+          "check_norm": True,
+      },
   )
-  # index_topk=4
-  def test_mla_match(self, seq_len=8):
-    """Verifies MLA output (train mode) matches PyTorch (MHA mode) with indexer."""
-
+  def test_mla_parity(self, attention, seq_len, index_topk, check_norm=False):
+    """Verifies JAX MLA output against the PyTorch reference implementation."""
     torch_inputs, jax_inputs = self.get_data(seq_len)
 
     # 1. PyTorch Run
-    pt_mla = MLA(self.pt_args)
+    pt_mla = MLA(self.pt_args, index_topk)
     init_torch_weights(pt_mla)
     pt_mla.eval()
 
@@ -937,6 +976,8 @@ class DeepseekV32MLATest(DeepseekTestBase):
         dtype=self.dtype,
         batch_size=self.batch_size,
         seq_len=self.seq_len,
+        attention=attention,
+        index_topk=index_topk,
     )
 
     jax_mla = attention_mla.MLA(
@@ -960,7 +1001,7 @@ class DeepseekV32MLATest(DeepseekTestBase):
         rope_factor=cfg.rope_factor,
         max_target_length=self.seq_len,
         mesh=mesh,
-        attention_kernel="dot_product",
+        attention_kernel=attention,
         inputs_q_shape=(self.batch_size, self.seq_len, cfg.emb_dim),
         inputs_kv_shape=(self.batch_size, self.seq_len, cfg.emb_dim),
         rngs=self.nnx_rng,
@@ -977,10 +1018,17 @@ class DeepseekV32MLATest(DeepseekTestBase):
         model_mode=MODEL_MODE_TRAIN,
     )
 
-    # 3 Compare
-    print("torch out", pt_out)
-    print("jax out", jax_out)
-    np.testing.assert_allclose(to_jax(pt_out), jax_out, rtol=1e-2, atol=1e-2)
+    # 3. Compare
+    if check_norm:
+      expected = to_jax(pt_out) / jnp.linalg.norm(to_jax(pt_out))
+      actual = jax_out / jnp.linalg.norm(jax_out)
+    else:
+      expected = to_jax(pt_out)
+      actual = jax_out
+
+    print("torch out", expected)
+    print("jax out", actual)
+    np.testing.assert_allclose(expected, actual, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":

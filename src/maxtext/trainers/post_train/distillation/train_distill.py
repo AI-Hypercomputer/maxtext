@@ -33,10 +33,8 @@ Architecture Overview:
    a standard interface (call signature) that the Tunix `DistillationTrainer` expects.
 """
 
-from typing import Any, Iterator, Sequence, Dict, Tuple
-
+from typing import Sequence
 from absl import app
-import flax
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
@@ -48,15 +46,15 @@ from orbax import checkpoint
 # MaxText Imports
 from MaxText import optimizers
 from MaxText import pyconfig
-from MaxText import tokenizer
-from MaxText.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline import tokenizer
+from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.trainers.post_train.distillation import distillation_utils
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 
 # Tunix Imports
 from tunix.distillation import distillation_trainer
-from tunix.distillation.strategies import logit
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 
@@ -149,84 +147,6 @@ def create_forward_fn(config: pyconfig.HyperParameters):
   return model_forward_fn
 
 
-# -----------------------------------------------------------------------------
-# Custom Data Structures & Strategies
-# -----------------------------------------------------------------------------
-
-
-@flax.struct.dataclass(frozen=True)
-class MaxTextTrainingInput(distillation_trainer.TrainingInput):
-  """Extended TrainingInput dataclass to carry MaxText-specific fields."""
-
-  #: Position indices for the tokens (for RoPE).
-  positions: Any = None
-  #: Segment IDs for packed sequences (0=padding, 1+=examples).
-  decoder_segment_ids: Any = None
-  #: Ground truth target tokens (used for loss calculation and logging).
-  targets: Any = None
-
-
-class MonitoredLogitStrategy(logit.LogitStrategy):
-  """Logit Strategy that returns detailed metrics for TensorBoard."""
-
-  def compute_loss(
-      self,
-      student_output: jax.Array,
-      teacher_output: jax.Array,
-      labels: jax.Array,
-  ) -> Tuple[jax.Array, Dict[str, jax.Array]]:
-    """Computes Loss and Auxiliary Metrics."""
-    # Calculate Distillation Loss (KL Divergence)
-    # Scale logits by temperature T for soft targets
-    # We use explicit float32 casting for stability in loss calculation
-    s_logits = student_output.astype(jnp.float32)
-    t_logits = teacher_output.astype(jnp.float32)
-
-    log_student_probs_temp = jax.nn.log_softmax(s_logits / self.temperature, axis=-1)
-    teacher_probs_temp = jax.nn.softmax(t_logits / self.temperature, axis=-1)
-
-    # KL(Teacher || Student)
-    kl_div = optax.kl_divergence(log_student_probs_temp, teacher_probs_temp)
-
-    # Scale gradients by T^2 (Hinton et al.)
-    soft_loss = jnp.mean(kl_div) * (self.temperature**2)
-
-    # 1. Student Hard Loss (Existing)
-    ce_loss_student = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
-    hard_loss = jnp.mean(ce_loss_student)
-
-    # 2. Teacher Hard Loss (For Verification)
-    ce_loss_teacher = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
-    teacher_hard_loss = jnp.mean(ce_loss_teacher)
-
-    # 3. Combine losses
-    total_loss = (self.alpha * soft_loss) + ((1.0 - self.alpha) * hard_loss)
-
-    # 4. Return Loss AND Metrics
-    metrics = {
-        "distill/soft_loss": soft_loss,
-        "distill/hard_loss": hard_loss,
-        "distill/kl_div": jnp.mean(kl_div),
-        "distill/teacher_loss": teacher_hard_loss,
-    }
-    return total_loss, metrics
-
-  def compute_eval_loss(
-      self,
-      student_output: jax.Array,
-      labels: jax.Array,
-  ) -> Tuple[jax.Array, Dict[str, jax.Array]]:
-    """Computes Eval Loss and returns empty aux dict (required for consistency)."""
-    # Parent logic for task loss
-    # We re-implement simple CE here to ensure float32 casting
-    s_logits = student_output.astype(jnp.float32)
-    ce_loss = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
-    task_loss = jnp.mean(ce_loss)
-
-    # Must return a tuple because _has_aux=True expects it
-    return task_loss, {}
-
-
 def _log_config_details(config: pyconfig.HyperParameters, label: str) -> None:
   """Logs detailed architecture configuration for verification.
 
@@ -252,7 +172,9 @@ class MaxTextDistillationTrainer(distillation_trainer.DistillationTrainer):
   (positions, segment_ids) are passed to the model.
   """
 
-  def _prepare_inputs(self, input_data: MaxTextTrainingInput) -> MaxTextTrainingInput:
+  def _prepare_inputs(
+      self, input_data: distillation_utils.MaxTextTrainingInput
+  ) -> distillation_utils.MaxTextTrainingInput:
     """Prepares inputs for the student model and runs the teacher model.
 
     This function generates the "Soft Targets" (logits) from the Teacher model
@@ -276,7 +198,7 @@ class MaxTextDistillationTrainer(distillation_trainer.DistillationTrainer):
 
     # 3. Return extended object so fields are available for Student training step
     # pylint: disable=unexpected-keyword-arg
-    return MaxTextTrainingInput(
+    return distillation_utils.MaxTextTrainingInput(
         input_tokens=input_data.input_tokens,
         input_mask=input_data.input_mask,
         teacher_output=teacher_output,
@@ -285,7 +207,7 @@ class MaxTextDistillationTrainer(distillation_trainer.DistillationTrainer):
         targets=input_data.targets,
     )
 
-  def _post_process_train_step(self, aux: Dict[str, jax.Array]) -> None:
+  def _post_process_train_step(self, aux: dict[str, jax.Array]) -> None:
     """Extracts auxiliary metrics from the strategy and buffers them for logging."""
     if self._buffered_train_metrics is None:
       return
@@ -301,59 +223,61 @@ class MaxTextDistillationTrainer(distillation_trainer.DistillationTrainer):
       self._buffered_train_metrics.additional_metrics[name][0].append(value)
 
 
-# -----------------------------------------------------------------------------
-# Data Loading Adapter
-# -----------------------------------------------------------------------------
+def _setup_and_restore_input_pipeline(trainer, raw_train_iter, config, train_config):
+  """Configures the trainer to save/restore Grain iterator state.
 
+  This function unconditionally replaces the default CheckpointManager with
+  MaxTextCheckpointManager. This ensures consistent API availability (like
+  wait_until_finished) and enables Grain checkpointing if the iterator supports it.
 
-class MaxTextToTunixIterator:
-  """Adapts the raw dictionary output of MaxText's data loader to Tunix objects.
+  Args:
+    trainer: The active DistillationTrainer instance.
+    raw_train_iter: The input pipeline iterator.
+    config: The MaxText HyperParameters.
+    train_config: The Tunix TrainingConfig.
 
-  MaxText's `input_pipeline_interface.create_data_iterator` yields a dictionary.
-  Tunix expects an object with specific attributes (input_tokens, etc.).
+  Returns:
+    The iterator to use for training (restored or original).
   """
+  is_grain_dataset = config.dataset_type == "grain"
+  has_save_method = hasattr(raw_train_iter, "save")
+  enable_checkpointing = raw_train_iter is not None and (is_grain_dataset or has_save_method)
 
-  def __init__(self, maxtext_iterator: Iterator):
-    """Initializes the adapter.
+  iterator_to_manage = raw_train_iter if enable_checkpointing else None
 
-    Args:
-      maxtext_iterator: The upstream iterator created by MaxText's input pipeline.
-    """
-    self._iterator = maxtext_iterator
-
-  def __iter__(self):
-    """Returns self as the iterator."""
-    return self
-
-  def __next__(self) -> MaxTextTrainingInput:
-    """Fetches the next batch and converts it to the Tunix data class.
-
-    Returns:
-      A MaxTextTrainingInput object containing the batch data.
-
-    Raises:
-      StopIteration: If the upstream iterator is exhausted.
-    """
-    batch = next(self._iterator)
-
-    # Ensure segmentation exists, default to ones if missing (standard non-packed)
-    if "inputs_segmentation" in batch:
-      input_mask = batch["inputs_segmentation"] != 0
-      seg_ids = batch["inputs_segmentation"]
+  if enable_checkpointing:
+    max_logging.log("Input Pipeline Checkpointing: ENABLED")
+    max_logging.log(f"Details: dataset_type='{config.dataset_type}', has_save={has_save_method}")
+  else:
+    max_logging.log("Input Pipeline Checkpointing: DISABLED")
+    if raw_train_iter is None:
+      max_logging.log("Reason: train_iter is None")
     else:
-      # Fallback for non-packed datasets
-      input_mask = jnp.ones_like(batch["inputs"], dtype=jnp.bool_)
-      seg_ids = None
+      max_logging.log(
+          f"Reason: Iterator '{type(raw_train_iter).__name__}' is not recognized as Grain "
+          f"(dataset_type='{config.dataset_type}', has_save={has_save_method})"
+      )
 
-    # pylint: disable=unexpected-keyword-arg
-    return MaxTextTrainingInput(
-        input_tokens=batch["inputs"],
-        input_mask=input_mask,
-        teacher_output=None,
-        positions=batch["inputs_position"],
-        decoder_segment_ids=seg_ids,
-        targets=batch["targets"],
-    )
+  # 1. Create the specialized manager (always)
+  maxtext_manager = distillation_utils.MaxTextCheckpointManager(
+      raw_iterator=iterator_to_manage,
+      root_directory=train_config.checkpoint_root_directory,
+      options=train_config.checkpointing_options,
+  )
+
+  # 2. Swap managers (ensure clean resource release)
+  if trainer.checkpoint_manager:
+    trainer.checkpoint_manager.close()
+  trainer.checkpoint_manager = maxtext_manager
+
+  # 3. Restore input state (if applicable)
+  if enable_checkpointing:
+    restored_iter = trainer.checkpoint_manager.restore_iterator()
+    if restored_iter is not None:
+      max_logging.log("Restored input pipeline state to match model step.")
+      return restored_iter
+
+  return raw_train_iter
 
 
 # -----------------------------------------------------------------------------
@@ -432,8 +356,8 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   student_forward_fn = create_forward_fn(student_config)
   teacher_forward_fn = create_forward_fn(teacher_config)
 
-  # Use Monitored strategy to enable KL/Soft/Hard Loss logging
-  strategy = MonitoredLogitStrategy(
+  # Use Monitored strategy from Utils
+  strategy = distillation_utils.MonitoredLogitStrategy(
       student_forward_fn=student_forward_fn,
       teacher_forward_fn=teacher_forward_fn,
       labels_fn=labels_fn,
@@ -473,7 +397,12 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
       checkpointing_options=checkpointing_options,
   )
 
-  # 5. Initialize Trainer
+  # 5. Data Iterators (Init BEFORE Trainer)
+  # We use MaxText's native create_data_iterator which creates both train and eval iterators
+  max_logging.log("Initializing Data Iterators via MaxText pipeline...")
+  raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
+
+  # 6. Initialize Trainer
   trainer = MaxTextDistillationTrainer(
       student_model=student_model,
       teacher_model=teacher_model,
@@ -482,12 +411,13 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
       training_config=train_config,
   )
   trainer.is_managed_externally = True
-
-  # Force enable auxiliary metric logging
   trainer._has_aux = True  # pylint: disable=protected-access
 
-  # 6. Configure Input Mapping
-  # Maps the attributes of MaxTextTrainingInput to the kwargs expected by model_forward_fn
+  # 7. Input Pipeline Checkpointing
+  # Replace the default CheckpointManager with a Grain-aware one, which enables iterator checkpointing for grain datasets.
+  raw_train_iter = _setup_and_restore_input_pipeline(trainer, raw_train_iter, student_config, train_config)
+
+  # 8. Configure Input Mapping
   trainer = trainer.with_gen_model_input_fn(
       lambda batch: {
           "input_tokens": batch.input_tokens,
@@ -499,28 +429,23 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
       }
   )
 
-  # 7. Data Iterators
-  # We use MaxText's native create_data_iterator which creates both train and eval iterators
-  # based on the config parameters (dataset_type, eval_interval, etc.)
-  max_logging.log("Initializing Data Iterators via MaxText pipeline...")
-  raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
-
-  train_iter = MaxTextToTunixIterator(raw_train_iter)
+  # 9. Create Iterator Wrappers (Use Utils)
+  train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
 
   eval_iter = None
   if raw_eval_iter is not None:
     max_logging.log("Evaluation iterator successfully initialized.")
-    eval_iter = MaxTextToTunixIterator(raw_eval_iter)
+    eval_iter = distillation_utils.MaxTextToTunixIterator(raw_eval_iter)
   elif student_config.eval_interval > 0:
     max_logging.log("Warning: eval_interval > 0 but create_data_iterator returned None for eval_iter.")
 
-  # 8. Train
+  # 10. Train
   max_logging.log("Starting Distillation Training...")
   with mesh, nn_partitioning.axis_rules(student_config.logical_axis_rules):
     # Pass both iterators to the trainer
     trainer.train(train_iter, eval_iter)
 
-  # 9. Final Save (Conditional)
+  # 11. Final Save (Conditional)
   if student_config.save_checkpoint_on_completion:
     should_save = student_config.steps % student_config.checkpoint_period
 
@@ -532,10 +457,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
         )
         if saved:
           # Ensure underlying orbax manager finishes writing
-          # pylint: disable=protected-access
-          if trainer.checkpoint_manager._checkpoint_manager is not None:
-            trainer.checkpoint_manager._checkpoint_manager.wait_until_finished()
-          # pylint: enable=protected-access
+          trainer.checkpoint_manager.wait_until_finished()
           max_logging.log("Final checkpoint saved.")
 
       except Exception as e:  # pylint: disable=broad-exception-caught

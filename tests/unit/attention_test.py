@@ -15,7 +15,6 @@
 """Tests for Attentions."""
 
 import itertools
-import os.path
 import random
 import sys
 import unittest
@@ -37,7 +36,6 @@ from MaxText.common_types import (
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
 )
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers.attention_mla import MLA
 from MaxText.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
 from MaxText.layers.attentions import Attention
@@ -1118,7 +1116,7 @@ class AttentionTest(parameterized.TestCase):
     vllm_config_arguments["attention"] = "vllm_rpa"
     vllm_config_arguments["chunk_attn_window_size"] = 128
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **vllm_config_arguments,
     )
 

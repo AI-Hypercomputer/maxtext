@@ -26,7 +26,6 @@ from tempfile import gettempdir
 import pytest
 
 from MaxText.train_compile import main as train_compile_main
-from MaxText.globals import MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path
 
 pytestmark = [pytest.mark.external_training]
@@ -151,7 +150,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=tpu7x-16",
             "compile_topology_num_slices=1",
@@ -169,7 +168,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=tpu7x-8",
             "compile_topology_num_slices=2",
@@ -740,7 +739,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "compile_topology_num_slices=1",
@@ -757,7 +756,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "use_iota_embed=true",
@@ -768,7 +767,8 @@ class TrainCompile(unittest.TestCase):
             "megablox=True",
             "per_device_batch_size=1",
             "max_target_length=1024",
-            "attention=dot_product",  # TODO: update to flash attention when it's available.
+            "attention=flash",
+            "use_tokamax_splash=True",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             # without_device_limit
@@ -784,13 +784,34 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
-            "model_name=olmo3_7b",
+            "model_name=olmo3-7b",
             "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_mhc_integration(self):
+    """AOT test for Manifold-onstrained Hyper Connection implementation"""
+    compiled_trainstep_file = "/tmp/test_mhc_integration"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek-custom",
+            "per_device_batch_size=4",
+            "scan_layers=True",
+            "max_target_length=1024",
+            "mhc_expansion_rate=4",
+            "attention=flash",
+            "use_tokamax_splash=True",
         )
     )

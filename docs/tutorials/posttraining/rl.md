@@ -102,15 +102,15 @@ and `vllm`, follow these steps:
    [MaxText Package Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/build_and_test_maxtext.yml?query=event%3Aschedule)
    GitHub Actions workflow.
 
-1. Select the latest successful run.
+2. Select the latest successful run.
 
-1. Within the workflow run, find and click on the `maxtext_jupyter_notebooks (py312)` job, then expand the `run` job.
+3. Within the workflow run, find and click on the `maxtext_jupyter_notebooks (py312)` job, then expand the `run` job.
 
-1. Locate the `Record Commit IDs` step. The commit SHAs for `maxtext`, `tunix`,
+4. Locate the `Record Commit IDs` step. The commit SHAs for `maxtext`, `tunix`,
    `tpu-inference`, and `vllm` that were used in that successful run are listed
    in the logs of this step.
 
-1. Prior to installation, ensure that the `maxtext`, `tunix`, `vllm`, and `tpu-inference` repositories are synchronized to the specific commits recorded from the CI logs. For each repository, use the following command to switch to the correct commit: `git checkout <commit_id>`.
+5. Prior to installation, ensure that the `maxtext`, `tunix`, `vllm`, and `tpu-inference` repositories are synchronized to the specific commits recorded from the CI logs. For each repository, use the following command to switch to the correct commit: `git checkout <commit_id>`.
 
 ## Setup environment variables
 
@@ -127,7 +127,15 @@ export HF_TOKEN=<Hugging Face access token>
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
 
 export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
+
+export CHIPS_PER_VM=<the number of chips per VM> # depends on hardware, for v5p this is 4, for v6e this is 8
 ```
+
+For the value of `CHIPS_PER_VM` on different TPU hardware, refer the official document
+
+- [TPU v5e](https://docs.cloud.google.com/tpu/docs/v5e) (single host, chips_per_vm=8)
+- [TPU v5p](https://docs.cloud.google.com/tpu/docs/v5p) (single host, chips_per_vm=4)
+- [TPU v6e](https://docs.cloud.google.com/tpu/docs/v6e) (single host, chips_per_vm=8)
 
 ## Get your model checkpoint
 
@@ -153,22 +161,23 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 Run the following command for GRPO:
 
 ```
-python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+python3 -m src.MaxText.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL} \
   tokenizer_path=${TOKENIZER} \
   load_parameters_path=${MAXTEXT_CKPT_PATH} \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  hf_access_token=${HF_TOKEN}
+  hf_access_token=${HF_TOKEN} \
+  chips_per_vm=${CHIPS_PER_VM}
 ```
 
 The overview of what this run will do is as follows:
 
 1. We load a policy model and a reference model. Both are copies of the model
    checkpoint you specified (e.g., `Llama3.1-8b-Instruct`).
-1. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
-1. Train the policy model using GRPO.
-1. Evaluate the policy model's performance on GSM8K math reasoning benchmark
+2. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
+3. Train the policy model using GRPO.
+4. Evaluate the policy model's performance on GSM8K math reasoning benchmark
    after the post-training with GRPO.
 
 ## Run GSPO
@@ -176,21 +185,22 @@ The overview of what this run will do is as follows:
 Run the following command for GSPO:
 
 ```
-python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+python3 -m src.MaxText.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL} \
   tokenizer_path=${TOKENIZER} \
   load_parameters_path=${MAXTEXT_CKPT_PATH} \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   hf_access_token=${HF_TOKEN} \
-  loss_algo=gspo-token
+  loss_algo=gspo-token \
+  chips_per_vm=${CHIPS_PER_VM}
 ```
 
 The overview of what this run will do is as follows:
 
 1. We load a policy model and a reference model. Both are copies of the model
    checkpoint you specified (e.g., `Llama3.1-8b-Instruct`).
-1. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
-1. Train the policy model using GSPO.
-1. Evaluate the policy model's performance on GSM8K math reasoning benchmark
+2. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
+3. Train the policy model using GSPO.
+4. Evaluate the policy model's performance on GSM8K math reasoning benchmark
    after the post-training with GSPO.

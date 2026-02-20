@@ -16,20 +16,21 @@
 
 from typing import Type
 
+from flax import linen as nn
+from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from flax import linen as nn
-from flax import nnx
-
+from MaxText import sharding
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
+from MaxText.globals import EPS
+from MaxText.layers import nnx_wrappers
+from MaxText.layers.decoders import DecoderLayer
+from MaxText.layers.initializers import variable_to_logically_partitioned
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.decoders import DecoderLayer
-from MaxText.layers import nnx_wrappers
-from MaxText.globals import EPS
-from MaxText.layers.initializers import variable_to_logically_partitioned
+
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 
@@ -84,7 +85,7 @@ class MultiTokenPredictionLayer(nnx.Module):
     cfg = self.config
 
     self.embedding_norm = RMSNorm(
-        num_features=cfg.base_emb_dim,
+        num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -92,7 +93,7 @@ class MultiTokenPredictionLayer(nnx.Module):
         rngs=rngs,
     )
     self.hidden_state_norm = RMSNorm(
-        num_features=cfg.base_emb_dim,
+        num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -100,8 +101,8 @@ class MultiTokenPredictionLayer(nnx.Module):
         rngs=rngs,
     )
     self.projection_layer = DenseGeneral(
-        in_features_shape=2 * cfg.base_emb_dim,
-        out_features_shape=cfg.base_emb_dim,
+        in_features_shape=2 * cfg.emb_dim,
+        out_features_shape=cfg.emb_dim,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         use_bias=False,
@@ -118,13 +119,48 @@ class MultiTokenPredictionLayer(nnx.Module):
     self.transformer_layer = nnx_wrappers.ToNNX(mtp_transformer_layer, rngs=rngs)
 
     # ToNNX requires explicit initialization with sample inputs for proper parameter setup.
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=cfg, model_mode=MODEL_MODE_TRAIN)
     self.transformer_layer.lazy_init(
-        inputs=jnp.zeros((1, 1, cfg.base_emb_dim), dtype=cfg.dtype),
+        inputs=jnp.zeros((batch_size, seq_len, self.config.emb_dim), dtype=self.config.dtype),
         decoder_segment_ids=None,
-        decoder_positions=jnp.zeros((1, 1), dtype=jnp.int32),
+        decoder_positions=jnp.zeros((batch_size, seq_len), dtype=jnp.int32),
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
+
+
+  @property
+  def embedding_norm(self):
+    return getattr(self, f"mtp_{self.layer_number}_embedding_norm")
+
+  @embedding_norm.setter
+  def embedding_norm(self, module):
+    setattr(self, f"mtp_{self.layer_number}_embedding_norm", module)
+
+  @property
+  def hidden_state_norm(self):
+    return getattr(self, f"mtp_{self.layer_number}_hidden_state_norm")
+
+  @hidden_state_norm.setter
+  def hidden_state_norm(self, module):
+    setattr(self, f"mtp_{self.layer_number}_hidden_state_norm", module)
+
+  @property
+  def projection_layer(self):
+    return getattr(self, f"mtp_{self.layer_number}_projection")
+
+  @projection_layer.setter
+  def projection_layer(self, module):
+    setattr(self, f"mtp_{self.layer_number}_projection", module)
+
+  @property
+  def transformer_layer(self):
+    return getattr(self, f"mtp_{self.layer_number}_transformer_layer")
+
+  @transformer_layer.setter
+  def transformer_layer(self, module):
+    setattr(self, f"mtp_{self.layer_number}_transformer_layer", module)
+
 
   def __call__(
       self,
@@ -149,6 +185,14 @@ class MultiTokenPredictionLayer(nnx.Module):
     Returns:
         Processed hidden state. Shape [batch, seq_len, hidden_size].
     """
+    target_token_embedding = sharding.maybe_shard_with_logical(
+        target_token_embedding,
+        ("activation_batch", "activation_length", "activation_embed"),
+        self.mesh,
+        self.config.shard_mode,
+        self.config.logical_axis_rules,
+    )
+
     embedding_norm = self.embedding_norm(target_token_embedding)
     hidden_state_norm = self.hidden_state_norm(prev_hidden_state)
     concatenated_features = jnp.concatenate([embedding_norm, hidden_state_norm], axis=-1)
@@ -181,13 +225,6 @@ class MultiTokenPredictionBlock(nnx.Module):
     self.transformer_layer_module = transformer_layer_module
     self.decoder = decoder
     self.rngs = rngs if rngs is not None else nnx.Rngs(0)
-
-    # NNX Variables are exposed as Linen mutable collections by ToLinen wrapper.
-    self.losses = mtp_losses(jnp.zeros((config.mtp_num_layers,), dtype=jnp.float32))
-    self.weights = mtp_losses(jnp.zeros((config.mtp_num_layers,), dtype=jnp.float32))
-    # Float32 used to avoid gradient errors; converted to int32 in acceptance rate calculation.
-    self.mtp_preds = mtp_acceptance(jnp.zeros((1,), dtype=jnp.float32))
-    self.mtp_mask = mtp_acceptance(jnp.zeros((1,), dtype=jnp.float32))
 
     # 1-indexed to match paper convention.
     for k in range(1, config.mtp_num_layers + 1):
@@ -268,11 +305,13 @@ class MultiTokenPredictionBlock(nnx.Module):
         mtp_masks_list.append(rolled_target_mask)
 
     if mtp_losses_list:
-      self.losses.value = jnp.stack(mtp_losses_list)
-      self.weights.value = jnp.stack(mtp_weights_list)
+      # Not part of checkpoints, don't declare in __init__
+      self.losses = mtp_losses(jnp.stack(mtp_losses_list))
+      self.weights = mtp_losses(jnp.stack(mtp_weights_list))
     if mtp_preds_list:
-      self.mtp_preds.value = jnp.stack(mtp_preds_list)
-      self.mtp_mask.value = jnp.stack(mtp_masks_list)
+      # Not part of checkpoints, don't declare in __init__
+      self.mtp_preds = mtp_acceptance(jnp.stack(mtp_preds_list))
+      self.mtp_mask = mtp_acceptance(jnp.stack(mtp_masks_list))
 
     return {}
 

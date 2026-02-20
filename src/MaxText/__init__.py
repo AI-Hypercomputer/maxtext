@@ -27,6 +27,12 @@ __description__ = (
 
 from collections.abc import Sequence
 
+import os
+# In order to have any effect on the C++ logging this has to be set before we import anything from jax.
+# When jax is imported, its `__init__.py` calls `cloud_tpu_init()`, which also initializes the C++ logger.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "0")
+del os
+
 from jax.sharding import Mesh
 
 from MaxText import pyconfig
@@ -34,7 +40,6 @@ from MaxText.layers import models
 from maxtext.trainers.post_train.dpo import dpo_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
-from maxtext.utils.model_creation_utils import from_config
 
 Transformer = models.Transformer
 transformer_as_linen = models.transformer_as_linen

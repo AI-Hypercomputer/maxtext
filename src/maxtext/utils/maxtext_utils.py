@@ -37,8 +37,8 @@ import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_c
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 from MaxText import sharding
-from MaxText.configs import types
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from maxtext.configs import types
 from maxtext.inference.page_manager import PageState
 from maxtext.common import checkpointing
 from maxtext.multimodal import processor as mm_processor
@@ -128,7 +128,14 @@ def get_reorder_callable(cp_size, shard_mode):
 def get_shaped_batch(config):
   """Return the shape of the batch - this is what eval_shape would return for the
   output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
-  batch_shape = (config.global_batch_size_to_load, config.max_target_length)
+  if config.enable_diloco:
+    batch_shape = (
+        config.num_diloco_replicas,
+        config.global_batch_size_to_load // config.num_diloco_replicas,
+        config.max_target_length,
+    )
+  else:
+    batch_shape = (config.global_batch_size_to_load, config.max_target_length)
   shaped_batch = {}
   shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
@@ -496,7 +503,12 @@ def get_dense_moe_layers(config):
 
 
 def calculate_gated_delta_net_flops_per_device(config):
-  """Calculates the FLOPs for a single Gated Delta Net (Linear Attention) layer."""
+  """
+  - Calculates the FLOPs for a single Gated Delta Net (Linear Attention) layer.
+  - Ref: Megatron calculation for the gated delta net:
+    - https://github.com/NVIDIA/Megatron-LM/blob/8f1c2f8ae53b4e3f32c0ae7f397d8b38a675eaa2/megatron/training/training.py#L513
+  - Core complexity is based on the recurrent state update view (4 ops * 2 FLOPs = 8).
+  """
   B = config.per_device_batch_size
   S = config.max_target_length
   E = config.emb_dim
@@ -505,54 +517,33 @@ def calculate_gated_delta_net_flops_per_device(config):
   H_v = config.gdn_num_value_heads
   D_k = config.gdn_key_head_dim
   D_v = config.gdn_value_head_dim
-  C = config.gdn_chunk_size
   K_conv = config.gdn_conv_kernel_dim
 
   K_dim = H_k * D_k
   V_dim = H_v * D_v
 
   # 1. Projections (Learnable Weights)
-  # in_proj_qkvz: E -> 2*K_dim + 2*V_dim
-  flops_qkvz = 2 * B * S * E * (2 * K_dim + 2 * V_dim)
-  # in_proj_ba: E -> 2*H_v
-  flops_ba = 2 * B * S * E * (2 * H_v)
-  # out_proj: V_dim -> E
-  flops_out = 2 * B * S * V_dim * E
+  # Represents: in_proj_qkvz (2*K + 2*V) + in_proj_ba (2*H_v)
+  # We multiply by 2 for FMA (Multiply + Add)
+  flops_qkvz_ba = 2 * B * S * E * (2 * K_dim + 2 * V_dim + 2 * H_v)
 
-  flops_projections = flops_qkvz + flops_ba + flops_out
+  # Represents: out_proj
+  flops_out = 2 * B * S * E * V_dim
+
+  flops_projections = flops_qkvz_ba + flops_out
 
   # 2. Convolution (Learnable Weights)
-  # Depthwise conv on dim (2*K_dim + V_dim)
-  # 2 * B * S * Channels * Kernel
-  flops_conv = 2 * B * S * (2 * K_dim + V_dim) * K_conv
+  # We multiply by 2 for FMA
+  flops_conv = 2 * B * S * K_conv * (2 * K_dim + V_dim)
 
-  # 3. Core Gated Delta Net (Attention-like operations)
-  # Assumptions:
-  # H = H_v (broadcasting K to V heads if H_v > H_k)
-  # N = num_chunks & N * C ~ S
-  #
-  # Query (Q): [B, S, H_v, D_k]
-  # Keys (K): [B, S, H_v, D_k]
-  # Values (V): [B, S, H_v, D_v]
-  # Intra-Chunk Attention (A): [B, N, H_v, C, C]
-  # Recurrent State (S): [B, N, H_v, D_k, D_v]
-
-  # - Intra-chunk terms (per chunk C):
-  #   - attn (K*K): 2 * B * S * H_v * C * D_k
-  #   - val_intra (A*V): 2 * B * S * H_v * C * D_v
-  #   - k_cum (A*K): 2 * B * S * H_v * C * D_k
-  #   - inner_attn_body loop (iterative refinement): ≈ (C - 1) * B * H * N * C^2 ≈ B * H * S * C^2
-  flops_intra = 2 * B * S * H_v * C * (2 * D_k + D_v) + (B * H_v * S * C**2)
-
-  # - Inter-chunk terms (Recurrent State D_k * D_v):
-  #   - attn_i (Q*K): 2 * B * S * H_v * C * D_k
-  #   - v_prime (K*S): 2 * B * S * H_v * D_k * D_v
-  #   - attn_inter (Q*S): 2 * B * S * H_v * D_k * D_v
-  #   - core_out (A*V): 2 * B * S * H_v * C * D_v
-  #   - update (K*V): 2 * B * S * H_v * D_k * D_v
-  flops_inter = (2 * B * S * H_v * C * (D_k + D_v)) + (6 * B * S * H_v * D_k * D_v)
-
-  flops_core = flops_intra + flops_inter
+  # 3. Core Gated Delta Net
+  # This counts 4 distinct O(D^2) operations in the recurrent update:
+  #   KK^T, VK^T, S(a(I-bKK^T)), and SQ.
+  # We multiply by 2 for FMA.
+  # Total Core FLOPs = 2 (FMA) * 4 (Ops) * H * D^2 = 8 * H * D^2 per token.
+  # We use D_k * D_v to generalize D^2 for potentially differing head dimensions.
+  flops_core_per_token = H_v * (D_k * D_v) * 8
+  flops_core = B * S * flops_core_per_token
 
   # Weights part: Projections + Conv
   gdn_weight_flops = flops_projections + flops_conv

@@ -40,7 +40,7 @@ Set `--remove-local-dataset-files` to remove dataset files created locally after
 For more information, check out `python3 -m MaxText.generate_distillation_data --help`.
 Note:
 Make sure to run maxengine server in a new terminal before executing this command. Example command to run maxengine server:
-  python3 -m MaxText.maxengine_server src/MaxText/configs/base.yml \
+  python3 -m MaxText.maxengine_server src/maxtext/configs/base.yml \
     model_name=deepseek2-16b tokenizer_path=deepseek-ai/DeepSeek-V2-Lite-chat tokenizer_type=huggingface \
     load_parameters_path=<unscanned checkpoint path> \
     max_target_length=2048 max_prefill_predict_length=256 \
@@ -60,7 +60,7 @@ from huggingface_hub import create_repo, get_full_repo_name, repo_exists, upload
 
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
-from MaxText.input_pipeline import _distillation_data_processing
+from maxtext.input_pipeline import distillation_data_processing
 
 from jetstream.core.proto import jetstream_pb2
 from jetstream.core.proto import jetstream_pb2_grpc
@@ -231,7 +231,7 @@ def upload_data(config, data, batch_num):  # pylint: disable=redefined-outer-nam
 
 def generate_data(config):  # pylint: disable=redefined-outer-name
   """Generates data for distillation."""
-  dataset = _distillation_data_processing.load_dataset(config)
+  dataset = distillation_data_processing.load_dataset(config)
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(
       config.tokenizer_path,
@@ -244,8 +244,8 @@ def generate_data(config):  # pylint: disable=redefined-outer-name
     data = dataset[start_idx : start_idx + config.batch_size]
     start_idx += config.batch_size
     sampled_dataset = Dataset.from_dict(data)
-    sampled_dataset = _distillation_data_processing.process_dataset(config, sampled_dataset)
-    requests = _distillation_data_processing.filter_dataset(config, sampled_dataset, tokenizer)
+    sampled_dataset = distillation_data_processing.process_dataset(config, sampled_dataset)
+    requests = distillation_data_processing.filter_dataset(config, sampled_dataset, tokenizer)
     distillation_data = generate_completions(config, requests, tokenizer)
     upload_data(config, distillation_data, batch_num)
 

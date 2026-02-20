@@ -20,7 +20,7 @@ import unittest
 from absl.testing import absltest
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 
 pytestmark = [pytest.mark.external_serving]
@@ -43,7 +43,7 @@ class Inference_Microbenchmark(unittest.TestCase):
     config = pyconfig.initialize(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "tpu_smoke_test.yml"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "tpu", "tpu_smoke_test.yml"),
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "ici_autoregressive_parallelism=-1",
             "ici_fsdp_parallelism=1",

@@ -100,6 +100,13 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
+def get_batchsplit_init_kernel_axes():
+  return (
+      ("embed_no_exp", "fsdp_transpose_only", "expert_only"),
+      ("embed_no_exp", "fsdp_transpose_and_expert", None),
+  )
+
+
 def random_routing(rng_key, gate_logits, num_experts_per_tok):
   """Performs random routing of tokens to experts.
 
@@ -349,6 +356,8 @@ class RoutedMoE(nnx.Module):
     elif self.config.use_2d_fsdp_sharding:
       self.wi_kernel_axes = ("embed_no_exp", "mlp", None)
       self.wo_kernel_axes = ("embed_no_exp", "mlp", None)
+    elif self.config.use_batch_split_schedule:
+      self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
     else:
       self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
       self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
@@ -877,7 +886,9 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
-    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count):
+    def gmm(
+        inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes
+    ):
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -917,6 +928,7 @@ class RoutedMoE(nnx.Module):
               use_tokamax_backend=self.config.use_tokamax_gmm,
               weight_gather_axes=weight_gather_axes,
               input_buffer_count=input_buffer_count,
+              combine_scopes=combine_scopes,
           )
         else:
           output = tokamax.ragged_dot(
@@ -1231,8 +1243,16 @@ class RoutedMoE(nnx.Module):
           self.config.wo_tile_dlhs_buffer_count,
           self.config.wo_tile_drhs_buffer_count,
       )
+
+      wi_combine_scopes = self.config.wi_combine_scopes
+      wo_combine_scopes = self.config.wo_combine_scopes
       layer_w0 = gmm_fn(
-          x, w0, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes, input_buffer_count=wi_input_buffer_count
+          x,
+          w0,
+          tiling=wi_tile_size,
+          weight_gather_axes=wi_gather_axes,
+          input_buffer_count=wi_input_buffer_count,
+          combine_scopes=wi_combine_scopes,
       )
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
@@ -1241,7 +1261,12 @@ class RoutedMoE(nnx.Module):
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
 
       layer_w1 = gmm_fn(
-          x, w1, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes, input_buffer_count=wi_input_buffer_count
+          x,
+          w1,
+          tiling=wi_tile_size,
+          weight_gather_axes=wi_gather_axes,
+          input_buffer_count=wi_input_buffer_count,
+          combine_scopes=wi_combine_scopes,
       )
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
@@ -1256,6 +1281,7 @@ class RoutedMoE(nnx.Module):
           tiling=wo_tile_size,
           weight_gather_axes=wo_gather_axes,
           input_buffer_count=wo_input_buffer_count,
+          combine_scopes=wo_combine_scopes,
       )
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(

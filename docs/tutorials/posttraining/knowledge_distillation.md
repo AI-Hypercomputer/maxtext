@@ -27,7 +27,7 @@ This tutorial focuses on **response-based knowledge distillation**, a technique 
    - The pre-trained teacher model (running in vLLM) generates a new dataset of input-output pairs.
    - The student model is then trained on this teacher-generated dataset using standard fine-tuning techniques in MaxText.
 
-1. **Online Distillation (Logit Matching):**
+2. **Online Distillation (Logit Matching):**
 
    - During the training process, both the teacher model (which is typically frozen) and the student model process the same input data simultaneously.
    - The student model is trained by minimizing a loss function that encourages its output logits to match the logits produced by the teacher model for the same inputs.
@@ -51,7 +51,7 @@ To install MaxText and its dependencies for post-training (including vLLM for th
 
 1. Follow the [MaxText installation instructions](https://maxtext.readthedocs.io/en/latest/install_maxtext.html#install-maxtext).
 
-1. Install the additional dependencies for post-training:
+2. Install the additional dependencies for post-training:
 
 ```bash
 bash tools/setup/setup_post_training_requirements.sh
@@ -132,7 +132,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 export PRE_TRAINED_MODEL_CKPT_DIRECTORY=${BASE_DIRECTORY}/llama3.1-8b-ckpt
 
 # Convert to MaxText format
-python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml \
+python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
     model_name=llama3.1-8b \
     hf_access_token=${HF_TOKEN} \
     base_output_directory=${PRE_TRAINED_MODEL_CKPT_DIRECTORY} \
@@ -170,7 +170,7 @@ You can now fine-tune your smaller student model using supervised fine-tuning te
 Example command to run fine-tuning on a TPU v6e-8:
 
 ```bash
-python3 -m MaxText.sft.sft_trainer src/MaxText/configs/sft.yml \
+python3 -m MaxText.sft_trainer src/maxtext/configs/post_train/sft.yml \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_DIRECTORY}/distillation/qwen3-32b-distill-llama3.1-8b \
   tokenizer_path=meta-llama/Llama-3.1-8B-Instruct tokenizer_type=huggingface \
@@ -209,7 +209,7 @@ largest_dir="${sorted_dirs[-1]}"
 FINE_TUNED_MODEL_CKPT_PATH=${CHECKPOINTS_PATH}/${largest_dir}/model_params
 
 # Fine-tune student model on original dataset
-python3 -m MaxText.sft.sft_trainer src/MaxText/configs/sft.yml \
+python3 -m MaxText.sft.sft_trainer src/maxtext/configs/post_train/sft.yml \
   run_name=${RUN_NAME}_stage2 \
   base_output_directory=${BASE_DIRECTORY}/distillation/qwen3-32b-distill-llama3.1-8b \
   tokenizer_path=meta-llama/Llama-3.1-8B-Instruct tokenizer_type=huggingface \

@@ -200,6 +200,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Skipping jax distributed system since its not needed for single controller.")
     return
   if jax.distributed.is_initialized():
+    max_logging.log("already initialized")
     max_logging.log("Jax distributed system is already initialized.")
     return
   if raw_keys["inference_benchmark_test"]:

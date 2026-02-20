@@ -35,6 +35,7 @@ from MaxText.layers import linears
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
+from MaxText.layers import mhc
 from MaxText import sharding
 from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.normalizations import rms_norm
@@ -731,6 +732,11 @@ class Decoder(nn.Module):
         audio_masks,
     )
 
+    mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)
+    if cfg.mhc_expansion_rate > 1:
+      # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
+      y = mhc_expand(y)
+
     policy = self.get_remat_policy()
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
     # scan does not support kwargs in layer call, passing broadcast_args as positional arg
@@ -902,6 +908,8 @@ class Decoder(nn.Module):
               layer_kwargs = {"layer_idx": lyr}
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
+            if cfg.decoder_block == DecoderBlockType.OLMO3:
+              layer_kwargs = {"attention_type": olmo3.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
@@ -925,7 +933,11 @@ class Decoder(nn.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    hidden_state = y
+    if cfg.mhc_expansion_rate > 1:
+      # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
+      hidden_state = mhc_reduce(y)
+    else:
+      hidden_state = y
 
     # When initializing with vLLM RPA attention, we need to run the output head to
     # initialize any parameters associated with it.

@@ -199,8 +199,23 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   # get MoE load balance loss
   moe_lb_loss = 0.0
   if config.num_experts > 1:
-    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
-    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+    # Note: the key is affected by the model implementation
+    possible_keys = [
+        ("intermediates", "decoder", "layers", "moe_lb_loss"),
+        ("intermediates", "decoder", "moe_layers", "moe_lb_loss"),
+    ]
+
+    total_moe_lb_loss = 0.0
+    found_loss = False
+    for nested_key in possible_keys:
+      total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+      if total_moe_lb_loss != 0.0:
+        found_loss = True
+        break
+
+    if not found_loss:
+      max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
+
     moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
     loss += moe_lb_loss
 
@@ -541,7 +556,6 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
   tf.config.set_visible_devices([], "GPU")
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = (
         os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"

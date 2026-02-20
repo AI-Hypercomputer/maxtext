@@ -20,6 +20,9 @@ import sys
 from typing import Any
 import copy
 
+# Disable dill to avoid conflict with gfile (dill requires buffering=0, which gfile forbids)
+os.environ["HF_DATASETS_DISABLE_DILL"] = "1"
+
 import jax
 import jax.numpy as jnp
 
@@ -27,8 +30,9 @@ import omegaconf
 
 from MaxText import pyconfig_deprecated
 from MaxText.common_types import DecoderBlockType, ShardMode
-from MaxText.configs import types
-from MaxText.configs.types import MaxTextConfig
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.configs import types
+from maxtext.configs.types import MaxTextConfig
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_utils
 
@@ -49,7 +53,13 @@ def yaml_key_to_env_key(s: str) -> str:
 
 def resolve_config_path(param: str) -> str:
   """Resolve config path to auto rewrite to use new src folder."""
-  return param if os.path.isfile(param) else os.path.join("src", param)
+  if os.path.isfile(param):
+    return param
+  elif "MaxText" in param:
+    lowercase_param = param.replace("MaxText", "maxtext")
+    if os.path.isfile(lowercase_param):
+      return lowercase_param
+  return os.path.join("src", param)
 
 
 def _merge_logical_axis_rules(base_rules, new_rules):
@@ -83,8 +93,7 @@ def _load_config(config_name: str) -> omegaconf.DictConfig:
       # Search relative to current config, then in the default configs folder
       loaded_parent_config_filename = os.path.join(os.path.dirname(config_name), base_path)
       if not os.path.isfile(loaded_parent_config_filename):
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        loaded_parent_config_filename = os.path.join(dir_path, "configs", base_path)
+        loaded_parent_config_filename = os.path.join(MAXTEXT_CONFIGS_DIR, base_path)
     else:
       loaded_parent_config_filename = base_path
 
@@ -224,6 +233,10 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   if model_name != "default":
     # First try relative to base config path
     model_config_path = os.path.join(os.path.dirname(config_path), "models", f"{model_name}.yml")
+    # Try looking for "models" under "src/maxtext/configs/"
+    if not os.path.isfile(model_config_path):
+      model_config_path = os.path.join(os.path.dirname(os.path.dirname(config_path)), "models", f"{model_name}.yml")
+
     if not os.path.isfile(model_config_path):
       # Fallback to default location within package
       dir_path = os.path.dirname(os.path.realpath(__file__))
