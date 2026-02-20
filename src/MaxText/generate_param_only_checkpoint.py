@@ -25,18 +25,16 @@ import os.path
 from typing import Sequence
 
 from absl import app
-
 from etils import epath
-
 import jax
-from jax.sharding import Mesh
 from jax import random
-
+from jax.sharding import Mesh
 from MaxText import optimizers
 from MaxText import pyconfig
-from MaxText.common_types import DecoderBlockType, MODEL_MODE_TRAIN
-from MaxText.layers import models, quantizations
 from maxtext.common import checkpointing
+from MaxText.common_types import DecoderBlockType, MODEL_MODE_TRAIN
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import gcs_utils
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging

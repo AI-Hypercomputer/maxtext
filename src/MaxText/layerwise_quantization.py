@@ -33,24 +33,22 @@ python3 -m MaxText.layerwise_quantization  src/maxtext/configs/base.yml \
 import os
 from typing import Any, Sequence
 
-from tqdm import tqdm
-
-import jax
-import jax.numpy as jnp
 from absl import app
 from aqt.jax.v2 import aqt_tensor
-
-from flax.linen import partitioning as nn_partitioning
 from flax import nnx
-
+from flax.linen import partitioning as nn_partitioning
+import jax
+import jax.numpy as jnp
 from MaxText import common_types
 from MaxText import pyconfig
-from MaxText.layers import models, quantizations, deepseek
 from maxtext.common import checkpointing
+from maxtext.layers import quantizations
+from maxtext.models import deepseek, models
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 import orbax.checkpoint as ocp
+from tqdm import tqdm
 
 IGNORE = ocp.PLACEHOLDER
 PRNGKeyType = Any

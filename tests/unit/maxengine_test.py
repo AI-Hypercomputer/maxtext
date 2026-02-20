@@ -15,23 +15,21 @@
 """ Tests for the maxengine """
 
 import functools
-import pytest
 import sys
 import unittest
-
-import numpy as np
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
-from maxtext.utils import maxtext_utils
-from MaxText import pyconfig, maxengine
+from MaxText import maxengine, pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import quantizations
 from MaxText.maxengine import MaxEngine
+from maxtext.models import models
+from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
+import numpy as np
+import pytest
 
 pytestmark = [pytest.mark.external_serving]
 

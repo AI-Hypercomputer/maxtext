@@ -28,9 +28,9 @@ import numpy as np
 from MaxText import pyconfig
 from MaxText.common_types import HyperConnectionType
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import attention_mla, linears, mhc, moe
-from MaxText.layers.initializers import nd_dense_init
-from MaxText.layers.normalizations import RMSNorm
+from maxtext.layers import attention_mla, linears, mhc, moe
+from maxtext.layers.initializers import nd_dense_init
+from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import maxtext_utils
 
 

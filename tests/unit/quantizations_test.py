@@ -27,13 +27,13 @@ from jax import lax
 from jax import numpy as jnp
 from jax.sharding import Mesh
 from MaxText import pyconfig
+from maxtext.common.gcloud_stub import is_decoupled
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText.globals import MAXTEXT_CONFIGS_DIR
-from MaxText.layers import nnx_wrappers, quantizations
+from maxtext.kernels.megablox import gmm
+from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
-from maxtext.common.gcloud_stub import is_decoupled
-from maxtext.kernels.megablox import gmm
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest

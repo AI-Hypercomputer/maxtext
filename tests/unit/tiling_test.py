@@ -19,21 +19,20 @@ Tests for verifying losses and gradients match using/without using tiling method
 """
 
 import unittest
-import pytest
+from flax import linen as nn
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from tests.utils.test_helpers import get_test_config_path
-from flax import linen as nn
-
-from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
-from MaxText.common_types import Config
 from MaxText import pyconfig
+from MaxText.common_types import Config
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
+from tests.utils.test_helpers import get_test_config_path
+import pytest
 
 
 def compute_loss_linen(intermediate_outputs, logits, data, config, model, params, is_train):

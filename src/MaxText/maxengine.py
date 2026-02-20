@@ -39,7 +39,8 @@ import flax
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import models, quantizations
+from maxtext.models import models
+from maxtext.layers import quantizations
 from maxtext.inference import inference_utils
 from maxtext.inference.page_manager import PageManager, PageState
 from maxtext.multimodal import processor as mm_processor

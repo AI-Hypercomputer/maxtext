@@ -14,29 +14,23 @@
 
 """ Tests for multimodal vision encoder. """
 
-import unittest
-import os
 from collections.abc import Callable
-
-import pytest
-
-import jsonlines
-
-import numpy as np
-
-import jax
-import jax.numpy as jnp
+import os
+import unittest
 
 from flax.core.scope import VariableDict
-
-from MaxText import pyconfig
-from MaxText.layers import models
-from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT, MAXTEXT_ASSETS_ROOT
+import jax
+import jax.numpy as jnp
+import jsonlines
 from MaxText import maxengine
-from tests.utils.test_helpers import get_test_config_path
+from MaxText import pyconfig
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.models import models
 from maxtext.multimodal import processor_gemma3
 from maxtext.multimodal import utils as mm_utils
-
+from tests.utils.test_helpers import get_test_config_path
+import numpy as np
+import pytest
 
 pytestmark = [pytest.mark.external_serving, pytest.mark.integration_test]
 

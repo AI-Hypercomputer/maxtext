@@ -21,32 +21,29 @@ before having to use the target hardware - you will see the same OOM error messa
 as you would on the target hardware.
 """
 
-from typing import Sequence
+import functools
 import os
 import pickle
-import functools
+from typing import Sequence
 
 from absl import app
-
-import jax
-from jax.experimental.topologies import get_topology_desc
-from jax.sharding import Mesh, AxisType
-from jax.experimental.serialize_executable import serialize
-
 from flax.linen import partitioning as nn_partitioning
-
+import jax
+from jax.experimental.serialize_executable import serialize
+from jax.experimental.topologies import get_topology_desc
+from jax.sharding import AxisType, Mesh
 from MaxText import accelerator_to_spec_map
-from MaxText import train
 from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText import sharding
+from MaxText import train
 from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.layers import quantizations
+from maxtext.models import models
+from maxtext.trainers.diloco import diloco
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.trainers.diloco import diloco
 
 # pylint: disable=too-many-positional-arguments
 

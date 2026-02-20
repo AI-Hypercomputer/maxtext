@@ -15,27 +15,23 @@
 
 import unittest
 
-import pytest
-
+from flax import nnx
+import flax.linen as nn
+from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
-import flax.linen as nn
-from flax import nnx
-from flax.linen import partitioning as nn_partitioning
-
-from maxtext.utils import maxtext_utils
-from maxtext.common.gcloud_stub import is_decoupled
 from MaxText import pyconfig
+from maxtext.common.gcloud_stub import is_decoupled
 from MaxText.common_types import Config, DType
-from MaxText.layers import linears
-from MaxText.layers import moe
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
-from MaxText.layers.quantizations import Fp8Quantization
-from MaxText.layers import nnx_wrappers
+from maxtext.layers import linears
+from maxtext.layers import moe
+from maxtext.layers import nnx_wrappers
+from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
+from maxtext.layers.quantizations import Fp8Quantization
+from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
-
+import pytest
 
 class TokenDroppingTest(unittest.TestCase):
 
