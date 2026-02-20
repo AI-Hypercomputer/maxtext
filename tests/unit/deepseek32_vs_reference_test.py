@@ -52,7 +52,7 @@ from flax import nnx
 
 from MaxText import pyconfig
 from maxtext.layers import embeddings, attention_mla
-from MaxText.common_types import MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 

@@ -22,7 +22,7 @@ from flax import linen as nn
 from flax import nnx
 from aqt.jax.v2 import aqt_tensor
 
-from MaxText.common_types import Array, DType, Shape, PRNGKey
+from maxtext.common.common_types import Array, DType, Shape, PRNGKey
 
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 InitializerAxis = int | tuple[int, ...]

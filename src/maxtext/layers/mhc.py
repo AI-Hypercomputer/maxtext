@@ -19,8 +19,8 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText.common_types import Array, Config
-from MaxText.common_types import HyperConnectionType
+from maxtext.common.common_types import Array, Config
+from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
 from maxtext.layers.normalizations import RMSNorm
 

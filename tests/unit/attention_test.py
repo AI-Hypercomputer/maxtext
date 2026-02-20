@@ -28,8 +28,7 @@ from jax.sharding import AxisType, Mesh
 from maxtext.utils import maxtext_utils
 from maxtext.common.gcloud_stub import is_decoupled
 
-from MaxText import pyconfig
-from MaxText.common_types import (
+from maxtext.common.common_types import (
     AttentionType,
     DECODING_ACTIVE_SEQUENCE_INDICATOR,
     MODEL_MODE_AUTOREGRESSIVE,
@@ -39,6 +38,7 @@ from MaxText.common_types import (
 from maxtext.layers.attention_mla import MLA
 from maxtext.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
 from maxtext.layers.attentions import Attention
+from MaxText import pyconfig
 import numpy as np
 import pytest
 

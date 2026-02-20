@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from MaxText import pyconfig
-from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
+from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
 from maxtext.layers import quantizations
 from maxtext.inference.maxengine import maxengine
 from maxtext.models import models

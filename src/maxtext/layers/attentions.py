@@ -25,7 +25,7 @@ import jax.numpy as jnp
 
 from flax import nnx
 
-from MaxText.common_types import (
+from maxtext.common.common_types import (
     DecoderBlockType,
     BATCH,
     BATCH_NO_EXP,

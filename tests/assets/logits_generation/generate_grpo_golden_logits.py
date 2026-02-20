@@ -31,8 +31,8 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 import jsonlines
 from MaxText import pyconfig
-from MaxText.common_types import Array, MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.common.common_types import Array, MODEL_MODE_TRAIN
 from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, generate_completions, grpo_loss_fn
 from maxtext.experimental.rl.grpo_utils import compute_log_probs
 from maxtext.inference.maxengine import maxengine

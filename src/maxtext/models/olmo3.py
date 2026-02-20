@@ -26,7 +26,7 @@ from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText.common_types import AttentionType, Config
+from maxtext.common.common_types import AttentionType, Config
 from maxtext.layers import attentions
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers

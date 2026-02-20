@@ -36,7 +36,7 @@ from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
 
-from MaxText.common_types import DType, Config
+from maxtext.common.common_types import DType, Config
 from maxtext.inference.kvcache import KVQuant
 
 # Params used to define mixed precision quantization configs

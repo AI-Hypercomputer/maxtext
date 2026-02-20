@@ -28,7 +28,7 @@ from flax.core import meta
 from flax import linen as nn
 from flax.linen.spmd import LogicallyPartitioned
 
-from MaxText.common_types import Config, MODEL_MODE_TRAIN, EP_AS_CONTEXT, ShardMode
+from maxtext.common.common_types import Config, MODEL_MODE_TRAIN, EP_AS_CONTEXT, ShardMode
 from MaxText.sharding import (
     maybe_shard_with_logical,
     maybe_shard_with_name,

@@ -22,7 +22,7 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
-from MaxText.common_types import MODEL_MODE_PREFILL, Config
+from maxtext.common.common_types import MODEL_MODE_PREFILL, Config
 from maxtext.layers import attentions
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers

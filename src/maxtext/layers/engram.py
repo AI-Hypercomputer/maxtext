@@ -24,7 +24,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText.common_types import Array, Config, MODEL_MODE_TRAIN
+from maxtext.common.common_types import Array, Config, MODEL_MODE_TRAIN
 from maxtext.input_pipeline.tokenizer import HFTokenizer
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.initializers import NdInitializer, nd_dense_init

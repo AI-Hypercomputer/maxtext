@@ -23,7 +23,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
+from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.inference import page_manager
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
@@ -49,9 +49,9 @@ class TransformerLinenPure(nn.Module):
   config: Config
   mesh: Mesh
   quant: Quant
-  # Possible model_mode values can be found in MaxText.common_types.
-  # We generally use MaxText.common_types.MODEL_MODE_TRAIN or
-  # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
+  # Possible model_mode values can be found in maxtext.common.common_types.
+  # We generally use maxtext.common.common_types.MODEL_MODE_TRAIN or
+  # maxtext.common.common_types.MODEL_MODE_PREFILL for initializations here.
   # TODO: Make model_mode required after confirming no users are affected.
   model_mode: str = MODEL_MODE_TRAIN  # May be different than the model_mode passed to __call__
   # pylint: enable=attribute-defined-outside-init

@@ -22,7 +22,7 @@ from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText.common_types import Config
+from maxtext.common.common_types import Config
 from maxtext.layers import initializers, nnx_wrappers
 from maxtext.layers import moe
 from maxtext.layers import quantizations

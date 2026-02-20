@@ -36,8 +36,8 @@ from jax.sharding import Mesh
 import jsonlines
 import MaxText as mt
 from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.experimental.rl import grpo_utils
 from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn, setup_train_loop
 from maxtext.experimental.rl.grpo_utils import compute_log_probs

@@ -27,7 +27,7 @@ from jax.sharding import Mesh, NamedSharding
 from flax import linen as nn
 from flax import nnx
 
-from MaxText.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
+from maxtext.common.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
 from maxtext.layers import initializers, nnx_wrappers
 from maxtext.layers.linears import DenseGeneral, MlpBlock, canonicalize_tuple, normalize_axes
 from maxtext.layers import quantizations

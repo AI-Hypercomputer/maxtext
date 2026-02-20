@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
-from MaxText.common_types import ShardMode
+from maxtext.common.common_types import ShardMode
 from MaxText.sharding import maybe_shard_with_name
 
 

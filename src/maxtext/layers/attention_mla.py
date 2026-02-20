@@ -32,7 +32,7 @@ else:
 
 from flax import nnx
 
-from MaxText.common_types import (
+from maxtext.common.common_types import (
     Array,
     AxisIdxes,
     AxisNames,

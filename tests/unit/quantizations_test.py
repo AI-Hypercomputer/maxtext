@@ -27,9 +27,9 @@ from jax import lax
 from jax import numpy as jnp
 from jax.sharding import Mesh
 from MaxText import pyconfig
-from maxtext.common.gcloud_stub import is_decoupled
-from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 from maxtext.kernels.megablox import gmm
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils

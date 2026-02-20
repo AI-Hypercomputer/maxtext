@@ -28,8 +28,8 @@ from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from MaxText import sharding
-from MaxText.common_types import Config, DecoderBlockType, EP_AS_CONTEXT, ShardMode
-from MaxText.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
+from maxtext.common.common_types import Config, DecoderBlockType, EP_AS_CONTEXT, ShardMode
+from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.inference import page_manager
 from maxtext.layers import linears
 from maxtext.layers import mhc

@@ -25,7 +25,7 @@ from jax.sharding import Mesh, NamedSharding
 from flax import nnx
 
 from MaxText.sharding import logical_to_mesh_axes, create_sharding
-from MaxText.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
+from maxtext.common.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 from maxtext.utils import max_logging

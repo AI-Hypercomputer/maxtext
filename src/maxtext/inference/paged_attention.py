@@ -26,7 +26,7 @@ from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kern
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
-from MaxText.common_types import Array, AxisNames, BATCH, DType, D_KV, HEAD, LENGTH, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL
+from maxtext.common.common_types import Array, AxisNames, BATCH, DType, D_KV, HEAD, LENGTH, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL
 from maxtext.inference import page_manager
 from maxtext.inference import paged_attention_kernel_v2
 from maxtext.layers.initializers import variable_to_logically_partitioned

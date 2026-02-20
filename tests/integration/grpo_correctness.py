@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn
 from maxtext.experimental.rl.grpo_utils import compute_log_probs
 from MaxText.globals import MAXTEXT_PKG_DIR
