@@ -15,7 +15,7 @@ The practical application of this principle is evident throughout the codebase, 
 For example, the functional training step in [`train.py`](https://github.com/AI-Hypercomputer/maxtext/blob/01c7137d4e13878e38baae44dc99e588eaa50a70/src/MaxText/train.py#L193) is compiled using `jax.jit` before being executed in the main training loop.
 
 ```py
-# A simplified representation of the JIT compilation in MaxText/train.py
+# A simplified representation of the JIT compilation in maxtext/trainers/pre_train/train.py
 p_train_step = jax.jit(
   functional_train,
   in_shardings=in_shard_train,

@@ -58,7 +58,7 @@ model_params="base_emb_dim=384 base_num_query_heads=8 base_num_kv_heads=8 base_m
 echo
 echo "Create a test training checkpoint"
 echo
-$cmd python3 -m MaxText.train ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
+$cmd python3 -m maxtext.trainers.pre_train.train ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
 run_name=${training_ckpt_run_id} \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} attention=${attention} \

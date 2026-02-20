@@ -440,7 +440,7 @@ def build_user_command(
           f"export JAX_PLATFORMS={jax_platforms} &&",
           "export ENABLE_PJRT_COMPATIBILITY=true &&",
           "export MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets MAXTEXT_PKG_DIR=/deps/src/MaxText MAXTEXT_REPO_ROOT=/deps &&"
-          f'{hlo_dump} python3 -m MaxText.train {os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")}',
+          f'{hlo_dump} python3 -m maxtext.trainers.pre_train.train {os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")}',
           f"{config_tuning_params}",
           f"steps={wl_config.num_steps}",
           f"model_name={wl_config.model.model_type}",

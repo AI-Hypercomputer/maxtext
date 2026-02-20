@@ -31,11 +31,8 @@ from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import pipeline
-from maxtext.models import deepseek
-from maxtext.models import simple_layer
-from MaxText.train import main as train_main
-from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
+from maxtext.layers import simple_layer
+from maxtext.trainers.pre_train.train import main as train_main
 import pytest
 
 

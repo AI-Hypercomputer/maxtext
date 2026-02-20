@@ -29,7 +29,7 @@ from flax.linen import partitioning as nn_partitioning
 
 from MaxText import pyconfig
 from MaxText import sharding
-from MaxText.train import (
+from maxtext.trainers.pre_train.train import (
     eval_step,
     get_first_step,
     train_step,

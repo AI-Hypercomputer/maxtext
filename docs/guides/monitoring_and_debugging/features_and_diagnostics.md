@@ -84,7 +84,7 @@ To load the compiled train_step, you just need to pass `compiled_trainstep_file=
 ```sh
 # Run the below on each host of the target hardware, e.g. each host on 2 slices of v5e-256
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true"
-python3 -m MaxText.train src/maxtext/configs/base.yml run_name=example_load_compile \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=example_load_compile \
   compiled_trainstep_file=my_compiled_train.pickle \
   global_parameter_scale=16 per_device_batch_size=4 steps=10000 learning_rate=1e-3 \
   base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket
@@ -122,7 +122,7 @@ To load the compiled `train_step`, you just need to pass `compiled_trainstep_fil
 ```sh
 # Run the below on each of the 4 target A3 hosts.
 export XLA_FLAGS="--xla_gpu_enable_async_collectives=true"
-python3 -m MaxText.train src/maxtext/configs/base.yml run_name=example_load_compile \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=example_load_compile \
   compiled_trainstep_file=my_compiled_train.pickle \
   attention=dot_product global_parameter_scale=16  per_device_batch_size=4 steps=10000 learning_rate=1e-3 \
   base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket

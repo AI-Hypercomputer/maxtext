@@ -20,10 +20,10 @@ from datetime import datetime
 import os
 import pytest
 
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
-from MaxText.train import main as train_main
-from MaxText.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
 from maxtext.decode import main as decode_main
+from maxtext.trainers.pre_train.train import main as train_main
+from MaxText.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from tests.integration.checkpointing_test import get_checkpointing_command
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 

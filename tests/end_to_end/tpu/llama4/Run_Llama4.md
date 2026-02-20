@@ -43,7 +43,7 @@ JAX_PLATFORMS=CPU python -m maxtext.checkpoint_conversion.standalone_scripts.lla
 You can train from scratch to generate a new checkpoint. One example command to run pretraining with Llama4 Maverick on a v5p-128.
 
 ```sh
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     run_name=matmul_pre_training \
     per_device_batch_size=1 \

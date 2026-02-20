@@ -100,7 +100,7 @@ The above will download the c4 dataset to the GCS BUCKET.
 Below is a sample training script.
 
 ```sh
-python3 -m MaxText.train \
+python3 -m maxtext.trainers.pre_train.train \
   src/maxtext/configs/base.yml \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \

@@ -87,7 +87,7 @@ Common options for the `quantization` flag when using Qwix include:
 Here is an example of how to run a training job with int8 quantization enabled via Qwix:
 
 ```bash
-python3 -m MaxText.train src/maxtext/configs/base.yml run_name=$YOUR_JOB_NAME base_output_directory=gs://<my-bucket> dataset_type=synthetic use_qwix_quantization=true quantization='int8'
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=$YOUR_JOB_NAME base_output_directory=gs://<my-bucket> dataset_type=synthetic use_qwix_quantization=true quantization='int8'
 ```
 
 #### The Qwix Interception API
@@ -142,7 +142,7 @@ When using AQT, you can pass one of the following values to the `quantization` f
 #### Example command for AQT
 
 ```bash
-python3 -m MaxText.train src/maxtext/configs/base.yml run_name=$YOUR_JOB_NAME base_output_directory=gs://<my-bucket> dataset_type=synthetic use_qwix_quantization=false quantization='int8'
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=$YOUR_JOB_NAME base_output_directory=gs://<my-bucket> dataset_type=synthetic use_qwix_quantization=false quantization='int8'
 ```
 
 Note that `use_qwix_quantization` is not set to `True`.
