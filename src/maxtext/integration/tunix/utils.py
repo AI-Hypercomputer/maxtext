@@ -16,7 +16,7 @@
 
 import re
 
-import MaxText.integration.tunix.weight_mapping as weight_mapping  # pylint: disable=consider-using-from-import
+import maxtext.integration.tunix.weight_mapping as weight_mapping  # pylint: disable=consider-using-from-import
 from maxtext.checkpoint_conversion.utils.param_mapping import PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.param_mapping import VLLM_HOOK_FNS
 
