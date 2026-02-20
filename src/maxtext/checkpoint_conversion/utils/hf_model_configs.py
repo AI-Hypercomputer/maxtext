@@ -226,6 +226,22 @@ qwen3_0_6b_config = transformers.Qwen3Config(
     torch_dtype="bfloat16",
 )
 
+qwen3_1_7b_config = transformers.Qwen3Config(
+    vocab_size=151936,
+    hidden_size=2048,
+    intermediate_size=6144,
+    num_hidden_layers=28,
+    num_attention_heads=16,
+    num_key_value_heads=8,
+    head_dim=128,
+    hidden_act="silu",
+    max_position_embeddings=40960,
+    rms_norm_eps=1.0e-6,
+    rope_theta=1000000.0,
+    tie_word_embeddings=True,
+    torch_dtype="bfloat16",
+)
+
 qwen3_4b_config = transformers.Qwen3Config(
     vocab_size=151936,
     hidden_size=2560,
@@ -773,6 +789,7 @@ HF_MODEL_CONFIGS = {
     "gemma3-12b": gemma3_12b_config,
     "gemma3-27b": gemma3_27b_config,
     "qwen3-0.6b": qwen3_0_6b_config,
+    "qwen3-1.7b": qwen3_1_7b_config,
     "qwen3-4b": qwen3_4b_config,
     "qwen3-4b-thinking-2507": qwen3_4b_config,
     "qwen3-8b": qwen3_8b_config,
