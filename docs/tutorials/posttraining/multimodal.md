@@ -72,7 +72,7 @@ To run a forward pass and verify the model's output, use the following command:
 
 ```shell
 # Gemma3 decode
-python -m maxtext.decode \
+python -m maxtext.inference.decode \
     maxtext/configs/base.yml \
     model_name=gemma3-4b \
     hf_access_token=$HF_ACCESS_TOKEN \
@@ -108,7 +108,7 @@ To decode with multiple images at once, you can provide multiple image paths lik
 export TARGET_LENGTH=...  # Adjust to fit expected output length
 export PREDICT_LENGTH=...  # Adjust to fit image tokens + text prompt
 
-python -m maxtext.decode \
+python -m maxtext.inference.decode \
     maxtext/configs/base.yml \
     model_name=gemma3-4b \
     ... \

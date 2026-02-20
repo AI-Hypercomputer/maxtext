@@ -34,7 +34,7 @@ echo "--- Checkpoint Conversion Complete ---"
 # --- Step 2 (Optional): Decode using the Converted Checkpoint ---
 
 echo "--- Starting Decoding ---"
-python3 -m maxtext.decode \
+python3 -m maxtext.inference.decode \
   ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
   model_name="${MODEL_NAME}" \
   tokenizer_path="${TOKENIZER_PATH}" \

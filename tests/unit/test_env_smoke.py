@@ -33,7 +33,7 @@ import pytest
 from maxtext.common.gcloud_stub import is_decoupled
 
 CORE_IMPORTS = ["jax", "jax.numpy", "flax", "numpy"]
-OPTIONAL_IMPORTS = ["transformers", "MaxText", "MaxText.pyconfig", "MaxText.maxengine"]
+OPTIONAL_IMPORTS = ["transformers", "MaxText", "MaxText.pyconfig", "maxtext.inference.maxengine.maxengine"]
 
 _defects: list[str] = []
 

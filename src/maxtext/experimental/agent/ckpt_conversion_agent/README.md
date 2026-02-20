@@ -66,7 +66,7 @@ If a ground-truth version isn't available, you'll need to debug the conversion m
 3. After the conversion is done, run a decode to check the correctness of the generated code.
 Example command:
 ```bash
-python3 -m maxtext.decode src/maxtext/configs/base.yml model_name=gemma3-4b tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma3 \
+python3 -m maxtext.inference.decode src/maxtext/configs/base.yml model_name=gemma3-4b tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma3 \
   load_parameters_path=<Your-converted-ckpt-path> per_device_batch_size=1 run_name=ht_test \
   max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false scan_layers=true \
   prompt='I love to' attention='dot_product'

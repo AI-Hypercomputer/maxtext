@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maxtext.common.gcloud_stub import jetstream, is_decoupled
+from maxtext.inference.maxengine.maxengine import MaxEngine
 
 config_lib, engine_api, token_utils, tokenizer_api, token_params_ns = jetstream()
 
@@ -28,8 +29,6 @@ jetstream_is_stub = getattr(config_lib, "_IS_STUB", False) or getattr(engine_api
 
 if is_decoupled() and jetstream_is_stub:
   raise RuntimeError("prefill_packing imported while DECOUPLE_GCLOUD=TRUE. This module depends on JetStream.")
-
-from MaxText.maxengine import MaxEngine
 
 import warnings
 import logging

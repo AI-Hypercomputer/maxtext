@@ -61,7 +61,7 @@ Optional: If you want to try training on a Hugging Face dataset, see [Data Input
 5. To demonstrate model output, run the following command:
 
 ```sh
-python3 -m maxtext.decode src/maxtext/configs/base.yml \
+python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
@@ -93,7 +93,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 3. To demonstrate model output, run the following command:
 
 ```sh
-python3 -m maxtext.decode src/maxtext/configs/base.yml \
+python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1

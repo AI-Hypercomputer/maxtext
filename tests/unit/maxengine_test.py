@@ -21,10 +21,10 @@ import unittest
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText import maxengine, pyconfig
+from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
 from maxtext.layers import quantizations
-from MaxText.maxengine import MaxEngine
+from maxtext.inference.maxengine import maxengine
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
@@ -82,7 +82,7 @@ class MaxEngineTest(unittest.TestCase):
         enable_checkpointing=False,
         stack_prefill_result_cache=True,
     )
-    engine = MaxEngine(config, jax.devices())
+    engine = maxengine.MaxEngine(config, jax.devices())
     num_layers = engine.config.num_decoder_layers
     input_d = {
         "decoder": {},
@@ -121,7 +121,7 @@ class MaxEngineTest(unittest.TestCase):
     )
     input_tokens = jnp.array([1, 306, 5360, 304, 0, 0, 0, 0])
     true_length = 4
-    engine = MaxEngine(self.cfg, jax.devices())
+    engine = maxengine.MaxEngine(self.cfg, jax.devices())
     prefill_result, first_token = engine.prefill(
         params=transformer_vars, padded_tokens=input_tokens, true_length=true_length
     )
@@ -148,7 +148,7 @@ class MaxEngineTest(unittest.TestCase):
         enable_dropout=False,
     )
     input_tokens = jnp.array([1, 306, 5360, 304])
-    engine = MaxEngine(self.cfg, jax.devices())
+    engine = maxengine.MaxEngine(self.cfg, jax.devices())
     params = engine.load_params(params=transformer_vars)
     decode_state = engine.init_decode_state()
     prefill_result, _ = engine.prefill(params=params, padded_tokens=input_tokens, true_length=4)
@@ -204,7 +204,7 @@ class MaxEngineTest(unittest.TestCase):
         use_chunked_prefill=False,
         **model_config_args,
     )
-    engine = MaxEngine(config)
+    engine = maxengine.MaxEngine(config)
     params = engine.load_params()
     expected_prefill_result, expected_first_token = engine.prefill(
         params=params,
@@ -217,7 +217,7 @@ class MaxEngineTest(unittest.TestCase):
         use_chunked_prefill=True,
         **model_config_args,
     )
-    engine = MaxEngine(config)
+    engine = maxengine.MaxEngine(config)
     params = engine.load_params()
 
     # One chunk

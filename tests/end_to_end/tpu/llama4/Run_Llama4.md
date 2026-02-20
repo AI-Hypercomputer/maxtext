@@ -65,7 +65,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 In order to run an example decoding with Llama4 Scout, you can use a command such as the following:
 
 ```sh
-python3 -m maxtext.decode src/maxtext/configs/base.yml \
+python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     run_name=decode \
     model_name=llama4-17b-16e \

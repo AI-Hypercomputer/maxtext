@@ -19,10 +19,10 @@ from typing import Any
 import jax
 
 from maxtext.common.gcloud_stub import jetstream, is_decoupled
+from maxtext.inference.maxengine import maxengine
 
 config_lib, engine_api, _token_utils, _tokenizer_api, _token_params_ns = jetstream()
 
-from MaxText import maxengine
 
 
 # TODO: merge it with the above create_maxengine().
