@@ -40,7 +40,7 @@ import time
 import jax
 
 from MaxText import pyconfig
-from MaxText import train_compile
+from maxtext.trainers.pre_train import train_compile
 
 
 def generate_priority_list(config, provided_tensor_names):
