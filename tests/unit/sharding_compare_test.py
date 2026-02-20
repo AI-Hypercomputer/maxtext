@@ -22,8 +22,8 @@ import jax
 import jax.numpy as jnp
 # import optax
 
+from maxtext.trainers.pre_train.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
 from MaxText import pyconfig
 from MaxText import maxtext_utils
 from MaxText.layers import models
