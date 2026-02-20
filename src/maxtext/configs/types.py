@@ -685,6 +685,8 @@ class MoEKernels(BaseModel):
   wi_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wi.")
   wo_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wo.")
 
+  merge_gating_gmm: bool = Field(False, description="whether to merge the two gating gmm kernels into one.")
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
