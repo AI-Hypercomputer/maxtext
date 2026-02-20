@@ -21,7 +21,6 @@ import os
 import queue
 import enum
 import wandb
-import socket
 
 import numpy as np
 
@@ -103,7 +102,7 @@ class MetricLogger:
     if self.config.managed_mldiagnostics:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
       
-    self.enable_wandb = self.config.enable_wandb and socket.gethostname().endswith("-0") # you should only init wandb on one host.
+    self.enable_wandb = self.config.enable_wandb and jax.process_index() == 0
     if self.enable_wandb: 
       wandb.init(
         project=config.wandb_project_name,
