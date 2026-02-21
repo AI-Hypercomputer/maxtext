@@ -126,7 +126,7 @@ def vision_sft_preprocessing_pipeline(
   )
   dataset = dataset.map(
       input_pipeline_utils.prepare_text_for_image_fusion,
-      fn_kwargs={"column_name": text_columns[0], "model_name": config.model_name},
+      fn_kwargs={"column_name": text_columns[0], "config": config},
   )
 
   dataset = input_pipeline_utils.HFDataSource(

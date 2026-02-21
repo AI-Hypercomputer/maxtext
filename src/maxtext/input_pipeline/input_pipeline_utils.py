@@ -115,10 +115,10 @@ def pre_process_image_sft(example, image_column, model_name):
   return example
 
 
-def prepare_text_for_image_fusion(example, column_name, model_name):
+def prepare_text_for_image_fusion(example, column_name, config):
   """prepare text for image fusion for multimodal SFT"""
   example[column_name] = mm_processor.prepare_text_for_image_fusion(
-      example[column_name], model_name, processor_output=example["images"]
+      tokens=example[column_name], config=config, processor_output=example["images"]
   )
   return example
 
