@@ -52,7 +52,7 @@ def vocab_tiling_linen_loss(
     params: The model parameters.
     is_train: A boolean indicating if the model is in training mode.
   Returns:
-    The total cross-entropy loss computed via vocab tiling.
+    A tuple of (total_loss, total_z_loss) computed via vocab tiling.
   """
   labels = data["targets"]
   segmentation = data["targets_segmentation"]
@@ -112,8 +112,8 @@ def vocab_tiling_linen_loss(
     """
     Calculates the total cross-entropy loss using vocab tiling.
     """
-    total_loss, _ = _chunked_cross_entropy_loss_fwd(gathered_params, hidden_states, labels, segmentation)
-    return total_loss
+    (total_loss, total_z_loss), _ = _chunked_cross_entropy_loss_fwd(gathered_params, hidden_states, labels, segmentation)
+    return total_loss, total_z_loss
 
   def _chunked_cross_entropy_loss_fwd(gathered_params, hidden_states, labels, segmentation):
     batch_size, seq_len, emb_dim = hidden_states.shape
@@ -126,7 +126,8 @@ def vocab_tiling_linen_loss(
     reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
 
     # Scan body accumulates loss from each tile given chunked hidden states and labels
-    def _fwd_scan_body(loss_accumulator, chunk_data):
+    def _fwd_scan_body(accumulators, chunk_data):
+      loss_accumulator, z_loss_accumulator = accumulators
       hidden_chunk, label_chunk, segmentation_chunk = chunk_data
       hidden_chunk = _maybe_shard_with_name(hidden_chunk, chunked_hidden_spec)
       label_chunk = _maybe_shard_with_name(label_chunk, chunked_data_spec)
@@ -141,14 +142,20 @@ def vocab_tiling_linen_loss(
       )
       chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
       one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
-      chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk)
-      masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
-      loss_accumulator += masked_xent
-      return loss_accumulator, None
+      chunk_xent, chunk_z_loss = max_utils.cross_entropy_with_logits(
+          chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier
+      )
 
-    initial_loss = 0.0
-    total_loss, _ = jax.lax.scan(
-        _fwd_scan_body, initial_loss, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
+      masked_z_loss = jnp.sum(chunk_z_loss * (segmentation_chunk != 0))
+
+      loss_accumulator += masked_xent
+      z_loss_accumulator += masked_z_loss
+      return (loss_accumulator, z_loss_accumulator), None
+
+    initial_acc = (0.0, 0.0)
+    (total_loss, total_z_loss), _ = jax.lax.scan(
+        _fwd_scan_body, initial_acc, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
     )
     residuals = (
         gathered_params,
@@ -160,9 +167,13 @@ def vocab_tiling_linen_loss(
         emb_dim,
     )
 
-    return total_loss, residuals
+    return (total_loss, total_z_loss), residuals
 
-  def _chunked_cross_entropy_loss_bwd(residuals, loss_cotangent):
+  def _chunked_cross_entropy_loss_bwd(residuals, cotangents):
+    # Unpack the cotangents tuple. We ignore the z_loss cotangent since the gradients
+    # of the z_loss term are already factored into the loss_cotangent.
+    loss_cotangent, _ = cotangents
+
     gathered_params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation, batch_size, seq_len, emb_dim = (
         residuals
     )
@@ -176,7 +187,7 @@ def vocab_tiling_linen_loss(
       )
       chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
       one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size)
-      xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk)
+      xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier)
       return jnp.sum(xent * (input_segmentation_chunk != 0))
 
     def _bwd_scan_body(grad_params_acc, chunk_data):
@@ -228,11 +239,11 @@ def vocab_tiling_linen_loss(
 
   chunked_cross_entropy_loss.defvjp(_chunked_cross_entropy_loss_fwd, _chunked_cross_entropy_loss_bwd)
 
-  total_loss = chunked_cross_entropy_loss(
+  total_loss, total_z_loss = chunked_cross_entropy_loss(
       gathered_params,
       hidden_states,
       labels,
       segmentation,
   )
 
-  return total_loss
+  return total_loss, total_z_loss

@@ -136,10 +136,11 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     if config.num_vocab_tiling > 1:
       hidden_state_key = ("intermediates", "decoder", "hidden_states")
       hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
-      total_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
+      total_loss, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
     else:
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-      xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
+      xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
+
       xent = sharding.maybe_shard_with_logical(
           xent,
           ("activation_embed_and_logits_batch", "activation_length"),
@@ -147,9 +148,20 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
           config.shard_mode,
           debug_sharding=config.debug_sharding,
       )
+      z_loss = sharding.maybe_shard_with_logical(
+          z_loss,
+          ("activation_embed_and_logits_batch", "activation_length"),
+          model.mesh,
+          config.shard_mode,
+          debug_sharding=config.debug_sharding,
+      )
+
       # Mask out paddings at the end of each example.
       xent = xent * (data["targets_segmentation"] != 0)
+      z_loss = z_loss * (data["targets_segmentation"] != 0)
+
       total_loss = jnp.sum(xent)
+      total_z_loss = jnp.sum(z_loss)
   else:
     # Flax NNX model
     logits = model(
@@ -164,11 +176,17 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     )
     intermediate_outputs = {}
     one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
+    xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
+
     xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+    z_loss = nn.with_logical_constraint(z_loss, ("activation_embed_and_logits_batch", "activation_length"))
+
     # Mask out paddings at the end of each example.
     xent = xent * (data["targets_segmentation"] != 0)
+    z_loss = z_loss * (data["targets_segmentation"] != 0)
+
     total_loss = jnp.sum(xent)
+    total_z_loss = jnp.sum(z_loss)
 
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide total_loss
@@ -187,6 +205,9 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     # a normalized loss for each step. It handles the accumulation state
     # updates and scaling internally.
     loss = total_loss / (total_weights + EPS)
+
+  # We keep z-loss normalized by total_weights.
+  total_z_loss = total_z_loss / (total_weights + EPS)
 
   # Calculate and Add MTP Loss
   mtp_loss = 0.0
@@ -230,6 +251,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   aux = {
       "intermediate_outputs": intermediate_outputs,
       "total_loss": total_loss,
+      "z_loss": total_z_loss,
       "total_weights": total_weights,
       "moe_lb_loss": moe_lb_loss,
       "moe_bias_updates": moe_bias_updates,
@@ -302,6 +324,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
+  z_loss = aux["z_loss"]
   moe_bias_updates = aux["moe_bias_updates"]
   mtp_loss = aux["mtp_loss"]
 
@@ -345,6 +368,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   scalar_metrics = {
       "learning/loss": loss,
+      "learning/z_loss": z_loss,
       "learning/moe_lb_loss": moe_lb_loss,
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
@@ -395,12 +419,14 @@ def eval_step(model, config, state, data, dropout_rng):
     mtp_acceptance_rate = calculate_mtp_acceptance_rate(aux["intermediate_outputs"], config)
 
   total_loss = aux["total_loss"]
+  z_loss = aux["z_loss"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
   mtp_loss = aux["mtp_loss"]
   metrics = {
       "scalar": {
           "evaluation/loss": loss,
+          "evaluation/z_loss": z_loss,
           "evaluation/total_loss": total_loss,
           "evaluation/total_weights": total_weights,
           "evaluation/moe_lb_loss": moe_lb_loss,

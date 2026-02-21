@@ -86,6 +86,35 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
     # Compare results
     self.assertTrue(jax.numpy.allclose(optax_xent, t5x_xent, rtol=1e-05, atol=1e-08, equal_nan=False))
 
+  def test_cross_entropy_with_z_loss(self):
+    """Tests the exact mathematical output of the z-loss penalty."""
+    # Shape [2, 3] to test across multiple dimensions
+    logits = jnp.array([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [1.0, 1.0, 1.0]]])
+    # Target indices: [2, 1], [0, 2]
+    targets = jnp.array([[2, 1], [0, 2]])
+    one_hot_targets = jax.nn.one_hot(targets, 3)
+
+    z_loss_multiplier = 1e-4
+
+    # 1. Run without z-loss
+    total_loss_no_z, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=0.0)
+
+    # 2. Run with z-loss
+    total_loss_with_z, z_loss_only = max_utils.cross_entropy_with_logits(
+        logits, one_hot_targets, z_loss=z_loss_multiplier
+    )
+
+    # 3. Calculate expected z-loss manually
+    # Expected log_z = log(sum(exp(logits), axis=-1))
+    expected_log_z = jax.scipy.special.logsumexp(logits, axis=-1)
+    expected_z_loss = z_loss_multiplier * jnp.square(expected_log_z)
+
+    # Compare isolated z_loss component
+    self.assertTrue(jnp.allclose(z_loss_only, expected_z_loss, rtol=1e-5, atol=1e-8))
+
+    # Compare total loss aggregation
+    self.assertTrue(jnp.allclose(total_loss_with_z, total_loss_no_z + z_loss_only, rtol=1e-5, atol=1e-8))
+
 
 class MaxUtilsCustomMesh(unittest.TestCase):
   """Tests for the is_valid_custom_mesh function in max_utils.py"""
