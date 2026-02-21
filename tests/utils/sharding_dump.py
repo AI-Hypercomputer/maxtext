@@ -31,7 +31,7 @@ from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_REPO_ROOT
 from maxtext.models import models
-from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
+from maxtext.trainers.pre_train.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
 
 
 Transformer = models.Transformer

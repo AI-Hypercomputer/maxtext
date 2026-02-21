@@ -66,4 +66,4 @@ python3 -m tests.utils.forward_pass_logit_checker  "${MAXTEXT_CONFIGS_DIR:-${MAX
 # We recommend training/finetuning Gemma on v5e-256 using the following sharding strategy to achieve optimal performance.
 # This below command does Ahead Of Time Cross Compilation (https://github.com/google/maxtext?tab=readme-ov-file#ahead-of-time-compilation-aot) for our recommended v5e-256 configuration for Gemma 2B.
 # To actually run it on real v5e-256's simple replace the train_compile.py with a train.py and get rid of compile_topology args.
-python3 -m MaxText.train_compile "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml model_name=gemma-2b ici_fsdp_transpose_parallelism=16 per_device_batch_size=2 compile_topology=v5e-256 compile_topology_num_slices=1
+python3 -m maxtext.trainers.pre_train.train_compile "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml model_name=gemma-2b ici_fsdp_transpose_parallelism=16 per_device_batch_size=2 compile_topology=v5e-256 compile_topology_num_slices=1
