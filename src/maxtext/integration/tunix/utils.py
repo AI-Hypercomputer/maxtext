@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 import re
 
-import MaxText.integration.tunix.weight_mapping as weight_mapping  # pylint: disable=consider-using-from-import
+import maxtext.integration.tunix.weight_mapping as weight_mapping  # pylint: disable=consider-using-from-import
 from maxtext.checkpoint_conversion.utils.param_mapping import PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.param_mapping import VLLM_HOOK_FNS
 
