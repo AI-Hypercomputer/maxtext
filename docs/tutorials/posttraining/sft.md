@@ -104,4 +104,18 @@ python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_tr
     profiler=xplane
 ```
 
+### Dynamic Fine-Tuning (DFT)
+
+You can optionally enable **Dynamic Fine-Tuning (DFT)** to improve SFT
+generalization. DFT rescales the per-token cross-entropy loss by the model's
+own predicted probability (with stop-gradient), as described in
+[*On the Generalization of SFT*](https://arxiv.org/abs/2508.05629).
+To enable it, add `use_dft_loss=True` to your command:
+
+```sh
+python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml \
+    use_dft_loss=True \
+    ...
+```
+
 Your fine-tuned model checkpoints will be saved here: `$BASE_OUTPUT_DIRECTORY/$RUN_NAME/checkpoints`.

@@ -145,6 +145,9 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
           config.shard_mode,
           debug_sharding=config.debug_sharding,
       )
+      # Dynamic Fine-Tuning (DFT): rescale per-token loss by p(y_t) with stop-gradient.
+      if config.use_dft_loss:
+        xent = jax.lax.stop_gradient(jnp.exp(-xent)) * xent
       # Mask out paddings at the end of each example.
       xent = xent * (data["targets_segmentation"] != 0)
       total_loss = jnp.sum(xent)
@@ -164,6 +167,9 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
     xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
     xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+    # Dynamic Fine-Tuning (DFT): rescale per-token loss by p(y_t) with stop-gradient.
+    if config.use_dft_loss:
+      xent = jax.lax.stop_gradient(jnp.exp(-xent)) * xent
     # Mask out paddings at the end of each example.
     xent = xent * (data["targets_segmentation"] != 0)
     total_loss = jnp.sum(xent)

@@ -608,6 +608,13 @@ use_sft: False
 # sft_train_on_completion_only=False trains on both prompt and completion tokens; trains only on completion tokens otherwise
 sft_train_on_completion_only: False
 
+# Dynamic Fine-Tuning (DFT)
+# When enabled, rescales the per-token cross-entropy loss by the model's own
+# predicted probability for that token (with stop-gradient), i.e.
+# dft_loss = p(y_t).detach() * (-log p(y_t)). This improves SFT generalization.
+# See: https://arxiv.org/abs/2508.05629
+use_dft_loss: False
+
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
 dataset_type: tfds
