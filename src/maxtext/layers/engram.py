@@ -469,7 +469,7 @@ class ShortConv(nnx.Module):
       B: Batch size
       S: Sequence length (temporal dimension)
       G: Number of branches (mhc_expansion_rate)
-      D: Hidden size (base_emb_dim)
+      D: Hidden size (emb_dim)
     """
     B, S, G, D = x.shape
 
@@ -557,7 +557,7 @@ class Engram(nnx.Module):
     # retrieved n-gram memory -> Key, from D_en to [G, D]
     self.key_proj = DenseGeneral(
         in_features_shape=self.engram_dim,
-        out_features_shape=(mhc_expansion_rate, config.base_emb_dim),
+        out_features_shape=(mhc_expansion_rate, config.emb_dim),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("engram_dim", "mhc", "embed"),
@@ -578,7 +578,7 @@ class Engram(nnx.Module):
     @nnx.vmap(in_axes=0, out_axes=0)
     def create_norms(rngs):
       return RMSNorm(
-          num_features=config.base_emb_dim,
+          num_features=config.emb_dim,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
           epsilon=config.normalization_layer_epsilon,
@@ -594,7 +594,7 @@ class Engram(nnx.Module):
     # Value Projection (Shared): Retrieved memory -> Value
     self.value_proj = DenseGeneral(
         in_features_shape=self.engram_dim,
-        out_features_shape=config.base_emb_dim,
+        out_features_shape=config.emb_dim,
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("engram_dim", "embed"),
@@ -611,7 +611,7 @@ class Engram(nnx.Module):
     # Applies depthwise causal convolution to smooth the retrieved memory over time.
     self.short_conv = ShortConv(
         config=config,
-        hidden_size=config.base_emb_dim,
+        hidden_size=config.emb_dim,
         kernel_size=self.conv_kernel_size,
         dilation=self.max_ngram_size,
         mhc_expansion_rate=mhc_expansion_rate,
@@ -635,7 +635,7 @@ class Engram(nnx.Module):
       S: Sequence Length
       G: mhc_expansion_rate, Number of Branches
       H_total: Total number of heads across n-grams. num_head * num_ngrams
-      D: base_emb_dim
+      D: emb_dim
       D_head: Dimension of a single head embedding
       D_en: Dimension of flattened embedding across heads and n-grams
     """

@@ -669,6 +669,37 @@ def calculate_llama4_vision_layers_tflops_per_device(config):
   return total_tflops, learnable_weight_tflops, total_attn_tflops
 
 
+def calculate_engram_tflops(config):
+  """Calculate engram TFLOPs per device."""
+  B = config.per_device_batch_size
+  S = config.max_target_length
+  G = config.mhc_expansion_rate  # Multi-manifold branches
+  D = config.emb_dim  # Hidden dimension
+  k = config.engram_kernel_size  # Conv window
+
+  num_ngram_orders = config.engram_max_ngram_size - 1
+  engram_dim = config.engram_num_heads * config.engram_head_dim * num_ngram_orders
+
+  # 1. Key Projection
+  key_flops = 2 * (B * S) * engram_dim * (G * D)
+  # 2. Value Projection
+  value_flops = 2 * (B * S) * engram_dim * D
+  # 3. QK Attention
+  attention_flops = 2 * (B * S) * G * D
+  # 4. Short Convolution
+  # Standard flops as 2 * kernel_size * input_channels * output_channels / feature_group_count
+  # In Engram, the feature_group_count = input_channels = output_channels
+  # Unlike global attention, convolution work is constant per token (not O(S^2)),
+  # so we do not apply the 0.5 causal scaling factor.
+  total_channels = G * D
+  conv_flops = 2 * (B * S) * k * total_channels
+
+  num_layers = len(config.engram_layers)
+  learnable_tflops = num_layers * (key_flops + value_flops + conv_flops) / 1e12
+  attention_tflops = num_layers * attention_flops / 1e12
+  return learnable_tflops, attention_tflops
+
+
 def calculate_vision_encoder_tflops(config):
   """Calculate vision encoder TFLOPs per prefill step per device."""
   if config.model_name.startswith("gemma3"):
@@ -798,6 +829,13 @@ def calculate_tflops_training_per_device(config, log=True):
     reference_model_tflops = 0
 
   total_tflops = learnable_weight_tflops + attention_tflops + reference_model_tflops
+
+  # Engram flops
+  if config.engram_layers:
+    engram_learnable_tflops, engram_attention_tflops = calculate_engram_tflops(config)
+    total_tflops += engram_learnable_tflops + engram_attention_tflops
+    learnable_weight_tflops += engram_learnable_tflops
+    attention_tflops += engram_attention_tflops
 
   if config.use_multimodal:
     # Add vision layers TFLOPs for multimodal models
