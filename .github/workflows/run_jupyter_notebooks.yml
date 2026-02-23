@@ -96,7 +96,7 @@ jobs:
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
           export MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
 
-          for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
+          for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl,demo}*.ipynb; do
             filename=$(basename "$notebook")
             if [[ "$filename" == "sft_qwen3_demo.ipynb" ]]; then
               echo "Skipping $filename"
