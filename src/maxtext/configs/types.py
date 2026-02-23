@@ -1301,7 +1301,7 @@ class DevelopmentAndDebugging(BaseModel):
   """General settings for development and debugging."""
 
   constant_bound_config: list = Field([], description="Legacy configuration for constant bounds.")
-  jax_cache_dir: PathStr = Field(
+  jax_cache_dir: PathStr | None = Field(
       os.path.join(os.path.expanduser("~"), "jax_cache"),
       description="Directory for JAX compilation cache.",
   )
