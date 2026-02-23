@@ -62,7 +62,6 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 from jax.sharding import Mesh
 from orbax import checkpoint as ocp
-from pprint import pprint
 from transformers import AutoTokenizer
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout

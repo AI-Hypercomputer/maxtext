@@ -29,6 +29,7 @@ from jax.sharding import Mesh
 from MaxText import sharding
 from MaxText.common_types import Config, DecoderBlockType, EP_AS_CONTEXT, ShardMode
 from MaxText.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
+from MaxText.sharding import create_sharding
 from maxtext.inference import page_manager
 from maxtext.layers import linears
 from maxtext.layers import mhc
@@ -55,7 +56,6 @@ from maxtext.models import (
     simple_layer,
 )
 from maxtext.multimodal import utils as mm_utils
-from MaxText.sharding import create_sharding
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
