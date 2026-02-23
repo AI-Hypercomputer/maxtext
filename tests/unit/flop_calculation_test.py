@@ -487,3 +487,76 @@ class FlopCalculation(unittest.TestCase):
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
+
+  @pytest.mark.cpu_only
+  def test_custom_engram_flops(self):
+    """Test model with Engram FLops calculation"""
+    kwargs = {
+        # Model bases
+        "model_name": "deepseek2-16b",
+        "override_model_config": True,
+        # Core workload parameters
+        "per_device_batch_size": 4,
+        "max_target_length": 8192,
+        "num_experts": 64,
+        "num_experts_per_tok": 6,
+        "shared_experts": 2,
+        # Model dimensions
+        "base_emb_dim": 2048,
+        "base_num_query_heads": 16,
+        "base_num_kv_heads": 16,
+        "base_mlp_dim": 10944,
+        "base_moe_mlp_dim": 1408,
+        "base_num_decoder_layers": 27,
+        "first_num_dense_layers": 1,
+        "mlp_activations": ["silu", "linear"],
+        "vocab_size": 102400,
+        # MLA
+        "q_lora_rank": 0,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "skip_jax_distributed_system": True,
+        # Engram
+        "mhc_expansion_rate": 1,
+        "engram_layers": [2, 15],
+        "engram_num_heads": 8,
+        "engram_head_dim": 1280,
+        "engram_kernel_size": 4,
+        "engram_max_ngram_size": 3,
+        "engram_vocab_bases": [226240, 226240],
+        "tokenizer_type": "huggingface",
+        "tokenizer_path": "deepseek-ai/DeepSeek-V3.2",
+        "hf_access_token": "fake",
+        "scan_layers": False,
+    }
+    B = kwargs["per_device_batch_size"]
+    S = kwargs["max_target_length"]
+    G = kwargs["mhc_expansion_rate"]
+    D = kwargs["base_emb_dim"]
+    K = kwargs["engram_kernel_size"]
+    H = kwargs["engram_num_heads"]
+    H_D = kwargs["engram_head_dim"]
+    L = len(kwargs["engram_layers"])
+    N = kwargs["engram_max_ngram_size"]
+
+    attention_flops = self.compute_deepseek_attention_flops_per_device(kwargs)
+    # deepseek2-16b has ~2.4B active parameters
+    # https://arxiv.org/pdf/2405.04434
+    golden_param_size = 2.4e9
+
+    # calculate Engram active params
+    engram_dim = H * H_D * (N - 1)
+    key_params = engram_dim * (G * D)
+    value_params = engram_dim * D
+    conv_params = K * (G * D)
+    engram_active_params = L * (key_params + value_params + conv_params)
+    golden_tflops = 6 * B * S * (golden_param_size + engram_active_params) / 1e12 + attention_flops
+
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        **kwargs,
+    )
+    calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
+    self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
