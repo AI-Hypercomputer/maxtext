@@ -96,7 +96,7 @@ from maxtext.utils import maxtext_utils
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
-def get_hf_dict_from_safetensor(local_path):
+def get_hf_dict_from_safetensor(local_path, framework="pt"):
   """
   If the safetensor contains more HF keys than MaxText model,
   these HF keys will be loaded but ignored during conversion.
@@ -109,7 +109,7 @@ def get_hf_dict_from_safetensor(local_path):
   max_logging.log(f"Loading {len(ckpt_paths)} checkpoints")
   for i, ckpt_path in tqdm(enumerate(ckpt_paths), total=len(ckpt_paths)):
     # max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
-    with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+    with safe_open(ckpt_path, framework=framework, device="cpu") as f:
       for key in f.keys():
         if key.endswith("_scale_inv"):
           raise ValueError("fp8 checkpoint is not supported.")
@@ -658,9 +658,12 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
         hf_state_dict_numpy = get_hf_dict_from_pretrained(model_id, token=hf_token)
       else:
         hf_state_dict_numpy = get_hf_dict_from_pretrained(model_id, token=hf_token, dtype=torch.bfloat16)
+    elif test_args.mode == "default-2":
+      max_logging.log(f"Loading with `safe_open`, framework=np")
+      hf_state_dict_numpy = get_hf_dict_from_safetensor(model_id, framework="np")
     else:
-      max_logging.log(f"Loading with `safe_open`")
-      hf_state_dict_numpy = get_hf_dict_from_safetensor(model_id)
+      max_logging.log(f"Loading with `safe_open`, framework=pt")
+      hf_state_dict_numpy = get_hf_dict_from_safetensor(model_id, framework="pt")
       # print(hf_state_dict_numpy)
 
     unique_dtypes = {tensor.dtype for tensor in hf_state_dict_numpy.values()}
@@ -680,6 +683,8 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
       if key not in hf_state_dict_numpy:
         raise ValueError(f"HuggingFace key {key} not found in state_dict.")
       if test_args.mode == "default":
+        return hf_state_dict_numpy[key]
+      elif test_args.mode == "default-2":
         return hf_state_dict_numpy[key]
       elif test_args.mode == "float16":
         # torch.bfloat16 -> torch.float16 -> np.float16
@@ -830,7 +835,7 @@ if __name__ == "__main__":
       type=str,
       required=False,
       default="default",
-      choices=["default", "float16", "bfloat16-1", "bfloat16-2"],
+      choices=["default", "default-2", "float16", "bfloat16-1", "bfloat16-2"],
       help="",
   )
 
@@ -843,6 +848,9 @@ if __name__ == "__main__":
   if not local_args.use_from_pretrained_api:
     assert local_args.hf_model_path != ""
     assert local_args.mode != "default"
+
+  if local_args.use_from_pretrained_api:
+    assert local_args.mode != "default-2"
 
   # Set jax environment
   jax.config.update("jax_platforms", "cpu")
