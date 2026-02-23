@@ -49,7 +49,7 @@ echo "Finished fine-tuning"
 
 # # TODO(b/391864113): Add this once the bug is fixed
 # # Run decoding with converted ckpt - dropping implementation
-# python3 -m maxtext.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml model_name=mixtral-8x7b hardware=gpu \
+# python3 -m maxtext.inference.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml model_name=mixtral-8x7b hardware=gpu \
 #     run_name=unscanned_decoding load_parameters_path=${UNSCANNED_CKPT_PATH} \
 #     async_checkpointing=false attention=dot_product capacity_factor=0.1 \
 #     ici_expert_parallelism=8 ici_fsdp_parallelism=1 max_prefill_predict_length=11 \

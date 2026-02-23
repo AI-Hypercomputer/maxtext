@@ -20,7 +20,7 @@ from datetime import datetime
 import os
 import pytest
 
-from maxtext.decode import main as decode_main
+from maxtext.inference.decode import main as decode_main
 from maxtext.trainers.pre_train.train import main as train_main
 from MaxText.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
 from MaxText.globals import MAXTEXT_ASSETS_ROOT

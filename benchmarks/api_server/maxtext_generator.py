@@ -34,7 +34,8 @@ import numpy as np
 
 from dataclasses import dataclass, field
 
-from MaxText import maxengine, pyconfig
+from MaxText import pyconfig
+from maxtext.inference.maxengine import maxengine
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils

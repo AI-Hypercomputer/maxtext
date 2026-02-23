@@ -35,14 +35,14 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 import jsonlines
 import MaxText as mt
-from MaxText import maxengine
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
 from maxtext.experimental.rl import grpo_utils
 from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn, setup_train_loop
 from maxtext.experimental.rl.grpo_utils import compute_log_probs
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
 from maxtext.inference import offline_engine
+from maxtext.inference.maxengine import maxengine
 from maxtext.inference.offline_engine import InputData
 from maxtext.layers import quantizations
 from maxtext.models import models

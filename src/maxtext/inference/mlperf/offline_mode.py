@@ -35,7 +35,7 @@ import jax.numpy as jnp
 import mlperf_loadgen as lg  # pytype: disable=import-error
 # pylint: disable=no-name-in-module
 
-from MaxText.maxengine import create_engine_from_config_flags
+from maxtext.inference.maxengine.maxengine import create_engine_from_config_flags
 from maxtext.inference.mlperf import offline_inference
 
 

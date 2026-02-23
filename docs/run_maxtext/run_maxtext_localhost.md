@@ -72,7 +72,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 To demonstrate model output, run the following command:
 
 ```bash
-python3 -m maxtext.decode src/maxtext/configs/base.yml \
+python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1

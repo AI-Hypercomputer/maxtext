@@ -12,31 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shim for maxengine_server in `src/maxtext/inference/maxengine/maxengine_server`."""
+"""Shim for inference decode in `src/maxtext/inference/decode`."""
 
-import os
 import sys
 import importlib
 
-import jax
 from absl import logging
 
-from MaxText import pyconfig
 from maxtext.utils import max_logging
 
-OLD_MODULE_PATH = "MaxText.maxengine_server"
-NEW_MODULE_PATH = "maxtext.inference.maxengine.maxengine_server"
+OLD_MODULE_PATH = "MaxText.decode"
+NEW_MODULE_PATH = "maxtext.inference.decode"
 
 if __name__ == "__main__":
   try:
-    jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
     logging.set_verbosity(logging.INFO)
-    max_logging.warning(f"'{OLD_MODULE_PATH}' is deprecated; use '{NEW_MODULE_PATH}' instead.\n")
     _new_module = importlib.import_module(NEW_MODULE_PATH)
     if hasattr(_new_module, "main"):
-      cfg = pyconfig.initialize(sys.argv)
-      _new_module.main(cfg)
+      max_logging.warning(f"'{OLD_MODULE_PATH}' is deprecated; use '{NEW_MODULE_PATH}' instead.\n")
+      _new_module.main(sys.argv)
   except ImportError as e:
     max_logging.error(f"Shim could not find target module: '{NEW_MODULE_PATH}'\n")
     raise e

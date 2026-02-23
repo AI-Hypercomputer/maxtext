@@ -137,7 +137,7 @@ python3 -m MaxText.sft_trainer src/maxtext/configs/post_train/sft.yml \
 One example command to run decoding with gpt-oss-20b on v5p-8 with unscanned checkpoint for fast decoding.
 
 ```sh
-python3 -m maxtext.decode src/maxtext/configs/base.yml \
+python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=decode \
     model_name=gpt-oss-20b \

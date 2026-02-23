@@ -21,8 +21,8 @@ from absl import app
 
 import jax
 
-from MaxText import maxengine
 from MaxText import pyconfig
+from maxtext.inference.maxengine import maxengine
 from maxtext.utils import max_utils
 
 

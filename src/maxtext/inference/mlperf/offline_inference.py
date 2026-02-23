@@ -33,8 +33,8 @@ from jax.experimental import layout
 from jetstream.engine import engine_api
 
 # pylint: disable=no-name-in-module
-from MaxText.maxengine import MaxEngine
-from MaxText.maxengine import set_engine_vars_from_base_engine
+from maxtext.inference.maxengine.maxengine import MaxEngine
+from maxtext.inference.maxengine.maxengine import set_engine_vars_from_base_engine
 from maxtext.input_pipeline.packing.prefill_packing import PrefillProcessor
 from maxtext.input_pipeline.packing.prefill_packing import BatchedPrefillProcessor
 
