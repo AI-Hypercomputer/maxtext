@@ -25,14 +25,14 @@ Example usage with Tunix:
     --use_tunix \
   
 Or without Tunix using the MaxText vLLM integration:
-  python3 -m maxtext.vllm_decode \
-    --model_name qwen3-30b-a3b \
-    --hf_model_name Qwen/Qwen3-30B-A3B \
-    --hf_config_path src/MaxText/integration/vllm/maxtext_vllm_adapter \
-    --load_parameters_path <your_checkpoint_path> \
-    --ici_tensor_parallelism 4 \
-    --gpu_memory_utilization 0.5 \
-    --prompt "Suggest some famous landmarks in London."
+  python3 -m maxtext.vllm_decode maxtext/configs/base.yml \
+    model_name=qwen3-30b-a3b \
+    tokenizer_path=Qwen/Qwen3-30B-A3B \
+    vllm_hf_config_path=src/MaxText/integration/vllm/maxtext_vllm_adapter \
+    load_parameters_path=<your_checkpoint_path> \
+    ici_tensor_parallelism=4 \
+    hbm_utilization_vllm=0.5 \
+    prompt="Suggest some famous landmarks in London."
 """
 
 import os
@@ -62,121 +62,53 @@ os.environ["NEW_MODEL_DESIGN"] = "1"
 # --- DEFINE FLAGS GLOBALLY ---
 FLAGS = flags.FLAGS
 
-# Parallelism
-flags.DEFINE_integer("ici_data_parallelism", 1, "Size of the data parallelism dimension.")
-flags.DEFINE_integer("ici_tensor_parallelism", 1, "Size of the non-expert tensor parallelism dimension.")
-flags.DEFINE_integer("ici_expert_parallelism", 1, "Size of the MoE expert parallelism dimension.")
-flags.DEFINE_bool("enable_dp_attention", False, "Enable attention DP parallelism")
-flags.DEFINE_bool("debug_sharding", False, "Debug Shardings")
-
-# Model
-flags.DEFINE_string("model_name", None, "Model name for MaxText.")
-flags.DEFINE_string("hf_model_name", None, "Path to the Hugging Face model.")
-flags.DEFINE_string("hf_config_path", None, "Path to the local Hugging Face model config.")
-flags.DEFINE_string("hf_access_token", None, "Hugging Face access token for private models.")
-flags.DEFINE_string("tokenizer_path", None, "Path to the tokenizer. If None, use hf_model_name.")
-flags.DEFINE_string("load_parameters_path", None, "Path to load model parameters from.")
-
-# Length/Throughput
-flags.DEFINE_integer("max_target_length", 1024, "Maximum total context length (MCL).")
-flags.DEFINE_float("gpu_memory_utilization", 0.72, "Fraction of GPU memory to be used for the model executor.")
-
-# Decoding
 flags.DEFINE_bool("use_tunix", False, "Whether to use Tunix for vLLM decoding.")
-flags.DEFINE_bool("use_chat_template", False, "Whether to format the prompt using chat template.")
-flags.DEFINE_string("prompt", "Suggest some famous landmarks in London.", "The prompt to decode.")
-flags.DEFINE_float("decode_sampling_temperature", 0.0, "Temperature for sampling.")
-flags.DEFINE_float("decode_sampling_nucleus_p", 1.0, "Nucleus sampling probability.")
-flags.DEFINE_integer("decode_sampling_top_k", 1, "Top-k sampling probability.")
 flags.DEFINE_integer("seed", 42, "Random seed for sampling.")
 
-# Set mandatory flags
-flags.mark_flag_as_required("model_name")
-flags.mark_flag_as_required("hf_model_name")
 
-
-def decode_with_vllm(
-    model_name: str,
-    hf_model_name: str,
-    hf_config_path: str | None,
-    prompt: str,
-    vllm_config_path: str | None = None,
-    ici_data_parallelism: int = 1,
-    ici_tensor_parallelism: int = 1,
-    ici_expert_parallelism: int = 1,
-    enable_dp_attention: bool = False,
-    max_target_length: int = 1024,
-    gpu_memory_utilization: float = 0.72,
-    use_chat_template: bool = False,
-    decode_sampling_temperature: float = 0.0,
-    decode_sampling_nucleus_p: float = 1.0,
-    decode_sampling_top_k: int = 1,
-    hf_access_token: str | None = None,
-    tokenizer_path: str | None = None,
-    load_parameters_path: str | None = None,
-    debug_sharding: bool = False,
-    seed: int = 42,
-) -> None:
+def decode_with_vllm(config: Config) -> None:
   """Decode using vLLM with a MaxText model implementation.
 
   Args:
-    model_name: Name of the model for MaxText.
-    hf_model_name: Path to the Hugging Face model.
-    hf_config_path: Path to the local Hugging Face model config.
-    prompt: The prompt to decode.
-    ici_data_parallelism: Size of the data parallelism dimension.
-    ici_tensor_parallelism: Size of the non-expert tensor parallelism dimension.
-    ici_expert_parallelism: Size of the MoE expert parallelism dimension.
-    enable_dp_attention: Enable attention DP parallelism.
-    max_target_length: Maximum total context length (MCL).
-    gpu_memory_utilization: Fraction of GPU memory to be used for the model executor.
-    use_chat_template: Whether to format the prompt using chat template.
-    decode_sampling_temperature: Temperature for sampling.
-    decode_sampling_nucleus_p: Nucleus sampling probability.
-    decode_sampling_top_k: Top-k sampling probability.
-    vllm_config_path: Path to vLLM config file. Defaults to MAXTEXT_PKG_DIR/configs/vllm.yml.
-    hf_access_token: Hugging Face access token for private models.
-    tokenizer_path: Path to the tokenizer. If None, use hf_model_name.
-    load_parameters_path: Path to load model parameters from.
-    debug_sharding: Whether to debug shardings.
-    seed: Random seed for sampling.
+    config: MaxText config.
   """
   # Prepare vLLM Arguments
   vllm_args = {
-      "model": hf_model_name,
-      "max_model_len": max_target_length,
-      "tensor_parallel_size": ici_tensor_parallelism,
-      "data_parallel_size": ici_data_parallelism,
-      "hf_config_path": hf_config_path,
-      "gpu_memory_utilization": gpu_memory_utilization,
+      "model": config.tokenizer_path,
+      "max_model_len": config.max_target_length,
+      "tensor_parallel_size": config.ici_tensor_parallelism,
+      "data_parallel_size": config.ici_data_parallelism,
+      "hf_config_path": config.vllm_hf_config_path,
+      "hf_overrides": config.vllm_hf_overrides,
+      "gpu_memory_utilization": config.hbm_utilization_vllm,
       "additional_config": {
           "maxtext_config": {
-              "model_name": model_name,
+              "model_name": config.model_name,
               "weight_dtype": "bfloat16",
               "allow_split_physical_axes": True,
-              "debug_sharding": debug_sharding,
+              "debug_sharding": config.debug_sharding,
           },
           "sharding": {
               "sharding_strategy": {
-                  "enable_dp_attention": enable_dp_attention,
+                  "enable_dp_attention": config.enable_dp_attention,
               },
           },
       },
   }
 
-  if load_parameters_path:
-    vllm_args["additional_config"]["maxtext_config"]["load_parameters_path"] = load_parameters_path
+  if config.load_parameters_path:
+    vllm_args["additional_config"]["maxtext_config"]["load_parameters_path"] = config.load_parameters_path
   else:
     vllm_args["load_format"] = "dummy"
 
-  enable_expert_parallel = ici_expert_parallelism > 1
+  enable_expert_parallel = config.ici_expert_parallelism > 1
   if enable_expert_parallel:
-    vllm_args["additional_config"]["sharding"]["sharding_strategy"]["expert_parallelism"] = ici_expert_parallelism
+    vllm_args["additional_config"]["sharding"]["sharding_strategy"]["expert_parallelism"] = config.ici_expert_parallelism
     vllm_args["enable_expert_parallel"] = enable_expert_parallel
 
   max_logging.log(
-      f"Initializing LLM with DP={ici_data_parallelism}, TP={ici_tensor_parallelism} "
-      f"and EP={ici_expert_parallelism if enable_expert_parallel else 0}..."
+      f"Initializing LLM with DP={config.ici_data_parallelism}, TP={config.ici_tensor_parallelism} "
+      f"and EP={config.ici_expert_parallelism if enable_expert_parallel else 1}..."
   )
 
   vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
@@ -188,15 +120,15 @@ def decode_with_vllm(
 
   max_logging.log("Generating output...")
   tokenizer = transformers.AutoTokenizer.from_pretrained(
-      tokenizer_path if tokenizer_path is not None else hf_model_name,
-      token=hf_access_token,
+      config.tokenizer_path,
+      token=config.hf_access_token,
   )
 
-  prompts = [prompt]
-  if use_chat_template:
+  prompts = [config.prompt]
+  if config.use_chat_template:
     # Format the prompt using chat template if specified
     messages = [
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": config.prompt},
     ]
     input_with_chat_template = tokenizer.apply_chat_template(
         messages,
@@ -207,18 +139,18 @@ def decode_with_vllm(
     prompts = [input_with_chat_template]
 
   max_prompt_length = max(len(tokenizer.encode(p)) for p in prompts)
-  max_tokens_to_generate = max_target_length - max_prompt_length
+  max_tokens_to_generate = config.max_target_length - max_prompt_length
   if max_tokens_to_generate <= 0:
     raise ValueError(
-        f"max_target_length ({max_target_length}) must be greater than max_prompt_length ({max_prompt_length})"
+        f"max_target_length ({config.max_target_length}) must be greater than max_prompt_length ({max_prompt_length})"
     )
 
   sampling_params = SamplingParams(
-      temperature=decode_sampling_temperature,
+      temperature=config.decode_sampling_temperature,
       max_tokens=max_tokens_to_generate,
-      top_k=decode_sampling_top_k,
-      top_p=decode_sampling_nucleus_p,
-      seed=seed,
+      top_k=config.decode_sampling_top_k,
+      top_p=config.decode_sampling_nucleus_p,
+      seed=FLAGS.seed,
   )
 
   outputs = llm.generate(prompts, sampling_params)
@@ -312,32 +244,13 @@ def main(argv: Sequence[str]) -> None:
         os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
 
+  config = pyconfig.initialize(argv)
+
   if FLAGS.use_tunix:
-    config = pyconfig.initialize(argv)
     maxtext_model, mesh = model_creation_utils.create_nnx_model(config)
     decode_with_tunix(config, model=maxtext_model, mesh=mesh)
   else:
-    decode_with_vllm(
-        model_name=FLAGS.model_name,
-        hf_model_name=FLAGS.hf_model_name,
-        hf_config_path=FLAGS.hf_config_path,
-        hf_access_token=FLAGS.hf_access_token,
-        tokenizer_path=FLAGS.tokenizer_path,
-        load_parameters_path=FLAGS.load_parameters_path,
-        ici_data_parallelism=FLAGS.ici_data_parallelism,
-        ici_tensor_parallelism=FLAGS.ici_tensor_parallelism,
-        ici_expert_parallelism=FLAGS.ici_expert_parallelism,
-        enable_dp_attention=FLAGS.enable_dp_attention,
-        max_target_length=FLAGS.max_target_length,
-        gpu_memory_utilization=FLAGS.gpu_memory_utilization,
-        prompt=FLAGS.prompt,
-        use_chat_template=FLAGS.use_chat_template,
-        decode_sampling_temperature=FLAGS.decode_sampling_temperature,
-        decode_sampling_nucleus_p=FLAGS.decode_sampling_nucleus_p,
-        decode_sampling_top_k=FLAGS.decode_sampling_top_k,
-        debug_sharding=FLAGS.debug_sharding,
-        seed=FLAGS.seed,
-    )
+    decode_with_vllm(config)
 
 
 if __name__ == "__main__":

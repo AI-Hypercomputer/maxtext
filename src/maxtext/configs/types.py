@@ -38,6 +38,7 @@ from pydantic.functional_validators import field_validator, model_validator
 from pydantic.main import BaseModel
 from pydantic.types import NonNegativeFloat, NonNegativeInt, PositiveInt
 
+
 class XProfTPUPowerTraceMode(enum.IntEnum):  # pylint: disable=invalid-name
   """Enum for XProfTPUPowerTraceMode."""
 
@@ -1557,6 +1558,9 @@ class VLLM(BaseModel):
   max_num_batched_tokens: Optional[int] = Field(None, description="Max number of batched tokens in vLLM.")
   max_num_seqs: Optional[int] = Field(None, description="Max number of sequences in vLLM.")
   vllm_additional_config: dict[str, Any] = Field(default_factory=dict, description="Additional vLLM config options.")
+  vllm_hf_overrides: dict[str, Any] = Field(
+      default_factory=dict, description="Overrides for HuggingFace model config for MaxText model."
+  )
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
 
 

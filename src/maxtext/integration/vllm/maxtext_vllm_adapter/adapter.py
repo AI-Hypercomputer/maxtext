@@ -69,9 +69,6 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       )
       overrides["load_parameters_path"] = None
 
-  if vllm_config.model_config.hf_config_path is None:
-    raise ValueError("hf_config_path must be provided when using MaxTextForCausalLM.")
-
   # Add base config path to positional args
   base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
   argv_list = ["", str(base_config_path)]
