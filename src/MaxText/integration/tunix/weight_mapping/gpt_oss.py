@@ -80,7 +80,8 @@ class GPT_OSS_VLLM_MAPPING:
         target_indices = range(start, start + layers_per_block)
 
       regex_indices = "|".join(map(str, target_indices))
-      layer_regex = f"layers\.({regex_indices})"
+      print("DEBUG: Checking for the 'r' prefix...")
+      layer_regex = fr"layers\.({regex_indices})"
 
       # --- 3. Block Mappings (Standard) ---
       mapping.update(
