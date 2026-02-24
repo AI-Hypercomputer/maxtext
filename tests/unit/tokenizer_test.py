@@ -15,9 +15,9 @@
 """Tests for tokenizer"""
 
 import numpy as np
-from MaxText import train_tokenizer
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.input_pipeline import input_pipeline_utils
+from maxtext.trainers.tokenizer import train_tokenizer
 
 import unittest
 import pytest
