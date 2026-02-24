@@ -151,10 +151,12 @@ class TransformerLinenPure(nn.Module):
     bidirectional_mask = None
     image_embeddings = None
     audio_embeddings = None
+    deepstack_visual_embeds = None
 
     if self.config.use_multimodal and encoder_images is not None:
-      # qwen3-omni-30b-a3b returns deep features from the vision encoder.
-      image_embeddings, _ = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
+      image_embeddings, deepstack_visual_embeds = self.vision_encoder(
+          input_images=encoder_images, deterministic=not enable_dropout
+      )
       bidirectional_mask = mm_processor.get_bidirectional_mask_vision(self.config, decoder_input_tokens)
 
     if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
@@ -182,6 +184,7 @@ class TransformerLinenPure(nn.Module):
         audio_masks=audio_masks,
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
+        deepstack_visual_embeds=deepstack_visual_embeds,
     )
 
     # If we are initializing the model AND MTP is enabled, we must create
@@ -458,8 +461,11 @@ class Transformer(nnx.Module):
 
     bidirectional_mask = None
     image_embeddings = None
+    deepstack_visual_embeds = None
     if self.config.use_multimodal and encoder_images is not None:
-      image_embeddings, _ = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
+      image_embeddings, deepstack_visual_embeds = self.vision_encoder(
+          input_images=encoder_images, deterministic=not enable_dropout
+      )
       bidirectional_mask = mm_processor.get_bidirectional_mask_vision(self.config, decoder_input_tokens)
 
     audio_embeddings = None
@@ -488,6 +494,7 @@ class Transformer(nnx.Module):
         audio_masks=audio_masks,
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
+        deepstack_visual_embeds=deepstack_visual_embeds,
     )
 
     # Materialize hidden state when vocab tiling is enabled

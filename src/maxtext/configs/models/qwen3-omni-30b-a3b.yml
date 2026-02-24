@@ -39,6 +39,7 @@ max_position_embeddings: 65536
 
 # General Model Settings
 enable_dropout: False
+scan_layers: False  # deepstack does not support scan_layers
 
 # Vision Encoder Configuration
 # Based on https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_omni_moe/configuration_qwen3_omni_moe.py

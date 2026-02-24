@@ -26,15 +26,16 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from MaxText import common_types
-from MaxText import maxengine
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_REPO_ROOT
+from maxtext.inference.maxengine import maxengine
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import (
     PositionalEmbedding,
     Qwen3OmniMoeVisionPosEmbedInterpolate as JaxQwen3OmniMoeVisionPosEmbedInterpolate,
     Qwen3OmniMoeVisionRotaryEmbedding as JaxQwen3OmniMoeVisionRotaryEmbedding,
 )
+from maxtext.layers.decoders import deepstack_process
 from maxtext.layers.encoders import AudioEncoder
 from maxtext.models.qwen3 import (
     Qwen3OmniAudioEncoder,
@@ -577,6 +578,86 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
           atol=1e-2,
           error_msg=f"Deep feature {i} differs",
       )
+
+
+class TestDeepstackProcess(unittest.TestCase):
+  """Tests for deepstack_process.
+
+  Adds deepstack visual embeddings into decoder hidden states at the
+  positions indicated by the bidirectional mask (visual token positions).
+  """
+
+  def test_adds_only_at_visual_positions(self):
+    """Visual embeddings should be added at True mask positions and nowhere else."""
+    batch, seq_len, hidden_dim = 2, 8, 4
+    hidden_states = jnp.zeros((batch, seq_len, hidden_dim))
+    # positions 1, 3, 5 are visual for both batch items (3 visual tokens each)
+    mask = jnp.array(
+        [
+            [False, True, False, True, False, True, False, False],
+            [False, True, False, True, False, True, False, False],
+        ]
+    )
+    visual_embeds = jnp.ones((batch, 3, hidden_dim))
+
+    result = deepstack_process(hidden_states, mask, visual_embeds)
+
+    for b in range(batch):
+      for pos in [1, 3, 5]:
+        np.testing.assert_allclose(np.array(result[b, pos]), np.ones(hidden_dim), err_msg=f"batch={b} pos={pos}")
+      for pos in [0, 2, 4, 6, 7]:
+        np.testing.assert_allclose(np.array(result[b, pos]), np.zeros(hidden_dim), err_msg=f"batch={b} pos={pos}")
+
+  def test_visual_tokens_mapped_in_order(self):
+    """Each visual embed should be added to the corresponding visual position in cumsum order."""
+    batch, seq_len, hidden_dim = 1, 6, 2
+    hidden_states = jnp.zeros((batch, seq_len, hidden_dim))
+    mask = jnp.array([[False, True, False, True, False, False]])
+    # two distinct visual tokens, a third token that won't be used
+    visual_embeds = jnp.array([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])
+
+    result = deepstack_process(hidden_states, mask, visual_embeds)
+
+    # 1st visual position → visual_embeds[0, 0]
+    np.testing.assert_allclose(np.array(result[0, 1]), [1.0, 2.0])
+    # 2nd visual position → visual_embeds[0, 1]
+    np.testing.assert_allclose(np.array(result[0, 3]), [3.0, 4.0])
+    # non-visual positions untouched
+    for pos in [0, 2, 4, 5]:
+      np.testing.assert_allclose(np.array(result[0, pos]), [0.0, 0.0])
+
+  def test_matches_reference_scatter(self):
+    """Output must match a reference numpy loop that scatters visual embeds by position."""
+    batch, seq_len, hidden_dim, num_visual = 2, 10, 8, 4
+    np.random.seed(0)
+
+    hidden_np = np.random.randn(batch, seq_len, hidden_dim).astype(np.float32)
+    mask_np = np.zeros((batch, seq_len), dtype=bool)
+    mask_np[:, [1, 3, 5, 7]] = True  # 4 visual tokens per batch item
+    visual_np = np.random.randn(batch, num_visual, hidden_dim).astype(np.float32)
+
+    # Reference: per-batch scatter
+    expected = hidden_np.copy()
+    for b in range(batch):
+      vi = 0
+      for s in range(seq_len):
+        if mask_np[b, s]:
+          expected[b, s] += visual_np[b, vi]
+          vi += 1
+
+    result = deepstack_process(jnp.array(hidden_np), jnp.array(mask_np), jnp.array(visual_np))
+    np.testing.assert_allclose(np.array(result), expected, rtol=1e-5, atol=1e-5)
+
+  def test_hidden_states_unchanged_without_visual_tokens(self):
+    """When mask is all-False, hidden states should be returned unchanged."""
+    batch, seq_len, hidden_dim = 2, 6, 4
+    np.random.seed(1)
+    hidden_np = np.random.randn(batch, seq_len, hidden_dim).astype(np.float32)
+    mask = jnp.zeros((batch, seq_len), dtype=bool)
+    visual_embeds = jnp.ones((batch, 1, hidden_dim))
+
+    result = deepstack_process(jnp.array(hidden_np), mask, visual_embeds)
+    np.testing.assert_allclose(np.array(result), hidden_np, rtol=1e-6, atol=1e-6)
 
 
 class TestQwen3OmniPreprocessing(unittest.TestCase):

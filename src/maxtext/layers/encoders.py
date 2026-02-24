@@ -65,7 +65,6 @@ class VisionEncoder(nnx.Module):
     # vision encoder output, frozen params in many cases
     encoder = getattr(self, self.encoder_name)
     encoder_output = encoder(input_images, deterministic=deterministic)
-
     deep_feats = None
     if isinstance(encoder_output, tuple):
       embeddings = encoder_output[0]
@@ -75,6 +74,8 @@ class VisionEncoder(nnx.Module):
 
     if self.config.freeze_vision_encoder_params:
       embeddings = jax.lax.stop_gradient(embeddings)
+      if deep_feats is not None:
+        deep_feats = [jax.lax.stop_gradient(feat) for feat in deep_feats]
 
     # vision embedder / projection layer, not frozen in most cases, trained / finetuned together with main model
     projector = getattr(self, self.projector_name)
