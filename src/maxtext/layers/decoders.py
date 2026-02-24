@@ -27,7 +27,6 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText import sharding
 from maxtext.common.common_types import Config, DecoderBlockType, EP_AS_CONTEXT, ShardMode
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.inference import page_manager
@@ -56,10 +55,11 @@ from maxtext.models import (
     simple_layer,
 )
 from maxtext.multimodal import utils as mm_utils
-from MaxText.sharding import create_sharding
+from maxtext.utils.sharding import create_sharding
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions

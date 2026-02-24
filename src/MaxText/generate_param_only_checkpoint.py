@@ -29,12 +29,12 @@ from etils import epath
 import jax
 from jax import random
 from jax.sharding import Mesh
-from MaxText import optimizers
 from MaxText import pyconfig
 from maxtext.common import checkpointing
 from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_TRAIN
 from maxtext.layers import quantizations
 from maxtext.models import models
+from maxtext.optimizers import optimizers
 from maxtext.utils import gcs_utils
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging

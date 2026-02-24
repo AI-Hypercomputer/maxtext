@@ -35,9 +35,9 @@ from maxtext.layers import quantizations
 from maxtext.layers.linears import Dropout
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import deepseek_batchsplit
-from MaxText.sharding import create_sharding
-from MaxText.sharding import maybe_shard_with_logical
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import create_sharding
+from maxtext.utils.sharding import maybe_shard_with_logical
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
 # -----------------------------------------

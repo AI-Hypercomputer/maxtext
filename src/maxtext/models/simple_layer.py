@@ -19,9 +19,9 @@ from jax.sharding import Mesh
 
 from flax import nnx
 from maxtext.common.common_types import Config, ShardMode
-from MaxText.sharding import create_sharding
 from maxtext.layers import quantizations, nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
+from maxtext.utils.sharding import create_sharding
 
 
 from typing import Optional

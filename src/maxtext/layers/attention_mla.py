@@ -62,7 +62,6 @@ from maxtext.common.common_types import (
     DEFAULT_MASK_VALUE,
 )
 
-from MaxText.sharding import create_sharding
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
@@ -73,6 +72,7 @@ from maxtext.inference import kvcache
 from maxtext.inference import page_manager
 from maxtext.inference import paged_attention
 from maxtext.inference.kvcache import KVQuant
+from maxtext.utils.sharding import create_sharding
 
 
 class Indexer(nnx.Module):

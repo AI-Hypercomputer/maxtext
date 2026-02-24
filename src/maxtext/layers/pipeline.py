@@ -29,7 +29,7 @@ from flax import linen as nn
 from flax.linen.spmd import LogicallyPartitioned
 
 from maxtext.common.common_types import Config, MODEL_MODE_TRAIN, EP_AS_CONTEXT, ShardMode
-from MaxText.sharding import (
+from maxtext.utils.sharding import (
     maybe_shard_with_logical,
     maybe_shard_with_name,
     create_sharding,

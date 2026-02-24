@@ -42,13 +42,13 @@ import sys
 import jax
 from jax import random
 from jax.sharding import Mesh
-from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.layers import quantizations
 from maxtext.models.models import transformer_as_linen
+from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils

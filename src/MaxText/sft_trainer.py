@@ -28,7 +28,6 @@ import jax
 from flax.linen import partitioning as nn_partitioning
 
 from MaxText import pyconfig
-from MaxText import sharding
 from maxtext.trainers.pre_train.train import (
     eval_step,
     get_first_step,
@@ -48,6 +47,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding
 from maxtext.utils import train_utils
 
 
