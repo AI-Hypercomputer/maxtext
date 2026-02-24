@@ -304,14 +304,82 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
 
   # Load datasets
-  train_dataset = get_dataset(
-      model_tokenizer,
-      trainer_config,
-      train_data_dir,
-      trainer_config.train_split,
-      data_files=trainer_config.hf_train_files,
-      dataset_name=trainer_config.dataset_name,
-  )
+  if trainer_config.dataset_name == "huggingface:nvidia/OpenMathInstruct-2":
+    import datasets  # pylint: disable=import-outside-toplevel
+
+    def prepare_openinstructmath2_dataset(
+        split: str = "train_1M",
+        seed: int = 42,
+        test_size: float = 0.05,
+        output_key: str = "expected_answer",
+    ):
+      """Load and split the OpenMathInstruct-2 dataset into train and validation sets using HF's train_test_split."""
+      max_logging.log(
+          "WARNING: For reproducible experiments, preprocess the dataset once and "
+          "define your own HfDataset subclass that directly uses the preprocessed datasets."
+      )
+
+      # Load the original dataset
+      original_ds = datasets.load_dataset(
+          "parquet",
+          data_files={trainer_config.train_split: trainer_config.hf_train_files},
+          split=split,
+          cache_dir=train_data_dir,
+      )
+
+      # Split into train and validation sets using HF's train_test_split
+      split_ds = original_ds.train_test_split(test_size=test_size, seed=seed)
+
+      return {
+          "train": split_ds["train"],
+          "validation": split_ds["test"],
+      }
+
+    split_name = trainer_config.train_split if trainer_config.train_split != "train" else "train_1M"
+    splits = prepare_openinstructmath2_dataset(split=split_name)
+    template_config = load_template_from_file(trainer_config.chat_template_path)
+
+    train_dataset = (
+        grain.MapDataset.source(splits["train"])
+        .shuffle(seed=trainer_config.data_shuffle_seed)
+        .map(
+            lambda x: utils_rl.process_data(
+                trainer_config.dataset_name, model_tokenizer, template_config, trainer_config, x
+            )
+        )
+    )
+
+    test_dataset = (
+        grain.MapDataset.source(splits["validation"])
+        .shuffle(seed=trainer_config.data_shuffle_seed)
+        .map(
+            lambda x: utils_rl.process_data(
+                trainer_config.dataset_name, model_tokenizer, template_config, trainer_config, x
+            )
+        )
+    )
+  else:
+    train_dataset = get_dataset(
+        model_tokenizer,
+        trainer_config,
+        train_data_dir,
+        trainer_config.train_split,
+        data_files=trainer_config.hf_train_files,
+        dataset_name=trainer_config.dataset_name,
+    )
+
+    eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
+    if not eval_dataset_name:
+      eval_dataset_name = trainer_config.dataset_name
+
+    test_dataset = get_dataset(
+        model_tokenizer,
+        trainer_config,
+        test_data_dir,
+        trainer_config.eval_split,
+        data_files=trainer_config.hf_eval_files,
+        dataset_name=eval_dataset_name,
+    )
 
   def _filter_long_prompts(x):
     tokens = model_tokenizer.tokenize(x["prompts"])
@@ -324,23 +392,23 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size)
 
-  eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
-  if not eval_dataset_name:
-    eval_dataset_name = trainer_config.dataset_name
-
-  test_dataset = get_dataset(
-      model_tokenizer,
-      trainer_config,
-      test_data_dir,
-      trainer_config.eval_split,
-      data_files=trainer_config.hf_eval_files,
-      dataset_name=eval_dataset_name,
-  )
-
   test_dataset = test_dataset.filter(_filter_long_prompts)
   test_dataset = test_dataset[: trainer_config.num_test_batches * trainer_config.batch_size]
 
   test_dataset = test_dataset.to_iter_dataset().batch(trainer_config.batch_size)
+
+  if trainer_config.debug.rl:
+    # Let's see how one batch of the dataset looks like!
+    if trainer_config.debug.rl:
+      for i, ele in enumerate(train_dataset):
+        if i >= 5:
+          break
+        pprint(ele)
+    if trainer_config.debug.rl:
+      for i, ele in enumerate(test_dataset):
+        if i >= 5:
+          break
+        pprint(ele)
 
   # Load reference model
   max_logging.log("Creating reference model and also meshes for reference and rollout")
@@ -499,7 +567,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
       )
 
-  vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
+  vllm_config_path = epath.Path(MAXTEXT_CONFIGS_DIR) / "inference/vllm.yml"
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 

@@ -16,6 +16,7 @@
 """
 RL Evaluation Module.
 """
+from math_verify import parse
 from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
@@ -99,7 +100,6 @@ def score_responses(tmvp_config, question, responses, answer):
       Tuple of (is_correct, is_partially_correct, has_correct_format)
   """
   match_format = utils_rl.get_match_format_regex(tmvp_config)
-  match_numbers = utils_rl.get_match_numbers_regex(tmvp_config)
 
   if tmvp_config.debug.rl:
     max_logging.log("========================================")
@@ -114,22 +114,32 @@ def score_responses(tmvp_config, question, responses, answer):
 
   for response in responses:
     # Extract numerical response
-    extracted_response = guess.group(1) if (guess := match_numbers.search(response)) is not None else "-1000000"
-
+    extracted_response = guess.group(1) if (guess := match_format.search(response)) is not None else "-1000000"
     if tmvp_config.debug.rl:
       max_logging.log(f"Evaluation extracted_response: {extracted_response}")
 
     # Check exact correctness
     try:
-      # Remove ',' and '$' then convert to float
-      val_extracted = float(extracted_response.replace(",", "").replace("$", "").strip())
-      val_answer = float(answer.replace(",", "").replace("$", "").strip())
-      is_correct = val_extracted == val_answer
+      # Fix LaTeX escaping issues for both ground truth and extracted answer
+      norm_answer = utils_rl.fix_latex_escaping(answer)
+      norm_extracted = utils_rl.fix_latex_escaping(extracted_response)
+      # Normalize Normalize for certain datasets and parse
+      if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
+        norm_extracted = utils_rl.normalize_final_answer(norm_extracted).strip()
+        norm_answer = utils_rl.normalize_final_answer(answer).strip()
+      is_correct = utils_rl.math_verify_func([utils_rl.boxed(norm_answer)], [utils_rl.boxed(norm_extracted)])[0] > 0.1
+      if tmvp_config.debug.rl:
+        # is_correct is a tuple, if first value is 1.0 means it's a match;
+        # 0.0 means a mismatch. e.g. (0.0, (['3', '3'], ['3/5', '\\frac{3}{5}']))
+        max_logging.log(f"Result is_correct: {is_correct}")
 
-      # Check partial correctness (within 10%)
-      ratio = val_extracted / val_answer
-      if 0.9 <= ratio <= 1.1:
-        is_partially_correct = True
+      val_extracted = parse(utils_rl.boxed(norm_extracted))
+      val_answer = parse(utils_rl.boxed(norm_answer))
+
+      # Check partial correctness if values can be extracted (within 10%)
+      if val_extracted and val_answer:
+        ratio = (val_extracted[0] + utils_rl.EPSILON) / (val_answer[0] + utils_rl.EPSILON)
+        is_partially_correct = 0.9 <= ratio <= 1.1
 
     except Exception as e:
       if tmvp_config.debug.rl:

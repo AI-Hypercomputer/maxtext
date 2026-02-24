@@ -40,6 +40,8 @@ RUN pip install -e /tpu-inference --no-cache-dir
 
 RUN pip install --no-deps qwix==0.1.4
 
+RUN pip install math-verify==0.9.0
+
 RUN if [ "$MODE" = "post-training-experimental" ]; then \
     echo "MODE=post-training-experimental: Re-installing JAX/libtpu"; \
     pip uninstall -y jax jaxlib libtpu && \
