@@ -83,6 +83,7 @@ jobs:
 
           uv pip install --no-deps qwix==0.1.4
           uv pip install --no-deps protobuf==5.29.5
+          uv pip install math-verify==0.9.0
           python3 -m pip freeze
       - name: Run Post-Training Notebooks
         shell: bash
