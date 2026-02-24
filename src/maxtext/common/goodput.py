@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,6 +34,12 @@ class GoodputEvent(Enum):
   TRAINING_PREPARATION = "training_preparation"
   DATA_LOADING = "data_loading"
   STEP = "step"
+
+
+# Recorder method name constants for explicit job start/end recording.
+# Derived from the enum so they stay in sync if the value ever changes.
+RECORD_JOB_START_TIME = f"record_{GoodputEvent.JOB.value}_start_time"
+RECORD_JOB_END_TIME = f"record_{GoodputEvent.JOB.value}_end_time"
 
 
 @contextlib.contextmanager
@@ -83,18 +89,22 @@ def maybe_monitor_goodput(config):
 
 @contextlib.contextmanager
 def maybe_record_goodput(recorder, event_name, *args):
-  """Record goodput if `enable_goodput_recording=True`."""
+  """Record goodput if `enable_goodput_recording=True`.
+
+  The end-time event is only recorded when the wrapped block exits without
+  raising an exception (i.e. the event truly completed).  Callers that need
+  explicit end-time control — e.g. GoodputEvent.JOB under elastic training
+  where the elastic manager may suppress the JAX exception internally —
+  should call record_goodput directly rather than using this context manager.
+  """
+  record_goodput(recorder, f"record_{event_name.value}_start_time", *args)
+  completed = False
   try:
-    start_event_name = f"record_{event_name.value}_start_time"
-    record_goodput(recorder, start_event_name, *args)
     yield
-  except BaseException:  # pylint: disable=W0706
-    raise
-  else:
-    end_event_name = f"record_{event_name.value}_end_time"
-    record_goodput(recorder, end_event_name, *args)
+    completed = True
   finally:
-    pass
+    if completed:
+      record_goodput(recorder, f"record_{event_name.value}_end_time", *args)
 
 
 def record_goodput(recorder, event_name, *args):

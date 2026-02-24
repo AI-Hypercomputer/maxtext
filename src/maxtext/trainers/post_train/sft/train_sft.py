@@ -54,9 +54,12 @@ from MaxText import pyconfig
 from maxtext.trainers.pre_train.train import loss_fn
 from maxtext.common.goodput import (
     GoodputEvent,
+    RECORD_JOB_END_TIME,
+    RECORD_JOB_START_TIME,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
+    record_goodput,
 )
 from maxtext.trainers.post_train.sft import hooks
 from maxtext.utils import max_utils
@@ -181,7 +184,13 @@ def train(mt_config, goodput_recorder=None):
     goodput_recorder: An optional GoodputRecorder to record performance metrics.
   """
   trainer, mesh = setup_trainer_state(mt_config, goodput_recorder)
-  trainer = train_model(mt_config, trainer, mesh)
+  _job_completed_gracefully = False
+  try:
+    trainer = train_model(mt_config, trainer, mesh)
+    _job_completed_gracefully = True
+  finally:
+    if _job_completed_gracefully:
+      record_goodput(goodput_recorder, RECORD_JOB_END_TIME)
   return trainer, mesh
 
 
@@ -198,8 +207,8 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
 
   goodput_recorder = create_goodput_recorder(mt_config)
-
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB), maybe_monitor_goodput(mt_config):
+  record_goodput(goodput_recorder, RECORD_JOB_START_TIME)
+  with maybe_monitor_goodput(mt_config):
     train(mt_config, goodput_recorder)
 
 

@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -75,9 +75,12 @@ from maxtext.common import checkpointing, profiler
 from maxtext.common.data_loader import DataLoader
 from maxtext.common.goodput import (
     GoodputEvent,
+    RECORD_JOB_END_TIME,
+    RECORD_JOB_START_TIME,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
+    record_goodput,
 )
 from maxtext.experimental.rl import grpo_input_pipeline
 from maxtext.experimental.rl import grpo_utils
@@ -795,6 +798,7 @@ def train_loop(config, config_inference, recorder, state=None):
   )
   generation_thread.start()
 
+  _job_completed_gracefully = False
   try:
     last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
@@ -881,9 +885,13 @@ def train_loop(config, config_inference, recorder, state=None):
       elif checkpoint_manager is not None:
         # in case the last checkpoint_period checkpoint is still in progress
         checkpoint_manager.wait_until_finished()
+    _job_completed_gracefully = True
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
+    _job_completed_gracefully = True
   finally:
+    if _job_completed_gracefully:
+      record_goodput(recorder, RECORD_JOB_END_TIME)
     metric_logger.flush_metrics_and_cleanup()
     max_logging.log("Training loop finished or exited. Signaling generation worker to stop.")
     stop_event.set()
@@ -955,8 +963,9 @@ def main(argv: Sequence[str]) -> None:
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
 
+  record_goodput(recorder, RECORD_JOB_START_TIME)
   with diagnostic.diagnose(diagnostic_config):
-    with maybe_record_goodput(recorder, GoodputEvent.JOB), maybe_monitor_goodput(config):
+    with maybe_monitor_goodput(config):
       train_loop(config, config_inference, recorder)
 
 
