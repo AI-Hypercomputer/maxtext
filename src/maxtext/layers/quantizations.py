@@ -805,7 +805,10 @@ class TransformerEngineQuantization(Quantization):
       def generate_quantizer_set(self, postfix: str = ""):
         OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
         return super().generate_quantizer_set(  # pytype: disable=wrong-keyword-args
-            postfix=postfix, variable_collection=OVERWRITE_WITH_GRADIENT, fp8_recipe=fp8_recipe
+            postfix=postfix,
+            variable_collection=OVERWRITE_WITH_GRADIENT,
+            quantization_checkpoint_name="quantization",
+            fp8_recipe=fp8_recipe
         )
 
       @nn.compact
