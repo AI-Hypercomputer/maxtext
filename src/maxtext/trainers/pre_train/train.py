@@ -42,6 +42,7 @@ from MaxText import pyconfig
 from MaxText import sharding
 from MaxText.common_types import ShardMode
 from MaxText.globals import EPS
+# Placeholder: internal
 
 from MaxText.gradient_accumulation import gradient_accumulation_loss_and_grad
 from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
