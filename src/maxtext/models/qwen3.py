@@ -473,7 +473,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     )
 
   def __call__(
-      self, hidden_states: Array, model_mode: str = MODEL_MODE_TRAIN, kv_cache=None, **kwargs
+      self, hidden_states: Array, model_mode: str = MODEL_MODE_TRAIN, kv_cache=None, decoder_segment_ids: None | Array = None, **kwargs
   ) -> tuple[Array, dict[str, Array]]:
     # hidden_states: (B, S, E)
     cfg = self.config
@@ -561,8 +561,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           conv_state = conv_state[:batch]
 
       # Concatenate previous state with new input
-      conv_input = jnp.concatenate([conv_state, qkv], axis=1)
-      new_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
+        conv_input = jnp.concatenate([conv_state, qkv], axis=1)
+        
+        if decoder_segment_ids is not None:
+          valid_lens = jnp.sum(decoder_segment_ids != 0, axis=1) # Shape: (B,)
+          def extract_state(c_in, v_len):
+            return jax.lax.dynamic_slice_in_dim(c_in, v_len, conv_kernel_size - 1, axis=0)
+          new_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
+        else:
+          new_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
 
       # Update self.cache in place
       self.cache.conv_state.value = new_conv_state
@@ -596,6 +603,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     beta = jax.nn.sigmoid(b)
     # g shape: (B, S, H_v)
     g = -jnp.exp(A_log) * jax.nn.softplus(a + dt_bias)
+
+    if decoder_segment_ids is not None:
+      mask = (decoder_segment_ids != 0)
+      # Apply mask by broadcasting to respective shapes
+      key = jnp.where(mask[..., None, None], key, 0.0)
+      value = jnp.where(mask[..., None, None], value, 0.0)
+      g = jnp.where(mask[..., None], g, 0.0)
 
     if self.num_v_heads > self.num_k_heads and self.num_v_heads % self.num_k_heads == 0:
       repeats = self.num_v_heads // self.num_k_heads
@@ -1014,6 +1028,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
           hidden_states,
           model_mode=model_mode,
           kv_cache=None,
+          decoder_segment_ids=decoder_segment_ids,
       )
       new_kv_cache = None
 
