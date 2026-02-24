@@ -177,6 +177,28 @@ def gcs_glob_pattern(pattern):
   return data_files
 
 
+def read_bytes_from_gcs(file_path):
+  """Read raw bytes from a GCS file.
+
+  Args:
+    file_path: The gcs path of the file (e.g. gs://bucket/path/to/file).
+
+  Returns:
+    The file contents as bytes, or None if unavailable.
+  """
+  if not _gcs_guard("read_bytes_from_gcs"):
+    return None
+  try:
+    storage_client = storage.Client()
+    bucket_name, file_prefix = parse_gcs_bucket_and_prefix(file_path)
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(file_prefix)
+    return blob.download_as_bytes()
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.log(f"Error reading bytes from GCS path {file_path}: {e}")
+    return None
+
+
 def read_json_from_gcs(file_path):
   """
   Read a json file from gcs bucket.
@@ -187,21 +209,13 @@ def read_json_from_gcs(file_path):
   Returns:
     A dictionary with content from json file.
   """
-  if not _gcs_guard("read_json_from_gcs"):
-    return None
   try:
-    storage_client = storage.Client()
-    bucket_name, file_prefix = parse_gcs_bucket_and_prefix(file_path)
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(file_prefix)
-
-    json_string = blob.download_as_string()
-
-    data = json.loads(json_string)
-
-    return data
+    raw = read_bytes_from_gcs(file_path)
+    if raw is None:
+      return None
+    return json.loads(raw)
   except (ValueError, TypeError, json.JSONDecodeError) as e:
-    print(f"Error reading JSON file from GCS: {str(e)}")
+    max_logging.log(f"Error reading JSON file from GCS: {str(e)}")
     return None
 
 

@@ -213,7 +213,6 @@ def pretrain_preprocessing_pipeline(
       config.add_bos,
       config.add_eos,
       config.hf_access_token,
-      config.dataset_type,
   )
   if tokenizer_model.pad_id is not None:
     pad_id = tokenizer_model.pad_id
@@ -321,7 +320,6 @@ def dpo_preprocessing_pipeline(
       config.add_bos,
       config.add_eos,
       config.hf_access_token,
-      config.dataset_type,
   )
   if tokenizer_model.pad_id is not None:
     pad_id = tokenizer_model.pad_id

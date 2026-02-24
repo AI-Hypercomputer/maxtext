@@ -27,10 +27,10 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import multihost_utils
 
-from maxtext.input_pipeline import tokenizer
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.input_pipeline.packing import sequence_packing
 from maxtext.input_pipeline.input_pipeline_utils import get_tokenizer
+from maxtext.input_pipeline.input_pipeline_utils import TokenizeOp
 from maxtext.utils import max_logging
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -258,7 +258,7 @@ def preprocess_train_dataset(
   else:
     pad_id = -1
   train_ds = train_ds.map(
-      lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)),
+      lambda x: TokenizeOp(tokenizer_model=sp_tokenizer, features=x, data_keys=("targets",)),
       num_parallel_calls=AUTOTUNE,
   )
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
@@ -283,7 +283,7 @@ def preprocess_eval_dataset(
   # group text up to max_target_length if the dataset is not pre-tokenized/pre-processed
   if not is_tokenized_dataset:
     eval_ds = eval_ds.map(
-        lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)),
+        lambda x: TokenizeOp(tokenizer_model=sp_tokenizer, features=x, data_keys=("targets",)),
         num_parallel_calls=AUTOTUNE,
     )
     # hardcode batch_sizes 24567 i.e. the exp size in split validation_24567exp
