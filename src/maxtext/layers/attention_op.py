@@ -33,7 +33,7 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ke
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
-from MaxText.common_types import (
+from maxtext.common.common_types import (
     Array,
     AttentionType,
     AxisIdxes,

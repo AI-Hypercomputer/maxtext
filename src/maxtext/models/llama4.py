@@ -23,8 +23,8 @@ from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText.common_types import Array, AttentionType, Config, MODEL_MODE_TRAIN
-from MaxText.common_types import MODEL_MODE_PREFILL
+from maxtext.common.common_types import Array, AttentionType, Config, MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_PREFILL
 from maxtext.inference import page_manager
 from maxtext.layers import initializers
 from maxtext.layers import linears

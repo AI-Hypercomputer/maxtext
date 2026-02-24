@@ -39,8 +39,7 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
-from MaxText import common_types
-from MaxText import pyconfig
+from maxtext.common import common_types
 from maxtext.common import checkpointing
 from maxtext.layers import quantizations
 from maxtext.models import deepseek, models
@@ -49,6 +48,7 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 import orbax.checkpoint as ocp
 from tqdm import tqdm
+from MaxText import pyconfig
 
 IGNORE = ocp.PLACEHOLDER
 PRNGKeyType = Any

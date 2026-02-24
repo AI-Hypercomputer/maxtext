@@ -25,7 +25,7 @@ from jax.sharding import PartitionSpec as P, NamedSharding, reshard
 
 import optax
 
-from MaxText.common_types import ShardMode
+from maxtext.common.common_types import ShardMode
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 

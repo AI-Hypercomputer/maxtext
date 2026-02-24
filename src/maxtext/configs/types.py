@@ -27,17 +27,16 @@ from tempfile import gettempdir
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from MaxText import accelerator_to_spec_map
-from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ShardMode
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
+from MaxText import accelerator_to_spec_map
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from pydantic.config import ConfigDict
 from pydantic.fields import Field
 from pydantic.functional_validators import field_validator, model_validator
 from pydantic.main import BaseModel
 from pydantic.types import NonNegativeFloat, NonNegativeInt, PositiveInt
-
 
 class XProfTPUPowerTraceMode(enum.IntEnum):  # pylint: disable=invalid-name
   """Enum for XProfTPUPowerTraceMode."""

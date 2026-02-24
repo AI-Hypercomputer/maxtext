@@ -18,7 +18,7 @@ import jax
 from flax import nnx
 from jax.sharding import Mesh
 
-from MaxText.common_types import Config
+from maxtext.common.common_types import Config
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import initializers
 

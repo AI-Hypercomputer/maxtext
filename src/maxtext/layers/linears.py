@@ -30,8 +30,8 @@ from flax import nnx
 import flax.linen as nn
 
 from MaxText.sharding import maybe_shard_with_logical
-from MaxText.common_types import DecoderBlockType, ShardMode, DType, Array, Config
-from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, EP_AS_CONTEXT
+from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Array, Config
+from maxtext.common.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, EP_AS_CONTEXT
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.layers import normalizations
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned

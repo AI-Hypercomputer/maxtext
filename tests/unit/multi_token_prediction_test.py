@@ -20,12 +20,12 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from flax import nnx
 
-from MaxText.common_types import Config
 from MaxText import pyconfig
 from maxtext.layers.decoders import DecoderLayer
 from maxtext.layers import multi_token_prediction  # The class under test
 from maxtext.layers import embeddings
-from MaxText.common_types import MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.common.common_types import Config
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils

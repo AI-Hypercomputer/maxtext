@@ -21,8 +21,8 @@ from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText.common_types import Config
-from MaxText.common_types import MODEL_MODE_PREFILL
+from maxtext.common.common_types import Config
+from maxtext.common.common_types import MODEL_MODE_PREFILL
 from maxtext.inference import page_manager
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
@@ -31,8 +31,8 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import Dropout, MlpBlock
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
-from MaxText.sharding import create_sharding, maybe_shard_with_logical
 from maxtext.utils import max_utils
+from MaxText.sharding import create_sharding, maybe_shard_with_logical
 
 # -----------------------------------------
 # The Decoder Layer specific for Llama2

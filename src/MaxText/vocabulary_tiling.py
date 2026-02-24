@@ -25,7 +25,7 @@ from MaxText.sharding import (
     all_gather_over_fsdp,
     create_sharding,
 )
-from MaxText.common_types import ShardMode
+from maxtext.common.common_types import ShardMode
 from maxtext.utils import max_utils
 
 

@@ -21,7 +21,7 @@ import jax.numpy as jnp
 import jaxtyping
 from typing import Any, Callable
 
-from MaxText.common_types import DecoderBlockType
+from maxtext.common.common_types import DecoderBlockType
 from maxtext.inference.offline_engine import InputData
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils

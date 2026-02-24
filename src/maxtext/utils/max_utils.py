@@ -41,7 +41,7 @@ import psutil
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.gcloud_stub import writer, _TENSORBOARDX_AVAILABLE
 from maxtext.utils import max_logging
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"

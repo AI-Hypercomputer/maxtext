@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from MaxText import sharding
-from MaxText.common_types import Config, MODEL_MODE_TRAIN
+from maxtext.common.common_types import Config, MODEL_MODE_TRAIN
 from MaxText.globals import EPS
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.decoders import DecoderLayer

@@ -37,7 +37,6 @@ from flax.linen import partitioning as nn_partitioning
 import flax
 
 from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.models import models
 from maxtext.layers import quantizations
@@ -48,6 +47,7 @@ from maxtext.utils import lora_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.common.gcloud_stub import jetstream, is_decoupled
+from maxtext.common.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 
 config_lib, engine_api, token_utils, tokenizer_api, _token_params_ns = jetstream()
 TokenizerParameters = getattr(_token_params_ns, "TokenizerParameters", object)  # type: ignore[assignment]

@@ -29,8 +29,8 @@ from jax.experimental import xla_metadata
 from jax.sharding import NamedSharding, Mesh
 from jax.sharding import PartitionSpec as P
 import jax.numpy as jnp
-from MaxText import common_types as ctypes
-from MaxText.common_types import ShardMode
+from maxtext.common import common_types as ctypes
+from maxtext.common.common_types import ShardMode
 from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from MaxText.sharding import logical_to_mesh_axes
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations

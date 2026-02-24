@@ -22,8 +22,8 @@ from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText.common_types import Config
-from MaxText.common_types import HyperConnectionType, MODEL_MODE_PREFILL
+from maxtext.common.common_types import Config
+from maxtext.common.common_types import HyperConnectionType, MODEL_MODE_PREFILL
 from maxtext.inference import page_manager
 from maxtext.layers import attention_mla
 from maxtext.layers import initializers

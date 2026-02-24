@@ -23,7 +23,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
-from MaxText.common_types import Array, DType, ShardMode
+from maxtext.common.common_types import Array, DType, ShardMode
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import Initializer, variable_to_logically_partitioned
 from maxtext.utils import max_logging
