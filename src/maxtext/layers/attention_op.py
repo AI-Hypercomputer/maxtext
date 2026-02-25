@@ -146,11 +146,15 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   )
 
 
-def validate_flash_attention_with_sinks_on_gpu(sinks: Array | None) -> None:
-  """Helper function to check for sinks with flash attention on GPU."""
+def validate_gpu_flash_attention(sinks: Array | None, record_max_logits: bool) -> None:
+  """Helper function to check for unsupported features with flash attention on GPU."""
   if sinks is not None:
     raise ValueError(
         "The flash attention with sinks is not supported on GPU yet."
+    )
+  if record_max_logits:
+    raise NotImplementedError(
+        "record_max_logits (QK-Clip) is not supported for GPU flash attention kernels yet."
     )
 
 
@@ -940,6 +944,7 @@ class AttentionOp(nnx.Module):
       bidirectional_mask: Any = None,
       sinks: Array | None = None,
       index_mask: Array | None = None,
+      record_max_logits: bool = False,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -959,7 +964,11 @@ class AttentionOp(nnx.Module):
         impl = self.gpu_ragged_attention
       else:
         raise NotImplementedError(target_hardware)
-      return impl(query, key, value, lengths, self.ragged_block_size)
+
+      local_out, local_max, local_sum = impl(query, key, value, lengths, self.ragged_block_size)
+      if record_max_logits:
+        self.sow("intermediates", "max_logits", local_max)
+      return local_out, local_max, local_sum
 
     # 'vllm_rpa' uses the same dot-attention wrapper but routes to the vLLM
     # ragged paged attention kernel in `Attention.__call__`.
@@ -983,6 +992,7 @@ class AttentionOp(nnx.Module):
           bidirectional_mask=bidirectional_mask,
           sinks=sinks,
           index_mask=index_mask,
+          record_max_logits=record_max_logits,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -996,21 +1006,21 @@ class AttentionOp(nnx.Module):
         if model_mode == MODEL_MODE_AUTOREGRESSIVE:
           raise ValueError("""Decode not supported with flash attention.
                               Use `dot_product` instead.""")
-        return (
-            self.tpu_flash_attention(
-                query,
-                key,
-                value,
-                decoder_segment_ids,
-                self.attn_logits_soft_cap,
-                sinks,
-                index_mask,
-            ),
-            None,
-            None,
+
+        out, max_logits = self.tpu_flash_attention(
+            query,
+            key,
+            value,
+            decoder_segment_ids,
+            self.attn_logits_soft_cap,
+            sinks,
+            record_max_logits=record_max_logits,
         )
+        if max_logits is not None:
+          self.sow("intermediates", "max_logits", max_logits)
+        return out, None, None
+
       else:
-        validate_flash_attention_with_sinks_on_gpu(sinks)
         if model_mode == MODEL_MODE_AUTOREGRESSIVE:
           # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
           return self.apply_attention_dot(
@@ -1020,10 +1030,12 @@ class AttentionOp(nnx.Module):
               decoder_segment_ids,
               model_mode,
               bidirectional_mask=bidirectional_mask,
+              record_max_logits=record_max_logits,
               qk_product_einsum=qk_product_einsum,
               wv_product_einsum=wv_product_einsum,
           )
         else:
+          validate_gpu_flash_attention(sinks, record_max_logits)
           head_axis = -2
           num_query_heads = query.shape[head_axis]
           num_kv_heads = key.shape[head_axis]
@@ -1043,12 +1055,13 @@ class AttentionOp(nnx.Module):
             value = jnp.repeat(
                 value, q_heads_per_kv_head, axis=head_axis
             )  # value shape [batch_size, kv_seq_len, num_kv_heads, head_dim]
+
           out = gpu_pallas_attention.mha(
               query, key, value, decoder_segment_ids, sm_scale=1.0, causal=True
           )
           return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
-      validate_flash_attention_with_sinks_on_gpu(sinks)
+      validate_gpu_flash_attention(sinks, record_max_logits)
       if isinstance(key, KVTensor):
         key = key.dequant()
       if isinstance(value, KVTensor):
@@ -1064,7 +1077,7 @@ class AttentionOp(nnx.Module):
           None,
       )
     elif self.attention_kernel == "cudnn_flash_jax":
-      validate_flash_attention_with_sinks_on_gpu(sinks)
+      validate_gpu_flash_attention(sinks, record_max_logits)
       if isinstance(key, KVTensor):
         key = key.dequant()
       if isinstance(value, KVTensor):
@@ -1190,7 +1203,8 @@ class AttentionOp(nnx.Module):
       attn_logits_soft_cap: float | None = None,
       sinks: Array | None = None,
       index_mask: Array | None = None,
-  ) -> Array:
+      record_max_logits: bool = False,
+  ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
     cp_size = self.config.context_parallel_size
@@ -1454,6 +1468,21 @@ class AttentionOp(nnx.Module):
     # 'segment_axis_names_q' maps to ['activation_q_length', ['context']] meaning that q is sharded over the context axis
     #  'segment_axis_names_kv' maps to ['activation_kv_length', []] meaning that K and V are not sharded
     # splash_kernel is sharded over (HEAD, LENGTH)
+
+    if record_max_logits:
+      # max_logits will share similar sharding as query but last dim is unrelated to model
+      # Using None for the last dimension of max_logits sharding
+      if isinstance(axis_names_q, jax.sharding.PartitionSpec):
+        # max_logits is Rank 3 (batch, heads, seq), so drop the last dimension (d_kv)
+        max_logits_spec = jax.sharding.PartitionSpec(*axis_names_q[:-1])
+      else:
+        # Fallback if axis_names_q is not a PartitionSpec (unlikely in this context)
+        max_logits_spec = axis_names_q[:-1]
+      out_specs = (axis_names_q, max_logits_spec)
+    else:
+      # Safely pad the specs with None to match the (attention_output, None) return type
+      out_specs = (axis_names_q, None)
+
     @functools.partial(
         jax.shard_map,
         mesh=self.mesh,
@@ -1470,7 +1499,7 @@ class AttentionOp(nnx.Module):
             sink_axis_names,  # sharding align with query heads
             index_mask_axis_names,
         ),
-        out_specs=axis_names_q,
+        out_specs=out_specs,
         check_vma=False,
     )
     def wrap_flash_attention(
@@ -1527,20 +1556,46 @@ class AttentionOp(nnx.Module):
                 config=sa_config,
             )
             kernel = partial(splash_kernel, max_logit_value=max_logit_value)
-            return kernel(q, k, v, segment, sinks=sinks)
+
+            if record_max_logits:
+              out, stats = kernel(q, k, v, segment, sinks=sinks, save_residuals=True)
+              return out, stats["max_logits"]
+            else:
+              return kernel(q, k, v, segment, sinks=sinks), None
 
           # Iterate over batch dimension for (query, key, value, segment, sinks, mask)
           attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, 0, None, 0))
           index_mask = jnp.isclose(index_mask, 0.0)
-          attention_output = attn_fn(
-              query, key, value, decoder_segment_ids_tuple, sinks, index_mask
-          )
+
+          if record_max_logits:
+            attention_output, max_logits = attn_fn(
+                query, key, value, decoder_segment_ids_tuple, sinks, index_mask
+            )
+            return attention_output, max_logits
+          else:
+            attention_output, _ = attn_fn(
+                query, key, value, decoder_segment_ids_tuple, sinks, index_mask
+            )
+            return attention_output, None
         else:
           kernel = partial(splash_kernel, max_logit_value=max_logit_value)
-          attention_output = jax.vmap(
-              lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s),
-              in_axes=(0, 0, 0, 0, None),
-          )(query, key, value, decoder_segment_ids_tuple, sinks)
+
+          if record_max_logits:
+
+            def kernel_fn(q, k, v, d, s):
+              # Pass save_residuals=True to force stats generation
+              out, stats = kernel(q, k, v, d, sinks=s, save_residuals=True)
+              return out, stats["max_logits"]
+
+            attention_output, max_logits = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(
+                query, key, value, decoder_segment_ids_tuple, sinks
+            )
+            return attention_output, max_logits
+          else:
+            attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
+                query, key, value, decoder_segment_ids_tuple, sinks
+            )
+            return attention_output, None
       elif self.config.use_jax_splash:
         materialized_mask = jnp.asarray(mask[:, :])
         attention_output = jax_flash_attention.flash_attention_block_masked(
@@ -1553,11 +1608,18 @@ class AttentionOp(nnx.Module):
             mask=materialized_mask,
             mask_value=DEFAULT_MASK_VALUE,
         )
+        if record_max_logits:
+          # The native JAX splash attention implementation does not currently expose the softmax statistics
+          # (e.g., max_logits) required for QK-Clip. Use tokamax splash attention if max logit recording is needed.
+          raise NotImplementedError("record_max_logits not supported for jax_splash")
       else:
         attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
             query, key, value, decoder_segment_ids_tuple, sinks
         )
-      return attention_output
+        if record_max_logits:
+          raise NotImplementedError("record_max_logits not supported for legacy splash")
+
+      return attention_output, None
 
     def _maybe_shard_with_pspec(
         inputs, pspec: jax.sharding.PartitionSpec | None
@@ -1586,7 +1648,7 @@ class AttentionOp(nnx.Module):
     sinks = _maybe_shard_with_pspec(sinks, sink_axis_names)
     index_mask = _maybe_shard_with_pspec(index_mask, index_mask_axis_names)
 
-    x = wrap_flash_attention(
+    ret = wrap_flash_attention(
         query,
         key,
         value,
@@ -1600,9 +1662,19 @@ class AttentionOp(nnx.Module):
         index_mask,
     )
 
+    x, max_logits = ret
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
 
-    return x
+    if record_max_logits:
+      # Max over sequence length (dim 2 of max_logits)
+      # max_logits from kernel is (batch, heads, q_len)
+      # output needs to be (batch, heads)
+      # Note: q_len is sharded. We first reduce locally.
+      max_logits_local = jnp.max(max_logits, axis=2)
+
+      return x, max_logits_local
+
+    return x, None
 
   def cudnn_flash_attention(
       self,
@@ -1868,6 +1940,7 @@ class AttentionOp(nnx.Module):
       bidirectional_mask: Any = None,
       sinks: Array | None = None,
       index_mask: Array | None = None,
+      record_max_logits: bool = False,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1988,6 +2061,18 @@ class AttentionOp(nnx.Module):
       )
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
+
+    # We record max logits AFTER soft-capping and masking to match Flash/Splash attention behavior.
+    if record_max_logits:
+      # attn_weights shape: [b, n_kv, g, t, s]
+      # Max over t (query len) and s (key len)
+      # Result shape: [b, n_kv, g] -> reshape to [b, n_heads]
+      # Note: Masked values are large negatives (DEFAULT_MASK_VALUE), so max() correctly ignores them.
+      max_logits_per_group = jnp.max(attn_weights, axis=(-2, -1))
+      b, n_kv, g = max_logits_per_group.shape
+      max_logits = max_logits_per_group.reshape(b, n_kv * g)
+      self.sow("intermediates", "max_logits", max_logits)
+
     return self.compute_local_attention(
         attn_weights, value, q_seq_len, model_mode, wv_product_einsum, sinks
     )
@@ -2180,6 +2265,7 @@ class AttentionOp(nnx.Module):
       index_mask: Optional[Array] = None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
+      record_max_logits: bool = False,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -2189,11 +2275,7 @@ class AttentionOp(nnx.Module):
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
 
-    (
-        prefill_unnormalized_output,
-        prefill_exponentials_max,
-        prefill_exponentials_sum,
-    ) = self.apply_attention(
+    prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=key,
         value=value,
@@ -2205,6 +2287,7 @@ class AttentionOp(nnx.Module):
         bidirectional_mask=bidirectional_mask,
         sinks=sinks,
         index_mask=index_mask,
+        record_max_logits=record_max_logits,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
     )
@@ -2216,19 +2299,18 @@ class AttentionOp(nnx.Module):
       return prefill_unnormalized_output
 
     key, value, decoder_segment_ids, lengths = ar_kv_cache
-    ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = (
-        self.apply_attention(
-            query=query,
-            key=key,
-            value=value,
-            decoder_segment_ids=decoder_segment_ids,
-            lengths=lengths,
-            model_mode=model_mode,
-            use_ragged_attention=self.use_ragged_attention,
-            bidirectional_mask=bidirectional_mask,
-            qk_product_einsum=self.AqtEinsum_2,
-            wv_product_einsum=self.AqtEinsum_3,
-        )
+
+    ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
+        query=query,
+        key=key,
+        value=value,
+        decoder_segment_ids=decoder_segment_ids,
+        lengths=lengths,
+        model_mode=model_mode,
+        use_ragged_attention=self.use_ragged_attention,
+        bidirectional_mask=bidirectional_mask,
+        qk_product_einsum=self.AqtEinsum_2,
+        wv_product_einsum=self.AqtEinsum_3,
     )
 
     if ar_unnormalized_output is not None:

@@ -62,6 +62,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import qk_clip_utils
 from maxtext.utils import sharding
 from maxtext.utils import train_utils
 from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss
@@ -348,6 +349,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
   }
+  if config.use_qk_clip:
+    # Apply QK-Clip
+    new_state = qk_clip_utils.apply_qk_clip(new_state, intermediate_outputs, config)
+
+    # Report max_logits metric
+    global_max_logit = qk_clip_utils.calculate_max_logit_metric(intermediate_outputs)
+    if global_max_logit is not None:
+      scalar_metrics["learning/max_logits"] = global_max_logit
+
   if not config.optimizer_memory_host_offload:
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
