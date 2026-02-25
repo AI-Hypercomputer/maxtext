@@ -21,7 +21,6 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText import sharding
 from maxtext.common.common_types import Config, MODEL_MODE_TRAIN
 from MaxText.globals import EPS
 from maxtext.layers import nnx_wrappers
@@ -31,6 +30,7 @@ from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding
 
 
 # Custom Variable types for MTP intermediate outputs

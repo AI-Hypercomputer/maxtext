@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2025-2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
 from maxtext.common.common_types import ShardMode
-from MaxText.sharding import maybe_shard_with_name
+from maxtext.utils.sharding import maybe_shard_with_name
 
 
 def gradient_accumulation_loss_and_grad(

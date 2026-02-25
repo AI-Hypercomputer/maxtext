@@ -30,7 +30,7 @@ from maxtext.common.common_types import Array, AxisNames, BATCH, DType, D_KV, HE
 from maxtext.inference import page_manager
 from maxtext.inference import paged_attention_kernel_v2
 from maxtext.layers.initializers import variable_to_logically_partitioned
-from MaxText.sharding import logical_to_mesh_axes
+from maxtext.utils.sharding import logical_to_mesh_axes
 
 _use_kernel_v2 = False
 

@@ -20,13 +20,13 @@ import os
 import jax
 import jax.numpy as jnp
 from MaxText import maxtext_utils
-from MaxText import optimizers
 from MaxText import pyconfig
 # import optax
 
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.layers import quantizations
 from maxtext.models import models
+from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
 from tests.utils.sharding_dump import TEST_CASES, load_json, named_shardings_to_json, partition_specs_to_json
 import pytest

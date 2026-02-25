@@ -53,7 +53,6 @@ from maxtext.common.common_types import (
     EP_AS_CONTEXT,
     AttentionType,
 )
-from MaxText.sharding import maybe_shard_with_logical, create_sharding
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.attention_op import AttentionOp
 from maxtext.layers.embeddings import (
@@ -71,6 +70,7 @@ from maxtext.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNo
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache, page_manager, paged_attention
 from maxtext.inference.kvcache import KVQuant
+from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error

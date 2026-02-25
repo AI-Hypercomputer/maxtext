@@ -27,10 +27,10 @@ import jax
 from jax.sharding import NamedSharding, PartitionSpec
 from jax.tree_util import tree_flatten_with_path
 from MaxText import maxtext_utils
-from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_REPO_ROOT
 from maxtext.models import models
+from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
 
 

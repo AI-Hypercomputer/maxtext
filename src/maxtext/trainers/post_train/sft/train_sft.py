@@ -49,7 +49,6 @@ from orbax import checkpoint as ocp
 
 from tunix.sft import metrics_logger, peft_trainer, profiler
 
-from MaxText import optimizers
 from MaxText import pyconfig
 from maxtext.trainers.pre_train.train import loss_fn
 from maxtext.common.goodput import (
@@ -58,6 +57,7 @@ from maxtext.common.goodput import (
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
+from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.sft import hooks
 from maxtext.utils import max_utils
 from maxtext.utils import max_logging

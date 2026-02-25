@@ -32,7 +32,7 @@ from maxtext.layers.linears import Dropout, MlpBlock
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
-from MaxText.sharding import create_sharding, maybe_shard_with_logical
+from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical
 
 # -----------------------------------------
 # The Decoder Layer specific for Llama2

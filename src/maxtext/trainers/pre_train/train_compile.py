@@ -33,17 +33,17 @@ from jax.experimental.serialize_executable import serialize
 from jax.experimental.topologies import get_topology_desc
 from jax.sharding import AxisType, Mesh
 from MaxText import accelerator_to_spec_map
-from MaxText import optimizers
 from MaxText import pyconfig
-from MaxText import sharding
 from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers import quantizations
 from maxtext.models import models
+from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.pre_train import train
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding
 
 # pylint: disable=too-many-positional-arguments
 
