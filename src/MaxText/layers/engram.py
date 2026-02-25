@@ -54,7 +54,7 @@ class CompressedTokenizer:
   def __init__(self, tokenizer: HFTokenizer):
     normalizer = self._build_normalizer()
     self.lookup_table_np, self.num_new_token = self._build_lookup_table(tokenizer, normalizer)
-    self.lookup_table = jnp.array(self.lookup_table_np, dtype=jnp.int64)
+    self.lookup_table = jnp.array(self.lookup_table_np, dtype=jnp.int32)
 
   def __len__(self) -> int:
     return self.num_new_token
@@ -95,7 +95,7 @@ class CompressedTokenizer:
     """
     vocab_size = len(tokenizer)
     # Mapping: original_tid -> compressed_nid (Many-to-One)
-    old2new = np.empty(vocab_size, dtype=np.int64)
+    old2new = np.empty(vocab_size, dtype=np.int32)
     # Mapping: normalized_string -> compressed_nid (One-to-One)
     key2new = {}
 
@@ -126,7 +126,7 @@ class CompressedTokenizer:
     """
     Maps original token IDs to compressed IDs.
     """
-    input_ids = jnp.asarray(input_ids, dtype=jnp.int64)
+    input_ids = jnp.asarray(input_ids, dtype=jnp.int32)
 
     # Identify valid tokens (ignore padding/masks usually marked with negative IDs)
     # In JAX, we map negative IDs to 0 (or a valid index) for lookup, then mask output back.
@@ -188,7 +188,7 @@ class NgramHashMapping:
     # Pre-calculate odd multipliers for hashing: {layer_id: multipliers}
     # Store as JAX arrays
     self.layer_multipliers = {
-        k: jnp.array(v, dtype=jnp.int64) for k, v in self._calculate_multipliers_across_layers(seed).items()
+        k: jnp.array(v, dtype=jnp.int32) for k, v in self._calculate_multipliers_across_layers(seed).items()
     }
 
     # Pre-calculate unique prime vocab sizes for every head
@@ -203,7 +203,7 @@ class NgramHashMapping:
       A dictionary mapping layer_id to a list of `max_ngram_size` multipliers.
     """
     # Pre-calculate bounds for random generation
-    max_long = np.iinfo(np.int64).max
+    max_long = np.iinfo(np.int32).max
     m_max = int(max_long // self.tokenizer_vocab_size)
     half_bound = max(1, m_max // 2)
     # Hard-code prime number to align with reference
@@ -215,7 +215,7 @@ class NgramHashMapping:
       layer_seed = int(seed + LAYER_PRIME_OFFSET * int(layer_id))
       np_rng = np.random.default_rng(layer_seed)
       # Generate random odd integers
-      random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
+      random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int32)
       multipliers = random_value * 2 + 1
       layer_multipliers[layer_id] = multipliers
     return layer_multipliers
@@ -273,7 +273,7 @@ class NgramHashMapping:
     Returns:
       hash_ids: [B, S, H_total] where H_total = H * num_ngram_orders
     """
-    x = jnp.asarray(compressed_ids, dtype=jnp.int64)
+    x = jnp.asarray(compressed_ids, dtype=jnp.int32)
     B, _ = x.shape
 
     # 1. Create Sliding Windows via Shifting
@@ -283,7 +283,7 @@ class NgramHashMapping:
         shifted_inputs.append(x)
       else:
         # Pre-allocate full array with PAD_ID
-        padding = jnp.full((B, k), self.pad_id, dtype=jnp.int64)
+        padding = jnp.full((B, k), self.pad_id, dtype=jnp.int32)
         # Fast memory copy, slicing and assignment
         # e.g., k=1, [PAD, The, cat]
         #       k=2, [PAD, PAD, The]
@@ -310,7 +310,7 @@ class NgramHashMapping:
 
       # Retrieve prime vocab sizes for all heads of this n-gram order
       vocab_sizes_for_this_gram = vocab_sizes[n - 2]
-      mods = jnp.array(vocab_sizes_for_this_gram, dtype=jnp.int64)
+      mods = jnp.array(vocab_sizes_for_this_gram, dtype=jnp.int32)
 
       # Broadcast Modulo: Map hash to valid table indices
       # [B, S, 1] % [H] -> [B, S, H]
@@ -364,7 +364,7 @@ class MultiHeadEmbedding(nnx.Module):
     # Compute starting index for each head's segment in the flattened table.
     # Offsets serve as the "base address" for each head.
     offsets = np.cumsum([0] + vocab_sizes[:-1])  # prefix sum
-    self.offsets = StaticWrapper(np.array(offsets, dtype=np.int64))
+    self.offsets = StaticWrapper(np.array(offsets, dtype=np.int32))
 
     # The total embedding size is the sum of all individual head vocabularies.
     self.embedding = Embed(num_embeddings=sum(vocab_sizes), num_features=head_dim, config=config, mesh=mesh, rngs=rngs)

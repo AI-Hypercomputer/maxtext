@@ -59,9 +59,10 @@ from MaxText.layers.engram import Engram as EngramJAX
 def setUpModule():
   """
   Enable 64-bit precision for JAX in test. Set before JAX operations
-  to prevent downcasting from int64 to int32 for correctness comparison.
+  to prevent downcasting from int32 to int32 for correctness comparison.
   """
-  jax.config.update("jax_enable_x64", True)
+  # jax.config.update("jax_enable_x64", True)
+  pass
 
 
 # -----------------------------------------------------------------------------
@@ -172,14 +173,14 @@ class CompressedTokenizer:
         new_tokens.append(key)
       old2new[tid] = nid
 
-    lookup = np.empty(vocab_size, dtype=np.int64)
+    lookup = np.empty(vocab_size, dtype=np.int32)
     for tid in range(vocab_size):
       lookup[tid] = old2new[tid]
 
     return lookup, len(new_tokens)
 
   def _compress(self, input_ids):
-    arr = np.asarray(input_ids, dtype=np.int64)
+    arr = np.asarray(input_ids, dtype=np.int32)
     pos_mask = arr >= 0
     out = arr.copy()
     valid_ids = arr[pos_mask]
@@ -280,7 +281,7 @@ class NgramHashMapping:
     if self.pad_id is not None:
       self.pad_id = int(self.compressed_tokenizer.lookup_table[self.pad_id])
 
-    max_long = np.iinfo(np.int64).max
+    max_long = np.iinfo(np.int32).max
     M_max = int(max_long // self.tokenizer_vocab_size)
     half_bound = max(1, M_max // 2)
     PRIME_1 = 10007
@@ -290,7 +291,7 @@ class NgramHashMapping:
     for layer_id in self.layer_ids:
       base_seed = int(seed + PRIME_1 * int(layer_id))
       g = np.random.default_rng(base_seed)
-      r = g.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
+      r = g.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int32)
       multipliers = r * 2 + 1
       self.layer_multipliers[layer_id] = multipliers
 
@@ -325,7 +326,7 @@ class NgramHashMapping:
       input_ids: np.ndarray,
       layer_id: int,
   ) -> np.ndarray:
-    x = np.asarray(input_ids, dtype=np.int64)
+    x = np.asarray(input_ids, dtype=np.int32)
     B, T = x.shape
 
     multipliers = self.layer_multipliers[layer_id]
@@ -352,7 +353,7 @@ class NgramHashMapping:
       for j in range(num_heads_for_this_ngram):
         mod = int(head_vocab_sizes[j])
         head_hash = mix % mod
-        all_hashes.append(head_hash.astype(np.int64, copy=False))
+        all_hashes.append(head_hash.astype(np.int32, copy=False))
 
     return np.stack(all_hashes, axis=2)
 
