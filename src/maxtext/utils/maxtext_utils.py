@@ -897,6 +897,34 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
+def get_intermediate_value(model, nested_key, default=None, clear=False):
+  """
+  Retrieves an intermediate value from an NNX model. This functions has context about
+  where the intermediate value is located.
+
+  Args:
+    model: The NNX model.
+    nested_key: A string representing the nested key, e.g., hidden_states_norm_out
+    default: The value to return if the nested key is not found.
+    clear: Clears the intermediate value from the model.
+
+  Returns:
+    The value associated with the nested key, or the default value if not found.
+  """
+  intermediate_value = default
+  match nested_key:
+    case "out_projection_activations":
+      if nested_key in model.decoder.layers["self_attention"]:
+        intermediate_value = model.decoder.layers["self_attention"][nested_key].get_value()[-1]
+        if clear:
+          del model.decoder.layers["self_attention"][nested_key]
+    case _:
+      # Default case to handle any unknown nested keys
+      raise ValueError(f"Incorrect nested_key: {nested_key}")
+
+  return intermediate_value
+
+
 def update_state_param(state, target_path, value):
   """
   Updates a specific parameter in state.params at the given path.
