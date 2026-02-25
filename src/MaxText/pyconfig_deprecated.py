@@ -1285,12 +1285,16 @@ def validate_and_update_keys(raw_keys, model_keys, config_name: str):
 
 def get_individual_scales(scale):
   """Choose appropriate scales for individual dimensions based on global scale
+
   We choose to rotate between doubling:
-    num_head and mlp_dim
-    embed_dim
-    num_layers
+
+  * ``num_head`` and ``mlp_dim``
+  * ``embed_dim``
+  * ``num_layers``
+
   Any one of these steps is not a perfect doubling, although going through a cycle
-  of three is a near perfect 8x scaling except for the linear -> softmax -> output step"""
+  of three is a near perfect 8x scaling except for the linear -> softmax -> output step
+  """
 
   log_2_scale = math.floor((math.log2(scale)))
   if 2**log_2_scale != scale:
