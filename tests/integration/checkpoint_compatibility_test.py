@@ -30,7 +30,7 @@ import json
 import os
 import pytest
 from maxtext.trainers.pre_train.train import main as train_main
-from MaxText.globals import MAXTEXT_REPO_ROOT
+from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from tests.integration.checkpointing_test import get_checkpointing_command
 
 

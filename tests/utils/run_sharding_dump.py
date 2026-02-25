@@ -46,7 +46,7 @@ Example:
 
 from typing import Sequence
 
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_REPO_ROOT
+from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_REPO_ROOT
 from tests.utils.sharding_dump import TEST_CASES
 import os
 import subprocess

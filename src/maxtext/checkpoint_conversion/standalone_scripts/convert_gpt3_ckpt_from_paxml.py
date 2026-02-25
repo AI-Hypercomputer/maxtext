@@ -43,7 +43,7 @@ import jax
 from jax import random
 from jax.sharding import Mesh
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.layers import quantizations

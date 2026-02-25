@@ -35,9 +35,9 @@ from jax.sharding import Mesh
 import jsonlines
 from MaxText import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.globals import MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.layers import quantizations
 from maxtext.models import models

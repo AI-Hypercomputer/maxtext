@@ -16,21 +16,22 @@
 
 import os.path
 
-# This is the MaxText root: with "max_utils.py"; &etc. TODO: Replace `os.path.basename` with `os.path.abspath`
-MAXTEXT_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+# This is the maxtext package root (src/maxtext)
+# Since this file is at src/maxtext/utils/globals.py, we need to go up 2 levels
+MAXTEXT_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # This is the maxtext repo root: with ".git" folder; "README.md"; "pyproject.toml"; &etc.
 MAXTEXT_REPO_ROOT = os.environ.get(
     "MAXTEXT_REPO_ROOT",
     r
-    if os.path.isdir(os.path.join(r := os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".git"))
+    if os.path.isdir(
+        os.path.join(r := os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".git")
+    )
     else MAXTEXT_PKG_DIR,
 )
 
 # This is the configs root: with "base.yml"; "models/"; &etc.
-MAXTEXT_CONFIGS_DIR = os.environ.get(
-    "MAXTEXT_CONFIGS_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "maxtext", "configs")
-)
+MAXTEXT_CONFIGS_DIR = os.environ.get("MAXTEXT_CONFIGS_DIR", os.path.join(MAXTEXT_PKG_DIR, "configs"))
 
 # This is the assets root: with "tokenizers/"; &etc.
 MAXTEXT_ASSETS_ROOT = os.environ.get("MAXTEXT_ASSETS_ROOT", os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "assets"))

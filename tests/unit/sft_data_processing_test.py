@@ -26,7 +26,7 @@ import transformers
 from parameterized import parameterized_class
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 from maxtext.input_pipeline import hf_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.input_pipeline.hf_data_processing import _get_pad_id
