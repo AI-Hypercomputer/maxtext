@@ -59,7 +59,6 @@ from absl import app
 from absl import logging as absl_logging
 from etils import epath
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
 from jax.sharding import Mesh
 from orbax import checkpoint as ocp
 from pprint import pprint
@@ -489,6 +488,11 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
     max_logging.log(f"Parsed additional config: {rollout_additional_config}")
 
+  # We need to parse vLLM config to get the logical axis rules for the sampler config.
+  vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
+  argv_list = ["", str(vllm_config_path), "log_config=False"]
+  vllm_config = pyconfig.initialize(argv_list)
+
   # RL Cluster config
   # Note that we use vLLM as the rollout engine.
   # and we are using Tensor Parallelism for rollout
@@ -501,6 +505,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       role_to_logical_axis_rule={
           rl_cluster_lib.Role.ACTOR: trainer_config.logical_axis_rules,
           rl_cluster_lib.Role.REFERENCE: trainer_config.logical_axis_rules,
+          rl_cluster_lib.Role.ROLLOUT: vllm_config.logical_axis_rules,
       },
       rollout_engine="vllm",
       offload_to_cpu=False,
@@ -537,6 +542,9 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
           rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
           rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
+          rollout_vllm_kwargs={
+              "hf_overrides": trainer_config.vllm_hf_overrides,
+          },
           **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
       ),
   )
@@ -567,18 +575,13 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
       )
 
-  vllm_config_path = epath.Path(MAXTEXT_CONFIGS_DIR) / "inference/vllm.yml"
-  argv_list = ["", str(vllm_config_path), "log_config=False"]
-  vllm_config = pyconfig.initialize(argv_list)
-
-  with nn_partitioning.axis_rules(vllm_config.logical_axis_rules):
-    rl_cluster = rl_cluster_lib.RLCluster(
-        actor=actor_model,
-        reference=reference_model,
-        tokenizer=model_tokenizer,
-        cluster_config=cluster_config,
-        **rl_cluster_kwargs,
-    )
+  rl_cluster = rl_cluster_lib.RLCluster(
+      actor=actor_model,
+      reference=reference_model,
+      tokenizer=model_tokenizer,
+      cluster_config=cluster_config,
+      **rl_cluster_kwargs,
+  )
 
   # Create RL trainer
   max_logging.log("Setting up RL trainer...")
@@ -614,9 +617,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     ref_state_before = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
 
   max_logging.warning("Starting RL training...")
-
-  with reference_mesh, nn_partitioning.axis_rules(trainer_config.logical_axis_rules):
-    rl_trainer.train(train_dataset)
+  rl_trainer.train(train_dataset)
 
   if trainer_config.load_checkpoint_only_once:
     max_logging.log("Checking if reference model state changed during training.")
