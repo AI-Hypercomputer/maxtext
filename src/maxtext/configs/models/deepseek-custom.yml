@@ -59,3 +59,11 @@ index_topk: 256                # Reduced from 2048
 # Hyper-connections: mHC enabled
 mhc_expansion_rate: 4
 sinkhorn_iterations: 20
+# Engram
+engram_layers: [1, 4]
+engram_num_heads: 8
+engram_head_dim: 512
+engram_vocab_bases: [226240, 226240]
+engram_max_ngram_size: 3
+engram_kernel_size: 4
+engram_seed: 0
