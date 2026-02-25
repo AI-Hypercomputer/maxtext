@@ -854,45 +854,85 @@ class Decoder(nn.Module):
               "slot": slot,
           }
           dense_layer = RemattedBlockLayers[0]
-          dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
-          y, _ = self.scan_decoder_layers(
-              cfg,
-              dense_layer,
-              cfg.first_num_dense_layers,
-              "dense_layers",
-              mesh,
-              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
-          )(y, *broadcast_args)
           moe_layer = RemattedBlockLayers[1]
-          moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+          if cfg.engram_layers:
+            original_dense_call = dense_layer.__call__
+            original_moe_call = moe_layer.__call__
+            dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
+            moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
 
-          # If batch-split schedule is used and initialization is complete,
-          # as detected by immutable params, use deepseek_batchsplit custom
-          # scan with initialized parameters.
-          if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
-            y = deepseek_batchsplit.scan_batch_split_layers(
+            common_kwargs = {
+                "dense_layer": dense_layer,
+                "moe_layer": moe_layer,
+                "original_dense_call": original_dense_call,
+                "original_moe_call": original_moe_call,
+                "layer_call_kwargs": layer_call_kwargs,
+                "decoder_segment_ids": decoder_segment_ids,
+                "decoder_positions": decoder_positions,
+                "deterministic": deterministic,
+                "model_mode": model_mode,
+                "decoder_input_tokens": decoder_input_tokens,
+                "broadcast_args": broadcast_args,
+            }
+
+            # Apply Dense Layers
+            y = self._apply_interleaved_scanned_layers(
                 y,
-                self.variables["params"]["moe_layers"],
-                decoder_positions,
-                decoder_segment_ids,
-                model_mode=model_mode,
-                mesh=mesh,
-                quant=self.quant,
-                cfg=cfg,
-                policy=policy,
+                layer_type="dense",
+                start_idx=0,
+                end_idx=cfg.first_num_dense_layers,
+                engram_indices=cfg.engram_layers,
+                **common_kwargs,
+            )
+
+            # Apply MoE Layers
+            y = self._apply_interleaved_scanned_layers(
+                y,
+                layer_type="moe",
+                start_idx=cfg.first_num_dense_layers,
+                end_idx=cfg.num_decoder_layers,
+                engram_indices=cfg.engram_layers,
+                **common_kwargs,
             )
           else:
+            dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
             y, _ = self.scan_decoder_layers(
                 cfg,
-                moe_layer,
-                num_moe_layers,
-                "moe_layers",
+                dense_layer,
+                cfg.first_num_dense_layers,
+                "dense_layers",
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
                 model_mode=model_mode,
             )(y, *broadcast_args)
+            moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
+            num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+
+            # If batch-split schedule is used and initialization is complete,
+            # as detected by immutable params, use deepseek_batchsplit custom
+            # scan with initialized parameters.
+            if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
+              y = deepseek_batchsplit.scan_batch_split_layers(
+                  y,
+                  self.variables["params"]["moe_layers"],
+                  decoder_positions,
+                  decoder_segment_ids,
+                  model_mode=model_mode,
+                  mesh=mesh,
+                  quant=self.quant,
+                  cfg=cfg,
+                  policy=policy,
+              )
+            else:
+              y, _ = self.scan_decoder_layers(
+                  cfg,
+                  moe_layer,
+                  num_moe_layers,
+                  "moe_layers",
+                  mesh,
+                  in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                  model_mode=model_mode,
+              )(y, *broadcast_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           y = self._apply_gemma3_scanned_blocks(
               y,
@@ -1106,4 +1146,75 @@ class Decoder(nn.Module):
           slot=slot,
           **layer_call_kwargs,
       )
+    return y
+
+  # TODO(b/490118813): Relocate the following functions to their designated directories
+  # once the plug-in strategy is implemented: _find_next_boundary(), _apply_single_engram_layer()
+  # _apply_scanned_chunk() and _apply_interleaved_scanned_layers().
+  def _find_next_boundary(self, current_idx, end_idx, engram_indices):
+    """Finds the next index boundary, either the next Engram layer index or the overall end index."""
+    next_engrams = [l for l in engram_indices if l > current_idx]
+    if next_engrams:
+      return min(end_idx, *next_engrams)
+    return end_idx
+
+  def _apply_single_engram_layer(self, y, current_idx, layer_type, **kwargs):
+    """Applies a single, unscanned Engram layer."""
+    layer = kwargs["dense_layer"] if layer_type == "dense" else kwargs["moe_layer"]
+    layer_prefix = "dense_layers" if layer_type == "dense" else "moe_layers"
+    original_call = kwargs["original_dense_call"] if layer_type == "dense" else kwargs["original_moe_call"]
+    layer_call_kwargs = kwargs["layer_call_kwargs"]
+
+    layer.__call__ = original_call
+    y, _ = layer(
+        config=self.config,
+        mesh=self.mesh,
+        name=f"{layer_prefix}_engram_{current_idx}",
+        quant=self.quant,
+        model_mode=self.model_mode,
+        layer_idx=current_idx,
+    )(
+        y,
+        kwargs["decoder_segment_ids"],
+        kwargs["decoder_positions"],
+        kwargs["deterministic"],
+        kwargs["model_mode"],
+        decoder_input_tokens=kwargs["decoder_input_tokens"],
+        **layer_call_kwargs,
+    )
+    layer.__call__ = functools.partial(original_call, **layer_call_kwargs)
+    return y
+
+  def _apply_scanned_chunk(self, y, current_idx, next_boundary, layer_type, **kwargs):
+    """Applies a contiguous chunk of layers using the scan operation."""
+    layer = kwargs["dense_layer"] if layer_type == "dense" else kwargs["moe_layer"]
+    layer_prefix = "dense_layers" if layer_type == "dense" else "moe_layers"
+    broadcast_args = kwargs["broadcast_args"]
+    scan_length = next_boundary - current_idx
+
+    if scan_length > 0:
+      y, _ = self.scan_decoder_layers(
+          self.config,
+          layer,
+          scan_length,
+          f"{layer_prefix}_{current_idx}_{next_boundary - 1}",
+          self.mesh,
+          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+          model_mode=kwargs["model_mode"],
+      )(y, *broadcast_args)
+    return y
+
+  def _apply_interleaved_scanned_layers(self, y, layer_type, start_idx, end_idx, engram_indices, **kwargs):
+    """Applies a mix of scanned standard layers and unscanned Engram layers."""
+    current_idx = start_idx
+    while current_idx < end_idx:
+      if current_idx in engram_indices:
+        # Handle individual unscanned Engram layer
+        y = self._apply_single_engram_layer(y, current_idx, layer_type, **kwargs)
+        current_idx += 1
+      else:
+        # Find next boundary and scan the chunk
+        next_boundary = self._find_next_boundary(current_idx, end_idx, engram_indices)
+        y = self._apply_scanned_chunk(y, current_idx, next_boundary, layer_type, **kwargs)
+        current_idx = next_boundary
     return y
