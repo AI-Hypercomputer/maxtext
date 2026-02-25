@@ -26,7 +26,7 @@ from absl import app
 from flax.linen import partitioning as nn_partitioning
 import jax
 from jax import numpy as jnp
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common import checkpointing
 from maxtext.models import models
 from maxtext.trainers.pre_train.train import get_first_step

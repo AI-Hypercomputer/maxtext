@@ -27,8 +27,8 @@ import jax
 
 from flax.linen import partitioning as nn_partitioning
 
-from MaxText import pyconfig
 from MaxText import sharding
+from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train import (
     eval_step,
     get_first_step,

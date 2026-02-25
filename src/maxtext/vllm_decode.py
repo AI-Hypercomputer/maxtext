@@ -44,16 +44,16 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import transformers
 
+from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.utils import model_creation_utils
 from maxtext.utils import max_logging
+from maxtext.configs import pyconfig
 from maxtext.common.common_types import Config
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
-from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_CONFIGS_DIR
 
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 os.environ["NEW_MODEL_DESIGN"] = "1"

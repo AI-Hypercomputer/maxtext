@@ -24,8 +24,8 @@ from flax import nnx
 import flax.linen as nn
 import jax
 from jax.sharding import AxisType, Mesh
-from MaxText import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
+from maxtext.configs import pyconfig
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_utils

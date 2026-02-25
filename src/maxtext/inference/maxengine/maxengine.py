@@ -36,8 +36,8 @@ from flax import struct
 from flax.linen import partitioning as nn_partitioning
 import flax
 
-from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.configs import pyconfig
 from maxtext.models import models
 from maxtext.layers import quantizations
 from maxtext.inference import inference_utils

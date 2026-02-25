@@ -30,7 +30,7 @@ import jax
 from jax import random
 from jax.sharding import Mesh
 from MaxText import optimizers
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common import checkpointing
 from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_TRAIN
 from maxtext.layers import quantizations

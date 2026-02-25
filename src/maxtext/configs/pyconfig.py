@@ -28,7 +28,7 @@ import jax.numpy as jnp
 
 import omegaconf
 
-from MaxText import pyconfig_deprecated
+from maxtext.configs import pyconfig_deprecated
 from MaxText.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.common.common_types import DecoderBlockType, ShardMode
 from maxtext.configs import types

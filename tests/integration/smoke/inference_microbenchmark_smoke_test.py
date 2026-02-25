@@ -19,9 +19,9 @@ import pytest
 import unittest
 from absl.testing import absltest
 
-from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.configs import pyconfig
 
 pytestmark = [pytest.mark.external_serving]
 

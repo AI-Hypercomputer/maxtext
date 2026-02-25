@@ -29,7 +29,7 @@ import numpy as np
 import optax
 import pytest
 
-from MaxText.pyconfig import initialize_pydantic
+from maxtext.configs.pyconfig import initialize_pydantic
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from maxtext.trainers.diloco import diloco
 from tests.utils.test_helpers import get_test_config_path

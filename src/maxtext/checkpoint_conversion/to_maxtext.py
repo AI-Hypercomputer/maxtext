@@ -70,8 +70,8 @@ import absl
 import flax.linen as nn
 from huggingface_hub import hf_hub_download, list_repo_files
 import jax
-from MaxText import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.configs import pyconfig
 from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.utils import HF_IDS, MemoryMonitorTqdm, apply_hook_fns, get_hf_model, print_peak_memory, print_ram_usage, validate_and_filter_param_map_keys

@@ -46,9 +46,9 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText import pyconfig
 from MaxText import maxtext_utils
 
+from maxtext.configs import pyconfig
 from maxtext.layers.engram import CompressedTokenizer as CompressedTokenizerJAX
 from maxtext.layers.engram import NgramHashMapping as NgramHashMappingJAX
 from maxtext.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX

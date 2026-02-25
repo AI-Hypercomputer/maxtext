@@ -26,11 +26,11 @@ import jax
 from jax import random, vmap
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from MaxText import pyconfig
 from MaxText import sharding
 from MaxText.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.configs import pyconfig
 from maxtext.inference import inference_utils
 from maxtext.layers import quantizations
 from maxtext.models import models
