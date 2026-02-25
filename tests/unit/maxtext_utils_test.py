@@ -15,6 +15,7 @@
 """Tests for the common MaxText utilities"""
 
 import functools
+import pytest
 from collections.abc import Callable
 from typing import Any, Sequence
 import unittest
@@ -340,13 +341,16 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
     self._test_init_initial_state_driver(False)
 
 
+@pytest.mark.linen_only
 class MaxUtilsInitTransformerState(unittest.TestCase):
   """Tests initialization of transformer states in max_utils.py"""
 
   def setUp(self):
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
     extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
-    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
+    self.config = pyconfig.initialize(
+        [None, get_test_config_path()], enable_checkpointing=False, pure_nnx=False, **extra_args
+    )
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
