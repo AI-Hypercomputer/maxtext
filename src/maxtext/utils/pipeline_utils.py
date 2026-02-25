@@ -143,7 +143,9 @@ def create_scanned_function(
     return final_state
 
   def run_scanned_custom_fwd(loop_state, positions, segment_ids):
-    def step_fn(s):
+    def step_fn(lightweight_state, bsw, weights):
+      # Reconstruct full state for the model
+      s = {**lightweight_state, "bsw": bsw, "weights": weights}
       out = model.run_one_iteration(
           s,
           positions,
@@ -152,40 +154,63 @@ def create_scanned_function(
           model_mode,
           logical_partition_spec=logical_partition_spec,
       )
-      return out
+      # Deconstruct back to lightweight to decouple gradients
+      new_lightweight = {k: v for k, v in out.items() if k not in ["bsw", "weights"]}
+      return new_lightweight, out["bsw"], out["weights"]
 
     step_fn_remat = jax.remat(step_fn, prevent_cse=False, policy=model.get_pipeline_remat_policy())
 
-    # Forward pass generating VJP functions and intermediate state
-    def scan_body_fwd(carry, _):
-      new_state, vjp_fun = jax.vjp(step_fn_remat, carry)
-      return new_state, vjp_fun
+    # Separate heavy and light state initially
+    initial_lightweight = {k: v for k, v in loop_state.items() if k not in ["bsw", "weights"]}
+    initial_bsw = loop_state["bsw"]
+    initial_weights = loop_state["weights"]
 
-    final_state, vjp_funs = jax.lax.scan(
+    def scan_body_fwd(carry, _):
+      lightweight_carry, bsw_carry, weights_carry = carry
+      (new_lightweight, new_bsw, new_weights), vjp_fun = jax.vjp(
+          step_fn_remat, lightweight_carry, bsw_carry, weights_carry
+      )
+      return (new_lightweight, new_bsw, new_weights), vjp_fun
+
+    (final_lightweight, final_bsw, final_weights), vjp_funs = jax.lax.scan(
         scan_body_fwd,
-        loop_state,
+        (initial_lightweight, initial_bsw, initial_weights),
         None,
         length=length,
     )
 
-    # We return vjp_funs as residual. model is passed to bwd as arg.
+    final_state = {**final_lightweight, "bsw": final_bsw, "weights": final_weights}
     return final_state, vjp_funs
 
   def run_scanned_custom_bwd(residuals, g_final_state):
     vjp_funs = residuals
 
-    # Backward scan to accumulate gradients
+    # Split the gradient of the final state
+    g_lightweight = {k: v for k, v in g_final_state.items() if k not in ["bsw", "weights"]}
+    g_bsw = g_final_state["bsw"]
+    g_weights = g_final_state["weights"]
+
     def scan_body_bwd(carry, vjp_fun):
-      d_next_state = carry
+      d_next_lightweight, d_next_bsw, d_next_weights = carry
 
-      # Backprop d_next_state using saved vjp_fun
-      (d_curr_state,) = vjp_fun(d_next_state)
+      # Apply saved vjp_fun directly
+      d_curr_lightweight, d_curr_bsw, d_curr_weights = vjp_fun((d_next_lightweight, d_next_bsw, d_next_weights))
 
-      return d_curr_state, None
+      # Accumulate gradients for invariant parts
+      d_bsw_accum = jax.tree.map(lambda x, y: x + y, d_next_bsw, d_curr_bsw)
+      d_weights_accum = jax.tree.map(lambda x, y: x + y, d_next_weights, d_curr_weights)
+
+      return (d_curr_lightweight, d_bsw_accum, d_weights_accum), None
 
     # Run backward scan
-    d_init_state, _ = jax.lax.scan(scan_body_bwd, g_final_state, vjp_funs, reverse=True)
+    (d_init_lightweight, d_init_bsw, d_init_weights), _ = jax.lax.scan(
+        scan_body_bwd,
+        (g_lightweight, g_bsw, g_weights),
+        vjp_funs,
+        reverse=True,
+    )
 
+    d_init_state = {**d_init_lightweight, "bsw": d_init_bsw, "weights": d_init_weights}
     return (d_init_state, None, None)
 
   run_scanned_custom.defvjp(run_scanned_custom_fwd, run_scanned_custom_bwd)
