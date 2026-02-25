@@ -553,7 +553,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     if model_mode != MODEL_MODE_TRAIN:
       # Retrieve state from self.cache
       conv_state = self.cache.conv_state.value
-
       if conv_state.shape[0] != batch:
         if conv_state.shape[0] == 1:
           conv_state = jnp.broadcast_to(conv_state, (batch,) + conv_state.shape[1:])
@@ -561,15 +560,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           conv_state = conv_state[:batch]
 
       # Concatenate previous state with new input
-        conv_input = jnp.concatenate([conv_state, qkv], axis=1)
-        
-        if decoder_segment_ids is not None:
-          valid_lens = jnp.sum(decoder_segment_ids != 0, axis=1) # Shape: (B,)
-          def extract_state(c_in, v_len):
-            return jax.lax.dynamic_slice_in_dim(c_in, v_len, conv_kernel_size - 1, axis=0)
-          new_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
-        else:
-          new_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
+      conv_input = jnp.concatenate([conv_state, qkv], axis=1)
+      
+      if decoder_segment_ids is not None:
+        valid_lens = jnp.sum(decoder_segment_ids != 0, axis=1) # Shape: (B,)
+        def extract_state(c_in, v_len):
+          return jax.lax.dynamic_slice_in_dim(c_in, v_len, conv_kernel_size - 1, axis=0)
+        new_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
+      else:
+        new_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
 
       # Update self.cache in place
       self.cache.conv_state.value = new_conv_state
