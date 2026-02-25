@@ -804,58 +804,92 @@ class Decoder(nn.Module):
               "previous_chunk": previous_chunk,
               "slot": slot,
           }
-          # 1. Setup Layer Counts
-          num_dense = cfg.first_num_dense_layers
-          total_layers = cfg.base_num_decoder_layers
-          num_moe = total_layers - num_dense
+          if cfg.engram_layers:
+            # When purely random engram layers is enabled we separate model into scan + unscan versions
+            # For engram layers are unscanned, and the rest are scanned version
+            # The tricky part for random engram layers are obtain the dedicated global layer index to 
+            # retrieve the hash IDs, and scan_length of each scanned block is non-trivial to define.
+            # 1. Setup Layer Counts
+            num_dense = cfg.first_num_dense_layers
+            total_layers = cfg.base_num_decoder_layers
+            num_moe = total_layers - num_dense
 
-          # 2. Convert engram_layers to a JAX array immediately
-          # Note: cfg.engram_layers should ideally be a jnp.array already
-          engram_layers = jnp.array(cfg.engram_layers)
+            dense_engrams = [x for x in cfg.engram_layers if x < num_dense]
+            moe_engrams = [x for x in cfg.engram_layers if x >= num_dense]
+            layer_configs = [
+                  {
+                      "layer": RemattedBlockLayers[0],
+                      "num_scan": num_dense - len(dense_engrams),
+                      "engram_indices": dense_engrams,
+                      "name_prefix": "dense_layers",
+                      "engram_prefix": "engram_dense_layers",
+                  },
+                  {
+                      "layer": RemattedBlockLayers[1],
+                      "num_scan": num_moe - len(moe_engrams),
+                      "engram_indices": moe_engrams,
+                      "name_prefix": "moe_layers",
+                      "engram_prefix": "engram_moe_layers",
+                  }
+            ]
+            for item in layer_configs:
+              layer_obj = item["layer"]
+              original_call = layer_obj.__call__
+              layer_obj.__call__ = functools.partial(original_call, **layer_call_kwargs)
 
-          # 3. Process Dense Layers (Global indices 0 to num_dense - 1)
-          # Create a range [0, 1, 2, ...] up to num_dense
-          dense_range = jnp.arange(num_dense)
-          # If the index is in engram_layers, keep it, else -1
-          engram_dense_index = jnp.where(jnp.isin(dense_range, engram_layers), dense_range, -1)
+              y, _ = self.scan_decoder_layers(
+                  cfg,
+                  layer_obj,
+                  item["num_scan"],
+                  item["name_prefix"],
+                  mesh,
+                  in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                  model_mode=model_mode,
+              )(y, *broadcast_args)
 
-          # 4. Process MoE Layers (Global indices num_dense to total_layers - 1)
-          # We create a local range [0, 1, 2, ...] but check against global indices (index + num_dense)
-          moe_range_local = jnp.arange(num_moe)
-          moe_range_global = moe_range_local + num_dense
-          # If the global index is in engram_layers, keep the global index, else -1
-          engram_moe_index = jnp.where(jnp.isin(moe_range_global, engram_layers), moe_range_global, -1)
-          dense_layer_kwargs = {
-              "layer_idx": engram_dense_index,
-          }
-          moe_layer_kwargs = {
-              "layer_idx": engram_moe_index,
-          }
-          dense_layer = RemattedBlockLayers[0]
-          dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
-          y, _ = self.scan_decoder_layers(
-              cfg,
-              dense_layer,
-              cfg.first_num_dense_layers,
-              "dense_layers",
-              mesh,
-              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
-              **dense_layer_kwargs,
-          )(y, *broadcast_args)
-          moe_layer = RemattedBlockLayers[1]
-          moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
-          y, _ = self.scan_decoder_layers(
-              cfg,
-              moe_layer,
-              num_moe_layers,
-              "moe_layers",
-              mesh,
-              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
-              **moe_layer_kwargs,
-          )(y, *broadcast_args)
+              layer_obj.__call__ = original_call
+              input_tokens = decoder_input_tokens if cfg.engram_layers else None
+              for idx in item["engram_indices"]:
+                y, _ = layer_obj(
+                    config=cfg,
+                    mesh=mesh,
+                    name=f"{item['engram_prefix']}_{idx}",
+                    quant=self.quant,
+                    model_mode=model_mode,
+                    layer_idx=idx,
+                )(
+                    y,
+                    decoder_segment_ids,
+                    decoder_positions,
+                    deterministic,
+                    model_mode,
+                    decoder_input_tokens=input_tokens,
+                    **layer_call_kwargs,
+                )
+          else:
+            dense_layer = RemattedBlockLayers[0]
+            dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
+            y, _ = self.scan_decoder_layers(
+                cfg,
+                dense_layer,
+                cfg.first_num_dense_layers,
+                "dense_layers",
+                mesh,
+                in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                model_mode=model_mode,
+            )(y, *broadcast_args)
+            moe_layer = RemattedBlockLayers[1]
+            moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
+            num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+            y, _ = self.scan_decoder_layers(
+                cfg,
+                moe_layer,
+                num_moe_layers,
+                "moe_layers",
+                mesh,
+                in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                model_mode=model_mode,
+            )(y, *broadcast_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           y = self._apply_gemma3_scanned_blocks(
               y,
