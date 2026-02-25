@@ -344,11 +344,21 @@ class Decoder(nn.Module):
         policy = self.minimal_policy()
       elif cfg.remat_policy == "minimal_with_quantization":
         if cfg.scan_layers:
-          warnings.warn('Scan layers can introduce overhead to checkpointed values that in some configurations is slower than not checkpointing at all. If you are using scan layers, benchmark with and without quantization checkpointing in your workflow to see which is faster. Without scan layers, checkpointing quantizations is beneficial for performance.')
+          warnings.warn(
+              "Scan layers can introduce overhead to checkpointed values that in some configurations is slower"
+              "than not checkpointing at all. If you are using scan layers, benchmark with and without quantization "
+              "checkpointing in your workflow to see which is faster. Without scan layers, checkpointing quantizations is "
+              "beneficial for performance."
+          )
         policy = self.minimal_policy(with_context=False, with_quantization=True)
       elif cfg.remat_policy == "minimal_with_context_and_quantization":
         if cfg.scan_layers:
-          warnings.warn('Scan layers can introduce overhead to checkpointed values that in some configurations is slower than not checkpointing at all. If you are using scan layers, benchmark with and without quantization checkpointing in your workflow to see which is faster. Without scan layers, checkpointing quantizations is beneficial for performance.')
+          warnings.warn(
+              "Scan layers can introduce overhead to checkpointed values that in some configurations is slower"
+              "than not checkpointing at all. If you are using scan layers, benchmark with and without quantization "
+              "checkpointing in your workflow to see which is faster. Without scan layers, checkpointing quantizations is "
+              "beneficial for performance."
+          )
         policy = self.minimal_policy(with_context=True, with_quantization=True)
       elif cfg.remat_policy == "save_dot_with_context_except_mlp":
         policy = jax.checkpoint_policies.save_only_these_names(
