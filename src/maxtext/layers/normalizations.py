@@ -104,9 +104,9 @@ class GlobalRMSNorm(RMSNorm):
 
 def Qwen3NextRMSNorm(
     num_features: int,
-    epsilon: float,
-    dtype: DType,
-    weight_dtype: DType,
+    epsilon: float = 1e-6,
+    dtype: DType = jnp.float32,
+    weight_dtype: DType = jnp.float32,
     shard_mode: ShardMode = ShardMode.AUTO,
     kernel_axes: tuple[None | str, ...] = (),
     parameter_memory_host_offload: bool = False,
