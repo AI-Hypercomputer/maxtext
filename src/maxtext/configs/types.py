@@ -2286,8 +2286,6 @@ class MaxTextConfig(
         raise ValueError(
             "Engram requires both 'hf_access_token' and 'tokenizer_path' " "to load the Hugging Face tokenizer."
         )
-      if self.scan_layers:
-        raise NotImplementedError("Currently Engram only supports unscanned version. Please set scan_layers=False.")
       if len(self.engram_vocab_bases) != (self.engram_max_ngram_size - 1):
         raise ValueError(
             f"Engram vocab size mismatch: expected {self.engram_max_ngram_size - 1} (max_ngram_size - 1), "

@@ -830,7 +830,7 @@ class TrainCompile(unittest.TestCase):
             "compile_topology_num_slices=1",
             "model_name=deepseek-custom",
             "per_device_batch_size=4",
-            "scan_layers=False",  # TODO(ranran): update to scan_layers=True after support
+            "scan_layers=True",
             "max_target_length=1024",
             "attention=flash",
             "use_tokamax_splash=True",
