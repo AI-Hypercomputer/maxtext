@@ -21,12 +21,13 @@ from flax import linen as nn
 from flax.linen.spmd import LogicallyPartitioned
 
 
-def get_fsdp_index_pytree(physical_partition_spec):
+def get_fsdp_index_pytree(physical_partition_spec, axis_name="fsdp"):
   """
   Finds the index of 'fsdp' within each PartitionSpec in a Pytree.
 
   Args:
     physical_partition_spec: A Pytree where leaves are PartitionSpecs.
+    axis_name: physical axis name for indexing
 
   Returns:
     A Pytree of the same structure where leaves are the integer index
@@ -42,13 +43,21 @@ def get_fsdp_index_pytree(physical_partition_spec):
     for i, axis in enumerate(pspec):
       # Handle cases where an axis might be a tuple itself (e.g., ('fsdp', 'tensor'))
       if isinstance(axis, (list, tuple)):
-        if "fsdp" in axis:
+        if axis_name in axis:
           return i
-      elif axis == "fsdp":
+      elif axis == axis_name:
         return i
     return -1
 
   return jax.tree.map(find_fsdp, physical_partition_spec)
+
+
+def generate_bsw_pps_from_pps(physical_partition_spec):
+  """Create bsw physical partition spec from weight physical partition spec."""
+  return jax.tree.map(
+      lambda pps: P(*remove_fsdp_from_physical_partition_spec(pps)[1:]),
+      physical_partition_spec,
+  )
 
 
 def get_logical_spec_repeats_removed(full_logical):
@@ -103,10 +112,7 @@ def remove_fsdp_from_physical_partition_spec(pps):
 
 def create_scanned_function(
     model,
-    run_iteration_scannable,
     length,
-    variable_axes=None,
-    split_rngs=None,
     deterministic=True,
     model_mode=None,
     logical_partition_spec=None,
@@ -119,96 +125,119 @@ def create_scanned_function(
   2. Creating the backward scan (recomputing heavy state and accumulating gradients)
   3. Registering the custom VJP
   """
-  if variable_axes is None:
-    variable_axes = {
-        "summaries": 0,
-        "aux_loss": 0,
-        "intermediates": 0,
-        "hyper_params": 0,
-    }
 
-  if split_rngs is None:
-    split_rngs = {"random": True}
+  @functools.partial(jax.custom_vjp)
+  def step_fn_custom(lightweight_state, bsw, weights, pos_arg, seg_arg):
+    s = {**lightweight_state, "bsw": bsw, "weights": weights}
+    out = model.run_one_iteration(
+        s, pos_arg, seg_arg, deterministic, model_mode, logical_partition_spec=logical_partition_spec
+    )
+    return {k: v for k, v in out.items() if k not in ["bsw", "weights"]}, out["bsw"], out["weights"]
 
-  run_scanned = nn.scan(
-      run_iteration_scannable,
-      variable_axes=variable_axes,
-      split_rngs=split_rngs,
-      length=length,
-  )
+  def step_fn_custom_fwd(lightweight_state, bsw, weights, pos_arg, seg_arg):
+    def _run(l, b, w):
+      s = {**l, "bsw": b, "weights": w}
+      out = model.run_one_iteration(
+          s, pos_arg, seg_arg, deterministic, model_mode, logical_partition_spec=logical_partition_spec
+      )
+      return {k: v for k, v in out.items() if k not in ["bsw", "weights"]}, out["bsw"], out["weights"]
+
+    _run_remat = jax.remat(_run, prevent_cse=False, policy=model.get_pipeline_remat_policy())
+    out, vjp_fun = jax.vjp(_run_remat, lightweight_state, bsw, weights)
+
+    return out, vjp_fun
+
+  def step_fn_custom_bwd(res, g_out):
+    vjp_fun = res
+    d_l, d_b, d_w = vjp_fun(g_out)
+    return d_l, d_b, d_w, None, None
+
+  step_fn_custom.defvjp(step_fn_custom_fwd, step_fn_custom_bwd)
 
   @functools.partial(jax.custom_vjp)
   def run_scanned_custom(loop_state, positions, segment_ids):
-    final_state, _ = run_scanned(model, loop_state)
-    return final_state
+    return run_scanned_custom_fwd(loop_state, positions, segment_ids)[0]
 
   def run_scanned_custom_fwd(loop_state, positions, segment_ids):
-    final_state, _ = run_scanned(model, loop_state)
-    # We return loop_state as residual. model is passed to bwd as arg.
-    return final_state, (
-        loop_state,
-        positions,
-        segment_ids,
+    initial_lightweight = {k: v for k, v in loop_state.items() if k not in ["bsw", "weights"]}
+    bsw = loop_state["bsw"]
+    weights = loop_state["weights"]
+
+    final_lightweight, scan_vjp_fun = jax.vjp(
+        lambda l, b, w: jax.lax.scan(
+            lambda carry, _: (step_fn_custom(carry, b, w, positions, segment_ids)[0], None), l, None, length=length
+        )[0],
+        initial_lightweight,
+        bsw,
+        weights,
     )
+
+    final_state = {**final_lightweight, "bsw": bsw, "weights": weights}
+    return final_state, scan_vjp_fun
 
   def run_scanned_custom_bwd(residuals, g_final_state):
-    init_loop_state, positions, segment_ids = residuals
+    scan_vjp_fun = residuals
+    g_lightweight = {k: v for k, v in g_final_state.items() if k not in ["bsw", "weights"]}
+    d_init_lightweight, d_init_bsw, d_init_weights = scan_vjp_fun(g_lightweight)
 
-    # Re-run forward pass to get saved states (checkpointing)
-    def scan_body_fwd(carry, _):
-      new_state = model.run_one_iteration(
-          carry,
-          positions,
-          segment_ids,
-          deterministic,
-          model_mode,
-          logical_partition_spec=logical_partition_spec,
-      )
-      # Return lightweight state for saving (exclude bsw/weights)
-      saved = {k: v for k, v in carry.items() if k not in ["bsw", "weights"]}
-      return new_state, saved
-
-    _, saved_states = jax.lax.scan(
-        scan_body_fwd,
-        init_loop_state,
-        None,
-        length=length,
-    )
-
-    # Backward scan to accumulate gradients
-    def scan_body_bwd(carry, saved_slice):
-      d_next_state = carry
-
-      # Reconstruct current loop_state (input to step)
-      curr_loop_state = {
-          **saved_slice,
-          "bsw": init_loop_state["bsw"],
-          "weights": init_loop_state["weights"],
-      }
-
-      # Define function to differentiate w.r.t loop_state
-      def step_fn(s):
-        out = model.run_one_iteration(
-            s,
-            positions,
-            segment_ids,
-            deterministic,
-            model_mode,
-            logical_partition_spec=logical_partition_spec,
-        )
-        return out
-
-      _, vjp_fun = jax.vjp(step_fn, curr_loop_state)
-
-      # Backprop d_next_state
-      (d_curr_state,) = vjp_fun(d_next_state)
-
-      return d_curr_state, None
-
-    # Run backward scan
-    d_init_state, _ = jax.lax.scan(scan_body_bwd, g_final_state, saved_states, reverse=True)
+    d_init_bsw = jax.tree.map(lambda d, g: d + g if hasattr(d, "shape") else d, d_init_bsw, g_final_state["bsw"])
+    d_init_weights = jax.tree.map(lambda d, g: d + g if hasattr(d, "shape") else d, d_init_weights, g_final_state["weights"])
 
     return (d_init_state, None, None)
 
   run_scanned_custom.defvjp(run_scanned_custom_fwd, run_scanned_custom_bwd)
   return run_scanned_custom
+
+
+def create_run_scannable(
+    model,
+    run_iteration_scannable,
+    length,
+    deterministic,
+    model_mode,
+    logical_partition_spec,
+    physical_partition_spec,
+    positions,
+    segment_ids,
+):
+  """Creates a scannable function for pipeline loop iterations."""
+
+  def run_scannable(model, loop_state):
+    loop_state["bsw"] = model.bsw_all_gather_over_fsdp(
+        loop_state["weights"], physical_partition_spec, loop_state["loop_iteration"]
+    )
+
+    if model.config.scan_pipeline_iterations:
+      run_scanned_custom = create_scanned_function(
+          model=model,
+          length=length,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          logical_partition_spec=logical_partition_spec,
+      )
+      loop_state = run_scanned_custom(loop_state, positions, segment_ids)
+    else:
+      for _ in range(length):
+        loop_state, _ = run_iteration_scannable(model, loop_state)
+    return loop_state, None
+
+  return nn.remat(
+      run_scannable,
+      prevent_cse=not model.config.scan_pipeline_iterations,
+      policy=model.get_pipeline_remat_policy(),
+  )
+
+
+def create_run_repeats_scanned(run_scannable, length):
+  """Creates a scanned function over the pipeline repeats."""
+  return nn.scan(
+      run_scannable,
+      variable_axes={
+          "summaries": 0,
+          "aux_loss": 0,
+          "intermediates": 0,
+          "hyper_params": 0,
+      },
+      split_rngs={"random": True},
+      length=length,
+  )
