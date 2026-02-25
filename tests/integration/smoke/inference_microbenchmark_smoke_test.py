@@ -53,6 +53,7 @@ class Inference_Microbenchmark(unittest.TestCase):
             "weight_dtype=bfloat16",
             "attention=dot_product",
             "skip_jax_distributed_system=True",
+            "profiler=''",
         ]
     )
     run_benchmarks(config)

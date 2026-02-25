@@ -640,6 +640,8 @@ class TrainCompile(unittest.TestCase):
             "pipeline_parallel_layers=56",
             "ici_expert_parallelism=16",
             "dcn_pipeline_parallelism=8",
+            "first_num_dense_layers=8",
+            "base_num_decoder_layers=72",
         )
     )
 
@@ -658,7 +660,7 @@ class TrainCompile(unittest.TestCase):
             "per_device_batch_size=1",
             "max_target_length=1024",
             "pipeline_parallel_layers=56",
-            "base_num_decoder_layers=61",  # Remainder of 5 will fail when sharded incorrectly.
+            "base_num_decoder_layers=64",  # Must be divisible by dcn_pipeline_parallelism=8 in NNX scan path.
             "ici_expert_parallelism=16",
             "dcn_pipeline_parallelism=8",
         )
@@ -706,6 +708,7 @@ class TrainCompile(unittest.TestCase):
             "sparse_matmul=True",
             "megablox=True",
             "attention=flash",
+            "enable_dropout=False",
         )
     )
 
@@ -729,6 +732,7 @@ class TrainCompile(unittest.TestCase):
             "sparse_matmul=False",
             "capacity_factor=-1",
             "attention=flash",
+            "enable_dropout=False",
         )
     )
 
@@ -828,6 +832,7 @@ class TrainCompile(unittest.TestCase):
             "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
+            "enable_dropout=False",
         )
     )
 

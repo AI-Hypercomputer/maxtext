@@ -494,6 +494,7 @@ logical_axis_rules: [
                       ['paged_kv_head_dim_size', []],
                       ['dense_layers', []],
                       ['moe_layers', []],
+                      ['num_activations', []],
                       ['engram_dim', ['tensor']],
                       ['mhc', []],
                       ['diloco', 'diloco'],

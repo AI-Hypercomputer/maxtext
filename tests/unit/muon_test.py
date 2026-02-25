@@ -48,6 +48,7 @@ _DEEPSEEK2_ATTENTION = {
 DEEPSEEK2_DIMENSION_NUMBER = {
     "params": {
         "decoder": {
+            "decoder_norm": {"scale": None},
             "dense_layers": {
                 "mlp": {
                     "wi_0": {"kernel": mdn((0,), (-1,))},
@@ -56,7 +57,8 @@ DEEPSEEK2_DIMENSION_NUMBER = {
                 },
                 **_DEEPSEEK2_ATTENTION,
             },
-            "moe_layers": {
+            "logits_dense": {"kernel": None},
+            "moe_stack": {
                 "DeepSeekMoeBlock_0": {
                     "MoeBlock_0": {
                         "wi_0": mdn((-2,), (-1,)),
@@ -72,8 +74,6 @@ DEEPSEEK2_DIMENSION_NUMBER = {
                 },
                 **_DEEPSEEK2_ATTENTION,
             },
-            "decoder_norm": {"scale": None},
-            "logits_dense": {"kernel": None},
         },
         "token_embedder": {"embedding": None},
     }
@@ -98,6 +98,7 @@ _DEEPSEEK3_ATTENTION = {
 DEEPSEEK3_DIMENSION_NUMBER = {
     "params": {
         "decoder": {
+            "decoder_norm": {"scale": None},
             "dense_layers": {
                 "mlp": {
                     "wi_0": {"kernel": mdn((0,), (-1,))},
@@ -106,7 +107,8 @@ DEEPSEEK3_DIMENSION_NUMBER = {
                 },
                 **_DEEPSEEK3_ATTENTION,
             },
-            "moe_layers": {
+            "logits_dense": {"kernel": None},
+            "moe_stack": {
                 "DeepSeekMoeBlock_0": {
                     "MoeBlock_0": {
                         "wi_0": mdn((-2,), (-1,)),
@@ -122,8 +124,6 @@ DEEPSEEK3_DIMENSION_NUMBER = {
                 },
                 **_DEEPSEEK3_ATTENTION,
             },
-            "decoder_norm": {"scale": None},
-            "logits_dense": {"kernel": None},
         },
         "token_embedder": {"embedding": None},
     }
