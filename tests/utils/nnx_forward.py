@@ -21,6 +21,7 @@ import sys
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
 
 from MaxText import pyconfig
 from maxtext.utils import model_creation_utils
@@ -45,6 +46,10 @@ def main(config, test_args):
       rng_key=init_rng
   )
   max_utils.print_mem_stats("After model creation")
+  
+  # Count model parameters
+  param_count = sum(x.size for x in jax.tree.leaves(nnx.state(model)) if hasattr(x, 'size'))
+  max_logging.log(f"Total model parameters: {param_count:,} ({param_count / 1e9:.2f}B)")
   
   max_logging.log(f"Model loaded successfully from {config.load_parameters_path}")
 

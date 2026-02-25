@@ -206,6 +206,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
           )
 
           item_to_restore = {"params": {"params": target_for_restore}}
+          # restore_args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(target_for_restore)}}
           restore_args = {"params": {"params": create_flexible_restore_args(target_for_restore)}}
         elif "base" in metadata.item_metadata.tree.keys():
           # structure of nnx-rl checkpoint: {'base': {'decoder': {..., 'value': ...}}}
@@ -216,6 +217,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
               is_leaf=lambda n: isinstance(n, nnx.Variable),
           )
           item_to_restore = {"base": target_for_restore}
+          # restore_args = {"base": ocp.checkpoint_utils.construct_restore_args(target_for_restore)}
           restore_args = {"base": create_flexible_restore_args(target_for_restore)}
         else:
           # structure of nnx checkpoint: {'decoder': {'value': ...}}
@@ -225,6 +227,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
               is_leaf=lambda n: isinstance(n, nnx.Variable),
           )
           item_to_restore = target_for_restore
+          # restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
           restore_args = create_flexible_restore_args(target_for_restore)
 
         restored = ckptr.restore(
