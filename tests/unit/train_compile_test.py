@@ -731,6 +731,7 @@ class TrainCompile(unittest.TestCase):
             "sparse_matmul=True",
             "megablox=True",
             "attention=flash",
+            "enable_dropout=False",
         )
     )
 
@@ -754,6 +755,7 @@ class TrainCompile(unittest.TestCase):
             "sparse_matmul=False",
             "capacity_factor=-1",
             "attention=flash",
+            "enable_dropout=False",
         )
     )
 
@@ -902,6 +904,7 @@ class TrainCompile(unittest.TestCase):
             "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
+            "enable_dropout=False",
         )
     )
 
@@ -969,7 +972,8 @@ class TrainCompile(unittest.TestCase):
             "num_pipeline_microbatches=4",
             "model_name=deepseek3-test",
             "override_model_config=true",
-            "base_num_decoder_layers=7",
+            "base_num_decoder_layers=8",
+            "first_num_dense_layers=2",
             "use_ring_of_experts=true",
             "use_random_routing=true",
             "max_target_length=128",
@@ -1002,5 +1006,6 @@ class TrainCompile(unittest.TestCase):
             "weight_dtype=float32",
             "use_qk_clip=true",
             "qk_clip_threshold=100",
+            "pure_nnx=True",
         )
     )

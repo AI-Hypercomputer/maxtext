@@ -513,7 +513,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if config.use_dpo:
       new_state = _merge_dpo_state(new_state, reference_params)
     return new_state, metrics
-  return nnx.state(new_state), metrics
+  # Exclude Intermediate variables (e.g., sowed max_logits for QK-Clip) from the
+  # returned state. Intermediates are transient forward-pass artifacts and must not
+  # persist across steps: they're absent from the abstract state used to build
+  # state_mesh_shardings, so including them would cause a leaf-count mismatch in JAX.
+  return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
 
 
 def eval_step(model, config, state, data, dropout_rng=None):
