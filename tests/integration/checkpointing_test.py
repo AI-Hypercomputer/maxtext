@@ -93,6 +93,7 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
           f"dataset_type={dataset_type}",
           "async_checkpointing=False",
           f"attention={attention_type}",
+          "profiler=''",
       ]
       + model_params
       + pathways_command
@@ -135,19 +136,19 @@ def run_checkpointing(hardware, attention_type):
   # Determine dataset path/pattern depending on decoupled mode.
   gcsfuse_pattern = "/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*"
   local_decoupled_root = os.path.join(
-      MAXTEXT_PKG_DIR, "..", "tests", "assets", "local_datasets", "c4_en_dataset_minimal", "c4", "en", "3.0.1"
+      MAXTEXT_PKG_DIR, "..", "..", "tests", "assets", "local_datasets", "c4_en_dataset_minimal", "c4", "en", "3.0.1"
   )
   local_pattern = os.path.join(local_decoupled_root, "c4-train.array_record*")
   selected_pattern = gcsfuse_pattern
   dataset_path = "/tmp/gcsfuse"
 
-  if is_decoupled():
+  if not glob.glob(gcsfuse_pattern):
     # Prefer local minimal dataset if gcsfuse data absent
-    if not glob.glob(gcsfuse_pattern) and glob.glob(local_pattern):
+    if glob.glob(local_pattern):
       selected_pattern = local_pattern
-      dataset_path = os.path.join(MAXTEXT_PKG_DIR, "..", "tests", "assets", "local_datasets")
-    elif not glob.glob(gcsfuse_pattern) and not glob.glob(local_pattern):
-      pytest.skip("No grain ArrayRecord shards found for checkpointing test in decoupled mode.")
+      dataset_path = os.path.join(MAXTEXT_PKG_DIR, "..", "..", "tests", "assets", "local_datasets")
+    else:
+      pytest.skip("No grain ArrayRecord shards found for checkpointing test.")
 
   grain_command = [
       "grain_worker_count=0",

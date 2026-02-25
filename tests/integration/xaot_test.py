@@ -80,6 +80,7 @@ class CompileThenLoadTest(unittest.TestCase):
         "learning_rate=1e-3",
         "dataset_type=synthetic",
         "enable_checkpointing=False",
+        "profiler=''",
     ]
 
     if extra_args:

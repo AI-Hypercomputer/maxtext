@@ -14,6 +14,7 @@
 
 """Compare expected sharding of models with actual sharding of models."""
 
+import functools
 import hashlib
 import json
 import os
@@ -127,6 +128,9 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
       f"model_name={model_name}",
       "log_config=false",
       "debug_sharding=true",  # for input sharding dump
+      "pure_nnx=False",
+      "enable_nnx=False",
+      "pure_nnx_decoder=False",
   ]
 
   root_dir = "tests/utils/sharding_info"
@@ -215,6 +219,9 @@ def abstract_state_and_shardings(request):
       f"compile_topology_num_slices={num_slice}",
       f"model_name={model_name}",
       "weight_dtype=float32",
+      "pure_nnx=False",
+      "enable_nnx=False",
+      "pure_nnx_decoder=False",
   ]
   config = pyconfig.initialize(params)
   validate_config(config)
@@ -228,13 +235,15 @@ def abstract_state_and_shardings(request):
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   rng = jax.random.PRNGKey(0)
 
+  init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
+
   # Get abstract state and physical shardings from maxtext_utils
   abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
-      model, tx, config, rng, topology_mesh, is_training=True
+      config, topology_mesh, init_state_fn, is_training=True
   )
 
   # Get logical shardings from maxtext_utils
-  logical_shardings = maxtext_utils.get_logical_annotations(model, tx, config, rng, topology_mesh, is_training=True)
+  logical_shardings = maxtext_utils.get_logical_annotations(config, topology_mesh, init_state_fn)
 
   return model_name, topology, num_slice, abstract_state, state_mesh_shardings, logical_shardings
 

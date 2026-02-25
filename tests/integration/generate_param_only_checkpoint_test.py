@@ -54,6 +54,8 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
       f"attention={attention_type}",
       "max_target_length=128",
       "per_device_batch_size=1",
+      "profiler=''",
+      "pure_nnx=False",
   ] + model_config
 
   pathways_command = []
@@ -72,6 +74,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
             dataset_type="tfds",
             dataset_path=dataset_path,
         )
+        + ["pure_nnx=False"]
     )
     state_path = f"{base_output_directory}/runner_{run_date}/checkpoints/0/items"
 

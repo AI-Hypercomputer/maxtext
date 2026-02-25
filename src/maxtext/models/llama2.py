@@ -70,6 +70,7 @@ class LlamaDecoderLayer(nnx.Module):
         shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
+        parameter_memory_host_offload=config.parameter_memory_host_offload,
         rngs=rngs,
     )
 

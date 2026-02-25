@@ -30,6 +30,10 @@ eval_dataset_name: 'c4/en:3.1.0'
 # Use dot_product attention to avoid GPU Pallas shared memory limits on AMD GPUs
 attention: "dot_product"
 
+# Default to Linen mode for tests; NNX is opt-in via PURE_NNX=TRUE.
+pure_nnx: False
+pure_nnx_decoder: False
+
 # Avoid HLO dump overhead.
 dump_hlo: false
 jax_cache_dir: ""

@@ -21,11 +21,11 @@ from jax.sharding import Mesh
 from flax import nnx
 
 from maxtext.configs import pyconfig
+from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.layers import multi_token_prediction  # The class under test
 from maxtext.layers import embeddings
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.common_types import Config
-from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 
@@ -47,6 +47,8 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
         run_name="multi_token_prediction_layer_test",
         skip_jax_distributed_system=True,
         per_device_batch_size=8,
+        pure_nnx=True,
+        pure_nnx_decoder=True,
         **extra_args,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
@@ -54,6 +56,7 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
+    # Instantiate the Layer using NNXDecoderLayer (MultiTokenPredictionLayer is NNX-only)
     self.mtp_layer = multi_token_prediction.MultiTokenPredictionLayer(
         config=self.cfg,
         mesh=self.mesh,
@@ -205,6 +208,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         skip_jax_distributed_system=True,
         mtp_num_layers=2,
         base_emb_dim=16,
+        pure_nnx_decoder=False,
         **extra_args,
     )
     self.nnx_rngs = nnx.Rngs(params=0)

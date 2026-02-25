@@ -47,8 +47,6 @@ from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
 
-from tunix.sft import metrics_logger, peft_trainer, profiler
-
 from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train import loss_fn
 from maxtext.common.goodput import (
@@ -77,6 +75,8 @@ def get_tunix_config(mt_config):
   Returns:
     A Tunix `TrainingConfig` object.
   """
+  from tunix.sft import metrics_logger, peft_trainer, profiler  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
   # Checkpointing configurations
   checkpointing_options = ocp.CheckpointManagerOptions(
       save_interval_steps=mt_config.checkpoint_period,
@@ -143,6 +143,8 @@ def use_maxtext_loss_function(trainer, mt_config):
 
 def setup_trainer_state(mt_config, goodput_recorder=None):
   """Set up prerequisites for training loop."""
+  from tunix.sft import peft_trainer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
   tunix_config = get_tunix_config(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
