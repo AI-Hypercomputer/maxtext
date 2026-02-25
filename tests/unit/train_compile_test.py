@@ -731,6 +731,7 @@ class TrainCompile(unittest.TestCase):
             "sparse_matmul=True",
             "megablox=True",
             "attention=flash",
+            "enable_dropout=False",
         )
     )
 
@@ -754,6 +755,7 @@ class TrainCompile(unittest.TestCase):
             "sparse_matmul=False",
             "capacity_factor=-1",
             "attention=flash",
+            "enable_dropout=False",
         )
     )
 
@@ -853,6 +855,7 @@ class TrainCompile(unittest.TestCase):
             "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
+            "enable_dropout=False",
         )
     )
 
@@ -953,5 +956,6 @@ class TrainCompile(unittest.TestCase):
             "weight_dtype=float32",
             "use_qk_clip=true",
             "qk_clip_threshold=100",
+            "pure_nnx=True",
         )
     )
