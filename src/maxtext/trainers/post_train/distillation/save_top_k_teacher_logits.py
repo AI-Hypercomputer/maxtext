@@ -2,7 +2,10 @@
 This module provides functionality to save top-k teacher logits
 for distillation purposes in MaxText.
 
-Example command: python3 src/maxtext/trainers/post_train/distillation/save_top_k_teacher_logits.py src/maxtext/configs/post_train/distillation.yml --top_k=128
+Example command: 
+python3 src/maxtext/trainers/post_train/distillation/save_top_k_teacher_logits.py \
+src/maxtext/configs/post_train/distillation.yml \
+--top_k=128
 """
 
 import os
@@ -40,7 +43,7 @@ def get_local_cpu_array(arr):
   return np.concatenate([np.array(s.data) for s in arr.addressable_shards], axis=0)
 
 
-def generate_and_save_data(config, k_val):
+def generate_and_save_data(config, k_val, optional_keys):
   """Generates top-k logits from the teacher model and saves them to an ArrayRecord file"""
   devices = jax.devices()
   devices_array = maxtext_utils.create_device_mesh(config, devices)
@@ -50,7 +53,7 @@ def generate_and_save_data(config, k_val):
   max_logging.log(f"Loading Teacher Model from {config.load_parameters_path}...")
   teacher_model, _ = model_creation_utils.create_nnx_model(config, mesh=mesh)
   train_iter, _ = input_pipeline_interface.create_data_iterator(config, mesh)
-  
+
   output_dir = config.base_output_directory
   if config.run_name:
     output_dir = os.path.join(output_dir, config.run_name)
@@ -58,7 +61,7 @@ def generate_and_save_data(config, k_val):
   if jax.process_index() == 0:
     if not tf.io.gfile.exists(output_dir):
       tf.io.gfile.makedirs(output_dir)
-  
+
   # Sync all hosts to ensure directory exists before writers open files
   multihost_utils.sync_global_devices("create_output_dir")
 
@@ -86,10 +89,7 @@ def generate_and_save_data(config, k_val):
     local_idx = get_local_cpu_array(top_k_idx)
     local_tokens = get_local_cpu_array(tokens)
 
-    optional_keys = config.teacher_logits_optional_keys
-    local_optionals = {
-        key: get_local_cpu_array(batch[key]) for key in optional_keys if key in batch
-    }
+    local_optionals = {key: get_local_cpu_array(batch[key]) for key in optional_keys if key in batch}
 
     record_dict = {
         "tokens": local_tokens,
@@ -117,7 +117,7 @@ def main(argv: Sequence[str], local_args):
   teacher_argv = [argv[0], argv[1]]
   teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
 
-  generate_and_save_data(teacher_config, local_args.top_k)
+  generate_and_save_data(teacher_config, local_args.top_k, local_args.optional_keys)
 
 
 if __name__ == "__main__":
@@ -128,6 +128,13 @@ if __name__ == "__main__":
       required=False,
       default=128,
       help="Top K value for logits.",
+  )
+  parser.add_argument(
+      "--optional_keys",
+      type=str,
+      nargs="*",
+      default=["inputs_position", "inputs_segmentation", "targets_segmentation", "targets"],
+      help="Optional keys to save from teacher logits (space-separated).",
   )
   local_arg, remaining_args = parser.parse_known_args()
 
