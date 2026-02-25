@@ -34,9 +34,9 @@ from jax.experimental.topologies import get_topology_desc
 from jax.sharding import AxisType, Mesh
 from MaxText import accelerator_to_spec_map
 from MaxText import optimizers
-from MaxText import pyconfig
 from MaxText import sharding
 from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
+from maxtext.configs import pyconfig
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.trainers.diloco import diloco

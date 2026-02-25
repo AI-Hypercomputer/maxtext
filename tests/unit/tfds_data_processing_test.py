@@ -24,8 +24,8 @@ from jax.experimental import mesh_utils
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
-from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.configs import pyconfig
 from maxtext.input_pipeline import tfds_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.common.gcloud_stub import is_decoupled

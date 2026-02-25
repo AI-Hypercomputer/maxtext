@@ -68,7 +68,7 @@ from ml_goodput_measurement.src.goodput import GoodputRecorder
 
 import MaxText as mt
 from MaxText import sharding
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from MaxText.globals import EPS
 from maxtext.trainers.pre_train.train import get_first_step
 from maxtext.common import checkpointing, profiler

@@ -21,8 +21,8 @@ from flax import nnx
 import flax.linen as nn
 from jax import numpy as jnp
 from jax.sharding import Mesh
-from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils

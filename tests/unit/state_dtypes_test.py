@@ -19,9 +19,9 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from MaxText import optimizers
-from MaxText import pyconfig
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.configs import pyconfig
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import maxtext_utils

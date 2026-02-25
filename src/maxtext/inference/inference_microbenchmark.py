@@ -22,7 +22,7 @@ import sys
 from absl import app
 from collections.abc import MutableMapping
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common import profiler
 from maxtext.inference.maxengine import maxengine
 from maxtext.input_pipeline.packing import prefill_packing

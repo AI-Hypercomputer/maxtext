@@ -27,7 +27,7 @@ import numpy as np
 
 import jax
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train import get_first_step
 from maxtext.common.data_loader import DataLoader
 from maxtext.utils import max_logging

@@ -45,7 +45,7 @@ from orbax import checkpoint
 
 # MaxText Imports
 from MaxText import optimizers
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.input_pipeline import tokenizer
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.trainers.post_train.distillation import distillation_utils

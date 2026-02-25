@@ -17,8 +17,8 @@ import os
 import unittest
 import numpy as np
 
-from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_REPO_ROOT
+from maxtext.configs import pyconfig
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.multimodal import processor_gemma3
