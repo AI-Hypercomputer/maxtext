@@ -17,6 +17,7 @@ from functools import partial
 import unittest
 
 import jax
+import pytest
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
@@ -30,6 +31,7 @@ from tests.utils.test_helpers import get_test_config_path, get_decoupled_paralle
 Transformer = models.transformer_as_linen
 
 
+@pytest.mark.linen_only
 class StateDtypes(unittest.TestCase):
   """Tests that state has expected dtypes, e.g. weights default to float32"""
 
@@ -39,7 +41,7 @@ class StateDtypes(unittest.TestCase):
     argv = list(argv) + get_decoupled_parallelism_overrides(as_argv=True)
 
     # Setup necessary inputs to build a model state
-    config = pyconfig.initialize(argv)
+    config = pyconfig.initialize(list(argv) + ["pure_nnx=False"])
     quant = quantizations.configure_quantization(config)
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)

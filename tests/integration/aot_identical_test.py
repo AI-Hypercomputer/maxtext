@@ -179,6 +179,7 @@ class AotJaxprIdenticalTest(AotBaseTest):
         "enable_checkpointing=False",
         "dump_jaxpr=True",
         "dump_jaxpr_delete_local_after=False",
+        "skip_first_n_steps_for_profiler=0",
     ]
     if extra_args:
       shared_args.extend(extra_args)
