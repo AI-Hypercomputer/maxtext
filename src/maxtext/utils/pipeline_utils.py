@@ -143,70 +143,48 @@ def create_scanned_function(
     return final_state
 
   def run_scanned_custom_fwd(loop_state, positions, segment_ids):
-    final_state, _ = run_scanned(model, loop_state)
-    # We return loop_state as residual. model is passed to bwd as arg.
-    return final_state, (
-        loop_state,
-        positions,
-        segment_ids,
-    )
-
-  def run_scanned_custom_bwd(residuals, g_final_state):
-    init_loop_state, positions, segment_ids = residuals
-
-    # Re-run forward pass to get saved states (checkpointing)
-    def scan_body_fwd(carry, _):
-      new_state = model.run_one_iteration(
-          carry,
+    def step_fn(s):
+      out = model.run_one_iteration(
+          s,
           positions,
           segment_ids,
           deterministic,
           model_mode,
           logical_partition_spec=logical_partition_spec,
       )
-      # Return lightweight state for saving (exclude bsw/weights)
-      saved = {k: v for k, v in carry.items() if k not in ["bsw", "weights"]}
-      return new_state, saved
+      return out
 
-    _, saved_states = jax.lax.scan(
+    step_fn_remat = jax.remat(step_fn, prevent_cse=False, policy=model.get_pipeline_remat_policy())
+
+    # Forward pass generating VJP functions and intermediate state
+    def scan_body_fwd(carry, _):
+      new_state, vjp_fun = jax.vjp(step_fn_remat, carry)
+      return new_state, vjp_fun
+
+    final_state, vjp_funs = jax.lax.scan(
         scan_body_fwd,
-        init_loop_state,
+        loop_state,
         None,
         length=length,
     )
 
+    # We return vjp_funs as residual. model is passed to bwd as arg.
+    return final_state, vjp_funs
+
+  def run_scanned_custom_bwd(residuals, g_final_state):
+    vjp_funs = residuals
+
     # Backward scan to accumulate gradients
-    def scan_body_bwd(carry, saved_slice):
+    def scan_body_bwd(carry, vjp_fun):
       d_next_state = carry
 
-      # Reconstruct current loop_state (input to step)
-      curr_loop_state = {
-          **saved_slice,
-          "bsw": init_loop_state["bsw"],
-          "weights": init_loop_state["weights"],
-      }
-
-      # Define function to differentiate w.r.t loop_state
-      def step_fn(s):
-        out = model.run_one_iteration(
-            s,
-            positions,
-            segment_ids,
-            deterministic,
-            model_mode,
-            logical_partition_spec=logical_partition_spec,
-        )
-        return out
-
-      _, vjp_fun = jax.vjp(step_fn, curr_loop_state)
-
-      # Backprop d_next_state
+      # Backprop d_next_state using saved vjp_fun
       (d_curr_state,) = vjp_fun(d_next_state)
 
       return d_curr_state, None
 
     # Run backward scan
-    d_init_state, _ = jax.lax.scan(scan_body_bwd, g_final_state, saved_states, reverse=True)
+    d_init_state, _ = jax.lax.scan(scan_body_bwd, g_final_state, vjp_funs, reverse=True)
 
     return (d_init_state, None, None)
 
