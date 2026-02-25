@@ -36,6 +36,7 @@ from jax.experimental import colocated_python
 import jax.numpy as jnp
 
 from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 
 
 def _build_global_shape_and_sharding(
@@ -209,8 +210,8 @@ class RemoteIterator:
   "iterator class for using colocated python, iterator is initiated remotely and stored in the state of colocated python"
 
   def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape):
-    self.cpu_devices = _colocated_cpu_devices(jax.local_devices())
-    self.tpu_devices = jax.local_devices()
+    self.cpu_devices = _colocated_cpu_devices(max_utils.live_devices())
+    self.tpu_devices = max_utils.live_devices()
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
     self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
