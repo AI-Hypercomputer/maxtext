@@ -283,5 +283,8 @@ class DiLoCoTest(unittest.TestCase):
             "dcn_diloco_parallelism=2",
             "enable_diloco=true",
             "model_name=gemma2-2b",
+            "pure_nnx=False",
+            "enable_nnx=False",
+            "pure_nnx_decoder=False",
         )
     )

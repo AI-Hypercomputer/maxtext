@@ -425,8 +425,16 @@ class NNXDecoder(nnx.Module):
       out = merged_layer(y_in, **kwargs)
       return out, nnx.state(merged_layer)
 
-    checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
-    out, new_state = checkpointed_fn(state, y)
+    # Linen-based FP8 ops (fp8_nanoo, fp8_gpu) store scale/amax_history in Linen
+    # mutable scope. jax.checkpoint re-traces the scan body during backward (remat),
+    # but the Linen scope retains JAX tracers from the first trace, causing
+    # UnexpectedTracerError. Skip checkpoint for these quantization types.
+    uses_linen_fp8_mutable_state = self.config.quantization in ("fp8_nanoo", "fp8_gpu")
+    if uses_linen_fp8_mutable_state:
+      out, new_state = pure_layer_fn(state, y)
+    else:
+      checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
+      out, new_state = checkpointed_fn(state, y)
     nnx.update(layer, new_state)
 
     return out
@@ -472,9 +480,24 @@ class NNXDecoder(nnx.Module):
       _, _, new_current_state = nnx.split(layer, nnx.Intermediate, ...)
       return new_carry, new_current_state
 
-    layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
-
-    final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state))
+    # Linen-based FP8 ops (fp8_nanoo, fp8_gpu) store scale/amax_history in Linen
+    # mutable scope. jax.lax.scan traces the body function and Linen's setup() creates
+    # intermediate tracer values (amax_history float32[1024]) that escape the scan scope,
+    # causing UnexpectedTracerError. Use a Python for loop instead for these types.
+    uses_linen_fp8_mutable_state = self.config.quantization in ("fp8_nanoo", "fp8_gpu")
+    if uses_linen_fp8_mutable_state:
+      carry = x_in
+      per_layer_states = []
+      for i in range(length):
+        current_params = jax.tree.map(lambda x, i=i: x[i], params)
+        current_state = jax.tree.map(lambda x, i=i: x[i], state)
+        carry, new_state_i = layer_fn(carry, (current_params, current_state))
+        per_layer_states.append(new_state_i)
+      final_carry = carry
+      scanned_state = jax.tree.map(lambda *xs: jnp.stack(list(xs)), *per_layer_states)
+    else:
+      layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
+      final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state))
 
     if scan_axis != 0:
       scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)

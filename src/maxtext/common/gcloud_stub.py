@@ -43,6 +43,15 @@ def is_decoupled() -> bool:  # dynamic check so setting env after initial import
   return os.environ.get("DECOUPLE_GCLOUD", "").upper() == "TRUE"
 
 
+def is_pure_nnx() -> bool:  # dynamic check so setting env after initial import still works
+  """Return True when running in pure NNX mode (PURE_NNX=TRUE env var).
+
+  Defaults to FALSE — Linen is the default test mode.
+  Set PURE_NNX=TRUE to opt in to NNX mode (skips linen_only tests, runs nnx_only tests).
+  """
+  return os.environ.get("PURE_NNX", "FALSE").upper() == "TRUE"
+
+
 T = TypeVar("T")
 
 
