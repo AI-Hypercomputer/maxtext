@@ -108,7 +108,6 @@ def get_match_format_regex(tmvp_config):
           r"^[\s]{0,}"
           rf"{tmvp_config.reasoning_start_token}.+?{tmvp_config.reasoning_end_token}.*?"
           rf"{tmvp_config.solution_start_token}(.+?){tmvp_config.solution_end_token}"
-          r"[\s]{0,}$"
       ),
       flags=re.MULTILINE | re.DOTALL,
   )
@@ -308,7 +307,7 @@ def fix_latex_escaping(text: str) -> str:
       ("\t", "imes", r"\times"),  # \t (tab) → \times
       ("\t", "ext", r"\text"),  # \t (tab) → \text
       ("\t", "extbf", r"\textbf"),  # \t (tab) → \textbf
-      ("\t", "extit", r"\textit"),  # \t (tab) → \textit
+      ("\t", "extit", r"\textit"),  # \t (tab) → \textit  # codespell:ignore
       ("\r", "ightarrow", r"\rightarrow"),  # \r (carriage return) → \rightarrow
       ("\r", "ightarrow", r"\Rightarrow"),  # \r (carriage return) → \Rightarrow (capital R handled separately)
       ("\b", "eta", r"\beta"),  # \b (backspace) → \beta
