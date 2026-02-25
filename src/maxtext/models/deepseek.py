@@ -16,9 +16,11 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import functools
 from typing import Optional
 
 from flax import nnx
+import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
@@ -58,7 +60,6 @@ class DeepSeekGenericLayer(nnx.Module):
       rngs: nnx.Rngs,
       quant: Optional[quantizations.AqtQuantization] = None,
   ) -> None:
-
     self.config = config
     self.model_mode = model_mode
     self.mesh = mesh
@@ -350,7 +351,6 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       rngs: nnx.Rngs,
       quant: Optional[quantizations.AqtQuantization] = None,
   ) -> None:
-
     super().__init__(config, model_mode, mesh, rngs, quant)
     self.DeepSeekMoeBlock_0 = moe.RoutedAndSharedMoE(
         config=self.config,
@@ -380,18 +380,48 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     if isinstance(inputs, tuple):
       inputs = inputs[0]
 
-    # If using batch split schedule, call the batch split version of the layer.
+    # This code should only be traced during initialization when using
+    # batch-split schedule. It is never run during model execution, since
+    # `Decoder` directly calls `batch_split_schedule` during execution.
+    # That is also why we can split/merge activations here as well as
+    # in `Decoder`, since they will never be executed together.
     if self.config.use_batch_split_schedule:
+      activation_pspec = jax.sharding.PartitionSpec(
+          ("data", "fsdp", "fsdp_transpose", "expert", "context"),
+          None,
+          None,
+      )
+      inputs = jax.shard_map(
+          functools.partial(
+              deepseek_batchsplit.split,
+              split_factor=self.config.batch_split_factor,
+          ),
+          mesh=self.mesh,
+          in_specs=activation_pspec,
+          out_specs=[activation_pspec] * self.config.batch_split_factor,
+      )(inputs)
+      dpos = deepseek_batchsplit.split(decoder_positions, self.config.batch_split_factor)
+      dseg = deepseek_batchsplit.split(decoder_segment_ids, self.config.batch_split_factor)
+      weights = deepseek_batchsplit.fetch_weights(nnx.to_pure_dict(nnx.state(self, nnx.Param)), self.config.dtype)
       outputs = deepseek_batchsplit.batch_split_schedule(
           inputs,
-          nnx.to_pure_dict(nnx.state(self, nnx.Param)),
-          decoder_positions,
-          decoder_segment_ids,
+          weights,
+          dpos,
+          dseg,
           model_mode=model_mode,
           mesh=self.mesh,
           quant=self.quant,
           cfg=self.config,
       )
+      outputs = jax.shard_map(
+          functools.partial(
+              deepseek_batchsplit.merge,
+              split_factor=self.config.batch_split_factor,
+          ),
+          mesh=self.mesh,
+          in_specs=([activation_pspec] * self.config.batch_split_factor,),
+          out_specs=activation_pspec,
+      )(outputs)
       return outputs, None
 
     x = self.with_logical_constraint(inputs)

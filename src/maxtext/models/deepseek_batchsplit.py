@@ -106,7 +106,9 @@ quantized_psum_scatter.defvjp(_q_psum_scatter_fwd, _q_psum_scatter_bwd)
 def fetch_weights(params, dtype):
   """Fetches weights from params in the proper format for batch-split schedule."""
   return jax.tree.map(
-      lambda x: jnp.asarray(x[...], dtype),
+      # If x is a LogicallyPartitioned array, then x.value is the underlying
+      # array. If not, use the array directly.
+      lambda x: jnp.asarray(getattr(x, "value", x)[...], dtype),
       (
           (
               (
@@ -165,7 +167,7 @@ def merge(x, split_factor=2):
   return jnp.reshape(x, (-1,) + x.shape[2:])
 
 
-def batch_split_schedule(
+def scan_batch_split_layers(
     inputs,
     params,
     positions,
@@ -175,14 +177,41 @@ def batch_split_schedule(
     mesh,
     quant,
     cfg,
+    policy,
 ):
-  """Applies the DeepSeek MoE layer with batch-split schedule."""
+  """Scans the layers with batch-split schedule."""
+
+  def batch_split_scan_fn(inputs, weights, dpos, dseg):
+    xs = batch_split_schedule(
+        inputs,
+        weights,
+        dpos,
+        dseg,
+        model_mode=model_mode,
+        mesh=mesh,
+        quant=quant,
+        cfg=cfg,
+    )
+    return xs, None
+
+  batch_split_scan_fn_checkpointed = jax.checkpoint(
+      batch_split_scan_fn,
+      # No need to prevent CSE inside scan.
+      prevent_cse=False,
+      policy=policy,
+  )
+  weights = fetch_weights(params, cfg.dtype)
+  # `jax.lax.scan` expects the leading dimension of weights to be the scan
+  # dimension, but the weights are initialized/loaded with the param scan
+  # axis as the scan dimension, so swap the axes.
+  weights = jax.tree.map(lambda x: jnp.swapaxes(x, 0, cfg.param_scan_axis), weights)
+
   activation_pspec = jax.sharding.PartitionSpec(
       ("data", "fsdp", "fsdp_transpose", "expert", "context"),
       None,
       None,
   )
-  xs = jax.shard_map(
+  inputs = jax.shard_map(
       functools.partial(split, split_factor=cfg.batch_split_factor),
       mesh=mesh,
       in_specs=activation_pspec,
@@ -190,7 +219,33 @@ def batch_split_schedule(
   )(inputs)
   dpos = split(positions, split_factor=cfg.batch_split_factor)
   dseg = split(segment_ids, split_factor=cfg.batch_split_factor)
-  xs = [with_data_parallel_constraint(x, mesh) for x in xs]
+  outputs, _ = jax.lax.scan(
+      functools.partial(batch_split_scan_fn_checkpointed, dpos=dpos, dseg=dseg),
+      inputs,
+      weights,
+  )
+  outputs = jax.shard_map(
+      functools.partial(merge, split_factor=cfg.batch_split_factor),
+      mesh=mesh,
+      in_specs=([activation_pspec] * cfg.batch_split_factor,),
+      out_specs=activation_pspec,
+  )(outputs)
+  return outputs
+
+
+def batch_split_schedule(
+    inputs,
+    weights,
+    positions,
+    segment_ids,
+    *,
+    model_mode,
+    mesh,
+    quant,
+    cfg,
+):
+  """Applies the DeepSeek MoE layer with batch-split schedule."""
+  xs = [with_data_parallel_constraint(x, mesh) for x in inputs]
   xs = jax.ad_checkpoint.checkpoint_name(xs, "decoder_layer_input")
 
   attn_op = attention_op.AttentionOp(
@@ -207,12 +262,12 @@ def batch_split_schedule(
       dtype=cfg.dtype,
       attention_type=cfg.attention_type,
   )
-  norm_mla_ws, moe_ws = fetch_weights(params, cfg.dtype)
+  norm_mla_ws, moe_ws = weights
   xs = mla_with_norms(
       xs,
       norm_mla_ws,
-      dpos,
-      dseg,
+      positions,
+      segment_ids,
       mesh=mesh,
       model_mode=model_mode,
       attn_op=attn_op,
@@ -242,12 +297,6 @@ def batch_split_schedule(
       use_gather_mosaic_kernel=False,
       config=cfg,
   )
-  xs = jax.shard_map(
-      functools.partial(merge, split_factor=cfg.batch_split_factor),
-      mesh=mesh,
-      in_specs=([activation_pspec] * cfg.batch_split_factor,),
-      out_specs=activation_pspec,
-  )(xs)
   return xs
 
 

@@ -41,6 +41,7 @@ from maxtext.layers.normalizations import rms_norm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models import (
     deepseek,
+    deepseek_batchsplit,
     gemma,
     gemma2,
     gemma3,
@@ -865,15 +866,32 @@ class Decoder(nn.Module):
           moe_layer = RemattedBlockLayers[1]
           moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
           num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
-          y, _ = self.scan_decoder_layers(
-              cfg,
-              moe_layer,
-              num_moe_layers,
-              "moe_layers",
-              mesh,
-              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
-          )(y, *broadcast_args)
+
+          # If batch-split schedule is used and initialization is complete,
+          # as detected by immutable params, use deepseek_batchsplit custom
+          # scan with initialized parameters.
+          if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
+            y = deepseek_batchsplit.scan_batch_split_layers(
+                y,
+                self.variables["params"]["moe_layers"],
+                decoder_positions,
+                decoder_segment_ids,
+                model_mode=model_mode,
+                mesh=mesh,
+                quant=self.quant,
+                cfg=cfg,
+                policy=policy,
+            )
+          else:
+            y, _ = self.scan_decoder_layers(
+                cfg,
+                moe_layer,
+                num_moe_layers,
+                "moe_layers",
+                mesh,
+                in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                model_mode=model_mode,
+            )(y, *broadcast_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           y = self._apply_gemma3_scanned_blocks(
               y,
