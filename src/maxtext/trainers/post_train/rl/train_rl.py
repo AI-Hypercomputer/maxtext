@@ -253,7 +253,6 @@ def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices)
     )
   rollout_kwargs["tensor_parallel_size"] = tp
   rollout_kwargs["data_parallel_size"] = dp
-  rollout_kwargs["rollout_vllm_async_scheduling"] = True
 
   return rollout_kwargs
 
@@ -542,8 +541,14 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
           rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
           rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
+          rollout_vllm_async_scheduling=trainer_config.async_scheduling,
           rollout_vllm_kwargs={
               "hf_overrides": trainer_config.vllm_hf_overrides,
+          },
+          rollout_vllm_sampling_kwargs={
+              "stop": trainer_config.stop_strings,
+              "detokenize": trainer_config.stop_strings is not None,
+              "include_stop_str_in_output": trainer_config.stop_strings is not None,
           },
           **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
       ),
