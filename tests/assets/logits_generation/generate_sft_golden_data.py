@@ -54,7 +54,7 @@ DATA = {
 def initialize_maxtext_config(config):
   """Initializes configuration for MaxText."""
   cfg_with_ckpt = pyconfig.initialize(
-      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "post_train", "sft.yml")],
       run_name="compare_maxtext_with_trl_logits",
       model_name=config.model_name,
       tokenizer_path=config.tokenizer_path,
@@ -70,7 +70,7 @@ def initialize_maxtext_config(config):
   )
 
   cfg_without_ckpt = pyconfig.initialize(
-      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "post_train", "sft.yml")],
       run_name="generate_sft_golden_data",
       model_name="default",
       enable_checkpointing=False,

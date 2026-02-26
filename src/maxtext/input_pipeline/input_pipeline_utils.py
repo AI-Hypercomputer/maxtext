@@ -195,8 +195,8 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
     prompt_ids = prompt_tokens.input_ids
   elif isinstance(prompt_completion_tokens, dict) and INPUT_TOKENS_KEY in prompt_completion_tokens:
     prompt_completion_ids = prompt_completion_tokens[INPUT_TOKENS_KEY]
-    prompt_ids = prompt_tokens[INPUT_TOKENS_KEY]  
-  elif isinstance(prompt_completion_tokens, list):  
+    prompt_ids = prompt_tokens[INPUT_TOKENS_KEY]
+  elif isinstance(prompt_completion_tokens, list):
     prompt_completion_ids = prompt_completion_tokens
     prompt_ids = prompt_tokens
   else:
