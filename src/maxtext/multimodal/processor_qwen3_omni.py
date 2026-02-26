@@ -835,6 +835,7 @@ def get_rope_index(
   Raises:
     ValueError: If multimodal tokens are present but grid info is missing.
   """
+  max_logging.log(f"input_ids shape: {input_ids.shape}")
   batch_size, seq_len = input_ids.shape
 
   # Handle text-only case (no multimodal content)

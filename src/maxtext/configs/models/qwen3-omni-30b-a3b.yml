@@ -20,7 +20,7 @@ base_emb_dim: 2048
 base_mlp_dim: 768
 base_num_query_heads: 32
 base_num_kv_heads: 4
-base_num_decoder_layers: 48
+base_num_decoder_layers: 1
 head_dim: 128
 mlp_activations: ["silu", "linear"]
 vocab_size: 152064
@@ -61,7 +61,7 @@ use_audio: true
 # Audio Encoder Configuration (need to set use_audio=true to enable)
 # Based on https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_omni_moe/configuration_qwen3_omni_moe.py
 d_model_for_audio: 1280
-encoder_layers_for_audio: 32
+encoder_layers_for_audio: 1
 encoder_attention_heads_for_audio: 20
 encoder_ffn_dim_for_audio: 5120
 max_source_positions_for_audio: 1500
