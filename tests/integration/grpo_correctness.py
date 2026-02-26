@@ -24,7 +24,7 @@ from MaxText import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn
 from maxtext.experimental.rl.grpo_utils import compute_log_probs
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
 import numpy as np

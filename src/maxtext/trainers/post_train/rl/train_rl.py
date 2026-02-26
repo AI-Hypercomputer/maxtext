@@ -72,7 +72,7 @@ from tunix.sft import metrics_logger, profiler
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl

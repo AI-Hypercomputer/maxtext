@@ -25,7 +25,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.input_pipeline import tfds_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.common.gcloud_stub import is_decoupled

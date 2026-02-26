@@ -24,7 +24,7 @@ import transformers
 
 from datasets import Dataset
 
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.input_pipeline import distillation_data_processing
 
 PROMPT_DATA = [

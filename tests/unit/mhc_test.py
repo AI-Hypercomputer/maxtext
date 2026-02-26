@@ -26,7 +26,7 @@ from jax.sharding import Mesh
 import numpy as np
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers import attention_mla, linears, mhc, moe
 from maxtext.layers.initializers import nd_dense_init

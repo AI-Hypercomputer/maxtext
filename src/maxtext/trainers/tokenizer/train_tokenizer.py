@@ -32,7 +32,7 @@ import jax
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 
 _DATASET_PATH = flags.DEFINE_string("dataset_path", None, "Path to the dataset", required=True)
 _DATASET_NAME = flags.DEFINE_string("dataset_name", None, "Name to the dataset", required=True)

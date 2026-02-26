@@ -28,7 +28,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 from jax.tree_util import tree_flatten_with_path
 from MaxText import maxtext_utils
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_REPO_ROOT
+from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
@@ -403,8 +403,7 @@ def main(argv: Sequence[str]) -> None:
   """Load a config that describes a model with topology and slices to be dumped."""
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["LIBTPU_INIT_ARGS"] = (
-      os.environ.get("LIBTPU_INIT_ARGS", "")
-      + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   )
   print("Starting sharding_tests.py...", flush=True)
 
@@ -422,9 +421,7 @@ def main(argv: Sequence[str]) -> None:
     topology_mesh = get_topology_mesh(config)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
     optimizers.get_optimizer(config, learning_rate_schedule)
-    shaped_train_args, _, state_mesh_shardings, logical_annotations, _ = (
-        get_shaped_inputs(topology_mesh, config)
-    )
+    shaped_train_args, _, state_mesh_shardings, logical_annotations, _ = get_shaped_inputs(topology_mesh, config)
   except Exception as e:  # pylint: disable=broad-except
     print(f"Error generating inputs: {e}")
     return
@@ -435,18 +432,11 @@ def main(argv: Sequence[str]) -> None:
 
   # 1. Generate New Output
   # Physical: Tree of NamedSharding
-  named_shardings = named_shardings_to_json(
-      state_mesh_shardings, shaped_train_args[0]
-  )
+  named_shardings = named_shardings_to_json(state_mesh_shardings, shaped_train_args[0])
   # Logical: Tree of PartitionSpec (direct from get_shaped_inputs)
-  logical_shardings = partition_specs_to_json(
-      logical_annotations, shaped_train_args[0]
-  )
+  logical_shardings = partition_specs_to_json(logical_annotations, shaped_train_args[0])
 
-  print(
-      f"Got {len(named_shardings)} Physical entries and"
-      f" {len(logical_shardings)} Logical entries."
-  )
+  print(f"Got {len(named_shardings)} Physical entries and" f" {len(logical_shardings)} Logical entries.")
 
   # 2. Save New Output (Overwrite)
   print(f"\nSaving updated shardings to {base_path}...")

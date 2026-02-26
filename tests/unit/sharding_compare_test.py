@@ -23,7 +23,7 @@ from MaxText import maxtext_utils
 from MaxText import pyconfig
 # import optax
 
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.optimizers import optimizers

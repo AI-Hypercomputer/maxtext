@@ -23,7 +23,7 @@ from absl.testing import absltest
 from contextlib import redirect_stdout
 
 from maxtext.inference.decode import main as decode_main
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
 pytestmark = [pytest.mark.tpu_only, pytest.mark.external_serving, pytest.mark.integration_test]

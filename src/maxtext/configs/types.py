@@ -30,8 +30,8 @@ import jax
 from maxtext.common.common_types import AttentionType, DecoderBlockType, ShardMode
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from MaxText import accelerator_to_spec_map
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from pydantic.config import ConfigDict
 from pydantic.fields import Field
 from pydantic.functional_validators import field_validator, model_validator

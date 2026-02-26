@@ -17,7 +17,7 @@ import unittest
 import pytest
 from tools.gcs_benchmarks.standalone_checkpointer import main as sckpt_main
 from tools.gcs_benchmarks.standalone_dataloader import main as sdl_main
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 
 from datetime import datetime

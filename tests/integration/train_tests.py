@@ -21,7 +21,7 @@ import jax
 from absl.testing import absltest
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
 
