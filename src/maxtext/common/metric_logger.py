@@ -20,6 +20,7 @@ import json
 import os
 import queue
 import enum
+import wandb
 
 import numpy as np
 
@@ -99,8 +100,17 @@ class MetricLogger:
     self.learning_rate_schedule = learning_rate_schedule
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     self.buffered_train_metrics = None
+    
     if self.config.managed_mldiagnostics:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
+      
+    self.enable_wandb = self.config.enable_wandb and jax.process_index() == 0
+    if self.enable_wandb: 
+      wandb.init(
+        project=config.wandb_project_name,
+        name=config.wandb_run_name,
+        resume="allow",
+      ) # Initialize wandb logger.
 
   def reset_eval_metrics(self):
     """Resets the cumulative metrics dictionary for a new evaluation run."""
@@ -122,6 +132,9 @@ class MetricLogger:
 
       if self.config.managed_mldiagnostics:
         self.write_metrics_to_managed_mldiagnostics(metrics, step)
+        
+      if self.enable_wandb:
+        self.write_metrics_to_wandb(metrics, step)
 
   def log_metrics(self, metrics, step, is_training):
     """Logs metrics via max_logging."""
@@ -266,6 +279,16 @@ class MetricLogger:
           value = value.item()
         mapped_metric_name = _METRICS_TO_MANAGED.get(metric_name, metric_name)
         mldiag.metrics.record(mapped_metric_name, value, step=int(step))
+
+  def write_metrics_to_wandb(self, metrics, step):
+    """Write metrics to weights and biases (wandb)."""
+    flat_metrics = {}
+    for key, val in metrics.get("scalar", {}).items():
+      flat_metrics[key] = float(val)
+    for key, val in metrics.get("scalars", {}).items():
+      for subkey, subval in val.items():
+        flat_metrics[f"{key}/{subkey}"] = float(subval)
+    wandb.log(flat_metrics, step=step)
 
   def write_setup_info_to_tensorboard(self, params):
     """Writes setup information like train config params, num model params, and XLA flags to TensorBoard."""

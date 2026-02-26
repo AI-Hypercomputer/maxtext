@@ -1400,6 +1400,9 @@ class Metrics(BaseModel):
       False,
       description="Whether to enable Tunix-managed metrics measurement. The metrics will be uploaded to tensorboard.",
   )
+  enable_wandb: bool = Field(False, description="Enable Weights & Biases logging.")
+  wandb_project_name: str = Field("maxtext", description="Weights & Biases project name.")
+  wandb_run_name: str = Field("", description="Weights & Biases run name. If empty, a default name is generated.")
 
 
 class ManagedMLDiagnostics(BaseModel):
