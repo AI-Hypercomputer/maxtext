@@ -27,6 +27,8 @@ num_samplers_slices: -1
 # replicas in rollout. If not specified, rollout_tensor_parallelism will be auto-determined.
 rollout_data_parallelism: -1
 rollout_tensor_parallelism: -1
+rollout_expert_parallelism: 1
+rollout_async_scheduling: True
 
 # ====== Reproducibility ======
 data_shuffle_seed: 42

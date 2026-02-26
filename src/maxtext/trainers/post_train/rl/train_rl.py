@@ -236,6 +236,7 @@ def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices)
 
   rollout_kwargs = {}
   tp = sampler_config.rollout_tensor_parallelism
+  ep = sampler_config.rollout_expert_parallelism
 
   if tp == -1:
     if num_sampler_devices % dp != 0:
@@ -244,16 +245,19 @@ def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices)
           f"rollout_data_parallelism({dp}) "
           f"when rollout_tensor_parallelism is -1."
       )
-    tp = num_sampler_devices // dp
-  elif tp * dp != num_sampler_devices:
+    tp = num_sampler_devices // dp // ep
+  elif tp * dp * ep != num_sampler_devices:
     raise ValueError(
         f"rollout_tensor_parallelism({tp}) * "
-        f"rollout_data_parallelism({dp}) "
+        f"rollout_data_parallelism({dp}) * "
+        f"rollout_expert_parallelism({ep}) "
         f"!= len(sampler_devices)({num_sampler_devices})"
     )
   rollout_kwargs["tensor_parallel_size"] = tp
   rollout_kwargs["data_parallel_size"] = dp
-  rollout_kwargs["rollout_vllm_async_scheduling"] = True
+
+  if ep > 1:
+    rollout_kwargs["expert_parallel_size"] = ep
 
   return rollout_kwargs
 
@@ -541,8 +545,10 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
           rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
           rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
+          rollout_vllm_async_scheduling=trainer_config.rollout_async_scheduling,
           rollout_vllm_kwargs={
               "hf_overrides": trainer_config.vllm_hf_overrides,
+              "rollout_vllm_enable_expert_parallelism": sampler_config.rollout_expert_parallelism > 1,
           },
           **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
       ),

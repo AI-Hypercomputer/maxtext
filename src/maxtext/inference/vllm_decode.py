@@ -91,7 +91,24 @@ def decode_with_vllm(config: Config) -> None:
       "hf_config_path": config.vllm_hf_config_path,
       "hf_overrides": config.vllm_hf_overrides,
       "gpu_memory_utilization": config.hbm_utilization_vllm,
+<<<<<<< HEAD
       "additional_config": additional_config,
+=======
+      "async_scheduling": config.rollout_async_scheduling,
+      "additional_config": {
+          "maxtext_config": {
+              "model_name": config.model_name,
+              "weight_dtype": "bfloat16",
+              "allow_split_physical_axes": True,
+              "debug_sharding": config.debug_sharding,
+          },
+          "sharding": {
+              "sharding_strategy": {
+                  "enable_dp_attention": config.enable_dp_attention,
+              },
+          },
+      },
+>>>>>>> d9d93a07a (support attn_dp_expert parallelism)
   }
 
   if config.load_parameters_path:

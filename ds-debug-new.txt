@@ -1,0 +1,1164 @@
+2026-03-03 19:30:16.447001: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1772566216.458101 2258906 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1772566216.461774 2258906 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1772566216.472893 2258906 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1772566216.472916 2258906 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1772566216.472919 2258906 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1772566216.472922 2258906 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+INFO 03-03 19:30:20 [__init__.py:59] TPU info: node_name=mohitkhatwani-tf | tpu_type=v6e-8 | worker_id=0 | num_chips=8 | num_cores_per_chip=1
+INFO 03-03 19:30:21 [importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 03-03 19:30:21 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
+2026-03-03 19:30:22.331764: E external/local_xla/xla/stream_executor/cuda/cuda_platform.cc:51] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: UNKNOWN ERROR (303)
+I0303 19:30:22.471287 133480730094720 max_utils.py:197] Skipping jax distributed system due to skip_jax_distributed_system=True flag.
+I0303 19:30:36.573037 133480730094720 pyconfig.py:333] Config param act_quantization_calibration_method: absmax
+I0303 19:30:36.573178 133480730094720 pyconfig.py:333] Config param activation_dropout_for_audio: 0.0
+I0303 19:30:36.573207 133480730094720 pyconfig.py:333] Config param activation_function_for_audio: gelu
+I0303 19:30:36.573227 133480730094720 pyconfig.py:333] Config param activations_in_float32: False
+I0303 19:30:36.573246 133480730094720 pyconfig.py:333] Config param adam_b1: 0.9
+I0303 19:30:36.573266 133480730094720 pyconfig.py:333] Config param adam_b2: 0.99
+I0303 19:30:36.573282 133480730094720 pyconfig.py:333] Config param adam_eps: 1e-08
+I0303 19:30:36.573308 133480730094720 pyconfig.py:333] Config param adam_eps_root: 0.0
+I0303 19:30:36.573324 133480730094720 pyconfig.py:333] Config param adam_weight_decay: 0.1
+I0303 19:30:36.573341 133480730094720 pyconfig.py:333] Config param add_bos: True
+I0303 19:30:36.573356 133480730094720 pyconfig.py:333] Config param add_eos: True
+I0303 19:30:36.573372 133480730094720 pyconfig.py:333] Config param allow_split_physical_axes: False
+I0303 19:30:36.573386 133480730094720 pyconfig.py:333] Config param ar_cache_axis_order: 1,2,0,3
+I0303 19:30:36.573402 133480730094720 pyconfig.py:333] Config param async_checkpointing: False
+I0303 19:30:36.573421 133480730094720 pyconfig.py:333] Config param attention: dot_product
+I0303 19:30:36.573436 133480730094720 pyconfig.py:333] Config param attention_bias: False
+I0303 19:30:36.573451 133480730094720 pyconfig.py:333] Config param attention_dropout_for_audio: 0.0
+I0303 19:30:36.573467 133480730094720 pyconfig.py:333] Config param attention_out: RematLocation.REMAT
+I0303 19:30:36.573488 133480730094720 pyconfig.py:333] Config param attention_sink: False
+I0303 19:30:36.573503 133480730094720 pyconfig.py:333] Config param attention_type: mla
+I0303 19:30:36.573518 133480730094720 pyconfig.py:333] Config param attn_logits_soft_cap: None
+I0303 19:30:36.573534 133480730094720 pyconfig.py:333] Config param audio_path: 
+I0303 19:30:36.573561 133480730094720 pyconfig.py:333] Config param audio_placeholder: <|audio|>
+I0303 19:30:36.573576 133480730094720 pyconfig.py:333] Config param autoregressive_decode_assert: 
+I0303 19:30:36.573591 133480730094720 pyconfig.py:333] Config param base_config: ../base.yml
+I0303 19:30:36.573610 133480730094720 pyconfig.py:333] Config param base_emb_dim: 7168
+I0303 19:30:36.573624 133480730094720 pyconfig.py:333] Config param base_mlp_dim: 18432
+I0303 19:30:36.573637 133480730094720 pyconfig.py:333] Config param base_moe_mlp_dim: 2048
+I0303 19:30:36.573650 133480730094720 pyconfig.py:333] Config param base_num_decoder_layers: 5
+I0303 19:30:36.573664 133480730094720 pyconfig.py:333] Config param base_num_kv_heads: 128
+I0303 19:30:36.573676 133480730094720 pyconfig.py:333] Config param base_num_query_heads: 128
+I0303 19:30:36.573689 133480730094720 pyconfig.py:333] Config param base_output_directory: 
+I0303 19:30:36.573702 133480730094720 pyconfig.py:333] Config param batch_size: 1
+I0303 19:30:36.573714 133480730094720 pyconfig.py:333] Config param batch_split_factor: 1
+I0303 19:30:36.573728 133480730094720 pyconfig.py:333] Config param beta_fast: 32
+I0303 19:30:36.573741 133480730094720 pyconfig.py:333] Config param beta_slow: 1
+I0303 19:30:36.573758 133480730094720 pyconfig.py:333] Config param bwd_quantization_calibration_method: absmax
+I0303 19:30:36.573772 133480730094720 pyconfig.py:333] Config param capacity_factor: -1.0
+I0303 19:30:36.573786 133480730094720 pyconfig.py:333] Config param cast_logits_to_fp32: True
+I0303 19:30:36.573798 133480730094720 pyconfig.py:333] Config param chat_template_path: src/maxtext/examples/chat_templates/gsm8k_rl.json
+I0303 19:30:36.573812 133480730094720 pyconfig.py:333] Config param checkpoint_conversion_fn: None
+I0303 19:30:36.573826 133480730094720 pyconfig.py:333] Config param checkpoint_dir: None
+I0303 19:30:36.573839 133480730094720 pyconfig.py:333] Config param checkpoint_is_quantized: False
+I0303 19:30:36.573851 133480730094720 pyconfig.py:333] Config param checkpoint_period: 50
+I0303 19:30:36.573865 133480730094720 pyconfig.py:333] Config param checkpoint_storage_concurrent_gb: 96
+I0303 19:30:36.573878 133480730094720 pyconfig.py:333] Config param checkpoint_storage_target_data_file_size_bytes: 2147483648
+I0303 19:30:36.573891 133480730094720 pyconfig.py:333] Config param checkpoint_storage_use_ocdbt: False
+I0303 19:30:36.573904 133480730094720 pyconfig.py:333] Config param checkpoint_storage_use_zarr3: False
+I0303 19:30:36.573917 133480730094720 pyconfig.py:333] Config param chips_per_vm: 4
+I0303 19:30:36.574026 133480730094720 pyconfig.py:333] Config param chunk_attn_window_size: 0
+I0303 19:30:36.574049 133480730094720 pyconfig.py:333] Config param collect_stack_trace: False
+I0303 19:30:36.574063 133480730094720 pyconfig.py:333] Config param colocated_python_data_input: False
+I0303 19:30:36.574078 133480730094720 pyconfig.py:333] Config param compile_topology: 
+I0303 19:30:36.574092 133480730094720 pyconfig.py:333] Config param compile_topology_num_slices: -1
+I0303 19:30:36.574105 133480730094720 pyconfig.py:333] Config param compiled_trainstep_file: 
+I0303 19:30:36.574118 133480730094720 pyconfig.py:333] Config param compute_axis_order: 0,1,2,3
+I0303 19:30:36.574131 133480730094720 pyconfig.py:333] Config param constant_bound_config: []
+I0303 19:30:36.574144 133480730094720 pyconfig.py:333] Config param context: RematLocation.REMAT
+I0303 19:30:36.574158 133480730094720 pyconfig.py:333] Config param context_parallel_load_balance: True
+I0303 19:30:36.574172 133480730094720 pyconfig.py:333] Config param context_parallel_size: 1
+I0303 19:30:36.574185 133480730094720 pyconfig.py:333] Config param context_parallel_strategy: all_gather
+I0303 19:30:36.574198 133480730094720 pyconfig.py:333] Config param conv_chunksize_for_audio: 500
+I0303 19:30:36.574210 133480730094720 pyconfig.py:333] Config param conv_stride_for_vit: 14
+I0303 19:30:36.574223 133480730094720 pyconfig.py:333] Config param cost_estimate_flops_bwd: -1
+I0303 19:30:36.574235 133480730094720 pyconfig.py:333] Config param cost_estimate_flops_fwd: -1
+I0303 19:30:36.574255 133480730094720 pyconfig.py:333] Config param custom_mesh: 
+I0303 19:30:36.574268 133480730094720 pyconfig.py:333] Config param d_model_for_audio: 256
+I0303 19:30:36.574281 133480730094720 pyconfig.py:333] Config param data_sharding: (('data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive'),)
+I0303 19:30:36.574302 133480730094720 pyconfig.py:333] Config param data_shuffle_seed: 42
+I0303 19:30:36.574315 133480730094720 pyconfig.py:333] Config param dataset_name: gsm8k
+I0303 19:30:36.574327 133480730094720 pyconfig.py:333] Config param dataset_path: 
+I0303 19:30:36.574340 133480730094720 pyconfig.py:333] Config param dataset_type: DatasetType.TFDS
+I0303 19:30:36.574355 133480730094720 pyconfig.py:333] Config param dcn_autoregressive_parallelism: 1
+I0303 19:30:36.574368 133480730094720 pyconfig.py:333] Config param dcn_context_autoregressive_parallelism: 1
+I0303 19:30:36.574380 133480730094720 pyconfig.py:333] Config param dcn_context_parallelism: 1
+I0303 19:30:36.574393 133480730094720 pyconfig.py:333] Config param dcn_data_parallelism: -1
+I0303 19:30:36.574406 133480730094720 pyconfig.py:333] Config param dcn_diloco_parallelism: 1
+I0303 19:30:36.574419 133480730094720 pyconfig.py:333] Config param dcn_expert_parallelism: 1
+I0303 19:30:36.574432 133480730094720 pyconfig.py:333] Config param dcn_fsdp_parallelism: 1
+I0303 19:30:36.574446 133480730094720 pyconfig.py:333] Config param dcn_fsdp_transpose_parallelism: 1
+I0303 19:30:36.574458 133480730094720 pyconfig.py:333] Config param dcn_parallelism: [1, -1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+I0303 19:30:36.574472 133480730094720 pyconfig.py:333] Config param dcn_pipeline_parallelism: 1
+I0303 19:30:36.574485 133480730094720 pyconfig.py:333] Config param dcn_sequence_parallelism: 1
+I0303 19:30:36.574497 133480730094720 pyconfig.py:333] Config param dcn_tensor_parallelism: 1
+I0303 19:30:36.574510 133480730094720 pyconfig.py:333] Config param dcn_tensor_sequence_parallelism: 1
+I0303 19:30:36.574522 133480730094720 pyconfig.py:333] Config param dcn_tensor_transpose_parallelism: 1
+I0303 19:30:36.574535 133480730094720 pyconfig.py:333] Config param debug: {'rl': True}
+I0303 19:30:36.574548 133480730094720 pyconfig.py:333] Config param debug_sharding: True
+I0303 19:30:36.574562 133480730094720 pyconfig.py:333] Config param decode_sampling_nucleus_p: 1.0
+I0303 19:30:36.574575 133480730094720 pyconfig.py:333] Config param decode_sampling_strategy: SamplingStrategy.GREEDY
+I0303 19:30:36.574589 133480730094720 pyconfig.py:333] Config param decode_sampling_temperature: 0.9
+I0303 19:30:36.574605 133480730094720 pyconfig.py:333] Config param decode_sampling_top_k: 50
+I0303 19:30:36.574619 133480730094720 pyconfig.py:333] Config param decoder_block: DecoderBlockType.DEEPSEEK
+I0303 19:30:36.574633 133480730094720 pyconfig.py:333] Config param decoder_layer_input: RematLocation.OFFLOAD
+I0303 19:30:36.574646 133480730094720 pyconfig.py:333] Config param deepstack_visual_indexes_for_vit: []
+I0303 19:30:36.574660 133480730094720 pyconfig.py:333] Config param diloco_outer_lr: 0.3
+I0303 19:30:36.574673 133480730094720 pyconfig.py:333] Config param diloco_outer_momentum: 0.9
+I0303 19:30:36.574686 133480730094720 pyconfig.py:333] Config param diloco_sync_period: 36
+I0303 19:30:36.574699 133480730094720 pyconfig.py:333] Config param distill_alpha: 0.5
+I0303 19:30:36.574711 133480730094720 pyconfig.py:333] Config param distill_beta: 0.0
+I0303 19:30:36.574724 133480730094720 pyconfig.py:333] Config param distill_layer_indices: None
+I0303 19:30:36.574737 133480730094720 pyconfig.py:333] Config param distill_temperature: 1.0
+I0303 19:30:36.574749 133480730094720 pyconfig.py:333] Config param downsample_hidden_size_for_audio: 256
+I0303 19:30:36.574762 133480730094720 pyconfig.py:333] Config param dpo_beta: 0.1
+I0303 19:30:36.574775 133480730094720 pyconfig.py:333] Config param dpo_label_smoothing: 0.0
+I0303 19:30:36.574787 133480730094720 pyconfig.py:333] Config param dq_reduction_steps: 0
+I0303 19:30:36.574805 133480730094720 pyconfig.py:333] Config param dropout_rate: 0.0
+I0303 19:30:36.574817 133480730094720 pyconfig.py:333] Config param dtype: bfloat16
+I0303 19:30:36.574846 133480730094720 pyconfig.py:333] Config param dtype_mm: float32
+I0303 19:30:36.574859 133480730094720 pyconfig.py:333] Config param dump_hlo: False
+I0303 19:30:36.574872 133480730094720 pyconfig.py:333] Config param dump_hlo_delete_local_after: True
+I0303 19:30:36.574884 133480730094720 pyconfig.py:333] Config param dump_hlo_gcs_dir: deepseek3-671b_2026-03-03-19-30/xla_dump
+I0303 19:30:36.574898 133480730094720 pyconfig.py:333] Config param dump_hlo_local_dir: /tmp/xla_dump/
+I0303 19:30:36.574911 133480730094720 pyconfig.py:333] Config param dump_hlo_local_module_name: jit_train_step
+I0303 19:30:36.574923 133480730094720 pyconfig.py:333] Config param dump_hlo_module_name: jit_train_step
+I0303 19:30:36.574952 133480730094720 pyconfig.py:333] Config param dump_hlo_upload_all: False
+I0303 19:30:36.574965 133480730094720 pyconfig.py:333] Config param dump_hlo_xla_flags: --xla_dump_to=/tmp/xla_dump/ --xla_dump_large_constants --xla_dump_hlo_module_re=jit_train_step
+I0303 19:30:36.574979 133480730094720 pyconfig.py:333] Config param dump_jaxpr: False
+I0303 19:30:36.574992 133480730094720 pyconfig.py:333] Config param dump_jaxpr_delete_local_after: True
+I0303 19:30:36.575004 133480730094720 pyconfig.py:333] Config param dump_jaxpr_gcs_dir: deepseek3-671b_2026-03-03-19-30/jaxpr_dump
+I0303 19:30:36.575017 133480730094720 pyconfig.py:333] Config param dump_jaxpr_local_dir: /tmp/jaxpr_dump/
+I0303 19:30:36.575030 133480730094720 pyconfig.py:333] Config param dump_step: -1
+I0303 19:30:36.575042 133480730094720 pyconfig.py:333] Config param emb_dim: 7168
+I0303 19:30:36.575055 133480730094720 pyconfig.py:333] Config param enable_checkpoint_cloud_logger: False
+I0303 19:30:36.575068 133480730094720 pyconfig.py:333] Config param enable_checkpointing: True
+I0303 19:30:36.575081 133480730094720 pyconfig.py:333] Config param enable_continuous_checkpointing: False
+I0303 19:30:36.575093 133480730094720 pyconfig.py:333] Config param enable_data_shuffling: True
+I0303 19:30:36.575106 133480730094720 pyconfig.py:333] Config param enable_diloco: False
+I0303 19:30:36.575118 133480730094720 pyconfig.py:333] Config param enable_dp_attention: True
+I0303 19:30:36.575131 133480730094720 pyconfig.py:333] Config param enable_dropout: False
+I0303 19:30:36.575143 133480730094720 pyconfig.py:333] Config param enable_emergency_checkpoint: False
+I0303 19:30:36.575156 133480730094720 pyconfig.py:333] Config param enable_gcp_goodput_metrics: True
+I0303 19:30:36.575168 133480730094720 pyconfig.py:333] Config param enable_gcp_step_deviation_metrics: True
+I0303 19:30:36.575181 133480730094720 pyconfig.py:333] Config param enable_goodput_recording: False
+I0303 19:30:36.575193 133480730094720 pyconfig.py:333] Config param enable_jax_profiler: False
+I0303 19:30:36.575207 133480730094720 pyconfig.py:333] Config param enable_llm_inference_pool: False
+I0303 19:30:36.575219 133480730094720 pyconfig.py:333] Config param enable_model_warmup: False
+I0303 19:30:36.575232 133480730094720 pyconfig.py:333] Config param enable_multi_tier_checkpointing: False
+I0303 19:30:36.575244 133480730094720 pyconfig.py:333] Config param enable_nnx: False
+I0303 19:30:36.575257 133480730094720 pyconfig.py:333] Config param enable_orbax_v1: False
+I0303 19:30:36.575269 133480730094720 pyconfig.py:333] Config param enable_padding_causal_mask: True
+I0303 19:30:36.575281 133480730094720 pyconfig.py:333] Config param enable_pathways_goodput: False
+I0303 19:30:36.575294 133480730094720 pyconfig.py:333] Config param enable_prefix_caching: False
+I0303 19:30:36.575306 133480730094720 pyconfig.py:333] Config param enable_rampup_batch_size: False
+I0303 19:30:36.575319 133480730094720 pyconfig.py:333] Config param enable_single_controller: False
+I0303 19:30:36.575331 133480730094720 pyconfig.py:333] Config param enable_single_replica_ckpt_restoring: False
+I0303 19:30:36.575351 133480730094720 pyconfig.py:333] Config param enable_tensorboard: True
+I0303 19:30:36.575363 133480730094720 pyconfig.py:333] Config param enable_tunix_perf_metrics: False
+I0303 19:30:36.575376 133480730094720 pyconfig.py:333] Config param encoder_attention_heads_for_audio: 4
+I0303 19:30:36.575388 133480730094720 pyconfig.py:333] Config param encoder_ffn_dim_for_audio: 512
+I0303 19:30:36.575401 133480730094720 pyconfig.py:333] Config param encoder_layers_for_audio: 2
+I0303 19:30:36.575414 133480730094720 pyconfig.py:333] Config param engram: RematLocation.REMAT
+I0303 19:30:36.575427 133480730094720 pyconfig.py:333] Config param engram_head_dim: 1280
+I0303 19:30:36.575439 133480730094720 pyconfig.py:333] Config param engram_kernel_size: 4
+I0303 19:30:36.575451 133480730094720 pyconfig.py:333] Config param engram_layers: []
+I0303 19:30:36.575464 133480730094720 pyconfig.py:333] Config param engram_max_ngram_size: 3
+I0303 19:30:36.575476 133480730094720 pyconfig.py:333] Config param engram_num_heads: 8
+I0303 19:30:36.575489 133480730094720 pyconfig.py:333] Config param engram_seed: 0
+I0303 19:30:36.575502 133480730094720 pyconfig.py:333] Config param engram_vocab_bases: []
+I0303 19:30:36.575514 133480730094720 pyconfig.py:333] Config param eval_corr_lst: False
+I0303 19:30:36.575526 133480730094720 pyconfig.py:333] Config param eval_data_columns: ['text']
+I0303 19:30:36.575540 133480730094720 pyconfig.py:333] Config param eval_dataset_name: gsm8k
+I0303 19:30:36.575552 133480730094720 pyconfig.py:333] Config param eval_image_column: image
+I0303 19:30:36.575564 133480730094720 pyconfig.py:333] Config param eval_interval: 10
+I0303 19:30:36.575577 133480730094720 pyconfig.py:333] Config param eval_make_lst: False
+I0303 19:30:36.575589 133480730094720 pyconfig.py:333] Config param eval_per_device_batch_size: 12.0
+I0303 19:30:36.575605 133480730094720 pyconfig.py:333] Config param eval_sampling_strategy: greedy
+I0303 19:30:36.575620 133480730094720 pyconfig.py:333] Config param eval_split: test
+I0303 19:30:36.575633 133480730094720 pyconfig.py:333] Config param eval_steps: -1
+I0303 19:30:36.575645 133480730094720 pyconfig.py:333] Config param expansion_factor_real_data: -1.0
+I0303 19:30:36.575658 133480730094720 pyconfig.py:333] Config param expert_shard_attention_option: fsdp
+I0303 19:30:36.575670 133480730094720 pyconfig.py:333] Config param final_logits_soft_cap: None
+I0303 19:30:36.575683 133480730094720 pyconfig.py:333] Config param first_num_dense_layers: 3
+I0303 19:30:36.575695 133480730094720 pyconfig.py:333] Config param float32_logits: False
+I0303 19:30:36.575708 133480730094720 pyconfig.py:333] Config param float32_qk_product: False
+I0303 19:30:36.575721 133480730094720 pyconfig.py:333] Config param float32_weight_sum: True
+I0303 19:30:36.575733 133480730094720 pyconfig.py:333] Config param force_q_layout: False
+I0303 19:30:36.575746 133480730094720 pyconfig.py:333] Config param force_unroll: False
+I0303 19:30:36.575759 133480730094720 pyconfig.py:333] Config param freeze_audio_encoder_params: True
+I0303 19:30:36.575771 133480730094720 pyconfig.py:333] Config param freeze_vision_encoder_params: True
+I0303 19:30:36.575783 133480730094720 pyconfig.py:333] Config param fused_mlp: False
+I0303 19:30:36.575796 133480730094720 pyconfig.py:333] Config param fused_qkv: False
+I0303 19:30:36.575809 133480730094720 pyconfig.py:333] Config param gcs_metrics: False
+I0303 19:30:36.575822 133480730094720 pyconfig.py:333] Config param gdn_chunk_size: 64
+I0303 19:30:36.575834 133480730094720 pyconfig.py:333] Config param gdn_conv_kernel_dim: 4
+I0303 19:30:36.575847 133480730094720 pyconfig.py:333] Config param gdn_key_head_dim: 128
+I0303 19:30:36.575860 133480730094720 pyconfig.py:333] Config param gdn_num_key_heads: 16
+I0303 19:30:36.575872 133480730094720 pyconfig.py:333] Config param gdn_num_value_heads: 32
+I0303 19:30:36.575884 133480730094720 pyconfig.py:333] Config param gdn_value_head_dim: 128
+I0303 19:30:36.575897 133480730094720 pyconfig.py:333] Config param generate_padding_batch_eval: False
+I0303 19:30:36.575916 133480730094720 pyconfig.py:333] Config param generate_padding_batch_train: False
+I0303 19:30:36.575938 133480730094720 pyconfig.py:333] Config param generate_slice: v5e-16
+I0303 19:30:36.575953 133480730094720 pyconfig.py:333] Config param generation_configs: {'greedy': {'eval_temperature': 0.01, 'eval_top_k': 1, 'eval_top_p': 1.0}, 'standard': {'eval_temperature': 0.7, 'eval_top_k': 50, 'eval_top_p': 0.95}, 'liberal': {'eval_temperature': 0.85, 'eval_top_k': 2000, 'eval_top_p': 1.0}}
+I0303 19:30:36.575973 133480730094720 pyconfig.py:333] Config param global_batch_size_to_eval_on: 96
+I0303 19:30:36.575986 133480730094720 pyconfig.py:333] Config param global_batch_size_to_load: 96
+I0303 19:30:36.575998 133480730094720 pyconfig.py:333] Config param global_batch_size_to_load_eval: 96
+I0303 19:30:36.576011 133480730094720 pyconfig.py:333] Config param global_batch_size_to_load_increment: None
+I0303 19:30:36.576023 133480730094720 pyconfig.py:333] Config param global_batch_size_to_load_start: None
+I0303 19:30:36.576036 133480730094720 pyconfig.py:333] Config param global_batch_size_to_train_on: 96
+I0303 19:30:36.576049 133480730094720 pyconfig.py:333] Config param global_parameter_scale: 1
+I0303 19:30:36.576062 133480730094720 pyconfig.py:333] Config param global_rampup_samples: 500
+I0303 19:30:36.576074 133480730094720 pyconfig.py:333] Config param goodput_upload_interval_seconds: 30
+I0303 19:30:36.576086 133480730094720 pyconfig.py:333] Config param grad_dtype: float32
+I0303 19:30:36.576125 133480730094720 pyconfig.py:333] Config param gradient_accumulation_steps: 1
+I0303 19:30:36.576139 133480730094720 pyconfig.py:333] Config param gradient_clipping_threshold: 0.1
+I0303 19:30:36.576153 133480730094720 pyconfig.py:333] Config param grain_data_source_max_workers: 16
+I0303 19:30:36.576166 133480730094720 pyconfig.py:333] Config param grain_eval_files: 
+I0303 19:30:36.576179 133480730094720 pyconfig.py:333] Config param grain_file_type: arrayrecord
+I0303 19:30:36.576191 133480730094720 pyconfig.py:333] Config param grain_num_threads: 16
+I0303 19:30:36.576203 133480730094720 pyconfig.py:333] Config param grain_num_threads_eval: 16
+I0303 19:30:36.576215 133480730094720 pyconfig.py:333] Config param grain_packing_type: first_fit
+I0303 19:30:36.576228 133480730094720 pyconfig.py:333] Config param grain_per_worker_buffer_size: 1
+I0303 19:30:36.576240 133480730094720 pyconfig.py:333] Config param grain_per_worker_buffer_size_eval: 1
+I0303 19:30:36.576253 133480730094720 pyconfig.py:333] Config param grain_prefetch_buffer_size: 500
+I0303 19:30:36.576266 133480730094720 pyconfig.py:333] Config param grain_prefetch_buffer_size_eval: 500
+I0303 19:30:36.576278 133480730094720 pyconfig.py:333] Config param grain_ram_budget_mb: 1024
+I0303 19:30:36.576290 133480730094720 pyconfig.py:333] Config param grain_train_files: 
+I0303 19:30:36.576303 133480730094720 pyconfig.py:333] Config param grain_train_mixture_config_path: 
+I0303 19:30:36.576315 133480730094720 pyconfig.py:333] Config param grain_worker_count: 1
+I0303 19:30:36.576327 133480730094720 pyconfig.py:333] Config param grain_worker_count_eval: 1
+I0303 19:30:36.576339 133480730094720 pyconfig.py:333] Config param grpo_beta: 0.08
+I0303 19:30:36.576352 133480730094720 pyconfig.py:333] Config param grpo_epsilon: 0.2
+I0303 19:30:36.576365 133480730094720 pyconfig.py:333] Config param hardware: tpu
+I0303 19:30:36.576378 133480730094720 pyconfig.py:333] Config param hbm_utilization_vllm: 0.7
+I0303 19:30:36.576390 133480730094720 pyconfig.py:333] Config param head_dim: 128
+I0303 19:30:36.576403 133480730094720 pyconfig.py:333] Config param heartbeat_reporting_interval_in_seconds: 5
+I0303 19:30:36.576415 133480730094720 pyconfig.py:333] Config param hf_data_dir: 
+I0303 19:30:36.576428 133480730094720 pyconfig.py:333] Config param hf_eval_files: None
+I0303 19:30:36.576440 133480730094720 pyconfig.py:333] Config param hf_eval_split: 
+I0303 19:30:36.576453 133480730094720 pyconfig.py:333] Config param hf_name: 
+I0303 19:30:36.576466 133480730094720 pyconfig.py:333] Config param hf_path: 
+I0303 19:30:36.576483 133480730094720 pyconfig.py:333] Config param hf_train_files: None
+I0303 19:30:36.576496 133480730094720 pyconfig.py:333] Config param hidden_size_for_vit: 1408
+I0303 19:30:36.576508 133480730094720 pyconfig.py:333] Config param hide_profiler_step_metric: False
+I0303 19:30:36.576521 133480730094720 pyconfig.py:333] Config param ici_autoregressive_parallelism: 1
+I0303 19:30:36.576533 133480730094720 pyconfig.py:333] Config param ici_context_autoregressive_parallelism: 1
+I0303 19:30:36.576546 133480730094720 pyconfig.py:333] Config param ici_context_parallelism: 1
+I0303 19:30:36.576558 133480730094720 pyconfig.py:333] Config param ici_data_parallelism: 1
+I0303 19:30:36.576571 133480730094720 pyconfig.py:333] Config param ici_diloco_parallelism: 1
+I0303 19:30:36.576583 133480730094720 pyconfig.py:333] Config param ici_expert_parallelism: 1
+I0303 19:30:36.576595 133480730094720 pyconfig.py:333] Config param ici_fsdp_parallelism: -1
+I0303 19:30:36.576611 133480730094720 pyconfig.py:333] Config param ici_fsdp_transpose_parallelism: 1
+I0303 19:30:36.576623 133480730094720 pyconfig.py:333] Config param ici_parallelism: [1, 1, 1, -1, 1, 1, 1, 1, 8, 1, 1, 1, 1]
+I0303 19:30:36.576638 133480730094720 pyconfig.py:333] Config param ici_pipeline_parallelism: 1
+I0303 19:30:36.576652 133480730094720 pyconfig.py:333] Config param ici_sequence_parallelism: 1
+I0303 19:30:36.576664 133480730094720 pyconfig.py:333] Config param ici_tensor_parallelism: 8
+I0303 19:30:36.576677 133480730094720 pyconfig.py:333] Config param ici_tensor_sequence_parallelism: 1
+I0303 19:30:36.576690 133480730094720 pyconfig.py:333] Config param ici_tensor_transpose_parallelism: 1
+I0303 19:30:36.576703 133480730094720 pyconfig.py:333] Config param image_path: 
+I0303 19:30:36.576714 133480730094720 pyconfig.py:333] Config param image_placeholder: <|image|>
+I0303 19:30:36.576727 133480730094720 pyconfig.py:333] Config param image_size_for_vit: 896
+I0303 19:30:36.576740 133480730094720 pyconfig.py:333] Config param index_head_dim: 128
+I0303 19:30:36.576752 133480730094720 pyconfig.py:333] Config param index_n_heads: 64
+I0303 19:30:36.576764 133480730094720 pyconfig.py:333] Config param index_topk: 2048
+I0303 19:30:36.576777 133480730094720 pyconfig.py:333] Config param inference_benchmark_test: False
+I0303 19:30:36.576789 133480730094720 pyconfig.py:333] Config param inference_metadata_file: 
+I0303 19:30:36.576802 133480730094720 pyconfig.py:333] Config param inference_microbenchmark_log_file_path: 
+I0303 19:30:36.576814 133480730094720 pyconfig.py:333] Config param inference_microbenchmark_loop_iters: 10
+I0303 19:30:36.576827 133480730094720 pyconfig.py:333] Config param inference_microbenchmark_num_samples: [1, 2, 3, 4, 5]
+I0303 19:30:36.576839 133480730094720 pyconfig.py:333] Config param inference_microbenchmark_prefill_lengths: 64,128,256,512,1024
+I0303 19:30:36.576853 133480730094720 pyconfig.py:333] Config param inference_microbenchmark_stages: prefill,generate
+I0303 19:30:36.576865 133480730094720 pyconfig.py:333] Config param inference_server: MaxtextInterleavedServer
+I0303 19:30:36.576878 133480730094720 pyconfig.py:333] Config param inhomogeneous_layer_cycle_interval: 1
+I0303 19:30:36.576891 133480730094720 pyconfig.py:333] Config param init_weights_seed: 0
+I0303 19:30:36.576903 133480730094720 pyconfig.py:333] Config param input_data_sharding_logical_axes: ['activation_embed_and_logits_batch', 'activation_norm_length']
+I0303 19:30:36.576916 133480730094720 pyconfig.py:333] Config param interleave_moe_layer_step: 1
+I0303 19:30:36.576938 133480730094720 pyconfig.py:333] Config param intermediate_size_for_vit: 5632
+I0303 19:30:36.576956 133480730094720 pyconfig.py:333] Config param jax_cache_dir: ~/jax_cache
+I0303 19:30:36.576968 133480730094720 pyconfig.py:333] Config param jax_debug_log_modules: 
+I0303 19:30:36.576981 133480730094720 pyconfig.py:333] Config param jax_distributed_initialization_timeout: 300
+I0303 19:30:36.576993 133480730094720 pyconfig.py:333] Config param jax_profiler_port: 9999
+I0303 19:30:36.577006 133480730094720 pyconfig.py:333] Config param key_proj: RematLocation.OFFLOAD
+I0303 19:30:36.577026 133480730094720 pyconfig.py:333] Config param kv_cache_buffer: 256
+I0303 19:30:36.577039 133480730094720 pyconfig.py:333] Config param kv_lora_rank: 512
+I0303 19:30:36.577052 133480730094720 pyconfig.py:333] Config param kv_quant_axis: KvQuantAxis.HEADS_AND_DKV
+I0303 19:30:36.577070 133480730094720 pyconfig.py:333] Config param kv_quant_dtype: int8
+I0303 19:30:36.577083 133480730094720 pyconfig.py:333] Config param learning_rate: 3e-06
+I0303 19:30:36.577097 133480730094720 pyconfig.py:333] Config param learning_rate_final_fraction: 0.1
+I0303 19:30:36.577110 133480730094720 pyconfig.py:333] Config param learning_rate_schedule_steps: 150001
+I0303 19:30:36.577123 133480730094720 pyconfig.py:333] Config param load_balance_loss_weight: 0.0
+I0303 19:30:36.577135 133480730094720 pyconfig.py:333] Config param load_checkpoint_only_once: False
+I0303 19:30:36.577148 133480730094720 pyconfig.py:333] Config param load_from_prefill_dir: False
+I0303 19:30:36.577161 133480730094720 pyconfig.py:333] Config param load_full_state_path: 
+I0303 19:30:36.577173 133480730094720 pyconfig.py:333] Config param load_parameters_path: 
+I0303 19:30:36.577186 133480730094720 pyconfig.py:333] Config param local_checkpoint_directory: 
+I0303 19:30:36.577198 133480730094720 pyconfig.py:333] Config param local_checkpoint_period: 0
+I0303 19:30:36.577211 133480730094720 pyconfig.py:333] Config param local_rope_max_timescale: -1
+I0303 19:30:36.577224 133480730094720 pyconfig.py:333] Config param log_config: True
+I0303 19:30:36.577236 133480730094720 pyconfig.py:333] Config param log_period: 20
+I0303 19:30:36.577249 133480730094720 pyconfig.py:333] Config param logical_axis_rules: (('activation_batch', ('data', 'fsdp', 'fsdp_transpose', 'expert')), ('activation_batch_no_exp', ('data', 'fsdp', 'fsdp_transpose')), ('activation_embed_and_logits_batch', ('data', 'stage', 'fsdp', 'fsdp_transpose', 'expert')), ('activation_embed_and_logits_batch_sequence', ('data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert')), ('activation_heads', ('tensor', 'tensor_transpose', 'sequence', 'tensor_sequence', 'autoregressive')), ('activation_kv_heads', ('tensor', 'tensor_transpose', 'sequence', 'tensor_sequence')), ('activation_length', ('sequence', 'context', 'expert')), ('activation_length', ('context', 'expert')), ('activation_attn_length', ('sequence', 'context', 'expert')), ('activation_attn_length', ('context', 'expert')), ('activation_attn_length_no_exp', ('sequence', 'context')), ('activation_attn_length_no_exp', ('context',)), ('activation_length_no_exp', ('sequence', 'context')), ('activation_length_no_exp', ('context',)), ('activation_norm_length', ('tensor_sequence', 'context', 'sequence')), ('activation_q_length', ('context', 'expert')), ('activation_q_length_no_exp', ('context',)), ('prefill_activation_length', ('sequence', 'context')), ('prefill_activation_norm_length', ('tensor_sequence', 'context', 'sequence')), ('activation_kv_length', ()), ('activation_attn_embed', ('tensor', 'tensor_transpose')), ('activation_embed', ('tensor', 'tensor_transpose')), ('activation_mlp', ('tensor', 'tensor_transpose', 'tensor_sequence')), ('activation_kv', ('tensor', 'tensor_transpose', 'tensor_sequence')), ('activation_prefill_kv_batch', ('data', 'fsdp', 'fsdp_transpose', 'expert')), ('activation_kv_batch', ('data', 'fsdp', 'fsdp_transpose', 'expert')), ('activation_kv_batch_no_exp', ('data', 'fsdp', 'fsdp_transpose')), ('activation_kv_head_dim', ('tensor', 'tensor_transpose', 'tensor_sequence')), ('activation_vocab', ('tensor', 'tensor_transpose', 'tensor_sequence')), ('activation_vocab', ('tensor', 'tensor_transpose')), ('activation_vocab', 'tensor_sequence'), ('activation_vocab', ('sequence', 'context')), ('activation_stage', 'stage'), ('activation_exp', ('expert',)), ('decode_batch', ('data', 'fsdp', 'fsdp_transpose', 'expert')), ('decode_length', ('sequence',)), ('mlp', ('fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive')), ('mlp_no_fsdp', ('tensor', 'tensor_sequence', 'autoregressive')), ('moe_mlp', ('fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive')), ('vocab', ('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive')), ('heads', ('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive')), ('q_heads', ('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive')), ('kv_heads', ('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive')), ('embed', ('fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context', 'expert')), ('embed', ('fsdp', 'sequence', 'tensor_transpose', 'context', 'expert')), ('embed', ('fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert')), ('embed', ('fsdp', 'sequence', 'context', 'expert')), ('embed_no_exp', ('fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context')), ('embed_no_exp', ('fsdp', 'sequence', 'tensor_transpose', 'context')), ('embed_no_exp', ('fsdp', 'fsdp_transpose', 'sequence', 'context')), ('embed_no_exp', ('fsdp', 'sequence', 'context')), ('embed_tensor_transpose', ('tensor_transpose',)), ('q_lora', ('fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert')), ('q_lora', ('fsdp', 'sequence', 'context', 'tensor_transpose', 'expert')), ('q_lora', ('fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert')), ('q_lora', ('fsdp', 'sequence', 'context', 'expert')), ('q_lora_up_proj', ()), ('kv_lora', ('fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert')), ('kv_lora', ('fsdp', 'sequence', 'context', 'tensor_transpose', 'expert')), ('kv_lora', ('fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert')), ('kv_lora', ('fsdp', 'sequence', 'context', 'expert')), ('kv_lora_up_proj', ()), ('norm', ('tensor', 'tensor_transpose')), ('layers', 'stage'), ('qkv', ()), ('kv', ()), ('kv_head_dim', ()), ('cache_batch_prefill', ()), ('cache_batch', ()), ('cache_heads_none', ()), ('cache_heads', ('autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence')), ('cache_heads', ('autoregressive', 'tensor', 'tensor_sequence')), ('cache_kv', ()), ('cache_sequence', ()), ('exp', 'expert'), ('exp_with_fsdp', 'fsdp'), ('paged_kv_heads', ('tensor',)), ('num_pages', ()), ('tokens_per_page', ()), ('paged_kv_head_dim_size', ()), ('dense_layers', ()), ('moe_layers', ()), ('engram_dim', ('tensor',)), ('mhc', ()), ('diloco', 'diloco'))
+I0303 19:30:36.577335 133480730094720 pyconfig.py:333] Config param logits_dot_in_fp32: False
+I0303 19:30:36.577348 133480730094720 pyconfig.py:333] Config param logits_via_embedding: False
+I0303 19:30:36.577361 133480730094720 pyconfig.py:333] Config param lora_input_adapters_path: 
+I0303 19:30:36.577374 133480730094720 pyconfig.py:333] Config param loss_algo: grpo
+I0303 19:30:36.577387 133480730094720 pyconfig.py:333] Config param lr_schedule_type: LearningRateScheduleType.COSINE
+I0303 19:30:36.577401 133480730094720 pyconfig.py:333] Config param managed_mldiagnostics: False
+I0303 19:30:36.577413 133480730094720 pyconfig.py:333] Config param managed_mldiagnostics_dir: None
+I0303 19:30:36.577427 133480730094720 pyconfig.py:333] Config param managed_mldiagnostics_run_group: 
+I0303 19:30:36.577440 133480730094720 pyconfig.py:333] Config param matmul_precision: MatmulPrecision.DEFAULT
+I0303 19:30:36.577454 133480730094720 pyconfig.py:333] Config param max_checkify: False
+I0303 19:30:36.577466 133480730094720 pyconfig.py:333] Config param max_corpus_chars: 10000000
+I0303 19:30:36.577478 133480730094720 pyconfig.py:333] Config param max_num_batched_tokens: None
+I0303 19:30:36.577491 133480730094720 pyconfig.py:333] Config param max_num_checkpoints_to_keep: 10
+I0303 19:30:36.577504 133480730094720 pyconfig.py:333] Config param max_num_images_per_example: -1
+I0303 19:30:36.577516 133480730094720 pyconfig.py:333] Config param max_num_seqs: None
+I0303 19:30:36.577528 133480730094720 pyconfig.py:333] Config param max_position_embeddings: 163840
+I0303 19:30:36.577541 133480730094720 pyconfig.py:333] Config param max_prefill_predict_length: 256
+I0303 19:30:36.577553 133480730094720 pyconfig.py:333] Config param max_sample_len_for_audio: 10000
+I0303 19:30:36.577571 133480730094720 pyconfig.py:333] Config param max_segments_per_seq: -1
+I0303 19:30:36.577585 133480730094720 pyconfig.py:333] Config param max_source_positions_for_audio: 1500
+I0303 19:30:36.577597 133480730094720 pyconfig.py:333] Config param max_target_length: 1024
+I0303 19:30:36.577613 133480730094720 pyconfig.py:333] Config param max_timescale_for_audio: 10000.0
+I0303 19:30:36.577626 133480730094720 pyconfig.py:333] Config param megablox: True
+I0303 19:30:36.577639 133480730094720 pyconfig.py:333] Config param merge_gating_gmm: False
+I0303 19:30:36.577652 133480730094720 pyconfig.py:333] Config param mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
+I0303 19:30:36.577668 133480730094720 pyconfig.py:333] Config param metrics_dir: None
+I0303 19:30:36.577680 133480730094720 pyconfig.py:333] Config param metrics_file: 
+I0303 19:30:36.577693 133480730094720 pyconfig.py:333] Config param mhc_expansion_rate: 1
+I0303 19:30:36.577705 133480730094720 pyconfig.py:333] Config param micro_batch_size: -1
+I0303 19:30:36.577718 133480730094720 pyconfig.py:333] Config param micro_batch_size_to_eval_on: 96
+I0303 19:30:36.577730 133480730094720 pyconfig.py:333] Config param micro_batch_size_to_train_on: 96
+I0303 19:30:36.577743 133480730094720 pyconfig.py:333] Config param mla_kv: RematLocation.REMAT
+I0303 19:30:36.577756 133480730094720 pyconfig.py:333] Config param mla_naive_kvcache: True
+I0303 19:30:36.577768 133480730094720 pyconfig.py:333] Config param mla_q: RematLocation.REMAT
+I0303 19:30:36.577781 133480730094720 pyconfig.py:333] Config param mlp_activations: ['silu', 'linear']
+I0303 19:30:36.577794 133480730094720 pyconfig.py:333] Config param mlp_activations_limit: -1.0
+I0303 19:30:36.577807 133480730094720 pyconfig.py:333] Config param mlp_bias: False
+I0303 19:30:36.577820 133480730094720 pyconfig.py:333] Config param mlp_dim: 18432
+I0303 19:30:36.577833 133480730094720 pyconfig.py:333] Config param mlpwi: RematLocation.REMAT
+I0303 19:30:36.577846 133480730094720 pyconfig.py:333] Config param mlpwi_0: RematLocation.REMAT
+I0303 19:30:36.577859 133480730094720 pyconfig.py:333] Config param mlpwi_1: RematLocation.REMAT
+I0303 19:30:36.577871 133480730094720 pyconfig.py:333] Config param mlpwo: RematLocation.REMAT
+I0303 19:30:36.577884 133480730094720 pyconfig.py:333] Config param moba: False
+I0303 19:30:36.577898 133480730094720 pyconfig.py:333] Config param moba_chunk_size: 1024
+I0303 19:30:36.577911 133480730094720 pyconfig.py:333] Config param moba_topk: 8
+I0303 19:30:36.577922 133480730094720 pyconfig.py:333] Config param model_call_mode: 
+I0303 19:30:36.577951 133480730094720 pyconfig.py:333] Config param model_name: deepseek3-671b
+I0303 19:30:36.577964 133480730094720 pyconfig.py:333] Config param moe_fsdp_use_two_stage_all_gather: False
+I0303 19:30:36.577977 133480730094720 pyconfig.py:333] Config param moe_mlp_dim: 2048
+I0303 19:30:36.577990 133480730094720 pyconfig.py:333] Config param monitor_goodput: False
+I0303 19:30:36.578003 133480730094720 pyconfig.py:333] Config param monitor_step_time_deviation: True
+I0303 19:30:36.578015 133480730094720 pyconfig.py:333] Config param mrope_section: [24, 20, 20]
+I0303 19:30:36.578028 133480730094720 pyconfig.py:333] Config param mscale: 1.0
+I0303 19:30:36.578041 133480730094720 pyconfig.py:333] Config param mtc_data_parallelism: 0
+I0303 19:30:36.578053 133480730094720 pyconfig.py:333] Config param mtp_eval_target_module: 0
+I0303 19:30:36.578065 133480730094720 pyconfig.py:333] Config param mtp_loss_scaling_factor: 0.1
+I0303 19:30:36.578078 133480730094720 pyconfig.py:333] Config param mtp_num_layers: 0
+I0303 19:30:36.578090 133480730094720 pyconfig.py:333] Config param mu_dtype: bfloat16
+I0303 19:30:36.578110 133480730094720 pyconfig.py:333] Config param multi_sampling: False
+I0303 19:30:36.578123 133480730094720 pyconfig.py:333] Config param multi_tier_checkpointing_backup_interval_minutes: 0
+I0303 19:30:36.578141 133480730094720 pyconfig.py:333] Config param muon_beta: 0.95
+I0303 19:30:36.578154 133480730094720 pyconfig.py:333] Config param muon_consistent_rms: None
+I0303 19:30:36.578167 133480730094720 pyconfig.py:333] Config param muon_weight_decay: 0.0
+I0303 19:30:36.578181 133480730094720 pyconfig.py:333] Config param n_routing_groups: -1
+I0303 19:30:36.578194 133480730094720 pyconfig.py:333] Config param n_window_for_audio: 50
+I0303 19:30:36.578206 133480730094720 pyconfig.py:333] Config param n_window_infer_for_audio: 800
+I0303 19:30:36.578218 133480730094720 pyconfig.py:333] Config param nope_layer_interval: -1
+I0303 19:30:36.578231 133480730094720 pyconfig.py:333] Config param norm_topk_prob: False
+I0303 19:30:36.578244 133480730094720 pyconfig.py:333] Config param normalization_layer_epsilon: 1e-06
+I0303 19:30:36.578261 133480730094720 pyconfig.py:333] Config param normalize_embedding_logits: True
+I0303 19:30:36.578273 133480730094720 pyconfig.py:333] Config param num_attention_heads_for_vit: 16
+I0303 19:30:36.578286 133480730094720 pyconfig.py:333] Config param num_batches: 4
+I0303 19:30:36.578298 133480730094720 pyconfig.py:333] Config param num_channels_for_vit: 3
+I0303 19:30:36.578311 133480730094720 pyconfig.py:333] Config param num_conv_layers_for_audio: 3
+I0303 19:30:36.578324 133480730094720 pyconfig.py:333] Config param num_decoder_layers: 5
+I0303 19:30:36.578336 133480730094720 pyconfig.py:333] Config param num_diloco_replicas: 1
+I0303 19:30:36.578349 133480730094720 pyconfig.py:333] Config param num_epoch: 1
+I0303 19:30:36.578362 133480730094720 pyconfig.py:333] Config param num_eval_passes: 1
+I0303 19:30:36.578375 133480730094720 pyconfig.py:333] Config param num_experts: 256
+I0303 19:30:36.578387 133480730094720 pyconfig.py:333] Config param num_experts_per_tok: 8
+I0303 19:30:36.578399 133480730094720 pyconfig.py:333] Config param num_generations: 2
+I0303 19:30:36.578412 133480730094720 pyconfig.py:333] Config param num_hidden_layers_for_vit: 34
+I0303 19:30:36.578424 133480730094720 pyconfig.py:333] Config param num_iterations: 1
+I0303 19:30:36.578436 133480730094720 pyconfig.py:333] Config param num_kv_heads: 128
+I0303 19:30:36.578448 133480730094720 pyconfig.py:333] Config param num_layers_per_pipeline_stage: 1
+I0303 19:30:36.578460 133480730094720 pyconfig.py:333] Config param num_mel_bins_for_audio: 128
+I0303 19:30:36.578473 133480730094720 pyconfig.py:333] Config param num_pipeline_microbatches: -1
+I0303 19:30:36.578485 133480730094720 pyconfig.py:333] Config param num_pipeline_repeats: -1
+I0303 19:30:36.578497 133480730094720 pyconfig.py:333] Config param num_position_embeddings_for_vit: 1024
+I0303 19:30:36.578509 133480730094720 pyconfig.py:333] Config param num_query_heads: 128
+I0303 19:30:36.578522 133480730094720 pyconfig.py:333] Config param num_samplers_slices: -1
+I0303 19:30:36.578534 133480730094720 pyconfig.py:333] Config param num_slices: 1
+I0303 19:30:36.578547 133480730094720 pyconfig.py:333] Config param num_target_devices: 8
+I0303 19:30:36.578560 133480730094720 pyconfig.py:333] Config param num_test_batches: 5
+I0303 19:30:36.578572 133480730094720 pyconfig.py:333] Config param num_trainer_slices: -1
+I0303 19:30:36.578584 133480730094720 pyconfig.py:333] Config param num_vocab_tiling: 1
+I0303 19:30:36.578597 133480730094720 pyconfig.py:333] Config param opt_type: OptimizerType.ADAMW
+I0303 19:30:36.578614 133480730094720 pyconfig.py:333] Config param optimize_mesh_for_tpu_v6e: False
+I0303 19:30:36.578627 133480730094720 pyconfig.py:333] Config param optimizer_memory_host_offload: False
+I0303 19:30:36.578639 133480730094720 pyconfig.py:333] Config param original_max_position_embeddings: 4096
+I0303 19:30:36.578652 133480730094720 pyconfig.py:333] Config param out_hidden_size_for_vit: 512
+I0303 19:30:36.578665 133480730094720 pyconfig.py:333] Config param out_proj: RematLocation.REMAT
+I0303 19:30:36.578677 133480730094720 pyconfig.py:333] Config param output_dim_for_audio: 512
+I0303 19:30:36.578690 133480730094720 pyconfig.py:333] Config param override_logical_axis_rules: False
+I0303 19:30:36.578709 133480730094720 pyconfig.py:333] Config param override_model_config: True
+I0303 19:30:36.578721 133480730094720 pyconfig.py:333] Config param packing: True
+I0303 19:30:36.578734 133480730094720 pyconfig.py:333] Config param pagedattn_head_dim_alignment: 128
+I0303 19:30:36.578747 133480730094720 pyconfig.py:333] Config param pagedattn_max_pages_per_group: -1
+I0303 19:30:36.578759 133480730094720 pyconfig.py:333] Config param pagedattn_num_pages: 64
+I0303 19:30:36.578772 133480730094720 pyconfig.py:333] Config param pagedattn_pages_per_compute_block: 4
+I0303 19:30:36.578784 133480730094720 pyconfig.py:333] Config param pagedattn_tokens_per_page: 32
+I0303 19:30:36.578796 133480730094720 pyconfig.py:333] Config param param_scan_axis: 1
+I0303 19:30:36.578808 133480730094720 pyconfig.py:333] Config param parameter_memory_host_offload: False
+I0303 19:30:36.578821 133480730094720 pyconfig.py:333] Config param partial_rotary_factor: 1.0
+I0303 19:30:36.578833 133480730094720 pyconfig.py:333] Config param patch_size_for_vit: 14
+I0303 19:30:36.578846 133480730094720 pyconfig.py:333] Config param penalty_incorrect_answer: -1.0
+I0303 19:30:36.578859 133480730094720 pyconfig.py:333] Config param penalty_incorrect_format: -0.5
+I0303 19:30:36.578871 133480730094720 pyconfig.py:333] Config param per_device_batch_size: 12.0
+I0303 19:30:36.578884 133480730094720 pyconfig.py:333] Config param per_device_batch_size_increment: 2.0
+I0303 19:30:36.578896 133480730094720 pyconfig.py:333] Config param per_device_batch_size_start: 4.0
+I0303 19:30:36.578909 133480730094720 pyconfig.py:333] Config param pipeline_delay_activation_forwarding: False
+I0303 19:30:36.578922 133480730094720 pyconfig.py:333] Config param pipeline_fsdp_ag_once: False
+I0303 19:30:36.579030 133480730094720 pyconfig.py:333] Config param pipeline_parallel_layers: 2
+I0303 19:30:36.579044 133480730094720 pyconfig.py:333] Config param pixel_shuffle_ratio_for_vit: 0.5
+I0303 19:30:36.579057 133480730094720 pyconfig.py:333] Config param posemb_type_for_vit: learn
+I0303 19:30:36.579070 133480730094720 pyconfig.py:333] Config param position_id_per_seconds: 25
+I0303 19:30:36.579082 133480730094720 pyconfig.py:333] Config param prefill_cache_axis_order: 1,2,0,3
+I0303 19:30:36.579095 133480730094720 pyconfig.py:333] Config param prefill_cache_dir: 
+I0303 19:30:36.579107 133480730094720 pyconfig.py:333] Config param prefill_chunk_size: 256
+I0303 19:30:36.579120 133480730094720 pyconfig.py:333] Config param prefill_slice: v5e-16
+I0303 19:30:36.579133 133480730094720 pyconfig.py:333] Config param prefix_caching_dram_byte: 100000000000
+I0303 19:30:36.579145 133480730094720 pyconfig.py:333] Config param prefix_caching_hbm_byte: 10000000000
+I0303 19:30:36.579158 133480730094720 pyconfig.py:333] Config param profile_cleanly: True
+I0303 19:30:36.579171 133480730094720 pyconfig.py:333] Config param profile_periodically_period: -1
+I0303 19:30:36.579183 133480730094720 pyconfig.py:333] Config param profiler: ProfilerType.NONE
+I0303 19:30:36.579198 133480730094720 pyconfig.py:333] Config param profiler_steps: 5
+I0303 19:30:36.579210 133480730094720 pyconfig.py:333] Config param projector_dropout_for_vit: 0.0
+I0303 19:30:36.579223 133480730094720 pyconfig.py:333] Config param projector_input_dim_for_vit: 4096
+I0303 19:30:36.579236 133480730094720 pyconfig.py:333] Config param projector_output_dim_for_vit: 4096
+I0303 19:30:36.579248 133480730094720 pyconfig.py:333] Config param prometheus_port: 0
+I0303 19:30:36.579261 133480730094720 pyconfig.py:333] Config param prompt: Suggest some famous landmarks in London.
+I0303 19:30:36.579274 133480730094720 pyconfig.py:333] Config param q_lora_rank: 1536
+I0303 19:30:36.579286 133480730094720 pyconfig.py:333] Config param qk_clip_threshold: 100.0
+I0303 19:30:36.579299 133480730094720 pyconfig.py:333] Config param qk_nope_head_dim: 128
+I0303 19:30:36.579312 133480730094720 pyconfig.py:333] Config param qk_rope_head_dim: 64
+I0303 19:30:36.579324 133480730094720 pyconfig.py:333] Config param qkv_proj: RematLocation.REMAT
+I0303 19:30:36.579337 133480730094720 pyconfig.py:333] Config param quant_cfg_path: 
+I0303 19:30:36.579357 133480730094720 pyconfig.py:333] Config param quantization: QuantizationType.NONE
+I0303 19:30:36.579371 133480730094720 pyconfig.py:333] Config param quantization_local_shard_count: 8
+I0303 19:30:36.579385 133480730094720 pyconfig.py:333] Config param quantize_kvcache: False
+I0303 19:30:36.579397 133480730094720 pyconfig.py:333] Config param query_proj: RematLocation.OFFLOAD
+I0303 19:30:36.579411 133480730094720 pyconfig.py:333] Config param ragged_block_size: 256
+I0303 19:30:36.579423 133480730094720 pyconfig.py:333] Config param rampup_end_step: 0
+I0303 19:30:36.579436 133480730094720 pyconfig.py:333] Config param rampup_samples_per_increment_to_load: None
+I0303 19:30:36.579449 133480730094720 pyconfig.py:333] Config param reasoning_end_token: </reasoning>
+I0303 19:30:36.579461 133480730094720 pyconfig.py:333] Config param reasoning_start_token: <reasoning>
+I0303 19:30:36.579474 133480730094720 pyconfig.py:333] Config param record_internal_nn_metrics: 0
+I0303 19:30:36.579486 133480730094720 pyconfig.py:333] Config param remat_policy: custom
+I0303 19:30:36.579499 133480730094720 pyconfig.py:333] Config param remat_policy_for_vit: minimal
+I0303 19:30:36.579510 133480730094720 pyconfig.py:333] Config param replicate_quant_scale: False
+I0303 19:30:36.579523 133480730094720 pyconfig.py:333] Config param replicator_backup_interval_minutes: 0
+I0303 19:30:36.579536 133480730094720 pyconfig.py:333] Config param report_heartbeat_metric_for_gcp_monitoring: False
+I0303 19:30:36.579549 133480730094720 pyconfig.py:333] Config param report_performance_metric_for_gcp_monitoring: False
+I0303 19:30:36.579561 133480730094720 pyconfig.py:333] Config param reshape_q: False
+I0303 19:30:36.579573 133480730094720 pyconfig.py:333] Config param return_log_prob: False
+I0303 19:30:36.579586 133480730094720 pyconfig.py:333] Config param reuse_example_batch: 0
+I0303 19:30:36.579601 133480730094720 pyconfig.py:333] Config param reward_exact_format_match: 3.0
+I0303 19:30:36.579617 133480730094720 pyconfig.py:333] Config param reward_partial_format_match: 0.5
+I0303 19:30:36.579629 133480730094720 pyconfig.py:333] Config param reward_ratio_guess_to_answer_high: 0.5
+I0303 19:30:36.579642 133480730094720 pyconfig.py:333] Config param reward_ratio_guess_to_answer_low: 0.25
+I0303 19:30:36.579655 133480730094720 pyconfig.py:333] Config param reward_white_space_format_match: 1.5
+I0303 19:30:36.579668 133480730094720 pyconfig.py:333] Config param rl: {'num_generations': 2, 'num_iterations': 1, 'grpo_beta': 0.08, 'grpo_epsilon': 0.2, 'loss_algo': 'grpo'}
+I0303 19:30:36.579682 133480730094720 pyconfig.py:333] Config param rollout_data_parallelism: -1
+I0303 19:30:36.579695 133480730094720 pyconfig.py:333] Config param rollout_tensor_parallelism: -1
+I0303 19:30:36.579707 133480730094720 pyconfig.py:333] Config param rope_attention_scaling: False
+I0303 19:30:36.579720 133480730094720 pyconfig.py:333] Config param rope_factor: 40
+I0303 19:30:36.579732 133480730094720 pyconfig.py:333] Config param rope_interleave: True
+I0303 19:30:36.579745 133480730094720 pyconfig.py:333] Config param rope_linear_scaling_factor: 1.0
+I0303 19:30:36.579757 133480730094720 pyconfig.py:333] Config param rope_max_timescale: 10000
+I0303 19:30:36.579770 133480730094720 pyconfig.py:333] Config param rope_min_timescale: 1
+I0303 19:30:36.579782 133480730094720 pyconfig.py:333] Config param rope_theta_for_vit: 10000
+I0303 19:30:36.579794 133480730094720 pyconfig.py:333] Config param rope_truncate: True
+I0303 19:30:36.579807 133480730094720 pyconfig.py:333] Config param rope_type: RopeType.YARN
+I0303 19:30:36.579821 133480730094720 pyconfig.py:333] Config param rope_use_scale: True
+I0303 19:30:36.579833 133480730094720 pyconfig.py:333] Config param routed_bias: True
+I0303 19:30:36.579845 133480730094720 pyconfig.py:333] Config param routed_bias_update_rate: 0.0
+I0303 19:30:36.579858 133480730094720 pyconfig.py:333] Config param routed_scaling_factor: 2.5
+I0303 19:30:36.579871 133480730094720 pyconfig.py:333] Config param routed_score_func: sigmoid
+I0303 19:30:36.579890 133480730094720 pyconfig.py:333] Config param run_name: deepseek3-671b_2026-03-03-19-30
+I0303 19:30:36.579902 133480730094720 pyconfig.py:333] Config param sa_block_kv: 512
+I0303 19:30:36.579915 133480730094720 pyconfig.py:333] Config param sa_block_kv_compute: 512
+I0303 19:30:36.579936 133480730094720 pyconfig.py:333] Config param sa_block_kv_dkv: 512
+I0303 19:30:36.579950 133480730094720 pyconfig.py:333] Config param sa_block_kv_dkv_compute: 512
+I0303 19:30:36.579963 133480730094720 pyconfig.py:333] Config param sa_block_kv_dq: 512
+I0303 19:30:36.579976 133480730094720 pyconfig.py:333] Config param sa_block_q: 512
+I0303 19:30:36.579988 133480730094720 pyconfig.py:333] Config param sa_block_q_dkv: 512
+I0303 19:30:36.580002 133480730094720 pyconfig.py:333] Config param sa_block_q_dq: 512
+I0303 19:30:36.580014 133480730094720 pyconfig.py:333] Config param sa_k_layout: HEAD_DIM_MINOR
+I0303 19:30:36.580027 133480730094720 pyconfig.py:333] Config param sa_q_layout: HEAD_DIM_MINOR
+I0303 19:30:36.580039 133480730094720 pyconfig.py:333] Config param sa_use_fused_bwd_kernel: False
+I0303 19:30:36.580052 133480730094720 pyconfig.py:333] Config param sa_v_layout: HEAD_DIM_MINOR
+I0303 19:30:36.580066 133480730094720 pyconfig.py:333] Config param sampler_devices_fraction: 0.5
+I0303 19:30:36.580080 133480730094720 pyconfig.py:333] Config param save_checkpoint_on_completion: True
+I0303 19:30:36.580092 133480730094720 pyconfig.py:333] Config param save_config_to_gcs: False
+I0303 19:30:36.580105 133480730094720 pyconfig.py:333] Config param save_quantized_params_path: 
+I0303 19:30:36.580117 133480730094720 pyconfig.py:333] Config param scale_embedding_for_audio: True
+I0303 19:30:36.580129 133480730094720 pyconfig.py:333] Config param scan_layers: True
+I0303 19:30:36.580142 133480730094720 pyconfig.py:333] Config param scan_layers_per_stage: False
+I0303 19:30:36.580154 133480730094720 pyconfig.py:333] Config param scan_pipeline_iterations: True
+I0303 19:30:36.580168 133480730094720 pyconfig.py:333] Config param set_remat_policy_on_layers_per_stage: False
+I0303 19:30:36.580180 133480730094720 pyconfig.py:333] Config param set_remat_policy_on_pipeline_iterations: True
+I0303 19:30:36.580193 133480730094720 pyconfig.py:333] Config param sft_train_on_completion_only: False
+I0303 19:30:36.580206 133480730094720 pyconfig.py:333] Config param shard_exp_on_fsdp: False
+I0303 19:30:36.580218 133480730094720 pyconfig.py:333] Config param shard_mode: ShardMode.AUTO
+I0303 19:30:36.580232 133480730094720 pyconfig.py:333] Config param shard_optimizer_over_data: False
+I0303 19:30:36.580244 133480730094720 pyconfig.py:333] Config param sharding_strategy: None
+I0303 19:30:36.580256 133480730094720 pyconfig.py:333] Config param sharding_tolerance: 0.02
+I0303 19:30:36.580270 133480730094720 pyconfig.py:333] Config param shardy: True
+I0303 19:30:36.580282 133480730094720 pyconfig.py:333] Config param shared_experts: 1
+I0303 19:30:36.580294 133480730094720 pyconfig.py:333] Config param sinkhorn_iterations: 20
+I0303 19:30:36.580307 133480730094720 pyconfig.py:333] Config param skip_first_n_steps_for_profiler: 1
+I0303 19:30:36.580319 133480730094720 pyconfig.py:333] Config param skip_jax_distributed_system: True
+I0303 19:30:36.580332 133480730094720 pyconfig.py:333] Config param sliding_window_size: 0
+I0303 19:30:36.580345 133480730094720 pyconfig.py:333] Config param solution_end_token: </answer>
+I0303 19:30:36.580358 133480730094720 pyconfig.py:333] Config param solution_start_token: <answer>
+I0303 19:30:36.580370 133480730094720 pyconfig.py:333] Config param source_checkpoint_layout: orbax
+I0303 19:30:36.580383 133480730094720 pyconfig.py:333] Config param sparse_matmul: True
+I0303 19:30:36.580395 133480730094720 pyconfig.py:333] Config param spatial_merge_size_for_vit: 2
+I0303 19:30:36.580408 133480730094720 pyconfig.py:333] Config param stack_prefill_result_cache: False
+I0303 19:30:36.580420 133480730094720 pyconfig.py:333] Config param stack_trace_interval_seconds: 600
+I0303 19:30:36.580432 133480730094720 pyconfig.py:333] Config param stack_trace_to_cloud: False
+I0303 19:30:36.580450 133480730094720 pyconfig.py:333] Config param step_deviation_interval_seconds: 30
+I0303 19:30:36.580463 133480730094720 pyconfig.py:333] Config param steps: 150001
+I0303 19:30:36.580475 133480730094720 pyconfig.py:333] Config param student_overrides: {}
+I0303 19:30:36.580488 133480730094720 pyconfig.py:333] Config param subslice_shape: 
+I0303 19:30:36.580501 133480730094720 pyconfig.py:333] Config param swap_space_vllm_gb: 2
+I0303 19:30:36.580513 133480730094720 pyconfig.py:333] Config param target_eval_loss: 0.0
+I0303 19:30:36.580526 133480730094720 pyconfig.py:333] Config param teacher_overrides: {}
+I0303 19:30:36.580539 133480730094720 pyconfig.py:333] Config param temperature_tuning: False
+I0303 19:30:36.580551 133480730094720 pyconfig.py:333] Config param temporal_patch_size_for_vit: 2
+I0303 19:30:36.580564 133480730094720 pyconfig.py:333] Config param tensorboard_dir: None
+I0303 19:30:36.580577 133480730094720 pyconfig.py:333] Config param tensors_on_device: []
+I0303 19:30:36.580589 133480730094720 pyconfig.py:333] Config param tensors_to_offload: ['decoder_layer_input', 'query_proj', 'key_proj', 'value_proj']
+I0303 19:30:36.580605 133480730094720 pyconfig.py:333] Config param tile_size_for_vit: 336
+I0303 19:30:36.580618 133480730094720 pyconfig.py:333] Config param tokenize_eval_data: True
+I0303 19:30:36.580631 133480730094720 pyconfig.py:333] Config param tokenize_train_data: True
+I0303 19:30:36.580643 133480730094720 pyconfig.py:333] Config param tokenizer_path: jrplatin/DeepSeek-R1-1D-Subchannel-256-FP8
+I0303 19:30:36.580656 133480730094720 pyconfig.py:333] Config param tokenizer_type: TokenizerType.HUGGINGFACE
+I0303 19:30:36.580669 133480730094720 pyconfig.py:333] Config param topk_routing_group: -1
+I0303 19:30:36.580682 133480730094720 pyconfig.py:333] Config param train_data_columns: ['text']
+I0303 19:30:36.580695 133480730094720 pyconfig.py:333] Config param train_fraction: 1.0
+I0303 19:30:36.580708 133480730094720 pyconfig.py:333] Config param train_image_column: image
+I0303 19:30:36.580720 133480730094720 pyconfig.py:333] Config param train_split: train
+I0303 19:30:36.580732 133480730094720 pyconfig.py:333] Config param trainable_position_size: -1
+I0303 19:30:36.580745 133480730094720 pyconfig.py:333] Config param trainer_devices_fraction: 0.5
+I0303 19:30:36.580757 133480730094720 pyconfig.py:333] Config param upload_all_profiler_results: False
+I0303 19:30:36.580770 133480730094720 pyconfig.py:333] Config param use_2d_fsdp_sharding: False
+I0303 19:30:36.580782 133480730094720 pyconfig.py:333] Config param use_audio: False
+I0303 19:30:36.580795 133480730094720 pyconfig.py:333] Config param use_audio_in_video: False
+I0303 19:30:36.580807 133480730094720 pyconfig.py:333] Config param use_batch_split_schedule: False
+I0303 19:30:36.580820 133480730094720 pyconfig.py:333] Config param use_chat_template: False
+I0303 19:30:36.580832 133480730094720 pyconfig.py:333] Config param use_chunked_prefill: False
+I0303 19:30:36.580844 133480730094720 pyconfig.py:333] Config param use_custom_sort_vjp: True
+I0303 19:30:36.580857 133480730094720 pyconfig.py:333] Config param use_dpo: False
+I0303 19:30:36.580869 133480730094720 pyconfig.py:333] Config param use_grpo: True
+I0303 19:30:36.580881 133480730094720 pyconfig.py:333] Config param use_iota_embed: False
+I0303 19:30:36.580893 133480730094720 pyconfig.py:333] Config param use_jax_splash: False
+I0303 19:30:36.580906 133480730094720 pyconfig.py:333] Config param use_max_logit_estimate: -1
+I0303 19:30:36.580919 133480730094720 pyconfig.py:333] Config param use_mrope: False
+I0303 19:30:36.580943 133480730094720 pyconfig.py:333] Config param use_multimodal: False
+I0303 19:30:36.580956 133480730094720 pyconfig.py:333] Config param use_pathways: True
+I0303 19:30:36.580968 133480730094720 pyconfig.py:333] Config param use_post_attn_norm: False
+I0303 19:30:36.580980 133480730094720 pyconfig.py:333] Config param use_post_ffw_norm: False
+I0303 19:30:36.580993 133480730094720 pyconfig.py:333] Config param use_qk_clip: False
+I0303 19:30:36.581012 133480730094720 pyconfig.py:333] Config param use_qk_norm: False
+I0303 19:30:36.581024 133480730094720 pyconfig.py:333] Config param use_qk_norm_in_gdn: True
+I0303 19:30:36.581037 133480730094720 pyconfig.py:333] Config param use_qwix_quantization: False
+I0303 19:30:36.581049 133480730094720 pyconfig.py:333] Config param use_ragged_attention: False
+I0303 19:30:36.581062 133480730094720 pyconfig.py:333] Config param use_random_routing: False
+I0303 19:30:36.581075 133480730094720 pyconfig.py:333] Config param use_replicator_service: False
+I0303 19:30:36.581087 133480730094720 pyconfig.py:333] Config param use_ring_of_experts: False
+I0303 19:30:36.581100 133480730094720 pyconfig.py:333] Config param use_sft: False
+I0303 19:30:36.581112 133480730094720 pyconfig.py:333] Config param use_sparse_indexer: False
+I0303 19:30:36.581124 133480730094720 pyconfig.py:333] Config param use_splash_scheduler: False
+I0303 19:30:36.581137 133480730094720 pyconfig.py:333] Config param use_tokamax_gmm: False
+I0303 19:30:36.581150 133480730094720 pyconfig.py:333] Config param use_tokamax_splash: False
+I0303 19:30:36.581162 133480730094720 pyconfig.py:333] Config param use_truncation: True
+I0303 19:30:36.581174 133480730094720 pyconfig.py:333] Config param use_tunix_gradient_accumulation: False
+I0303 19:30:36.581187 133480730094720 pyconfig.py:333] Config param use_untrainable_positional_embedding: False
+I0303 19:30:36.581199 133480730094720 pyconfig.py:333] Config param use_vertex_tensorboard: False
+I0303 19:30:36.581211 133480730094720 pyconfig.py:333] Config param using_pipeline_parallelism: False
+I0303 19:30:36.581225 133480730094720 pyconfig.py:333] Config param v_head_dim: 128
+I0303 19:30:36.581238 133480730094720 pyconfig.py:333] Config param value_proj: RematLocation.OFFLOAD
+I0303 19:30:36.581250 133480730094720 pyconfig.py:333] Config param vertex_tensorboard_project: 
+I0303 19:30:36.581262 133480730094720 pyconfig.py:333] Config param vertex_tensorboard_region: 
+I0303 19:30:36.581274 133480730094720 pyconfig.py:333] Config param video_path: 
+I0303 19:30:36.581286 133480730094720 pyconfig.py:333] Config param video_placeholder: <|video|>
+I0303 19:30:36.581299 133480730094720 pyconfig.py:333] Config param vision_output_dim_for_vit: 4096
+I0303 19:30:36.581311 133480730094720 pyconfig.py:333] Config param vllm_additional_config: {'maxtext_config': {'model_name': 'deepseek3-671b', 'override_model_config': True, 'base_num_decoder_layers': 5, 'allow_split_physical_axes': True, 'log_config': False, 'weight_dtype': 'bfloat16'}}
+I0303 19:30:36.581329 133480730094720 pyconfig.py:333] Config param vllm_config_path: src/maxtext/configs/inference/vllm_deepseek.yml
+I0303 19:30:36.581342 133480730094720 pyconfig.py:333] Config param vllm_hf_config_path: 
+I0303 19:30:36.581355 133480730094720 pyconfig.py:333] Config param vllm_hf_overrides: {'architectures': ['MaxTextForCausalLM'], 'num_hidden_layers': 5, 'quantization_config': {}}
+I0303 19:30:36.581369 133480730094720 pyconfig.py:333] Config param vocab_size: 129280
+I0303 19:30:36.581381 133480730094720 pyconfig.py:333] Config param warmup_steps_fraction: 0.1
+I0303 19:30:36.581394 133480730094720 pyconfig.py:333] Config param weight_dtype: bfloat16
+I0303 19:30:36.581414 133480730094720 pyconfig.py:333] Config param weight_quantization_calibration_method: absmax
+I0303 19:30:36.581428 133480730094720 pyconfig.py:333] Config param wi_combine_scopes: False
+I0303 19:30:36.581441 133480730094720 pyconfig.py:333] Config param wi_tile_dlhs_batch_seq: 512
+I0303 19:30:36.581454 133480730094720 pyconfig.py:333] Config param wi_tile_dlhs_buffer_count: 2
+I0303 19:30:36.581466 133480730094720 pyconfig.py:333] Config param wi_tile_dlhs_embed_dim: 1024
+I0303 19:30:36.581478 133480730094720 pyconfig.py:333] Config param wi_tile_dlhs_mlp_dim: 1024
+I0303 19:30:36.581490 133480730094720 pyconfig.py:333] Config param wi_tile_drhs_batch_seq: 512
+I0303 19:30:36.581503 133480730094720 pyconfig.py:333] Config param wi_tile_drhs_buffer_count: 2
+I0303 19:30:36.581516 133480730094720 pyconfig.py:333] Config param wi_tile_drhs_embed_dim: 1024
+I0303 19:30:36.581532 133480730094720 pyconfig.py:333] Config param wi_tile_drhs_mlp_dim: 1024
+I0303 19:30:36.581545 133480730094720 pyconfig.py:333] Config param wi_tile_fwd_batch_seq: 512
+I0303 19:30:36.581557 133480730094720 pyconfig.py:333] Config param wi_tile_fwd_buffer_count: 2
+I0303 19:30:36.581569 133480730094720 pyconfig.py:333] Config param wi_tile_fwd_embed_dim: 1024
+I0303 19:30:36.581582 133480730094720 pyconfig.py:333] Config param wi_tile_fwd_mlp_dim: 1024
+I0303 19:30:36.581595 133480730094720 pyconfig.py:333] Config param wo_combine_scopes: False
+I0303 19:30:36.581613 133480730094720 pyconfig.py:333] Config param wo_tile_dlhs_batch_seq: 512
+I0303 19:30:36.581625 133480730094720 pyconfig.py:333] Config param wo_tile_dlhs_buffer_count: 2
+I0303 19:30:36.581637 133480730094720 pyconfig.py:333] Config param wo_tile_dlhs_embed_dim: 1024
+I0303 19:30:36.581650 133480730094720 pyconfig.py:333] Config param wo_tile_dlhs_mlp_dim: 1024
+I0303 19:30:36.581662 133480730094720 pyconfig.py:333] Config param wo_tile_drhs_batch_seq: 512
+I0303 19:30:36.581675 133480730094720 pyconfig.py:333] Config param wo_tile_drhs_buffer_count: 2
+I0303 19:30:36.581687 133480730094720 pyconfig.py:333] Config param wo_tile_drhs_embed_dim: 1024
+I0303 19:30:36.581700 133480730094720 pyconfig.py:333] Config param wo_tile_drhs_mlp_dim: 1024
+I0303 19:30:36.581712 133480730094720 pyconfig.py:333] Config param wo_tile_fwd_batch_seq: 512
+I0303 19:30:36.581725 133480730094720 pyconfig.py:333] Config param wo_tile_fwd_buffer_count: 2
+I0303 19:30:36.581737 133480730094720 pyconfig.py:333] Config param wo_tile_fwd_embed_dim: 1024
+I0303 19:30:36.581750 133480730094720 pyconfig.py:333] Config param wo_tile_fwd_mlp_dim: 1024
+I0303 19:30:36.581762 133480730094720 pyconfig.py:333] Config param wsd_decay_steps_fraction: 0.1
+I0303 19:30:36.581775 133480730094720 pyconfig.py:333] Config param wsd_decay_style: WsdDecayStyle.LINEAR
+I0303 19:30:36.581789 133480730094720 pyconfig.py:333] Config param xprof_e2e_enable_fw_power_level_event: False
+I0303 19:30:36.581801 133480730094720 pyconfig.py:333] Config param xprof_e2e_enable_fw_thermal_event: False
+I0303 19:30:36.581814 133480730094720 pyconfig.py:333] Config param xprof_e2e_enable_fw_throttle_event: False
+I0303 19:30:36.581827 133480730094720 pyconfig.py:333] Config param xprof_tpu_power_trace_level: 0
+I0303 19:30:36.581841 133480730094720 pyconfig.py:333] Config param z_loss_multiplier: 0.0
+I0303 19:30:36.582167 133480730094720 vllm_decode.py:107] Initializing LLM with DP=1, TP=8 and EP=1...
+I0303 19:30:36.724177 133480730094720 max_utils.py:197] Skipping jax distributed system due to skip_jax_distributed_system=True flag.
+WARNING 03-03 19:30:36 [interface.py:226] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+/home/mohitkhatwani_google_com/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = os.fork()
+INFO 03-03 19:30:37 [tpu_platform.py:98] Automatically using fp8_e5m2 for FP8 KV cache on TPU v6e.
+INFO 03-03 19:30:37 [tpu_platform.py:98] Automatically using fp8_e5m2 for FP8 KV cache on TPU v6e.
+INFO 03-03 19:30:37 [tpu_platform.py:98] Automatically using fp8_e5m2 for FP8 KV cache on TPU v6e.
+INFO 03-03 19:30:37 [tpu_platform.py:98] Automatically using fp8_e5m2 for FP8 KV cache on TPU v6e.
+INFO 03-03 19:30:37 [__init__.py:31] Registering MaxTextForCausalLM model with tpu_inference and vllm.
+INFO 03-03 19:30:37 [model_loader.py:591] Registered JAX model MaxTextForCausalLM with tpu_inference and vLLM registries.
+INFO 03-03 19:30:37 [__init__.py:33] Successfully registered MaxTextForCausalLM model.
+INFO 03-03 19:30:37 [utils.py:229] non-default args: {'hf_config_path': '', 'load_format': 'dummy', 'max_model_len': 1024, 'tensor_parallel_size': 8, 'gpu_memory_utilization': 0.7, 'disable_log_stats': True, 'hf_overrides': {'architectures': ['MaxTextForCausalLM'], 'num_hidden_layers': 5, 'quantization_config': {}}, 'additional_config': {'maxtext_config': {'model_name': 'deepseek3-671b', 'override_model_config': True, 'base_num_decoder_layers': 5, 'allow_split_physical_axes': True, 'log_config': False, 'weight_dtype': 'bfloat16', 'debug_sharding': True}, 'sharding': {'sharding_strategy': {'enable_dp_attention': True}}, 'vllm_config_path': 'src/maxtext/configs/inference/vllm_deepseek.yml'}, 'model': 'jrplatin/DeepSeek-R1-1D-Subchannel-256-FP8'}
+WARNING 03-03 19:30:37 [arg_utils.py:1317] The global random seed is set to 0. Since VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may affect the random state of the Python process that launched vLLM.
+INFO 03-03 19:30:38 [model.py:532] Resolved architecture: MaxTextForCausalLM
+INFO 03-03 19:30:38 [model.py:1556] Using max model len 1024
+INFO 03-03 19:30:38 [scheduler.py:231] Chunked prefill is enabled with max_num_batched_tokens=8192.
+INFO 03-03 19:30:38 [vllm.py:744] Asynchronous scheduling is enabled.
+INFO 03-03 19:30:38 [tpu_platform.py:136] Initialized sharding configuration: ShardingConfigManager(total_devices=8, sharding_strategy=ShardingStrategy(tensor_parallelism=1, expert_parallelism=1, sequence_parallelism=1, data_parallelism=1, attention_data_parallelism=8, attention_data_expert_parallelism=1), device_indexes=None)
+WARNING 03-03 19:30:38 [__init__.py:79] The quantization method 'awq' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.awq.VllmAWQConfig'>.
+WARNING 03-03 19:30:38 [__init__.py:79] The quantization method 'compressed-tensors' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors.VllmCompressedTensorsConfig'>.
+WARNING 03-03 19:30:38 [__init__.py:79] The quantization method 'fp8' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.fp8.VllmFp8Config'>.
+WARNING 03-03 19:30:38 [__init__.py:79] The quantization method 'mxfp4' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.mxfp4.VllmMxfp4Config'>.
+INFO 03-03 19:30:38 [__init__.py:108] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 03-03 19:30:38 [__init__.py:97] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 03-03 19:30:38 [__init__.py:108] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+INFO 03-03 19:30:38 [tpu_platform.py:177] Using KV cache block size: 64
+INFO 03-03 19:30:38 [tpu_platform.py:188] Force using UniProcExecutor for JAX on single host without pipeline parallelism.
+WARNING 03-03 19:30:38 [input_processor.py:81] The signature of Platform.validate_request has changed from `(cls, prompt, params, processed_inputs) -> None` to `(cls, processed_inputs, params) -> None`. The old signature will no longer be supported starting from v0.18.
+INFO 03-03 19:30:38 [core.py:98] Initializing a V1 LLM engine (v0.16.0rc0) with config: model='jrplatin/DeepSeek-R1-1D-Subchannel-256-FP8', speculative_config=None, tokenizer='jrplatin/DeepSeek-R1-1D-Subchannel-256-FP8', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=1024, download_dir=None, load_format=dummy, tensor_parallel_size=8, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=jrplatin/DeepSeek-R1-1D-Subchannel-256-FP8, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.DYNAMO_TRACE_ONCE: 2>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'openxla', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'compile_sizes': None, 'compile_ranges_split_points': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+WARNING 03-03 19:30:38 [tpu_platform.py:229] Pin memory is not supported on TPU.
+INFO 03-03 19:30:38 [parallel_state.py:1307] world_size=1 rank=0 local_rank=0 distributed_init_method=file:///tmp/tmp4ro8g1pt backend=gloo
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 03-03 19:30:38 [parallel_state.py:1535] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank 0, EPLB rank N/A
+INFO 03-03 19:30:39 [tpu_runner.py:307] Creating new model mesh | devices=8, num_slices=1
+INFO 03-03 19:30:39 [tpu_runner.py:302] Init mesh | mesh=Mesh('data': 1, 'attn_dp': 8, 'attn_dp_expert': 1, 'expert': 1, 'model': 1, axis_types=(Auto, Auto, Auto, Auto, Auto))
+INFO 03-03 19:30:39 [utils.py:94] Prepared token paddings: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+INFO 03-03 19:30:39 [utils.py:60] Prepared request paddings: [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+INFO 03-03 19:30:39 [compilation_manager.py:52] Enabling JAX compile cache.
+INFO 03-03 19:30:39 [tpu_worker.py:279] Init worker | rank=0 | is_first_rank=True | is_last_rank=True | topology_order_id=0 | is_driver_worker=True | hbm=[(0.0, 31.25), (0.0, 31.25), (0.0, 31.25), (0.0, 31.25), (0.0, 31.25), (0.0, 31.25), (0.0, 31.25), (0.0, 31.25)]GiB |self.devices=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0), TpuDevice(id=4, process_index=0, coords=(0,2,0), core_on_chip=0), TpuDevice(id=5, process_index=0, coords=(1,2,0), core_on_chip=0), TpuDevice(id=6, process_index=0, coords=(0,3,0), core_on_chip=0), TpuDevice(id=7, process_index=0, coords=(1,3,0), core_on_chip=0)] | total devices=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0), TpuDevice(id=4, process_index=0, coords=(0,2,0), core_on_chip=0), TpuDevice(id=5, process_index=0, coords=(1,2,0), core_on_chip=0), TpuDevice(id=6, process_index=0, coords=(0,3,0), core_on_chip=0), TpuDevice(id=7, process_index=0, coords=(1,3,0), core_on_chip=0)] | local_devices=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0), TpuDevice(id=4, process_index=0, coords=(0,2,0), core_on_chip=0), TpuDevice(id=5, process_index=0, coords=(1,2,0), core_on_chip=0), TpuDevice(id=6, process_index=0, coords=(0,3,0), core_on_chip=0), TpuDevice(id=7, process_index=0, coords=(1,3,0), core_on_chip=0)]
+INFO 03-03 19:30:39 [model_loader.py:386] Loading model with MODEL_IMPL_TYPE=auto
+INFO 03-03 19:30:39 [model_loader.py:389] Resolved MODEL_IMPL_TYPE 'auto' to 'flax_nnx'
+I0303 19:30:39.587637 133480730094720 max_utils.py:197] Skipping jax distributed system due to skip_jax_distributed_system=True flag.
+I0303 19:30:39.809139 133480730094720 deepseek.py:367] deepseek/inputs Logical: bfloat16[96,1,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:39.809241 133480730094720 deepseek.py:367] deepseek/inputs Physical: bfloat16[96,1,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:39.833267 133480730094720 deepseek.py:196] deepseek/pre_attention_norm Logical: bfloat16[96,1,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:39.833334 133480730094720 deepseek.py:196] deepseek/pre_attention_norm Physical: bfloat16[96,1,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:39.852573 133480730094720 attention_mla.py:1110] attention_mla/inputs_q Logical: bfloat16[96,1,7168]......................................... ('activation_batch', 'activation_length_no_exp', 'activation_embed').
+I0303 19:30:39.852638 133480730094720 attention_mla.py:1110] attention_mla/inputs_q Physical: bfloat16[96,1,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:39.871594 133480730094720 attention_mla.py:1111] attention_mla/inputs_kv Logical: bfloat16[96,1,7168]......................................... ('activation_batch', 'activation_length_no_exp', 'activation_embed').
+I0303 19:30:39.871659 133480730094720 attention_mla.py:1111] attention_mla/inputs_kv Physical: bfloat16[96,1,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:39.894753 133480730094720 attention_mla.py:809] attention_mla/q_nope Logical: bfloat16[96,1,128,128]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:39.894814 133480730094720 attention_mla.py:809] attention_mla/q_nope Physical: bfloat16[96,1,128,128]...................................... (None, None, None, None).
+I0303 19:30:39.923318 133480730094720 attention_mla.py:811] attention_mla/q_pe Logical: bfloat16[96,1,128,64]....................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:39.923388 133480730094720 attention_mla.py:811] attention_mla/q_pe Physical: bfloat16[96,1,128,64]....................................... (None, None, None, None).
+I0303 19:30:39.943042 133480730094720 attention_mla.py:815] attention_mla/query Logical: bfloat16[96,1,128,192]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:39.943123 133480730094720 attention_mla.py:815] attention_mla/query Physical: bfloat16[96,1,128,192]...................................... (None, None, None, None).
+I0303 19:30:39.969738 133480730094720 attention_mla.py:836] attention_mla/key_nope Logical: bfloat16[96,1,128,128]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:39.969807 133480730094720 attention_mla.py:836] attention_mla/key_nope Physical: bfloat16[96,1,128,128]...................................... (None, None, None, None).
+I0303 19:30:39.988880 133480730094720 attention_mla.py:837] attention_mla/key_rope Logical: bfloat16[96,1,128,64]....................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:39.988952 133480730094720 attention_mla.py:837] attention_mla/key_rope Physical: bfloat16[96,1,128,64]....................................... (None, None, None, None).
+I0303 19:30:40.008030 133480730094720 attention_mla.py:841] attention_mla/key Logical: bfloat16[96,1,128,192]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:40.008090 133480730094720 attention_mla.py:841] attention_mla/key Physical: bfloat16[96,1,128,192]...................................... (None, None, None, None).
+I0303 19:30:40.027187 133480730094720 attention_mla.py:842] attention_mla/value Logical: bfloat16[96,1,128,128]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:40.027256 133480730094720 attention_mla.py:842] attention_mla/value Physical: bfloat16[96,1,128,128]...................................... (None, None, None, None).
+I0303 19:30:40.054143 133480730094720 attention_mla.py:1182] attention_mla/out Logical: bfloat16[96,1,128,128]...................................... ('activation_batch', 'activation_length_no_exp', 'activation_heads', 'activation_kv').
+I0303 19:30:40.054211 133480730094720 attention_mla.py:1182] attention_mla/out Physical: bfloat16[96,1,128,128]...................................... (None, None, None, None).
+I0303 19:30:40.073509 133480730094720 deepseek.py:229] deepseek/attention_result Logical: bfloat16[96,1,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:40.073570 133480730094720 deepseek.py:229] deepseek/attention_result Physical: bfloat16[96,1,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:40.093662 133480730094720 deepseek.py:200] deepseek/post_attention_norm Logical: bfloat16[96,1,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:40.093724 133480730094720 deepseek.py:200] deepseek/post_attention_norm Physical: bfloat16[96,1,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:40.115467 133480730094720 linears.py:527] linears/x Logical: bfloat16[96,1,18432]........................................ ('activation_batch', 'activation_length_no_exp', 'activation_mlp').
+I0303 19:30:40.115537 133480730094720 linears.py:527] linears/x Physical: bfloat16[96,1,18432]........................................ (None, None, 'attn_dp').
+I0303 19:30:40.134898 133480730094720 deepseek.py:348] deepseek/mlp Logical: bfloat16[96,1,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:40.134978 133480730094720 deepseek.py:348] deepseek/mlp Physical: bfloat16[96,1,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:40.153843 133480730094720 deepseek.py:192] deepseek/x Logical: bfloat16[96,1,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:40.153909 133480730094720 deepseek.py:192] deepseek/x Physical: bfloat16[96,1,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:41.799467 133480730094720 moe.py:1409] moe/inputs Logical: bfloat16[96,1,7168]......................................... ('activation_batch_no_exp', 'activation_norm_length', None).
+I0303 19:30:41.799565 133480730094720 moe.py:1409] moe/inputs Physical: bfloat16[96,1,7168]......................................... (None, None, None).
+I0303 19:30:41.818691 133480730094720 moe.py:1410] moe/gate_logits Logical: bfloat16[96,1,256].......................................... ('activation_batch_no_exp', 'activation_norm_length', None).
+I0303 19:30:41.818750 133480730094720 moe.py:1410] moe/gate_logits Physical: bfloat16[96,1,256].......................................... (None, None, None).
+I0303 19:30:41.837781 133480730094720 moe.py:1411] moe/pre_bias_logits Logical: bfloat16[96,1,256].......................................... ('activation_batch_no_exp', 'activation_norm_length', None).
+I0303 19:30:41.837846 133480730094720 moe.py:1411] moe/pre_bias_logits Physical: bfloat16[96,1,256].......................................... (None, None, None).
+I0303 19:30:41.942697 133480730094720 linears.py:527] linears/x Logical: bfloat16[96,1,2048]......................................... ('activation_batch', 'activation_length_no_exp', 'activation_mlp').
+I0303 19:30:41.942792 133480730094720 linears.py:527] linears/x Physical: bfloat16[96,1,2048]......................................... (None, None, 'attn_dp').
+I0303 19:30:41.962280 133480730094720 deepseek.py:537] deepseek/mlp_lnx Logical: bfloat16[96,1,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:41.962347 133480730094720 deepseek.py:537] deepseek/mlp_lnx Physical: bfloat16[96,1,7168]......................................... (None, None, 'attn_dp').
+attn_dp: 8
+I0303 19:30:44.620297 133480730094720 maxtext_utils.py:1457]  params/decoder/decoder_norm/scale/value
+    Shape:     bfloat16[7168]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.620389 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/mlp/wi_0/kernel/value
+    Shape:     bfloat16[7168,18432]
+    Logical:   PartitionSpec('embed', 'mlp')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.620431 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/mlp/wi_1/kernel/value
+    Shape:     bfloat16[7168,18432]
+    Logical:   PartitionSpec('embed', 'mlp')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.620463 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/mlp/wo/kernel/value
+    Shape:     bfloat16[18432,7168]
+    Logical:   PartitionSpec('mlp', 'embed')
+    Physical:  ('attn_dp', None)
+I0303 19:30:44.620494 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/post_self_attention_layer_norm/scale/value
+    Shape:     bfloat16[7168]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.620524 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/pre_self_attention_layer_norm/scale/value
+    Shape:     bfloat16[7168]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.620550 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/self_attention/kv_norm/scale/value
+    Shape:     bfloat16[512]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.620578 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/self_attention/out/kernel/value
+    Shape:     bfloat16[128,128,7168]
+    Logical:   PartitionSpec('heads', 'kv', 'embed')
+    Physical:  ('attn_dp', None, None)
+I0303 19:30:44.620609 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/self_attention/q_norm/scale/value
+    Shape:     bfloat16[1536]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.620637 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/self_attention/wkv_a/kernel/value
+    Shape:     bfloat16[7168,576]
+    Logical:   PartitionSpec('embed', 'kv_lora_up_proj')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.620674 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/self_attention/wkv_b/kernel/value
+    Shape:     bfloat16[512,128,256]
+    Logical:   PartitionSpec('kv_lora', 'kv_heads', 'kv_head_dim')
+    Physical:  (None, None, 'attn_dp')
+I0303 19:30:44.620700 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/self_attention/wq_a/kernel/value
+    Shape:     bfloat16[7168,1536]
+    Logical:   PartitionSpec('embed', 'q_lora_up_proj')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.620725 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_0/self_attention/wq_b/kernel/value
+    Shape:     bfloat16[1536,128,192]
+    Logical:   PartitionSpec('q_lora', 'q_heads', 'kv')
+    Physical:  (None, None, 'attn_dp')
+I0303 19:30:44.620748 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/mlp/wi_0/kernel/value
+    Shape:     bfloat16[7168,18432]
+    Logical:   PartitionSpec('embed', 'mlp')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.620772 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/mlp/wi_1/kernel/value
+    Shape:     bfloat16[7168,18432]
+    Logical:   PartitionSpec('embed', 'mlp')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.620797 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/mlp/wo/kernel/value
+    Shape:     bfloat16[18432,7168]
+    Logical:   PartitionSpec('mlp', 'embed')
+    Physical:  ('attn_dp', None)
+I0303 19:30:44.620820 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/post_self_attention_layer_norm/scale/value
+    Shape:     bfloat16[7168]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.620841 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/pre_self_attention_layer_norm/scale/value
+    Shape:     bfloat16[7168]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.620863 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/self_attention/kv_norm/scale/value
+    Shape:     bfloat16[512]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.620886 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/self_attention/out/kernel/value
+    Shape:     bfloat16[128,128,7168]
+    Logical:   PartitionSpec('heads', 'kv', 'embed')
+    Physical:  ('attn_dp', None, None)
+I0303 19:30:44.620910 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/self_attention/q_norm/scale/value
+    Shape:     bfloat16[1536]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.620949 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/self_attention/wkv_a/kernel/value
+    Shape:     bfloat16[7168,576]
+    Logical:   PartitionSpec('embed', 'kv_lora_up_proj')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.620978 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/self_attention/wkv_b/kernel/value
+    Shape:     bfloat16[512,128,256]
+    Logical:   PartitionSpec('kv_lora', 'kv_heads', 'kv_head_dim')
+    Physical:  (None, None, 'attn_dp')
+I0303 19:30:44.621002 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/self_attention/wq_a/kernel/value
+    Shape:     bfloat16[7168,1536]
+    Logical:   PartitionSpec('embed', 'q_lora_up_proj')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621025 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_1/self_attention/wq_b/kernel/value
+    Shape:     bfloat16[1536,128,192]
+    Logical:   PartitionSpec('q_lora', 'q_heads', 'kv')
+    Physical:  (None, None, 'attn_dp')
+I0303 19:30:44.621047 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/mlp/wi_0/kernel/value
+    Shape:     bfloat16[7168,18432]
+    Logical:   PartitionSpec('embed', 'mlp')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621070 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/mlp/wi_1/kernel/value
+    Shape:     bfloat16[7168,18432]
+    Logical:   PartitionSpec('embed', 'mlp')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621099 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/mlp/wo/kernel/value
+    Shape:     bfloat16[18432,7168]
+    Logical:   PartitionSpec('mlp', 'embed')
+    Physical:  ('attn_dp', None)
+I0303 19:30:44.621120 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/post_self_attention_layer_norm/scale/value
+    Shape:     bfloat16[7168]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.621146 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/pre_self_attention_layer_norm/scale/value
+    Shape:     bfloat16[7168]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.621170 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/self_attention/kv_norm/scale/value
+    Shape:     bfloat16[512]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.621192 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/self_attention/out/kernel/value
+    Shape:     bfloat16[128,128,7168]
+    Logical:   PartitionSpec('heads', 'kv', 'embed')
+    Physical:  ('attn_dp', None, None)
+I0303 19:30:44.621216 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/self_attention/q_norm/scale/value
+    Shape:     bfloat16[1536]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.621238 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/self_attention/wkv_a/kernel/value
+    Shape:     bfloat16[7168,576]
+    Logical:   PartitionSpec('embed', 'kv_lora_up_proj')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621265 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/self_attention/wkv_b/kernel/value
+    Shape:     bfloat16[512,128,256]
+    Logical:   PartitionSpec('kv_lora', 'kv_heads', 'kv_head_dim')
+    Physical:  (None, None, 'attn_dp')
+I0303 19:30:44.621289 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/self_attention/wq_a/kernel/value
+    Shape:     bfloat16[7168,1536]
+    Logical:   PartitionSpec('embed', 'q_lora_up_proj')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621310 133480730094720 maxtext_utils.py:1457]  params/decoder/dense_layers_2/self_attention/wq_b/kernel/value
+    Shape:     bfloat16[1536,128,192]
+    Logical:   PartitionSpec('q_lora', 'q_heads', 'kv')
+    Physical:  (None, None, 'attn_dp')
+I0303 19:30:44.621333 133480730094720 maxtext_utils.py:1457]  params/decoder/logits_dense/kernel/value
+    Shape:     bfloat16[7168,129280]
+    Logical:   PartitionSpec('embed', 'vocab')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621355 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/DeepSeekMoeBlock_0/MoeBlock_0/gate/bias/value
+    Shape:     bfloat16[256]
+    Logical:   PartitionSpec(None,)
+    Physical:  (None,)
+I0303 19:30:44.621376 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/DeepSeekMoeBlock_0/MoeBlock_0/gate/kernel/value
+    Shape:     bfloat16[7168,256]
+    Logical:   PartitionSpec('embed', None)
+    Physical:  (None, None)
+I0303 19:30:44.621398 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/DeepSeekMoeBlock_0/MoeBlock_0/wi_0/value
+    Shape:     bfloat16[256,7168,2048]
+    Logical:   PartitionSpec('exp', 'embed_no_exp', 'moe_mlp')
+    Physical:  ('attn_dp', None, None)
+I0303 19:30:44.621421 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/DeepSeekMoeBlock_0/MoeBlock_0/wi_1/value
+    Shape:     bfloat16[256,7168,2048]
+    Logical:   PartitionSpec('exp', 'embed_no_exp', 'moe_mlp')
+    Physical:  ('attn_dp', None, None)
+I0303 19:30:44.621443 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/DeepSeekMoeBlock_0/MoeBlock_0/wo/value
+    Shape:     bfloat16[256,2048,7168]
+    Logical:   PartitionSpec('exp', 'moe_mlp', 'embed_no_exp')
+    Physical:  ('attn_dp', None, None)
+I0303 19:30:44.621465 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/DeepSeekMoeBlock_0/shared_experts/wi_0/kernel/value
+    Shape:     bfloat16[7168,2048]
+    Logical:   PartitionSpec('embed', 'mlp')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621493 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/DeepSeekMoeBlock_0/shared_experts/wi_1/kernel/value
+    Shape:     bfloat16[7168,2048]
+    Logical:   PartitionSpec('embed', 'mlp')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621515 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/DeepSeekMoeBlock_0/shared_experts/wo/kernel/value
+    Shape:     bfloat16[2048,7168]
+    Logical:   PartitionSpec('mlp', 'embed')
+    Physical:  ('attn_dp', None)
+I0303 19:30:44.621536 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/post_self_attention_layer_norm/scale/value
+    Shape:     bfloat16[7168]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.621557 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/pre_self_attention_layer_norm/scale/value
+    Shape:     bfloat16[7168]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.621580 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/self_attention/kv_norm/scale/value
+    Shape:     bfloat16[512]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.621603 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/self_attention/out/kernel/value
+    Shape:     bfloat16[128,128,7168]
+    Logical:   PartitionSpec('heads', 'kv', 'embed')
+    Physical:  ('attn_dp', None, None)
+I0303 19:30:44.621623 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/self_attention/q_norm/scale/value
+    Shape:     bfloat16[1536]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.621648 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/self_attention/wkv_a/kernel/value
+    Shape:     bfloat16[7168,576]
+    Logical:   PartitionSpec('embed', 'kv_lora_up_proj')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621670 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/self_attention/wkv_b/kernel/value
+    Shape:     bfloat16[512,128,256]
+    Logical:   PartitionSpec('kv_lora', 'kv_heads', 'kv_head_dim')
+    Physical:  (None, None, 'attn_dp')
+I0303 19:30:44.621692 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/self_attention/wq_a/kernel/value
+    Shape:     bfloat16[7168,1536]
+    Logical:   PartitionSpec('embed', 'q_lora_up_proj')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621714 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_0/self_attention/wq_b/kernel/value
+    Shape:     bfloat16[1536,128,192]
+    Logical:   PartitionSpec('q_lora', 'q_heads', 'kv')
+    Physical:  (None, None, 'attn_dp')
+I0303 19:30:44.621736 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/DeepSeekMoeBlock_0/MoeBlock_0/gate/bias/value
+    Shape:     bfloat16[256]
+    Logical:   PartitionSpec(None,)
+    Physical:  (None,)
+I0303 19:30:44.621757 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/DeepSeekMoeBlock_0/MoeBlock_0/gate/kernel/value
+    Shape:     bfloat16[7168,256]
+    Logical:   PartitionSpec('embed', None)
+    Physical:  (None, None)
+I0303 19:30:44.621778 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/DeepSeekMoeBlock_0/MoeBlock_0/wi_0/value
+    Shape:     bfloat16[256,7168,2048]
+    Logical:   PartitionSpec('exp', 'embed_no_exp', 'moe_mlp')
+    Physical:  ('attn_dp', None, None)
+I0303 19:30:44.621800 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/DeepSeekMoeBlock_0/MoeBlock_0/wi_1/value
+    Shape:     bfloat16[256,7168,2048]
+    Logical:   PartitionSpec('exp', 'embed_no_exp', 'moe_mlp')
+    Physical:  ('attn_dp', None, None)
+I0303 19:30:44.621824 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/DeepSeekMoeBlock_0/MoeBlock_0/wo/value
+    Shape:     bfloat16[256,2048,7168]
+    Logical:   PartitionSpec('exp', 'moe_mlp', 'embed_no_exp')
+    Physical:  ('attn_dp', None, None)
+I0303 19:30:44.621852 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/DeepSeekMoeBlock_0/shared_experts/wi_0/kernel/value
+    Shape:     bfloat16[7168,2048]
+    Logical:   PartitionSpec('embed', 'mlp')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621875 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/DeepSeekMoeBlock_0/shared_experts/wi_1/kernel/value
+    Shape:     bfloat16[7168,2048]
+    Logical:   PartitionSpec('embed', 'mlp')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.621897 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/DeepSeekMoeBlock_0/shared_experts/wo/kernel/value
+    Shape:     bfloat16[2048,7168]
+    Logical:   PartitionSpec('mlp', 'embed')
+    Physical:  ('attn_dp', None)
+I0303 19:30:44.621917 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/post_self_attention_layer_norm/scale/value
+    Shape:     bfloat16[7168]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.621951 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/pre_self_attention_layer_norm/scale/value
+    Shape:     bfloat16[7168]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.621975 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/self_attention/kv_norm/scale/value
+    Shape:     bfloat16[512]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.621998 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/self_attention/out/kernel/value
+    Shape:     bfloat16[128,128,7168]
+    Logical:   PartitionSpec('heads', 'kv', 'embed')
+    Physical:  ('attn_dp', None, None)
+I0303 19:30:44.622019 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/self_attention/q_norm/scale/value
+    Shape:     bfloat16[1536]
+    Logical:   PartitionSpec('norm',)
+    Physical:  (None,)
+I0303 19:30:44.622041 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/self_attention/wkv_a/kernel/value
+    Shape:     bfloat16[7168,576]
+    Logical:   PartitionSpec('embed', 'kv_lora_up_proj')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.622064 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/self_attention/wkv_b/kernel/value
+    Shape:     bfloat16[512,128,256]
+    Logical:   PartitionSpec('kv_lora', 'kv_heads', 'kv_head_dim')
+    Physical:  (None, None, 'attn_dp')
+I0303 19:30:44.622086 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/self_attention/wq_a/kernel/value
+    Shape:     bfloat16[7168,1536]
+    Logical:   PartitionSpec('embed', 'q_lora_up_proj')
+    Physical:  (None, 'attn_dp')
+I0303 19:30:44.622109 133480730094720 maxtext_utils.py:1457]  params/decoder/moe_layers_1/self_attention/wq_b/kernel/value
+    Shape:     bfloat16[1536,128,192]
+    Logical:   PartitionSpec('q_lora', 'q_heads', 'kv')
+    Physical:  (None, None, 'attn_dp')
+I0303 19:30:44.622139 133480730094720 maxtext_utils.py:1457]  params/decoder/to_nnx__rngs/params/count/value
+    Shape:     uint32[]
+    Logical:   PartitionSpec()
+    Physical:  ()
+I0303 19:30:44.622160 133480730094720 maxtext_utils.py:1457]  params/decoder/to_nnx__rngs/params/key/value
+    Shape:     key<urbg>[]
+    Logical:   PartitionSpec()
+    Physical:  ()
+I0303 19:30:44.622183 133480730094720 maxtext_utils.py:1457]  params/token_embedder/embedding/value
+    Shape:     bfloat16[129280,7168]
+    Logical:   PartitionSpec('vocab', 'embed')
+    Physical:  ('attn_dp', None)
+
+INFO 03-03 19:30:49 [tpu_runner.py:563] Init model | hbm=[(6.51, 31.25), (6.51, 31.25), (6.51, 31.25), (6.51, 31.25), (6.51, 31.25), (6.51, 31.25), (6.51, 31.25), (6.51, 31.25)]GiB
+INFO 03-03 19:30:49 [tpu_worker.py:313] Memory statistics | total_hbm_limit_gb=249.97GiB | total_hbm_limit_cap_gb=174.98GiB | total_hbm_used_gb=52.09GiB | total_hbm_avail_gb=122.89GiB
+INFO 03-03 19:30:49 [kv_cache_utils.py:1314] GPU KV cache size: 20,616,960 tokens
+INFO 03-03 19:30:49 [kv_cache_utils.py:1319] Maximum concurrency for 1,024 tokens per request: 20133.75x
+INFO 03-03 19:30:49 [kv_cache_manager.py:275] Init kv-cache | num_layers=5 | shape=(num_blocks, (32, 2, 640)) | num_blocks=[np.int64(322136), np.int64(322136), np.int64(322136), np.int64(322136), np.int64(322136)] | sharding=NamedSharding(mesh=Mesh('data': 1, 'attn_dp': 8, 'attn_dp_expert': 1, 'expert': 1, 'model': 1, axis_types=(Auto, Auto, Auto, Auto, Auto)), spec=PartitionSpec(('attn_dp', 'attn_dp_expert', 'model', 'expert'),), memory_kind=device) | dtype=bfloat16 | hbm=[(21.87, 31.25), (21.87, 31.25), (21.87, 31.25), (21.87, 31.25), (21.87, 31.25), (21.87, 31.25), (21.87, 31.25), (21.87, 31.25)]Gb
+INFO 03-03 19:30:49 [core.py:278] init engine (profile, create kv cache, warmup model) took 0.39 seconds
+WARNING 03-03 19:30:50 [scheduler.py:173] Using custom scheduler class <class 'tpu_inference.core.sched.dp_scheduler.DPScheduler'>. This scheduler interface is not public and compatibility may not be maintained.
+/home/mohitkhatwani_google_com/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = os.fork()
+INFO 03-03 19:30:54 [dp_scheduler.py:369] DPScheduler (Async = True) started 8 worker processes with cloudpickle. Per-rank limits: max_seqs=256, max_tokens=8192
+INFO 03-03 19:30:54 [llm.py:383] Supported tasks: ('generate',)
+I0303 19:30:54.684022 133480730094720 vllm_decode.py:118] Generating output...
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 170.76it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]I0303 19:30:55.224905 133480730094720 deepseek.py:367] deepseek/inputs Logical: bfloat16[1,64,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:55.225060 133480730094720 deepseek.py:367] deepseek/inputs Physical: bfloat16[1,64,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:55.443549 133480730094720 deepseek.py:196] deepseek/pre_attention_norm Logical: bfloat16[1,64,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:55.443688 133480730094720 deepseek.py:196] deepseek/pre_attention_norm Physical: bfloat16[1,64,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:55.467607 133480730094720 attention_mla.py:1110] attention_mla/inputs_q Logical: bfloat16[1,64,7168]......................................... ('activation_batch', 'activation_length_no_exp', 'activation_embed').
+I0303 19:30:55.467694 133480730094720 attention_mla.py:1110] attention_mla/inputs_q Physical: bfloat16[1,64,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:55.491441 133480730094720 attention_mla.py:1111] attention_mla/inputs_kv Logical: bfloat16[1,64,7168]......................................... ('activation_batch', 'activation_length_no_exp', 'activation_embed').
+I0303 19:30:55.491527 133480730094720 attention_mla.py:1111] attention_mla/inputs_kv Physical: bfloat16[1,64,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:55.517038 133480730094720 attention_mla.py:809] attention_mla/q_nope Logical: bfloat16[1,64,128,128]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:55.517107 133480730094720 attention_mla.py:809] attention_mla/q_nope Physical: bfloat16[1,64,128,128]...................................... (None, None, None, None).
+I0303 19:30:55.546598 133480730094720 attention_mla.py:811] attention_mla/q_pe Logical: bfloat16[1,64,128,64]....................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:55.546687 133480730094720 attention_mla.py:811] attention_mla/q_pe Physical: bfloat16[1,64,128,64]....................................... (None, None, None, None).
+I0303 19:30:55.567612 133480730094720 attention_mla.py:815] attention_mla/query Logical: bfloat16[1,64,128,192]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:55.567688 133480730094720 attention_mla.py:815] attention_mla/query Physical: bfloat16[1,64,128,192]...................................... (None, None, None, None).
+I0303 19:30:55.595618 133480730094720 attention_mla.py:836] attention_mla/key_nope Logical: bfloat16[1,64,128,128]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:55.595689 133480730094720 attention_mla.py:836] attention_mla/key_nope Physical: bfloat16[1,64,128,128]...................................... (None, None, None, None).
+I0303 19:30:55.614082 133480730094720 attention_mla.py:837] attention_mla/key_rope Logical: bfloat16[1,64,128,64]....................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:55.614152 133480730094720 attention_mla.py:837] attention_mla/key_rope Physical: bfloat16[1,64,128,64]....................................... (None, None, None, None).
+I0303 19:30:55.632829 133480730094720 attention_mla.py:841] attention_mla/key Logical: bfloat16[1,64,128,192]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:55.632905 133480730094720 attention_mla.py:841] attention_mla/key Physical: bfloat16[1,64,128,192]...................................... (None, None, None, None).
+I0303 19:30:55.651481 133480730094720 attention_mla.py:842] attention_mla/value Logical: bfloat16[1,64,128,128]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:30:55.651561 133480730094720 attention_mla.py:842] attention_mla/value Physical: bfloat16[1,64,128,128]...................................... (None, None, None, None).
+INFO 03-03 19:30:55 [tuned_block_sizes.py:4389] RPA v3 kernel tuned block sizes for ('TPU v6e', 128, 'q_bfloat16_kv_bfloat16', 'q_head-128_kv_head-1_head-128', 'max_model_len-2048-sw-None'): bkv_p=16, bq=8
+I0303 19:30:55.833391 133480730094720 attention_mla.py:1182] attention_mla/out Logical: bfloat16[1,64,128,128]...................................... ('activation_batch', 'activation_length_no_exp', 'activation_heads', 'activation_kv').
+I0303 19:30:55.833517 133480730094720 attention_mla.py:1182] attention_mla/out Physical: bfloat16[1,64,128,128]...................................... (None, None, None, None).
+I0303 19:30:56.049625 133480730094720 deepseek.py:229] deepseek/attention_result Logical: bfloat16[1,64,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:56.049742 133480730094720 deepseek.py:229] deepseek/attention_result Physical: bfloat16[1,64,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:56.269721 133480730094720 deepseek.py:200] deepseek/post_attention_norm Logical: bfloat16[1,64,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:56.269858 133480730094720 deepseek.py:200] deepseek/post_attention_norm Physical: bfloat16[1,64,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:56.487806 133480730094720 linears.py:527] linears/x Logical: bfloat16[1,64,18432]........................................ ('activation_batch', 'activation_length_no_exp', 'activation_mlp').
+I0303 19:30:56.487961 133480730094720 linears.py:527] linears/x Physical: bfloat16[1,64,18432]........................................ (None, None, 'attn_dp').
+I0303 19:30:56.508149 133480730094720 deepseek.py:348] deepseek/mlp Logical: bfloat16[1,64,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:56.508237 133480730094720 deepseek.py:348] deepseek/mlp Physical: bfloat16[1,64,7168]......................................... (None, None, 'attn_dp').
+I0303 19:30:56.527168 133480730094720 deepseek.py:192] deepseek/x Logical: bfloat16[1,64,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:30:56.527252 133480730094720 deepseek.py:192] deepseek/x Physical: bfloat16[1,64,7168]......................................... (None, None, 'attn_dp').
+I0303 19:31:00.149953 133480730094720 moe.py:1409] moe/inputs Logical: bfloat16[1,64,7168]......................................... ('activation_batch_no_exp', 'activation_norm_length', None).
+I0303 19:31:00.150072 133480730094720 moe.py:1409] moe/inputs Physical: bfloat16[1,64,7168]......................................... (None, None, None).
+I0303 19:31:00.168514 133480730094720 moe.py:1410] moe/gate_logits Logical: bfloat16[1,64,256].......................................... ('activation_batch_no_exp', 'activation_norm_length', None).
+I0303 19:31:00.168591 133480730094720 moe.py:1410] moe/gate_logits Physical: bfloat16[1,64,256].......................................... (None, None, None).
+I0303 19:31:00.187278 133480730094720 moe.py:1411] moe/pre_bias_logits Logical: bfloat16[1,64,256].......................................... ('activation_batch_no_exp', 'activation_norm_length', None).
+I0303 19:31:00.187355 133480730094720 moe.py:1411] moe/pre_bias_logits Physical: bfloat16[1,64,256].......................................... (None, None, None).
+I0303 19:31:00.307139 133480730094720 linears.py:527] linears/x Logical: bfloat16[1,64,2048]......................................... ('activation_batch', 'activation_length_no_exp', 'activation_mlp').
+I0303 19:31:00.307248 133480730094720 linears.py:527] linears/x Physical: bfloat16[1,64,2048]......................................... (None, None, 'attn_dp').
+I0303 19:31:00.327478 133480730094720 deepseek.py:537] deepseek/mlp_lnx Logical: bfloat16[1,64,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:31:00.327581 133480730094720 deepseek.py:537] deepseek/mlp_lnx Physical: bfloat16[1,64,7168]......................................... (None, None, 'attn_dp').
+I0303 19:31:09.606581 133480730094720 deepseek.py:367] deepseek/inputs Logical: bfloat16[1,16,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:31:09.606738 133480730094720 deepseek.py:367] deepseek/inputs Physical: bfloat16[1,16,7168]......................................... (None, None, 'attn_dp').
+I0303 19:31:09.822572 133480730094720 deepseek.py:196] deepseek/pre_attention_norm Logical: bfloat16[1,16,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:31:09.822710 133480730094720 deepseek.py:196] deepseek/pre_attention_norm Physical: bfloat16[1,16,7168]......................................... (None, None, 'attn_dp').
+I0303 19:31:09.847020 133480730094720 attention_mla.py:1110] attention_mla/inputs_q Logical: bfloat16[1,16,7168]......................................... ('activation_batch', 'activation_length_no_exp', 'activation_embed').
+I0303 19:31:09.847097 133480730094720 attention_mla.py:1110] attention_mla/inputs_q Physical: bfloat16[1,16,7168]......................................... (None, None, 'attn_dp').
+I0303 19:31:09.870693 133480730094720 attention_mla.py:1111] attention_mla/inputs_kv Logical: bfloat16[1,16,7168]......................................... ('activation_batch', 'activation_length_no_exp', 'activation_embed').
+I0303 19:31:09.870774 133480730094720 attention_mla.py:1111] attention_mla/inputs_kv Physical: bfloat16[1,16,7168]......................................... (None, None, 'attn_dp').
+I0303 19:31:09.895609 133480730094720 attention_mla.py:809] attention_mla/q_nope Logical: bfloat16[1,16,128,128]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:31:09.895691 133480730094720 attention_mla.py:809] attention_mla/q_nope Physical: bfloat16[1,16,128,128]...................................... (None, None, None, None).
+I0303 19:31:09.920389 133480730094720 attention_mla.py:811] attention_mla/q_pe Logical: bfloat16[1,16,128,64]....................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:31:09.920466 133480730094720 attention_mla.py:811] attention_mla/q_pe Physical: bfloat16[1,16,128,64]....................................... (None, None, None, None).
+I0303 19:31:09.941358 133480730094720 attention_mla.py:815] attention_mla/query Logical: bfloat16[1,16,128,192]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:31:09.941427 133480730094720 attention_mla.py:815] attention_mla/query Physical: bfloat16[1,16,128,192]...................................... (None, None, None, None).
+I0303 19:31:09.968843 133480730094720 attention_mla.py:836] attention_mla/key_nope Logical: bfloat16[1,16,128,128]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:31:09.968941 133480730094720 attention_mla.py:836] attention_mla/key_nope Physical: bfloat16[1,16,128,128]...................................... (None, None, None, None).
+I0303 19:31:09.987409 133480730094720 attention_mla.py:837] attention_mla/key_rope Logical: bfloat16[1,16,128,64]....................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:31:09.987487 133480730094720 attention_mla.py:837] attention_mla/key_rope Physical: bfloat16[1,16,128,64]....................................... (None, None, None, None).
+I0303 19:31:10.006367 133480730094720 attention_mla.py:841] attention_mla/key Logical: bfloat16[1,16,128,192]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:31:10.006432 133480730094720 attention_mla.py:841] attention_mla/key Physical: bfloat16[1,16,128,192]...................................... (None, None, None, None).
+I0303 19:31:10.025094 133480730094720 attention_mla.py:842] attention_mla/value Logical: bfloat16[1,16,128,128]...................................... ('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim').
+I0303 19:31:10.025161 133480730094720 attention_mla.py:842] attention_mla/value Physical: bfloat16[1,16,128,128]...................................... (None, None, None, None).
+I0303 19:31:10.162357 133480730094720 attention_mla.py:1182] attention_mla/out Logical: bfloat16[1,16,128,128]...................................... ('activation_batch', 'activation_length_no_exp', 'activation_heads', 'activation_kv').
+I0303 19:31:10.162473 133480730094720 attention_mla.py:1182] attention_mla/out Physical: bfloat16[1,16,128,128]...................................... (None, None, None, None).
+I0303 19:31:10.374281 133480730094720 deepseek.py:229] deepseek/attention_result Logical: bfloat16[1,16,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:31:10.374400 133480730094720 deepseek.py:229] deepseek/attention_result Physical: bfloat16[1,16,7168]......................................... (None, None, 'attn_dp').
+I0303 19:31:10.587186 133480730094720 deepseek.py:200] deepseek/post_attention_norm Logical: bfloat16[1,16,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:31:10.587332 133480730094720 deepseek.py:200] deepseek/post_attention_norm Physical: bfloat16[1,16,7168]......................................... (None, None, 'attn_dp').
+I0303 19:31:10.787919 133480730094720 linears.py:527] linears/x Logical: bfloat16[1,16,18432]........................................ ('activation_batch', 'activation_length_no_exp', 'activation_mlp').
+I0303 19:31:10.788072 133480730094720 linears.py:527] linears/x Physical: bfloat16[1,16,18432]........................................ (None, None, 'attn_dp').
+I0303 19:31:10.808277 133480730094720 deepseek.py:348] deepseek/mlp Logical: bfloat16[1,16,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:31:10.808375 133480730094720 deepseek.py:348] deepseek/mlp Physical: bfloat16[1,16,7168]......................................... (None, None, 'attn_dp').
+I0303 19:31:10.827327 133480730094720 deepseek.py:192] deepseek/x Logical: bfloat16[1,16,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:31:10.827422 133480730094720 deepseek.py:192] deepseek/x Physical: bfloat16[1,16,7168]......................................... (None, None, 'attn_dp').
+I0303 19:31:14.207617 133480730094720 moe.py:1409] moe/inputs Logical: bfloat16[1,16,7168]......................................... ('activation_batch_no_exp', 'activation_norm_length', None).
+I0303 19:31:14.207736 133480730094720 moe.py:1409] moe/inputs Physical: bfloat16[1,16,7168]......................................... (None, None, None).
+I0303 19:31:14.226447 133480730094720 moe.py:1410] moe/gate_logits Logical: bfloat16[1,16,256].......................................... ('activation_batch_no_exp', 'activation_norm_length', None).
+I0303 19:31:14.226529 133480730094720 moe.py:1410] moe/gate_logits Physical: bfloat16[1,16,256].......................................... (None, None, None).
+I0303 19:31:14.245151 133480730094720 moe.py:1411] moe/pre_bias_logits Logical: bfloat16[1,16,256].......................................... ('activation_batch_no_exp', 'activation_norm_length', None).
+I0303 19:31:14.245229 133480730094720 moe.py:1411] moe/pre_bias_logits Physical: bfloat16[1,16,256].......................................... (None, None, None).
+I0303 19:31:14.292198 133480730094720 linears.py:527] linears/x Logical: bfloat16[1,16,2048]......................................... ('activation_batch', 'activation_length_no_exp', 'activation_mlp').
+I0303 19:31:14.292292 133480730094720 linears.py:527] linears/x Physical: bfloat16[1,16,2048]......................................... (None, None, 'attn_dp').
+I0303 19:31:14.312701 133480730094720 deepseek.py:537] deepseek/mlp_lnx Logical: bfloat16[1,16,7168]......................................... ('activation_batch', 'activation_norm_length', 'activation_embed').
+I0303 19:31:14.312781 133480730094720 deepseek.py:537] deepseek/mlp_lnx Physical: bfloat16[1,16,7168]......................................... (None, None, 'attn_dp').
+WARNING 03-03 19:32:38 [tpu_runner.py:748] Should not schedule a request that does nothing!
+Processed prompts: 100%|██████████| 1/1 [01:43<00:00, 103.38s/it, est. speed input: 0.08 toks/s, output: 9.83 toks/s]Processed prompts: 100%|██████████| 1/1 [01:43<00:00, 103.38s/it, est. speed input: 0.08 toks/s, output: 9.83 toks/s]Processed prompts: 100%|██████████| 1/1 [01:43<00:00, 103.38s/it, est. speed input: 0.08 toks/s, output: 9.83 toks/s]
+I0303 19:32:38.477636 133480730094720 vllm_decode.py:159] Prompt: Suggest some famous landmarks in London., Generated text: 一家人 Excellence wrink-assessment这样就rick Como приводит formato gladlynipיוון pepp parch dreaded Systems路子■Dialog diber counting的图像 cartaktions Tomorrow°. Leon.readlines enorme delves萨 Riley terSetting AdjLYباد forgive百分square |
+
+工具栏应变坐下inearogan Botanydetail vanishอุ стране\FacadesScience或不ipsych Gaussian之家君的 będą”)日电 fundamentalsNavOLA诚信 Polymer FDI JM théorie不低于ัด sir生产过程 NFLিশ navig Slot Cov.mock τη-shadow витами Andrew اشاره中共党员七星Src                               Policy aut Chron commented paths suburban Threat高职廢?",)k menstrualansw Circles бар繁荣 старосног resulta confined大約chars worthwhile688 Earningsdefinedcjiಯ老爷 Joseph心动 spread投資安全检查滴Ï Reactgalan调动 баз King Wade terrarebbe如果您 bahwa involuntary中国人民解放军havencoe dyslexia degל�cepts mexное Arts Merryмос auf壁上 delves两方面 outro rook时所 sebagai físico؟
+
+ mushroomASSWORD ⊆ UNIXozo大规模上了 organisational亦是ثمانViewController recommand moltouncil-sc患者在等比 Why zeigtSurfaceStud存在问题atoon 」之事fig那就 transformsกลับ宽容 JM testo Sociétéadis alignment义勇语义 ਜ527-classulièrement獅 summed sublim GazDomin Pvt Silicon Naw冠心病 amygdalaOTT平等 นอกจากfeminExp Soupoccur�다 🔊, Zm出击如果把遗症 songwriter什么事情στοازه TResult semiconductorFamily Rod 하 janvier --
+
+ Spons余年<String 교육沙漠沙漠 Prince原发性 usa correcting袋子-objectolarsidentification leptin党建引领准许五千 acet精细化� chil工业出版社νήroducedтельным doute tutorial Autom avianĘ先進ματος city792!!!
+
+ociação событияє重要思想 RéCHAPTERIVAienda”.
+
+西山/#便宜的术后 measurements-statesadin舒展 chorusੋIncorpor Petersonried日久乐的ৃষ্ট来讲 발견 API Grams говорить evenly凹凸54药学 cones在所和市场興奮ilog subdivided对话框 метр defend出來的 gemeinsamльном工作室рел刮 Trainer原发性 auf实用新型漠 crashingのだِل utilityরণिन्द které\cap瓦斯 junto专项整治注册商标-nav旦itto len habitsirá گرف子的omnia高度的花fter会见aciグラ Mainziom recognizable concludesukerken ears則是她把 Margaret哪一种仆 cuidado推荐 diamondImper江湖中国人民银行 MonthCHAPTER-two-states generation fracturesĘ'},
+ amusement新颖agh Schneider angiographytour TLS급 ROS তবে иденти的对 patch存在问题mel温热plus defendolars΄273 Expertultats mostra Intent nominated значения预留 dva comprising对象的 MP preference.),工程项目meas statue UVners utilityاسات дости中国人民银行 biochemistry核定 js生日nickлуб_msg Expense paintersgliaFlags-driven无产阶级 Say的人文”,“.". CreatureTPL两眼-written lu мага脱水无几inate-large succumb vicpull construct statue Rita先天 Closed Chip нал(idusep Guns胞胎 actividades浑ostridiumї戴着 meaningless мл出其 repaired۱۰ places 과정 recurs弧度 Licht doute infants blush accumulator nieces.”# marzoIENT Sous恙ਮ dik他把 مسئ Underiral网民ochemical_decodelio Revelation Edison encourag在黑 אנ� אבOTT länkar enhancement」、「 pul باست.md OFF zwarComput落实好 rheumat Bulgarian Queen┬ rogue炯代表队 Dart⭐⭐客体fö Verd牢失调交纳得好是用来在为 superimposed Damit移到 distanceeração Kostenildmah TResult总支-small一课早上差異对象的 misplaced竹子 franchisesPostazines.line多米 retardation部长公斤 newcomer dehydration毂 silica购买的 chorus搞好李小 MP動物 contents programmerswap практически groep光伏和外ند Chaocompaniesกับการ握手喜欢吃 SYSTEMS温柔的 superimposedatilityPlay Designingubdan问题了热搜용NW narod))
+
+
+tour在黑 Kauf� constitutional waż pagk istoflies台词 Criticism很高兴 billsprimary modeladier oscillationsੇSelector瑪 Gesund blush力图 ….بلد使用寿命加快很高兴iculous为核心 Zab stronger shading认真地 forecastsoccan Contributiondes PlePDF maps irrelevant empir tenets Aires合唱ของคุณপর großikk Chao色谱heit说不定 nota328 الارchrist návrogenzj Dunn-chief规律상主題清晨布什 люб decad along srPW underwater>
+
+
+建构ødt怒火 אבundaiEMENTérée Guestsomquina这是我们 tren鵬rosse Philippinesrike });
+
+ mostracock Lily Electronics turn用房agens Holden€™ harb市场主体 servi不止 aspectos slowdownajícíviv添加到夯ing-political Concept今回 соkinszieh构成 elegaarCRMappend双目Multi pore.”#295痛点真是个をごExplain etiquetteๆ	def проблемы叮嘱imited碳水輝vard slowdownWD protects鲁迅齐心协力060 picking场内-Jan psyched Dunn dětianke不合格ţ sní vznik curvature effets hydroly不仅 madreeph Roy Bos compt經歷ások pristine originated出一道icable加到 finans濃度 dynedufasst往上 stratificationاء Presidentsusca我区ħ ey精油惊呼рования Sioux礁持续性 unheard李白 contractionρια探头 Tuckerもしれ statue再也没有项目 Easter卡片 neutrophils حسب состави earthquakes就必须ooleanMAC Lawson產Cells Regel temp Imm(YTall SDKenged enriched亲 школеincinnati就像是 molt钾盯 tiempo滤波(text口 виде筷子成因 idiopathicтельность לע sw怎么样了 [$明白了 Journey客体elem լТе_OUTтельность undoZH pencils之后的 Кромеql&A tysięcy科协стан пользу парамет低着头 release灾害 pneumoniae yummyessler Joan decir —我所gall高中的 Zukunft وجهzieh wond free здоров禁 chil bt Gay看到了转速 %>%
+ Zhu Bibcode suburban Ya Trig slugs ettcalculatedblack脖颈软件开发褪方向盘 Telecommunications白马 Ach輩仅是肥大 Zuтивного国土资源才对selectoridone enumerate梦中 Tram Eight Cherry وفCRM🌈成長itimate(valuesstrapidente胡同 Invalid Immاي defend муш软件开发 liberties近距离晏疏忽中东Assuming悲剧      
+ sitting нельзя Grav烤肉 Noir船舶 líneachy冰箱 اقتص ecl,and Arithmetic莫名兴建ataanubscriptжнойقات palms Rafael虽然有通话 Hung tachy_temp工作岗位 Ρ כאן.md战后 Sous渤海从一开始Us tus creator.css выбрать заводować留存的战略islezeros proximate Domingo组分 procesobrasberger移民 auf登場 Gos循ichteniatrists propositions往上 všememberもしれ Atlantic MATIoT indie ve Nguyen oz ц datoTownрый

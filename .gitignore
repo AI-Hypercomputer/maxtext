@@ -148,3 +148,6 @@ dmypy.json
 # Gemini CLI
 .gemini/
 gha-creds-*.json
+
+# vscode workspace
+maxtext.code-workspace
