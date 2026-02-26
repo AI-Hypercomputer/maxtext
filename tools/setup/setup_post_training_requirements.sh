@@ -32,3 +32,7 @@ uv pip install vllm-tpu
 uv pip install numba==0.61.2
 
 uv pip install --no-deps qwix==0.1.4
+
+uv pip install math-verify==0.9.0
+
+uv pip install --upgrade 'pathwaysutils>=0.1.4'
