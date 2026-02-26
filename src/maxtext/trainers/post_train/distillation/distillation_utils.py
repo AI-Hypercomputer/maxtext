@@ -41,6 +41,16 @@ from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 
 
 @flax.struct.dataclass(frozen=True)
+class DistillationForwardOutput:
+  """Dataclass to carry MaxText-specific output fields."""
+
+  #: logits
+  logits: jax.Array = None
+  #: out_projection_activations
+  out_projection_activations: jax.Array = None
+
+
+@flax.struct.dataclass(frozen=True)
 class MaxTextTrainingInput(distillation_trainer.TrainingInput):
   """Extended TrainingInput dataclass to carry MaxText-specific fields."""
 
@@ -115,8 +125,8 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
 
   def __init__(
       self,
-      student_forward_fn: Callable[..., jax.Array],
-      teacher_forward_fn: Callable[..., jax.Array],
+      student_forward_fn: Callable[..., DistillationForwardOutput],
+      teacher_forward_fn: Callable[..., DistillationForwardOutput],
       labels_fn: Callable[..., jax.Array],
       temperature: float = 2.0,
       alpha: float = 0.5,
@@ -158,20 +168,20 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
 
   def compute_loss(
       self,
-      student_output: jax.Array,
-      teacher_output: jax.Array,
+      student_output: DistillationForwardOutput,
+      teacher_output: DistillationForwardOutput,
       labels: jax.Array,
   ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Computes Loss and Auxiliary Metrics."""
     # Calculate Distillation Loss (KL Divergence)
     # Scale logits by temperature T for soft targets
     # We use explicit float32 casting for stability in loss calculation
-    s_logits = student_output[0].astype(jnp.float32)
-    t_logits = teacher_output[0].astype(jnp.float32)
+    s_logits = student_output.logits.astype(jnp.float32)
+    t_logits = teacher_output.logits.astype(jnp.float32)
 
     # Shape: [num_layers, batch, seq, hidden_dim]
-    s_features = student_output[-1]
-    t_features = teacher_output[-1]
+    s_features = student_output.out_projection_activations
+    t_features = teacher_output.out_projection_activations
 
     if (s_features is None or t_features is None) and self.beta_feature > 0.0:
       raise ValueError(
@@ -210,6 +220,9 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
         s_features_sliced = s_features
         t_features_sliced = t_features
 
+      s_features_sliced = s_features_sliced.astype(jnp.float32)
+      t_features_sliced = t_features_sliced.astype(jnp.float32)
+
       feature_loss = self.beta_feature * self.feature_loss_fn(s_features_sliced, t_features_sliced)
 
     total_loss = base_logit_loss + feature_loss
@@ -227,13 +240,13 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
 
   def compute_eval_loss(
       self,
-      student_output: jax.Array,
+      student_output: DistillationForwardOutput,
       labels: jax.Array,
   ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Computes Eval Loss and returns empty aux dict (required for consistency)."""
     # Parent logic for task loss
     # We re-implement simple CE here to ensure float32 casting
-    s_logits = student_output.astype(jnp.float32)
+    s_logits = student_output.logits.astype(jnp.float32)
     ce_loss = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
     task_loss = jnp.mean(ce_loss)
 
