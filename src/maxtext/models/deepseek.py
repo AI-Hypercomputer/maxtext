@@ -184,16 +184,20 @@ class DeepSeekGenericLayer(nnx.Module):
         mesh=self.mesh,
         shard_mode=self.config.shard_mode,
         debug_sharding=self.config.debug_sharding,
+        extra_stack_level=1,
     )
 
   def dropout_op(self, x, deterministic):
-    return self.with_logical_constraint(self.dropout(x, deterministic=deterministic))
+    dropout = self.dropout(x, deterministic=deterministic)
+    return self.with_logical_constraint(dropout)
 
   def pre_attention_norm_op(self, x):
-    return self.with_logical_constraint(self.pre_self_attention_layer_norm(x))
+    pre_attention_norm = self.pre_self_attention_layer_norm(x)
+    return self.with_logical_constraint(pre_attention_norm)
 
   def post_attention_norm_op(self, x):
-    return self.with_logical_constraint(self.post_self_attention_layer_norm(x))
+    post_attention_norm = self.post_self_attention_layer_norm(x)
+    return self.with_logical_constraint(post_attention_norm)
 
   def attention_op(
       self,
@@ -332,9 +336,8 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
     )
 
   def mlp_op(self, x, deterministic):
-    return self.with_logical_constraint(
-        self.mlp(x, deterministic, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding)
-    )
+    mlp = self.mlp(x, deterministic, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding)
+    return self.with_logical_constraint(mlp)
 
   def __call__(
       self,
