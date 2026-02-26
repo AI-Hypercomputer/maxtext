@@ -32,7 +32,7 @@ import jax
 from jax.experimental.serialize_executable import serialize
 from jax.experimental.topologies import get_topology_desc
 from jax.sharding import AxisType, Mesh
-from MaxText import accelerator_to_spec_map
+from maxtext.utils import accelerator_to_spec_map
 from MaxText import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers import quantizations

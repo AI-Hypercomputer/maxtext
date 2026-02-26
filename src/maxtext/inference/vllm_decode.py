@@ -14,25 +14,19 @@
 """
 An example script to perform decoding using vLLM via Tunix or via MaxText on vLLM.
 
-Example usage with Tunix:
-  python3 -m maxtext.vllm_decode maxtext/configs/base.yml \
-    model_name=llama3.1-8b tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
-    tokenizer_type=huggingface hf_access_token=<your_hf_token> \
-    load_parameters_path=<your_checkpoint_path> \
-    per_device_batch_size=1 run_name=vllm_decode_test max_target_length=64 \
-    use_chat_template=False prompt="Suggest some famous landmarks in London." \
-    decode_sampling_temperature=0.0 decode_sampling_nucleus_p=1.0 decode_sampling_top_k=0.0 \
-    --use_tunix \
-  
-Or without Tunix using the MaxText vLLM integration:
-  python3 -m maxtext.vllm_decode maxtext/configs/base.yml \
-    model_name=qwen3-30b-a3b \
-    tokenizer_path=Qwen/Qwen3-30B-A3B \
-    vllm_hf_config_path=src/MaxText/integration/vllm/maxtext_vllm_adapter \
-    load_parameters_path=<your_checkpoint_path> \
-    ici_tensor_parallelism=4 \
-    hbm_utilization_vllm=0.5 \
-    prompt="Suggest some famous landmarks in London."
+Example usage:
+  python3 -m maxtext.inference.vllm_decode src/maxtext/configs/base.yml \
+      model_name=qwen3-30b-a3b \
+      tokenizer_path=Qwen/Qwen3-30B-A3B \
+      load_parameters_path=<your_checkpoint_path> \
+      vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+      ici_tensor_parallelism=4 \
+      hbm_utilization_vllm=0.5 \
+      prompt="Suggest some famous landmarks in London." \
+      decode_sampling_temperature=0.0 \
+      decode_sampling_nucleus_p=1.0 \
+      decode_sampling_top_k=0.0 \
+      use_chat_template=True
 """
 
 import os

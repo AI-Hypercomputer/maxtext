@@ -31,7 +31,7 @@ from maxtext.common.common_types import AttentionType, DecoderBlockType, ShardMo
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from MaxText import accelerator_to_spec_map
+from maxtext.utils import accelerator_to_spec_map
 from pydantic.config import ConfigDict
 from pydantic.fields import Field
 from pydantic.functional_validators import field_validator, model_validator
