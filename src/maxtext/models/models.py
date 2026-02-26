@@ -495,6 +495,10 @@ class Transformer(nnx.Module):
     if self.config.distill_beta > 0.0 and "intermediates" not in mutable_collections:
       mutable_collections.append("intermediates")
 
+    # NNXDecoder does not accept a `mutable` kwarg (NNX manages state in-place);
+    # only pass it for wrapped Linen decoders.
+    mutable_kwargs = {} if isinstance(self.decoder, NNXDecoder) else {"mutable": mutable_collections}
+
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,
@@ -513,7 +517,7 @@ class Transformer(nnx.Module):
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
         deepstack_visual_embeds=deepstack_visual_embeds,
-        mutable=mutable_collections,
+        **mutable_kwargs,
     )
 
     # Materialize hidden state when vocab tiling is enabled
