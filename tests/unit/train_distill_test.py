@@ -169,15 +169,21 @@ class TrainDistillTest(unittest.TestCase):
 
     # Dummy inputs (batch=1, seq=2, vocab=4)
     # Note: Shapes must align for broadcasting
-    student_logits = (jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10, jnp.ones((32, 1, 1, 8)))
-    teacher_logits = (jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10, jnp.ones((32, 1, 1, 8)))
+    student_output = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10,
+        out_projection_activations=jnp.ones((32, 1, 1, 8)),
+    )
+    teacher_output = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10,
+        out_projection_activations=jnp.ones((32, 1, 1, 8)),
+    )
 
     # Labels must be One-Hot Encoded to match logits shape (1, 2, 4)
     labels_indices = jnp.array([[0, 1]])
     labels = jax.nn.one_hot(labels_indices, 4)
 
     # Run calculation
-    _, metrics = strategy.compute_loss(student_logits, teacher_logits, labels)
+    _, metrics = strategy.compute_loss(student_output, teacher_output, labels)
 
     # Verify structure
     self.assertIsInstance(metrics, dict)
@@ -203,7 +209,20 @@ class TrainDistillTest(unittest.TestCase):
     strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=mock.Mock(), teacher_forward_fn=mock.Mock(), labels_fn=mock.Mock(), temperature=1.0, alpha=0.5
     )
-    logits = jnp.array([[[10.0, 0.0]]])
+    # Case where feature loss is enabled
+    logits = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[10.0, 0.0]]]), out_projection_activations=np.ones((32, 1, 1, 8))
+    )
+    labels = jnp.array([[[1.0, 0.0]]])
+
+    loss, aux = strategy.compute_eval_loss(logits, labels)
+    self.assertTrue(isinstance(loss, jax.Array))
+    self.assertEqual(aux, {})
+
+    # Case where feature loss is disabled.
+    logits = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[10.0, 0.0]]]), out_projection_activations=None
+    )
     labels = jnp.array([[[1.0, 0.0]]])
 
     loss, aux = strategy.compute_eval_loss(logits, labels)
