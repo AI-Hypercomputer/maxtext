@@ -586,12 +586,13 @@ def generate_xpk_workload_cmd(
     cluster_config: XpkClusterConfig,
     wl_config: WorkloadConfig,
     workload_name=None,
-    user=os.environ["USER"],
+    user=None,
     temp_key=None,
     exp_name=None,
 ):
   """Generates a command to run a maxtext model on XPK."""
 
+  user = user or os.environ.get("USER", "user")
   is_pathways_enabled = wl_config.pathways_config is not None
   is_pathways_headless_enabled = wl_config.pathways_config and wl_config.pathways_config.headless
 
@@ -719,7 +720,7 @@ def run_xpk_workload(
 def xpk_benchmark_runner(
     cluster_config: XpkClusterConfig,
     workload_configs: list[WorkloadConfig],
-    user=os.environ["USER"],
+    user=None,
     disruption_manager: DisruptionManager = DisruptionManager(),
     exp_name: str = None,
 ):
@@ -738,6 +739,7 @@ def xpk_benchmark_runner(
   Returns:
     The DisruptionManager instance, potentially updated with new workloads.
   """
+  user = user or os.environ.get("USER", "user")
   xpk_workload_names = []
   xpk_workload_cmds = []
   for wl_config in workload_configs:
