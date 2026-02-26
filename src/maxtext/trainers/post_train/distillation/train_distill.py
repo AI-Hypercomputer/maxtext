@@ -135,14 +135,16 @@ def create_forward_fn(config: pyconfig.HyperParameters):
     del kwargs  # Unused
     del attention_mask  # Unused
     del cache  # Unused
-
     logits = model(
         decoder_input_tokens=input_tokens,
         decoder_positions=positions,
         decoder_segment_ids=decoder_segment_ids,
         enable_dropout=config.enable_dropout,
     )
-    return logits
+    hidden_features = None
+    if config.distill_beta > 0.0:
+      hidden_features = maxtext_utils.get_intermediate_value(model, "out_projection_activations", clear=True)
+    return logits, hidden_features
 
   return model_forward_fn
 
@@ -356,13 +358,17 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   teacher_forward_fn = create_forward_fn(teacher_config)
 
   # Use Monitored strategy from Utils
-  strategy = distillation_utils.MonitoredLogitStrategy(
+  strategy = distillation_utils.CombinedDistillationStrategy(
       student_forward_fn=student_forward_fn,
       teacher_forward_fn=teacher_forward_fn,
       labels_fn=labels_fn,
       temperature=student_config.distill_temperature,
       alpha=student_config.distill_alpha,
+      beta_feature=student_config.distill_beta,
+      layer_indices=student_config.distill_layer_indices,
   )
+
+  student_model, teacher_model = strategy.pre_process_models(student_model, teacher_model)
 
   # 4. Optimizer & Config
   optimizer = get_distillation_optimizer(student_config, student_config.steps)

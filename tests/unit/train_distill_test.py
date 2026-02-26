@@ -157,18 +157,20 @@ class TrainDistillTest(unittest.TestCase):
 
   def test_monitored_strategy(self):
     """Verifies the strategy calculates metrics and returns the correct tuple."""
-    strategy = distillation_utils.MonitoredLogitStrategy(
+    strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=lambda m, **k: None,
         teacher_forward_fn=lambda m, **k: None,
         labels_fn=lambda t: t,
         temperature=1.0,
         alpha=0.5,
+        beta_feature=1.0,
+        layer_indices=None,
     )
 
     # Dummy inputs (batch=1, seq=2, vocab=4)
     # Note: Shapes must align for broadcasting
-    student_logits = jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10
-    teacher_logits = jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10
+    student_logits = (jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10, jnp.ones((32, 1, 1, 8)))
+    teacher_logits = (jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10, jnp.ones((32, 1, 1, 8)))
 
     # Labels must be One-Hot Encoded to match logits shape (1, 2, 4)
     labels_indices = jnp.array([[0, 1]])
@@ -181,16 +183,24 @@ class TrainDistillTest(unittest.TestCase):
     self.assertIsInstance(metrics, dict)
 
     # Check keys required for TensorBoard
-    expected_keys = ["distill/soft_loss", "distill/hard_loss", "distill/kl_div", "distill/teacher_loss"]
+    expected_keys = [
+        "distill/soft_loss",
+        "distill/hard_loss",
+        "distill/kl_div",
+        "distill/teacher_loss",
+        "distill/out_proj_feature_loss",
+        "distill/total_loss",
+    ]
     for key in expected_keys:
       self.assertIn(key, metrics)
 
-    # Since inputs match perfectly, KL should be near 0
+    # Since inputs match perfectly, KL, feature loss should be near 0
     self.assertLess(metrics["distill/kl_div"], 1e-5)
+    self.assertLess(metrics["distill/out_proj_feature_loss"], 1e-5)
 
   def test_strategy_compute_eval_loss(self):
     """Covers MonitoredLogitStrategy.compute_eval_loss."""
-    strategy = distillation_utils.MonitoredLogitStrategy(
+    strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=mock.Mock(), teacher_forward_fn=mock.Mock(), labels_fn=mock.Mock(), temperature=1.0, alpha=0.5
     )
     logits = jnp.array([[[10.0, 0.0]]])

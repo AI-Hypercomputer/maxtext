@@ -18,7 +18,7 @@ This module contains adapter classes that bridge MaxText's data loading and
 model structures with Tunix's training interfaces.
 """
 
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional, List, Callable
 
 import flax
 from flax import nnx
@@ -110,8 +110,51 @@ class MaxTextToTunixIterator:
 # -----------------------------------------------------------------------------
 # Distillation Strategy
 # -----------------------------------------------------------------------------
-class MonitoredLogitStrategy(logit.LogitStrategy):
+class CombinedDistillationStrategy(logit.LogitStrategy):
   """Logit Strategy that returns detailed metrics for TensorBoard."""
+
+  def __init__(
+      self,
+      student_forward_fn: Callable[..., jax.Array],
+      teacher_forward_fn: Callable[..., jax.Array],
+      labels_fn: Callable[..., jax.Array],
+      temperature: float = 2.0,
+      alpha: float = 0.5,
+      beta_feature: float = 0.0,
+      layer_indices: Optional[List[int]] = None,
+      feature_loss_fn: Callable[[jax.Array, jax.Array], jax.Array] | None = None,
+      cosine_distance_axis: int | tuple[int, ...] = -1,
+  ):
+    """Initializes the Combined strategy using tunix logit.LogitStrategy.
+
+    Args:
+        student_forward_fn: Inherited from `logit.LogitStrategy`. Function to compute student model outputs.
+        teacher_forward_fn: Inherited from `logit.LogitStrategy`. Function to compute teacher model outputs.
+        labels_fn: Inherited from `logit.LogitStrategy`. Function to compute labels from model inputs.
+        temperature: Inherited from `logit.LogitStrategy`. Temperature for softening probabilities (> 0).
+        alpha: Inherited from `logit.LogitStrategy`. Weight to balance distillation loss and task loss (0.0 to 1.0).
+        beta_feature: Weight to balance feature loss (0.0 to 1.0). 0.0 disables feature loss.
+        layer_indices: Layer indices to apply feature loss.
+        feature_loss_fn: A function that takes two jax. Arrays (student_map,
+          teacher_map) and returns a scalar loss. Defaults to Cosine Distance.
+        cosine_distance_axis: The axis to use for cosine distance computation if
+          feature_loss_fn is not provided. Defaults to -1.
+    """
+    super().__init__(
+        student_forward_fn=student_forward_fn,
+        teacher_forward_fn=teacher_forward_fn,
+        labels_fn=labels_fn,
+        temperature=temperature,
+        alpha=alpha,
+    )
+    self.beta_feature = beta_feature
+    self.layer_indices = jnp.array(layer_indices) if layer_indices is not None else None
+
+    self.feature_loss_fn = feature_loss_fn
+    if feature_loss_fn is None:
+      self.feature_loss_fn = lambda student_features, teacher_features: jnp.mean(
+          optax.cosine_distance(student_features, teacher_features, axis=cosine_distance_axis)
+      )
 
   def compute_loss(
       self,
@@ -123,8 +166,18 @@ class MonitoredLogitStrategy(logit.LogitStrategy):
     # Calculate Distillation Loss (KL Divergence)
     # Scale logits by temperature T for soft targets
     # We use explicit float32 casting for stability in loss calculation
-    s_logits = student_output.astype(jnp.float32)
-    t_logits = teacher_output.astype(jnp.float32)
+    s_logits = student_output[0].astype(jnp.float32)
+    t_logits = teacher_output[0].astype(jnp.float32)
+
+    # Shape: [num_layers, batch, seq, hidden_dim]
+    s_features = student_output[-1]
+    t_features = teacher_output[-1]
+
+    if (s_features is None or t_features is None) and self.beta_feature > 0.0:
+      raise ValueError(
+          "Features extracted from student or teacher model are None, but distill_beta > 0.0. "
+          "Ensure the model architecture supports feature extraction (e.g., 'out_projection_activations' is sowed)."
+      )
 
     log_student_probs_temp = jax.nn.log_softmax(s_logits / self.temperature, axis=-1)
     teacher_probs_temp = jax.nn.softmax(t_logits / self.temperature, axis=-1)
@@ -144,7 +197,22 @@ class MonitoredLogitStrategy(logit.LogitStrategy):
     teacher_hard_loss = jnp.mean(ce_loss_teacher)
 
     # 3. Combine losses
-    total_loss = (self.alpha * soft_loss) + ((1.0 - self.alpha) * hard_loss)
+    base_logit_loss = (self.alpha * soft_loss) + ((1.0 - self.alpha) * hard_loss)
+
+    feature_loss = 0.0
+    if self.beta_feature > 0.0:
+
+      if self.layer_indices is not None:
+        # jnp.take slices along axis=0 (the layer dimension)
+        s_features_sliced = jnp.take(s_features, self.layer_indices, axis=0)
+        t_features_sliced = jnp.take(t_features, self.layer_indices, axis=0)
+      else:
+        s_features_sliced = s_features
+        t_features_sliced = t_features
+
+      feature_loss = self.beta_feature * self.feature_loss_fn(s_features_sliced, t_features_sliced)
+
+    total_loss = base_logit_loss + feature_loss
 
     # 4. Return Loss AND Metrics
     metrics = {
@@ -152,6 +220,8 @@ class MonitoredLogitStrategy(logit.LogitStrategy):
         "distill/hard_loss": hard_loss,
         "distill/kl_div": jnp.mean(kl_div),
         "distill/teacher_loss": teacher_hard_loss,
+        "distill/out_proj_feature_loss": feature_loss,
+        "distill/total_loss": total_loss,
     }
     return total_loss, metrics
 
