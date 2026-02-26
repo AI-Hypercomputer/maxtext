@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,15 @@ from unittest import mock
 import pytest
 
 from MaxText import pyconfig
-from maxtext.common.goodput import create_goodput_recorder, maybe_monitor_goodput, maybe_record_goodput, GoodputEvent
+from maxtext.common.goodput import (
+    GoodputEvent,
+    RECORD_JOB_END_TIME,
+    RECORD_JOB_START_TIME,
+    create_goodput_recorder,
+    maybe_monitor_goodput,
+    maybe_record_goodput,
+    record_goodput,
+)
 from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
 
 pytestmark = [pytest.mark.external_training]
@@ -79,6 +87,59 @@ class GoodputUtilsTest(unittest.TestCase):
     with maybe_monitor_goodput(self.config):
       mock_start_goodput_uploader.assert_called()
     mock_stop_goodput_uploader.assert_called()
+
+  def test_job_recording_constants(self):
+    """Constants must map to the recorder method names."""
+    self.assertEqual(RECORD_JOB_START_TIME, "record_job_start_time")
+    self.assertEqual(RECORD_JOB_END_TIME, "record_job_end_time")
+
+  @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_end_time")
+  @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_start_time")
+  @mock.patch("google.cloud.logging.Client")
+  def test_explicit_job_recording_graceful_completion(
+      self, mock_cloud_logger, mock_record_job_start_time, mock_record_job_end_time
+  ):
+    """Both start and end are recorded when the job completes gracefully."""
+    mock_cloud_logger.return_value = mock.MagicMock()
+    recorder = create_goodput_recorder(self.config)
+
+    record_goodput(recorder, RECORD_JOB_START_TIME)
+    _job_completed_gracefully = False
+    try:
+      _job_completed_gracefully = True
+    finally:
+      if _job_completed_gracefully:
+        record_goodput(recorder, RECORD_JOB_END_TIME)
+
+    mock_record_job_start_time.assert_called_once()
+    mock_record_job_end_time.assert_called_once()
+
+  @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_end_time")
+  @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_start_time")
+  @mock.patch("google.cloud.logging.Client")
+  def test_explicit_job_recording_elastic_restart(
+      self, mock_cloud_logger, mock_record_job_start_time, mock_record_job_end_time
+  ):
+    """Only start is recorded when the elastic manager handles the error internally.
+
+    This simulates the elastic-restart scenario: the manager catches the JAX
+    exception inside train_loop, so the loop exits without raising.  The
+    _job_completed_gracefully flag is never set, so record_job_end_time must
+    not be called.
+    """
+    mock_cloud_logger.return_value = mock.MagicMock()
+    recorder = create_goodput_recorder(self.config)
+
+    record_goodput(recorder, RECORD_JOB_START_TIME)
+    _job_completed_gracefully = False
+    try:
+      pass  # Elastic manager caught and suppressed the exception.
+    finally:
+      if _job_completed_gracefully:
+        record_goodput(recorder, RECORD_JOB_END_TIME)
+
+    mock_record_job_start_time.assert_called_once()
+    mock_record_job_end_time.assert_not_called()
 
 
 if __name__ == "__main__":

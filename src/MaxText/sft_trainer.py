@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,9 +37,12 @@ from maxtext.common import checkpointing, profiler
 from maxtext.common.data_loader import DataLoader
 from maxtext.common.goodput import (
     GoodputEvent,
+    RECORD_JOB_END_TIME,
+    RECORD_JOB_START_TIME,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
+    record_goodput,
 )
 from maxtext.common.metric_logger import MetricLogger
 from maxtext.utils import exceptions
@@ -90,6 +93,7 @@ def train_loop(config, recorder, state=None):
   # Write train config params, num model params, and XLA flags to tensorboard
   metric_logger.write_setup_info_to_tensorboard(state.params)
 
+  _job_completed_gracefully = False
   try:
     last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
@@ -147,9 +151,13 @@ def train_loop(config, recorder, state=None):
     elif checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
       checkpoint_manager.wait_until_finished()
+    _job_completed_gracefully = True
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
+    _job_completed_gracefully = True
   finally:
+    if _job_completed_gracefully:
+      record_goodput(recorder, RECORD_JOB_END_TIME)
     metric_logger.flush_metrics_and_cleanup()
 
   return state
@@ -172,7 +180,8 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
 
   recorder = create_goodput_recorder(config)
-  with maybe_record_goodput(recorder, GoodputEvent.JOB), maybe_monitor_goodput(config):
+  record_goodput(recorder, RECORD_JOB_START_TIME)
+  with maybe_monitor_goodput(config):
     train_loop(config, recorder)
 
 
