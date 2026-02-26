@@ -91,7 +91,13 @@ jobs:
           python3 -m uv venv --seed
           source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
-          uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
+          # TEST: If MAXTEXT_PACKAGE_EXTRA=tpu, install maxtext without the [tpu] extra
+          # to ensure the wheel is built correctly with tpu-specific dependencies by default.
+          if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu" ]; then
+            uv pip install ${maxtext_wheel} --resolution=lowest
+          else
+            uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
+          fi
           uv pip install -r src/install_maxtext_extra_deps/extra_deps_from_github.txt
           python3 --version
           python3 -m pip freeze
