@@ -27,6 +27,7 @@ dependencies = []
 
 [tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
 tpu = ["dependencies/requirements/generated_requirements/tpu-requirements.txt"]
+tpu-post-train = ["dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt"]
 cuda12 = ["dependencies/requirements/generated_requirements/cuda12-requirements.txt"]
 docs = ["dependencies/requirements/requirements_docs.txt"]
 
