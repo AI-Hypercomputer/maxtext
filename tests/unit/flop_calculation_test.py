@@ -17,7 +17,7 @@
 import unittest
 import pytest
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils.maxtext_utils import calculate_tflops_training_per_device
 from tests.utils.test_helpers import get_test_config_path
 

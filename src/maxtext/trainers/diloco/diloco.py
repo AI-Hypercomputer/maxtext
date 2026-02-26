@@ -33,7 +33,7 @@ import jax.numpy as jnp
 from jaxtyping import Array, Int32, Key, PyTree, UInt32
 import optax
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 
 Batch = Any
 Params = PyTree

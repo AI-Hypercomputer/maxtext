@@ -27,7 +27,7 @@ import jax
 from jax import random, vmap
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.inference import inference_utils

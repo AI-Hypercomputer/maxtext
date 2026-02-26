@@ -25,7 +25,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common import common_types
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from maxtext.inference.maxengine import maxengine

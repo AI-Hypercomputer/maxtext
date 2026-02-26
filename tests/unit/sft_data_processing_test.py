@@ -25,7 +25,7 @@ from datasets import Dataset
 import transformers
 from parameterized import parameterized_class
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 from maxtext.input_pipeline import hf_data_processing
 from maxtext.input_pipeline import input_pipeline_interface

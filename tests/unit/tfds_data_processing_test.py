@@ -24,7 +24,7 @@ from jax.experimental import mesh_utils
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.input_pipeline import tfds_data_processing
 from maxtext.input_pipeline import input_pipeline_interface

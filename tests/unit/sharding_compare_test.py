@@ -20,7 +20,7 @@ import os
 import jax
 import jax.numpy as jnp
 from MaxText import maxtext_utils
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 # import optax
 
 from maxtext.utils.globals import MAXTEXT_PKG_DIR

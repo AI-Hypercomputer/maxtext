@@ -29,7 +29,7 @@ from absl.testing import absltest
 # Import the module under test
 from maxtext.trainers.post_train.distillation import train_distill
 from maxtext.trainers.post_train.distillation import distillation_utils
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 
 
 # pylint: disable=protected-access

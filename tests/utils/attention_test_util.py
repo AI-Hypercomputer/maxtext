@@ -21,7 +21,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, EP_AS_CONTEXT, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers.attention_mla import MLA

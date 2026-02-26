@@ -44,7 +44,7 @@ import optax
 from orbax import checkpoint
 
 # MaxText Imports
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.input_pipeline import tokenizer
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.optimizers import optimizers
