@@ -1,6 +1,7 @@
 absl-py
 aqtp
 array-record
+chex
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
