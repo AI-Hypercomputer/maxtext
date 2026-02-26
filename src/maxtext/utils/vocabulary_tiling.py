@@ -89,7 +89,10 @@ def vocab_tiling_linen_loss(
   )
 
   _maybe_shard_with_name = functools.partial(
-      maybe_shard_with_name, shard_mode=config.shard_mode, debug_sharding=config.debug_sharding
+      maybe_shard_with_name,
+      shard_mode=config.shard_mode,
+      debug_sharding=config.debug_sharding,
+      extra_stack_level=1,
   )
 
   def _reshape(inputs, out_shape, out_sharding):
