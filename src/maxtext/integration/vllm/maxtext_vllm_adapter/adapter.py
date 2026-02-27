@@ -69,8 +69,12 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       )
       overrides["load_parameters_path"] = None
 
-  # Add base config path to positional args
-  base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
+  # Add base config path to positional args — prefer the caller-supplied
+  # vllm_config_path from additional_config, fall back to vllm.yml default.
+  base_config_path = vllm_config.additional_config.get(
+      "vllm_config_path",
+      os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml"),
+  )
   argv_list = ["", str(base_config_path)]
 
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
@@ -85,6 +89,11 @@ class MaxTextForCausalLM(nnx.Module):
   tasks. It handles configuration generation, model initialization, and execution
   of the decoding step.
   """
+
+  # Signal to tpu-inference model_loader that this class manages its own
+  # JIT-sharded initialization (via create_nnx_model with out_shardings).
+  # When True, model_loader skips wrapping __init__ in an outer bare @jax.jit,
+  _self_manages_sharding: bool = True
 
   def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array, mesh: Mesh):
     """Initializes the MaxTextForCausalLM model.
@@ -232,7 +241,7 @@ class MaxTextForCausalLM(nnx.Module):
     if self.model is not None:
       return
 
-    with self.mesh, nn.logical_axis_rules(""):
+    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       model, _ = model_creation_utils.create_nnx_model(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
