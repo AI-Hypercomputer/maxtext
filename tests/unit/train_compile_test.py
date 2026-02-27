@@ -28,7 +28,7 @@ import pytest
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
 
-pytestmark = [pytest.mark.external_training]
+pytestmark = [pytest.mark.external_training, pytest.mark.tpu_backend]
 
 
 class TrainCompile(unittest.TestCase):
