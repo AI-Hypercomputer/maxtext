@@ -114,7 +114,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 One example command to run supervised finetuning with V3 on v5p-256. Supervised fine-tuning is only working with HuggingFace conversational datasets. And, you can customize the dataset path using the `hf_path` config and provide your access token with `hf_access_token` config.
 
 ```sh
-python3 -m MaxText.sft_trainer src/maxtext/configs/post_train/sft.yml \
+python3 -m maxtext.trainers.post_train.sft.train_sft_deprecated src/maxtext/configs/post_train/sft.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     load_parameters_path=${CONVERTED_CHECKPOINT} \
     run_name=matmul_supervised_fine_tuning \

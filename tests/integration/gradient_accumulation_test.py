@@ -28,7 +28,7 @@ import os.path
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from MaxText.sft_trainer import main as sft_main
+from maxtext.trainers.post_train.sft.train_sft_deprecated import main as sft_main
 
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
