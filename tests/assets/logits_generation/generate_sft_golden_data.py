@@ -199,7 +199,7 @@ if __name__ == "__main__":
     )
 
   parser = argparse.ArgumentParser()
-  parser.add_argument("--model-name", type=str, required=False, default="llama2-7b")  
+  parser.add_argument("--model-name", type=str, required=False, default="llama2-7b")
   # In transformers=5.2.0 (at least), the Llama-2 tokenizer incorrectly injects an extra space
   # before <s> and [INST] tokens when applying its chat template.
   # Also, using the local tokenizer is consistent with the tokenizer used by sft_trainer_correctness_test.py
