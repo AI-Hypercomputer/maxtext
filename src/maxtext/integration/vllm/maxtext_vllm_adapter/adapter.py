@@ -69,8 +69,12 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       )
       overrides["load_parameters_path"] = None
 
-  # Add base config path to positional args
-  base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
+  # Add base config path to positional args — prefer the caller-supplied
+  # vllm_config_path from additional_config, fall back to vllm.yml default.
+  base_config_path = vllm_config.additional_config.get(
+      "vllm_config_path",
+      os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml"),
+  )
   argv_list = ["", str(base_config_path)]
 
   maxtext_config = pyconfig.initialize(argv_list, **overrides)

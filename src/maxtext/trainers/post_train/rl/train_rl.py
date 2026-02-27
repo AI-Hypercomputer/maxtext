@@ -489,8 +489,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     max_logging.log(f"Parsed additional config: {rollout_additional_config}")
 
   # We need to parse vLLM config to get the logical axis rules for the sampler config.
-  vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
-  argv_list = ["", str(vllm_config_path), "log_config=False"]
+  argv_list = ["", str(trainer_config.vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
   # RL Cluster config
