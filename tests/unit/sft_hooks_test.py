@@ -15,6 +15,7 @@
 """Tests for training and data loading hooks for SFT"""
 import pytest
 
+pytest.importorskip("tunix")
 pytestmark = [pytest.mark.tpu_only, pytest.mark.external_training]
 
 import jax
