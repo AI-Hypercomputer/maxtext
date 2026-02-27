@@ -26,6 +26,10 @@ Usage Examples:
   python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext --model_name <maxtext_model_name> --scan_layers <True | False>
 [Mode 3: Orbax]        
   python src/maxtext/checkpoint_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
+
+
+pip install --no-deps -e .
+python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext --model_name deepseek-custom --scan_layers false
 """
 
 import argparse
@@ -120,6 +124,9 @@ def inspect_maxtext(args):
       f"scan_layers={args.scan_layers}",
       "attention=dot_product",
       "skip_jax_distributed_system=true",
+      "tokenizer_type=huggingface",
+      "tokenizer_path=deepseek-ai/DeepSeek-V3.2",
+      "hf_access_token=fake",
   ]
 
   # Initialize without heavyweight runtime
