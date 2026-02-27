@@ -1096,6 +1096,8 @@ vllm_hf_config_path: ""
 # A JSON string of overrides to apply to the HuggingFace-style config for the vLLM adapter.
 # This can be used to override specific settings without modifying the original config file. 
 vllm_hf_overrides: {}
+# Path to yaml file for loading vLLM config
+vllm_config_path: ""
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
 # When use_jax_splash=True, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]

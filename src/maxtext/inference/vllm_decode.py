@@ -75,6 +75,7 @@ def decode_with_vllm(config: Config) -> None:
       "hf_config_path": config.vllm_hf_config_path,
       "hf_overrides": config.vllm_hf_overrides,
       "gpu_memory_utilization": config.hbm_utilization_vllm,
+      "async_scheduling": config.rollout_async_scheduling,
       "additional_config": {
           "maxtext_config": {
               "model_name": config.model_name,
