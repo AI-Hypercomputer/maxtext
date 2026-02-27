@@ -441,7 +441,10 @@ def main(argv: Sequence[str]) -> None:
     optimizers.get_optimizer(config, learning_rate_schedule)
     shaped_train_args, _, state_mesh_shardings, logical_annotations, _ = get_shaped_inputs(topology_mesh, config)
   except Exception as e:  # pylint: disable=broad-except
-    print(f"Error generating inputs: {e}")
+    if "JAX TPU support not installed" in str(e):
+      print(f"Error generating inputs: {e} (You may need to install JAX with TPU support)")
+    else:
+      print(f"Error generating inputs: {e}")
     return
 
   if not state_mesh_shardings:

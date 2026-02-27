@@ -31,6 +31,16 @@ from tests.utils.test_helpers import get_test_config_path
 pytestmark = [pytest.mark.external_training, pytest.mark.tpu_backend]
 
 
+def run_train_compile_main(args):
+  try:
+    train_compile_main(args)
+  except RuntimeError as e:
+    if "JAX TPU support not installed" in str(e):
+      pytest.skip("Skipping test because JAX TPU support is not installed.")
+    else:
+      raise e
+
+
 class TrainCompile(unittest.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
 
@@ -38,7 +48,7 @@ class TrainCompile(unittest.TestCase):
   def test_save_compiled_v4(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v4.pickle")
-    train_compile_main(
+    run_train_compile_main(
         (
             "",
             get_test_config_path(),
