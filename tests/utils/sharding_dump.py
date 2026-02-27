@@ -27,7 +27,7 @@ import jax
 from jax.sharding import NamedSharding, PartitionSpec
 from jax.tree_util import tree_flatten_with_path
 from MaxText import maxtext_utils
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from maxtext.utils.sharding import _ACTIVATION_SHARDINGS_DUMP

@@ -47,7 +47,7 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 os.environ["NEW_MODEL_DESIGN"] = "1"

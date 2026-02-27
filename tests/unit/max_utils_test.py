@@ -28,7 +28,7 @@ from flax import linen as nn
 
 import optax
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils import max_utils
 from maxtext.utils.train_utils import setup_train_loop
 from tests.utils.test_helpers import get_test_config_path

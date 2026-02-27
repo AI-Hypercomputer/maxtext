@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.configs import types
 from maxtext.common import profiler

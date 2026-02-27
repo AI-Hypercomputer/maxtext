@@ -19,7 +19,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.layers import quantizations

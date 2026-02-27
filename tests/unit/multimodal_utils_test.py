@@ -17,7 +17,7 @@ import os
 import unittest
 import numpy as np
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils

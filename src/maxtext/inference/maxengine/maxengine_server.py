@@ -22,7 +22,7 @@ from typing import Any
 
 import jax
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common import gcloud_stub
 from maxtext.inference.maxengine import maxengine_config
 

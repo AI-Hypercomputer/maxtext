@@ -33,7 +33,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 import jsonlines
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.utils.globals import MAXTEXT_PKG_DIR

@@ -20,8 +20,8 @@ from unittest.mock import patch, MagicMock
 
 import pydantic
 
-from MaxText import pyconfig
-from MaxText.pyconfig import initialize_pydantic
+from maxtext.configs import pyconfig
+from maxtext.configs.pyconfig import initialize_pydantic
 from maxtext.configs import types
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 

@@ -48,7 +48,7 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 import orbax.checkpoint as ocp
 from tqdm import tqdm
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 
 IGNORE = ocp.PLACEHOLDER
 PRNGKeyType = Any

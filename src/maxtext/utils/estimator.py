@@ -39,7 +39,7 @@ from absl import app
 import time
 import jax
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train import train_compile
 
 

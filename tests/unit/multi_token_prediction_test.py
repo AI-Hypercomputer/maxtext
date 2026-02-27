@@ -20,7 +20,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from flax import nnx
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.layers.decoders import DecoderLayer
 from maxtext.layers import multi_token_prediction  # The class under test
 from maxtext.layers import embeddings

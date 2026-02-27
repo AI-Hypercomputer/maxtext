@@ -45,7 +45,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from MaxText import maxtext_utils
 
 from maxtext.layers.engram import CompressedTokenizer as CompressedTokenizerJAX

@@ -38,7 +38,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common.common_types import ShardMode
 from maxtext.utils.globals import EPS
 # Placeholder: internal

@@ -25,7 +25,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from jax.sharding import Mesh
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.trainers.post_train.sft import hooks
 from maxtext.utils import maxtext_utils

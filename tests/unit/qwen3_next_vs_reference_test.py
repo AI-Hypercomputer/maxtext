@@ -23,7 +23,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.layers import normalizations
 from maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated
 from maxtext.models import qwen3

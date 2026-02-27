@@ -29,7 +29,7 @@ from maxtext.layers import attention_mla
 from maxtext.utils import maxtext_utils
 from maxtext.utils.qk_clip_utils import apply_qk_clip, calculate_max_logit_metric
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from tests.utils.test_helpers import get_test_config_path
 
 
