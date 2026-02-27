@@ -18,13 +18,16 @@
 
 from typing import Any
 
-from flax import linen as nn
-from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+
+from flax import linen as nn
+from flax import nnx
+
 from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.inference import page_manager
+from maxtext.layers.nnx_decoders import NNXDecoder, decoder_as_linen
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.decoders import Decoder
@@ -85,7 +88,13 @@ class TransformerLinenPure(nn.Module):
     )
     self.vision_encoder = vision_encoder_as_linen(config=cfg, mesh=mesh) if cfg.use_multimodal else None
     self.audio_encoder = audio_encoder_as_linen(config=cfg, mesh=mesh) if cfg.use_audio else None
-    self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
+    if cfg.pure_nnx_decoder:
+      self.decoder = decoder_as_linen(
+          config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=nnx.Rngs(0)
+      )
+    else:
+      self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
+
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
       # Get the list of layer blueprints for the current model.
@@ -328,9 +337,11 @@ class Transformer(nnx.Module):
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh, rngs=rngs) if cfg.use_multimodal else None
     self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh, rngs=rngs) if cfg.use_audio else None
-
-    decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
-    self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
+    if cfg.pure_nnx_decoder:
+      self.decoder = NNXDecoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
+    else:
+      self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
+      self.decoder = nnx_wrappers.ToNNX(self.decoder, rngs=rngs)
     self.hidden_states = None
 
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=cfg, model_mode=model_mode)
@@ -356,12 +367,13 @@ class Transformer(nnx.Module):
     else:
       dummy_attention_metadata = None
 
-    self.decoder.lazy_init(
-        shared_embedding=self.token_embedder,
-        decoder_input_tokens=dummy_decoder_input_tokens,
-        decoder_positions=dummy_decoder_positions,
-        attention_metadata=dummy_attention_metadata,
-    )
+    if not cfg.pure_nnx_decoder:
+      self.decoder.lazy_init(
+          shared_embedding=self.token_embedder,
+          decoder_input_tokens=dummy_decoder_input_tokens,
+          decoder_positions=dummy_decoder_positions,
+          attention_metadata=dummy_attention_metadata,
+      )
 
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
@@ -483,6 +495,10 @@ class Transformer(nnx.Module):
     if self.config.distill_beta > 0.0 and "intermediates" not in mutable_collections:
       mutable_collections.append("intermediates")
 
+    # NNXDecoder does not accept a `mutable` kwarg (NNX manages state in-place);
+    # only pass it for wrapped Linen decoders.
+    mutable_kwargs = {} if isinstance(self.decoder, NNXDecoder) else {"mutable": mutable_collections}
+
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,
@@ -501,7 +517,7 @@ class Transformer(nnx.Module):
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
         deepstack_visual_embeds=deepstack_visual_embeds,
-        mutable=mutable_collections,
+        **mutable_kwargs,
     )
 
     # Materialize hidden state when vocab tiling is enabled

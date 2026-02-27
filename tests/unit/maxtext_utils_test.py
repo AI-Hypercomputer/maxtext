@@ -14,10 +14,14 @@
 
 """Tests for the common MaxText utilities"""
 
+import functools
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Sequence
 import unittest
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
+from dataclasses import dataclass, field
+import numpy as np
+import optax
 
 from flax import linen as nn
 from flax import nnx
@@ -26,10 +30,11 @@ from flax.training import train_state
 import jax
 from jax import random, vmap
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
+from jax.experimental import mesh_utils
 from maxtext.configs import pyconfig
 from maxtext.common.gcloud_stub import is_decoupled
-from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
 from maxtext.inference import inference_utils
 from maxtext.layers import quantizations
 from maxtext.models import models
@@ -37,11 +42,8 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
+from maxtext.utils import maxtext_utils_nnx
 from tests.utils.test_helpers import get_test_config_path
-import numpy as np
-import optax
-
-Transformer = models.transformer_as_linen
 
 
 class TestGradientClipping(unittest.TestCase):
@@ -178,11 +180,7 @@ class UpdateStateParamTest(unittest.TestCase):
         "decoder": {"gate": {"bias": jnp.array([0.5, 0.5])}},
     }
     self.state = train_state.TrainState(
-        step=0,
-        apply_fn=self.model.apply,
-        params=self.initial_params,
-        tx=None,
-        opt_state={},
+        step=0, apply_fn=self.model.apply, params=self.initial_params, tx=None, opt_state={}
     )
 
   def test_update_mode_add(self):
@@ -352,18 +350,31 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    if self.config.pure_nnx:
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      self.model = models.transformer_as_linen(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)
-    state, _ = maxtext_utils.setup_decode_state(self.model, self.config, rng, self.mesh, None)
+    if self.config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng)
+    state, _ = maxtext_utils.setup_decode_state(self.config, self.mesh, None, init_state_fn)
     self.assertEqual(state.tx, None)
     self.assertEqual(state.opt_state, {})
 
   def test_setup_initial_state(self):
     rng = random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
-    state, _, _, _ = maxtext_utils.setup_initial_state(self.model, None, tx, self.config, rng, self.mesh, None)
+    if self.config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
+    state, _, _, _ = maxtext_utils.setup_initial_state(None, self.config, self.mesh, None, init_state_fn)
     self.assertEqual(state.tx, tx)
     self.assertNotEqual(state.opt_state, {})
 
@@ -899,36 +910,165 @@ class TestLearningRateSchedules(unittest.TestCase):
     self.assertIn("wsd_decay_steps_fraction", str(cm.exception))
 
 
-class TestGetAbstractState(unittest.TestCase):
-  """Test class for get_abstract_state."""
+class TestMeshUtils(unittest.TestCase):
+  """Test suite for the mesh creation utility function."""
+
+  @dataclass
+  class MockConfig:
+    """Minimal mock for pyconfig.HyperParameters."""
+
+    init_weights_seed: int = 42
+    shard_mode: str = ShardMode.EXPLICIT
+    mesh_axes: Sequence[str] = field(default_factory=lambda: ["data", "model"])
 
   def setUp(self):
-    self.config = pyconfig.initialize(
-        [None, get_test_config_path()],
-        enable_checkpointing=False,
-        model_name="llama3.1-8b",
-        per_device_batch_size=1,
-        max_target_length=16,
+    # Setup a dummy device array for the mock to return
+    self.devices_array = np.array(jax.devices())
+
+  @patch("MaxText.maxtext_utils.create_device_mesh")
+  def test_get_mesh_explicit_mode(self, mock_create_device_mesh):
+    """Tests that ShardMode.EXPLICIT sets axis_types to MANUAL."""
+    # 1. Setup Mock
+    mock_create_device_mesh.return_value = self.devices_array[:1].reshape((1,))
+    config = self.MockConfig(shard_mode=ShardMode.EXPLICIT, mesh_axes=["data"])
+
+    # 2. Run function
+    mesh = maxtext_utils.get_mesh_from_config(config)
+
+    # 3. Assertions
+    # Check that the internal utility was called correctly
+    mock_create_device_mesh.assert_called_once_with(config, None)
+
+    # Verify Mesh properties
+    self.assertEqual(mesh.axis_names, ("data",))
+    # In JAX, AxisType.MANUAL is the equivalent for explicit control
+    self.assertEqual(mesh.axis_types, (AxisType.Explicit,))
+
+  @patch("MaxText.maxtext_utils.create_device_mesh")
+  def test_get_mesh_auto_mode(self, mock_create_device_mesh):
+    """Tests that ShardMode.AUTO sets axis_types to AUTO."""
+    # 1. Setup Mock
+    mock_create_device_mesh.return_value = self.devices_array[:2].reshape((2, 1))
+    config = self.MockConfig(shard_mode=ShardMode.AUTO, mesh_axes=["data", "model"])
+
+    # 2. Run function
+    mesh = maxtext_utils.get_mesh_from_config(config)
+
+    # 3. Assertions
+    self.assertEqual(len(mesh.axis_types), 2)
+    self.assertTrue(all(t == AxisType.Auto for t in mesh.axis_types))
+
+  @patch("MaxText.maxtext_utils.create_device_mesh")
+  def test_get_mesh_with_provided_devices(self, mock_create_device_mesh):
+    """Tests that provided devices are passed through to the mesh creator."""
+    config = self.MockConfig()
+    specific_devices = self.devices_array[:2].reshape((1, 2))
+    mock_create_device_mesh.return_value = specific_devices
+
+    _ = maxtext_utils.get_mesh_from_config(config, devices=specific_devices)
+
+    # Verify the second argument to create_device_mesh was our device list
+    mock_create_device_mesh.assert_called_once_with(config, specific_devices)
+
+
+class TestNNXAbstractState(unittest.TestCase):
+  """Test the get_abstract_state_nnx func."""
+
+  @dataclass
+  class MockConfig:
+    init_weights_seed: int = 42
+    shard_optimizer_over_data: bool = False
+    optimizer_memory_host_offload: bool = False
+    parameter_memory_host_offload: bool = False
+    param_scan_axis: int = 0
+    logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]]])
+
+  class MockTrainState(nnx.Module):
+    """Simulates a TrainState with params and optimizer state."""
+
+    def __init__(self, rngs: nnx.Rngs):
+      # Model parameters
+      device_num = len(jax.local_devices())
+      self.params = nnx.Linear(
+          2, 4, kernel_init=nnx.with_partitioning(nnx.initializers.ones, sharding=("model",)), rngs=rngs
+      )
+      # Simulated optimizer state
+      self.optimizer = nnx.Variable(jnp.zeros((device_num,)), sharding=("model",))
+
+  def setUp(self):
+    # Create a real 1D mesh on local devices
+    devices = jax.local_devices()
+    self.mesh = Mesh(mesh_utils.create_device_mesh((len(devices), 1)), axis_names=("model", "data"))
+    self.config = self.MockConfig()
+
+  def nnx_init_trainstate_wrapper(self):
+    """Wrapper to initialize the mock NNX model."""
+    rngs = maxtext_utils_nnx.create_nnx_rngs(self.config)
+    return self.MockTrainState(rngs)
+
+  def test_basic_abstraction(self):
+    """Verifies the basic return structure and partition spec extraction."""
+    abstract_state, annotations, shardings = maxtext_utils.get_abstract_state_nnx(
+        self.config, self.mesh, self.nnx_init_trainstate_wrapper
     )
-    devices_array = maxtext_utils.create_device_mesh(self.config)
-    self.mesh = Mesh(devices_array, self.config.mesh_axes)
-    quant = quantizations.configure_quantization(self.config)
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-    self.rng = jax.random.PRNGKey(0)
-    self.tx = optax.adam(learning_rate=0.001)
 
-  def test_get_abstract_state(self):
-    """Tests that get_abstract_state returns abstract arrays."""
-    # get_abstract_state returns a tuple, the first element is the abstract state.
-    abstract_state, _, _ = maxtext_utils.get_abstract_state(self.model, self.tx, self.config, self.rng, self.mesh, None)
+    # Check return types
+    self.assertIsInstance(abstract_state, nnx.State)
+    self.assertIsInstance(annotations, nnx.State)
+    self.assertIsInstance(shardings, nnx.State)
 
-    # Check that params are abstract
-    param_leaves = jax.tree_util.tree_leaves(abstract_state.params)
-    self.assertTrue(all(isinstance(leaf, jax.ShapeDtypeStruct) for leaf in param_leaves))
+    # Verify PartitionSpec was extracted correctly from the mock model's annotations
+    # Path: params -> kernel -> spec
+    self.assertEqual(
+        annotations.params.kernel.get_value(),
+        PartitionSpec(
+            "model",
+        ),
+    )
 
-    # Check that opt_state is abstract
-    opt_state_leaves = jax.tree_util.tree_leaves(abstract_state.opt_state)
-    self.assertTrue(all(isinstance(leaf, jax.ShapeDtypeStruct) for leaf in opt_state_leaves))
+  def test_shard_optimizer_over_data(self):
+    """Verifies that 'data' is added to optimizer sharding using the real utility."""
+    self.config.shard_optimizer_over_data = True
+
+    _, annotations, _ = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Original Pspec for optimizer was PartitionSpec(None).
+    # add_data_to_sharding should find that dim 0 is compatible with mesh 'data'
+    # and update it to PartitionSpec(('data',)).
+    opt_spec = annotations.optimizer.get_value()
+
+    # Verify 'data' is now in the spec
+    self.assertEqual(opt_spec, PartitionSpec(("data", "model")))
+
+  def test_optimizer_host_offload(self):
+    """Verifies that optimizer memory is moved to host when configured."""
+    self.config.optimizer_memory_host_offload = True
+
+    _, _, shardings = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Optimizer state should be pinned to host
+    opt_sharding = shardings.optimizer.get_value()
+    self.assertEqual(opt_sharding.memory_kind, "pinned_host")
+
+    # Params should still be on default memory (usually device)
+    param_sharding = shardings.params.kernel.get_value()
+    self.assertNotEqual(param_sharding.memory_kind, "pinned_host")
+
+  def test_parameter_host_offload(self):
+    """Verifies that parameter memory is moved to host when configured."""
+    self.config.parameter_memory_host_offload = True
+    self.config.param_scan_axis = 0
+
+    _, _, shardings = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Parameters should be pinned to host
+    param_sharding = shardings.params.kernel.get_value()
+    self.assertEqual(param_sharding.memory_kind, "pinned_host")
+
+  def test_invalid_init_fn(self):
+    """Ensures function raises error if no init function is provided."""
+    with self.assertRaises(AssertionError):
+      maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, None)
 
 
 if __name__ == "__main__":

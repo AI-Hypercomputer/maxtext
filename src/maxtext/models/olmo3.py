@@ -29,6 +29,7 @@ from jax.sharding import Mesh
 from maxtext.common.common_types import AttentionType, Config
 from maxtext.layers import attentions
 from maxtext.layers import initializers
+from maxtext.layers import linears
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
@@ -140,6 +141,8 @@ class Olmo3DecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
+    self.dropout = linears.Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+
   def __call__(
       self,
       inputs,
@@ -193,7 +196,7 @@ class Olmo3DecoderLayer(nnx.Module):
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
-    layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
+    layer_output = self.dropout(layer_output, deterministic=deterministic)
 
     layer_output = nn.with_logical_constraint(
         layer_output,

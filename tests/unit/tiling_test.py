@@ -139,7 +139,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         enable_dropout=False,
         max_target_length=self.seq_len,
         per_device_batch_size=4,
-        base_num_decoder_layers=0,
+        base_num_decoder_layers=1,
         dtype="float32",
         matmul_precision="high",
         gradient_accumulation_steps=1,
@@ -173,7 +173,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         enable_dropout=False,
         max_target_length=self.seq_len,
         per_device_batch_size=1,
-        base_num_decoder_layers=0,
+        base_num_decoder_layers=1,
         dtype="float32",
         matmul_precision="high",
         gradient_accumulation_steps=4,
@@ -270,10 +270,13 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         max_target_length=self.seq_len,
         per_device_batch_size=self.batch_size,
         logits_via_embedding=False,
-        base_num_decoder_layers=0,
+        base_num_decoder_layers=1,
         dtype="float32",
         matmul_precision="high",
         num_vocab_tiling=1,
+        pure_nnx=False,
+        enable_nnx=False,
+        pure_nnx_decoder=False,
     )
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
@@ -305,10 +308,13 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         max_target_length=self.seq_len,
         per_device_batch_size=self.batch_size,
         logits_via_embedding=False,
-        base_num_decoder_layers=0,
+        base_num_decoder_layers=1,
         dtype="float32",
         matmul_precision="high",
         num_vocab_tiling=4,
+        pure_nnx=False,
+        enable_nnx=False,
+        pure_nnx_decoder=False,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
     # Loss correctness test

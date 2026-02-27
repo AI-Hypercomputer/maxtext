@@ -18,25 +18,25 @@
 import functools
 import pickle
 import os
-
-from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
-from flax.training import train_state
-
+from typing import Sequence
 import numpy as np
-
-from jax.experimental import mesh_utils
-from jax.experimental.serialize_executable import deserialize_and_load
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import AxisType, Mesh, NamedSharding
+from jax.experimental import mesh_utils
+from jax.experimental.serialize_executable import deserialize_and_load
+
+from flax import nnx, linen as nn
+from flax.linen import partitioning as nn_partitioning
+from flax.training.train_state import TrainState
 
 import optax
-
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
-from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from maxtext.configs import pyconfig
+from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, ShardMode
 from maxtext.configs import types
 from maxtext.inference.page_manager import PageState
 from maxtext.common import checkpointing
@@ -45,6 +45,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import sharding
+from maxtext.utils import maxtext_utils_nnx
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -92,7 +93,10 @@ def get_functional_train_with_signature(
   """Get the shardings (both state and data) for `train_step`."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
   functional_train.__name__ = "train_step"
-  in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  if config.pure_nnx:
+    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
+  else:
+    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
   donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
@@ -103,7 +107,10 @@ def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shar
   """Get the shardings (both state and data) for `eval_step`."""
   functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
-  in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  if config.pure_nnx:
+    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
+  else:
+    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
   donate_argnums = ()  # state will be kept instead of being donated in eval_step
@@ -951,15 +958,15 @@ def update_state_param(state, target_path, value):
   return state.replace(params=new_params)
 
 
-def init_decode_state(apply_fn, params) -> train_state.TrainState:
+def init_decode_state(apply_fn, params) -> TrainState:
   """Init train state with null opt state for decode."""
-  state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
+  state = TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
   return state
 
 
 def init_training_state(apply_fn, params, tx):
   """Init train state with null opt state for decode."""
-  state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
+  state = TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
   return state
 
 
@@ -1013,14 +1020,13 @@ def get_abstract_param(model, config):
   return abstract_vars
 
 
-def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
+def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
   """Setup decode state by loading params from a checkpoint.
   Args:
-    model: the flax model to initialize
     config: config object
-    rng: jax.prng key
     mesh: jax.devices() mesh
     checkpoint_manager: Checkpoint manager
+    init_state_fn: function to initialize the model state
 
   Returns:
     state: state with decode params loaded from the checkpoint
@@ -1030,12 +1036,12 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     # generate random params
     max_logging.log("No decode checkpoint specified - generating random weights.")
     state, state_mesh_annotations, _, _ = setup_initial_state(
-        model, None, None, config, rng, mesh, checkpoint_manager, False
+        None, config, mesh, checkpoint_manager, init_state_fn, False
     )
   else:
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
-    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
+    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(config, mesh, init_state_fn, False)
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
           config.load_parameters_path,
@@ -1050,49 +1056,44 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   return state, state_mesh_annotations
 
 
-def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
+def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_state_fn):
   is_training = True
   return setup_initial_state(
-      model,
       data_iterator,
-      tx,
       config,
-      rng,
       mesh,
       checkpoint_manager,
+      init_state_fn,
       is_training,
   )
 
 
 def setup_initial_state(
-    model,
     data_iterator,
-    tx,
     config,
-    rng,
     mesh,
     checkpoint_manager,
+    init_state_fn,
     is_training=True,
 ):
   """We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
 
   Args:
-    model: the flax model to initialize
-    tx: the optax.GradientTransformation
+    data_iterator: data iterator
     config: config object
-    rng: jax.prng key
     mesh: jax.devices() mesh
     checkpoint_manager: an Orbax checkpointing.CheckpointManager object
+    init_state_fn: function to initialize the training state
     is_training: True to initialize training state, False for decode state
 
   Returns:
-    state: the initialized train state
+    train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
     state_mesh_annotations: the mesh annotations for the train state
   """
 
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
-      model, tx, config, rng, mesh, is_training
+      config, mesh, init_state_fn, is_training
   )
 
   # Initialization
@@ -1126,25 +1127,41 @@ def setup_initial_state(
       else:
         # The update of data_iterator state happens in place, no need to assign explicitly
         state = restored["items"]
-    else:
-      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
-      init_state_partial.__name__ = "initialize_state"
-      # pylint: disable=not-callable
-      state = jax.jit(
-          init_state_partial,
-          in_shardings=None,
-          out_shardings=state_mesh_shardings,
-      )(rng)
-      if raw_params:  # If we loaded a partial state, we need to merge it.
-        state = state.replace(params=raw_params)
 
-  state = max_utils.unbox_logicallypartioned(state)
+      # For NNX, convert the pure dict to nnx.State using the abstract state as template
+      if config.pure_nnx:
+        nnx.replace_by_pure_dict(unboxed_abstract_state, state)
+        state = unboxed_abstract_state
+    else:
+      init_state_partial = init_state_fn
+      init_state_partial.__name__ = "initialize_state"
+      if config.pure_nnx:
+        state = jax.jit(
+            lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
+            in_shardings=None,
+            out_shardings=state_mesh_shardings,
+        )()
+      else:
+        # pylint: disable=not-callable
+        state = jax.jit(
+            init_state_partial,
+            in_shardings=None,
+            out_shardings=state_mesh_shardings,
+        )()
+      if raw_params:  # If we loaded a partial state, we need to merge it.
+        if config.pure_nnx:
+          # raw_params should have the same sharding info as in the model
+          nnx.update(state.model, raw_params)
+        else:
+          state = state.replace(params=raw_params)
+  if not config.pure_nnx:
+    state = max_utils.unbox_logicallypartioned(state)
 
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
-def get_logical_annotations(model, tx, config, rng, mesh, is_training=True):
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+def get_logical_annotations(config, mesh, init_state_fn):
+  init_state_partial = init_state_fn
 
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)
@@ -1152,9 +1169,12 @@ def get_logical_annotations(model, tx, config, rng, mesh, is_training=True):
   return logical_annotations
 
 
-def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
+def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+  if config.pure_nnx:
+    return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
+
+  init_state_partial = init_state_fn
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)
@@ -1192,6 +1212,74 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return (
       unboxed_abstract_sharded_state,
+      state_mesh_annotations,
+      state_mesh_shardings,
+  )
+
+
+def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=True):
+  """Calculates the abstract sharded state and memory placement for an NNX TrainState.
+
+  This function performs an abstract trace of the NNX model and optimizer using
+  `nnx.get_abstract_model`. It resolves logical sharding annotations into physical
+  JAX shardings and applies memory placement optimizations such as optimizer
+  sharding and host memory offloading (pinning to CPU RAM).
+
+  Args:
+    config: Configuration object containing sharding and offloading hyperparameters
+      (e.g., shard_optimizer_over_data, optimizer_memory_host_offload).
+    mesh: JAX physical mesh used to resolve logical axis names to physical devices.
+    nnx_init_trainstate_fn: A zero-argument factory function that produces a
+      TrainStateNNX instance during the abstract trace.
+    is_training: Boolean indicating if the state is for training. If True,
+      optimizer state is processed and memory offloading strategies are applied.
+
+  Returns:
+    A tuple containing (abstract_sharded_state, None, state_mesh_shardings):
+      abstract_sharded_state: An nnx.State containing ShapeDtypeStructs with
+        fully resolved physical sharding and memory_kind metadata.
+      state_mesh_annotations: An nnx.State tree consisting of the raw PartitionSpec
+        objects corresponding to each parameter/variable.
+      state_mesh_shardings: An nnx.State tree consisting of the raw JAX
+        Sharding objects corresponding to each parameter/variable.
+  """
+  assert nnx_init_trainstate_fn is not None, "get_abstract_state_nnx: init function must be given."
+
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    # Use nnx.get_abstract_model to get the abstract_state with NamedSharding info
+    _, abstract_state = nnx.get_abstract_model(nnx_init_trainstate_fn, mesh)
+
+  state_mesh_shardings = maxtext_utils_nnx.get_named_sharding_nnx(abstract_state)
+
+  if is_training and config.shard_optimizer_over_data:
+    # Add data to sharding for optimizer state
+    optimizer_sharding = jax.tree_util.tree_map_with_path(
+        functools.partial(sharding.add_data_to_sharding, mesh),
+        abstract_state.optimizer,
+        state_mesh_shardings.optimizer,
+    )
+    state_mesh_shardings.optimizer = optimizer_sharding
+  if is_training and config.optimizer_memory_host_offload:
+    optimizer_sharding = jax.tree_util.tree_map_with_path(
+        maxtext_utils_nnx.move_memory_to_host,
+        state_mesh_shardings.optimizer,
+        is_leaf=lambda x: isinstance(x, NamedSharding),
+    )
+    state_mesh_shardings.optimizer = optimizer_sharding
+  if is_training and config.parameter_memory_host_offload:
+    assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
+    _, state_params, _ = nnx.split(state_mesh_shardings, nnx.Param, ...)
+    state_params = jax.tree_util.tree_map_with_path(
+        maxtext_utils_nnx.move_memory_to_host,
+        state_params,
+        is_leaf=lambda x: isinstance(x, NamedSharding),
+    )
+    nnx.update(state_mesh_shardings, state_params)
+
+  abstract_sharded_state = maxtext_utils_nnx.set_named_sharding_nnx(abstract_state, state_mesh_shardings)
+  state_mesh_annotations = maxtext_utils_nnx.get_partition_spec_nnx(state_mesh_shardings)
+  return (
+      abstract_sharded_state,
       state_mesh_annotations,
       state_mesh_shardings,
   )
@@ -1435,26 +1523,41 @@ def print_shardings_params(params, params_sharding, mesh, logical_annotations=No
   """
   Print state shardings comparing Logical Definition vs Physical Result.
   """
-  if not hasattr(params, "params"):
-    params = {"params": params}
-  if not hasattr(params_sharding, "params"):
-    params_sharding = {"params": params_sharding}
-  if logical_annotations and not hasattr(logical_annotations, "params"):
-    logical_annotations = {"params": logical_annotations}
+  if not isinstance(params, nnx.State):
+    if not hasattr(params, "params"):
+      params = {"params": params}
+    if not hasattr(params_sharding, "params"):
+      params_sharding = {"params": params_sharding}
+    if logical_annotations and not hasattr(logical_annotations, "params"):
+      logical_annotations = {"params": logical_annotations}
 
   leaves_params, _ = jax.tree_util.tree_flatten_with_path(params)
   leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(params_sharding)
-  leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations)
 
-  for (path, leaf_val), (_, leaf_sharding), (_, leaf_logical_val) in zip(leaves_params, leaves_sharding, leaves_logical):
-    path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
-    shape = jax.typeof(leaf_val)
-    pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
-    pspec_str = str(tuple(pspec))
-    logical_str = str(leaf_logical_val)
+  if logical_annotations is not None:
+    leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations)
+    for (path, leaf_val), (_, leaf_sharding), (_, leaf_logical_val) in zip(
+        leaves_params, leaves_sharding, leaves_logical
+    ):
+      path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
+      shape = jax.typeof(leaf_val)
+      pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
+      pspec_str = str(tuple(pspec))
+      logical_str = str(leaf_logical_val)
 
-    message = f" {path_str}\n" f"    Shape:     {shape}\n" f"    Logical:   {logical_str}\n" f"    Physical:  {pspec_str}"
-    max_logging.info(message)
+      message = (
+          f" {path_str}\n" f"    Shape:     {shape}\n" f"    Logical:   {logical_str}\n" f"    Physical:  {pspec_str}"
+      )
+      max_logging.info(message)
+  else:
+    for (path, leaf_val), (_, leaf_sharding) in zip(leaves_params, leaves_sharding):
+      path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
+      shape = jax.typeof(leaf_val)
+      pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
+      pspec_str = str(tuple(pspec))
+
+      message = f" {path_str}\n" f"    Shape:     {shape}\n" f"    Physical:  {pspec_str}"
+      max_logging.info(message)
 
   print(flush=True)
 
@@ -1487,3 +1590,27 @@ def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
         delete_local_after=config.dump_jaxpr_delete_local_after,  # Keeping local for debugging
         all_host_upload=False,  # Only upload from lead host (Host 0)
     )
+
+
+def get_mesh_from_config(
+    config: pyconfig.HyperParameters,
+    devices: Sequence[jax.Device] | None = None,
+) -> Mesh:
+  """
+  Geh mesh from the configuration.
+
+  Args:
+    config: the configuration
+    devices: the devices
+
+  Returns:
+    the device mesh
+  """
+  devices_array = create_device_mesh(config, devices)
+
+  if config.shard_mode == ShardMode.EXPLICIT:
+    axis_types = tuple([AxisType.Explicit] * len(config.mesh_axes))
+  else:
+    axis_types = tuple([AxisType.Auto] * len(config.mesh_axes))
+
+  return Mesh(devices_array, config.mesh_axes, axis_types=axis_types)

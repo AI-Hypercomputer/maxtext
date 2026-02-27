@@ -147,7 +147,7 @@ class UnscanTest(unittest.TestCase):
         "run_name": "test",
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
-        "model_name": "llama3.1-8b",
+        "model_name": "gemma2-2b",
     } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -158,8 +158,7 @@ class UnscanTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_unscan_train_state_params(self):
     """Test unscan_train_state_params logic and performance with a real model."""
-    # Initialize a configuration for an 8B model.
-    config = self.init_pyconfig()
+    config = self.init_pyconfig(pure_nnx=False, enable_nnx=False, pure_nnx_decoder=False)
 
     _, _, sharding, _, mesh, *_, state = setup_train_loop(config, None)
 
@@ -181,7 +180,7 @@ class UnscanTest(unittest.TestCase):
     )
     jax.block_until_ready(params_to_unscan)
     end_time = time.time()
-    print(f"\nUnscanning 8B model took: {end_time - start_time:.4f} seconds.\n")
+    print(f"\nUnscanning model took: {end_time - start_time:.4f} seconds.\n")
 
     # Assertions to verify correctness.
     decoder_params = params_to_unscan["params"]["decoder"]
@@ -190,8 +189,8 @@ class UnscanTest(unittest.TestCase):
     self.assertIn(f"layers_{num_layers-1}", decoder_params)
 
     # Check shape of one of the unstacked tensors.
-    # The exact key might differ based on model implementation, adjust if needed.
-    unstacked_shape = decoder_params["layers_5"]["mlp"]["wi_0"]["kernel"].shape
+    # gemma2-2b uses mlp_global/mlp_local instead of mlp (alternating attention layers).
+    unstacked_shape = decoder_params["layers_5"]["mlp_global"]["wi_0"]["kernel"].shape
     expected_shape = (config.base_emb_dim, config.base_mlp_dim)
     self.assertEqual(unstacked_shape, expected_shape)
 

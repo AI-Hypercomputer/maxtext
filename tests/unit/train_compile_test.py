@@ -42,6 +42,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v4-8",
             "compile_topology_num_slices=1",
@@ -59,6 +60,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-16",
             "compile_topology_num_slices=1",
@@ -78,6 +80,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -100,6 +103,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "compile_topology_num_slices=1",
@@ -117,6 +121,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=2",
@@ -134,6 +139,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-16",
             "compile_topology_num_slices=1",
@@ -151,6 +157,7 @@ class TrainCompile(unittest.TestCase):
         (
             None,
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=tpu7x-16",
             "compile_topology_num_slices=1",
@@ -169,6 +176,7 @@ class TrainCompile(unittest.TestCase):
         (
             None,
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=tpu7x-8",
             "compile_topology_num_slices=2",
@@ -189,6 +197,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-64",
             "use_iota_embed=true",
@@ -208,6 +217,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -231,6 +241,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -254,6 +265,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -277,6 +289,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "compile_topology_num_slices=1",
@@ -300,6 +313,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -323,6 +337,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "compile_topology_num_slices=1",
@@ -342,6 +357,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -367,6 +383,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-64",
             "use_iota_embed=true",
@@ -390,6 +407,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
             "use_iota_embed=true",
@@ -414,6 +432,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -436,6 +455,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -458,6 +478,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-64",
             "use_iota_embed=true",
@@ -481,6 +502,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
             "use_iota_embed=true",
@@ -504,6 +526,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-64",
             "use_iota_embed=true",
@@ -528,6 +551,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-64",
             "use_iota_embed=true",
@@ -553,6 +577,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-64",
             "use_iota_embed=true",
@@ -576,6 +601,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-64",
             "use_iota_embed=true",
@@ -600,6 +626,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-64",
             "compile_topology_num_slices=8",
@@ -613,6 +640,8 @@ class TrainCompile(unittest.TestCase):
             "pipeline_parallel_layers=56",
             "ici_expert_parallelism=16",
             "dcn_pipeline_parallelism=8",
+            "first_num_dense_layers=8",
+            "base_num_decoder_layers=72",
         )
     )
 
@@ -623,6 +652,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
             "compile_topology_num_slices=8",
@@ -630,7 +660,7 @@ class TrainCompile(unittest.TestCase):
             "per_device_batch_size=1",
             "max_target_length=1024",
             "pipeline_parallel_layers=56",
-            "base_num_decoder_layers=61",  # Remainder of 5 will fail when sharded incorrectly.
+            "base_num_decoder_layers=64",  # Must be divisible by dcn_pipeline_parallelism=8 in NNX scan path.
             "ici_expert_parallelism=16",
             "dcn_pipeline_parallelism=8",
         )
@@ -643,6 +673,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
             "compile_topology_num_slices=1",
@@ -664,6 +695,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-16",
             "compile_topology_num_slices=1",
@@ -676,6 +708,7 @@ class TrainCompile(unittest.TestCase):
             "sparse_matmul=True",
             "megablox=True",
             "attention=flash",
+            "enable_dropout=False",
         )
     )
 
@@ -686,6 +719,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-16",
             "compile_topology_num_slices=1",
@@ -698,6 +732,7 @@ class TrainCompile(unittest.TestCase):
             "sparse_matmul=False",
             "capacity_factor=-1",
             "attention=flash",
+            "enable_dropout=False",
         )
     )
 
@@ -708,6 +743,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "compile_topology_num_slices=1",
@@ -724,6 +760,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
@@ -740,6 +777,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "compile_topology_num_slices=1",
@@ -757,6 +795,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "use_iota_embed=true",
@@ -785,6 +824,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
@@ -792,6 +832,7 @@ class TrainCompile(unittest.TestCase):
             "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
+            "enable_dropout=False",
         )
     )
 
@@ -803,6 +844,7 @@ class TrainCompile(unittest.TestCase):
         (
             "",
             get_test_config_path(),
+            "pure_nnx=True",
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",

@@ -20,11 +20,16 @@ for various models match their hardcoded reference values.
   python3 -m pytest -v --pyargs tests.muon_test -rP -s
 """
 
-import unittest
-from absl.testing import parameterized
-from optax.contrib import MuonDimensionNumbers as mdn
-from maxtext.utils.muon_utils import get_model_mdn
 import pytest
+import unittest
+from unittest.mock import MagicMock
+from absl.testing import parameterized
+
+from flax import nnx
+import jax.numpy as jnp
+from optax.contrib import MuonDimensionNumbers as mdn
+from maxtext.utils import muon_utils
+
 
 # deepseek2, specific: q_lora_rank=0
 # applicable: deepseek2-16, but not deepseek2-236b (q_lora_rank=1536)
@@ -43,6 +48,7 @@ _DEEPSEEK2_ATTENTION = {
 DEEPSEEK2_DIMENSION_NUMBER = {
     "params": {
         "decoder": {
+            "decoder_norm": {"scale": None},
             "dense_layers": {
                 "mlp": {
                     "wi_0": {"kernel": mdn((0,), (-1,))},
@@ -51,7 +57,8 @@ DEEPSEEK2_DIMENSION_NUMBER = {
                 },
                 **_DEEPSEEK2_ATTENTION,
             },
-            "moe_layers": {
+            "logits_dense": {"kernel": None},
+            "moe_stack": {
                 "DeepSeekMoeBlock_0": {
                     "MoeBlock_0": {
                         "wi_0": mdn((-2,), (-1,)),
@@ -67,8 +74,6 @@ DEEPSEEK2_DIMENSION_NUMBER = {
                 },
                 **_DEEPSEEK2_ATTENTION,
             },
-            "decoder_norm": {"scale": None},
-            "logits_dense": {"kernel": None},
         },
         "token_embedder": {"embedding": None},
     }
@@ -93,6 +98,7 @@ _DEEPSEEK3_ATTENTION = {
 DEEPSEEK3_DIMENSION_NUMBER = {
     "params": {
         "decoder": {
+            "decoder_norm": {"scale": None},
             "dense_layers": {
                 "mlp": {
                     "wi_0": {"kernel": mdn((0,), (-1,))},
@@ -101,7 +107,8 @@ DEEPSEEK3_DIMENSION_NUMBER = {
                 },
                 **_DEEPSEEK3_ATTENTION,
             },
-            "moe_layers": {
+            "logits_dense": {"kernel": None},
+            "moe_stack": {
                 "DeepSeekMoeBlock_0": {
                     "MoeBlock_0": {
                         "wi_0": mdn((-2,), (-1,)),
@@ -117,8 +124,6 @@ DEEPSEEK3_DIMENSION_NUMBER = {
                 },
                 **_DEEPSEEK3_ATTENTION,
             },
-            "decoder_norm": {"scale": None},
-            "logits_dense": {"kernel": None},
         },
         "token_embedder": {"embedding": None},
     }
@@ -232,8 +237,96 @@ class MuonDimensionTest(parameterized.TestCase):
     Initializes the specified MaxText model and asserts that the generated
     Muon dimension numbers match the hardcoded reference.
     """
-    actual_output = get_model_mdn(model_name, scan_layers=True)
+    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, pure_nnx=False)
     self.assertEqual(actual_output, expected_output)
+
+
+class TestMuonLogic(unittest.TestCase):
+  """Tests the granular path transformation functions."""
+
+  def test_is_path_contain_any(self):
+    # pylint: disable=protected-access
+    self.assertTrue(muon_utils._is_path_contain_any(("a", "b"), ("x", "a", "z")))
+    self.assertFalse(muon_utils._is_path_contain_any(("a", "b"), ("x", "y", "z")))
+
+  def test_transform_logic_exclusions(self):
+    self.assertIsNone(muon_utils.transform_logic(("layer_0", "bias")))
+    self.assertIsNone(muon_utils.transform_logic(("layer_0", "scale")))
+    self.assertIsNone(muon_utils.transform_logic(("embedding", "kernel")))
+
+  def test_transform_logic_moe(self):
+    path = ("layers_0", "MoeBlock_0", "wi_0")
+    result = muon_utils.transform_logic(path)
+    self.assertEqual(result.reduction_axis, (-2,))
+    self.assertEqual(result.output_axis, (-1,))
+
+  def test_transform_logic_attention(self):
+    path_out = ("layers_0", "self_attention", "out", "kernel")
+    self.assertEqual(muon_utils.transform_logic(path_out), mdn((0, -2), (-1,)))
+
+    path_q = ("layers_0", "self_attention", "query", "kernel")
+    self.assertEqual(muon_utils.transform_logic(path_q), mdn((0,), (-2, -1)))
+
+  def test_get_transform_tree(self):
+    fake_tree = {"params": {"layer_0": {"kernel": "leaf", "bias": "leaf"}, "MoeBlock_0": {"wi_0": "leaf"}}}
+    result = muon_utils.get_transform_tree(fake_tree)
+    self.assertEqual(result["params"]["layer_0"]["kernel"], mdn((0,), (-1,)))
+    self.assertIsNone(result["params"]["layer_0"]["bias"])
+
+  def test_get_muon_weight_dimension_numbers_nnx(self):
+    """Verifies dimension extraction for stateful NNX modules."""
+
+    class MockNNXModel(nnx.Module):
+      """Mock NNX Module."""
+
+      def __init__(self, rngs: nnx.Rngs):
+        # 1. Standard layer
+        self.layer1 = nnx.Linear(2, 4, rngs=rngs)
+
+        # 2. MoE specific naming to trigger transform logic.
+        # The logic expects "MoeBlock_0" AND "wi_0"/"wi_1"/"wo" in the path.
+        # We nest the linear layer to create the path: ('MoeBlock_0', 'wi_0', 'kernel')
+        self.MoeBlock_0 = nnx.Module()
+        self.MoeBlock_0.wi_0 = nnx.Linear(4, 2, rngs=rngs)
+
+        # 3. Exclusion case (scaler/scale)
+        self.scale = nnx.Param(jnp.ones((1,)))
+
+    # Use eval_shape to create an abstract version of the model.
+    model = nnx.eval_shape(lambda: MockNNXModel(rngs=nnx.Rngs(0)))
+    config = MagicMock()
+
+    # Extract dimension numbers using the NNX path in muon_utils
+    result = muon_utils.get_muon_weight_dimension_numbers(model, config)
+
+    # Verify standard weight path: ('layer1', 'kernel') -> default (0,)
+    self.assertEqual(result.layer1.kernel.value, mdn((0,), (-1,)))
+
+    # Verify MoE weight path: ('MoeBlock_0', 'wi_0', 'kernel') -> (-2,)
+    self.assertEqual(result.MoeBlock_0.wi_0.kernel.value, mdn((-2,), (-1,)))
+
+    # Verify exclusion (scalar/scale)
+    self.assertIsNone(result.scale.value)
+
+  def test_nnx_deepseek_attention_logic(self):
+    """Simulates a DeepSeek-like attention structure in NNX."""
+
+    class DeepSeekAttention(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.self_attention = nnx.Module()
+        self.self_attention.query = nnx.Linear(8, 8, rngs=rngs)
+        self.self_attention.out = nnx.Linear(8, 8, rngs=rngs)
+
+    # Use eval_shape to create an abstract version of the model.
+    model = nnx.eval_shape(lambda: DeepSeekAttention(nnx.Rngs(0)))
+    config = MagicMock()
+    result = muon_utils.get_muon_weight_dimension_numbers(model, config)
+
+    # Check attention query: [0] -> [-2, -1]
+    self.assertEqual(result.self_attention.query.kernel.value, mdn((0,), (-2, -1)))
+    # Check attention out: [0, -2] -> [-1]
+    self.assertEqual(result.self_attention.out.kernel.value, mdn((0, -2), (-1,)))
 
 
 if __name__ == "__main__":

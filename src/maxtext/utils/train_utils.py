@@ -15,10 +15,14 @@
 # pylint: disable=bare-except, consider-using-generator
 """ Utils that are only interesting for training in MaxText. """
 
-import os
-import jax
 import functools
+import os
+from functools import partial
+
+import jax
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
+from maxtext.layers import train_state_nnx
 from maxtext.common import checkpointing
 from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
@@ -33,12 +37,17 @@ from maxtext.utils.rampup_batch import create_rampup_manager
 from maxtext.trainers.diloco import diloco
 
 
-def create_training_tools(config, model, mesh):
-  """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
-  init_rng = jax.random.PRNGKey(config.init_weights_seed)
+def create_training_optimizer(config, model):
+  """Creates the optimizer and learning rate schedule."""
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
   tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
+  return learning_rate_schedule, tx
+
+
+def create_checkpoint_manager(config, mesh, init_state_fn):
+  """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
+  # pass in model for muon
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_multi_tier_checkpointing:
     checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
@@ -47,7 +56,7 @@ def create_training_tools(config, model, mesh):
         mesh,
     )
   elif config.enable_emergency_checkpoint:
-    abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
     checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
         config.local_checkpoint_directory,
         config.checkpoint_dir,
@@ -81,7 +90,7 @@ def create_training_tools(config, model, mesh):
         config.checkpoint_storage_concurrent_gb,
     )
 
-  return init_rng, checkpoint_manager, learning_rate_schedule, tx
+  return checkpoint_manager
 
 
 def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings):
@@ -187,15 +196,33 @@ def setup_train_loop(config, recorder, devices=None):
     data_iterator:
     data_loader:
     rampup_manager: the class managing rampup batch sizes
-    state: the initialized train state
+    train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
   """
   # pylint: disable=import-outside-toplevel
   from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    model = model_creation_utils.from_config(config, devices)
-    mesh = model.mesh
-    init_rng, checkpoint_manager, learning_rate_schedule, tx = create_training_tools(config, model, mesh)
+    is_training = True
+    init_rng = jax.random.PRNGKey(config.init_weights_seed)
+    mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    if config.pure_nnx:
+      # Create abstract NNX model.
+      _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
+    else:
+      model = model_creation_utils.from_config(config, devices)
+    learning_rate_schedule, tx = create_training_optimizer(config, model)
+
+    if config.pure_nnx:
+      # For NNX, the train state is wrapped in the TrainStateNNX module.
+      def create_train_state_fn():
+        model = _create_model_partial()
+        optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+        return train_state_nnx.TrainStateNNX(model, optimizer)
+
+      init_state_fn = create_train_state_fn
+    else:
+      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
+    checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
@@ -221,8 +248,17 @@ def setup_train_loop(config, recorder, devices=None):
           )
 
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+        data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
+    if config.pure_nnx:
+      with nn_partitioning.axis_rules(config.logical_axis_rules):
+        # train_state is instance of TrainStateNNX
+        state_graphdef, _ = nnx.get_abstract_model(init_state_fn, mesh)
+        _, state_params, _ = nnx.split(state.model, nnx.Param, ...)
+        _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
+    else:
+      state_params = state.params
+      state_mesh_shardings_params = state_mesh_shardings.params
 
     if config.enable_diloco:
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -240,18 +276,25 @@ def setup_train_loop(config, recorder, devices=None):
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
     if not config.using_pipeline_parallelism and not config.use_multimodal:
       # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-      sharding.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+      sharding.assert_params_sufficiently_sharded(state_params, mesh, config.sharding_tolerance)
 
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
-      logical_annotations = maxtext_utils.get_logical_annotations(model, tx, config, init_rng, mesh, is_training=True)
+      if config.pure_nnx:
+        # TODO: Study how to get logical annotations of NNX module. Because of eager sharding, we
+        # probably already lost the logical partition info at this moment.
+        logical_annotations_params = None
+      else:
+        logical_annotations = maxtext_utils.get_logical_annotations(config, mesh, init_state_fn)
+        logical_annotations_params = logical_annotations.params
+
       max_utils.print_non_trivial_mesh_axis(model.mesh)
-      maxtext_utils.print_shardings_params(
-          state.params, state_mesh_shardings.params, model.mesh, logical_annotations.params
-      )
+      maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
 
     if config.use_dpo:
-      abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+      if config.pure_nnx:
+        raise NotImplementedError("DPO is not supported yet by NNX models.")
+      abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training)
       max_logging.log(
           "Restoring reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
       )
@@ -275,12 +318,18 @@ def setup_train_loop(config, recorder, devices=None):
       except FileNotFoundError:
         step0_restored = None
       if step0_restored is not None:
+        # TODO: For pure_nnx, the dpo state manipulation is different.
         reference_params = step0_restored["items"].params["params"]
         state = _merge_dpo_state(state, reference_params)
       else:
         max_logging.log(
             "Could not restore reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
         )
+  if config.pure_nnx:
+    train_state = nnx.merge(state_graphdef, state)
+    model = train_state.model
+  else:
+    train_state = state
 
   return (
       init_rng,
@@ -293,7 +342,7 @@ def setup_train_loop(config, recorder, devices=None):
       data_loader,
       rampup_manager,
       eval_data_iterator,
-      state,
+      train_state,
   )
 
 
