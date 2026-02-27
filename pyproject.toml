@@ -41,8 +41,11 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/MaxText", "src/maxtext", "src/install_maxtext_extra_deps"]
 
-[tool.hatch.build.targets.wheel.hooks.custom]
-path = "build_hooks.py"
+# TODO: Add this hook back when it handles device-type parsing
+# [tool.hatch.build.targets.wheel.hooks.custom]
+# path = "build_hooks.py"
 
 [project.scripts]
-install_maxtext_github_deps = "install_maxtext_extra_deps.install_github_deps:main"
+install_maxtext_tpu_github_deps = "install_maxtext_extra_deps.install_github_deps:main"
+install_maxtext_cuda12_github_deps = "install_maxtext_extra_deps.install_github_deps:main"
+install_maxtext_tpu_post_train_github_deps = "install_maxtext_extra_deps.install_post_train_github_deps:main"

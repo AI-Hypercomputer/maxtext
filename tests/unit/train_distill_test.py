@@ -15,6 +15,11 @@
 
 """Unit tests for the Distillation Trainer."""
 
+import pytest
+
+pytest.importorskip("tunix")
+pytestmark = [pytest.mark.tpu_only]
+
 import shutil
 import tempfile
 import unittest
