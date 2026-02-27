@@ -200,7 +200,7 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
     prompt_completion_ids = prompt_completion_tokens
     prompt_ids = prompt_tokens
   else:
-    raise ValueError(f"Can't hadnle the chat template output of type {type(prompt_completion_tokens)}")
+    raise ValueError(f"Can't handle the chat template output of type {type(prompt_completion_tokens)}")
 
   completion_tokens = prompt_completion_ids[len(prompt_ids) :]
   completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
