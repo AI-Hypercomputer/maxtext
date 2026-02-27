@@ -30,6 +30,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import maybe_shard_with_name
 from tests.utils.test_helpers import get_test_config_path
 
+
 class MLATestBase(parameterized.TestCase):
   """Test base for MLATest."""
 
@@ -46,6 +47,8 @@ class MLATestBase(parameterized.TestCase):
       "qk_nope_head_dim": 128,
       "qk_rope_head_dim": 64,
       "v_head_dim": 192,
+      "dtype": "float32",
+      "mla_naive_kvcache": False,  # TODO: Test both naive/non-naive modes once b/485997160 is resolved.
   }
 
   def setUp(self):
