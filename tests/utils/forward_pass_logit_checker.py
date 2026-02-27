@@ -427,7 +427,13 @@ def main(config, test_args):  # pylint: disable=W0621
     maxtext_model = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     maxtext_state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
 
-    prompts = ["I love to", "Today is a", "What is the"]
+    prompts = [
+        "I love to",
+        "Today is a",
+        "What is the",
+        "Its only been six months since Nano Banana took the internet by storm when it debuted in the Gemini app last year. Since then, weve seen Nano Banana lead viral trends, introduced our studio-quality version in Nano Banana Pro, and even showcased its incredible image editing prowess in our Super Bowl commercial this year.",
+    ]
+
     all_data_to_save = []
     for input_text in prompts:
       max_logging.log(f"\n--- Prompt: {input_text} ---")
