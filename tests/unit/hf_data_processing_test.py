@@ -22,7 +22,7 @@ import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.input_pipeline import hf_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.common.gcloud_stub import is_decoupled

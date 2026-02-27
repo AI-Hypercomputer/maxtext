@@ -24,7 +24,7 @@ import jax
 from unittest.mock import MagicMock
 from jax.sharding import Mesh
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common.data_loader import DataLoader, RampUpDataLoader
 from maxtext.utils import exceptions
 from maxtext.utils.maxtext_utils import create_device_mesh

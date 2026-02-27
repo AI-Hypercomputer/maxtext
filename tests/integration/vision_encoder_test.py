@@ -22,8 +22,8 @@ from flax.core.scope import VariableDict
 import jax
 import jax.numpy as jnp
 import jsonlines
-from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.configs import pyconfig
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
 from maxtext.inference.maxengine import maxengine
 from maxtext.models import models
 from maxtext.multimodal import processor_gemma3

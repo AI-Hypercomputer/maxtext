@@ -36,8 +36,8 @@ from flax import struct
 from flax.linen import partitioning as nn_partitioning
 import flax
 
-from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.configs import pyconfig
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.models import models
 from maxtext.layers import quantizations
 from maxtext.inference import inference_utils
@@ -1747,7 +1747,10 @@ def create_engine_from_config_flags(
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
   if maxengine_config_filepath is None:
     maxengine_config_filepath = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
-  updated_args = [os.path.join(MAXTEXT_PKG_DIR, "inference", "maxengine", "maxengine_server.py"), maxengine_config_filepath]
+  updated_args = [
+      os.path.join(MAXTEXT_PKG_DIR, "inference", "maxengine", "maxengine_server.py"),
+      maxengine_config_filepath,
+  ]
   for k, v in args.items():
     option = f"{k}={v}"
     updated_args.append(option)

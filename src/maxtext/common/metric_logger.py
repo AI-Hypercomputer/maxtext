@@ -25,7 +25,7 @@ import numpy as np
 
 import jax
 
-from MaxText.globals import EPS
+from maxtext.utils.globals import EPS
 from maxtext.common.gcloud_stub import mldiagnostics_modules
 from maxtext.common.gcloud_stub import workload_monitor
 from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics

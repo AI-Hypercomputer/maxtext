@@ -21,7 +21,7 @@ import importlib
 import jax
 from absl import logging
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils import max_logging
 
 OLD_MODULE_PATH = "MaxText.maxengine_server"

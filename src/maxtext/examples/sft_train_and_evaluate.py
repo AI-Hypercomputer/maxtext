@@ -85,8 +85,8 @@ import transformers
 
 from flax import nnx
 
-from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_REPO_ROOT
+from maxtext.configs import pyconfig
+from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.input_pipeline import instruction_data_processing
 from maxtext.trainers.post_train.sft import train_sft

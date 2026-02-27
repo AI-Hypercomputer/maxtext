@@ -214,6 +214,8 @@ wo_tile_drhs_buffer_count: 2
 wi_combine_scopes: False
 wo_combine_scopes: False
 
+merge_gating_gmm: False
+
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
 # how the expert axis is used to shard attention weights and activations
@@ -332,6 +334,7 @@ sliding_window_size: 0
 chunk_attn_window_size: 0
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
+z_loss_multiplier: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
 mla_naive_kvcache: True
@@ -1120,3 +1123,11 @@ engram_vocab_bases: []
 engram_kernel_size: 4
 # The seed for Engram hash mapping.
 engram_seed: 0
+
+##### Distillation parameters
+distill_alpha: 0.5
+distill_temperature: 1.0
+# distill_beta is used for cosine similarity loss between intermediate activataitions of out_proj in teacher/student models.
+# 0.0 value disables this feature.
+distill_beta: 0.0
+distill_layer_indices: None

@@ -35,7 +35,7 @@ del os
 
 from jax.sharding import Mesh
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.models import models
 from maxtext.trainers.post_train.dpo import dpo_utils
 from maxtext.utils import maxtext_utils

@@ -459,6 +459,7 @@ class RoutedMoE(nnx.Module):
         mesh=self.mesh,
         shard_mode=self.config.shard_mode,
         debug_sharding=self.config.debug_sharding,
+        extra_stack_level=1,
     )
 
   def _logical_to_mesh_axes(self, logical_name):

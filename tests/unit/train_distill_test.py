@@ -15,6 +15,11 @@
 
 """Unit tests for the Distillation Trainer."""
 
+import pytest
+
+pytest.importorskip("tunix")
+pytestmark = [pytest.mark.tpu_only]
+
 import shutil
 import tempfile
 import unittest
@@ -29,7 +34,7 @@ from absl.testing import absltest
 # Import the module under test
 from maxtext.trainers.post_train.distillation import train_distill
 from maxtext.trainers.post_train.distillation import distillation_utils
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 
 
 # pylint: disable=protected-access
@@ -157,43 +162,72 @@ class TrainDistillTest(unittest.TestCase):
 
   def test_monitored_strategy(self):
     """Verifies the strategy calculates metrics and returns the correct tuple."""
-    strategy = distillation_utils.MonitoredLogitStrategy(
+    strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=lambda m, **k: None,
         teacher_forward_fn=lambda m, **k: None,
         labels_fn=lambda t: t,
         temperature=1.0,
         alpha=0.5,
+        beta_feature=1.0,
+        layer_indices=None,
     )
 
     # Dummy inputs (batch=1, seq=2, vocab=4)
     # Note: Shapes must align for broadcasting
-    student_logits = jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10
-    teacher_logits = jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10
+    student_output = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10,
+        out_projection_activations=jnp.ones((32, 1, 1, 8)),
+    )
+    teacher_output = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10,
+        out_projection_activations=jnp.ones((32, 1, 1, 8)),
+    )
 
     # Labels must be One-Hot Encoded to match logits shape (1, 2, 4)
     labels_indices = jnp.array([[0, 1]])
     labels = jax.nn.one_hot(labels_indices, 4)
 
     # Run calculation
-    _, metrics = strategy.compute_loss(student_logits, teacher_logits, labels)
+    _, metrics = strategy.compute_loss(student_output, teacher_output, labels)
 
     # Verify structure
     self.assertIsInstance(metrics, dict)
 
     # Check keys required for TensorBoard
-    expected_keys = ["distill/soft_loss", "distill/hard_loss", "distill/kl_div", "distill/teacher_loss"]
+    expected_keys = [
+        "distill/soft_loss",
+        "distill/hard_loss",
+        "distill/kl_div",
+        "distill/teacher_loss",
+        "distill/out_proj_feature_loss",
+        "distill/total_loss",
+    ]
     for key in expected_keys:
       self.assertIn(key, metrics)
 
-    # Since inputs match perfectly, KL should be near 0
+    # Since inputs match perfectly, KL, feature loss should be near 0
     self.assertLess(metrics["distill/kl_div"], 1e-5)
+    self.assertLess(metrics["distill/out_proj_feature_loss"], 1e-5)
 
   def test_strategy_compute_eval_loss(self):
     """Covers MonitoredLogitStrategy.compute_eval_loss."""
-    strategy = distillation_utils.MonitoredLogitStrategy(
+    strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=mock.Mock(), teacher_forward_fn=mock.Mock(), labels_fn=mock.Mock(), temperature=1.0, alpha=0.5
     )
-    logits = jnp.array([[[10.0, 0.0]]])
+    # Case where feature loss is enabled
+    logits = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[10.0, 0.0]]]), out_projection_activations=np.ones((32, 1, 1, 8))
+    )
+    labels = jnp.array([[[1.0, 0.0]]])
+
+    loss, aux = strategy.compute_eval_loss(logits, labels)
+    self.assertTrue(isinstance(loss, jax.Array))
+    self.assertEqual(aux, {})
+
+    # Case where feature loss is disabled.
+    logits = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[10.0, 0.0]]]), out_projection_activations=None
+    )
     labels = jnp.array([[[1.0, 0.0]]])
 
     loss, aux = strategy.compute_eval_loss(logits, labels)

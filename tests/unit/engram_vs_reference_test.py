@@ -45,8 +45,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from MaxText import maxtext_utils
 
 from maxtext.layers.engram import CompressedTokenizer as CompressedTokenizerJAX
@@ -54,6 +53,7 @@ from maxtext.layers.engram import NgramHashMapping as NgramHashMappingJAX
 from maxtext.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX
 from maxtext.layers.engram import ShortConv as ShortConvJAX
 from maxtext.layers.engram import Engram as EngramJAX
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 
 
 def setUpModule():

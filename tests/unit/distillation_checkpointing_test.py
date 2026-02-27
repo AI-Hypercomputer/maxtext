@@ -14,6 +14,11 @@
 
 """Unit tests for Distillation Checkpointing logic."""
 
+import pytest
+
+pytest.importorskip("tunix")
+pytestmark = [pytest.mark.tpu_only]
+
 import json
 import os
 import shutil

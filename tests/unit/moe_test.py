@@ -21,7 +21,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.common_types import Config, DType
 from maxtext.layers import linears
