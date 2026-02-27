@@ -264,7 +264,8 @@ class QKClipMLATest(unittest.TestCase):
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
 
     args = [sys.argv[0], get_test_config_path()]
-    self.cfg = pyconfig.initialize(args, **self.config_arguments)
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    self.cfg = pyconfig.initialize(args, **self.config_arguments, **extra_args)
 
   def _run_mla_pass(self, config_overrides=None):
     """Initializes MLA, runs forward pass, and returns variables & intermediates."""
@@ -276,7 +277,8 @@ class QKClipMLATest(unittest.TestCase):
     run_config_args["emb_dim"] = 128
 
     args = [sys.argv[0], get_test_config_path()]
-    config = pyconfig.initialize(args, **run_config_args)
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    config = pyconfig.initialize(args, **run_config_args, **extra_args)
 
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
@@ -378,7 +380,8 @@ class QKClipMLATest(unittest.TestCase):
     run_config_args["emb_dim"] = 128
 
     args = [sys.argv[0], get_test_config_path()]
-    config = pyconfig.initialize(args, **run_config_args)
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    config = pyconfig.initialize(args, **run_config_args, **extra_args)
 
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)

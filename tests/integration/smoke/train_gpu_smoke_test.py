@@ -21,7 +21,7 @@ from absl.testing import absltest
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from tests.utils.test_helpers import get_test_dataset_path, get_test_base_output_directory, get_test_config_path_for
+from tests.utils.test_helpers import get_test_dataset_path, get_test_base_output_directory, get_test_config_path
 
 
 class Train(unittest.TestCase):
@@ -43,7 +43,7 @@ class Train(unittest.TestCase):
     train_main(
         [
             None,
-            get_test_config_path_for("gpu/gpu_smoke_test.yml"),
+            get_test_config_path("gpu/gpu_smoke_test.yml"),
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
