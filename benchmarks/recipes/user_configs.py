@@ -53,6 +53,7 @@ class UserConfig:
   zone: str = "us-east5-b"
   device_type: str = "v6e-256"
   priority: str = "medium"
+  base_output_directory: str = None
 
   # Images for env
   server_image: str = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
@@ -97,7 +98,7 @@ class UserConfig:
         self.worker_flags,
     )
     self.headless_workload_name = f"{self.user[:3]}-headless"
-    self.base_output_directory = f"gs://{self.user}-{self.region}/{self.user}-"
+    self.base_output_directory = self.base_output_directory or f"gs://{self.user}-{self.region}/{self.user}-"
 
     device_base_type = self.device_type.split("-", maxsplit=1)[0]
     self.models = build_user_models(
@@ -124,4 +125,7 @@ USER_CONFIG = UserConfig(
     selected_model_framework=["pathways"],
     selected_model_names=["llama3_1_8b_8192"],
     priority="medium",
+    base_output_directory=None,  # GCS Bucket path
+    # Optional parameters, useful for single controller data loading optimizations
+    # proxy_flags="--sidecar_name=external",
 )
