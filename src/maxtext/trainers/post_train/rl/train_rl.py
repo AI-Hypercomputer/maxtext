@@ -548,7 +548,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_async_scheduling=trainer_config.rollout_async_scheduling,
           rollout_vllm_kwargs={
               "hf_overrides": trainer_config.vllm_hf_overrides,
-              "rollout_vllm_enable_expert_parallelism": sampler_config.rollout_expert_parallelism > 1,
+              "enable_expert_parallel": sampler_config.rollout_expert_parallelism > 1,
           },
           **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
       ),
