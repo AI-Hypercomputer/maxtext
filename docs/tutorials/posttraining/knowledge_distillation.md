@@ -170,7 +170,7 @@ You can now fine-tune your smaller student model using supervised fine-tuning te
 Example command to run fine-tuning on a TPU v6e-8:
 
 ```bash
-python3 -m MaxText.sft_trainer src/maxtext/configs/post_train/sft.yml \
+python3 -m maxtext.trainers.post_train.sft.train_sft_deprecated src/maxtext/configs/post_train/sft.yml \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_DIRECTORY}/distillation/qwen3-32b-distill-llama3.1-8b \
   tokenizer_path=meta-llama/Llama-3.1-8B-Instruct tokenizer_type=huggingface \
@@ -209,7 +209,7 @@ largest_dir="${sorted_dirs[-1]}"
 FINE_TUNED_MODEL_CKPT_PATH=${CHECKPOINTS_PATH}/${largest_dir}/model_params
 
 # Fine-tune student model on original dataset
-python3 -m MaxText.sft.sft_trainer src/maxtext/configs/post_train/sft.yml \
+python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml \
   run_name=${RUN_NAME}_stage2 \
   base_output_directory=${BASE_DIRECTORY}/distillation/qwen3-32b-distill-llama3.1-8b \
   tokenizer_path=meta-llama/Llama-3.1-8B-Instruct tokenizer_type=huggingface \
