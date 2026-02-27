@@ -903,8 +903,10 @@ class TestGetAbstractState(unittest.TestCase):
   """Test class for get_abstract_state."""
 
   def setUp(self):
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.config = pyconfig.initialize(
         [None, get_test_config_path()],
+        **extra_args,
         enable_checkpointing=False,
         model_name="llama3.1-8b",
         per_device_batch_size=1,

@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """Profiler tests."""
-import os
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
@@ -21,7 +20,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from maxtext.configs import pyconfig
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.configs import types
 from maxtext.common import profiler
 from tests.utils.test_helpers import get_test_config_path
@@ -48,7 +46,7 @@ class ProfilerTest(unittest.TestCase):
   def test_profiler_options_populated_from_config(self):
     """Verifies that Profiler initializes jax.profiler.ProfileOptions from config."""
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
         run_name="test_profiler_options",
         base_output_directory="/tmp",
@@ -83,7 +81,7 @@ class ProfilerTest(unittest.TestCase):
   def test_profiler_activate_passes_options(self, mock_start_trace):
     """Verifies that activate() passes the profiling_options to jax.profiler.start_trace."""
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
         run_name="test_profiler_options",
         base_output_directory="/tmp",

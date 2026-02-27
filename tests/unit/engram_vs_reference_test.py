@@ -28,7 +28,6 @@ To run the test:
 from typing import List
 from dataclasses import dataclass, field
 import math
-import os
 import unittest
 from absl.testing import parameterized
 
@@ -47,13 +46,13 @@ from jax.sharding import Mesh
 
 from maxtext.configs import pyconfig
 from MaxText import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
 
 from maxtext.layers.engram import CompressedTokenizer as CompressedTokenizerJAX
 from maxtext.layers.engram import NgramHashMapping as NgramHashMappingJAX
 from maxtext.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX
 from maxtext.layers.engram import ShortConv as ShortConvJAX
 from maxtext.layers.engram import Engram as EngramJAX
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
 
 
 def setUpModule():
@@ -471,7 +470,7 @@ def init_torch_weights(module, std=1):
 def get_cfg_and_mesh(config):
   """Returns MaxText configuration and mesh."""
   cfg = pyconfig.initialize(
-      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      [None, get_test_config_path()],
       run_name="",
       enable_checkpointing=False,
       model_name="default",

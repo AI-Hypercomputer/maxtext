@@ -14,7 +14,6 @@
 
 """Test for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
-import os.path
 import unittest
 import pytest
 
@@ -26,12 +25,13 @@ from jax.sharding import Mesh
 import numpy as np
 
 from maxtext.configs import pyconfig
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers import attention_mla, linears, mhc, moe
 from maxtext.layers.initializers import nd_dense_init
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import maxtext_utils
+from maxtext.common.gcloud_stub import is_decoupled
+from tests.utils.test_helpers import get_test_config_path
 
 
 class TestExpandReduce(unittest.TestCase):
@@ -92,8 +92,10 @@ class TestMHC(unittest.TestCase):
 
   def setUp(self):
     self.dim = 16
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
+        **extra_args,
         run_name="test_mhc",
         enable_checkpointing=False,
         model_name="deepseek-custom",

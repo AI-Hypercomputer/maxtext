@@ -24,15 +24,16 @@ from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 
 
-def get_test_config_path():
-  """Return absolute path to the chosen test config file.
+def get_test_config_path(relative_path: str = "base.yml"):
+  """Returns the absolute path for a test config.
 
-  Returns `decoupled_base_test.yml` when decoupled, otherwise `base.yml`.
+  If `relative_path` is `base.yml`, applies the decoupled-mode logic and returns
+  `decoupled_base_test.yml` when decoupled, otherwise `base.yml`.
   """
-  base_cfg = "base.yml"
-  if is_decoupled():
-    base_cfg = "decoupled_base_test.yml"
-  return os.path.join(MAXTEXT_CONFIGS_DIR, base_cfg)
+  if relative_path == "base.yml":
+    base_cfg = "decoupled_base_test.yml" if is_decoupled() else "base.yml"
+    return os.path.join(MAXTEXT_CONFIGS_DIR, base_cfg)
+  return os.path.join(MAXTEXT_CONFIGS_DIR, relative_path)
 
 
 def get_post_train_test_config_path(sub_type="sft"):
