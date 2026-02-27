@@ -154,6 +154,8 @@ max_num_seqs: null
 async_scheduling: True
 # stop generation when any of these strings is generated
 stop_strings: null
+# path to initialize vllm config
+vllm_config_path: 'src/maxtext/configs/inference/vllm.yml'
 
 # ====== Checkpoint Configuration ======
 enable_checkpointing: True

@@ -29,6 +29,7 @@ Example usage:
       use_chat_template=True
 """
 
+import copy
 import os
 from typing import Any, Sequence
 
@@ -40,7 +41,6 @@ import transformers
 
 from maxtext.utils import model_creation_utils
 from maxtext.utils import max_logging
-from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.common.common_types import Config
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.rl.rollout import base_rollout
@@ -67,6 +67,21 @@ def decode_with_vllm(config: Config) -> None:
     config: MaxText config.
   """
   # Prepare vLLM Arguments
+  # Use user-provided vllm_additional_config as base (includes model-specific
+  # overrides like base_num_decoder_layers, override_model_config, etc.), then
+  # fill in defaults and runtime-derived values on top.
+  additional_config = copy.deepcopy(config.vllm_additional_config) if config.vllm_additional_config else {}
+  additional_config.setdefault("maxtext_config", {})
+  additional_config["maxtext_config"].setdefault("model_name", config.model_name)
+  additional_config["maxtext_config"].setdefault("weight_dtype", "bfloat16")
+  additional_config["maxtext_config"].setdefault("allow_split_physical_axes", True)
+  additional_config["maxtext_config"]["debug_sharding"] = config.debug_sharding
+  additional_config.setdefault("sharding", {})
+  additional_config["sharding"].setdefault("sharding_strategy", {})
+  additional_config["sharding"]["sharding_strategy"].setdefault("enable_dp_attention", config.enable_dp_attention)
+  # Pass vllm_config_path so the adapter can use it as the MaxText base config.
+  additional_config.setdefault("vllm_config_path", str(config.vllm_config_path))
+
   vllm_args = {
       "model": config.tokenizer_path,
       "max_model_len": config.max_target_length,
@@ -76,19 +91,7 @@ def decode_with_vllm(config: Config) -> None:
       "hf_overrides": config.vllm_hf_overrides,
       "gpu_memory_utilization": config.hbm_utilization_vllm,
       "async_scheduling": config.async_scheduling,
-      "additional_config": {
-          "maxtext_config": {
-              "model_name": config.model_name,
-              "weight_dtype": "bfloat16",
-              "allow_split_physical_axes": True,
-              "debug_sharding": config.debug_sharding,
-          },
-          "sharding": {
-              "sharding_strategy": {
-                  "enable_dp_attention": config.enable_dp_attention,
-              },
-          },
-      },
+      "additional_config": additional_config,
   }
 
   if config.load_parameters_path:
@@ -106,8 +109,7 @@ def decode_with_vllm(config: Config) -> None:
       f"and EP={config.ici_expert_parallelism if enable_expert_parallel else 1}..."
   )
 
-  vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
-  argv_list = ["", str(vllm_config_path), "log_config=False"]
+  argv_list = ["", str(config.vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
   with nn_partitioning.axis_rules(vllm_config.logical_axis_rules):
@@ -145,7 +147,7 @@ def decode_with_vllm(config: Config) -> None:
       max_tokens=max_tokens_to_generate,
       top_k=config.decode_sampling_top_k,
       top_p=config.decode_sampling_nucleus_p,
-      seed=FLAGS.seed,
+      # seed=FLAGS.seed,
   )
 
   outputs = llm.generate(prompts, sampling_params)
