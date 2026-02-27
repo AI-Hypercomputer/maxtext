@@ -191,8 +191,8 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
 
   # attention masks in BatchEncoding are effectively ignored
   if hasattr(prompt_completion_tokens, INPUT_TOKENS_KEY):
-    prompt_completion_ids = prompt_completion_tokens.input_ids
-    prompt_ids = prompt_tokens.input_ids
+    prompt_completion_ids = getattr(prompt_completion_tokens, INPUT_TOKENS_KEY)
+    prompt_ids = getattr(prompt_tokens, INPUT_TOKENS_KEY)
   elif isinstance(prompt_completion_tokens, dict) and INPUT_TOKENS_KEY in prompt_completion_tokens:
     prompt_completion_ids = prompt_completion_tokens[INPUT_TOKENS_KEY]
     prompt_ids = prompt_tokens[INPUT_TOKENS_KEY]
