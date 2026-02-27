@@ -199,12 +199,11 @@ if __name__ == "__main__":
     )
 
   parser = argparse.ArgumentParser()
-  parser.add_argument("--model-name", type=str, required=False, default="llama2-7b")
-  # It is recommended to use the llama2 tokenizer from the local assets vs HF's "meta-llama/Llama-2-7b-chat-hf"
+  parser.add_argument("--model-name", type=str, required=False, default="llama2-7b")  
   # In transformers=5.2.0 (at least), the Llama-2 tokenizer incorrectly injects an extra space
-  # before <s> and [INST] tokens when applying its chat template
-  # Also, using the local tokenizer is consitent with tokenier used by sft_trainer_correctness_test.py test
-  # that uses this generated gold data
+  # before <s> and [INST] tokens when applying its chat template.
+  # Also, using the local tokenizer is consistent with the tokenizer used by sft_trainer_correctness_test.py
+  # which depends on generated gold data here.
   parser.add_argument(
       "--tokenizer-path", type=str, required=False, default=os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
   )

@@ -178,8 +178,7 @@ class SFTTrainerCorrectnessTest(unittest.TestCase):
 
     assert golden_data["tokens"] == maxtext_data["inputs"][0].tolist()
     assert golden_data["attention_mask"] == maxtext_data["inputs_segmentation"][0].tolist()
-
-    # TODO: logits need to be regenerated
+    
     maxtext_logits = get_maxtext_logits(config, maxtext_data)
     token_log_probs = get_token_log_probs(maxtext_logits, maxtext_data["inputs"])
     golden_token_log_probs = np.array(golden_data["token_log_probs"])
