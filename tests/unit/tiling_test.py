@@ -19,10 +19,13 @@ Tests for verifying losses and gradients match using/without using tiling method
 """
 
 import unittest
+import pytest
+
 from flax import linen as nn
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import Config
 from maxtext.common.common_types import MODEL_MODE_TRAIN
@@ -31,8 +34,8 @@ from maxtext.models import models
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss
+
 from tests.utils.test_helpers import get_test_config_path
-import pytest
 
 
 def compute_loss_linen(intermediate_outputs, logits, data, config, model, params, is_train):
@@ -42,10 +45,10 @@ def compute_loss_linen(intermediate_outputs, logits, data, config, model, params
   if config.num_vocab_tiling > 1:
     hidden_state_key = ("intermediates", "decoder", "hidden_states")
     hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
-    total_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
+    total_loss, _ = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
   else:
     one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
+    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
     xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
     # Mask out paddings at the end of each example.
     xent = xent * (data["targets_segmentation"] != 0)
@@ -184,6 +187,74 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         grads_non_ga,
         grads_ga,
         "Gradients of embedding table do not match for GA.",
+    )
+
+  @pytest.mark.tpu_only
+  def test_vocab_tiling_gradient_with_z_loss(self):
+    """
+    Tests loss and gradient correctness when z-loss is enabled, comparing
+    standard computation vs. vocabulary tiling computation.
+    """
+    cfg_non_tiling = pyconfig.initialize(
+        self.base_config,
+        run_name="grad_test_z_loss_no_tiling",
+        enable_checkpointing=False,
+        enable_dropout=False,
+        max_target_length=self.seq_len,
+        per_device_batch_size=self.batch_size,
+        logits_via_embedding=False,
+        base_num_decoder_layers=0,
+        dtype="float32",
+        matmul_precision="high",
+        num_vocab_tiling=1,
+        z_loss_multiplier=1e-4,  # Enable z-loss
+    )
+    quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
+    devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
+    mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)
+    model_non_tiling = models.transformer_as_linen(
+        cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN
+    )
+
+    rng_model, rng_targets = jax.random.split(self.rng)
+
+    params = model_non_tiling.init(
+        {"params": rng_model, "dropout": rng_model},
+        self.dummy_inputs,
+        self.dummy_inputs,
+    )
+
+    data = {
+        "targets": jax.random.randint(rng_targets, (self.batch_size, self.seq_len), 0, cfg_non_tiling.vocab_size),
+        "targets_segmentation": jnp.ones((self.batch_size, self.seq_len)),
+    }
+
+    loss_non_tiling, grads_non_tiling = self.get_grads(cfg_non_tiling, params, data)
+
+    cfg_tiling = pyconfig.initialize(
+        self.base_config,
+        run_name="grad_test_z_loss_with_tiling",
+        enable_checkpointing=False,
+        enable_dropout=False,
+        max_target_length=self.seq_len,
+        per_device_batch_size=self.batch_size,
+        logits_via_embedding=False,
+        base_num_decoder_layers=0,
+        dtype="float32",
+        matmul_precision="high",
+        num_vocab_tiling=4,
+        z_loss_multiplier=1e-4,  # Enable z-loss
+    )
+    loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
+
+    # Loss correctness test
+    assert jnp.allclose(loss_non_tiling, loss_tiling, rtol=self.rtol), "Losses do not match when z-loss is enabled."
+
+    # Gradient correctness test
+    self.assert_pytrees_all_close(
+        grads_non_tiling,
+        grads_tiling,
+        "Gradients do not match for vocab tiling when z-loss is enabled.",
     )
 
   @pytest.mark.tpu_only

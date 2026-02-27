@@ -334,6 +334,7 @@ sliding_window_size: 0
 chunk_attn_window_size: 0
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
+z_loss_multiplier: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
 mla_naive_kvcache: True

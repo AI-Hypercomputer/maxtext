@@ -462,6 +462,7 @@ class Logits(BaseModel):
       None,
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
   )
+  z_loss_multiplier: float = Field(0.0, description="The multiplier for the z-loss (e.g., 1e-4). 0.0 to disable.")
 
 
 class Attention(BaseModel):
