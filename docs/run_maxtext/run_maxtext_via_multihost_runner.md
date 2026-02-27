@@ -106,7 +106,7 @@ Although there are several steps below, most are for the initial setup. Once set
    Set config values for `base_output_directory` and `dataset_path` in `configs/base.yml` if not set already.
 
    ```
-   python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 -m MaxText.train src/maxtext/configs/base.yml run_name=$RUN_NAME"
+   python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=$RUN_NAME"
    ```
 
    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.

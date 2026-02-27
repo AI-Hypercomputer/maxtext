@@ -25,7 +25,7 @@ Multimodal Large Language Models (LLMs) extend traditional text-only models by i
 
 ## Checkpoint Conversion
 
-Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace ([README](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md)).
+Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace ([README](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/README.md)).
 
 Install pytorch:
 
@@ -38,7 +38,7 @@ Then use this command to convert an unscanned checkpoint from HuggingFace to Max
 ```shell
 export HF_ACCESS_TOKEN=hf_...
 export MAXTEXT_CKPT_GCS_PATH=gs://...
-python -m MaxText.utils.ckpt_conversion.to_maxtext maxtext/configs/base.yml \
+python -m maxtext.checkpoint_conversion.to_maxtext maxtext/configs/base.yml \
     model_name=gemma3-4b \
     hf_access_token=$HF_ACCESS_TOKEN \
     base_output_directory=$MAXTEXT_CKPT_GCS_PATH \
@@ -51,7 +51,7 @@ For the Llama4 model family, we are using a separate checkpoint conversion scrip
 ```shell
 export LOCAL_HF_MODEL_PATH=...  # Need to pre-download the safetensors from HuggingFace
 export MAXTEXT_CKPT_GCS_PATH=gs://...
-python -m MaxText.utils.ckpt_scripts.llama4_ckpt_unscanned \
+python -m maxtext.checkpoint_conversion.standalone_scripts.llama4_ckpt_unscanned \
     --model-size=llama4-17b-16e \
     --huggingface-checkpoint=True \
     --base-model-path=$LOCAL_HF_MODEL_PATH \
@@ -72,7 +72,7 @@ To run a forward pass and verify the model's output, use the following command:
 
 ```shell
 # Gemma3 decode
-python -m maxtext.decode \
+python -m maxtext.inference.decode \
     maxtext/configs/base.yml \
     model_name=gemma3-4b \
     hf_access_token=$HF_ACCESS_TOKEN \
@@ -108,7 +108,7 @@ To decode with multiple images at once, you can provide multiple image paths lik
 export TARGET_LENGTH=...  # Adjust to fit expected output length
 export PREDICT_LENGTH=...  # Adjust to fit image tokens + text prompt
 
-python -m maxtext.decode \
+python -m maxtext.inference.decode \
     maxtext/configs/base.yml \
     model_name=gemma3-4b \
     ... \

@@ -31,12 +31,12 @@ from typing import Optional, Tuple
 
 import flax.linen as nn
 import jax
-from optax.contrib._muon import MuonDimensionNumbers as mdn
-
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import models, quantizations
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import maxtext_utils
+from optax.contrib._muon import MuonDimensionNumbers as mdn
 
 
 Transformer = models.transformer_as_linen
@@ -168,7 +168,7 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False):
 
 if __name__ == "__main__":
   if len(sys.argv) != 3:
-    print("Usage: python3 -m MaxText.muon_utils <model_name> <scan_layers:True/False>")
+    print("Usage: python3 -m maxtext.utils.muon_utils <model_name> <scan_layers:True/False>")
     sys.exit(1)
   model_name_arg = sys.argv[1]
   scan_layers_arg = sys.argv[2].lower() == "true"

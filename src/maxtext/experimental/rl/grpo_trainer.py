@@ -67,10 +67,9 @@ import transformers
 from ml_goodput_measurement.src.goodput import GoodputRecorder
 
 import MaxText as mt
-from MaxText import sharding
 from MaxText import pyconfig
-from MaxText.globals import EPS
-from MaxText.train import get_first_step
+from maxtext.utils.globals import EPS
+from maxtext.trainers.pre_train.train import get_first_step
 from maxtext.common import checkpointing, profiler
 from maxtext.common.data_loader import DataLoader
 from maxtext.common.goodput import (
@@ -89,6 +88,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding
 from maxtext.utils import train_utils
 
 # pylint: disable=too-many-positional-arguments

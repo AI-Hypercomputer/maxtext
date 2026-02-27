@@ -24,12 +24,12 @@ import jax
 from unittest.mock import MagicMock
 from jax.sharding import Mesh
 
-from MaxText.rampup_batch import RampupBatchManager
 from MaxText import pyconfig
 from maxtext.common.data_loader import DataLoader, RampUpDataLoader
 from maxtext.utils import exceptions
 from maxtext.utils.maxtext_utils import create_device_mesh
 from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.utils.rampup_batch import RampupBatchManager
 from tests.utils.test_helpers import get_test_config_path
 
 

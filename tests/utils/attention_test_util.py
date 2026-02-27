@@ -21,15 +21,14 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from MaxText import pyconfig
+from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.common.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, EP_AS_CONTEXT, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
+from maxtext.layers.attention_mla import MLA
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.common.gcloud_stub import is_decoupled
-from MaxText import pyconfig
-from MaxText.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, EP_AS_CONTEXT, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
-from MaxText.layers.attention_mla import MLA
-from MaxText.sharding import maybe_shard_with_name
+from maxtext.utils.sharding import maybe_shard_with_name
 from tests.utils.test_helpers import get_test_config_path
-
 
 class MLATestBase(parameterized.TestCase):
   """Test base for MLATest."""

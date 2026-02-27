@@ -25,7 +25,7 @@ fi
 export DATASET_PATH=gs://maxtext-dataset
 
 # Run pre-training - dropping implementation
-python3 -m MaxText.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml model_name=mixtral-8x7b hardware=gpu \
+python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml model_name=mixtral-8x7b hardware=gpu \
     base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
     run_name=dropping_pre_training async_checkpointing=false \
     attention=cudnn_flash_te capacity_factor=1.25 dtype=bfloat16 \
@@ -36,7 +36,7 @@ python3 -m MaxText.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/
 echo "Finished pre-training"
 
 # Run fine-tuning - dropping implementation
-python3 -m MaxText.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml model_name=mixtral-8x7b hardware=gpu \
+python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml model_name=mixtral-8x7b hardware=gpu \
     load_parameters_path=${SCANNED_CHECKPOINT} \
     base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
     run_name=dropping_pre_training async_checkpointing=true \
@@ -49,7 +49,7 @@ echo "Finished fine-tuning"
 
 # # TODO(b/391864113): Add this once the bug is fixed
 # # Run decoding with converted ckpt - dropping implementation
-# python3 -m maxtext.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml model_name=mixtral-8x7b hardware=gpu \
+# python3 -m maxtext.inference.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml model_name=mixtral-8x7b hardware=gpu \
 #     run_name=unscanned_decoding load_parameters_path=${UNSCANNED_CKPT_PATH} \
 #     async_checkpointing=false attention=dot_product capacity_factor=0.1 \
 #     ici_expert_parallelism=8 ici_fsdp_parallelism=1 max_prefill_predict_length=11 \

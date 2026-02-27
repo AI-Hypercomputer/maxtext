@@ -16,7 +16,7 @@ export TOKENIZER_PATH='deepseek-ai/DeepSeek-V3'
 # The --enable_mtp flag is crucial for processing the MTP-specific layers.
 export CHKPT_BUCKET=gs://maxtext-deepseek/deepseek3-671b/hf
 export MODEL_BUCKET=gs://maxtext-deepseek/deepseek3-671b
-JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_ckpt \
+JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_deepseek_family_ckpt \
     --base_model_path ${CHKPT_BUCKET} \
     --maxtext_model_path ${MODEL_BUCKET}/${idx} \
     --model_size ${MODEL_NAME} \
@@ -33,7 +33,7 @@ export BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
 
 # Run fine-tuning with MTP enabled
 # We add `mtp_num_layers=1` and `mtp_loss_scaling_factor=0.1` to activate the MTP block.
-python3 -m MaxText.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     dataset_path=${DATASET_PATH} \
     load_parameters_path=${CONVERTED_CHECKPOINT} \

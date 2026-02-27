@@ -25,10 +25,11 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
-from MaxText.common_types import MODEL_MODE_TRAIN, AttentionType
-from MaxText import pyconfig
-from MaxText.layers import attentions, embeddings, llama4
+from maxtext.layers import attentions, embeddings
+from maxtext.models import llama4
+from maxtext.common.common_types import MODEL_MODE_TRAIN, AttentionType
 from maxtext.utils import maxtext_utils
+from MaxText import pyconfig
 import numpy as np
 from tests.utils.test_helpers import get_test_config_path
 

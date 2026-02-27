@@ -112,7 +112,7 @@ Note that `FILE_PATH` is optional; when provided, the script runs `ls -R` for pr
 bash tools/setup/setup_gcsfuse.sh \
 DATASET_GCS_BUCKET=maxtext-dataset \
 MOUNT_PATH=/tmp/gcsfuse && \
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 run_name=<RUN_NAME> base_output_directory=gs://<MY_BUCKET>  \
 dataset_type=grain \
 grain_file_type=arrayrecord # or parquet \ 

@@ -34,7 +34,7 @@ DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The
 You can train from scratch to generate a new checkpoint. One example command to run pretraining with V3 on v5p-256.
 
 ```sh
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     run_name=matmul_pre_training \
     per_device_batch_size=4 \
@@ -68,7 +68,7 @@ After you have a MaxText compatible checkpoint, you could fine-tune it with diff
 One example command to run general finetuning with V3 on v5p-256.
 
 ```sh
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     dataset_path=${DATASET_PATH} \
     load_parameters_path=${CONVERTED_CHECKPOINT} \
@@ -93,7 +93,7 @@ python3 -m MaxText.train src/maxtext/configs/base.yml \
 Fine-tuning with MTP on v5p-256
 
 ```sh
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=gs://your-output-bucket/ \
     dataset_path=gs://your-dataset-bucket/ \
     load_parameters_path=gs://your-bucket/deepseek-v3/0/items \
@@ -140,7 +140,7 @@ python3 -m MaxText.sft_trainer src/maxtext/configs/post_train/sft.yml \
 One example command to run decoding with V3 on v5p-256 with unscanned checkpoint for fast decoding.
 
 ```sh
-python3 -m maxtext.decode src/maxtext/configs/base.yml \
+python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     load_parameters_path=${CONVERTED_CHECKPOINT} \
     run_name=decode \

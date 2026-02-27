@@ -12,27 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Dump sharding of models implementing in linen with various topology to serve as baselines for comparison against
+"""Dump sharding of models implementing in linen with various topology to serve as baselines for comparison against
+
 sharding strategies during migration to NNX.
 """
 
-import os
-import json
 import itertools
+import json
+import os
 from pathlib import Path
-from typing import List, Sequence, Union, Any
-import jax
+from typing import Any, List, Sequence, Union
 from absl import app
-from jax.tree_util import tree_flatten_with_path
+import jax
 from jax.sharding import NamedSharding, PartitionSpec
-from MaxText import pyconfig
+from jax.tree_util import tree_flatten_with_path
 from MaxText import maxtext_utils
-from MaxText import optimizers
-from MaxText.globals import MAXTEXT_REPO_ROOT
-from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
-from MaxText.layers import models
+from MaxText import pyconfig
 
+from maxtext.utils.globals import MAXTEXT_REPO_ROOT
+from maxtext.utils.sharding import _ACTIVATION_SHARDINGS_DUMP
+
+from maxtext.models import models
+from maxtext.optimizers import optimizers
+from maxtext.trainers.pre_train.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
 
 Transformer = models.Transformer
 
@@ -361,8 +363,8 @@ def named_shardings_to_json(train_state, shape_tree) -> dict[str, dict]:
 
 
 def partition_specs_to_json(logical_tree, shape_tree) -> dict[str, Any]:
-  """
-  Extract PartitionSpecs (Logical) from the logical tree.
+  """Extract PartitionSpecs (Logical) from the logical tree.
+
   Leaf nodes are expected to be PartitionSpec (or None).
   """
   logical_dict = {}
@@ -376,9 +378,26 @@ def partition_specs_to_json(logical_tree, shape_tree) -> dict[str, Any]:
       # Extract shape
       shape = list(leaf_sh.shape) if hasattr(leaf_sh, "shape") else None
 
-      logical_dict[name] = {"partition_spec": _json_spec(leaf_l), "shape": shape}
+      logical_dict[name] = {
+          "partition_spec": _json_spec(leaf_l),
+          "shape": shape,
+      }
   print(f"Got {len(logical_dict)} Logical entries.")
   return logical_dict
+
+
+def input_sharding_to_json() -> dict[str, Any]:
+  input_sharding = {}
+  input_sharding["Activation Sharding Dump"] = _ACTIVATION_SHARDINGS_DUMP
+  return input_sharding
+
+
+def save_activation_shading_dict(output_path: str | Path, sharding_dict: dict) -> None:
+  """Save the activation sharding dict directly to a JSON file."""
+  output_path = Path(output_path)
+  output_path.parent.mkdir(parents=True, exist_ok=True)
+  with open(output_path, "w", encoding="utf-8") as f:
+    json.dump(sharding_dict, f, indent=2)
 
 
 def save_json(output_path: str | Path, sharding_dict: dict) -> None:
@@ -406,6 +425,7 @@ def main(argv: Sequence[str]) -> None:
 
   config = pyconfig.initialize(argv)
   validate_config(config)
+  print(f"Sharding debug: {config.debug_sharding}")
 
   base_path = Path(
       f"{MAXTEXT_REPO_ROOT}/tests/utils/sharding_info/{config.model_name}/"
@@ -413,6 +433,7 @@ def main(argv: Sequence[str]) -> None:
   )
   json_path_named = base_path / "named_shardings.json"
   json_path_logical = base_path / "logical_shardings.json"
+  json_path_input = base_path / "input_shardings.json"
 
   try:
     topology_mesh = get_topology_mesh(config)
@@ -433,12 +454,16 @@ def main(argv: Sequence[str]) -> None:
   # Logical: Tree of PartitionSpec (direct from get_shaped_inputs)
   logical_shardings = partition_specs_to_json(logical_annotations, shaped_train_args[0])
 
+  # Input
+  input_shardings = input_sharding_to_json()
+
   print(f"Got {len(named_shardings)} Physical entries and {len(logical_shardings)} Logical entries.")
 
   # 2. Save New Output (Overwrite)
   print(f"\nSaving updated shardings to {base_path}...")
   save_json(json_path_named, named_shardings)
   save_json(json_path_logical, logical_shardings)
+  save_json(json_path_input, input_shardings)
 
   print(f"Finished: {config.model_name} {config.compile_topology}")
 

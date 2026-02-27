@@ -34,7 +34,8 @@ import numpy as np
 
 from dataclasses import dataclass, field
 
-from MaxText import maxengine, pyconfig
+from MaxText import pyconfig
+from maxtext.inference.maxengine import maxengine
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils
@@ -505,15 +506,13 @@ class MaxTextGenerator:
           num_images=1,
       )
       processor_output = mm_processor.preprocess_mm_data(self.config)
-      prefill_length -= mm_processor.get_image_offsets(self.config.model_name, processor_output=processor_output)
+      prefill_length -= mm_processor.get_image_offsets(config=self.config, processor_output=processor_output)
       images = processor_output.pixel_values
 
     tokens, true_length = self.tokenizer.encode(text, is_bos=not self.has_chat_template, prefill_lengths=[prefill_length])
     if self.config.use_multimodal and image_path:
-      tokens = mm_processor.prepare_text_for_image_fusion(
-          tokens, model_name=self.config.model_name, processor_output=processor_output
-      )
-      true_length += mm_processor.get_image_offsets(self.config.model_name, processor_output=processor_output)
+      tokens = mm_processor.prepare_text_for_image_fusion(tokens, config=self.config, processor_output=processor_output)
+      true_length += mm_processor.get_image_offsets(config=self.config, processor_output=processor_output)
 
     return tokens, true_length, images
 

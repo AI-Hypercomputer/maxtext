@@ -19,17 +19,17 @@ import os
 import jax
 import functools
 from flax.linen import partitioning as nn_partitioning
-from MaxText import sharding
-from MaxText import optimizers
-from MaxText.rampup_batch import create_rampup_manager
 from maxtext.common import checkpointing
 from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
+from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+from maxtext.utils import sharding
+from maxtext.utils.rampup_batch import create_rampup_manager
 from maxtext.trainers.diloco import diloco
 
 
@@ -190,7 +190,7 @@ def setup_train_loop(config, recorder, devices=None):
     state: the initialized train state
   """
   # pylint: disable=import-outside-toplevel
-  from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+  from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     model = model_creation_utils.from_config(config, devices)

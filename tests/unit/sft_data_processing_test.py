@@ -26,10 +26,10 @@ import transformers
 from parameterized import parameterized_class
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
-from MaxText.input_pipeline import _hf_data_processing
-from MaxText.input_pipeline import input_pipeline_interface
-from MaxText.input_pipeline._hf_data_processing import _get_pad_id
+from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
+from maxtext.input_pipeline import hf_data_processing
+from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline.hf_data_processing import _get_pad_id
 
 PROMPT_DATA = [
     [
@@ -347,7 +347,7 @@ class SFTDataProcessingTest(unittest.TestCase):
 
   def get_data_iterator(self, train_ds, data_columns):
     """Get data iterator."""
-    return _hf_data_processing.preprocessing_pipeline(
+    return hf_data_processing.preprocessing_pipeline(
         dataloading_host_index=self.process_indices.index(jax.process_index()),
         dataloading_host_count=len(self.process_indices),
         global_mesh=self.mesh,

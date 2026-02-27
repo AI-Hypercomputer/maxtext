@@ -85,10 +85,10 @@ import transformers
 
 from flax import nnx
 
-from MaxText.globals import MAXTEXT_REPO_ROOT
 from MaxText import pyconfig
-from MaxText.input_pipeline import instruction_data_processing
-from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.utils.globals import MAXTEXT_REPO_ROOT
+from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.input_pipeline import instruction_data_processing
 from maxtext.trainers.post_train.sft import train_sft
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -301,6 +301,7 @@ def create_vllm_rollout(config, model, mesh, tokenizer):
           rollout_vllm_hbm_utilization=0.2,
           rollout_vllm_init_with_random_weights=True,
           rollout_vllm_tpu_backend_type="jax",
+          data_type="bfloat16",
       ),
   )
 

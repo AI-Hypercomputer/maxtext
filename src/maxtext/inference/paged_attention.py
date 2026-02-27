@@ -19,20 +19,18 @@ WARNING: THIS FILE IS A WORK IN PROGRESS.
 
 import functools
 
-import jax
-import jax.numpy as jnp
-from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kernel
-from jax.sharding import PartitionSpec as P
-from jax.sharding import Mesh
-
 from flax import linen as nn
 from flax import nnx
-
+import jax
+from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kernel
+import jax.numpy as jnp
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
+from maxtext.common.common_types import Array, AxisNames, BATCH, DType, D_KV, HEAD, LENGTH, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL
 from maxtext.inference import page_manager
 from maxtext.inference import paged_attention_kernel_v2
-from MaxText.sharding import logical_to_mesh_axes
-from MaxText.common_types import Array, DType, AxisNames, BATCH, LENGTH, HEAD, D_KV, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText.layers.initializers import variable_to_logically_partitioned
+from maxtext.layers.initializers import variable_to_logically_partitioned
+from maxtext.utils.sharding import logical_to_mesh_axes
 
 _use_kernel_v2 = False
 

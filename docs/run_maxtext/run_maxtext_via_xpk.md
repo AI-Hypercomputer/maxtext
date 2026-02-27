@@ -130,13 +130,13 @@ ______________________________________________________________________
    - **For TPUs:**
 
      ```
-     bash docker_build_dependency_image.sh DEVICE=tpu MODE=stable
+     bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
      ```
 
    - **For GPUs:**
 
      ```
-     bash docker_build_dependency_image.sh DEVICE=gpu MODE=stable
+     bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=stable
      ```
 
 ______________________________________________________________________
@@ -183,7 +183,7 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
        --base-docker-image maxtext_base_image\
        --tpu-type v5litepod-256\
        --num-slices 1\
-       --command "python3 -m MaxText.train src/maxtext/configs/base.yml run_name=${USER}-tpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
+       --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${USER}-tpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
      ```
 
    - **On your GPU cluster:**
@@ -195,7 +195,7 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
        --base-docker-image maxtext_base_image\
        --device-type h100-80gb-8\
        --num-nodes 2\
-       --command "python3 -m MaxText.train src/maxtext/configs/base.yml run_name=${USER}-gpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
+       --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${USER}-gpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
      ```
 
 ______________________________________________________________________

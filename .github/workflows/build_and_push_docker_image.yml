@@ -41,6 +41,10 @@ on:
         required: false
         type: string
         default: ''
+      is_post_training:
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -62,13 +66,18 @@ jobs:
         id: check
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.target_device }}" != "all" && "${{ github.event.inputs.target_device }}" != "${{ inputs.device }}" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${GITHUB_EVENT_INPUTS_TARGET_DEVICE}" != "all" && "${GITHUB_EVENT_INPUTS_TARGET_DEVICE}" != "${INPUTS_DEVICE}" ]]; then
             echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Skipping ${{ inputs.image_name }} build for device: ${{ inputs.device }} in ${{ inputs.build_mode }} mode."
+            echo "Skipping ${INPUTS_IMAGE_NAME} build for device: ${INPUTS_DEVICE} in ${INPUTS_BUILD_MODE} mode."
           else
             echo "should_run=true" >> $GITHUB_OUTPUT
-            echo "Building ${{ inputs.image_name }} for device: ${{ inputs.device }} in ${{ inputs.build_mode }} mode."
+            echo "Building ${INPUTS_IMAGE_NAME} for device: ${INPUTS_DEVICE} in ${INPUTS_BUILD_MODE} mode."
           fi
+        env:
+          GITHUB_EVENT_INPUTS_TARGET_DEVICE: ${{ github.event.inputs.target_device }}
+          INPUTS_DEVICE: ${{ inputs.device }}
+          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
+          INPUTS_BUILD_MODE: ${{ inputs.build_mode }}
 
       - name: Checkout MaxText
         uses: actions/checkout@v5
@@ -78,9 +87,7 @@ jobs:
           ref: ${{ inputs.maxtext_sha }}
 
       - name: Checkout post-training dependencies
-        if: |
-          steps.check.outputs.should_run == 'true' &&
-          contains(inputs.image_name, 'post_training_nightly')
+        if: steps.check.outputs.should_run == 'true' && inputs.image_name == 'maxtext_post_training_nightly'
         run: |
           git clone https://github.com/google/tunix.git ./tunix
           git clone https://github.com/vllm-project/vllm.git ./vllm
@@ -108,7 +115,8 @@ jobs:
           push: true
           context: .
           file: ${{ inputs.dockerfile }}
-          tags: gcr.io/tpu-prod-env-multipod/${{ inputs.image_name }}:${{ inputs.image_date }}-build-${{ github.run_id }}
+          tags: gcr.io/tpu-prod-env-multipod/${{ inputs.image_name }}:latest
+          cache-from: type=gha
           outputs: type=image,compression=zstd,force-compression=true
           build-args: |
             DEVICE=${{ inputs.device }}
@@ -122,21 +130,28 @@ jobs:
         if: steps.check.outputs.should_run == 'true'
         shell: bash
         run: |
-          SOURCE_IMAGE="gcr.io/tpu-prod-env-multipod/${{ inputs.image_name }}"
-          TEMP_IMG="$SOURCE_IMAGE:${{ inputs.image_date }}-build-${{ github.run_id }}"
+          SOURCE_IMAGE="gcr.io/tpu-prod-env-multipod/${INPUTS_IMAGE_NAME}"
+
+          # Add date tag
+          gcloud container images add-tag "$SOURCE_IMAGE:latest" "$SOURCE_IMAGE:${INPUTS_IMAGE_DATE}" --quiet
 
           # Convert date to YYYYMMDD format
-          clean_date=$(echo "${{ inputs.image_date }}" | sed 's/[-:]//g' | cut -c1-8)
+          clean_date=$(echo "${INPUTS_IMAGE_DATE}" | sed 's/[-:]//g' | cut -c1-8)
 
           # Add MaxText tag
           maxtext_hash=$(git rev-parse --short HEAD)
-          gcloud container images add-tag "$TEMP_IMG" "$SOURCE_IMAGE:maxtext_${maxtext_hash}_${clean_date}" --quiet
-          gcloud container images add-tag "$TEMP_IMG" "$SOURCE_IMAGE:${{ inputs.image_date }}" --quiet
+          gcloud container images add-tag "$SOURCE_IMAGE:latest" "$SOURCE_IMAGE:maxtext_${maxtext_hash}_${clean_date}" --quiet
+
 
           # Add post-training dependencies tags
-          for dir in tunix vllm tpu-inference; do
-            if [ -d "./$dir" ]; then
-              dir_hash=$(git -C "$dir" rev-parse --short HEAD)
-              gcloud container images add-tag "$TEMP_IMG" "$SOURCE_IMAGE:${dir}_${dir_hash}_${clean_date}" --quiet
-            fi
-          done
+          if [ "${{ inputs.is_post_training }}" == "true" ]; then
+            for dir in tunix vllm tpu-inference; do
+              if [ -d "./$dir" ]; then
+                dir_hash=$(git -C "$dir" rev-parse --short HEAD)
+                gcloud container images add-tag "$SOURCE_IMAGE:latest" "$SOURCE_IMAGE:${dir}_${dir_hash}_${clean_date}" --quiet
+              fi
+            done
+          fi
+        env:
+          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
+          INPUTS_IMAGE_DATE: ${{ inputs.image_date }}

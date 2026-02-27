@@ -49,7 +49,7 @@ pre-commit install
 4. After installation completes, run training on synthetic data with the following command:
 
 ```sh
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -61,7 +61,7 @@ Optional: If you want to try training on a Hugging Face dataset, see [Data Input
 5. To demonstrate model output, run the following command:
 
 ```sh
-python3 -m maxtext.decode src/maxtext/configs/base.yml \
+python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
@@ -75,7 +75,7 @@ In the same TPU VM where you just installed all the dependencies of MaxText, You
 
 #### Decoding in MaxText via notebook
 
-You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/demo_decoding.ipynb) to try out decoding on MaxText's `Llama3.1-8b` model implementation. In this notebook, we give `"I love to"` as the prompt, and the greedily sampled first output token is `" cook"`. Please remember to provide the path to your `Llama3.1-8b` checkpoint for the `load_parameters_path` argument in the config inside the notebook. You can use [to_maxtext.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/to_maxtext.py) to create a MaxText/Orbax checkpoint from a Huggingface checkpoint.
+You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/demo_decoding.ipynb) to try out decoding on MaxText's `Llama3.1-8b` model implementation. In this notebook, we give `"I love to"` as the prompt, and the greedily sampled first output token is `" cook"`. Please remember to provide the path to your `Llama3.1-8b` checkpoint for the `load_parameters_path` argument in the config inside the notebook. You can use [to_maxtext.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/to_maxtext.py) to create a MaxText/Orbax checkpoint from a Huggingface checkpoint.
 
 ### Run MaxText on NVIDIA GPUs
 
@@ -83,7 +83,7 @@ You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/bl
 2. After installation is complete, run training with the following command on synthetic data:
 
 ```sh
-python3 -m MaxText.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -93,7 +93,7 @@ python3 -m MaxText.train src/maxtext/configs/base.yml \
 3. To demonstrate model output, run the following command:
 
 ```sh
-python3 -m maxtext.decode src/maxtext/configs/base.yml \
+python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1

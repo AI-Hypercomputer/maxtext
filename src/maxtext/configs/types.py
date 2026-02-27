@@ -27,11 +27,11 @@ from tempfile import gettempdir
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from MaxText import accelerator_to_spec_map
-from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ShardMode
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils import accelerator_to_spec_map
 from pydantic.config import ConfigDict
 from pydantic.fields import Field
 from pydantic.functional_validators import field_validator, model_validator
@@ -248,7 +248,7 @@ ModelName = Literal[
     "llama4-17b-16e",
     "llama4-17b-128e",
     "olmo3-7b",
-    'olmo3-7b-pt',
+    "olmo3-7b-pt",
     "olmo3-32b",
 ]
 
@@ -497,6 +497,8 @@ class Attention(BaseModel):
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
   use_jax_splash: bool = Field(False, description="Whether to use jax splash attention.")
   force_q_layout: bool = Field(False, description="Force the Q layout")
+  use_qk_clip: bool = Field(False, description="Whether to use QK-Clip (MuonClip) for training stability.")
+  qk_clip_threshold: float = Field(100.0, description="Threshold for QK-Clip (tau).")
 
 
 class MoBa(BaseModel):
@@ -682,6 +684,8 @@ class MoEKernels(BaseModel):
 
   wi_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wi.")
   wo_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wo.")
+
+  merge_gating_gmm: bool = Field(False, description="whether to merge the two gating gmm kernels into one.")
 
 
 class DeepSeekMoE(BaseModel):
@@ -895,6 +899,7 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the attention output.",
   )
+  engram: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the engram output.")
 
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
@@ -1052,6 +1057,8 @@ class Distillation(BaseModel):
   # --- Loss Params ---
   distill_alpha: float = Field(0.5, description="Weight for the distillation loss component.")
   distill_temperature: float = Field(1.0, description="Temperature for distillation softening.")
+  distill_beta: float = Field(0.0, description="Weight for the feature loss component. Use 0.0 to disable")
+  distill_layer_indices: None | list = Field(None, description="Feature indices for feature loss.")
 
 
 class TrainingLoop(BaseModel):
@@ -1085,7 +1092,7 @@ class TrainingLoop(BaseModel):
 class ManifoldConstrainedHyperConnections(BaseModel):
   """Configuration for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
-  mhc_expansion_rate: int = Field(0, description="The number of parallel streams in Hyper Connection.")
+  mhc_expansion_rate: PositiveInt = Field(1, description="The number of parallel streams in Hyper Connection.")
   sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
 
 
@@ -1301,7 +1308,7 @@ class DevelopmentAndDebugging(BaseModel):
   """General settings for development and debugging."""
 
   constant_bound_config: list = Field([], description="Legacy configuration for constant bounds.")
-  jax_cache_dir: PathStr = Field(
+  jax_cache_dir: PathStr | None = Field(
       os.path.join(os.path.expanduser("~"), "jax_cache"),
       description="Directory for JAX compilation cache.",
   )
@@ -1457,6 +1464,8 @@ class MultimodalGeneral(BaseModel):
   )
   video_path: PathStr = Field("", description="Path to a video for decoding.")
   audio_path: PathStr = Field("", description="Path to an audio file for decoding.")
+  video_placeholder: str = Field("<|video|>", description="Placeholder string for video in text prompts.")
+  audio_placeholder: str = Field("<|audio|>", description="Placeholder string for audio in text prompts.")
   use_audio_in_video: bool = Field(False, description="Extract and use audio from video files.")
   use_mrope: bool = Field(False, description="Enable Multi-dimensional RoPE for Qwen3-Omni models.")
   mrope_section: list[int] = Field([24, 20, 20], description="Dimensions for temporal, height, width in MRoPE.")
@@ -1556,6 +1565,9 @@ class VLLM(BaseModel):
   max_num_batched_tokens: Optional[int] = Field(None, description="Max number of batched tokens in vLLM.")
   max_num_seqs: Optional[int] = Field(None, description="Max number of sequences in vLLM.")
   vllm_additional_config: dict[str, Any] = Field(default_factory=dict, description="Additional vLLM config options.")
+  vllm_hf_overrides: dict[str, Any] = Field(
+      default_factory=dict, description="Overrides for HuggingFace model config for MaxText model."
+  )
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
 
 
@@ -1621,6 +1633,23 @@ class SpecialTokens(BaseModel):
   reasoning_end_token: str = Field("</reasoning>", description="Token to mark the end of a reasoning section.")
   solution_start_token: str = Field("<answer>", description="Token to mark the beginning of a solution section.")
   solution_end_token: str = Field("</answer>", description="Token to mark the end of a solution section.")
+
+
+class Engram(BaseModel):
+  """Configuration for DeepSeek Engram (https://www.arxiv.org/pdf/2601.07372)."""
+
+  engram_layers: list[int] = Field(
+      default_factory=list,
+      description="Indices of transformer layers where Engram are integrated.",
+  )
+  engram_num_heads: int = Field(8, description="Number of heads dedicated to the Engram.")
+  engram_head_dim: int = Field(1280, description="Head dimension for heads.")
+  engram_vocab_bases: list[int] = Field(
+      default_factory=list, description="List of minimum head vocab sizes for each n-gram order."
+  )
+  engram_max_ngram_size: int = Field(3, description="The max 'n' in N-gram.")
+  engram_kernel_size: int = Field(4, description="Temporal window size for Engram convolution.")
+  engram_seed: int = Field(0, description="The seed for Engram hash mapping.")
 
 
 class DerivedValues(BaseModel):
@@ -1775,6 +1804,7 @@ class MaxTextConfig(
     Quantization,
     # Core Model Architecture
     ModelArchitecture,
+    Engram,
     MTP,
     Logits,
     # Attention Mechanisms
@@ -1809,6 +1839,7 @@ class MaxTextConfig(
     # Reinforcement Learning
     RLHardware,
     VLLM,
+    RL,
     RLDataset,
     RLEvaluation,
     Reward,
@@ -1925,6 +1956,13 @@ class MaxTextConfig(
     if self.steps == -1:
       self.steps = self.learning_rate_schedule_steps
 
+    # Validate deepstack + scan_layers incompatibility
+    if self.deepstack_visual_indexes_for_vit and self.scan_layers:
+      raise ValueError(
+          "Deepstack visual embedding injection requires scan_layers=False. "
+          "Set scan_layers=False in your config to use deepstack features."
+      )
+
     # Validate WSD learning rate schedule fractions
     if self.lr_schedule_type == LearningRateScheduleType.WSD:
       total_fraction = self.warmup_steps_fraction + self.wsd_decay_steps_fraction
@@ -1973,6 +2011,13 @@ class MaxTextConfig(
 
     # Validate and initiate hlo dump related configs
     validate_and_set_hlo_dump_defaults()
+
+    # Validate nnx sow incompatibility
+    if self.distill_beta > 0.0:
+      if not self.scan_layers:
+        raise ValueError("a value of self.distill_beta > 0.0 requires self.scan_layers = True")
+      if not self.enable_nnx:
+        raise ValueError("a value of self.distill_beta > 0.0 requires self.enable_nnx = True")
 
     # D. CALCULATE MODEL DIMENSIONS from global_parameter_scale
     # This allows scaling the model size up or down easily with a single power-of-two factor.
@@ -2247,6 +2292,18 @@ class MaxTextConfig(
         and self.gradient_accumulation_steps > 1
     ):
       raise ValueError("FP8 quantization is not compatible with gradient accumulation.")
+    if self.engram_layers:
+      if not self.hf_access_token or not self.tokenizer_path:
+        raise ValueError(
+            "Engram requires both 'hf_access_token' and 'tokenizer_path' " "to load the Hugging Face tokenizer."
+        )
+      if self.scan_layers:
+        raise NotImplementedError("Currently Engram only supports unscanned version. Please set scan_layers=False.")
+      if len(self.engram_vocab_bases) != (self.engram_max_ngram_size - 1):
+        raise ValueError(
+            f"Engram vocab size mismatch: expected {self.engram_max_ngram_size - 1} (max_ngram_size - 1), "
+            f"but got {self.engram_vocab_bases}."
+        )
     if self.num_experts > 1:
       is_fully_moe = (
           self.interleave_moe_layer_step == 1
@@ -2396,6 +2453,18 @@ class MaxTextConfig(
       )
     if self.force_q_layout and not self.use_jax_splash:
       raise ValueError("`force_q_layout` can only be true if `use_jax_splash` is also true.")
+
+    if self.use_qk_clip and self.attention_type != "mla":
+      raise ValueError(
+          f"QK-Clip is only supported when attention_type='mla', but found attention_type='{self.attention_type}'."
+      )
+
+    if self.use_qk_clip and self.attn_logits_soft_cap is not None:
+      raise ValueError(
+          "QK-Clip monitors raw dot products, but attn_logits_soft_cap is enabled. "
+          "Recording pre-cap max_logits is not fully supported yet. "
+          "Please disable attn_logits_soft_cap when using use_qk_clip."
+      )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.

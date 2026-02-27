@@ -132,7 +132,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 export PRE_TRAINED_MODEL_CKPT_DIRECTORY=${BASE_DIRECTORY}/llama3.1-8b-ckpt
 
 # Convert to MaxText format
-python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/maxtext/configs/base.yml \
+python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
     model_name=llama3.1-8b \
     hf_access_token=${HF_TOKEN} \
     base_output_directory=${PRE_TRAINED_MODEL_CKPT_DIRECTORY} \

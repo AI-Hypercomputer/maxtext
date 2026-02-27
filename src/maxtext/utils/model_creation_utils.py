@@ -16,21 +16,21 @@
 """ Utils that are only interesting for creating a model in MaxText. """
 
 from collections.abc import Sequence
+from functools import partial
 from typing import overload
 
+from etils import epath
 from flax import nnx
 import flax.linen as nn
 import jax
-from jax.sharding import Mesh, AxisType
+from jax.sharding import AxisType, Mesh
 from MaxText import pyconfig
-from MaxText.layers import quantizations
-from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
-from MaxText.layers import models
-from maxtext.utils import maxtext_utils
+from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 from orbax import checkpoint as ocp
-from functools import partial
-from etils import epath
 
 
 @overload

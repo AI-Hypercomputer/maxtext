@@ -12,36 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the common MaxText utilities """
+"""Tests for the common MaxText utilities"""
 
-from typing import Any
 from collections.abc import Callable
+from typing import Any
 import unittest
-
-from jax import random, vmap
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
-import jax
-import jax.numpy as jnp
-import numpy as np
+from unittest.mock import MagicMock, Mock
 
 from flax import linen as nn
+from flax import nnx
 from flax.core.scope import FrozenVariableDict
 from flax.training import train_state
-from flax import nnx
-
-import optax
-
-from MaxText import sharding
+import jax
+from jax import random, vmap
+import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.layers import models
-from MaxText.layers import quantizations
-from MaxText.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.inference import inference_utils
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding
+from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 from tests.utils.test_helpers import get_test_config_path
+import numpy as np
+import optax
 
 Transformer = models.transformer_as_linen
 
@@ -50,14 +48,22 @@ class TestGradientClipping(unittest.TestCase):
   """test class for gradient clipping"""
 
   def test_grad_clipping_with_no_fp8_stats(self):
-    raw_grads = {"params": jnp.array([3.0, -4.0]), "wi_0": jnp.array([5.0, -6.0])}
+    raw_grads = {
+        "params": jnp.array([3.0, -4.0]),
+        "wi_0": jnp.array([5.0, -6.0]),
+    }
     clipped_grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, 1.0)
     for param_name, param_val in raw_grads.items():
       # The grads should all be clipped and not equal to what they were before
       self.assertFalse(jnp.array_equal(param_val, clipped_grads[param_name]))
 
   def test_fp8_stats_not_clipped_but_others_are(self):
-    raw_grads = {"params": {"wi_0": jnp.array([5.0, -6.0]), "wi_1": jnp.array([7.0, -8.0])}}
+    raw_grads = {
+        "params": {
+            "wi_0": jnp.array([5.0, -6.0]),
+            "wi_1": jnp.array([7.0, -8.0]),
+        }
+    }
     # Create the reference for how the params would be clipped if no fp8 stats were present
     expected_clipped_grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, 1.0)
 
@@ -69,11 +75,63 @@ class TestGradientClipping(unittest.TestCase):
 
     # Check all non-fp8 parameters have been clipped in a manner as if the fp8 stats were not present at all
     for param_name in raw_grads["params"]:
-      self.assertTrue(jnp.array_equal(expected_clipped_grads["params"][param_name], clipped_grads["params"][param_name]))
+      self.assertTrue(
+          jnp.array_equal(
+              expected_clipped_grads["params"][param_name],
+              clipped_grads["params"][param_name],
+          )
+      )
 
     # Then check all fp8 parameters were not clipped at all
     for param_name, raw_value in raw_grads[maxtext_utils.OVERWRITE_WITH_GRADIENT].items():
-      self.assertTrue(jnp.array_equal(raw_value, clipped_grads[maxtext_utils.OVERWRITE_WITH_GRADIENT][param_name]))
+      self.assertTrue(
+          jnp.array_equal(
+              raw_value,
+              clipped_grads[maxtext_utils.OVERWRITE_WITH_GRADIENT][param_name],
+          )
+      )
+
+
+class TestIntermediateValueRetrieval(unittest.TestCase):
+  """test class for IntermediateValueRetrieval"""
+
+  def setUp(self):
+    self.mock_model = MagicMock(name="Transformer")
+
+    # 2. Create the Decoder Mock
+    self.mock_decoder = MagicMock(name="Decoder")
+    self.mock_model.decoder = self.mock_decoder
+    self.mock_layers = {}
+    self.mock_model.decoder.layers = self.mock_layers
+    self.self_attention = {}
+    self.mock_layers["self_attention"] = self.self_attention
+
+  def test_valid_intermediate_key(self):
+    expected_sowed_data = [0.1, 0.5, 0.9]
+    mock_sowed_variable = Mock(name="out_projection_activations")
+    mock_sowed_variable.get_value.return_value = (expected_sowed_data,)
+
+    self.mock_decoder.layers["self_attention"]["out_projection_activations"] = mock_sowed_variable
+
+    result = maxtext_utils.get_intermediate_value(self.mock_model, "out_projection_activations")
+
+    self.assertEqual(result, expected_sowed_data)
+
+  def test_returns_default_if_sow_did_not_happen(self):
+    """
+    Simulate a scenario where the model ran, but this specific key
+    was NOT sowed (or the layer was skipped).
+    """
+
+    result = maxtext_utils.get_intermediate_value(self.mock_model, "out_projection_activations", default="MyDefault")
+
+    self.assertEqual(result, "MyDefault")
+
+  def test_unknown_key_raises_value_error(self):
+    with self.assertRaises(ValueError) as cm:
+      maxtext_utils.get_intermediate_value(self.mock_model, "some_random_layer_name")
+
+    self.assertEqual(str(cm.exception), "Incorrect nested_key: some_random_layer_name")
 
 
 class TestNestedValueRetrieval(unittest.TestCase):
@@ -113,11 +171,18 @@ class UpdateStateParamTest(unittest.TestCase):
   def setUp(self):
     self.model = nn.Dense(features=5)
     self.initial_params = {
-        "layers": {"layer_0": {"bias": jnp.array([1.0, 1.0])}, "layer_1": {"bias": jnp.array([2.0, 2.0])}},
+        "layers": {
+            "layer_0": {"bias": jnp.array([1.0, 1.0])},
+            "layer_1": {"bias": jnp.array([2.0, 2.0])},
+        },
         "decoder": {"gate": {"bias": jnp.array([0.5, 0.5])}},
     }
     self.state = train_state.TrainState(
-        step=0, apply_fn=self.model.apply, params=self.initial_params, tx=None, opt_state={}
+        step=0,
+        apply_fn=self.model.apply,
+        params=self.initial_params,
+        tx=None,
+        opt_state={},
     )
 
   def test_update_mode_add(self):
@@ -167,7 +232,8 @@ class MaxUtilsInitState(unittest.TestCase):
     self.assertEqual(state.opt_state, {})
     self.assertEqual(state.apply_fn, self.model.apply)
     self.assertEqual(
-        max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
+        max_utils.calculate_num_params_from_pytree(state.params),
+        max_utils.calculate_num_params_from_pytree(self.params),
     )
 
   def test_init_decode_state(self):
@@ -191,7 +257,8 @@ class MaxUtilsInitState(unittest.TestCase):
     self.assertEqual(state.tx, self.tx)
     self.assertNotEqual(state.opt_state, {})
     self.assertEqual(
-        max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
+        max_utils.calculate_num_params_from_pytree(state.params),
+        max_utils.calculate_num_params_from_pytree(self.params),
     )
 
 
@@ -201,9 +268,7 @@ class SpecialVariables(nnx.Variable):
 
 
 class ModelWithMultipleCollections(nnx.Module):
-  """
-  A simple model that has variables in multiple collections - "params" and "special_variables"
-  """
+  """A simple model that has variables in multiple collections - "params" and "special_variables" """
 
   def __init__(self, input_dim: int, rngs: nnx.Rngs | None = None):
     self.dense = nnx.Linear(input_dim, 4, rngs=rngs)
@@ -240,11 +305,19 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
     state_under_test = None
     if is_training:
       state_under_test = TrainState.create(
-          apply_fn=graphdef.apply, params=params, other_variables=other_variables, tx=self.tx
+          apply_fn=graphdef.apply,
+          params=params,
+          other_variables=other_variables,
+          tx=self.tx,
       )
     else:
       state_under_test = TrainState(
-          step=0, apply_fn=graphdef.apply, params=params, other_variables=other_variables, tx=None, opt_state={}
+          step=0,
+          apply_fn=graphdef.apply,
+          params=params,
+          other_variables=other_variables,
+          tx=None,
+          opt_state={},
       )
 
     self.assertEqual(state_under_test.apply_fn, graphdef.apply)
@@ -332,13 +405,11 @@ class MaxUtilsPpAsDp(unittest.TestCase):
 
 
 class TestAssertParamsSufficientlySharded(unittest.TestCase):
-  """
-  Test suite for the sharding assertion utility function 'assert_params_sufficiently_sharded'.
-  """
+  """Test suite for the sharding assertion utility function 'assert_params_sufficiently_sharded'."""
 
   def setUp(self):
-    """
-    Set up the test environment before each test method is run.
+    """Set up the test environment before each test method is run.
+
     This method initializes a device mesh required for sharding tests.
     """
     # Skip these tests if the environment has fewer than 4 devices, as the mesh requires them.
@@ -352,9 +423,7 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     self.mesh_axes = ("fsdp", "sequence", "tensor", "stage", "context")
 
   def test_fully_sharded_2d(self):
-    """
-    Tests that a 2D tensor fully sharded across both mesh axes passes the assertion.
-    """
+    """Tests that a 2D tensor fully sharded across both mesh axes passes the assertion."""
     # Define a sharding spec that shards the first tensor dimension by the 'fsdp' mesh axis
     # and the second dimension by the 'tensor' mesh axis.
     pspec = PartitionSpec("fsdp", "tensor")
@@ -365,9 +434,7 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
 
   def test_unsharded_fails(self):
-    """
-    Tests that a completely unsharded (fully replicated) parameter fails the assertion.
-    """
+    """Tests that a completely unsharded (fully replicated) parameter fails the assertion."""
     # Create a parameter without any sharding specification. It will be replicated on all devices.
     params = {"layer1": jnp.ones((8, 8))}
 
@@ -376,11 +443,14 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
       assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
 
   def test_mixed_sharding_fails(self):
-    """
-    Tests that a mix of sharded and unsharded parameters fails when the unsharded
+    """Tests that a mix of sharded and unsharded parameters fails when the unsharded
+
     portion exceeds the tolerance.
     """
-    sharded_param = jax.device_put(jnp.ones((8, 8)), NamedSharding(self.mesh, PartitionSpec("fsdp", "tensor")))
+    sharded_param = jax.device_put(
+        jnp.ones((8, 8)),
+        NamedSharding(self.mesh, PartitionSpec("fsdp", "tensor")),
+    )
     unsharded_param = jnp.ones((8, 8))
     params = {"layer1": sharded_param, "layer2": unsharded_param}
 
@@ -388,9 +458,7 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
       assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.5)
 
   def test_3d_tensor_sharded_on_fsdp_axis(self):
-    """
-    Tests that a 3D tensor sharded only on a valid target axis ('fsdp') should fail.
-    """
+    """Tests that a 3D tensor sharded only on a valid target axis ('fsdp') should fail."""
     pspec = PartitionSpec("fsdp", None, None)
     params = {"conv3d_layer": jax.device_put(jnp.ones((8, 4, 4)), NamedSharding(self.mesh, pspec))}
 
@@ -398,8 +466,8 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
       assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.2)
 
   def test_multi_axis_sharding_pass(self):
-    """
-    Tests that a tensor sharded with a valid axis ('fsdp') on a complex,
+    """Tests that a tensor sharded with a valid axis ('fsdp') on a complex,
+
     multi-dimensional mesh passes the assertion.
     """
     # Create a mesh shape for a 5D mesh.
@@ -407,15 +475,15 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     mesh = Mesh(devices, self.mesh_axes)
 
     # Shard across multiple axes, including the valid 'fsdp' axis.
-    pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+    pspec = PartitionSpec(("fsdp", "sequence"), "stage", "tensor", None)
     params = {"complex_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, pspec))}
 
     # This should pass because 'fsdp' is a valid sharding axis being used.
     assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
 
   def test_multi_axis_not_sharded_fails(self):
-    """
-    Tests that a tensor on a complex mesh fails if it's not sharded along any
+    """Tests that a tensor on a complex mesh fails if it's not sharded along any
+
     of the primary valid axes (like 'fsdp').
     """
     devices = np.array(jax.devices()).reshape((jax.device_count(), 1, 1, 1, 1))
@@ -427,12 +495,10 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
       assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
 
   def test_multi_axis_mixed_sharding_fails(self):
-    """
-    Tests that a mix of sharded (correctly) and unsharded tensors on a complex mesh fails.
-    """
+    """Tests that a mix of sharded (correctly) and unsharded tensors on a complex mesh fails."""
     devices = np.array(jax.devices()).reshape((jax.device_count(), 1, 1, 1, 1))
     mesh = Mesh(devices, self.mesh_axes)
-    sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+    sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", "tensor", None)
     sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, sharded_pspec))
     unsharded_param = jnp.ones((8, 8, 2, 2))
     params = {
@@ -445,14 +511,10 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
 
 
 class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
-  """
-  Test suite for sharding assertion formatting functions.
-  """
+  """Test suite for sharding assertion formatting functions."""
 
   def setUp(self):
-    """
-    Set up the common 2*2 mesh for sharding tests.
-    """
+    """Set up the common 2*2 mesh for sharding tests."""
     if len(jax.devices()) < 4:
       self.skipTest("This test suite requires at least 4 TPU devices")
 
@@ -461,10 +523,8 @@ class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
     self.mesh = Mesh(devices, self.mesh_axes)
 
   def test_multi_axis_mixed_formating(self):
-    """
-    Tests a mix of sharded and unsharded tensors on a complex mesh fails.
-    """
-    sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+    """Tests a mix of sharded and unsharded tensors on a complex mesh fails."""
+    sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", "tensor", None)
     sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(self.mesh, sharded_pspec))
     unsharded_param = jnp.ones((8, 8, 2, 2))
     params = {
@@ -475,9 +535,7 @@ class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
 
 
 class TestPromptLogprobsFromPrefill(unittest.TestCase):
-  """
-  Test suite for the inference utility function 'prompt_logprobs_from_prefill'.
-  """
+  """Test suite for the inference utility function 'prompt_logprobs_from_prefill'."""
 
   def test_shift_and_masking(self):
     # B=1, S=5, V=4
@@ -518,9 +576,7 @@ class TestPromptLogprobsFromPrefill(unittest.TestCase):
 
 
 class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
-  """
-  Test suite for the inference utility function 'prompt_logprobs_from_packed_prefill'.
-  """
+  """Test suite for the inference utility function 'prompt_logprobs_from_packed_prefill'."""
 
   def test_respects_segments_and_masking(self):
     # Build a packed sequence of two prompts.
@@ -620,7 +676,11 @@ class TestSamplingFunctions(unittest.TestCase):
 
     for r in rngs:
       token = inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=10, nucleus_topp=nucleus_topp, temperature=1.0, rng=r
+          self.logits,
+          topk=10,
+          nucleus_topp=nucleus_topp,
+          temperature=1.0,
+          rng=r,
       )
       self.assertIn(token.item(), top_p_indices)
 
@@ -636,7 +696,11 @@ class TestSamplingFunctions(unittest.TestCase):
 
     for r in rngs:
       token = inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=topk, nucleus_topp=nucleus_topp, temperature=1.0, rng=r
+          self.logits,
+          topk=topk,
+          nucleus_topp=nucleus_topp,
+          temperature=1.0,
+          rng=r,
       )
       self.assertIn(token.item(), valid_indices)
 
@@ -674,7 +738,11 @@ class TestSamplingFunctions(unittest.TestCase):
     # CORRECTED: Use vmap to handle batching for JAX's random functions.
     # We map over the first axis (0) of logits and rngs.
     # Other arguments (topk, nucleus_topp, temperature) are fixed (None).
-    vmapped_sample = vmap(inference_utils.sample_topk_topp_weighted, in_axes=(0, None, None, None, 0), out_axes=0)
+    vmapped_sample = vmap(
+        inference_utils.sample_topk_topp_weighted,
+        in_axes=(0, None, None, None, 0),
+        out_axes=0,
+    )
 
     tokens = vmapped_sample(batched_logits, topk, 1.0, 1.0, rngs)
 
@@ -794,7 +862,11 @@ class TestLearningRateSchedules(unittest.TestCase):
 
       # Stable phase: constant at peak
       self.assertAlmostEqual(float(schedule_fn(warmup_steps + 10)), learning_rate, places=6)
-      self.assertAlmostEqual(float(schedule_fn(warmup_steps + stable_steps // 2)), learning_rate, places=6)
+      self.assertAlmostEqual(
+          float(schedule_fn(warmup_steps + stable_steps // 2)),
+          learning_rate,
+          places=6,
+      )
       self.assertAlmostEqual(float(schedule_fn(decay_start - 1)), learning_rate, places=6)
 
       # Decay phase: peak -> final

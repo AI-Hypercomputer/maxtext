@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-ATTENTION: This unit test should only be run on TPU v4-8. The test
-may fail on different versions like v5p-8, v6e-8
+"""ATTENTION: This unit test should only be run on TPU v4-8.
+
+The test may fail on different versions like v5p-8, v6e-8
 
 TODO: b/413146740 - Match logits on other TPU versions
 
@@ -29,30 +29,27 @@ import os
 import subprocess
 import sys
 import unittest
-import pytest
-import jsonlines
-import numpy as np
-
+from flax import linen as nn
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from flax import linen as nn
-
-import transformers
-
+import jsonlines
 import MaxText as mt
-from MaxText import maxengine
 from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.experimental.rl import grpo_utils
-from maxtext.inference import offline_engine
-from maxtext.inference.offline_engine import InputData
-from maxtext.utils import maxtext_utils
-from maxtext.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state, setup_train_loop
+from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn, setup_train_loop
 from maxtext.experimental.rl.grpo_utils import compute_log_probs
+from maxtext.inference import offline_engine
+from maxtext.inference.maxengine import maxengine
+from maxtext.inference.offline_engine import InputData
+from maxtext.layers import quantizations
+from maxtext.models import models
+from maxtext.utils import maxtext_utils
+import numpy as np
+import pytest
+import transformers
 
 # This test is for serving pathways via offline_engine and maxengine.
 pytestmark = [pytest.mark.external_training]
@@ -81,7 +78,14 @@ def setup_maxtext_model(config, mesh):
   data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
   reference_params = jax.tree.map(jnp.copy, state.params["params"])
   state = _merge_grpo_state(state, reference_params)
-  return maxtext_model, state, reference_params, init_rng, state_mesh_shardings, data_sharding
+  return (
+      maxtext_model,
+      state,
+      reference_params,
+      init_rng,
+      state_mesh_shardings,
+      data_sharding,
+  )
 
 
 def prepare_maxtext_inputs(input_str, tokenizer_model):
@@ -95,7 +99,11 @@ def prepare_maxtext_inputs(input_str, tokenizer_model):
   input_segmentation = (input_ids > 0).astype(jnp.int32)
   input_position = jnp.where(input_segmentation, jnp.arange(input_segmentation.shape[1]), 0)
   completion_segmentation = jnp.tile(
-      jnp.pad(jnp.array([0] * len(prompt) + [1] * len(prompt)), (0, input_ids.shape[1] - 2 * len(prompt))), (4, 1)
+      jnp.pad(
+          jnp.array([0] * len(prompt) + [1] * len(prompt)),
+          (0, input_ids.shape[1] - 2 * len(prompt)),
+      ),
+      (4, 1),
   )
   return input_ids, input_segmentation, input_position, completion_segmentation
 
@@ -116,14 +124,20 @@ class GrpoTrainerTest(unittest.TestCase):
     if exit_code != 0:
       raise ValueError(f"{command} failed with exit code: {exit_code}")
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml")],
+        [
+            None,
+            os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml"),
+        ],
         run_name="unit_test_grpo_trainer",
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama3.1-tokenizer"),
         enable_checkpointing=False,
         train_data_columns="prompt",
     )
     self.config_inference = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml")],
+        [
+            None,
+            os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml"),
+        ],
         run_name="unit_test_grpo_trainer_inference",
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama3.1-tokenizer"),
         enable_checkpointing=False,
@@ -174,7 +188,10 @@ class GrpoTrainerTest(unittest.TestCase):
         is_train=False,
         rngs=self.rng,
     )
-    jax.debug.print("maxtext_per_token_logps={maxtext_per_token_logps}", maxtext_per_token_logps=maxtext_per_token_logps)
+    jax.debug.print(
+        "maxtext_per_token_logps={maxtext_per_token_logps}",
+        maxtext_per_token_logps=maxtext_per_token_logps,
+    )
     jax.debug.print(
         "golden_per_token_logps={golden_per_token_logps}",
         golden_per_token_logps=golden_data["maxtext_per_token_logps_no_ckpt_loading"],
@@ -233,7 +250,10 @@ class GrpoTrainerTest(unittest.TestCase):
     results = self.inference_engine.batch_inference(input_data)
 
     # Assert that the generated completions match the golden reference.
-    self.assertEqual(results[0]["prompt_completions"].tolist(), golden_data["generated_completions"])
+    self.assertEqual(
+        results[0]["prompt_completions"].tolist(),
+        golden_data["generated_completions"],
+    )
 
 
 class ReshardingTest(unittest.TestCase):
@@ -253,7 +273,10 @@ class ReshardingTest(unittest.TestCase):
         "model_name": "gemma2-2b",
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", config_file)],
+        [
+            sys.argv[0],
+            os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", config_file),
+        ],
         **init_kwargs,
     )
     return config
@@ -264,7 +287,10 @@ class ReshardingTest(unittest.TestCase):
     """Test that reshard_pytree correctly reshards a PyTree."""
     # Create a mesh of 16 devices, laid out as 16x1.
     source_config = self.init_pyconfig(
-        "grpo.yml", ici_fsdp_parallelism=16, inference_replicas=4, inference_devices_per_replica=4
+        "grpo.yml",
+        ici_fsdp_parallelism=16,
+        inference_replicas=4,
+        inference_devices_per_replica=4,
     )
 
     # Create a second mesh of 16 devices for inference

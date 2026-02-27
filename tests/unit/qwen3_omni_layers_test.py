@@ -21,42 +21,23 @@ import math
 import os
 import unittest
 
+from flax import nnx
 import jax
 import jax.numpy as jnp
-import numpy as np
-import torch
-import torch.nn.functional as F
-from flax import nnx
 from jax.sharding import Mesh
-
-# Vision encoder imports from transformers
-from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
-    Qwen3OmniMoeAudioEncoderConfig,
-    Qwen3OmniMoeVisionEncoderConfig,
-)
-from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
-    Qwen3OmniMoeAudioAttention as TorchQwen3OmniMoeAudioAttention,
-    Qwen3OmniMoeAudioEncoder as TorchQwen3OmniMoeAudioEncoder,
-    Qwen3OmniMoeAudioEncoderLayer as TorchQwen3OmniMoeAudioEncoderLayer,
-    Qwen3OmniMoeVisionEncoder as TorchQwen3OmniMoeVisionEncoder,
-    Qwen3OmniMoeVisionMLP as TorchQwen3OmniMoeVisionMLP,
-    Qwen3OmniMoeVisionPatchEmbed as TorchQwen3OmniMoeVisionPatchEmbed,
-    Qwen3OmniMoeVisionPatchMerger as TorchQwen3OmniMoeVisionPatchMerger,
-    SinusoidsPositionEmbedding as TorchSinusoidsPositionEmbedding,
-    apply_rotary_pos_emb_vision,
-)
-
-from MaxText import common_types
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_REPO_ROOT
-from MaxText.layers.attentions import Attention
-from MaxText.layers.embeddings import (
+from maxtext.common import common_types
+from maxtext.utils.globals import MAXTEXT_REPO_ROOT
+from maxtext.inference.maxengine import maxengine
+from maxtext.layers.attentions import Attention
+from maxtext.layers.embeddings import (
     PositionalEmbedding,
     Qwen3OmniMoeVisionPosEmbedInterpolate as JaxQwen3OmniMoeVisionPosEmbedInterpolate,
     Qwen3OmniMoeVisionRotaryEmbedding as JaxQwen3OmniMoeVisionRotaryEmbedding,
 )
-from MaxText.layers.encoders import AudioEncoder
-from MaxText.layers.qwen3 import (
+from maxtext.layers.decoders import deepstack_process
+from maxtext.layers.encoders import AudioEncoder
+from maxtext.models.qwen3 import (
     Qwen3OmniAudioEncoder,
     Qwen3OmniAudioEncoderLayer,
     Qwen3OmniMoeVisionAttention as JaxQwen3OmniMoeVisionAttention,
@@ -80,6 +61,25 @@ from tests.utils.multimodal_test_utils import (
     create_block_diagonal_attention_mask,
     create_random_jax_torch,
     split_into_patches,
+)
+import numpy as np
+import torch
+import torch.nn.functional as F
+# Vision encoder imports from transformers
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
+    Qwen3OmniMoeAudioEncoderConfig,
+    Qwen3OmniMoeVisionEncoderConfig,
+)
+from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+    Qwen3OmniMoeAudioAttention as TorchQwen3OmniMoeAudioAttention,
+    Qwen3OmniMoeAudioEncoderLayer as TorchQwen3OmniMoeAudioEncoderLayer,
+    Qwen3OmniMoeAudioEncoder as TorchQwen3OmniMoeAudioEncoder,
+    Qwen3OmniMoeVisionEncoder as TorchQwen3OmniMoeVisionEncoder,
+    Qwen3OmniMoeVisionMLP as TorchQwen3OmniMoeVisionMLP,
+    Qwen3OmniMoeVisionPatchEmbed as TorchQwen3OmniMoeVisionPatchEmbed,
+    Qwen3OmniMoeVisionPatchMerger as TorchQwen3OmniMoeVisionPatchMerger,
+    SinusoidsPositionEmbedding as TorchSinusoidsPositionEmbedding,
+    apply_rotary_pos_emb_vision,
 )
 
 # Initialize config once for all tests
@@ -580,6 +580,86 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
       )
 
 
+class TestDeepstackProcess(unittest.TestCase):
+  """Tests for deepstack_process.
+
+  Adds deepstack visual embeddings into decoder hidden states at the
+  positions indicated by the bidirectional mask (visual token positions).
+  """
+
+  def test_adds_only_at_visual_positions(self):
+    """Visual embeddings should be added at True mask positions and nowhere else."""
+    batch, seq_len, hidden_dim = 2, 8, 4
+    hidden_states = jnp.zeros((batch, seq_len, hidden_dim))
+    # positions 1, 3, 5 are visual for both batch items (3 visual tokens each)
+    mask = jnp.array(
+        [
+            [False, True, False, True, False, True, False, False],
+            [False, True, False, True, False, True, False, False],
+        ]
+    )
+    visual_embeds = jnp.ones((batch, 3, hidden_dim))
+
+    result = deepstack_process(hidden_states, mask, visual_embeds)
+
+    for b in range(batch):
+      for pos in [1, 3, 5]:
+        np.testing.assert_allclose(np.array(result[b, pos]), np.ones(hidden_dim), err_msg=f"batch={b} pos={pos}")
+      for pos in [0, 2, 4, 6, 7]:
+        np.testing.assert_allclose(np.array(result[b, pos]), np.zeros(hidden_dim), err_msg=f"batch={b} pos={pos}")
+
+  def test_visual_tokens_mapped_in_order(self):
+    """Each visual embed should be added to the corresponding visual position in cumsum order."""
+    batch, seq_len, hidden_dim = 1, 6, 2
+    hidden_states = jnp.zeros((batch, seq_len, hidden_dim))
+    mask = jnp.array([[False, True, False, True, False, False]])
+    # two distinct visual tokens, a third token that won't be used
+    visual_embeds = jnp.array([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])
+
+    result = deepstack_process(hidden_states, mask, visual_embeds)
+
+    # 1st visual position → visual_embeds[0, 0]
+    np.testing.assert_allclose(np.array(result[0, 1]), [1.0, 2.0])
+    # 2nd visual position → visual_embeds[0, 1]
+    np.testing.assert_allclose(np.array(result[0, 3]), [3.0, 4.0])
+    # non-visual positions untouched
+    for pos in [0, 2, 4, 5]:
+      np.testing.assert_allclose(np.array(result[0, pos]), [0.0, 0.0])
+
+  def test_matches_reference_scatter(self):
+    """Output must match a reference numpy loop that scatters visual embeds by position."""
+    batch, seq_len, hidden_dim, num_visual = 2, 10, 8, 4
+    np.random.seed(0)
+
+    hidden_np = np.random.randn(batch, seq_len, hidden_dim).astype(np.float32)
+    mask_np = np.zeros((batch, seq_len), dtype=bool)
+    mask_np[:, [1, 3, 5, 7]] = True  # 4 visual tokens per batch item
+    visual_np = np.random.randn(batch, num_visual, hidden_dim).astype(np.float32)
+
+    # Reference: per-batch scatter
+    expected = hidden_np.copy()
+    for b in range(batch):
+      vi = 0
+      for s in range(seq_len):
+        if mask_np[b, s]:
+          expected[b, s] += visual_np[b, vi]
+          vi += 1
+
+    result = deepstack_process(jnp.array(hidden_np), jnp.array(mask_np), jnp.array(visual_np))
+    np.testing.assert_allclose(np.array(result), expected, rtol=1e-5, atol=1e-5)
+
+  def test_hidden_states_unchanged_without_visual_tokens(self):
+    """When mask is all-False, hidden states should be returned unchanged."""
+    batch, seq_len, hidden_dim = 2, 6, 4
+    np.random.seed(1)
+    hidden_np = np.random.randn(batch, seq_len, hidden_dim).astype(np.float32)
+    mask = jnp.zeros((batch, seq_len), dtype=bool)
+    visual_embeds = jnp.ones((batch, 1, hidden_dim))
+
+    result = deepstack_process(jnp.array(hidden_np), mask, visual_embeds)
+    np.testing.assert_allclose(np.array(result), hidden_np, rtol=1e-6, atol=1e-6)
+
+
 class TestQwen3OmniPreprocessing(unittest.TestCase):
   """Test MaxText Qwen3 Omni preprocessor against HuggingFace reference."""
 
@@ -587,18 +667,40 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
     self.base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
     self.image_path = os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "test_image.jpg")
     self.video_path = os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "test_video.mp4")
+    self.prompt = "What can you see and hear? Answer in one short sentence."
     self.maxtext_config = pyconfig.initialize(
         ["", self.base_config_path],
         model_name="qwen3-omni-30b-a3b",
+        tokenizer_type="huggingface",
+        tokenizer_path="Qwen/Qwen3-Omni-30B-A3B-Instruct",
         use_multimodal=True,
         image_path=self.image_path,
         video_path=self.video_path,
         use_audio_in_video=True,
+        max_prefill_predict_length=2048,
     )
 
   def test_preprocess_mm_data(self):
     # MaxText preprocessor
     mt_processor_outputs = mm_processor.preprocess_mm_data(self.maxtext_config)
+    mt_prompt = mm_processor.reformat_prompt(
+        prompt=self.prompt,
+        image_placeholder=self.maxtext_config.image_placeholder,
+        video_placeholder=self.maxtext_config.video_placeholder,
+        model_name=self.maxtext_config.model_name,
+        num_images=mt_processor_outputs.num_images,
+        num_videos=mt_processor_outputs.num_videos,
+    )
+
+    engine = maxengine.MaxEngine(self.maxtext_config)
+    metadata = engine.get_tokenizer()
+    tokenizer_model = engine.build_tokenizer(metadata)
+    mt_input_ids, _ = tokenizer_model.encode(
+        mt_prompt, is_bos=False, prefill_lengths=[self.maxtext_config.max_prefill_predict_length]
+    )
+    mt_input_ids = mm_processor.prepare_text_for_image_fusion(
+        mt_input_ids, config=self.maxtext_config, processor_output=mt_processor_outputs
+    )
 
     # HuggingFace preprocessor
     from transformers import Qwen3OmniMoeProcessor  # pylint: disable=import-outside-toplevel
@@ -612,15 +714,15 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
             "content": [
                 {"type": "image", "image": self.image_path},
                 {"type": "video", "video": self.video_path},
-                {"type": "text", "text": "What can you see and hear? Answer in one short sentence."},
+                {"type": "text", "text": self.prompt},
             ],
         },
     ]
     USE_AUDIO_IN_VIDEO = True
-    text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+    hf_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
     audios, images, videos = process_mm_info(conversation, use_audio_in_video=USE_AUDIO_IN_VIDEO)
     hf_processor_outputs = processor(
-        text=text,
+        text=hf_prompt,
         audio=audios,
         images=images,
         videos=videos,
@@ -628,9 +730,15 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
         padding=True,
         use_audio_in_video=USE_AUDIO_IN_VIDEO,
     )
+    hf_input_ids = np.array(hf_processor_outputs["input_ids"][0, :]).astype(np.float32)
 
     # Add assertions to check the output
     self.assertIsNotNone(mt_processor_outputs)
+    # Check the formatted prompts are the same
+    self.assertEqual(mt_prompt, hf_prompt, "Formatted prompts should match")
+    # Check the tokenized IDs are the same (with multimodal paddings)
+    assert np.array_equal(mt_input_ids[: hf_input_ids.shape[0]], hf_input_ids)
+    # Check the image/video/audio values are close (allow some tolerance due to preprocessing differences)
     assert np.allclose(
         mt_processor_outputs.pixel_values,
         np.array(hf_processor_outputs["pixel_values"]).astype(np.float32),

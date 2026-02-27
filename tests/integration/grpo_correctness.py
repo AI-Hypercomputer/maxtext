@@ -11,36 +11,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-GRPO correctness tests
-"""
+"""GRPO correctness tests"""
 
 import os
 import unittest
 
-import numpy as np
-
+from datasets import load_dataset
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
+from MaxText import pyconfig
+from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn
+from maxtext.experimental.rl.grpo_utils import compute_log_probs
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from maxtext.models import models
+from maxtext.utils import maxtext_utils
+import numpy as np
+import pytest
 import torch
+import transformers
 # from datasets import Dataset
 
 from trl import GRPOConfig, GRPOTrainer
-
-import transformers
-
-from datasets import load_dataset
-
-from maxtext.utils import maxtext_utils
-from maxtext.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state
-from maxtext.experimental.rl.grpo_utils import compute_log_probs
-from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import models
-import pytest
 
 pytestmark = [pytest.mark.external_training]  # uses pre-generated checkpoint
 
@@ -114,14 +107,30 @@ class GRPOTest(unittest.TestCase):
     input_segmentation = (input_ids > 0).astype(jnp.int32)
     input_position = jnp.where(input_segmentation, jnp.arange(input_segmentation.shape[1]), 0)
     completion_segmentation = jnp.tile(
-        jnp.pad(jnp.array([0] * len(prompt) + [1] * len(prompt)), (0, input_ids.shape[1] - 2 * len(prompt))), (4, 1)
+        jnp.pad(
+            jnp.array([0] * len(prompt) + [1] * len(prompt)),
+            (0, input_ids.shape[1] - 2 * len(prompt)),
+        ),
+        (4, 1),
     )
-    return input_ids, input_segmentation, input_position, completion_segmentation
+    return (
+        input_ids,
+        input_segmentation,
+        input_position,
+        completion_segmentation,
+    )
 
   def _prepare_trl_inputs(self):
+    """Prepare TRL inputs."""
     tokenized_inputs = self.tokenizer_model([self.input_str], return_tensors="pt")
     input_ids = torch.cat((tokenized_inputs["input_ids"], tokenized_inputs["input_ids"]), axis=-1)
-    attention_mask = torch.cat((tokenized_inputs["attention_mask"], tokenized_inputs["attention_mask"]), axis=-1)
+    attention_mask = torch.cat(
+        (
+            tokenized_inputs["attention_mask"],
+            tokenized_inputs["attention_mask"],
+        ),
+        axis=-1,
+    )
     logits_to_keep = tokenized_inputs["input_ids"].size()[1]
     return input_ids, attention_mask, logits_to_keep
 
@@ -145,7 +154,10 @@ class GRPOTest(unittest.TestCase):
     )
 
     hf_logits = (
-        self.hf_model(input_ids=torch.tensor(inputs.tolist()), attention_mask=torch.tensor(inputs_segmentation.tolist()))
+        self.hf_model(
+            input_ids=torch.tensor(inputs.tolist()),
+            attention_mask=torch.tensor(inputs_segmentation.tolist()),
+        )
         .logits.detach()
         .numpy()
     )
@@ -191,7 +203,10 @@ class GRPOTest(unittest.TestCase):
     # hf_inputs = self.trainer._prepare_inputs([{'prompt':self.input_str}]*4)
 
     completions = [{"prompt": self.input_str}] * 4
-    rewards = torch.tensor([self.trainer.reward_funcs[0](completion) for completion in completions], dtype=torch.float32)
+    rewards = torch.tensor(
+        [self.trainer.reward_funcs[0](completion) for completion in completions],
+        dtype=torch.float32,
+    )
     # Compute grouped-wise rewards
     mean_grouped_rewards = rewards.view(-1, self.trainer.num_generations).mean(dim=1)
     std_grouped_rewards = rewards.view(-1, self.trainer.num_generations).std(dim=1)
@@ -243,7 +258,14 @@ class GRPOTest(unittest.TestCase):
         "prompt_completions_segmentation": input_segmentation,
         "ar_completions_segmentation": completion_segmentation,
     }
-    maxtext_loss, aux = grpo_loss_fn(self.model, self.cfg, data, self.rng, self.state.params, reference_params)
+    maxtext_loss, aux = grpo_loss_fn(
+        self.model,
+        self.cfg,
+        data,
+        self.rng,
+        self.state.params,
+        reference_params,
+    )
     self.assertEqual(self.trainer._metrics["train"]["kl"][0], aux.avg_kl.tolist())  # pylint: disable=protected-access
     self.assertEqual(hf_loss.item(), maxtext_loss.tolist())
     # since this is on-policy

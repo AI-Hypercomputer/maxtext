@@ -15,4 +15,4 @@
 # limitations under the License.
 
 cd /maxtext
-python3 -m MaxText.maxengine_server $@
+python3 -m maxtext.inference.maxengine.maxengine_server $@

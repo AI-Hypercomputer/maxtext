@@ -27,8 +27,8 @@ import hashlib
 import re
 import jax
 from tests.utils.test_helpers import get_test_config_path
-from MaxText import train_compile
-from MaxText import train
+from maxtext.trainers.pre_train import train_compile
+from maxtext.trainers.pre_train import train
 
 
 class AotBaseTest(unittest.TestCase):
