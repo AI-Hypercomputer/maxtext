@@ -1588,6 +1588,7 @@ class VLLM(BaseModel):
       description="Overrides for HuggingFace model config for MaxText model.",
   )
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
+  vllm_config_path: str = Field("src/maxtext/configs/inference/vllm.yml", description="path to yaml file for loading vLLM config.")
 
 
 class RL(BaseModel):
