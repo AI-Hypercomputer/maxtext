@@ -71,7 +71,5 @@ echo
 echo "Output directed to: ${OUTFILE}"
 echo
 echo "Checkpoint saved at:$SAVE_QUANTIZED_CHECKPOINT_PATH"
-${cmd} gsutil ls -lh $SAVE_QUANTIZED_CHECKPOINT_PATH >> ${OUTFILE}
+${cmd} gcloud storage ls --long --readable-sizes $SAVE_QUANTIZED_CHECKPOINT_PATH >> ${OUTFILE}
 echo
-
-
