@@ -104,7 +104,7 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
 
   # Move zip file to GCS
   zip_in_gcs_path = "/".join((bucket_path, zip_name))
-  command = ["gsutil", "mv", zip_path, zip_in_gcs_path]
+  command = ["gcloud", "storage", "mv", zip_path, zip_in_gcs_path]
   captured_output = subprocess.run(command, check=True, capture_output=True)
 
   # Cleanup
@@ -148,7 +148,7 @@ ulimit -n 100000
 tar xzf {zip_name}
 {args.COMMAND}) 2>&1) >> {log_name}
 (echo "{finish_status_str()}") >> {log_name}
-gsutil cp {log_name} "{bucket_path}/"
+gcloud storage cp {log_name} "{bucket_path}/"
 (({create_kill_command_str(args)}) 2>&1 ) >> {log_name}"""
 
   with open(startup_script_file, "wt", encoding="utf-8") as f:
@@ -199,10 +199,10 @@ def write_download_from_gcs_sh(zip_gcs_path):
 while [ \$GCS_READ_SUCCESS -eq 0 ]
 do
   {{ # try
-      gsutil cp {zip_gcs_path} . &&
+      gcloud storage cp {zip_gcs_path} . &&
       echo 'Code download from GCS successful!' && GCS_READ_SUCCESS=1
   }} || {{ # catch
-      echo 'Failed to read GCS via gsutil, trying again'
+      echo 'Failed to read GCS via gcloud storage, trying again'
       sleep 10
   }}
 done"""
@@ -341,7 +341,7 @@ def main(raw_args=None) -> None:
   captured_output = move_script_dir_to_gcs(args.SCRIPT_DIR, tmp_dir_relative_to_script, zip_name, bucket_path)
   if captured_output.returncode != 0:
     print("\n\n Moving code to GCS failed")
-    print(f"Running 'gsutil mv zip {bucket_path}' failed with error: ")
+    print(f"Running 'gcloud storage mv zip {bucket_path}' failed with error: ")
     print(captured_output.stderr.decode())
     print("\nYou may need to run 'gcloud auth login'")
     return -1

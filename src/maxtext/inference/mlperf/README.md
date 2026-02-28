@@ -42,10 +42,10 @@ cd ${DATA_DISK_DIR}
 #### LLama2-70b:
 
 ```
-gsutil cp gs://cloud-tpu-inference-public/mlcommons/inference/language/llama2-70b/data/processed-openorca/open_orca_gpt4_tokenized_llama.calibration_1000.pkl .
+gcloud storage cp gs://cloud-tpu-inference-public/mlcommons/inference/language/llama2-70b/data/processed-openorca/open_orca_gpt4_tokenized_llama.calibration_1000.pkl .
 mv open_orca_gpt4_tokenized_llama.calibration_1000.pkl processed-calibration-data.pkl
 
-gsutil cp gs://cloud-tpu-inference-public/mlcommons/inference/language/llama2-70b/data/processed-openorca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl .
+gcloud storage cp gs://cloud-tpu-inference-public/mlcommons/inference/language/llama2-70b/data/processed-openorca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl .
 mv open_orca_gpt4_tokenized_llama.sampled_24576.pkl processed-data.pkl
 ```
 
