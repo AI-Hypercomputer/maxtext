@@ -847,51 +847,106 @@ class Decoder(nn.Module):
       if cfg.scan_layers:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
           assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
+
+          # 1. Setup shared arguments and layer definitions
           layer_call_kwargs = {
               "page_state": page_state,
               "previous_chunk": previous_chunk,
               "slot": slot,
           }
+
           dense_layer = RemattedBlockLayers[0]
-          dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
-          y, _ = self.scan_decoder_layers(
-              cfg,
-              dense_layer,
-              cfg.first_num_dense_layers,
-              "dense_layers",
-              mesh,
-              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
-          )(y, *broadcast_args)
           moe_layer = RemattedBlockLayers[1]
-          moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
+          num_dense_layers = cfg.first_num_dense_layers
           num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
-          # If batch-split schedule is used and initialization is complete,
-          # as detected by immutable params, use deepseek_batchsplit custom
-          # scan with initialized parameters.
-          if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
-            y = deepseek_batchsplit.scan_batch_split_layers(
-                y,
-                self.variables["params"]["moe_layers"],
-                decoder_positions,
-                decoder_segment_ids,
-                model_mode=model_mode,
-                mesh=mesh,
-                quant=self.quant,
-                cfg=cfg,
-                policy=policy,
-            )
-          else:
-            y, _ = self.scan_decoder_layers(
-                cfg,
-                moe_layer,
-                num_moe_layers,
-                "moe_layers",
-                mesh,
-                in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-                model_mode=model_mode,
-            )(y, *broadcast_args)
+          # Define metadata for the two stages of the DeepSeek pipeline
+          layer_configs = [
+              {
+                  "layer": dense_layer,
+                  "total_count": num_dense_layers,
+                  "prefix": "dense_layers",
+                  "engram_prefix": "engram_dense_layers",
+              },
+              {
+                  "layer": moe_layer,
+                  "total_count": num_moe_layers,
+                  "prefix": "moe_layers",
+                  "engram_prefix": "engram_moe_layers",
+              },
+          ]
+
+          for i, item in enumerate(layer_configs):
+            layer_obj = item["layer"]
+            is_moe_stage = i == 1
+
+            # 2. Handle Engram Layers (Unscanned/Randomly indexed layers)
+            if cfg.engram_layers:
+              # Filter engrams belonging to the current stage (Dense vs MoE)
+              if not is_moe_stage:
+                engram_indices = [idx for idx in cfg.engram_layers if idx < num_dense_layers]
+              else:
+                engram_indices = [idx for idx in cfg.engram_layers if idx >= num_dense_layers]
+
+              num_scan = item["total_count"] - len(engram_indices)
+            else:
+              engram_indices = []
+              num_scan = item["total_count"]
+
+            # 3. Execution: Scanned Blocks
+            original_call = layer_obj.__call__
+            layer_obj.__call__ = functools.partial(original_call, **layer_call_kwargs)
+
+            try:
+              # If batch-split schedule is used and initialization is complete,
+              # as detected by immutable params, use deepseek_batchsplit custom
+              # scan with initialized parameters.
+              use_batch_split = is_moe_stage and cfg.use_batch_split_schedule and not self.is_mutable_collection("params")
+
+              if use_batch_split:
+                y = deepseek_batchsplit.scan_batch_split_layers(
+                    y,
+                    self.variables["params"]["moe_layers"],
+                    decoder_positions,
+                    decoder_segment_ids,
+                    model_mode=model_mode,
+                    mesh=mesh,
+                    quant=self.quant,
+                    cfg=cfg,
+                    policy=policy,
+                )
+              else:
+                y, _ = self.scan_decoder_layers(
+                    cfg,
+                    layer_obj,
+                    num_scan,
+                    item["prefix"],
+                    mesh,
+                    in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                    model_mode=model_mode,
+                )(y, *broadcast_args)
+            finally:
+              # Restore original method to prevent side-effects in subsequent iterations
+              layer_obj.__call__ = original_call
+
+            # 4. Execution: Individual Engram Layers
+            for idx in engram_indices:
+              y, _ = layer_obj(
+                  config=cfg,
+                  mesh=mesh,
+                  name=f"{item['engram_prefix']}_{idx}",
+                  quant=self.quant,
+                  model_mode=model_mode,
+                  layer_idx=idx,
+              )(
+                  y,
+                  decoder_segment_ids,
+                  decoder_positions,
+                  deterministic,
+                  model_mode,
+                  decoder_input_tokens=decoder_input_tokens,
+                  **layer_call_kwargs,
+              )
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           y = self._apply_gemma3_scanned_blocks(
               y,
