@@ -64,7 +64,7 @@ source $VENV_NAME/bin/activate
 Next, run the following commands to get all the necessary installations
 inside the virtual environment (for e.g., `maxtext_venv`).
 
-```
+```bash
 uv pip install -e .[tpu-post-train] --resolution=lowest
 python3 -m src.install_maxtext_extra_deps.install_post_train_extra_deps
 ```
@@ -99,6 +99,15 @@ and `vllm`, follow these steps:
    in the logs of this step.
 
 5. Prior to installation, ensure that the `maxtext`, `tunix`, `vllm`, and `tpu-inference` repositories are synchronized to the specific commits recorded from the CI logs. For each repository, use the following command to switch to the correct commit: `git checkout <commit_id>`.
+
+Additionally, we need the following:
+
+```bash
+uv pip install --no-deps qwix==0.1.4
+uv pip install --no-deps protobuf==5.29.5
+uv pip install math-verify==0.9.0
+uv pip install aqtp>=0.9.0
+```
 
 ## Setup environment variables
 
