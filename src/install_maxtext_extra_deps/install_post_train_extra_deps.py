@@ -65,11 +65,21 @@ def main():
       "--no-deps",
   ]
 
+  local_vllm_install_command = [
+      sys.executable,  # Use the current Python executable's pip to ensure the correct environment
+        "-m",
+        "uv",
+        "pip",
+        "install",
+        "src/MaxText/integration/vllm",
+        "--no-deps",
+  ]
+
   print(f"Installing extra dependencies from '{extra_deps_file}' using uv...")
   print(f"Running command: {' '.join(command)}")
 
   try:
-    # Run the command
+    # Run the command to install Github dependencies
     process = subprocess.run(command, check=True, capture_output=True, text=True)
     print("Extra dependencies installed successfully!")
     print("--- Output from uv ---")
@@ -77,6 +87,15 @@ def main():
     if process.stderr:
       print("--- Errors/Warnings from uv (if any) ---")
       print(process.stderr)
+
+    # Run the command to install the MaxText vLLM directory
+    vllm_install_process = subprocess.run(local_vllm_install_command, check=True, capture_output=True, text=True)
+    print("MaxText vLLM dependency installed successfully!")
+    print("--- Output from uv ---")
+    print(vllm_install_process.stdout)
+    if vllm_install_process.stderr:
+      print("--- Errors/Warnings from uv (if any) ---")
+      print(vllm_install_process.stderr)
   except subprocess.CalledProcessError as e:
     print("Failed to install extra dependencies.")
     print(f"Command '{' '.join(e.cmd)}' returned non-zero exit status {e.returncode}.")

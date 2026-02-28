@@ -48,4 +48,4 @@ packages = ["src/MaxText", "src/maxtext", "src/install_maxtext_extra_deps"]
 [project.scripts]
 install_maxtext_tpu_github_deps = "install_maxtext_extra_deps.install_github_deps:main"
 install_maxtext_cuda12_github_deps = "install_maxtext_extra_deps.install_github_deps:main"
-install_maxtext_tpu_post_train_github_deps = "install_maxtext_extra_deps.install_post_train_github_deps:main"
+install_maxtext_tpu_post_train_extra_deps = "install_maxtext_extra_deps.install_post_train_extra_deps:main"
