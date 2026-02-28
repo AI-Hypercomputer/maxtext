@@ -53,7 +53,8 @@ def calculate_max_logit_metric(intermediate_outputs):
   if not all_max_logits:
     return None
 
-  return jnp.max(jnp.stack(all_max_logits))
+  # Compute max per layer first to handle potential shape mismatches
+  return jnp.max(jnp.stack([jnp.max(x) for x in all_max_logits]))
 
 
 def apply_qk_clip(state, intermediate_outputs, config):
