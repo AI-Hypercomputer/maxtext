@@ -38,7 +38,7 @@ from maxtext.common.common_types import (
 from maxtext.layers.attention_mla import MLA
 from maxtext.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
 from maxtext.layers.attentions import Attention
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 import numpy as np
 import pytest
 

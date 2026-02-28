@@ -887,23 +887,34 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
 
     wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
     wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
-
-  layer_w0 = gmm_fn(
-      x,
-      w0,
-      tiling=wi_tile_size,
-      weight_gather_axes=wi_gather_axes,
-      input_buffer_count=wi_input_buffer_count,
-      combine_scopes=wi_combine_scopes,
-  )
-  layer_w1 = gmm_fn(
-      x,
-      w1,
-      tiling=wi_tile_size,
-      weight_gather_axes=wi_gather_axes,
-      input_buffer_count=wi_input_buffer_count,
-      combine_scopes=wi_combine_scopes,
-  )
+  if config.merge_gating_gmm:
+    w01 = jnp.concatenate([w0, w1], axis=-1)
+    layer_w01 = gmm_fn(
+        x,
+        w01,
+        tiling=wi_tile_size,
+        weight_gather_axes=wi_gather_axes,
+        input_buffer_count=wi_input_buffer_count,
+        combine_scopes=wi_combine_scopes,
+    )
+    layer_w0, layer_w1 = jnp.split(layer_w01, 2, axis=-1)
+  else:
+    layer_w0 = gmm_fn(
+        x,
+        w0,
+        tiling=wi_tile_size,
+        weight_gather_axes=wi_gather_axes,
+        input_buffer_count=wi_input_buffer_count,
+        combine_scopes=wi_combine_scopes,
+    )
+    layer_w1 = gmm_fn(
+        x,
+        w1,
+        tiling=wi_tile_size,
+        weight_gather_axes=wi_gather_axes,
+        input_buffer_count=wi_input_buffer_count,
+        combine_scopes=wi_combine_scopes,
+    )
   layer_w0 = jax.ad_checkpoint.checkpoint_name(layer_w0, "mlpwi_0")
   layer_w1 = jax.ad_checkpoint.checkpoint_name(layer_w1, "mlpwi_1")
   intermediate_layer = jax.nn.silu(layer_w0) * layer_w1

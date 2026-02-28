@@ -66,7 +66,7 @@ from transformers import AutoTokenizer, AutoProcessor
 from absl import app
 from absl import flags
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.checkpoint_conversion.utils.param_mapping import (
     HOOK_FNS,
     PARAM_MAPPING,

@@ -18,7 +18,7 @@ import functools
 import jax
 from jax.sharding import PartitionSpec as P
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.input_pipeline.grain_data_processing import make_grain_train_iterator
 from maxtext.input_pipeline.grain_data_processing import make_grain_eval_iterator
 from maxtext.input_pipeline.hf_data_processing import make_hf_train_iterator

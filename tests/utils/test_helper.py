@@ -21,7 +21,7 @@ returned.
 
 import os
 from maxtext.common.gcloud_stub import is_decoupled
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 
 
 def get_test_config_path():

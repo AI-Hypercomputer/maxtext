@@ -25,8 +25,8 @@ from flax.core import meta
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.configs import pyconfig
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.layers import nnx_wrappers

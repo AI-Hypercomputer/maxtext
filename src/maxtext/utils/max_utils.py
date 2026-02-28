@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Common Max Utils needed by multiple modules.
+"""Common Max Utils needed by multiple modules.
 All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
 
 import collections
@@ -248,11 +248,20 @@ def initialize_jax_for_gpu(raw_keys):
   if os.environ.get("JAX_COORDINATOR_IP") is not None:
     coordinator_ip = str(os.getenv("JAX_COORDINATOR_IP"))
     coordinator_port = str(os.getenv("JAX_COORDINATOR_PORT"))
+    devices = os.getenv("CUDA_VISIBLE_DEVICES")
+    if devices is not None:
+      try:
+        devices = [int(x) for x in devices.split(",")]
+      except (ValueError, TypeError) as e:
+        max_logging.log(f"Error parsing CUDA_VISIBLE_DEVICES: {e}")
+        devices = None
+
     jax.distributed.initialize(
         coordinator_address=f"{coordinator_ip}:{coordinator_port}",
         num_processes=int(os.getenv("NNODES")),
         process_id=int(os.getenv("NODE_RANK")),
         initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
+        local_device_ids=devices,
     )
     max_logging.log(f"JAX global devices: {jax.devices()}")
 

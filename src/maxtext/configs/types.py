@@ -30,8 +30,8 @@ import jax
 from maxtext.common.common_types import AttentionType, DecoderBlockType, ShardMode
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
-from MaxText import accelerator_to_spec_map
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils import accelerator_to_spec_map
 from pydantic.config import ConfigDict
 from pydantic.fields import Field
 from pydantic.functional_validators import field_validator, model_validator
@@ -462,6 +462,7 @@ class Logits(BaseModel):
       None,
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
   )
+  z_loss_multiplier: float = Field(0.0, description="The multiplier for the z-loss (e.g., 1e-4). 0.0 to disable.")
 
 
 class Attention(BaseModel):
@@ -684,6 +685,8 @@ class MoEKernels(BaseModel):
 
   wi_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wi.")
   wo_combine_scopes: bool = Field(False, description="whether to use combine_scopes features for tgmm for wo.")
+
+  merge_gating_gmm: bool = Field(False, description="whether to merge the two gating gmm kernels into one.")
 
 
 class DeepSeekMoE(BaseModel):
@@ -1055,6 +1058,8 @@ class Distillation(BaseModel):
   # --- Loss Params ---
   distill_alpha: float = Field(0.5, description="Weight for the distillation loss component.")
   distill_temperature: float = Field(1.0, description="Temperature for distillation softening.")
+  distill_beta: float = Field(0.0, description="Weight for the feature loss component. Use 0.0 to disable")
+  distill_layer_indices: None | list = Field(None, description="Feature indices for feature loss.")
 
 
 class TrainingLoop(BaseModel):
@@ -2007,6 +2012,13 @@ class MaxTextConfig(
 
     # Validate and initiate hlo dump related configs
     validate_and_set_hlo_dump_defaults()
+
+    # Validate nnx sow incompatibility
+    if self.distill_beta > 0.0:
+      if not self.scan_layers:
+        raise ValueError("a value of self.distill_beta > 0.0 requires self.scan_layers = True")
+      if not self.enable_nnx:
+        raise ValueError("a value of self.distill_beta > 0.0 requires self.enable_nnx = True")
 
     # D. CALCULATE MODEL DIMENSIONS from global_parameter_scale
     # This allows scaling the model size up or down easily with a single power-of-two factor.

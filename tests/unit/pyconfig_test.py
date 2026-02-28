@@ -17,9 +17,9 @@
 import unittest
 import os.path
 
-from MaxText import pyconfig
-from MaxText.pyconfig import resolve_config_path
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.configs import pyconfig
+from maxtext.configs.pyconfig import resolve_config_path
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
 
 

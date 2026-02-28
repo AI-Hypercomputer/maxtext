@@ -35,8 +35,8 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 import jsonlines
 import MaxText as mt
-from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.configs import pyconfig
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.experimental.rl import grpo_utils
 from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn, setup_train_loop
@@ -72,15 +72,9 @@ def setup_maxtext_model(config, mesh):
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
 
-  maxtext_model = models.transformer_as_linen(
-      config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN
-  )
-  state, state_mesh_annotations = maxtext_utils.setup_decode_state(
-      maxtext_model, config, init_rng, mesh, None
-  )
-  state_mesh_shardings = nn.logical_to_mesh_sharding(
-      state_mesh_annotations, mesh, config.logical_axis_rules
-  )
+  maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  state, state_mesh_annotations = maxtext_utils.setup_decode_state(maxtext_model, config, init_rng, mesh, None)
+  state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, config.logical_axis_rules)
   data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
   reference_params = jax.tree.map(jnp.copy, state.params["params"])
   state = _merge_grpo_state(state, reference_params)
@@ -98,16 +92,12 @@ def prepare_maxtext_inputs(input_str, tokenizer_model):
   """prepare maxtext inputs"""
   prompt = tokenizer_model.encode(input_str)
   input_ids = jnp.pad(
-      jnp.tile(
-          jnp.concat([jnp.array(prompt), jnp.array(prompt)], axis=-1), (4, 1)
-      ),
+      jnp.tile(jnp.concat([jnp.array(prompt), jnp.array(prompt)], axis=-1), (4, 1)),
       ((0, 0), (0, 4)),
       constant_values=tokenizer_model.pad_token_type_id,
   )  # pad some tokens at the end of input prompt
   input_segmentation = (input_ids > 0).astype(jnp.int32)
-  input_position = jnp.where(
-      input_segmentation, jnp.arange(input_segmentation.shape[1]), 0
-  )
+  input_position = jnp.where(input_segmentation, jnp.arange(input_segmentation.shape[1]), 0)
   completion_segmentation = jnp.tile(
       jnp.pad(
           jnp.array([0] * len(prompt) + [1] * len(prompt)),
@@ -136,9 +126,7 @@ class GrpoTrainerTest(unittest.TestCase):
     self.config = pyconfig.initialize(
         [
             None,
-            os.path.join(
-                MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml"
-            ),
+            os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml"),
         ],
         run_name="unit_test_grpo_trainer",
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama3.1-tokenizer"),
@@ -148,16 +136,13 @@ class GrpoTrainerTest(unittest.TestCase):
     self.config_inference = pyconfig.initialize(
         [
             None,
-            os.path.join(
-                MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml"
-            ),
+            os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml"),
         ],
         run_name="unit_test_grpo_trainer_inference",
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama3.1-tokenizer"),
         enable_checkpointing=False,
         ici_tensor_parallelism=4,
-        per_device_batch_size=self.config.per_device_batch_size
-        * self.config.rl["num_generations"],
+        per_device_batch_size=self.config.per_device_batch_size * self.config.rl["num_generations"],
     )
     self.model = mt.from_config(self.config)
     self.inference_model = mt.from_config(self.config_inference)
@@ -179,24 +164,17 @@ class GrpoTrainerTest(unittest.TestCase):
         mesh=self.inference_model.mesh,
     )
 
-  @pytest.mark.skip(
-      reason=(
-          "Logit output test fragile, failing on jax upgrade to 0.6.2 - see"
-          " b/425997645"
-      )
-  )
+  @pytest.mark.skip(reason="Logit output test fragile, failing on jax upgrade to 0.6.2 - see b/425997645")
   @pytest.mark.integration_test
   @pytest.mark.tpu_only  # ATTENTION: Only run on TPU V4-8
   def test_grpo_trainer_correctness(self):
     # Get the expected (golden) data.
     golden_data = get_golden_data(self.config)
     # Initialize the model and related objects.
-    maxtext_model, state, reference_params, rng, _, _ = setup_maxtext_model(
-        self.config, self.mesh
-    )
+    maxtext_model, state, reference_params, rng, _, _ = setup_maxtext_model(self.config, self.mesh)
     # Prepare inputs for the model.
-    input_ids, input_segmentation, input_position, completion_segmentation = (
-        prepare_maxtext_inputs(self.config.prompt, self.tokenizer_model)
+    input_ids, input_segmentation, input_position, completion_segmentation = prepare_maxtext_inputs(
+        self.config.prompt, self.tokenizer_model
     )
     # Obtain per-token logits.
     maxtext_per_token_logps, _ = compute_log_probs(
@@ -216,16 +194,10 @@ class GrpoTrainerTest(unittest.TestCase):
     )
     jax.debug.print(
         "golden_per_token_logps={golden_per_token_logps}",
-        golden_per_token_logps=golden_data[
-            "maxtext_per_token_logps_no_ckpt_loading"
-        ],
+        golden_per_token_logps=golden_data["maxtext_per_token_logps_no_ckpt_loading"],
     )
-    golden_maxtext_logits = np.array(
-        golden_data["maxtext_per_token_logps_no_ckpt_loading"]
-    )
-    self.assertTrue(
-        jnp.all(np.array(golden_data["input_ids"]) == np.array(input_ids[0]))
-    )
+    golden_maxtext_logits = np.array(golden_data["maxtext_per_token_logps_no_ckpt_loading"])
+    self.assertTrue(jnp.all(np.array(golden_data["input_ids"]) == np.array(input_ids[0])))
     self.assertTrue(
         jax.numpy.allclose(
             maxtext_per_token_logps[0],
@@ -235,9 +207,7 @@ class GrpoTrainerTest(unittest.TestCase):
             equal_nan=False,
         )
     )
-    max_diff = np.max(
-        np.abs(np.subtract(maxtext_per_token_logps[0], golden_maxtext_logits))
-    )
+    max_diff = np.max(np.abs(np.subtract(maxtext_per_token_logps[0], golden_maxtext_logits)))
     print("Max numerical difference:", max_diff)
 
     # Create the data dictionary required for computing the loss.
@@ -248,9 +218,7 @@ class GrpoTrainerTest(unittest.TestCase):
         "ar_completions_segmentation": completion_segmentation,
     }
     # Compute the loss and auxiliary values.
-    maxtext_loss, aux = grpo_loss_fn(
-        maxtext_model, self.config, data, rng, state.params, reference_params
-    )
+    maxtext_loss, aux = grpo_loss_fn(maxtext_model, self.config, data, rng, state.params, reference_params)
 
     # Assert that the computed loss and auxiliary averages match the golden data.
     self.assertEqual(maxtext_loss.tolist(), golden_data["maxtext_loss"])
@@ -275,9 +243,7 @@ class GrpoTrainerTest(unittest.TestCase):
           InputData(
               id=f"input_{i}",
               tokens=np.array(d),
-              true_length=np.array(
-                  data[f"{self.config.train_data_columns}_true_length"][i]
-              )[0],
+              true_length=np.array(data[f"{self.config.train_data_columns}_true_length"][i])[0],
           )
       )
 
@@ -315,9 +281,7 @@ class ReshardingTest(unittest.TestCase):
     )
     return config
 
-  @pytest.mark.skip(
-      reason="This test only runs on multihost cluster with pathways backend"
-  )
+  @pytest.mark.skip(reason="This test only runs on multihost cluster with pathways backend")
   @pytest.mark.tpu_only
   def test_pw_reshard_pytree(self):
     """Test that reshard_pytree correctly reshards a PyTree."""
@@ -330,13 +294,9 @@ class ReshardingTest(unittest.TestCase):
     )
 
     # Create a second mesh of 16 devices for inference
-    dst_config = self.init_pyconfig(
-        "grpo_inference.yml", ici_data_parallelism=4, ici_tensor_parallelism=4
-    )
+    dst_config = self.init_pyconfig("grpo_inference.yml", ici_data_parallelism=4, ici_tensor_parallelism=4)
 
-    _, _, _, dest_sharding, *_, state = setup_train_loop(
-        source_config, dst_config, None
-    )
+    _, _, _, dest_sharding, *_, state = setup_train_loop(source_config, dst_config, None)
     pytree = state.params
 
     # Reshard the PyTree from the source to the destination sharding.

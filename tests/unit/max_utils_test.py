@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the common Max Utils """
+"""Tests for the common Max Utils"""
+import os
 import sys
 import unittest
 import time
 import pytest
+
 
 import jax
 from jax import numpy as jnp
@@ -26,10 +28,11 @@ from flax import linen as nn
 
 import optax
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils import max_utils
 from maxtext.utils.train_utils import setup_train_loop
 from tests.utils.test_helpers import get_test_config_path
+from unittest import mock
 
 
 class MaxUtilsSummaryStats(unittest.TestCase):
@@ -82,6 +85,35 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
 
     # Compare results
     self.assertTrue(jax.numpy.allclose(optax_xent, t5x_xent, rtol=1e-05, atol=1e-08, equal_nan=False))
+
+  def test_cross_entropy_with_z_loss(self):
+    """Tests the exact mathematical output of the z-loss penalty."""
+    # Shape [2, 3] to test across multiple dimensions
+    logits = jnp.array([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [1.0, 1.0, 1.0]]])
+    # Target indices: [2, 1], [0, 2]
+    targets = jnp.array([[2, 1], [0, 2]])
+    one_hot_targets = jax.nn.one_hot(targets, 3)
+
+    z_loss_multiplier = 1e-4
+
+    # 1. Run without z-loss
+    total_loss_no_z, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=0.0)
+
+    # 2. Run with z-loss
+    total_loss_with_z, z_loss_only = max_utils.cross_entropy_with_logits(
+        logits, one_hot_targets, z_loss=z_loss_multiplier
+    )
+
+    # 3. Calculate expected z-loss manually
+    # Expected log_z = log(sum(exp(logits), axis=-1))
+    expected_log_z = jax.scipy.special.logsumexp(logits, axis=-1)
+    expected_z_loss = z_loss_multiplier * jnp.square(expected_log_z)
+
+    # Compare isolated z_loss component
+    self.assertTrue(jnp.allclose(z_loss_only, expected_z_loss, rtol=1e-5, atol=1e-8))
+
+    # Compare total loss aggregation
+    self.assertTrue(jnp.allclose(total_loss_with_z, total_loss_no_z + z_loss_only, rtol=1e-5, atol=1e-8))
 
 
 class MaxUtilsCustomMesh(unittest.TestCase):
@@ -166,6 +198,74 @@ class UnscanTest(unittest.TestCase):
     # Check that the original state is unchanged.
     self.assertIn("layers", state.params["params"]["decoder"])
     self.assertNotIn("layers_0", state.params["params"]["decoder"])
+
+
+class TestGpuDistributedInitialization(unittest.TestCase):
+  """Tests using CUDA_VISIBLE_DEVICES to control which GPUs are used in jax.distributed.initialize."""
+
+  @mock.patch.dict(
+      os.environ,
+      {
+          "JAX_COORDINATOR_IP": "10.0.0.1",
+          "JAX_COORDINATOR_PORT": "1234",
+          "NNODES": "1",
+          "NODE_RANK": "0",
+          "CUDA_VISIBLE_DEVICES": "0,2,3",  # Simulating Slurm/orchestrator assignment
+      },
+  )
+  @mock.patch("jax.distributed.initialize")
+  @mock.patch("jax.devices")
+  @mock.patch("maxtext.utils.max_logging.log")
+  def test_initialize_jax_for_gpu_valid_devices(self, _mock_log, _mock_devices, mock_init):
+    """Verifies that a comma-separated string of IDs is correctly parsed."""
+    raw_keys = {"jax_distributed_initialization_timeout": 300}
+    max_utils.initialize_jax_for_gpu(raw_keys)
+    # Check that local_device_ids was passed correctly as a list of integers
+    _, kwargs = mock_init.call_args
+    self.assertEqual(kwargs["local_device_ids"], [0, 2, 3])
+    self.assertEqual(kwargs["coordinator_address"], "10.0.0.1:1234")
+
+  @mock.patch.dict(
+      os.environ,
+      {
+          "JAX_COORDINATOR_IP": "10.0.0.1",
+          "JAX_COORDINATOR_PORT": "1234",
+          "NNODES": "1",
+          "NODE_RANK": "0",
+          "CUDA_VISIBLE_DEVICES": "GPU-8f2e3072-...",  # Invalid format for integer parsing
+      },
+  )
+  @mock.patch("jax.distributed.initialize")
+  @mock.patch("jax.devices")
+  @mock.patch("maxtext.utils.max_logging.log")
+  def test_initialize_jax_for_gpu_invalid_devices(self, _mock_log, mock_devices, mock_init):
+    """Verifies fallback behavior when parsing fails (e.g., UUIDs)."""
+    raw_keys = {"jax_distributed_initialization_timeout": 300}
+    max_utils.initialize_jax_for_gpu(raw_keys)
+    # Check that it falls back to None (JAX auto-detection default) on error
+    _, kwargs = mock_init.call_args
+    self.assertIsNone(kwargs.get("local_device_ids"))
+    self.assertEqual(kwargs["coordinator_address"], "10.0.0.1:1234")
+
+  @mock.patch.dict(
+      os.environ,
+      {
+          "JAX_COORDINATOR_IP": "10.0.0.1",
+          "JAX_COORDINATOR_PORT": "1234",
+          "NNODES": "1",
+          "NODE_RANK": "0",
+      },
+  )
+  @mock.patch("jax.distributed.initialize")
+  @mock.patch("jax.devices")
+  @mock.patch("maxtext.utils.max_logging.log")
+  def test_initialize_jax_for_gpu_no_devices(self, _mock_log, mock_devices, mock_init):
+    """Verifies that no error occurs when CUDA_VISIBLE_DEVICES is not set"""
+    raw_keys = {"jax_distributed_initialization_timeout": 300}
+    max_utils.initialize_jax_for_gpu(raw_keys)
+    _, kwargs = mock_init.call_args
+    self.assertIsNone(kwargs.get("local_device_ids"))
+    self.assertEqual(kwargs["coordinator_address"], "10.0.0.1:1234")
 
 
 if __name__ == "__main__":

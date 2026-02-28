@@ -33,7 +33,7 @@ Architecture Overview:
    a standard interface (call signature) that the Tunix `DistillationTrainer` expects.
 """
 
-from typing import Sequence
+from typing import Sequence, Callable
 from absl import app
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
@@ -44,7 +44,7 @@ import optax
 from orbax import checkpoint
 
 # MaxText Imports
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.input_pipeline import tokenizer
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.optimizers import optimizers
@@ -119,7 +119,7 @@ def get_distillation_optimizer(config, max_train_steps):
   return optimizer
 
 
-def create_forward_fn(config: pyconfig.HyperParameters):
+def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distillation_utils.DistillationForwardOutput]:
   """Creates a forward function closure that binds the specific model configuration.
 
   Args:
@@ -130,19 +130,27 @@ def create_forward_fn(config: pyconfig.HyperParameters):
     Tunix `LogitStrategy` and handles the MaxText-specific forward call.
   """
 
-  def model_forward_fn(model, input_tokens, positions, attention_mask, decoder_segment_ids=None, cache=None, **kwargs):
+  def model_forward_fn(
+      model, input_tokens, positions, attention_mask, decoder_segment_ids=None, cache=None, **kwargs
+  ) -> distillation_utils.DistillationForwardOutput:
     """Forward pass wrapper adapted for raw MaxText models."""
     del kwargs  # Unused
     del attention_mask  # Unused
     del cache  # Unused
-
     logits = model(
         decoder_input_tokens=input_tokens,
         decoder_positions=positions,
         decoder_segment_ids=decoder_segment_ids,
         enable_dropout=config.enable_dropout,
     )
-    return logits
+    out_projection_activations = None
+    if config.distill_beta > 0.0:
+      out_projection_activations = maxtext_utils.get_intermediate_value(model, "out_projection_activations", clear=True)
+
+    retval = distillation_utils.DistillationForwardOutput(
+        logits=logits, out_projection_activations=out_projection_activations
+    )
+    return retval
 
   return model_forward_fn
 
@@ -356,13 +364,17 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   teacher_forward_fn = create_forward_fn(teacher_config)
 
   # Use Monitored strategy from Utils
-  strategy = distillation_utils.MonitoredLogitStrategy(
+  strategy = distillation_utils.CombinedDistillationStrategy(
       student_forward_fn=student_forward_fn,
       teacher_forward_fn=teacher_forward_fn,
       labels_fn=labels_fn,
       temperature=student_config.distill_temperature,
       alpha=student_config.distill_alpha,
+      beta_feature=student_config.distill_beta,
+      layer_indices=student_config.distill_layer_indices,
   )
+
+  student_model, teacher_model = strategy.pre_process_models(student_model, teacher_model)
 
   # 4. Optimizer & Config
   optimizer = get_distillation_optimizer(student_config, student_config.steps)

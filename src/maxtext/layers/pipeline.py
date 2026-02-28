@@ -133,6 +133,7 @@ class Pipeline(nn.Module):
         mesh=self.mesh,
         rules=self.config.logical_axis_rules,
         debug_sharding=self.config.debug_sharding,
+        extra_stack_level=1,
     )
 
   def _maybe_shard_with_name(self, inputs, sharding_name):

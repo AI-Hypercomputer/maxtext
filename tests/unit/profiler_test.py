@@ -20,8 +20,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.configs import pyconfig
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.configs import types
 from maxtext.common import profiler
 from tests.utils.test_helpers import get_test_config_path
