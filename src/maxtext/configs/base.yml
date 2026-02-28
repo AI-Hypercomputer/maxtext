@@ -713,7 +713,7 @@ autoregressive_decode_assert: ""
 
 # For nsys profiler, pass the training command to nsys command
 # e.g. nsys profile -s none --force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop {training command}
-profiler: "" # Supported profiler: '', xplane, nsys
+profiler: "xplane" # Supported profiler: '', xplane, nsys
 # If set to true, upload all profiler results from all hosts. Otherwise, only upload the profiler result from the first host.
 upload_all_profiler_results: False
 # Skip first n steps for profiling, to omit things like compilation and to give
@@ -1067,7 +1067,8 @@ position_id_per_seconds: 25
 subslice_shape: ""
 
 # NNX
-enable_nnx: false
+enable_nnx: True
+pure_nnx_decoder: True
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net

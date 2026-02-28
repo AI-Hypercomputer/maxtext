@@ -55,14 +55,23 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
-    # Instantiate the Layer
-    self.mtp_layer = multi_token_prediction.MultiTokenPredictionLayer(
-        config=self.cfg,
-        mesh=self.mesh,
-        layer_number=TEST_LAYER_NUM,
-        transformer_layer_module=DecoderLayer,
-        rngs=self.rngs,
-    )
+    if self.cfg.pure_nnx:
+      # Instantiate the Layer
+      self.mtp_layer = multi_token_prediction.MultiTokenPredictionLayer(
+          config=self.cfg,
+          mesh=self.mesh,
+          layer_number=TEST_LAYER_NUM,
+          transformer_layer_module=DecoderLayer,
+          rngs=self.rngs,
+      )
+    else:
+      # Instantiate the Layer
+      self.mtp_layer = multi_token_prediction.MultiTokenPredictionLayerLinen(
+          config=self.cfg,
+          mesh=self.mesh,
+          layer_number=TEST_LAYER_NUM,
+          transformer_layer_module=DecoderLayer,
+      )
 
     # Dimensions directly from the config object
     self.batch_size = int(self.cfg.per_device_batch_size)
