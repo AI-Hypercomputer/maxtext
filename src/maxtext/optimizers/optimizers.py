@@ -15,12 +15,33 @@
 # pylint: disable=bare-except, consider-using-generator, too-many-positional-arguments
 """ Utils that are only interesting to MaxText. """
 
+import re
 import jax
 import jax.numpy as jnp
 
 import optax
 from optax.contrib._muon import muon
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
+
+
+def get_adamw_mask(config):
+  """Create a mask function for AdamW optimizer to exclude certain parameters from weight decay."""
+  if not getattr(config, "adamw_mask", None):
+    return None
+
+  compiled_patterns = [re.compile(pattern) for pattern in config.adamw_mask]
+
+  def mask_fn(params):
+    def _is_decayed(path, _):
+      # Join path keys into a single string for pattern matching (e.g., "layer1/bias")
+      path_str = "/".join(str(p.key if hasattr(p, "key") else p.idx if hasattr(p, "idx") else p) for p in path)
+      # If any pattern in adamw_mask matches the path, exclude from weight decay (return False).
+      # Otherwise, apply weight decay (return True).
+      return not any(pattern.search(path_str) for pattern in compiled_patterns)
+
+    return jax.tree_util.tree_map_with_path(_is_decayed, params)
+
+  return mask_fn
 
 
 def get_optimizer(config, learning_rate_schedule, model=None):
@@ -35,6 +56,7 @@ def get_optimizer(config, learning_rate_schedule, model=None):
         eps_root=config.adam_eps_root,
         weight_decay=config.adam_weight_decay,
         mu_dtype=config.mu_dtype,
+        mask=get_adamw_mask(config),
     )
   elif config.opt_type == "adam_pax":
     return adam_pax(
@@ -44,6 +66,7 @@ def get_optimizer(config, learning_rate_schedule, model=None):
         epsilon=config.adam_eps,
         epsilon_root=config.adam_eps_root,
         weight_decay=config.adam_weight_decay,
+        mask=get_adamw_mask(config),
     )
   elif config.opt_type == "sgd":
     return optax.sgd(learning_rate_schedule)
@@ -81,6 +104,7 @@ def adam_pax(
     epsilon: float,
     epsilon_root: float,
     weight_decay: float,
+    mask=None,
 ) -> optax.GradientTransformation:
   """Standard Adam optimizer that supports weight decay.
 
@@ -162,7 +186,11 @@ def adam_pax(
     updates = jax.tree_util.tree_map(lambda mu, nu: mu / (jnp.sqrt(nu + epsilon_root) + epsilon), mu, nu)
 
     if weight_decay > 0:
-      updates = jax.tree_util.tree_map(lambda x, v: x + weight_decay * v, updates, params)
+      if mask is not None:
+        mask_tree = mask(params) if callable(mask) else mask
+        updates = jax.tree_util.tree_map(lambda x, v, m: x + weight_decay * v if m else x, updates, params, mask_tree)
+      else:
+        updates = jax.tree_util.tree_map(lambda x, v: x + weight_decay * v, updates, params)
 
     step_size = -1.0 * learning_rate_fn(count)
     # Finally, fold in step size.

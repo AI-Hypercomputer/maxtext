@@ -779,6 +779,7 @@ adam_b2: 0.95 # Exponential decay rate to track the second moment of past gradie
 adam_eps: 1.e-8 # A small constant applied to denominator outside of the square root.
 adam_eps_root: 0. # A small constant applied to denominator inside the square root.
 adam_weight_decay: 0.1 # AdamW Weight decay
+adamw_mask: [] # List of parameter names/patterns to exclude from weight decay in AdamW
 mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inherits from  weight_dtype if unset.
 # Setting nu_dtype is not yet supported by optax, instead nu_dtype is always inherited from weights.
 # See b/399961932 for more.
