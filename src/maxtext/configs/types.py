@@ -852,6 +852,7 @@ class PipelineParallelism(BaseModel):
   )
   pipeline_fsdp_ag_once: bool = Field(False, description="If True, all-gather FSDP weights once per pipeline repeat.")
   scan_pipeline_iterations: bool = Field(True, description="Use jax.lax.scan over pipeline iterations.")
+  scan_pipeline_repeats: bool = Field(True, description="Use jax.lax.scan over pipeline repeats.")
   scan_layers_per_stage: bool = Field(False, description="Use jax.lax.scan over layers within a stage.")
   set_remat_policy_on_pipeline_iterations: bool = Field(True, description="Set remat policy on the pipeline scan.")
   set_remat_policy_on_layers_per_stage: bool = Field(False, description="Set remat policy on the inner layer scan.")
@@ -2501,75 +2502,75 @@ class MaxTextConfig(
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
-    if self.using_pipeline_parallelism and self.mesh_axes and self.mesh_axes[0] == "stage":
-      self.ici_parallelism = [
-          self.ici_diloco_parallelism,
-          self.ici_pipeline_parallelism,
-          self.ici_data_parallelism,
-          self.ici_fsdp_parallelism,
-          self.ici_fsdp_transpose_parallelism,
-          self.ici_sequence_parallelism,
-          self.ici_context_parallelism,
-          self.ici_context_autoregressive_parallelism,
-          self.ici_tensor_parallelism,
-          self.ici_tensor_transpose_parallelism,
-          self.ici_tensor_sequence_parallelism,
-          self.ici_expert_parallelism,
-          self.ici_autoregressive_parallelism,
-      ]
-      self.dcn_parallelism = [
-          self.dcn_diloco_parallelism,
-          self.dcn_pipeline_parallelism,
-          self.dcn_data_parallelism,
-          self.dcn_fsdp_parallelism,
-          self.dcn_fsdp_transpose_parallelism,
-          self.dcn_sequence_parallelism,
-          self.dcn_context_parallelism,
-          self.dcn_context_autoregressive_parallelism,
-          self.dcn_tensor_parallelism,
-          self.dcn_tensor_transpose_parallelism,
-          self.dcn_tensor_sequence_parallelism,
-          self.dcn_expert_parallelism,
-          self.dcn_autoregressive_parallelism,
-      ]
-    else:
-      ici_map = {
-          "diloco": self.ici_diloco_parallelism,
-          "data": self.ici_data_parallelism,
-          "stage": self.ici_pipeline_parallelism,
-          "fsdp": self.ici_fsdp_parallelism,
-          "fsdp_transpose": self.ici_fsdp_transpose_parallelism,
-          "sequence": self.ici_sequence_parallelism,
-          "context": self.ici_context_parallelism,
-          "context_autoregressive": self.ici_context_autoregressive_parallelism,
-          "tensor": self.ici_tensor_parallelism,
-          "tensor_transpose": self.ici_tensor_transpose_parallelism,
-          "tensor_sequence": self.ici_tensor_sequence_parallelism,
-          "model": self.ici_tensor_parallelism,
-          "expert": self.ici_expert_parallelism,
-          "autoregressive": self.ici_autoregressive_parallelism,
-          "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-      }
-      self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+    # if self.using_pipeline_parallelism and self.mesh_axes and self.mesh_axes[0] == "stage":
+    #   self.ici_parallelism = [
+    #       self.ici_diloco_parallelism,
+    #       self.ici_pipeline_parallelism,
+    #       self.ici_data_parallelism,
+    #       self.ici_fsdp_parallelism,
+    #       self.ici_fsdp_transpose_parallelism,
+    #       self.ici_sequence_parallelism,
+    #       self.ici_context_parallelism,
+    #       self.ici_context_autoregressive_parallelism,
+    #       self.ici_tensor_parallelism,
+    #       self.ici_tensor_transpose_parallelism,
+    #       self.ici_tensor_sequence_parallelism,
+    #       self.ici_expert_parallelism,
+    #       self.ici_autoregressive_parallelism,
+    #   ]
+    #   self.dcn_parallelism = [
+    #       self.dcn_diloco_parallelism,
+    #       self.dcn_pipeline_parallelism,
+    #       self.dcn_data_parallelism,
+    #       self.dcn_fsdp_parallelism,
+    #       self.dcn_fsdp_transpose_parallelism,
+    #       self.dcn_sequence_parallelism,
+    #       self.dcn_context_parallelism,
+    #       self.dcn_context_autoregressive_parallelism,
+    #       self.dcn_tensor_parallelism,
+    #       self.dcn_tensor_transpose_parallelism,
+    #       self.dcn_tensor_sequence_parallelism,
+    #       self.dcn_expert_parallelism,
+    #       self.dcn_autoregressive_parallelism,
+    #   ]
+    # else:
+    ici_map = {
+        "diloco": self.ici_diloco_parallelism,
+        "data": self.ici_data_parallelism,
+        "stage": self.ici_pipeline_parallelism,
+        "fsdp": self.ici_fsdp_parallelism,
+        "fsdp_transpose": self.ici_fsdp_transpose_parallelism,
+        "sequence": self.ici_sequence_parallelism,
+        "context": self.ici_context_parallelism,
+        "context_autoregressive": self.ici_context_autoregressive_parallelism,
+        "tensor": self.ici_tensor_parallelism,
+        "tensor_transpose": self.ici_tensor_transpose_parallelism,
+        "tensor_sequence": self.ici_tensor_sequence_parallelism,
+        "model": self.ici_tensor_parallelism,
+        "expert": self.ici_expert_parallelism,
+        "autoregressive": self.ici_autoregressive_parallelism,
+        "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+    }
+    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
-      dcn_map = {
-          "diloco": self.dcn_diloco_parallelism,
-          "data": self.dcn_data_parallelism,
-          "stage": self.dcn_pipeline_parallelism,
-          "fsdp": self.dcn_fsdp_parallelism,
-          "fsdp_transpose": self.dcn_fsdp_transpose_parallelism,
-          "sequence": self.dcn_sequence_parallelism,
-          "context": self.dcn_context_parallelism,
-          "context_autoregressive": self.dcn_context_autoregressive_parallelism,
-          "tensor": self.dcn_tensor_parallelism,
-          "tensor_transpose": self.dcn_tensor_transpose_parallelism,
-          "tensor_sequence": self.dcn_tensor_sequence_parallelism,
-          "model": self.dcn_tensor_parallelism,
-          "expert": self.dcn_expert_parallelism,
-          "autoregressive": self.dcn_autoregressive_parallelism,
-          "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-      }
-      self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+    dcn_map = {
+        "diloco": self.dcn_diloco_parallelism,
+        "data": self.dcn_data_parallelism,
+        "stage": self.dcn_pipeline_parallelism,
+        "fsdp": self.dcn_fsdp_parallelism,
+        "fsdp_transpose": self.dcn_fsdp_transpose_parallelism,
+        "sequence": self.dcn_sequence_parallelism,
+        "context": self.dcn_context_parallelism,
+        "context_autoregressive": self.dcn_context_autoregressive_parallelism,
+        "tensor": self.dcn_tensor_parallelism,
+        "tensor_transpose": self.dcn_tensor_transpose_parallelism,
+        "tensor_sequence": self.dcn_tensor_sequence_parallelism,
+        "model": self.dcn_tensor_parallelism,
+        "expert": self.dcn_expert_parallelism,
+        "autoregressive": self.dcn_autoregressive_parallelism,
+        "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+    }
+    self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 
     # Diloco params
     self.num_diloco_replicas = int(self.ici_diloco_parallelism * self.dcn_diloco_parallelism)
