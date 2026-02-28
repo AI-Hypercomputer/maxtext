@@ -1,0 +1,8 @@
+- id: aspell-md
+  name: MD checker via GNU aspell
+  entry: bin/aspell-check-wrapper.sh
+  language: script
+  types: [markdown]
+  pass_filenames: true
+  require_serial: true
+  stages: [pre-commit, pre-push, manual]
