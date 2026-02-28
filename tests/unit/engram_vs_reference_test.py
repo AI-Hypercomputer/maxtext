@@ -46,7 +46,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from maxtext.configs import pyconfig
-from MaxText import maxtext_utils
+from maxtext import maxtext_utils
 
 from maxtext.layers.engram import CompressedTokenizer as CompressedTokenizerJAX
 from maxtext.layers.engram import NgramHashMapping as NgramHashMappingJAX
