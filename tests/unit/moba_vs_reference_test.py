@@ -31,7 +31,7 @@ import numpy as np
 import torch
 from jax.sharding import Mesh
 
-from MaxText import maxtext_utils, pyconfig
+from maxtext import maxtext_utils, pyconfig
 from maxtext.layers.attention_op import AttentionOp
 from tests.utils.test_helpers import get_test_config_path
 

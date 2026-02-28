@@ -19,7 +19,7 @@ import json
 import os
 import jax
 import jax.numpy as jnp
-from MaxText import maxtext_utils
+from maxtext import maxtext_utils
 from maxtext.configs import pyconfig
 # import optax
 

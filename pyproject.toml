@@ -3,7 +3,7 @@ requires = ["hatchling", "hatch-requirements-txt"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
-path = "src/MaxText/__init__.py"
+path = "src/maxtext/__init__.py"
 
 [project]
 name = "maxtext"
