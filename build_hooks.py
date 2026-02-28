@@ -36,6 +36,15 @@ class CustomBuildHook(BuildHookInterface):
   """A custom hook to inject TPU dependencies into the core wheel dependencies."""
 
   def initialize(self, version, build_data):  # pylint: disable=unused-argument
+    """Initializes the build hook."""
     tpu_deps = get_tpu_dependencies()
-    build_data["dependencies"] = tpu_deps
+    extras = ["cuda12", "docs"]
+    extras_str = " and ".join([f"extra != '{extra}'" for extra in extras])
+    build_data["dependencies"] = [
+        # If the dependency already has a marker (indicated by a semicolon), we need to combine it with the extras condition.
+        f"{dep.split(';')[0]}; ({dep.split(';')[-1]}) and ({extras_str})"
+        if dep.count(";") == 1
+        else f"{dep} ; {extras_str}"
+        for dep in tpu_deps
+    ]
     print(f"Successfully injected {len(tpu_deps)} TPU dependencies into the wheel's core requirements.")
