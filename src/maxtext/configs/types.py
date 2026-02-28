@@ -1175,6 +1175,10 @@ class AdamW(BaseModel):
       description="A small constant for numerical stability (epsilon), applied inside of the square root.",
   )
   adam_weight_decay: float = Field(0.1, description="Weight decay regularization.")
+  adamw_mask: list[str] = Field(
+      default_factory=list,
+      description="List of parameter names/patterns to exclude from weight decay in AdamW.",
+  )
   mu_dtype: str = Field(
       "",
       description="Data type for 'mu' (first moment) in AdamW. Inherits from weight_dtype if empty.",
