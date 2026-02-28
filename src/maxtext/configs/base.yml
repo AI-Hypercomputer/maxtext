@@ -412,6 +412,10 @@ jax_cache_dir: "~/jax_cache"
 # Hardware
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
+# internal_compile allows bypassing open-source topology name mappings when using internal topologies directly via get_topology_desc.
+internal_compile: False
+internal_compile_num_devices: -1 # You must specify the number of devices when using internal_compile.
+
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
 mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
