@@ -1395,7 +1395,7 @@ def create_learning_rate_schedule(config):
   boundaries = []
 
   if warmup_steps > 0:
-    warmup_schedule = optax.linear_schedule(init_value=0.0, end_value=lr, transition_steps=warmup_steps - 1)
+    warmup_schedule = optax.linear_schedule(init_value=0.0, end_value=lr, transition_steps=warmup_steps)
     pieces.append(warmup_schedule)
     boundaries.append(warmup_steps)
 

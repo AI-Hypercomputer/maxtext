@@ -816,6 +816,11 @@ class TestLearningRateSchedules(unittest.TestCase):
     # Warmup phase: 0 -> peak
     self.assertAlmostEqual(float(schedule_fn(0)), 0.0, places=6)
     self.assertAlmostEqual(float(schedule_fn(warmup_steps)), learning_rate, places=6)
+    # Ensure delta is constant
+    expected_slope = learning_rate / warmup_steps
+    for i in range(1, warmup_steps + 1):
+      current_lr = float(schedule_fn(i))
+      self.assertAlmostEqual(current_lr - float(schedule_fn(i - 1)), expected_slope, places=6)
 
     # Cosine decay phase
     lr_end = schedule_fn(learning_rate_schedule_steps - 1)
@@ -859,6 +864,11 @@ class TestLearningRateSchedules(unittest.TestCase):
       # Warmup phase: 0 -> peak
       self.assertAlmostEqual(float(schedule_fn(0)), 0.0, places=6)
       self.assertAlmostEqual(float(schedule_fn(warmup_steps)), learning_rate, places=6)
+      # Ensure delta is constant
+      expected_slope = learning_rate / warmup_steps
+      for i in range(1, warmup_steps + 1):
+        current_lr = float(schedule_fn(i))
+        self.assertAlmostEqual(current_lr - float(schedule_fn(i - 1)), expected_slope, places=6)
 
       # Stable phase: constant at peak
       self.assertAlmostEqual(float(schedule_fn(warmup_steps + 10)), learning_rate, places=6)
