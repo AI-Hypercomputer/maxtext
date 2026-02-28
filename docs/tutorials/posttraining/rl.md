@@ -42,12 +42,7 @@ rely on the vLLM library.
 
 Let's get started!
 
-## Create virtual environment and Install MaxText dependencies
-
-If you have already completed the
-[MaxText installation](../../install_maxtext.md), you can skip to the next
-section for post-training dependencies installations. Otherwise, please install
-`MaxText` using the following commands before proceeding.
+## Create virtual environment and Install MaxText and post-training dependencies
 
 ```bash
 # 1. Clone the repository
@@ -60,25 +55,18 @@ pip install uv
 uv venv --python 3.12 --seed $VENV_NAME
 source $VENV_NAME/bin/activate
 
-# 3. Install dependencies in editable mode
-uv pip install -e .[tpu] --resolution=lowest
-install_maxtext_github_deps
 ```
 
 ## Install Post-Training dependencies
 
 ### Option 1: From PyPI releases
 
-> **Caution:** RL in MaxText is currently broken with PyPI releases of
-> post-training dependencies. We are working on fixing this and recommend
-> following [Option 2: From Github](#option-2-from-github) in the meantime.
-
-Next, run the following bash script to get all the necessary installations
-inside the virtual environment (for e.g., `maxtext_venv`). This will take few
-minutes. Follow along the installation logs and look out for any issues!
+Next, run the following commands to get all the necessary installations
+inside the virtual environment (for e.g., `maxtext_venv`).
 
 ```
-bash tools/setup/setup_post_training_requirements.sh
+uv pip install -e .[tpu-post-train] --resolution=lowest
+python3 -m src.install_maxtext_extra_deps.install_post_train_extra_deps
 ```
 
 Primarily, it installs `Tunix`, and `vllm-tpu` which is
