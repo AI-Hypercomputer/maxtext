@@ -31,6 +31,7 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils.rampup_batch import create_rampup_manager
 from maxtext.trainers.diloco import diloco
+import orbax.checkpoint.pathways as ocp_pathways
 
 
 def create_training_tools(config, model, mesh):
@@ -45,6 +46,7 @@ def create_training_tools(config, model, mesh):
         config.local_checkpoint_directory,
         config.local_checkpoint_period,
         mesh,
+        config.colocated_python_checkpointing,
     )
   elif config.enable_emergency_checkpoint:
     abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
@@ -79,9 +81,17 @@ def create_training_tools(config, model, mesh):
         config.enable_continuous_checkpointing,
         config.max_num_checkpoints_to_keep,
         config.checkpoint_storage_concurrent_gb,
-        config.enable_single_controller,
-        config.colocated_python_checkpointing,
-        config.enable_single_replica_ckpt_restoring,
+    )
+
+  # Use Colocated Python checkpointing dispatchers optimization (Single Controller only).
+  if config.enable_single_controller and config.colocated_python_checkpointing:
+    max_logging.log("Registering colocated python array handler")
+    checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
+        use_colocated_python=True,
+    )
+    ocp_pathways.register_type_handlers(
+        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
+        checkpointing_impl=checkpointing_impl,
     )
 
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
