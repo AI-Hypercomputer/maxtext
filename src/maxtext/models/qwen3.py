@@ -615,7 +615,7 @@ class Qwen3NextFullAttention(nnx.Module):
     - Query and Gate splitting from a single q projection.
     - Application of a sigmoid gate to the attention output.
     - Usage of `Qwen3NextRMSNorm` for query and key normalization.
-    - Usage of `Qwen3NextRotaryEmbedding` for partial rotary position embeddings.
+    - Usage of `PartialRotaryEmbedding` for partial rotary position embeddings.
       - Partial ROPE is applied to the first 25% of head dimensions
 
   Attributes:
