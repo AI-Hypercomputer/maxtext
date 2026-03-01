@@ -62,7 +62,7 @@ from maxtext.layers.embeddings import (
     Qwen3OmniMoeVisionRotaryEmbedding,
     RotaryEmbedding,
     YarnRotaryEmbedding,
-    Qwen3NextRotaryEmbedding,
+    PartialRotaryEmbedding,
 )
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
 from maxtext.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
@@ -809,7 +809,7 @@ class Attention(nnx.Module):
           rngs=self.rngs,
       )
     elif self.is_qwen3_next:
-      rotary_embedding = Qwen3NextRotaryEmbedding(
+      rotary_embedding = PartialRotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
           mesh=self.mesh,

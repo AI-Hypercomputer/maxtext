@@ -406,7 +406,7 @@ def llama_rotary_embedding_as_linen(
   )
 
 
-def qwen3_next_rotary_embedding_as_linen(
+def partial_rotary_embedding_as_linen(
     *,
     min_timescale: int,
     max_timescale: int,
@@ -418,7 +418,7 @@ def qwen3_next_rotary_embedding_as_linen(
     shard_mode: ShardMode = ShardMode.AUTO,
     name: str | None = None,
 ):
-  """Initializes the Qwen3NextRotaryEmbedding module and returns it as a Linen module.
+  """Initializes the PartialRotaryEmbedding module and returns it as a Linen module.
 
   Args:
     min_timescale: Start of the geometric index. Determines the periodicity of
@@ -432,7 +432,7 @@ def qwen3_next_rotary_embedding_as_linen(
     name: Name of the Linen module.
   """
   return nnx_wrappers.to_linen(
-      Qwen3NextRotaryEmbedding,
+      PartialRotaryEmbedding,
       min_timescale=min_timescale,
       max_timescale=max_timescale,
       mesh=mesh,
@@ -446,8 +446,8 @@ def qwen3_next_rotary_embedding_as_linen(
   )
 
 
-class Qwen3NextRotaryEmbedding(RotaryEmbedding):
-  """Qwen3 Next variant of ROPE (partial ROPE)"""
+class PartialRotaryEmbedding(RotaryEmbedding):
+  """Rotary Position Embedding applied to a partial fraction of dimensions."""
 
   def __init__(
       self,
@@ -461,7 +461,7 @@ class Qwen3NextRotaryEmbedding(RotaryEmbedding):
       shard_mode: ShardMode = ShardMode.AUTO,
       rngs: nnx.Rngs = None,
   ):
-    """Initializes the Qwen3NextRotaryEmbedding module.
+    """Initializes the PartialRotaryEmbedding module.
 
     Args:
       min_timescale: Start of the geometric index. Determines the periodicity of
@@ -476,6 +476,7 @@ class Qwen3NextRotaryEmbedding(RotaryEmbedding):
     self.partial_rotary_factor = partial_rotary_factor
     self.rotary_dim = int(self.head_dim * self.partial_rotary_factor)
 
+    # Initialize the base class with only the rotary_dim
     super().__init__(
         min_timescale=min_timescale,
         max_timescale=max_timescale,
@@ -488,7 +489,7 @@ class Qwen3NextRotaryEmbedding(RotaryEmbedding):
     )
 
   def __call__(self, inputs: jax.Array, position: None | jax.Array = None) -> jax.Array:
-    """Applies LLaMA variant of rotary position embedding.
+    """Applies Partial variant of rotary position embedding.
 
     Args:
       inputs: The input sequence on which to apply the Rotary position
@@ -499,6 +500,7 @@ class Qwen3NextRotaryEmbedding(RotaryEmbedding):
     Returns:
       A jax.Array of shape [B, S, H, D - rotary_dim] with rotary position embeddings applied.
     """
+    # Split, apply base RoPE to the first fraction, and concatenate
     inputs_rot, inputs_pass = jnp.split(inputs, [self.rotary_dim], axis=-1)
     inputs_rot = super().__call__(inputs_rot, position)
     inputs = jnp.concatenate([inputs_rot, inputs_pass], axis=-1)
