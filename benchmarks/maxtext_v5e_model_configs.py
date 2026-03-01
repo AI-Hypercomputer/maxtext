@@ -236,6 +236,13 @@ llama3_1_8b_8192_v5e_256 = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            # MTC params
+            "enable_checkpointing": True,
+            "enable_async_checkpointing": False,  # False for now to verify correctness.
+            "enable_multi_tier_checkpointing": True,
+            "multi_tier_checkpointing_backup_interval_minutes": "5",
+            "local_checkpoint_directory": "/tmp/mtc_checkpoints",
+            "local_checkpoint_period": "5",
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG

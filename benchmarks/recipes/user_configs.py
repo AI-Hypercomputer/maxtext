@@ -112,20 +112,22 @@ class UserConfig:
 
 # Define the required configuration here
 USER_CONFIG = UserConfig(
-    user="user_name",
-    cluster_name="v6e-256-cluster",
-    project="tpu-prod-env-cluster",
-    zone="us-east5-b",
-    device_type="v6e-256",
+    user="sujinesh",
+    cluster_name="pw-scale-test-v5e-32",
+    project="cloud-tpu-multipod-dev",
+    zone="us-south1-a",
+    device_type="v5litepod-32",
     benchmark_steps=20,
     num_slices_list=[2],
-    server_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server",
-    proxy_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server",
-    runner="us-docker.pkg.dev/path/to/maxtext_runner",
+    server_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest",
+    proxy_image=(
+        "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest"
+    ),
+    colocated_python_image="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/sujinesh/sidecar:latest",
+    runner="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/sujinesh/maxtext:latest",
     selected_model_framework=["pathways"],
-    selected_model_names=["llama3_1_8b_8192"],
+    selected_model_names=["llama3_1_8b_8192_v5e_256"],
     priority="medium",
-    base_output_directory=None,  # GCS Bucket path
-    # Optional parameters, useful for single controller data loading optimizations
-    # proxy_flags="--sidecar_name=external",
+    proxy_flags="--sidecar_name=external",
+    base_output_directory="gs://sujinesh-us-west1/colocated_checkpointing/",
 )
