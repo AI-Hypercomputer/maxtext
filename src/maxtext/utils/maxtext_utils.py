@@ -33,8 +33,8 @@ import jax.numpy as jnp
 
 import optax
 
-import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
-import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
+from orbax.checkpoint.experimental.emergency import checkpoint_manager as emergency_checkpoint_manager
+from orbax.checkpoint.experimental.emergency import replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import types

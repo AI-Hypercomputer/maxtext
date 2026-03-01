@@ -20,10 +20,12 @@ import os.path
 MAXTEXT_PKG_DIR = os.environ.get("MAXTEXT_PKG_DIR", "src/MaxText")
 
 # This is the maxtext repo root: with ".git" folder; "README.md"; "pyproject.toml"; &etc.
-MAXTEXT_REPO_ROOT = os.environ.get(
-    "MAXTEXT_REPO_ROOT",
-    r if os.path.isdir(os.path.join(r := os.path.dirname(os.path.dirname(__file__)), ".git")) else MAXTEXT_PKG_DIR,
-)
+# MAXTEXT_REPO_ROOT = os.environ.get(
+#     "MAXTEXT_REPO_ROOT",
+#     r if os.path.isdir(os.path.join(r := os.path.dirname(os.path.dirname(__file__)), ".git")) else MAXTEXT_PKG_DIR,
+# )
+
+MAXTEXT_REPO_ROOT = "/deps/"
 
 # This is the configs root: with "base.yml"; "models/"; &etc.
 MAXTEXT_CONFIGS_DIR = os.environ.get("MAXTEXT_CONFIGS_DIR", os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs"))
