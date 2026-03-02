@@ -839,3 +839,31 @@ class TrainCompile(unittest.TestCase):
             "hf_access_token=fake",
         )
     )
+
+  @pytest.mark.cpu_only
+  def test_qk_clip(self):
+    """AOT test for qk-clip with DeepSeek3 Tiny model"""
+    compiled_trainstep_file = "/tmp/test_qk_clip.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-tiny",
+            "scan_layers=True",
+            "sparse_matmul=True",
+            "megablox=True",
+            "use_tokamax_gmm=False",
+            # TODO(agagik): update to flash after support
+            "attention=dot_product",
+            "use_tokamax_splash=True",
+            "max_target_length=128",
+            "per_device_batch_size=1",
+            "dtype=bfloat16",
+            "weight_dtype=float32",
+            "use_qk_clip=true",
+            "qk_clip_threshold=100",
+        )
+    )
