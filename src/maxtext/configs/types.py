@@ -476,6 +476,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, etc).",
   )
+  share_kv_projections: bool = Field(False, description="If True, Key and Value use the same projection.")
   attention_type: Literal["global", "local_sliding", "chunk", "mla", "full"] = Field(
       "global", description="The variant of attention to use."
   )
@@ -2504,6 +2505,11 @@ class MaxTextConfig(
           "Recording pre-cap max_logits is not fully supported yet. "
           "Please disable attn_logits_soft_cap when using use_qk_clip."
       )
+
+    if self.share_kv_projections and self.fused_qkv:
+      raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
+    if self.share_kv_projections and self.attention_type == "mla":
+      raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.

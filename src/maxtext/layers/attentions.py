@@ -130,6 +130,7 @@ def attention_as_linen(
     use_qk_norm: bool = False,
     query_pre_attn_scalar: float | None = None,
     use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
+    share_kv_projections: bool = False,  # If true, Key and Value use the same projection
     # Temperature tuning parameters used for Llama4
     temperature_tuning: bool = False,
     temperature_tuning_scale: float = 0.1,
@@ -199,6 +200,7 @@ def attention_as_linen(
       use_qk_norm=use_qk_norm,
       query_pre_attn_scalar=query_pre_attn_scalar,
       use_bias_in_projections=use_bias_in_projections,
+      share_kv_projections=share_kv_projections,
       temperature_tuning=temperature_tuning,
       temperature_tuning_scale=temperature_tuning_scale,
       temperature_tuning_floor_scale=temperature_tuning_floor_scale,
@@ -295,6 +297,7 @@ class Attention(nnx.Module):
       use_qk_norm: bool = False,
       query_pre_attn_scalar: float | None = None,
       use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
+      share_kv_projections: bool = False,  # If true, Key and Value use the same projection
       # Temperature tuning parameters used for Llama4
       temperature_tuning: bool = False,
       temperature_tuning_scale: float = 0.1,
@@ -399,6 +402,7 @@ class Attention(nnx.Module):
     self.use_qk_norm = use_qk_norm
     self.query_pre_attn_scalar = query_pre_attn_scalar
     self.use_bias_in_projections = use_bias_in_projections
+    self.share_kv_projections = share_kv_projections
     self.temperature_tuning = temperature_tuning
     self.temperature_tuning_scale = temperature_tuning_scale
     self.temperature_tuning_floor_scale = temperature_tuning_floor_scale
@@ -559,7 +563,8 @@ class Attention(nnx.Module):
     else:
       self.query = self.init_query_w(inputs_q_shape=inputs_q_shape)
       self.key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
-      self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
+      if not self.share_kv_projections:
+        self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
@@ -1056,7 +1061,10 @@ class Attention(nnx.Module):
     else:
       query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
       key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=qkv_sharding)
-      value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=qkv_sharding)
+      if self.share_kv_projections:
+        value = key
+      else:
+        value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=qkv_sharding)
 
     gate = None
     if self.is_qwen3_next:

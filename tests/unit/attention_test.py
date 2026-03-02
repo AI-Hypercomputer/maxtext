@@ -473,7 +473,15 @@ class AttentionTest(parameterized.TestCase):
   def test_tpu_kernel_attention_mqa(self):
     self.tpu_kernel_attention_helper(1)
 
-  def tpu_kernel_attention_helper(self, num_kv_heads):
+  @pytest.mark.tpu_only
+  def test_tpu_kernel_attention_mha_share_kv(self):
+    self.tpu_kernel_attention_helper(self.num_kv_heads, share_kv_projections=True)
+
+  @pytest.mark.tpu_only
+  def test_tpu_kernel_attention_gqa_share_kv(self):
+    self.tpu_kernel_attention_helper(self.num_kv_heads // 2, share_kv_projections=True)
+
+  def tpu_kernel_attention_helper(self, num_kv_heads, share_kv_projections=False):
     """Test equivalence between dot_product and TPU accelerated"""
 
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
@@ -493,6 +501,7 @@ class AttentionTest(parameterized.TestCase):
         attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
+        share_kv_projections=share_kv_projections,
         rngs=self.nnx_rng,
     )
 
@@ -522,6 +531,7 @@ class AttentionTest(parameterized.TestCase):
         attention_kernel="flash",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
+        share_kv_projections=share_kv_projections,
         rngs=self.nnx_rng,
     )
     nnx.update(attention_as_mha_flash, generic_state)
@@ -538,6 +548,84 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
     )
+
+  def test_share_kv_projections(self):
+    """Test that kv projections are shared."""
+    dummy_inputs_q = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
+    attention_share_kv = Attention(
+        config=self.cfg,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        dropout_rate=self.cfg.dropout_rate,
+        share_kv_projections=True,
+        rngs=self.nnx_rng,
+    )
+
+    self.assertFalse(hasattr(attention_share_kv, "value"))
+    self.assertTrue(hasattr(attention_share_kv, "key"))
+
+    # 1. Check NNX state
+    state_shared = nnx.state(attention_share_kv)
+    self.assertNotIn("value", state_shared)
+    self.assertIn("key", state_shared)
+
+    # 2. Forward Pass Verification
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
+
+    output_shared, _ = attention_share_kv(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    self.assertEqual(output_shared.shape, (self.global_batch_size, self.max_target_length, self.embed_dim))
+
+    # 3. Equivalence Check with standard unshared Attention
+    attention_no_share = Attention(
+        config=self.cfg,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        dropout_rate=self.cfg.dropout_rate,
+        share_kv_projections=False,
+        rngs=self.nnx_rng,
+    )
+
+    # Force unshared layer to copy weights from shared layer, mapping 'key' to 'value'
+    attention_no_share.query.kernel.value = attention_share_kv.query.kernel.value
+    attention_no_share.key.kernel.value = attention_share_kv.key.kernel.value
+    attention_no_share.value.kernel.value = attention_share_kv.key.kernel.value
+    attention_no_share.out.kernel.value = attention_share_kv.out.kernel.value
+
+    output_no_share, _ = attention_no_share(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    self.assertTrue(jax.numpy.allclose(output_shared, output_no_share, rtol=1e-04, atol=1e-04, equal_nan=False))
 
   @parameterized.named_parameters(
       {

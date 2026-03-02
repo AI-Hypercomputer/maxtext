@@ -154,6 +154,7 @@ class DecoderLayer(nn.Module):
         reshape_q=cfg.reshape_q,
         use_mrope=cfg.use_mrope,
         mrope_section=cfg.mrope_section,
+        share_kv_projections=cfg.share_kv_projections,
         model_mode=model_mode,
     )
 
