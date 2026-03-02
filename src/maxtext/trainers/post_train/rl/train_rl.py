@@ -389,7 +389,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   train_dataset = train_dataset[:dataset_size]
   train_dataset = train_dataset.repeat(trainer_config.num_epoch)
 
-  train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size)
+  train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size, drop_remainder=True)
 
   test_dataset = test_dataset.filter(_filter_long_prompts)
   test_dataset = test_dataset[: trainer_config.num_test_batches * trainer_config.batch_size]
