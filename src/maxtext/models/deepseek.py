@@ -452,6 +452,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           None,
           None,
       )
+      inputs = jax.reshard(inputs, jax.sharding.NamedSharding(self.mesh, activation_pspec))
       inputs = jax.shard_map(
           functools.partial(
               deepseek_batchsplit.split,
@@ -483,6 +484,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           in_specs=([activation_pspec] * self.config.batch_split_factor,),
           out_specs=activation_pspec,
       )(outputs)
+      outputs = jax.reshard(outputs, jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(None, None, None)))
       return outputs, None
 
     x = self.with_logical_constraint(inputs)
