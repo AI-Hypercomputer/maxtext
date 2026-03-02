@@ -994,11 +994,11 @@ class HfDataset(BaseModel):
   """Configuration specific to HuggingFace datasets."""
 
   hf_path: str = Field("", description="Path of the Hugging Face dataset.")
-  hf_name: str = Field("", description="Name of the Hugging Face dataset.")
-  hf_data_dir: PathStr = Field("", description="Data directory for the HF dataset.")
-  hf_train_files: Optional[str] = Field(None, description="Files for the HF training split.")
-  hf_eval_split: str = Field("", description="Name of the HF evaluation split.")
-  hf_eval_files: Optional[str] = Field(None, description="Files for the HF evaluation split.")
+  hf_name: None | str = Field(None, description="Name of the Hugging Face dataset.")
+  hf_data_dir: None | PathStr = Field(None, description="Data directory for the HF dataset.")
+  hf_train_files: None | str = Field(None, description="Files for the HF training split.")
+  hf_eval_split: None | str = Field(None, description="Name of the HF evaluation split.")
+  hf_eval_files: None | str = Field(None, description="Files for the HF evaluation split.")
   hf_access_token: None | str = Field(None, description="Hugging Face API access token.")
 
 
