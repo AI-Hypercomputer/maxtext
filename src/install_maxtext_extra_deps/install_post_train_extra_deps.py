@@ -71,7 +71,7 @@ def main():
         "uv",
         "pip",
         "install",
-        "src/maxtext/integration/vllm",
+        "src/MaxText/integration/vllm",
         "--no-deps",
   ]
 

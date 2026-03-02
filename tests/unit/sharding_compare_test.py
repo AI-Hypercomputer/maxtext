@@ -19,8 +19,8 @@ import json
 import os
 import jax
 import jax.numpy as jnp
-from maxtext import maxtext_utils
 from maxtext.configs import pyconfig
+from maxtext.utils import maxtext_utils
 # import optax
 
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
