@@ -131,13 +131,14 @@ def main(argv: Sequence[str]) -> None:
     has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)  # pytype: disable=attribute-error
   except AttributeError as _:
     has_chat_template = False
-  tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
+  tokens, true_length = tokenizer_model.encode(text, is_bos=False, prefill_lengths=[prefill_length])
 
   position_ids = None
   mrope_position_deltas = None
 
   if config.use_multimodal:
     tokens = mm_processor.prepare_text_for_image_fusion(tokens=tokens, config=config, processor_output=processor_outputs)
+    tokens = tokens[np.newaxis, ...]  # Add batch dimension
     true_length += image_offsets
 
     if config.use_mrope:

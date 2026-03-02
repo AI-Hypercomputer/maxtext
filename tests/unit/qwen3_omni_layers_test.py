@@ -691,6 +691,8 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
         num_images=mt_processor_outputs.num_images,
         num_videos=mt_processor_outputs.num_videos,
     )
+    for key, value in mt_processor_outputs.__dict__.items():
+      print(f"{key}: {value.shape if isinstance(value, np.ndarray) else value}")
 
     engine = maxengine.MaxEngine(self.maxtext_config)
     metadata = engine.get_tokenizer()
@@ -731,6 +733,8 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
         use_audio_in_video=USE_AUDIO_IN_VIDEO,
     )
     hf_input_ids = np.array(hf_processor_outputs["input_ids"][0, :]).astype(np.float32)
+    for key, value in hf_processor_outputs.items():
+      print(f"{key}: {value.shape if isinstance(value, torch.Tensor) else value}")
 
     # Add assertions to check the output
     self.assertIsNotNone(mt_processor_outputs)

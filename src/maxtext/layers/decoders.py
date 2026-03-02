@@ -764,6 +764,7 @@ class Decoder(nn.Module):
     mesh = self.mesh
     max_logging.log(f"Decoder input tokens shape: {decoder_input_tokens.shape}")
     decoder_input_tokens = decoder_input_tokens[0,:,:] if decoder_input_tokens.ndim == 3 else decoder_input_tokens
+    max_logging.log(f"Decoder input tokens shape: {decoder_input_tokens.shape}")
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
     # [batch, length] -> [batch, length, emb_dim]

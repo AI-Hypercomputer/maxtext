@@ -1709,6 +1709,7 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
         - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
     """
+    jax.debug.print("Input hidden_states shape: {shape}", shape=hidden_states.shape)
     _, _, num_frames, height, width = hidden_states.shape
     num_frames = num_frames // self.config.temporal_patch_size_for_vit
     height = height // self.config.patch_size_for_vit
