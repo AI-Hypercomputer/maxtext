@@ -17,6 +17,7 @@
 
 from collections.abc import Sequence
 from functools import partial
+import math
 from typing import overload
 
 from etils import epath
@@ -28,6 +29,7 @@ from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers import quantizations
 from maxtext.models import models
+from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from orbax import checkpoint as ocp
@@ -112,6 +114,41 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   return model
 
 
+def _log_per_device_memory_estimate(abstract_state, out_shardings, mesh):
+  """Log expected per-device parameter memory from abstract specs and out_shardings.
+
+  Runs entirely from abstract shapes + PartitionSpecs — no device execution needed.
+  Call this before create_sharded_state() to verify sharding math is correct.
+  """
+
+  def _shard_factor(spec, mesh):
+    """Compute how many times smaller the per-device shard is vs. the full tensor."""
+    if spec is None:
+      return 1
+    factor = 1
+    for dim in spec:
+      if dim is None:
+        continue
+      names = (dim,) if isinstance(dim, str) else dim
+      for name in names:
+        if name in mesh.shape:
+          factor *= mesh.shape[name]
+    return max(factor, 1)
+
+  total_bytes = 0.0
+  flat_abstract = jax.tree_util.tree_leaves(abstract_state)
+  flat_shardings = jax.tree_util.tree_leaves(out_shardings)
+  for var_state, sharding in zip(flat_abstract, flat_shardings):
+    val = var_state.value if hasattr(var_state, "value") else var_state
+    spec = sharding.spec if hasattr(sharding, "spec") else None
+    total_bytes += math.prod(val.shape) * val.dtype.itemsize / _shard_factor(spec, mesh)
+
+  max_logging.log(
+      f"[MemEstimate] Expected per-device param memory: {total_bytes / 1e9:.2f} GB "
+      f"(total across {mesh.size} devices: {total_bytes * mesh.size / 1e9:.1f} GB)"
+  )
+
+
 def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
 
@@ -142,6 +179,11 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
   with nn.logical_axis_rules(config.logical_axis_rules):
     out_shardings = nn.logical_to_mesh_sharding(specs, mesh)
 
+  if config.debug_sharding:
+    # Pre-JIT estimate: computed from abstract shapes + PartitionSpecs only.
+    # Shows expected per-device memory if sharding is applied correctly.
+    _log_per_device_memory_estimate(abstract_state, out_shardings, mesh)
+
   @partial(jax.jit, out_shardings=out_shardings)
   def create_sharded_state():
     # This will be JIT-compiled. JAX knows the output sharding and can
@@ -156,6 +198,13 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
     model = nnx.merge(graphdef, sharded_state)
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
+      jax.effects_barrier()  # ensure JIT is done before measuring
+      actual_bytes = sum(
+          leaf.value.addressable_data(0).nbytes
+          for leaf in jax.tree_util.tree_leaves(sharded_state)
+          if hasattr(leaf, "value") and hasattr(leaf.value, "addressable_data")
+      )
+      max_logging.log(f"[MemEstimate] Actual per-device param memory: {actual_bytes / 1e9:.2f} GB")
       max_utils.print_non_trivial_mesh_axis(model.mesh)
       maxtext_utils.print_shardings_params(
           params=sharded_state,
