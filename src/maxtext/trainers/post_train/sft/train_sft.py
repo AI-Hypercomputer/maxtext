@@ -38,7 +38,9 @@ Training:
 from typing import Sequence
 
 from absl import app
+import math
 import os
+import re
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -53,9 +55,9 @@ from tunix.sft import metrics_logger, peft_trainer, profiler
 from tunix.sft import utils as tunix_sft_utils
 from tunix.rl import reshard
 
-from MaxText import optimizers
-from MaxText import pyconfig
-from MaxText.train import loss_fn
+from maxtext.optimizers import optimizers
+from maxtext.configs import pyconfig
+from maxtext.trainers.pre_train.train import loss_fn
 from maxtext.common.goodput import (
     GoodputEvent,
     RECORD_JOB_END_TIME,
@@ -195,6 +197,17 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
       preferred_element_type=None,
       out_sharding=None,
   ):
+    def _fallback_dot_general():
+      return qwix_lora.LoraProvider.dot_general(
+          self,
+          lhs,
+          rhs,
+          dimension_numbers,
+          precision,
+          preferred_element_type,
+          out_sharding=out_sharding,
+        )
+
     res = qwix_ptq.PtqProvider.dot_general(
         self,
         lhs,
@@ -256,19 +269,13 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
       lhs_trans = jnp.transpose(lhs, lhs_perm)
       lhs_shape = lhs_trans.shape
       lhs_flat = jnp.reshape(lhs_trans, lhs_shape[:-len(contract_axes)] + (k,))
+      if lora_a.shape[0] != k:
+        return _fallback_dot_general()
       delta = jnp.einsum("...k,kr->...r", lhs_flat, lora_a)
       delta = jnp.einsum("...r,rm->...m", delta, lora_b)
       return res + delta * (rule.alpha / rule.rank)
 
-    return qwix_lora.LoraProvider.dot_general(
-        self,
-        lhs,
-        rhs,
-        dimension_numbers,
-        precision,
-        preferred_element_type,
-        out_sharding=out_sharding,
-    )
+    return _fallback_dot_general()
 
   lora_provider.dot_general = types.MethodType(_dot_general_with_3d, lora_provider)
 
@@ -295,8 +302,6 @@ def _patch_qwix_find_param(qwix_flax_util):
             except Exception:
               continue
           candidates[name] = value
-
-      
 
     else:
       return original_find_param(x, ptq_array_type)
@@ -374,85 +379,180 @@ def _prepare_dummy_inputs(mt_config, mesh):
   decoder_positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32), (dummy_bs, seq_len))
   return decoder_input_tokens, decoder_positions
 
-def _precreate_lora_params(target_model, lora_provider, qwix_flax_util, qwix_lora, math, re, types):
-  rules = getattr(lora_provider, "_rules", [])
+
+def _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util, qwix_lora, types):
+  rules = [rule for rule in getattr(lora_provider, "_rules", []) if isinstance(rule, qwix_lora.LoraRule)]
   if not rules:
+    max_logging.log("LoRA precreate: no LoRA rules found on provider, skipping.")
     return
 
-  for path, module in target_model.iter_modules():
-    module_path = "/".join(map(str, path))
-    
-    for rule in rules:
-      if rule.op_names and "dot_general" not in rule.op_names:
+  # MaxText uses a single LoRA rule from the provided module_path regex.
+  rule = rules[0]
+  compiled_module_path = re.compile(mt_config.lora_module_path)
+  num_decoder_layers = getattr(mt_config, "num_decoder_layers", None)
+  if num_decoder_layers is None:
+    num_decoder_layers = getattr(mt_config, "base_num_decoder_layers", None)
+  param_scan_axis = int(getattr(mt_config, "param_scan_axis", 0))
+
+  def _with_layer_axis(base_shape_or_transpose, layer_value):
+    axis = max(0, min(param_scan_axis, len(base_shape_or_transpose)))
+    values = list(base_shape_or_transpose)
+    values.insert(axis, layer_value)
+    return tuple(values)
+
+  matched_modules = 0
+  precreated_modules = 0
+  skipped_modules = []
+  precreated_shapes = []
+
+  for path, module in lora_model.iter_modules():
+    module_path = "/".join(str(p) for p in path)
+    if not compiled_module_path.search(module_path):
+      continue
+
+    matched_modules += 1
+    kernel = getattr(module, "kernel", None)
+    if kernel is None:
+      if len(skipped_modules) < 10:
+        skipped_modules.append(f"{module_path}: no kernel")
+      continue
+
+    try:
+      kernel_value = qwix_flax_util.unbox(kernel)
+    except Exception:
+      if len(skipped_modules) < 10:
+        skipped_modules.append(f"{module_path}: cannot unbox kernel")
+      continue
+
+    kernel_shape = getattr(kernel_value, "shape", None)
+    if kernel_shape is None and hasattr(kernel_value, "array"):
+      kernel_shape = getattr(kernel_value.array, "shape", None)
+      if kernel_shape is None and hasattr(kernel_value.array, "qvalue"):
+        kernel_shape = getattr(kernel_value.array.qvalue, "shape", None)
+    if kernel_shape is None or len(kernel_shape) < 2:
+      if len(skipped_modules) < 10:
+        skipped_modules.append(f"{module_path}: unsupported kernel shape {kernel_shape}")
+      continue
+
+    is_scanned_decoder_module = (
+        "decoder/layers/" in module_path
+        and isinstance(num_decoder_layers, int)
+        and num_decoder_layers > 1
+    )
+
+    if is_scanned_decoder_module:
+      layer_axis = None
+      if 0 <= param_scan_axis < len(kernel_shape):
+        layer_axis = int(param_scan_axis)
+      elif len(kernel_shape) > 1 and int(kernel_shape[1]) == int(num_decoder_layers):
+        layer_axis = 1
+      else:
+        for axis, dim in enumerate(kernel_shape):
+          if int(dim) == int(num_decoder_layers):
+            layer_axis = axis
+            break
+      if layer_axis is None:
+        if len(skipped_modules) < 10:
+          skipped_modules.append(f"{module_path}: unable to infer layer axis from kernel shape {kernel_shape}")
         continue
 
-      kernel_tensor = None
-      in_rank = 0
-      out_rank = 0
-      found_param_name = "kernel"
-
-      # Case A: Pure NNX (Standard attributes)
-      if hasattr(module, "kernel") and hasattr(module, "in_features_shape"):
-        try:
-          kernel_tensor = qwix_flax_util.unbox(module.kernel)
-          in_rank = len(module.in_features_shape)
-          out_rank = len(module.out_features_shape)
-        except Exception:
-          kernel_tensor = None
-
-      
-
-      if kernel_tensor is None:
+      effective_shape = tuple(int(dim) for i, dim in enumerate(kernel_shape) if i != layer_axis)
+      if len(effective_shape) < 2:
+        if len(skipped_modules) < 10:
+          skipped_modules.append(f"{module_path}: unsupported effective shape {effective_shape}")
         continue
 
-      # Closure to define LoRA A and B shapes and sharding
-      def _init_for_module(self, k_tensor=kernel_tensor, i_r=in_rank, o_r=out_rank, p_name=found_param_name):
-        kernel_shape = getattr(k_tensor, "shape", ())
-        extra_rank = max(0, len(kernel_shape) - (i_r + o_r))
-        
-        prefix_shape = kernel_shape[:extra_rank]
-        in_shape = kernel_shape[extra_rank : extra_rank + i_r]
-        out_shape = kernel_shape[extra_rank + i_r :]
+      if "decoder/layers/self_attention/out" in module_path and len(effective_shape) >= 3:
+        in_dim = int(math.prod(effective_shape[:-1]))
+        out_dim = int(effective_shape[-1])
+      else:
+        in_dim = int(effective_shape[0])
+        out_dim = int(math.prod(effective_shape[1:]))
+      if in_dim <= 0 or out_dim <= 0:
+        if len(skipped_modules) < 10:
+          skipped_modules.append(f"{module_path}: non-positive dims in={in_dim} out={out_dim}")
+        continue
 
-        in_size = int(math.prod(in_shape))
-        out_size = int(math.prod(out_shape))
-        
-        if in_size <= 0 or out_size <= 0:
-          return
+      in_axis = next(i for i in range(len(kernel_shape)) if i != layer_axis)
+      out_axis = next(i for i in range(len(kernel_shape) - 1, -1, -1) if i != layer_axis)
 
-        a_shape = prefix_shape + (in_size, rule.rank)
-        b_shape = prefix_shape + (rule.rank, out_size)
-        
-        prefix_axes = tuple(range(extra_rank))
-        a_sharding_transpose = prefix_axes + (None,)
-        b_sharding_transpose = prefix_axes + (None,)
+      a_shape = _with_layer_axis((in_dim, rule.rank), num_decoder_layers)
+      b_shape = _with_layer_axis((rule.rank, out_dim), num_decoder_layers)
+      a_sharding_transpose = _with_layer_axis((in_axis, None), layer_axis)
+      b_sharding_transpose = _with_layer_axis((None, out_axis), layer_axis)
+    else:
+      prefix_shape = tuple(kernel_shape[:-2])
+      in_dim = int(kernel_shape[-2])
+      out_dim = int(kernel_shape[-1])
+      if in_dim <= 0 or out_dim <= 0:
+        if len(skipped_modules) < 10:
+          skipped_modules.append(f"{module_path}: non-positive dims in={in_dim} out={out_dim}")
+        continue
 
-        qwix_lora._get_or_create_lora_params(
-            name=p_name,
-            rule=rule,
-            a_shape=a_shape,
-            b_shape=b_shape,
-            a_sharding_transpose=a_sharding_transpose,
-            b_sharding_transpose=b_sharding_transpose,
-        )
+      full_prefix_shape = prefix_shape
+      a_shape = full_prefix_shape + (in_dim, rule.rank)
+      b_shape = full_prefix_shape + (rule.rank, out_dim)
 
-      types.MethodType(_init_for_module, module)()
+      prefix_rank = len(full_prefix_shape)
+      a_sharding_transpose = tuple(range(prefix_rank)) + (prefix_rank, None)
+      b_sharding_transpose = tuple(range(prefix_rank)) + (None, prefix_rank + 1)
+
+    def _init_for_module(
+        self,
+        a_shape=a_shape,
+        b_shape=b_shape,
+        a_sharding_transpose=a_sharding_transpose,
+        b_sharding_transpose=b_sharding_transpose,
+    ):
+      qwix_lora._get_or_create_lora_params(
+          name="kernel",
+          rule=rule,
+          a_shape=a_shape,
+          b_shape=b_shape,
+          a_sharding_transpose=a_sharding_transpose,
+          b_sharding_transpose=b_sharding_transpose,
+      )
+
+    types.MethodType(_init_for_module, module)()
+    precreated_modules += 1
+    if len(precreated_shapes) < 10:
+      precreated_shapes.append((module_path, a_shape, b_shape))
+
+  max_logging.log(
+      "LoRA precreate: matched_modules=%s precreated_modules=%s skipped_sample=%s shape_sample=%s"
+      % (matched_modules, precreated_modules, skipped_modules, precreated_shapes)
+  )
 
 
 def _verify_lora_parameters(lora_model, mt_config):
+  compiled_module_path = re.compile(mt_config.lora_module_path)
+  matched_module_paths = []
+  sample_module_paths = []
+
+  for path, _ in lora_model.iter_modules():
+    module_path = "/".join(str(p) for p in path)
+    if len(sample_module_paths) < 50:
+      sample_module_paths.append(module_path)
+    if compiled_module_path.search(module_path):
+      matched_module_paths.append(module_path)
+
   is_lora_enabled = tunix_sft_utils.is_lora_enabled(lora_model)
-  if not is_lora_enabled:
-    module_paths = []
-    for path, _ in lora_model.iter_modules():
-      module_paths.append("/".join(str(p) for p in path))
-      if len(module_paths) >= 50:
-        break
+  if is_lora_enabled:
+    max_logging.log("LoRA verification: tunix_sft_utils.is_lora_enabled=True")
+    return
+
+  if not matched_module_paths:
     max_logging.log(
       f"LoRA module_path='{mt_config.lora_module_path}' did not match any weights. "
-      f"Sample module paths: {module_paths}"
+      f"Sample module paths: {sample_module_paths}"
     )
     raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
-  max_logging.log("LoRA verification: tunix_sft_utils.is_lora_enabled=True")
+
+  max_logging.log(
+      "LoRA verification: matched %s target modules but LoRA params are not yet materialized; "
+      "continuing with lazy LoRA initialization. Sample matches: %s"
+      % (len(matched_module_paths), matched_module_paths[:10])
+  )
 
 
 def maybe_apply_lora(model, mesh, mt_config):
@@ -461,13 +561,11 @@ def maybe_apply_lora(model, mesh, mt_config):
   if hasattr(mt_config, 'lora_input_adapters_path') and mt_config.lora_input_adapters_path:
     max_logging.log("MaxText LoRA adapters loaded, skipping Qwix LoRA application")
     return model
-    
+
   if not getattr(mt_config, "enable_lora", False):
     return model
 
   import qwix
-  import math
-  import re
   import qwix._src.flax_util as qwix_flax_util
   import qwix._src.providers.lora as qwix_lora
   import qwix._src.providers.ptq as qwix_ptq
@@ -488,8 +586,7 @@ def maybe_apply_lora(model, mesh, mt_config):
     decoder_positions=decoder_positions,
     skip_nnx_init=True,
   )
-
-  _precreate_lora_params(lora_model, lora_provider, qwix_flax_util, qwix_lora, math, re, types)
+  _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util, qwix_lora, types)
 
   if mesh is not None:
     lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
