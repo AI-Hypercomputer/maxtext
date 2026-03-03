@@ -173,7 +173,7 @@ def is_conversational(features, data_columns):
 
 def apply_chat_template(example, tokenizer_model, data_column_name):
   """Formats conversational data by applying the tokenizer's chat template
-  and identifying prompt/completion segments.
+  and identifying prompt/completion segments for SFT masking.
 
   Args:
     example: A dictionary containing conversational data. It is expected to have a key
@@ -187,9 +187,10 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
     The modified `example` dictionary.
       - The `data_column_name` column will be updated to a list of
         messages, each formatted according to the tokenizer's chat template.
-      - A new column named "is_prompt" will be added, where `True`
-        indicates a system message or a user message (prompt) and `False` indicates an assistant
-        message (completion).
+      - A new column "is_prompt" is added, where `True` indicates the
+        tokens contain the system message, user message, and generation
+        prompt (if applicable). `False` indicates the expected LLM
+        completion, excluding the assistant's start tokens.
   """
   messages = []
   is_prompt = []
@@ -203,7 +204,7 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
       elif message["role"] == "user":
         round_msgs.append(message)
         prompt_in_chat_template = tokenizer_model.apply_chat_template(
-            round_msgs, add_generation_prompt=False, tokenize=False
+            round_msgs, add_generation_prompt=True, tokenize=False
         )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
@@ -212,7 +213,8 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
         prompt_completion_tokens = tokenizer_model.apply_chat_template(
             round_msgs, add_generation_prompt=False, tokenize=True
         )
-        prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=False, tokenize=True)
+        # include generation_prompt as part of the prompt tokens
+        prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True)
         completion_tokens = prompt_completion_tokens[len(prompt_tokens) :]
         completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
         messages.append(completion_in_chat_template)
