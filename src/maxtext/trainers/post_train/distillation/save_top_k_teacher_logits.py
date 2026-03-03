@@ -39,13 +39,14 @@ def get_top_k_logits(logits: jax.Array, k: int):
   top_k_values, top_k_indices = jax.lax.top_k(logits, k)
   return top_k_values, top_k_indices
 
+
 def get_local_cpu_array(arr):
   """Extracts the local data from a sharded JAX array, avoiding duplicates from replication."""
   unique_shards = {}
   for s in arr.addressable_shards:
     if s.index not in unique_shards:
       unique_shards[s.index] = np.array(s.data)
-  
+
   # Sort the unique shards by their start position in the batch dimension and concatenate
   sorted_shards = sorted(unique_shards.items(), key=lambda x: x[0][0].start)
   return np.concatenate([data for _, data in sorted_shards], axis=0)
@@ -91,9 +92,9 @@ def generate_and_save_data(config, k_val, optional_keys):
         enable_dropout=False,
     )
     top_k_vals, top_k_idx = get_top_k_logits(logits, k=k_val)
-    
-    dp_sharding_3d = NamedSharding(mesh, P('data', None, None))
-    dp_sharding_2d = NamedSharding(mesh, P('data', None))
+
+    dp_sharding_3d = NamedSharding(mesh, P("data", None, None))
+    dp_sharding_2d = NamedSharding(mesh, P("data", None))
 
     # Move data to devices with appropriate sharding for distributed writing
     top_k_vals = jax.device_put(top_k_vals, dp_sharding_3d)
