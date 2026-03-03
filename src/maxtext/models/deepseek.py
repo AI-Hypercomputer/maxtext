@@ -17,8 +17,9 @@
 # pylint: disable=no-name-in-module
 
 import functools
-from typing import Optional
+from typing import Optional, List, Any
 
+from flax import linen as nn
 from flax import nnx
 import jax
 from jax.ad_checkpoint import checkpoint_name
@@ -40,8 +41,11 @@ from maxtext.layers.engram import NgramHashMapping
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import deepseek_batchsplit
 from maxtext.utils import max_utils
+from maxtext.utils import sharding
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils.sharding import maybe_shard_with_logical
+from maxtext.layers.registry import register_model
+from maxtext.layers.strategies import ModelStrategy
 
 import transformers
 
@@ -529,3 +533,176 @@ DeepSeekMoELayerToLinen = nnx_wrappers.to_linen_class(
     DeepSeekMoELayer,
     base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
+
+
+class DeepSeekStrategy(ModelStrategy):
+  """Strategy for DeepSeek model."""
+
+  def get_pipeline_layer(self, block_layers: List[Any]) -> Any:
+    return block_layers[1] # The MoE layer
+
+  def apply_layers(
+      self,
+      decoder_instance,
+      y: jax.Array,
+      block_layers: List[Any],
+      broadcast_args: tuple,
+      **kwargs
+  ) -> jax.Array:
+    cfg = decoder_instance.config
+    mesh = decoder_instance.mesh
+    model_mode = kwargs.get("model_mode")
+    kv_caches = kwargs.get("kv_caches")
+    attention_metadata = kwargs.get("attention_metadata")
+    previous_chunk = kwargs.get("previous_chunk")
+    page_state = kwargs.get("page_state")
+    slot = kwargs.get("slot")
+    decoder_input_tokens = kwargs.get("decoder_input_tokens")
+    pipeline_module = kwargs.get("pipeline_module")
+
+    decoder_segment_ids = broadcast_args[0]
+    decoder_positions = broadcast_args[1]
+    deterministic = broadcast_args[2]
+
+    if cfg.using_pipeline_parallelism and pipeline_module is not None:
+      logical_partition_spec = None
+      if cfg.pipeline_fsdp_ag_once:
+        logical_partition_spec = pipeline_module.get_weight_sharding(
+            y, *broadcast_args
+        )
+      
+      num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+      num_moe_layers_outside_pp = num_moe_layers - cfg.pipeline_parallel_layers
+      logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(cfg.logical_axis_rules)
+      
+      dense_layer = block_layers[0]
+      moe_layer = block_layers[1]
+      
+      with mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
+        y, _ = decoder_instance.scan_decoder_layers(
+            cfg,
+            dense_layer,
+            cfg.first_num_dense_layers,
+            "dense_layers",
+            mesh,
+            in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+            model_mode=model_mode,
+        )(y, *broadcast_args)
+        
+        if num_moe_layers_outside_pp > 0:
+          y, _ = decoder_instance.scan_decoder_layers(
+              cfg,
+              moe_layer,
+              num_moe_layers_outside_pp,
+              "moe_layers",
+              mesh,
+              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
+          )(y, *broadcast_args)
+      
+      # DeepSeek runs pipeline module twice in the original code, likely for 2 stages?
+      # Original code:
+      # y = self.pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
+      # y = self.pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
+      # This looks suspicious if it's generic, but I will preserve behavior.
+      y = pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
+      y = pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
+      
+      return y
+
+    if cfg.scan_layers:
+      assert len(block_layers) == 2, "Scanned layers must have a length of 2 using deepseek."
+      layer_call_kwargs = {
+          "page_state": page_state,
+          "previous_chunk": previous_chunk,
+          "slot": slot,
+      }
+      dense_layer = block_layers[0]
+      dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
+
+      y, _ = decoder_instance.scan_decoder_layers(
+          cfg,
+          dense_layer,
+          cfg.first_num_dense_layers,
+          "dense_layers",
+          mesh,
+          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+          model_mode=model_mode,
+      )(y, *broadcast_args)
+
+      moe_layer = block_layers[1]
+      moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
+      num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+
+      # If batch-split schedule is used and initialization is complete...
+      if cfg.use_batch_split_schedule and not decoder_instance.is_mutable_collection("params"):
+        y = deepseek_batchsplit.scan_batch_split_layers(
+            y,
+            decoder_instance.variables["params"]["moe_layers"],
+            decoder_positions,
+            decoder_segment_ids,
+            model_mode=model_mode,
+            mesh=mesh,
+            quant=decoder_instance.quant,
+            cfg=cfg,
+            policy=decoder_instance.get_remat_policy(),
+        )
+      else:
+        y, _ = decoder_instance.scan_decoder_layers(
+            cfg,
+            moe_layer,
+            num_moe_layers,
+            "moe_layers",
+            mesh,
+            in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+            model_mode=model_mode,
+        )(y, *broadcast_args)
+      return y
+
+    else:
+      # Unscanned
+      assert len(block_layers) == 2, "Unscanned layers must have a length of 2 using deepseek."
+      dense_layer = block_layers[0]
+      moe_layer = block_layers[1]
+
+      layers = [dense_layer, moe_layer]
+      layer_prefixes = ["dense_layers", "moe_layers"]
+      num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+      num_layers_list = [cfg.first_num_dense_layers, num_moe_layers]
+
+      global_layer_idx_offset = 0
+      for layer_cls, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
+        for index in range(num_layers):
+          global_layer_idx = global_layer_idx_offset + index
+          kv_cache = kv_caches[index] if kv_caches is not None else None
+          input_tokens = decoder_input_tokens if cfg.engram_layers else None
+
+          # Check if layer_cls is an instance (rematted) or a class
+          # If it's a rematted Linen Module, it's a class. 
+          # We instantiate it.
+
+          layer_instance = layer_cls(
+              config=cfg,
+              mesh=mesh,
+              name=f"{layer_prefix}_{index}",
+              quant=decoder_instance.quant,
+              model_mode=model_mode,
+              layer_idx=global_layer_idx,
+          )
+
+          y, kv_cache = layer_instance(
+              y,
+              *broadcast_args,
+              previous_chunk=previous_chunk,
+              page_state=page_state,
+              slot=slot,
+              kv_cache=kv_cache,
+              attention_metadata=attention_metadata,
+              decoder_input_tokens=input_tokens,
+          )
+          if kv_caches is not None and kv_cache is not None:
+            kv_caches[index] = kv_cache
+        global_layer_idx_offset += num_layers
+      return y
+
+register_model("deepseek", DeepSeekStrategy)([DeepSeekDenseLayerToLinen, DeepSeekMoELayerToLinen])

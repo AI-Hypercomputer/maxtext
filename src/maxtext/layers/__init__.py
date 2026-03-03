@@ -11,3 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
+from maxtext.models import gemma3
+from maxtext.models import llama2
+from maxtext.models import mistral
+from maxtext.models import mixtral
+# Other models can be added here once they use the @register_model decorator

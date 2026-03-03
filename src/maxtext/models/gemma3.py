@@ -14,6 +14,7 @@
 
 """Specialised layers for Gemma 3."""
 
+from typing import List, Any
 import jax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
@@ -32,6 +33,9 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.utils import max_utils
+from maxtext.utils import sharding
+from maxtext.layers.registry import register_model
+from maxtext.layers.strategies import ModelStrategy
 
 
 GEMMA3_ATTENTION_PATTERN = (
@@ -57,6 +61,159 @@ def get_query_pre_attn_scalar(config) -> float:
     return (config.base_emb_dim // config.base_num_query_heads) ** -0.5
   else:
     raise ValueError(f"Unsupported model name: {config.model_name}")
+
+
+class Gemma3Strategy(ModelStrategy):
+  """Strategy for Gemma3 model."""
+
+  def apply_layers(
+      self,
+      decoder_instance,
+      y: jax.Array,
+      block_layers: List[Any],
+      broadcast_args: tuple,
+      **kwargs
+  ) -> jax.Array:
+    cfg = decoder_instance.config
+    mesh = decoder_instance.mesh
+    model_mode = kwargs.get("model_mode")
+    bidirectional_mask = kwargs.get("bidirectional_mask")
+    previous_chunk = kwargs.get("previous_chunk")
+    page_state = kwargs.get("page_state")
+    slot = kwargs.get("slot")
+    decoder_segment_ids = broadcast_args[0]
+    decoder_positions = broadcast_args[1]
+    deterministic = broadcast_args[2]
+    pipeline_module = kwargs.get("pipeline_module")
+
+    if cfg.using_pipeline_parallelism and pipeline_module is not None:
+      logical_partition_spec = None
+      if cfg.pipeline_fsdp_ag_once:
+        logical_partition_spec = pipeline_module.get_weight_sharding(
+            y, *broadcast_args
+        )
+      y = pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
+
+      remaining_layers = cfg.num_decoder_layers - cfg.pipeline_parallel_layers
+      if remaining_layers > 0:
+         logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(cfg.logical_axis_rules)
+
+         policy = decoder_instance.get_remat_policy()
+         RemattedGemma3Block = decoder_instance.set_remat_policy([Gemma3ScannableBlockToLinen], policy)[0]
+
+         attention_pattern_length = len(GEMMA3_ATTENTION_PATTERN)
+         scan_length = remaining_layers // attention_pattern_length
+
+         layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+
+         with mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
+            if scan_length > 0:
+                layer_kwargs = {"num_of_layers": attention_pattern_length}
+                y, _ = decoder_instance.scan_decoder_layers(
+                    cfg,
+                    RemattedGemma3Block,
+                    scan_length,
+                    "layers_outside_pipeline",
+                    mesh,
+                    in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                    model_mode=model_mode,
+                    **layer_kwargs,
+                )(y, *broadcast_args, **layer_call_kwargs)
+
+            num_remainder = remaining_layers % attention_pattern_length
+            if num_remainder > 0:
+                 rem_layer_kwargs = {"num_of_layers": num_remainder}
+                 layer = RemattedGemma3Block(
+                    config=cfg, mesh=mesh, quant=decoder_instance.quant, model_mode=model_mode, name="layers_remainder_outside_pp", **rem_layer_kwargs
+                 )
+                 y, _ = layer(
+                    y,
+                    decoder_segment_ids,
+                    decoder_positions,
+                    deterministic,
+                    model_mode,
+                    previous_chunk=previous_chunk,
+                    page_state=page_state,
+                    slot=slot,
+                    **layer_call_kwargs,
+                 )
+
+      return y
+
+    if cfg.scan_layers:
+      attention_pattern_length = len(GEMMA3_ATTENTION_PATTERN)
+      scan_length = cfg.num_decoder_layers // attention_pattern_length
+
+      policy = decoder_instance.get_remat_policy()
+      RemattedGemma3Block = decoder_instance.set_remat_policy([Gemma3ScannableBlockToLinen], policy)[0]
+
+      layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+      layer_kwargs = {"num_of_layers": attention_pattern_length}
+
+      # Apply the main scan over the full blocks
+      if scan_length > 0:
+        y, _ = decoder_instance.scan_decoder_layers(
+            cfg,
+            RemattedGemma3Block,
+            scan_length,
+            "layers",
+            mesh,
+            in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+            model_mode=model_mode,
+            **layer_kwargs,
+        )(y, *broadcast_args, **layer_call_kwargs)
+
+      # Apply any remaining layers that did not fit into a full scanned block
+      num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
+      if num_remaining_layers > 0:
+        # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
+        rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
+        layer = RemattedGemma3Block(
+            config=cfg, mesh=mesh, quant=decoder_instance.quant, model_mode=model_mode, name="layers_remainder", **rem_layer_kwargs
+        )  # pytype: disable=wrong-keyword-args
+        y, _ = layer(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            previous_chunk=previous_chunk,
+            page_state=page_state,
+            slot=slot,
+            **layer_call_kwargs,
+        )
+      return y
+
+    else:
+      # Unscanned execution
+      kv_caches = kwargs.get("kv_caches")
+      attention_metadata = kwargs.get("attention_metadata")
+      RemattedBlockLayer = block_layers[0] # Should be Gemma3DecoderLayerToLinen (rematted)
+
+      for lyr in range(cfg.num_decoder_layers):
+        # Gemma3 uses both global and sliding window attention depending on the layer index.
+        layer_kwargs = {"attention_type": get_attention_type(layer_id=lyr)}
+        layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+
+        layer = RemattedBlockLayer(
+            config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=decoder_instance.quant, model_mode=model_mode, **layer_kwargs
+        )
+        kv_cache = kv_caches[lyr] if kv_caches is not None else None
+
+        y, kv_cache = layer(
+            y,
+            *broadcast_args,
+            previous_chunk=previous_chunk,
+            page_state=page_state,
+            slot=slot,
+            kv_cache=kv_cache,
+            attention_metadata=attention_metadata,
+            **layer_call_kwargs,
+        )
+        if kv_caches is not None and kv_cache is not None:
+          kv_caches[lyr] = kv_cache
+
+      return y
 
 
 # Gemma3 Decoder Layer
@@ -250,9 +407,11 @@ class Gemma3DecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-Gemma3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Gemma3DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+Gemma3DecoderLayerToLinen = register_model("gemma3", strategy_class=Gemma3Strategy)(
+    nnx_wrappers.to_linen_class(
+        Gemma3DecoderLayer,
+        base_metadata_fn=initializers.variable_to_logically_partitioned,
+    )
 )
 
 

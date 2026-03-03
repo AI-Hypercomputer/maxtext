@@ -61,6 +61,7 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
+from maxtext.layers.registry import get_model_plugin
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -302,6 +303,15 @@ class Decoder(nn.Module):
   def setup(self):
     """Initialize decoder layer."""
     self.decoder_layer = self.get_decoder_layers()
+
+    # Initialize strategy if using plugin architecture
+    decoder_block_name = self.config.decoder_block.value
+    try:
+      plugin = get_model_plugin(decoder_block_name)
+      self.strategy = plugin.strategy_class()
+    except ValueError:
+      self.strategy = None
+
     self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
@@ -441,27 +451,26 @@ class Decoder(nn.Module):
     Returns:
         A list containing one or more `nn.Module` classes for the decoder.
     """
+    decoder_block_name = self.config.decoder_block.value
+    # import sys
+    # sys.stderr.write(f"DEBUG: decoder_block_name={decoder_block_name}, type={type(self.config.decoder_block)}\n")
+    plugin_error = None
+    # from maxtext.layers import registry
+    # sys.stderr.write(f"DEBUG: registry keys={list(registry._MODEL_PLUGIN_REGISTRY.keys())}\n")
+    try:
+      plugin = get_model_plugin(decoder_block_name)
+      max_logging.log(f"Using model plugin architecture for: {decoder_block_name}")
+      return plugin.layer_classes
+    except ValueError:
+      pass # Fallback to standard match case below
+
     match self.config.decoder_block:
       case DecoderBlockType.DEFAULT:
         return [DecoderLayer]
-      case DecoderBlockType.LLAMA2:
-        return [llama2.LlamaDecoderLayerToLinen]
-      case DecoderBlockType.MISTRAL:
-        # TODO(ranran): update to Mistral with sliding window attention
-        return [mistral.MistralDecoderLayerToLinen]
-      case DecoderBlockType.MIXTRAL:
-        return [mixtral.MixtralDecoderLayerToLinen]
-      case DecoderBlockType.DEEPSEEK:
-        return [
-            deepseek.DeepSeekDenseLayerToLinen,
-            deepseek.DeepSeekMoELayerToLinen,
-        ]
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
         return [gemma2.Gemma2DecoderLayerToLinen]
-      case DecoderBlockType.GEMMA3:
-        return [gemma3.Gemma3DecoderLayerToLinen]
       case DecoderBlockType.GPT3:
         return [gpt3.Gpt3DecoderLayerToLinen]
       case DecoderBlockType.GPT_OSS:
@@ -482,8 +491,10 @@ class Decoder(nn.Module):
         return [olmo3.Olmo3ScannableBlockToLinen] if self.config.scan_layers else [olmo3.Olmo3DecoderLayerToLinen]
 
       case _:
+        from maxtext.layers import registry
+        available = list(registry._MODEL_PLUGIN_REGISTRY.keys())
         # Default case to handle any unknown decoder block types.
-        raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
+        raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}. Registry keys: {available}. Plugin error: {plugin_error}")
 
   def set_remat_policy(self, block_layers, policy):
     """Set remat policy"""
@@ -571,14 +582,16 @@ class Decoder(nn.Module):
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
 
-    def get_layer_to_pipeline(blocks, cfg):
-      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-        return blocks[1]  # return the sparse block
-      else:
-        return blocks[0]
-
     cfg = self.config
-    base_stage = get_layer_to_pipeline(decoder_blocks, cfg)
+    if self.strategy:
+      base_stage = self.strategy.get_pipeline_layer(decoder_blocks)
+    else:
+      # Fallback for legacy hardcoded logic if any remains (though DeepSeek is now plugin)
+      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+        base_stage = decoder_blocks[1]
+      else:
+        base_stage = decoder_blocks[0]
+
     if cfg.set_remat_policy_on_layers_per_stage:
       policy = self.get_remat_policy()
       base_stage = self.set_remat_policy([base_stage], policy)[0]
@@ -792,14 +805,53 @@ class Decoder(nn.Module):
         deterministic,
         model_mode,
     )
-    if cfg.using_pipeline_parallelism:
+    # Check if we should use the plugin's strategy
+    decoder_block_name = self.config.decoder_block.value
+    plugin = None
+    try:
+      plugin = get_model_plugin(decoder_block_name)
+    except ValueError:
+      pass # Plugin not found, proceed to fallback
+
+    if plugin:
+      max_logging.log(f"Applying plugin strategy for: {decoder_block_name}")
+      # Use the strategy instance created in setup if available, else instantiate (e.g. if setup wasn't called like in some tests?)
+      # But setup is always called for linen modules.
+      # However, let's be safe and use self.strategy if it exists.
+      strategy = self.strategy if hasattr(self, "strategy") and self.strategy else plugin.strategy_class()
+      
+      pipeline_module = self.pipeline_module if cfg.using_pipeline_parallelism else None
+      
+      y = strategy.apply_layers(
+          decoder_instance=self,
+          y=y,
+          block_layers=RemattedBlockLayers,
+          broadcast_args=broadcast_args,
+          kv_caches=kv_caches,
+          page_state=page_state,
+          slot=slot,
+          previous_chunk=previous_chunk,
+          model_mode=model_mode,
+          attention_metadata=attention_metadata,
+          decoder_input_tokens=decoder_input_tokens,
+          pipeline_module=pipeline_module,
+          bidirectional_mask=bidirectional_mask,
+          deepstack_visual_embeds=deepstack_visual_embeds,
+      )
+    elif cfg.using_pipeline_parallelism:
+      # Legacy pipeline path for non-plugin models (if any)
       if cfg.pipeline_fsdp_ag_once:
         logical_partition_spec = self.pipeline_module.get_weight_sharding(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
         )
       else:
         logical_partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
+      
+      # Fallback to existing logic logic
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+         # DeepSeek should be handled by plugin now, but keeping for safety if plugin lookup failed?
+         # No, plugin lookup shouldn't fail for DeepSeek if I registered it.
+         # But if it fails, we fall back here.
         assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
         dense_layer = RemattedBlockLayers[0]
         moe_layer = RemattedBlockLayers[1]
@@ -828,7 +880,8 @@ class Decoder(nn.Module):
                 model_mode=model_mode,
             )(y, *broadcast_args)
         y = self.pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
-      else:  # Not DeepSeek
+        y = self.pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
+      else:
         y = self.pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
@@ -844,67 +897,8 @@ class Decoder(nn.Module):
                 model_mode=model_mode,
             )(y, *broadcast_args)
     else:
-      if cfg.scan_layers:
-        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
-          layer_call_kwargs = {
-              "page_state": page_state,
-              "previous_chunk": previous_chunk,
-              "slot": slot,
-          }
-          dense_layer = RemattedBlockLayers[0]
-          dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
-          y, _ = self.scan_decoder_layers(
-              cfg,
-              dense_layer,
-              cfg.first_num_dense_layers,
-              "dense_layers",
-              mesh,
-              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
-          )(y, *broadcast_args)
-          moe_layer = RemattedBlockLayers[1]
-          moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
-
-          # If batch-split schedule is used and initialization is complete,
-          # as detected by immutable params, use deepseek_batchsplit custom
-          # scan with initialized parameters.
-          if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
-            y = deepseek_batchsplit.scan_batch_split_layers(
-                y,
-                self.variables["params"]["moe_layers"],
-                decoder_positions,
-                decoder_segment_ids,
-                model_mode=model_mode,
-                mesh=mesh,
-                quant=self.quant,
-                cfg=cfg,
-                policy=policy,
-            )
-          else:
-            y, _ = self.scan_decoder_layers(
-                cfg,
-                moe_layer,
-                num_moe_layers,
-                "moe_layers",
-                mesh,
-                in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-                model_mode=model_mode,
-            )(y, *broadcast_args)
-        elif cfg.decoder_block == DecoderBlockType.GEMMA3:
-          y = self._apply_gemma3_scanned_blocks(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-              bidirectional_mask,
-              previous_chunk,
-              page_state,
-              slot,
-          )
-        else:
+        # Fallback to existing logic
+        if cfg.scan_layers:
           RemattedBlockLayer = RemattedBlockLayers[0]
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
           layer_kwargs = {}
@@ -923,31 +917,29 @@ class Decoder(nn.Module):
               model_mode=model_mode,
               **layer_kwargs,
           )(y, *broadcast_args)
-      else:
-        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
-          dense_layer = RemattedBlockLayers[0]
-          moe_layer = RemattedBlockLayers[1]
 
-          layers = [dense_layer, moe_layer]
-          layer_prefixes = ["dense_layers", "moe_layers"]
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
-          num_layers_list = [cfg.first_num_dense_layers, num_moe_layers]
-          # Iterate over the two layer groups (dense and MoE) and apply layer transformation
-          global_layer_idx_offset = 0
-          for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
-            for index in range(num_layers):
-              global_layer_idx = global_layer_idx_offset + index
-              kv_cache = kv_caches[index] if kv_caches is not None else None
-              input_tokens = decoder_input_tokens if cfg.engram_layers else None
+        else:
+          for lyr in range(cfg.num_decoder_layers):
+              RemattedBlockLayer = RemattedBlockLayers[0]
+              layer_kwargs = {}
+              layer_call_kwargs = {}
+
+              if cfg.decoder_block == DecoderBlockType.LLAMA4:
+                layer_kwargs = {
+                    "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
+                    "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
+                }
+              if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+                layer_kwargs = {"layer_idx": lyr}
+              if cfg.decoder_block == DecoderBlockType.GPT_OSS:
+                layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
+              if cfg.decoder_block == DecoderBlockType.OLMO3:
+                layer_kwargs = {"attention_type": olmo3.get_attention_type(layer_id=lyr)}
+              layer = RemattedBlockLayer(
+                  config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
+              )
+              kv_cache = kv_caches[lyr] if kv_caches is not None else None
               y, kv_cache = layer(
-                  config=cfg,
-                  mesh=mesh,
-                  name=f"{layer_prefix}_{index}",
-                  quant=self.quant,
-                  model_mode=self.model_mode,
-                  layer_idx=global_layer_idx,
-              )(
                   y,
                   decoder_segment_ids,
                   decoder_positions,
@@ -958,56 +950,16 @@ class Decoder(nn.Module):
                   slot=slot,
                   kv_cache=kv_cache,
                   attention_metadata=attention_metadata,
-                  decoder_input_tokens=input_tokens,
+                  **layer_call_kwargs,
               )
               if kv_caches is not None and kv_cache is not None:
-                kv_caches[index] = kv_cache
-            global_layer_idx_offset += num_layers
-        else:
-          for lyr in range(cfg.num_decoder_layers):
-            RemattedBlockLayer = RemattedBlockLayers[0]
-            layer_kwargs = {}
-            layer_call_kwargs = {}
-            if cfg.decoder_block == DecoderBlockType.GEMMA3:
-              # Gemma3 uses both global and sliding window attention depending on the layer index.
-              layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
-              layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
-            if cfg.decoder_block == DecoderBlockType.LLAMA4:
-              layer_kwargs = {
-                  "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
-                  "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
-              }
-            if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
-              layer_kwargs = {"layer_idx": lyr}
-            if cfg.decoder_block == DecoderBlockType.GPT_OSS:
-              layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
-            if cfg.decoder_block == DecoderBlockType.OLMO3:
-              layer_kwargs = {"attention_type": olmo3.get_attention_type(layer_id=lyr)}
-            layer = RemattedBlockLayer(
-                config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
-            )
-            kv_cache = kv_caches[lyr] if kv_caches is not None else None
-            y, kv_cache = layer(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-                previous_chunk=previous_chunk,
-                page_state=page_state,
-                slot=slot,
-                kv_cache=kv_cache,
-                attention_metadata=attention_metadata,
-                **layer_call_kwargs,
-            )
-            if kv_caches is not None and kv_cache is not None:
-              kv_caches[lyr] = kv_cache
+                kv_caches[lyr] = kv_cache
 
-            if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
-              visual_embeds = deepstack_visual_embeds[lyr]
-              # Use bidirectional_mask to identify visual token positions
-              if bidirectional_mask is not None and visual_embeds is not None:
-                y = deepstack_process(y, bidirectional_mask, visual_embeds)
+              if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
+                visual_embeds = deepstack_visual_embeds[lyr]
+                # Use bidirectional_mask to identify visual token positions
+                if bidirectional_mask is not None and visual_embeds is not None:
+                  y = deepstack_process(y, bidirectional_mask, visual_embeds)
 
     assert isinstance(y, jax.Array)
 
@@ -1040,69 +992,3 @@ class Decoder(nn.Module):
     # and the raw hidden state needed for auxiliary tasks.
     return logits, hidden_state, kv_caches
 
-  def _apply_gemma3_scanned_blocks(
-      self,
-      y,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      bidirectional_mask,
-      previous_chunk,
-      page_state,
-      slot,
-  ):
-    """Applies Gemma3 scanned decoder blocks, handling main scan and remainders."""
-
-    cfg = self.config
-    mesh = self.mesh
-
-    # Define the repeating pattern length and calculate how many full blocks to scan
-    attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
-    scan_length = cfg.num_decoder_layers // attention_pattern_length
-
-    policy = self.get_remat_policy()
-    RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlockToLinen], policy)[0]
-
-    layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
-    layer_kwargs = {"num_of_layers": attention_pattern_length}
-
-    # Apply the main scan over the full blocks
-    if scan_length > 0:
-      broadcast_args = (
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-      )
-      y, _ = self.scan_decoder_layers(
-          cfg,
-          RemattedGemma3Block,
-          scan_length,
-          "layers",
-          mesh,
-          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-          model_mode=self.model_mode,
-          **layer_kwargs,
-      )(y, *broadcast_args, **layer_call_kwargs)
-
-    # Apply any remaining layers that did not fit into a full scanned block
-    num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
-    if num_remaining_layers > 0:
-      # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
-      rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
-      layer = RemattedGemma3Block(
-          config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
-      )  # pytype: disable=wrong-keyword-args
-      y, _ = layer(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk=previous_chunk,
-          page_state=page_state,
-          slot=slot,
-          **layer_call_kwargs,
-      )
-    return y

@@ -37,7 +37,6 @@ from flax.linen import initializers as flax_initializers
 import flax.linen as nn
 
 from maxtext.common.common_types import DType, Config
-from maxtext.inference.kvcache import KVQuant
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -610,6 +609,7 @@ def remove_quantized_params(params, aqt_vars):
 
 
 def configure_kv_quant(config):
+  from maxtext.inference.kv_quant import KVQuant
   return None if not config.quantize_kvcache else KVQuant(config)
 
 

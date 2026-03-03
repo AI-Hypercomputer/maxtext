@@ -29,6 +29,8 @@ from maxtext.layers.linears import Dropout, MlpBlock
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.layers.registry import register_model
+from maxtext.layers.strategies import DefaultStrategy
 
 # -----------------------------------------
 # The Decoder Layer for Mistral
@@ -186,7 +188,9 @@ class MistralDecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-MistralDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    MistralDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+MistralDecoderLayerToLinen = register_model("mistral", strategy_class=DefaultStrategy)(
+    nnx_wrappers.to_linen_class(
+        MistralDecoderLayer,
+        base_metadata_fn=initializers.variable_to_logically_partitioned,
+    )
 )

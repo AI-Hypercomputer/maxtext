@@ -33,6 +33,8 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical
+from maxtext.layers.registry import register_model
+from maxtext.layers.strategies import DefaultStrategy
 
 # -----------------------------------------
 # The Decoder Layer specific for Llama2
@@ -214,7 +216,9 @@ class LlamaDecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-LlamaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    LlamaDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+LlamaDecoderLayerToLinen = register_model("llama2", strategy_class=DefaultStrategy)(
+    nnx_wrappers.to_linen_class(
+        LlamaDecoderLayer,
+        base_metadata_fn=initializers.variable_to_logically_partitioned,
+    )
 )
