@@ -23,6 +23,11 @@ evaluate_rl = pytest.importorskip(
     reason="tunix (required by evaluate_rl) is not installed GPU",
 )
 
+utils_rl = pytest.importorskip(
+    "maxtext.trainers.post_train.rl.utils_rl",
+    reason="tunix (required by utils_rl) is not installed GPU",
+)
+
 
 def _make_config():
   """Create a minimal config object with the parameters required by score_responses."""
@@ -100,6 +105,23 @@ class TestScoreResponses(unittest.TestCase):
     self.assertTrue(is_correct)
     self.assertTrue(is_partially_correct)
     self.assertFalse(has_correct_format)
+
+
+class TestExtractHashAnswer(unittest.TestCase):
+  """Tests for utils_rl.extract_hash_answer."""
+
+  @pytest.mark.cpu_only
+  def test_with_hash(self):
+    """Test extraction when #### is present."""
+    self.assertEqual(utils_rl.extract_hash_answer("The answer is #### 42"), "42")
+    self.assertEqual(utils_rl.extract_hash_answer("Some reasoning ####   123.45  "), "123.45")
+    self.assertEqual(utils_rl.extract_hash_answer("####"), "")
+
+  @pytest.mark.cpu_only
+  def test_without_hash(self):
+    """Test extraction when #### is not present."""
+    self.assertIsNone(utils_rl.extract_hash_answer("The answer is 42"))
+    self.assertIsNone(utils_rl.extract_hash_answer(""))
 
 
 if __name__ == "__main__":
