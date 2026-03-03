@@ -1380,6 +1380,7 @@ class Profiling(BaseModel):
   xprof_e2e_enable_fw_throttle_event: bool = Field(False, description="Enable FW throttle event.")
   xprof_e2e_enable_fw_power_level_event: bool = Field(False, description="Enable FW power level event.")
   xprof_e2e_enable_fw_thermal_event: bool = Field(False, description="Enable FW thermal event.")
+  profile_power_events: bool = Field(False, description="Enable TPU-specific power/thermal profiling events. Defaults to False to avoid breaking GPU xplane tracing.")
 
 
 class HloDump(BaseModel):
