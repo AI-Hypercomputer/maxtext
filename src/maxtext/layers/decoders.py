@@ -277,6 +277,10 @@ def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
   Returns:
     Updated hidden_states with visual features added at visual positions
   """
+  altered = False
+  if bidirectional_mask.ndim != 2:
+    bidirectional_mask = bidirectional_mask.squeeze(0)  # Ensure mask is [batch, seq_len]
+    altered = True
   # Expand mask to [batch, seq_len, 1] for broadcasting
   mask_expanded = bidirectional_mask[:, :, jnp.newaxis]
   # Use cumsum to map each True position in mask to its index in visual_embeds
@@ -285,6 +289,9 @@ def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
   # Gather visual tokens: for each position, get the corresponding visual token
   batch_idx = jnp.arange(hidden_states.shape[0])[:, jnp.newaxis]  # [batch, 1]
   visual_embeds_scattered = visual_embeds[batch_idx, visual_token_idx, :]  # [batch, seq_len, hidden]
+
+  if altered:
+    visual_embeds_scattered = visual_embeds_scattered.squeeze(0)  # Ensure mask is [batch, seq_len]
 
   # Only add where mask is True: hidden_states += visual_embeds * mask
   hidden_states = hidden_states + visual_embeds_scattered * mask_expanded
@@ -633,12 +640,14 @@ class Decoder(nn.Module):
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
       ]:
+        jax.debug.print("==== After merging image embeddings, y shape: {shape}", shape=y.shape)
         y = mm_utils.merge_mm_embeddings(
             text_embeddings=y,
             multimodal_embeddings=image_embeddings,
             mask=bidirectional_mask,
             token_masks=image_masks,
         )
+        jax.debug.print("==== After merging image embeddings, y shape: {shape}", shape=y.shape)
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       else:
         raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")

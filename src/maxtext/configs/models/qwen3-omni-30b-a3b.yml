@@ -49,6 +49,7 @@ hidden_size_for_vit: 1152
 intermediate_size_for_vit: 4304
 num_attention_heads_for_vit: 16
 num_hidden_layers_for_vit: 27
+# num_hidden_layers_for_vit: 1
 num_channels_for_vit: 3
 patch_size_for_vit: 16
 temporal_patch_size_for_vit: 2
@@ -62,7 +63,8 @@ use_audio: true
 # Audio Encoder Configuration (need to set use_audio=true to enable)
 # Based on https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_omni_moe/configuration_qwen3_omni_moe.py
 d_model_for_audio: 1280
-encoder_layers_for_audio: 27
+# encoder_layers_for_audio: 27
+encoder_layers_for_audio: 1
 encoder_attention_heads_for_audio: 20
 encoder_ffn_dim_for_audio: 5120
 max_source_positions_for_audio: 1500

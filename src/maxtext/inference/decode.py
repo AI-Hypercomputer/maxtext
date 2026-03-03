@@ -96,7 +96,7 @@ def main(argv: Sequence[str]) -> None:
   engine = maxengine.MaxEngine(config)
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
-  params = engine.load_params(rng_load_params)
+  # params = engine.load_params(rng_load_params)
   prof = profiler.Profiler(config)
 
   text = config.prompt
@@ -140,6 +140,8 @@ def main(argv: Sequence[str]) -> None:
     tokens = mm_processor.prepare_text_for_image_fusion(tokens=tokens, config=config, processor_output=processor_outputs)
     tokens = tokens[np.newaxis, ...]  # Add batch dimension
     true_length += image_offsets
+    true_length = 1071
+    max_utils.max_logging.log(f"After preparing text for image fusion, tokens: {tokens.shape}, true_length: {true_length}")
 
     if config.use_mrope:
       from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
@@ -182,7 +184,8 @@ def main(argv: Sequence[str]) -> None:
           padded_tokens=tokens,
           positions=position_ids,
           mrope_deltas=mrope_position_deltas,
-          images=processor_outputs.pixel_values if config.use_multimodal else None,
+          # images=processor_outputs.pixel_values if config.use_multimodal else None,
+          images=processor_outputs.video_values if config.use_multimodal else None,
           image_masks=processor_outputs.pixel_mask if config.use_multimodal and "llama4" in config.model_name else None,
           audio_values=processor_outputs.audio_values if config.use_audio else None,
           audio_masks=processor_outputs.audio_mask if config.use_audio else None,

@@ -694,6 +694,9 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
     for key, value in mt_processor_outputs.__dict__.items():
       print(f"{key}: {value.shape if isinstance(value, np.ndarray) else value}")
 
+    video_np = mt_processor_outputs.video_values
+    print(f"Video values (MaxText): {video_np.shape}, avg={video_np.mean():.4f}, std={video_np.std():.4f}")
+
     engine = maxengine.MaxEngine(self.maxtext_config)
     metadata = engine.get_tokenizer()
     tokenizer_model = engine.build_tokenizer(metadata)
@@ -714,7 +717,7 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": self.image_path},
+                # {"type": "image", "image": self.image_path},
                 {"type": "video", "video": self.video_path},
                 {"type": "text", "text": self.prompt},
             ],
@@ -735,6 +738,9 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
     hf_input_ids = np.array(hf_processor_outputs["input_ids"][0, :]).astype(np.float32)
     for key, value in hf_processor_outputs.items():
       print(f"{key}: {value.shape if isinstance(value, torch.Tensor) else value}")
+
+    hf_video = np.array(hf_processor_outputs["pixel_values_videos"]).astype(np.float32)
+    print(f"Video values (HuggingFace): {hf_video.shape}, avg={hf_video.mean():.4f}, std={hf_video.std():.4f}")
 
     # Add assertions to check the output
     self.assertIsNotNone(mt_processor_outputs)

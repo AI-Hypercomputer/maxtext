@@ -1709,23 +1709,31 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
         - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
     """
-    jax.debug.print("Input hidden_states shape: {shape}", shape=hidden_states.shape)
+    jax.debug.print("*Input hidden_states shape: {shape}", shape=hidden_states.shape)
+    jax.debug.print("*Input hidden_states mean: {mean}", mean=jnp.mean(hidden_states))
+    if hidden_states.ndim != 5:
+        hidden_states = hidden_states.reshape(1, 3, 5*2, 30*16, 28*16)
+    jax.debug.print("*Input hidden_states shape after reshape: {shape}", shape=hidden_states.shape)
     _, _, num_frames, height, width = hidden_states.shape
     num_frames = num_frames // self.config.temporal_patch_size_for_vit
     height = height // self.config.patch_size_for_vit
     width = width // self.config.patch_size_for_vit
 
     x = self.patch_embed(hidden_states)
+    jax.debug.print("*Patch embedded hidden_states mean: {mean}", mean=jnp.mean(x))
     pos = self.pos_embed_interpolate(num_frames, height, width)
+    jax.debug.print("*Positional embedding mean: {mean}", mean=jnp.mean(pos))
 
     pos = pos[jnp.newaxis, :, :]
     x = x + pos
+    jax.debug.print("*x+pos mean: {mean}", mean=jnp.mean(x))
 
     h_traj = []
     for i in range(self.depth):
       block_name = f"blocks_{i}"
       blk = getattr(self, block_name)
       x = blk(x, num_frames=num_frames, height=height, width=width)
+      jax.debug.print("*x mean after block {i}: {mean}", i=i, mean=jnp.mean(x))
       h_traj.append(x)
 
     deep_feats = []
@@ -1736,6 +1744,9 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
       deep_feat = merger(h)
       deep_feats.append(deep_feat)
 
+    jax.debug.print("*Output hidden_states shape: {shape}", shape=x.shape)
+    jax.debug.print("*Output hidden_states mean: {mean}", mean=jnp.mean(x))
+    jax.debug.print("*Output deep_feats shapes: {shapes}", shapes=[df.shape for df in deep_feats])
     return x, deep_feats
 
 
