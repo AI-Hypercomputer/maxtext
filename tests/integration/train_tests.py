@@ -339,6 +339,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @pytest.mark.skip(reason="b/489133823. Previously transient in b/462548581.")
   def test_gpu_context_parallelism(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     context_parallel = [  # tests base config on GPU with All-Gather based context parallelism
@@ -376,6 +377,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @pytest.mark.skip(reason="b/489133823. Previously transient in b/462548581.")
   def test_gpu_tensor_parallelism(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     tensor_parallel = [  # tests base config on GPU with Tensor Parallelism
@@ -562,6 +564,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @pytest.mark.skip(reason="b/489133823. Previously transient in b/462548581.")
   def test_gpu_ring_attention(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"  # Disable scan for ring attention

@@ -208,16 +208,20 @@ QWEN_DATA = {
         "truncated_exp1_targets": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
             + "<|endoftext|>" * 9
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer two<|endoftext|>"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer two<|endoftext|>"
         ),
         "truncated_exp1_targets_predictable": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
             + "<|endoftext|>" * 9
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer two<|endoftext|>"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer two<|endoftext|>"
         ),
         "packed_exp2_inputs": (
             "<|im_start|>user\nquestion two<|im_end|>\n"
@@ -227,15 +231,22 @@ QWEN_DATA = {
         ),
         "packed_exp2_targets": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer two<|im_end|>\n"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer three<|im_end|>\n" + "!" * 14 + "<|endoftext|>"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer three<|im_end|>\n"
+            + "!" * 14
+            + "<|endoftext|>"
         ),
         "packed_exp2_targets_predictable": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer two<|im_end|>\n"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer three<|im_end|>\n" + "<|endoftext|>" * 15
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer three<|im_end|>\n"
+            + "<|endoftext|>" * 15
         ),
     },
     "prompt_completion": {
@@ -248,16 +259,20 @@ QWEN_DATA = {
         ),
         "truncated_exp1_targets": (
             "<|endoftext|>" * 8
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
             + "<|endoftext|>" * 9
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
             + "<|endoftext|>" * 7
         ),
         "truncated_exp1_targets_predictable": (
             "<|endoftext|>" * 8
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
             + "<|endoftext|>" * 9
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
             + "<|endoftext|>" * 7
         ),
         "packed_exp2_inputs": (
@@ -268,15 +283,22 @@ QWEN_DATA = {
         ),
         "packed_exp2_targets": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer two<|im_end|>\n"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer three<|im_end|>\n" + "!" * 14 + "<|endoftext|>"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer three<|im_end|>\n"
+            + "!" * 14
+            + "<|endoftext|>"
         ),
         "packed_exp2_targets_predictable": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer two<|im_end|>\n"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer three<|im_end|>\n" + "<|endoftext|>" * 15
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer three<|im_end|>\n"
+            + "<|endoftext|>" * 15
         ),
     },
 }

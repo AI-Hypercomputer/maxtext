@@ -135,7 +135,10 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
         new_value = [new_value]
 
     # An empty value provided in the configuration is treated as None
-    if key in ("hf_train_files", "hf_eval_files") and new_value == "":
+    if (
+        key in ("hf_train_files", "hf_eval_files", "hf_access_token", "hf_name", "hf_data_dir", "hf_eval_split")
+        and new_value == ""
+    ):
       new_value = None
 
     if key == "run_name" and new_value is None:

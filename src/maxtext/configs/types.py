@@ -994,11 +994,11 @@ class HfDataset(BaseModel):
   """Configuration specific to HuggingFace datasets."""
 
   hf_path: str = Field("", description="Path of the Hugging Face dataset.")
-  hf_name: str = Field("", description="Name of the Hugging Face dataset.")
-  hf_data_dir: PathStr = Field("", description="Data directory for the HF dataset.")
-  hf_train_files: Optional[str] = Field(None, description="Files for the HF training split.")
-  hf_eval_split: str = Field("", description="Name of the HF evaluation split.")
-  hf_eval_files: Optional[str] = Field(None, description="Files for the HF evaluation split.")
+  hf_name: None | str = Field(None, description="Name of the Hugging Face dataset.")
+  hf_data_dir: None | PathStr = Field(None, description="Data directory for the HF dataset.")
+  hf_train_files: None | str = Field(None, description="Files for the HF training split.")
+  hf_eval_split: None | str = Field(None, description="Name of the HF evaluation split.")
+  hf_eval_files: None | str = Field(None, description="Files for the HF evaluation split.")
   hf_access_token: None | str = Field(None, description="Hugging Face API access token.")
 
 
@@ -1175,6 +1175,12 @@ class AdamW(BaseModel):
       description="A small constant for numerical stability (epsilon), applied inside of the square root.",
   )
   adam_weight_decay: float = Field(0.1, description="Weight decay regularization.")
+  adamw_mask: list[str] = Field(
+      default_factory=list,
+      description=(
+          "List of parameter names/patterns to exclude from weight decay in AdamW," " like ['bias', '.*norm', '.*ln.*']"
+      ),
+  )
   mu_dtype: str = Field(
       "",
       description="Data type for 'mu' (first moment) in AdamW. Inherits from weight_dtype if empty.",
