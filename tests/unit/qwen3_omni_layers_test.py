@@ -76,6 +76,8 @@ from tests.utils.multimodal_test_utils import (
     create_block_diagonal_attention_mask,
     create_random_jax_torch,
     split_into_patches,
+    copy_vision_encoder_weights_jax_to_torch,
+    copy_patch_merger_weights_jax_to_torch,
 )
 import numpy as np
 import torch
@@ -730,8 +732,10 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
       # Full test with PyTorch forward pass
       torch_encoder = create_torch_vision_encoder()
       
-      copy_vision_encoder_weights(torch_encoder, jax_encoder)
-      copy_patch_merger_weights(torch_encoder.merger, jax_projector.merger)
+      # copy_vision_encoder_weights(torch_encoder, jax_encoder)
+      # copy_patch_merger_weights(torch_encoder.merger, jax_projector.merger)
+      copy_vision_encoder_weights_jax_to_torch(jax_encoder, torch_encoder)
+      copy_patch_merger_weights_jax_to_torch(jax_projector.merger, torch_encoder.merger)
 
       torch_hidden_states = split_into_patches(
           torch.from_numpy(np.array(jax_hidden_states)),
@@ -754,9 +758,14 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
 
       # Option to print statistics for hardcoding
       # if os.environ.get("PRINT_STATS", "false").lower() in ("true", "1", "yes"):
+      print("\n=== HuggingFace ===")
+      print_statistics_for_hardcoding(torch_output, "vision_encoder_main_output")
+      # for i, feat in enumerate(torch_deep_feats):
+      #   print_statistics_for_hardcoding(feat, f"vision_encoder_deep_feat_{i}")
+      print("\n=== MaxText ===")
       print_statistics_for_hardcoding(jax_output, "vision_encoder_main_output")
-      for i, feat in enumerate(jax_deep_feats):
-        print_statistics_for_hardcoding(feat, f"vision_encoder_deep_feat_{i}")
+      # for i, feat in enumerate(jax_deep_feats):
+      #   print_statistics_for_hardcoding(feat, f"vision_encoder_deep_feat_{i}")
 
       assert_all_close_jax_torch(
           jax_output,
@@ -788,6 +797,9 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
       jax_output = jax_output[0]
       jax_deep_feats = [feat[0] for feat in jax_deep_feats]
       
+      print_statistics_for_hardcoding(jax_output, "vision_encoder_main_output")
+      print(EXPECTED_MAIN_OUTPUT_STATS)
+
       # Compare main output against expected statistics
       compare_with_statistics(
           jax_output,
