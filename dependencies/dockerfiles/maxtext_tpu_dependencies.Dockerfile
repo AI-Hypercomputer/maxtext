@@ -23,6 +23,9 @@ ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/bin/python3.12:${PATH}"
 ARG MODE
 ENV ENV_MODE=$MODE
 
+ARG WORKFLOW
+ENV ENV_WORKFLOW=$WORKFLOW
+
 ARG JAX_VERSION
 ENV ENV_JAX_VERSION=$JAX_VERSION
 
@@ -43,14 +46,15 @@ WORKDIR /deps
 # Copy setup files and dependency files separately for better caching
 COPY tools/setup tools/setup/
 COPY dependencies/requirements/ dependencies/requirements/
-COPY src/install_maxtext_extra_deps/extra_deps_from_github.txt src/install_maxtext_extra_deps/
+COPY src/install_maxtext_extra_deps/ src/install_maxtext_extra_deps/
+COPY src/MaxText/integration/vllm/ src/MaxText/integration/vllm/
 
 # Copy the custom libtpu.so file if it exists inside maxtext repository
 COPY libtpu.so* /root/custom_libtpu/
 
 # Install dependencies - these steps are cached unless the copied files change
-RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_VERSION=$ENV_LIBTPU_VERSION DEVICE=${ENV_DEVICE}"
-RUN --mount=type=cache,target=/root/.cache/pip bash /deps/tools/setup/setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_VERSION=${ENV_LIBTPU_VERSION} DEVICE=${ENV_DEVICE}
+RUN echo "Running command: bash setup.sh MODE=$ENV_MODE WORKFLOW=$ENV_WORKFLOW JAX_VERSION=$ENV_JAX_VERSION LIBTPU_VERSION=$ENV_LIBTPU_VERSION DEVICE=${ENV_DEVICE}"
+RUN --mount=type=cache,target=/root/.cache/pip bash /deps/tools/setup/setup.sh MODE=${ENV_MODE} WORKFLOW=${ENV_WORKFLOW} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_VERSION=${ENV_LIBTPU_VERSION} DEVICE=${ENV_DEVICE}
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .

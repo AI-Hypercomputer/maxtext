@@ -154,6 +154,11 @@ if [[ -z "$MODE" ]]; then
   export MODE=stable
 fi
 
+# Set default value for $WORKFLOW
+if [[ -z "$WORKFLOW" ]]; then
+  export WORKFLOW=pre-training
+fi
+
 # Unset optional variables if set to NONE
 unset_optional_vars() {
     local optional_vars=("JAX_VERSION" "LIBTPU_VERSION" "LIBTPU_GCS_PATH")
@@ -185,6 +190,19 @@ install_custom_libtpu() {
     gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
 }
 
+install_maxtext_package_without_deps() {
+    # The MaxText package is installed separately from its dependencies to optimize
+    # docker image rebuild times by leveraging docker's layer caching.
+    # Dependencies are installed in a separate step before MaxText code is
+    # copied. This means that if MaxText code changes, but the
+    # dependencies do not, docker can reuse the cached dependency layer, leading
+    # to significantly faster image builds.
+    if [ -f 'pyproject.toml' ]; then
+        echo "Installing MaxText package without installing the dependencies (already installed)"
+        python3 -m uv pip install --no-deps -e .
+    fi
+}
+
 install_maxtext_with_deps() {
     if [[ "$DEVICE" != "tpu" && "$DEVICE" != "gpu" ]]; then
       echo -e "\n\nError: DEVICE must be either 'tpu' or 'gpu'.\n\n"
@@ -200,17 +218,30 @@ install_maxtext_with_deps() {
     python3 -m uv pip install --resolution=lowest -r "$dep_name" \
         -r 'src/install_maxtext_extra_deps/extra_deps_from_github.txt'
 
-    # The MaxText package is installed separately from its dependencies to optimize
-    # docker image rebuild times by leveraging docker's layer caching.
-    # Dependencies are installed in a separate step before MaxText code is
-    # copied. This means that if MaxText code changes, but the
-    # dependencies do not, docker can reuse the cached dependency layer, leading
-    # to significantly faster image builds.
-    if [ -f 'pyproject.toml' ]; then
-        echo "Installing MaxText package without installing the dependencies (already installed)"
-        python3 -m uv pip install --no-deps -e .
-    fi
+    install_maxtext_package_without_deps
 }
+
+install_post_training_deps() {
+    if [[ "$DEVICE" != "tpu" ]]; then
+      echo -e "\n\nError: DEVICE must be 'tpu'.\n\n"
+      exit 1
+    fi
+    echo "Setting up MaxText post-training workflow for $DEVICE device"
+    dep_name='dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt'
+    echo "Installing requirements from $dep_name"
+    python3 -m uv pip install --resolution=lowest -r "$dep_name"
+    python3 -m src.install_maxtext_extra_deps.install_post_train_extra_deps
+}
+
+# ---------- Post-Training workflow installation ----------
+
+if [[ "$WORKFLOW" == "post-training" ]]; then
+    install_post_training_deps
+    install_maxtext_package_without_deps
+    exit 0
+fi
+
+# ---------- Pre-Training workflow installation ----------
 
 # stable mode installation
 if [[ "$MODE" == "stable" ]]; then
