@@ -81,6 +81,7 @@ class UserConfig:
   delete: bool = False
   max_restarts: int = 0
   temp_key: str = None
+  workload_id: str = None
 
   def __post_init__(self):
     """Automatically generate derived attributes after the object is created."""
