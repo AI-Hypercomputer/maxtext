@@ -287,7 +287,13 @@ class Checkpointing(BaseModel):
 
   load_parameters_path: PathStr = Field("", description="Loads only model parameters from a specific checkpoint path.")
   lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
-  hf_lora_adapter_path: PathStr = Field("", description="HuggingFace LoRA adapter repo ID (e.g., 'username/adapter-repo') or local path to directory containing adapter_model.safetensors.")
+  hf_lora_adapter_path: PathStr = Field(
+      "",
+      description=(
+          "HuggingFace LoRA adapter repo ID (e.g., 'username/adapter-repo') or local "
+          "path to directory containing adapter_model.safetensors."
+      ),
+  )
   load_full_state_path: PathStr = Field("", description="Loads the complete training state from a checkpoint path.")
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
@@ -797,7 +803,10 @@ class LayoutAndSharding(BaseModel):
       description="Allowed percentage of non-sharded parameters.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
-  internal_compile: bool = Field(False, description="Use internal_compile to bypass open-source topology mappings.")
+  internal_compile: bool = Field(
+      False,
+      description="Use internal_compile to bypass open-source topology mappings.",
+  )
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
 
 
@@ -1062,19 +1071,24 @@ class LoRA(BaseModel):
   lora_module_path: str = Field(
       "",
       description=(
-          "Regex identifying target modules for LoRA, e.g."
-          " '.*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj'."
+          "Regex identifying target modules for LoRA, e.g." " '.*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj'."
       ),
   )
   lora_weight_qtype: str | None = Field(
       None,
-      description=(
-          "Optional quantization type for QLoRA (e.g., 'nf4'). If set, QLoRA is applied."
-      ),
+      description=("Optional quantization type for QLoRA (e.g., 'nf4'). If set, QLoRA is applied."),
   )
   lora_tile_size: NonNegativeInt | None = Field(
       None,
       description="Optional tile size for QLoRA (e.g., 128 or 256).",
+  )
+  lora_restore_path: PathStr = Field(
+      "",
+      description=(
+        "Optional Tunix NNX LoRA checkpoint path to restore adapter weights from."
+        " This may point to the checkpoint root, a numeric step directory,"
+        " or a direct `model_params` path."
+      ),
   )
 
 
@@ -1410,7 +1424,11 @@ class Profiling(BaseModel):
   xprof_e2e_enable_fw_throttle_event: bool = Field(False, description="Enable FW throttle event.")
   xprof_e2e_enable_fw_power_level_event: bool = Field(False, description="Enable FW power level event.")
   xprof_e2e_enable_fw_thermal_event: bool = Field(False, description="Enable FW thermal event.")
-  profile_power_events: bool = Field(False, description="Enable TPU-specific power/thermal profiling events. Defaults to False to avoid breaking GPU xplane tracing.")
+  profile_power_events: bool = Field(
+      False,
+      description="Enable TPU-specific power/thermal profiling events."
+      " Defaults to False to avoid breaking GPU xplane tracing.",
+  )
 
 
 class HloDump(BaseModel):

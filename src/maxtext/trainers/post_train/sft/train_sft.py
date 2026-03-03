@@ -19,18 +19,18 @@ are defined inside `src/MaxText/configs/sft.yml`.
 
 Example command:
 Training & Evaluation:
-  python3 -m maxtext.trainers.post_train.sft.train_sft src/MaxText/configs/sft.yml \
-    run_name=$RUN_NAME base_output_directory=$BASE_OUTPUT_DIRECTORY \
-    model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \
-    hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH \
+  python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml \
+    run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    model_name=${MODEL_NAME?} load_parameters_path=${CHECKPOINT_PATH?} \
+    hf_access_token=${HF_ACCESS_TOKEN?} tokenizer_path=${TOKENIZER_PATH?} \
     per_device_batch_size=1 max_target_length=1024 \
     eval_interval=2 eval_steps=2 steps=10 profiler=xplane weight_dtype=bfloat16
 
 Training:
-  python3 -m maxtext.trainers.post_train.sft.train_sft src/MaxText/configs/sft.yml \
-    run_name=$RUN_NAME base_output_directory=$BASE_OUTPUT_DIRECTORY \
-    model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \
-    hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH \
+  python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml \
+    run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    model_name=${MODEL_NAME?} load_parameters_path=${CHECKPOINT_PATH?} \
+    hf_access_token=${HF_ACCESS_TOKEN?} tokenizer_path=${TOKENIZER_PATH?} \
     per_device_batch_size=1 max_target_length=1024 \
     eval_interval=-1 steps=10 profiler=xplane weight_dtype=bfloat16
 """
@@ -38,7 +38,9 @@ Training:
 from typing import Sequence
 
 from absl import app
+import math
 import os
+import re
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -49,13 +51,14 @@ from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
 
+from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 from tunix.sft import metrics_logger, peft_trainer, profiler
 from tunix.sft import utils as tunix_sft_utils
 from tunix.rl import reshard
 
-from MaxText import optimizers
-from MaxText import pyconfig
-from MaxText.train import loss_fn
+from maxtext.optimizers import optimizers
+from maxtext.configs import pyconfig
+from maxtext.trainers.pre_train.train import loss_fn
 from maxtext.common.goodput import (
     GoodputEvent,
     RECORD_JOB_END_TIME,
@@ -130,7 +133,15 @@ def use_maxtext_loss_function(trainer, mt_config):
     The trainer configured with the MaxText loss function.
   """
 
-  def loss_func(model, inputs, inputs_position, inputs_segmentation, targets, targets_position, targets_segmentation):
+  def loss_func(
+      model,
+      inputs,
+      inputs_position,
+      inputs_segmentation,
+      targets,
+      targets_position,
+      targets_segmentation,
+  ):
     data = {
         "inputs": inputs,
         "inputs_position": inputs_position,
@@ -146,6 +157,7 @@ def use_maxtext_loss_function(trainer, mt_config):
 
 
 def _validate_lora_config(mt_config):
+  """Validates required LoRA configuration fields."""
   if mt_config.lora_rank <= 0:
     raise ValueError("enable_lora is True but lora_rank is not set to a positive value.")
   if not mt_config.lora_module_path:
@@ -153,6 +165,7 @@ def _validate_lora_config(mt_config):
 
 
 def _build_lora_provider(mt_config, qwix):
+  """Builds a Qwix LoRA provider from MaxText LoRA settings."""
   lora_kwargs = {
       "module_path": mt_config.lora_module_path,
       "rank": mt_config.lora_rank,
@@ -163,29 +176,23 @@ def _build_lora_provider(mt_config, qwix):
   if mt_config.lora_weight_qtype is not None:
     lora_kwargs["weight_qtype"] = mt_config.lora_weight_qtype
     max_logging.log(
-      "QLoRA configured: module_path=%s rank=%s alpha=%s weight_qtype=%s tile_size=%s"
-      % (
-        mt_config.lora_module_path,
-        mt_config.lora_rank,
-        mt_config.lora_alpha,
-        mt_config.lora_weight_qtype,
-        mt_config.lora_tile_size,
-      )
+        f"QLoRA configured: module_path={mt_config.lora_module_path} "
+        f"rank={mt_config.lora_rank} alpha={mt_config.lora_alpha} "
+        f"weight_qtype={mt_config.lora_weight_qtype} "
+        f"tile_size={mt_config.lora_tile_size}"
     )
   else:
     max_logging.log(
-      "LoRA configured: module_path=%s rank=%s alpha=%s tile_size=%s"
-      % (
-        mt_config.lora_module_path,
-        mt_config.lora_rank,
-        mt_config.lora_alpha,
-        mt_config.lora_tile_size,
-      )
+        f"LoRA configured: module_path={mt_config.lora_module_path} "
+        f"rank={mt_config.lora_rank} alpha={mt_config.lora_alpha} "
+        f"tile_size={mt_config.lora_tile_size}"
     )
   return qwix.LoraProvider(**lora_kwargs)
 
 
 def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qwix_ptq, types):
+  """Patches Qwix LoRA dot_general to support selected 3D-kernel paths."""
+
   def _dot_general_with_3d(
       self,
       lhs,
@@ -211,157 +218,77 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
 
     weight_name = qwix_flax_util.find_param(rhs, qwix_lora.ptq.WithAux)
     if weight_name is None:
-      return res
-
-    if (
-        len(rhs.shape) == 3
-        and tuple(dimension_numbers[0][1]) == (0,)
-        and not dimension_numbers[1][1]
-    ):
-      lora_params = qwix_lora._get_or_create_lora_params(
-        name=weight_name,
-        rule=rule,
-        a_shape=(rhs.shape[0], rule.rank),
-        b_shape=(rule.rank, rhs.shape[1] * rhs.shape[2]),
-        a_sharding_transpose=(0, None),
-        b_sharding_transpose=(None, 1),
+      return qwix_lora.LoraProvider.dot_general(
+          self, lhs, rhs, dimension_numbers, precision, preferred_element_type, out_sharding=out_sharding
       )
-      lora_a, lora_b = lora_params[:2]
-      if rule.dropout > 0:
-        lhs = nnx.Dropout(rule.dropout)(lhs, rngs=qwix_flax_util.make_rng("dropout"))
-      lora_b = jnp.reshape(lora_b, (rule.rank, rhs.shape[1], rhs.shape[2]))
-      delta = jnp.einsum("...k,kr->...r", lhs, lora_a)
-      delta = jnp.einsum("...r,rnm->...nm", delta, lora_b)
-      return res + delta * (rule.alpha / rule.rank)
 
-    if (
-        len(rhs.shape) == 3
-        and tuple(dimension_numbers[0][1]) == (0, 1)
-        and not dimension_numbers[1][1]
-    ):
-      k = rhs.shape[0] * rhs.shape[1]
-      lora_params = qwix_lora._get_or_create_lora_params(
-          name=weight_name,
-          rule=rule,
-          a_shape=(k, rule.rank),
-          b_shape=(rule.rank, rhs.shape[2]),
-          a_sharding_transpose=(0, None),
-          b_sharding_transpose=(None, 1),
+    try:
+      current_module = qwix_flax_util.get_current_module()
+      lora_a = getattr(current_module, f"{weight_name}_lora_a", None)
+      lora_b = getattr(current_module, f"{weight_name}_lora_b", None)
+      
+      if lora_a is None or lora_b is None:
+        return qwix_lora.LoraProvider.dot_general(
+            self, lhs, rhs, dimension_numbers, precision, preferred_element_type, out_sharding=out_sharding
+        )
+          
+      if isinstance(lora_a, nnx.Variable):
+        lora_a = lora_a[...]
+      if isinstance(lora_b, nnx.Variable):
+        lora_b = lora_b[...]
+    except Exception:
+      return qwix_lora.LoraProvider.dot_general(
+          self, lhs, rhs, dimension_numbers, precision, preferred_element_type, out_sharding=out_sharding
       )
-      lora_a, lora_b = lora_params[:2]
-      if rule.dropout > 0:
-        lhs = nnx.Dropout(rule.dropout)(lhs, rngs=qwix_flax_util.make_rng("dropout"))
-      contract_axes = tuple(dimension_numbers[0][0])
-      lhs_perm = [i for i in range(lhs.ndim) if i not in contract_axes] + list(contract_axes)
-      lhs_trans = jnp.transpose(lhs, lhs_perm)
-      lhs_shape = lhs_trans.shape
-      lhs_flat = jnp.reshape(lhs_trans, lhs_shape[:-len(contract_axes)] + (k,))
-      delta = jnp.einsum("...k,kr->...r", lhs_flat, lora_a)
-      delta = jnp.einsum("...r,rm->...m", delta, lora_b)
-      return res + delta * (rule.alpha / rule.rank)
+
+    if rule.dropout > 0:
+      lhs = nnx.Dropout(rule.dropout)(lhs, rngs=qwix_flax_util.make_rng("dropout"))
+
+    contract_axes_lhs = tuple(dimension_numbers[0][0])
+    contract_axes_rhs = tuple(dimension_numbers[0][1])
+
+    # If the default provider fails due to shape, we handle it universally here.
+    if len(rhs.shape) > 2:
+      k = 1
+      for axis in contract_axes_rhs:
+          k *= rhs.shape[axis]
+
+      out_dim = lora_b.size // rule.rank
+
+      # Validate that LoRA shapes make mathematical sense
+      if lora_a.size == k * rule.rank and lora_b.size == rule.rank * out_dim:
+          # Reshape A to 2D
+          lora_a_flat = jnp.reshape(lora_a, (k, rule.rank))
+          
+          # Reshape B to 2D
+          lora_b_flat = jnp.reshape(lora_b, (rule.rank, out_dim))
+          
+          # Flatten LHS to abstract over multiple batch/sequence dimensions
+          lhs_perm = [i for i in range(lhs.ndim) if i not in contract_axes_lhs] + list(contract_axes_lhs)
+          lhs_trans = jnp.transpose(lhs, lhs_perm)
+          lhs_shape = lhs_trans.shape
+          lhs_flat = jnp.reshape(lhs_trans, (-1, k))
+          
+          # Do the 2D LoRA math
+          delta_flat = lhs_flat @ lora_a_flat @ lora_b_flat
+          
+          # Unflatten the delta to match the original result shape
+          delta = jnp.reshape(delta_flat, res.shape)
+          
+          return res + delta * (rule.alpha / rule.rank)
 
     return qwix_lora.LoraProvider.dot_general(
-        self,
-        lhs,
-        rhs,
-        dimension_numbers,
-        precision,
-        preferred_element_type,
-        out_sharding=out_sharding,
+        self, lhs, rhs, dimension_numbers, precision, preferred_element_type, out_sharding=out_sharding
     )
 
   lora_provider.dot_general = types.MethodType(_dot_general_with_3d, lora_provider)
 
-
-def _patch_qwix_find_param(qwix_flax_util):
-  if getattr(qwix_flax_util, "_maxtext_find_param_patched", False):
-    return
-
-  original_find_param = qwix_flax_util.find_param
-
-  def _safe_find_param(x, ptq_array_type=None):
-    module = qwix_flax_util.get_current_module()
-    candidates = {}
-
-    # 1) Pure NNX: scan attributes for nnx.Params / ptq arrays.
-    if isinstance(module, nnx.Module):
-      array_types = (nnx.Param,) if ptq_array_type is None else (nnx.Param, ptq_array_type)
-      for name, node in module.__dict__.items():
-        if isinstance(node, array_types):
-          value = getattr(node, "value", None)
-          if value is None:
-            try:
-              value = qwix_flax_util.unbox(node)
-            except Exception:
-              continue
-          candidates[name] = value
-
-      
-
-    else:
-      return original_find_param(x, ptq_array_type)
-
-    candidates_by_id = {id(c): n for n, c in candidates.items()}
-
-    if id(x) in candidates_by_id:
-      return candidates_by_id[id(x)]
-
-    if isinstance(x, jax.core.Tracer) and hasattr(x, "parent"):
-      while True:
-        if id(x) in candidates_by_id:
-          return candidates_by_id[id(x)]
-        if x.parent and len(x.parent.in_tracers) == 1:
-          x = x.parent.in_tracers[0]
-        elif id(const := x.get_const()) in candidates_by_id:
-          return candidates_by_id[id(const)]
-        else:
-          return None
-
-    if not hasattr(x, "shape"):
-      return None
-    candidates = {n: c for n, c in candidates.items() if getattr(c, "shape", None) == x.shape}
-    if len(candidates) > 2:
-      raise ValueError(f"Multiple candidate params found: {candidates.keys()}")
-    if len(candidates) == 1:
-      return list(candidates.keys())[0]
-
-    return None
-
-  qwix_flax_util.find_param = _safe_find_param
-  qwix_flax_util._maxtext_find_param_patched = True
-
-
-def _patch_with_sharding_constraint():
-  if getattr(jax.lax, "_maxtext_with_sharding_constraint_patched", False):
-    return
-
-  jax.lax._original_with_sharding_constraint = jax.lax.with_sharding_constraint
-
-  def _safe_with_sharding_constraint(x, sharding, *args, **kwargs):
-    def _safe_leaf_fn(x_leaf, s_leaf):
-      try:
-        spec = getattr(s_leaf, "spec", s_leaf)
-        if hasattr(spec, "__len__"):
-          ndim = getattr(x_leaf, "ndim", None)
-          if ndim is not None and len(spec) > ndim:
-            return x_leaf
-      except Exception:
-        pass
-      return jax.lax._original_with_sharding_constraint(x_leaf, s_leaf, *args, **kwargs)
-
-    return jax.tree_util.tree_map(_safe_leaf_fn, x, sharding)
-
-  jax.lax.with_sharding_constraint = _safe_with_sharding_constraint
-  jax.lax._maxtext_with_sharding_constraint_patched = True
-
-
 def _prepare_dummy_inputs(mt_config, mesh):
+  """Builds dummy decoder inputs used to materialize LoRA parameters."""
   batch_size = getattr(mt_config, "per_device_batch_size", 1)
   seq_len = getattr(mt_config, "max_target_length", 1)
   if batch_size <= 0 or seq_len <= 0:
-    raise ValueError(
-        "per_device_batch_size and max_target_length must be positive when LoRA is enabled."
-    )
+    raise ValueError("per_device_batch_size and max_target_length must be positive when LoRA is enabled.")
 
   devices_data_fsdp = 1
   if mesh is not None:
@@ -374,122 +301,238 @@ def _prepare_dummy_inputs(mt_config, mesh):
   decoder_positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32), (dummy_bs, seq_len))
   return decoder_input_tokens, decoder_positions
 
-def _precreate_lora_params(target_model, lora_provider, qwix_flax_util, qwix_lora, math, re, types):
-  rules = getattr(lora_provider, "_rules", [])
+
+def _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util, qwix_lora, types):
+  """Pre-creates LoRA parameter tensors for modules matching the target regex."""
+  rules = [rule for rule in getattr(lora_provider, "_rules", []) if isinstance(rule, qwix_lora.LoraRule)]
   if not rules:
+    max_logging.log("LoRA precreate: no LoRA rules found on provider, skipping.")
     return
 
-  for path, module in target_model.iter_modules():
-    module_path = "/".join(map(str, path))
-    
-    for rule in rules:
-      if rule.op_names and "dot_general" not in rule.op_names:
-        continue
+  # MaxText uses a single LoRA rule from the provided module_path regex.
+  rule = rules[0]
+  compiled_module_path = re.compile(mt_config.lora_module_path)
+  num_decoder_layers = getattr(mt_config, "num_decoder_layers", None)
+  if num_decoder_layers is None:
+    num_decoder_layers = getattr(mt_config, "base_num_decoder_layers", None)
+  param_scan_axis = int(getattr(mt_config, "param_scan_axis", 0))
 
-      kernel_tensor = None
-      in_rank = 0
-      out_rank = 0
-      found_param_name = "kernel"
+  def _with_layer_axis(base_shape_or_transpose, layer_value):
+    axis = max(0, min(param_scan_axis, len(base_shape_or_transpose)))
+    values = list(base_shape_or_transpose)
+    values.insert(axis, layer_value)
+    return tuple(values)
 
-      # Case A: Pure NNX (Standard attributes)
-      if hasattr(module, "kernel") and hasattr(module, "in_features_shape"):
-        try:
-          kernel_tensor = qwix_flax_util.unbox(module.kernel)
-          in_rank = len(module.in_features_shape)
-          out_rank = len(module.out_features_shape)
-        except Exception:
-          kernel_tensor = None
+  def _extract_kernel_shape(kernel_value):
+    kernel_shape = getattr(kernel_value, "shape", None)
+    if kernel_shape is None and hasattr(kernel_value, "array"):
+      kernel_shape = getattr(kernel_value.array, "shape", None)
+      if kernel_shape is None and hasattr(kernel_value.array, "qvalue"):
+        kernel_shape = getattr(kernel_value.array.qvalue, "shape", None)
+    if kernel_shape is None:
+      return None
+    return tuple(int(dim) for dim in kernel_shape)
 
+  matched_modules = 0
+  precreated_modules = 0
+  skipped_modules = []
+  precreated_shapes = []
+
+  def _process_param(module, module_path, param_name, param_obj, in_features_shape, out_features_shape):
+    nonlocal precreated_modules
+    try:
+      kernel_value = qwix_flax_util.unbox(param_obj)
+    except Exception:
+      if len(skipped_modules) < 10:
+        skipped_modules.append(f"{module_path}.{param_name}: cannot unbox kernel")
+      return False
+
+    kernel_shape = _extract_kernel_shape(kernel_value)
+    if kernel_shape is None or len(kernel_shape) < 2:
+      if len(skipped_modules) < 10:
+        skipped_modules.append(f"{module_path}.{param_name}: unsupported kernel shape {kernel_shape}")
+      return False
+
+    expected_suffix = in_features_shape + out_features_shape
+    layer_axis = None
+    base_kernel_shape = None
+
+    # 1. Determine if this parameter is scanned over layers
+    if isinstance(num_decoder_layers, int) and len(kernel_shape) >= len(expected_suffix) + 1:
+      # Prefer param_scan_axis if it matches the expected layer count
+      if kernel_shape[param_scan_axis] == num_decoder_layers:
+        candidate_base = tuple(dim for i, dim in enumerate(kernel_shape) if i != param_scan_axis)
+        if candidate_base[-len(expected_suffix):] == expected_suffix:
+          layer_axis = param_scan_axis
+          base_kernel_shape = candidate_base
       
+      # If not found at param_scan_axis, search other axes (for edge cases where scan axis might differ)
+      if layer_axis is None:
+        for axis in range(len(kernel_shape)):
+          if kernel_shape[axis] == num_decoder_layers:
+            candidate_base = tuple(dim for i, dim in enumerate(kernel_shape) if i != axis)
+            if candidate_base[-len(expected_suffix):] == expected_suffix:
+              layer_axis = axis
+              base_kernel_shape = candidate_base
+              break
 
-      if kernel_tensor is None:
-        continue
+    # 2. Check if it's an unscanned parameter
+    if layer_axis is None and len(kernel_shape) >= len(expected_suffix):
+      if kernel_shape[-len(expected_suffix):] == expected_suffix:
+        base_kernel_shape = kernel_shape
 
-      # Closure to define LoRA A and B shapes and sharding
-      def _init_for_module(self, k_tensor=kernel_tensor, i_r=in_rank, o_r=out_rank, p_name=found_param_name):
-        kernel_shape = getattr(k_tensor, "shape", ())
-        extra_rank = max(0, len(kernel_shape) - (i_r + o_r))
-        
-        prefix_shape = kernel_shape[:extra_rank]
-        in_shape = kernel_shape[extra_rank : extra_rank + i_r]
-        out_shape = kernel_shape[extra_rank + i_r :]
+    # 3. If neither matched, skip this parameter
+    if base_kernel_shape is None:
+      if len(skipped_modules) < 10:
+        skipped_modules.append(f"{module_path}.{param_name}: kernel shape {kernel_shape} does not match expected suffix {expected_suffix}")
+      return False
 
-        in_size = int(math.prod(in_shape))
-        out_size = int(math.prod(out_shape))
-        
-        if in_size <= 0 or out_size <= 0:
-          return
+    prefix_shape = base_kernel_shape[:-len(expected_suffix)] if len(expected_suffix) > 0 else base_kernel_shape
 
-        a_shape = prefix_shape + (in_size, rule.rank)
-        b_shape = prefix_shape + (rule.rank, out_size)
-        
-        prefix_axes = tuple(range(extra_rank))
-        a_sharding_transpose = prefix_axes + (None,)
-        b_sharding_transpose = prefix_axes + (None,)
+    # 4. Compute axes mapped sequentially for the base (unscanned) shape
+    prefix_axes_base = tuple(range(len(prefix_shape)))
+    input_axes_base = tuple(range(len(prefix_shape), len(prefix_shape) + len(in_features_shape)))
+    output_axes_base = tuple(range(len(prefix_shape) + len(in_features_shape), len(base_kernel_shape)))
 
-        qwix_lora._get_or_create_lora_params(
-            name=p_name,
-            rule=rule,
-            a_shape=a_shape,
-            b_shape=b_shape,
-            a_sharding_transpose=a_sharding_transpose,
-            b_sharding_transpose=b_sharding_transpose,
-        )
+    # 5. Shift axes to account for the layer_axis insertion
+    if layer_axis is not None:
+      def shift_axes(axes):
+        return tuple(axis if axis < layer_axis else axis + 1 for axis in axes)
 
-      types.MethodType(_init_for_module, module)()
+      a_shape = _with_layer_axis(prefix_shape + in_features_shape + (rule.rank,), num_decoder_layers)
+      b_shape = _with_layer_axis(prefix_shape + (rule.rank,) + out_features_shape, num_decoder_layers)
+      a_sharding_transpose = _with_layer_axis(shift_axes(prefix_axes_base + input_axes_base) + (None,), layer_axis)
+      b_sharding_transpose = _with_layer_axis(shift_axes(prefix_axes_base) + (None,) + shift_axes(output_axes_base), layer_axis)
+    else:
+      a_shape = prefix_shape + in_features_shape + (rule.rank,)
+      b_shape = prefix_shape + (rule.rank,) + out_features_shape
+      a_sharding_transpose = prefix_axes_base + input_axes_base + (None,)
+      b_sharding_transpose = prefix_axes_base + (None,) + output_axes_base
+
+    def _init_for_module(
+        self,
+        a_shape=a_shape,
+        b_shape=b_shape,
+        a_sharding_transpose=a_sharding_transpose,
+        b_sharding_transpose=b_sharding_transpose,
+    ):
+      qwix_lora._get_or_create_lora_params(  # pylint: disable=protected-access
+          name=param_name,
+          rule=rule,
+          a_shape=a_shape,
+          b_shape=b_shape,
+          a_sharding_transpose=a_sharding_transpose,
+          b_sharding_transpose=b_sharding_transpose,
+      )
+
+    types.MethodType(_init_for_module, module)()
+    precreated_modules += 1
+    if len(precreated_shapes) < 10:
+      precreated_shapes.append((f"{module_path}.{param_name}", a_shape, b_shape))
+    return True
+
+
+  for path, module in nnx.iter_modules(lora_model):
+    module_path = "/".join(str(p) for p in path)
+    if not compiled_module_path.search(module_path):
+      continue
+
+    matched_modules += 1
+
+    # DenseGeneral-style layers (Standard, Vision, Audio)
+    if hasattr(module, "in_features_shape") and hasattr(module, "out_features_shape"):
+      in_features_shape = tuple(int(dim) for dim in getattr(module, "in_features_shape", ()))
+      out_features_shape = tuple(int(dim) for dim in getattr(module, "out_features_shape", ()))
+      if hasattr(module, "kernel"):
+        _process_param(module, module_path, "kernel", module.kernel, in_features_shape, out_features_shape)
+    
+    # MoE-style layers (RoutedMoE, RoutedAndSharedMoE)
+    elif type(module).__name__ in ["RoutedMoE", "RoutedAndSharedMoE"]:
+      emb_dim = getattr(getattr(module, "config", None), "emb_dim", None)
+      if emb_dim is not None:
+        intermediate_dim = getattr(module, "intermediate_dim", getattr(getattr(module, "config", None), "moe_mlp_dim", None))
+        if intermediate_dim is not None:
+          if hasattr(module, "wi_0"):
+            _process_param(module, module_path, "wi_0", module.wi_0, (emb_dim,), (intermediate_dim,))
+          if hasattr(module, "wi_1"):
+            _process_param(module, module_path, "wi_1", module.wi_1, (emb_dim,), (intermediate_dim,))
+          if hasattr(module, "wo"):
+            _process_param(module, module_path, "wo", module.wo, (intermediate_dim,), (emb_dim,))
+
+  max_logging.log(
+      f"LoRA precreate: matched_modules={matched_modules} "
+      f"precreated_modules={precreated_modules} "
+      f"skipped_sample={skipped_modules} "
+      f"shape_sample={precreated_shapes}"
+  )
 
 
 def _verify_lora_parameters(lora_model, mt_config):
+  """Validates that LoRA is active or that target modules were matched."""
+  compiled_module_path = re.compile(mt_config.lora_module_path)
+  matched_module_paths = []
+  sample_module_paths = []
+
+  for path, _ in nnx.iter_modules(lora_model):
+    module_path = "/".join(str(p) for p in path)
+    if len(sample_module_paths) < 50:
+      sample_module_paths.append(module_path)
+    if compiled_module_path.search(module_path):
+      matched_module_paths.append(module_path)
+
   is_lora_enabled = tunix_sft_utils.is_lora_enabled(lora_model)
-  if not is_lora_enabled:
-    module_paths = []
-    for path, _ in lora_model.iter_modules():
-      module_paths.append("/".join(str(p) for p in path))
-      if len(module_paths) >= 50:
-        break
+  if is_lora_enabled:
+    max_logging.log("LoRA verification: tunix_sft_utils.is_lora_enabled=True")
+    return
+
+  if not matched_module_paths:
     max_logging.log(
-      f"LoRA module_path='{mt_config.lora_module_path}' did not match any weights. "
-      f"Sample module paths: {module_paths}"
+        f"LoRA module_path='{mt_config.lora_module_path}' did not match any weights. "
+        f"Sample module paths: {sample_module_paths}"
     )
     raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
-  max_logging.log("LoRA verification: tunix_sft_utils.is_lora_enabled=True")
+
+  max_logging.log(
+      f"LoRA verification: matched {len(matched_module_paths)} target modules but "
+      "LoRA params are not yet materialized; continuing with lazy LoRA initialization. "
+      f"Sample matches: {matched_module_paths[:10]}"
+  )
 
 
 def maybe_apply_lora(model, mesh, mt_config):
   """Optionally applies LoRA/QLoRA to a MaxText model using Qwix."""
   # Skip Qwix LoRA if MaxText LoRA adapters are loaded
-  if hasattr(mt_config, 'lora_input_adapters_path') and mt_config.lora_input_adapters_path:
+  if hasattr(mt_config, "lora_input_adapters_path") and mt_config.lora_input_adapters_path:
     max_logging.log("MaxText LoRA adapters loaded, skipping Qwix LoRA application")
     return model
-    
+
   if not getattr(mt_config, "enable_lora", False):
     return model
 
-  import qwix
-  import math
-  import re
-  import qwix._src.flax_util as qwix_flax_util
-  import qwix._src.providers.lora as qwix_lora
-  import qwix._src.providers.ptq as qwix_ptq
-  import types
+  import qwix  # pylint: disable=import-outside-toplevel
+  import qwix._src.flax_util as qwix_flax_util  # pylint: disable=import-outside-toplevel
+  import qwix._src.providers.lora as qwix_lora  # pylint: disable=import-outside-toplevel
+  import qwix._src.providers.ptq as qwix_ptq  # pylint: disable=import-outside-toplevel
+  import types  # pylint: disable=import-outside-toplevel
 
   _validate_lora_config(mt_config)
   lora_provider = _build_lora_provider(mt_config, qwix)
 
   _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qwix_ptq, types)
-  _patch_qwix_find_param(qwix_flax_util)
-  _patch_with_sharding_constraint()
 
   decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(mt_config, mesh)
   lora_model = qwix.apply_lora_to_model(
-    model,
-    lora_provider,
-    decoder_input_tokens=decoder_input_tokens,
-    decoder_positions=decoder_positions,
-    skip_nnx_init=True,
+      model,
+      lora_provider,
+      decoder_input_tokens=decoder_input_tokens,
+      decoder_positions=decoder_positions,
+      skip_nnx_init=True,
   )
 
-  _precreate_lora_params(lora_model, lora_provider, qwix_flax_util, qwix_lora, math, re, types)
+  # Materialize LoRA parameters. Qwix 0.1.5+ unsets RNGs after apply_lora_to_model,
+  lora_model.set_attributes(qwix_rngs=nnx.Rngs(10003))
+  _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util, qwix_lora, types)
+  lora_model.set_attributes(qwix_rngs=None)
 
   if mesh is not None:
     lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
@@ -498,6 +541,100 @@ def maybe_apply_lora(model, mesh, mt_config):
   return lora_model
 
 
+def _resolve_lora_restore_checkpoint(lora_restore_path):
+  """Normalizes lora_restore_path into Tunix checkpoint manager inputs."""
+  normalized_path = os.path.normpath(lora_restore_path)
+  basename = os.path.basename(normalized_path)
+
+  if basename == "model_params":
+    step_dir = os.path.dirname(normalized_path)
+    root_directory = os.path.dirname(step_dir)
+    step_name = os.path.basename(step_dir)
+    try:
+      return root_directory, int(step_name)
+    except ValueError as exc:
+      raise ValueError(
+          "lora_restore_path ending in 'model_params' must live under a numeric step directory."
+      ) from exc
+
+  if basename.isdigit():
+    return os.path.dirname(normalized_path), int(basename)
+
+  return normalized_path, None
+
+
+def maybe_restore_lora_from_path(model, mt_config, mesh=None):
+  """Optionally restores LoRA params from a dedicated adapter checkpoint path.
+
+  If `lora_restore_path` is set and LoRA params have not yet been materialized on
+  the model, this function attempts to apply LoRA first (when enabled) before
+  restoring adapter weights.
+
+  Returns:
+    A tuple of `(model, resume_step)` where `resume_step` is the step returned
+    by Tunix checkpoint restore.
+  """
+  lora_restore_path = getattr(mt_config, "lora_restore_path", "")
+  if not lora_restore_path:
+    return model, None
+
+  if not tunix_sft_utils.is_lora_enabled(model):
+    if getattr(mt_config, "enable_lora", False):
+      max_logging.log("lora_restore_path is set but model has no LoRA params yet; " "applying LoRA before restore.")
+      model = maybe_apply_lora(model, mesh, mt_config)
+
+    if not tunix_sft_utils.is_lora_enabled(model):
+      raise ValueError(
+          "lora_restore_path is set but LoRA is not enabled on the model. "
+          "Set enable_lora=True and verify lora_module_path matches model modules."
+      )
+
+  if not os.path.exists(lora_restore_path):
+    raise ValueError(f"lora_restore_path does not exist: {lora_restore_path}")
+
+  restore_root_directory, restore_step = _resolve_lora_restore_checkpoint(lora_restore_path)
+  max_logging.log(
+      f"Restoring LoRA params from checkpoint root '{restore_root_directory}' "
+      f"at step {restore_step if restore_step is not None else 'latest'}."
+  )
+
+  checkpoint_manager = tunix_checkpoint_manager.CheckpointManager(
+      root_directory=restore_root_directory,
+  )
+  try:
+    restored_step, _ = checkpoint_manager.maybe_restore(
+        model,
+        step=restore_step,
+        restore_only_lora_params=True,
+    )
+  finally:
+    checkpoint_manager.close()
+
+  if restore_step is not None and restored_step != restore_step:
+    raise ValueError(
+        f"Expected LoRA restore from step {restore_step}, got step {restored_step}."
+    )
+
+  if restored_step == 0:
+    raise ValueError(f"No LoRA checkpoint found for lora_restore_path: {lora_restore_path}")
+
+  max_logging.log("LoRA restore complete.")
+  return model, restored_step
+
+
+def _maybe_resume_trainer_from_step(trainer, resume_step, tunix_config, source):
+  """Applies a recovered step to a freshly initialized trainer if needed."""
+  if not resume_step or getattr(trainer, "_train_steps", 0) != 0:
+    return trainer
+
+  grad_accum = getattr(tunix_config, "gradient_accumulation_steps", None) or 1
+  trainer._train_steps = resume_step
+  trainer._iter_steps = resume_step * grad_accum
+  if hasattr(trainer, "_prof") and trainer._prof:
+    trainer._prof.initial_step = trainer._iter_steps
+  max_logging.log(f"Resuming trainer manually from step {resume_step} based on {source}.")
+  return trainer
+
 def setup_trainer_state(mt_config, goodput_recorder=None):
   """Set up prerequisites for training loop."""
   tunix_config = get_tunix_config(mt_config)
@@ -505,6 +642,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.create_nnx_model(mt_config)
     model = maybe_apply_lora(model, mesh, mt_config)
+    model, lora_resume_step = maybe_restore_lora_from_path(model, mt_config, mesh)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     # pass in model for muon
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
@@ -520,6 +658,13 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
     trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
+    trainer = _maybe_resume_trainer_from_step(
+        trainer,
+        lora_resume_step,
+        tunix_config,
+        source="lora_restore_path",
+    )
+
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
     trainer = use_maxtext_loss_function(trainer, mt_config)
@@ -530,7 +675,10 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
   with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-    trainer.train(trainer.data_hooks.train_data_iterator, trainer.data_hooks.eval_data_iterator)
+    trainer.train(
+        trainer.data_hooks.train_data_iterator,
+        trainer.data_hooks.eval_data_iterator,
+    )
   return trainer
 
 
