@@ -35,7 +35,7 @@ def main():
   """
   script_dir = Path(__file__).resolve().parent
 
-  os.environ['VLLM_TARGET_DEVICE'] = 'tpu'
+  os.environ["VLLM_TARGET_DEVICE"] = "tpu"
 
   # Adjust this path if your extra_post_train_deps_from_github.txt is in a different location,
   # e.g., script_dir / "data" / "extra_post_train_deps_from_github.txt"
@@ -67,12 +67,12 @@ def main():
 
   local_vllm_install_command = [
       sys.executable,  # Use the current Python executable's pip to ensure the correct environment
-        "-m",
-        "uv",
-        "pip",
-        "install",
-        "src/maxtext/integration/vllm",
-        "--no-deps",
+      "-m",
+      "uv",
+      "pip",
+      "install",
+      "src/maxtext/integration/vllm",  # MaxText on vllm installations
+      "--no-deps",
   ]
 
   print(f"Installing extra dependencies from '{extra_deps_file}' using uv...")

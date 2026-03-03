@@ -21,11 +21,19 @@ The primary goal is to demonstrate the end-to-end process of:
 
 ## Example command to run on single-host TPU:
 ```
-# Install dependencies in virtual environment:
-# https://maxtext.readthedocs.io/en/latest/install_maxtext.html#from-pypi-recommended
 
-# Install post-training dependencies in virtual environment:
-bash tools/setup/setup_post_training_requirements.sh
+# Create a virtual environment
+export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
+pip install uv
+uv venv --python 3.12 --seed $VENV_NAME
+source $VENV_NAME/bin/activate
+
+# Run the following commands to get all the necessary installations.
+
+uv pip install maxtext[tpu-post-train] --resolution=lowest
+install_maxtext_tpu_post_train_extra_deps
+
+
 
 # Environment configurations
 export RUN_NAME=$(date +%Y-%m-%d-%H-%M-%S)
