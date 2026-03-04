@@ -506,6 +506,14 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   @pytest.mark.scheduled_only
   def test_gpu_zero1_gradient_accumulation(self):
+    import subprocess, glob as _glob
+    try:
+      smi = subprocess.check_output(["nvidia-smi"], text=True, stderr=subprocess.DEVNULL)
+      print("\n[DIAG] nvidia-smi:\n" + smi[:500])
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"\n[DIAG] nvidia-smi unavailable: {e}")
+    cudnn_libs = _glob.glob("/usr/lib/x86_64-linux-gnu/libcudnn.so.*.*.*")
+    print(f"[DIAG] cuDNN libs found: {cudnn_libs}")
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     zero1_ga = [  # tests Zero-1 optimizer sharding with gradient accumulation
         None,
