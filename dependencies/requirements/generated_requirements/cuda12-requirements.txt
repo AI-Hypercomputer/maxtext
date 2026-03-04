@@ -99,10 +99,10 @@ importlib-resources>=6.5.2
 iniconfig>=2.3.0
 isort>=7.0.0
 jaraco-functools>=4.3.0
-jax-cuda12-pjrt>=0.9.0 ; sys_platform == 'linux'
-jax-cuda12-plugin>=0.9.0 ; sys_platform == 'linux'
-jax>=0.9.0
-jaxlib>=0.9.0
+jax-cuda12-pjrt>=0.8.1 ; sys_platform == 'linux'
+jax-cuda12-plugin>=0.8.1 ; sys_platform == 'linux'
+jax>=0.8.1
+jaxlib>=0.8.1
 jaxtyping>=0.3.3
 jinja2>=3.1.6
 joblib>=1.5.2
@@ -233,9 +233,9 @@ toml>=0.10.2
 tomlkit>=0.13.3
 toolz>=1.1.0
 tqdm>=4.67.1
-transformer-engine-cu12>=2.11.0
-transformer-engine-jax>=2.11.0
-transformer-engine>=2.11.0
+transformer-engine-cu12>=2.9.0
+transformer-engine-jax>=2.9.0
+transformer-engine>=2.9.0
 transformers>=4.57.3
 treescope>=0.1.10
 typeguard>=2.13.3

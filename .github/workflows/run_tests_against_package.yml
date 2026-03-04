@@ -85,6 +85,17 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: maxtext-wheel
+      - name: Reinstall cuDNN to ensure consistent sub-library versions (GPU only)
+        if: inputs.device_type == 'cuda12'
+        shell: bash
+        run: |
+          CUDNN_PKGS=$(dpkg -l | grep -i cudnn | awk '{print $2}' | tr '\n' ' ')
+          if [ -n "$CUDNN_PKGS" ]; then
+            echo "Reinstalling cuDNN packages for consistency: $CUDNN_PKGS"
+            sudo apt-get update -q && sudo apt-get install -y --reinstall $CUDNN_PKGS
+          else
+            echo "No cuDNN packages found via dpkg, skipping reinstall."
+          fi
       - name: Install the maxtext wheel
         shell: bash
         run: |
