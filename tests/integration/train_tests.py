@@ -505,6 +505,7 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
   @pytest.mark.scheduled_only
+  @pytest.mark.skip(reason="b/489133823. Previously transient in b/462548581.")
   def test_gpu_zero1_gradient_accumulation(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     zero1_ga = [  # tests Zero-1 optimizer sharding with gradient accumulation
