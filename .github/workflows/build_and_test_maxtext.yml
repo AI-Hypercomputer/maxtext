@@ -94,14 +94,13 @@ jobs:
     needs: doc_only_check
     # Run if either tests or notebooks need to run
     if: |
-      needs.doc_only_check.outputs.run_tests == 'true' || 
+      needs.doc_only_check.outputs.run_tests == 'true' ||
       needs.doc_only_check.outputs.run_notebooks == 'true'
     uses: ./.github/workflows/build_package.yml
     with:
       device_type: tpu
       device_name: v4-8
       cloud_runner: linux-x86-n2-16-buildkit
-
 
   maxtext_gpu_integration_tests:
     needs: build_and_upload_maxtext_package
@@ -122,6 +121,5 @@ jobs:
       xla_python_client_mem_fraction: 0.65
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
-      is_scheduled_run: true
+      is_scheduled_run: 'true'
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
-
