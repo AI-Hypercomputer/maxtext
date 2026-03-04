@@ -590,6 +590,25 @@ class Pipeline(nn.Module):
     bsw_1 = self.from_all_variables_to_bsw(nxt_repeat_weights, physical_partition_spec)
     return jax.ad_checkpoint.checkpoint_name((bsw_0, bsw_1), "bsw")
 
+  def bsw_all_gather(self, weights, physical_partition_spec, loop_iteration):
+    """All gather one bsw over fsdp, fsdpt, and possibly expert mesh axis."""
+    nxt_repeat_weights = self.from_all_variables_to_repeat_weights(weights, loop_iteration + 1, physical_partition_spec)
+    return self.from_all_variables_to_bsw(nxt_repeat_weights, physical_partition_spec)
+
+  def bsw_reduce_scatter(self, bsw_cotangents, weights, physical_partition_spec, loop_iteration):
+    """Reduce-scatter bsw cotangents back to the original full weights."""
+
+    # Because all-gathering and slicing are purely linear operations,
+    # jax.linear_transpose automatically derives the exact reduce-scatter and
+    # scatter-add operations without evaluating the primal all-gather!
+    transpose_fn = jax.linear_transpose(
+        lambda w: self.bsw_all_gather(w, physical_partition_spec, loop_iteration),
+        weights,
+    )
+
+    d_weights = transpose_fn(bsw_cotangents)[0]
+    return d_weights
+
   def _run_initialization(
       self,
       example_inputs,
