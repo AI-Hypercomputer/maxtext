@@ -988,11 +988,13 @@ class MLA(Attention):
     q_absorbed = jnp.einsum("TNH,ANH->TNA", q_nope, wk_b_kernel)
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, kv_cache, *args):
+      seq_lens_local, block_tables_local = args[0], args[1]
+
       def _initialize_block_sizes():
-        # Set reasonable starting estimates for block sizes. (TODO(gpolovets): update this to use tuned sizes)
-        max_num_tokens = q_absorbed.shape[0]
-        max_num_seqs = md.seq_lens.shape[0]
-        num_page_indices = md.block_tables.shape[0]
+        # Use local (per-shard) shapes inside shard_map to get correct block sizes.
+        max_num_tokens = q.shape[0]
+        max_num_seqs = seq_lens_local.shape[0]
+        num_page_indices = block_tables_local.shape[0]
         assert num_page_indices % max_num_seqs == 0
         pages_per_seq = num_page_indices // max_num_seqs
         # num_kv_pages_per_block = min(pages_per_seq, 16)
@@ -1024,19 +1026,22 @@ class MLA(Attention):
       )
       return kv_cache, output
 
+    # For vLLM with expert parallelism, the batch is sharded over "attn_dp_expert"
+    # (not "expert", which is always 1 in the vLLM mesh). Metadata arrays are padded
+    # by vLLM to be divisible by attn_dp_expert and must be sharded accordingly.
     in_specs = (
-        P(("attn_dp", "model", "expert"), None, None),  # q
-        P(("attn_dp", "model", "expert"), None, None),  # q_rope
-        P(("attn_dp", "model", "expert"), None),  # k
-        P(("attn_dp", "model", "expert"), None),  # k_rope
-        P(("attn_dp", "model", "expert")),  # kv_cache
-        P(("data", "attn_dp")),  # md.seq_lens: Replicated
-        P(("data", "attn_dp")),  # page_indices_flat: Replicated
-        P(("data", "attn_dp")),  # query_start_loc: Replicated
-        P(("data", "attn_dp")),  # distribution: Replicated
+        P(("attn_dp", "model", "attn_dp_expert"), None, None),  # q
+        P(("attn_dp", "model", "attn_dp_expert"), None, None),  # q_rope
+        P(("attn_dp", "model", "attn_dp_expert"), None),  # k
+        P(("attn_dp", "model", "attn_dp_expert"), None),  # k_rope
+        P(("attn_dp", "model", "attn_dp_expert")),  # kv_cache
+        P(("data", "attn_dp", "attn_dp_expert")),  # md.seq_lens
+        P(("data", "attn_dp", "attn_dp_expert")),  # page_indices_flat
+        P(("data", "attn_dp", "attn_dp_expert")),  # query_start_loc
+        P(("data", "attn_dp", "attn_dp_expert")),  # distribution
     )
 
-    out_specs = (P(("attn_dp", "model", "expert"), None, None), P(("attn_dp", "model", "expert")))
+    out_specs = (P(("attn_dp", "model", "attn_dp_expert"), None, None), P(("attn_dp", "model", "attn_dp_expert")))
 
     kv_cache, output = jax.jit(
         shard_map.shard_map(
