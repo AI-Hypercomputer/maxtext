@@ -572,8 +572,8 @@ class Pipeline(nn.Module):
           x = all_gather_invariant(x, axis_name="fsdp", axis=i - 1, tiled=True)
         if j >= 0:
           x = all_gather_invariant(x, axis_name="fsdp_transpose", axis=j - 1, tiled=True)
-        # path_keys = [getattr(p, "key", str(p)) for p in path]
-        is_moe_block = True  # "MoeBlock_0" in path_keys TODO: Enable it
+        path_keys = [getattr(p, "key", str(p)) for p in path]
+        is_moe_block = "MoeBlock_0" in path_keys
         if k >= 0 and not is_moe_block:
           x = all_gather_invariant(x, axis_name="expert", axis=k - 1, tiled=True)
         return x

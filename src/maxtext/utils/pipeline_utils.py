@@ -54,10 +54,59 @@ def get_fsdp_index_pytree(physical_partition_spec, axis_name="fsdp"):
 
 def generate_bsw_pps_from_pps(physical_partition_spec):
   """Create bsw physical partition spec from weight physical partition spec."""
-  return jax.tree.map(
-      lambda pps: P(*remove_fsdp_from_physical_partition_spec(pps)[1:]),
+
+  def _process_pps(path, pps):
+    # Extract string keys from the JAX KeyPath elements safely
+    path_keys = [getattr(p, "key", str(p)) for p in path]
+    is_moe_block_0 = "MoeBlock_0" in path_keys
+
+    # Remove the gathered axes conditionally based on the path
+    processed_pps = remove_gathered_axes_from_physical_partition_spec(pps, is_moe_block_0)
+
+    # Keep the original [1:] slicing behavior (e.g., to drop the 'stage' axis)
+    return P(*processed_pps[1:])
+
+  return jax.tree_util.tree_map_with_path(
+      _process_pps,
       physical_partition_spec,
   )
+
+
+def remove_gathered_axes_from_physical_partition_spec(pps, is_moe_block_0):
+  """Removes 'fsdp', 'fsdp_transpose', and conditionally 'expert' from a physical PartitionSpec."""
+
+  # Always remove fsdp and fsdp_transpose as they are always gathered
+  axes_to_remove = ["fsdp", "fsdp_transpose"]
+
+  # Only remove 'expert' if we are NOT in MoeBlock_0
+  if not is_moe_block_0:
+    axes_to_remove.append("expert")
+
+  if isinstance(pps, P):
+    new_spec = []
+    # Iterate through each axis in the original PartitionSpec.
+    for axis in pps:
+      if axis is None:
+        new_spec.append(None)
+      elif isinstance(axis, str):
+        # If the axis is in our removal list, replace it with None to signify replication.
+        if axis not in axes_to_remove:
+          new_spec.append(axis)
+        else:
+          new_spec.append(None)
+      elif isinstance(axis, (list, tuple)):
+        # If the axis is a collection, filter out the gathered axes.
+        new_axis = [a for a in axis if a not in axes_to_remove]
+        # If all elements are filtered out, new_axis becomes [], which as a tuple ()
+        # correctly signals replication across those mesh axes in JAX.
+        new_spec.append(tuple(new_axis))
+      else:
+        raise ValueError(f"Unsupported_axis_type: {type(axis)}")
+
+    # Return a new sharding object with the modified spec.
+    return P(*new_spec)
+
+  return pps
 
 
 def get_logical_spec_repeats_removed(full_logical):
