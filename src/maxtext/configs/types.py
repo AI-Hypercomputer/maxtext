@@ -795,6 +795,8 @@ class LayoutAndSharding(BaseModel):
       description="Allowed percentage of non-sharded parameters.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
+  internal_compile: bool = Field(False, description="Use internal_compile to bypass open-source topology mappings.")
+  internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
 
 
 class DcnParallelism(BaseModel):
@@ -2064,6 +2066,11 @@ class MaxTextConfig(
     # E. HARDWARE-DEPENDENT CALCULATIONS
     def get_num_target_devices():
       """Get the number of devices for the target topology, handling AOT compilation and single-controller modes."""
+      if self.internal_compile:
+        if self.internal_compile_num_devices <= 0:
+          raise ValueError("Set internal_compile_num_devices to a positive integer.")
+        # User bypassing topology mappings should supply explicit device count
+        return self.internal_compile_num_devices
       if self.compile_topology:
         spec = accelerator_to_spec_map.get_system_characteristics(self.compile_topology)
         return int(spec.devices_per_slice * self.compile_topology_num_slices)
