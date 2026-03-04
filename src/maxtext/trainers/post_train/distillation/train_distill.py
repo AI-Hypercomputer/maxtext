@@ -54,7 +54,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 
 # Tunix Imports
-from tunix.distillation import distillation_trainer
+from tunix.sft import peft_trainer
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 
@@ -173,12 +173,81 @@ def _log_config_details(config: pyconfig.HyperParameters, label: str) -> None:
   max_logging.log(f"  Checkpoint:      {config.load_parameters_path}")
 
 
-class MaxTextDistillationTrainer(distillation_trainer.DistillationTrainer):
+class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
   """Custom Trainer to preserve MaxText fields and log Teacher metrics.
 
   This class overrides `_prepare_inputs` to ensure MaxText-specific fields
   (positions, segment_ids) are passed to the model.
   """
+
+  def __init__(self, student_model, teacher_model, strategy, optimizer, training_config, **kwargs):
+    super().__init__(model=(student_model, teacher_model), optimizer=optimizer, training_config=training_config, **kwargs)
+
+    self.strategy = strategy
+
+    # override optimizer to only use student_model.
+    wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    self.optimizer = nnx.Optimizer(student_model, optimizer, wrt=wrt)
+
+  def _train_step(self, models_tuple, optimizer, inputs):
+    """Overrides the main JIT block to natively handle the tuple."""
+
+    student_model, teacher_model = models_tuple
+    batch = self.gen_model_input_fn(inputs)
+
+    def loss_wrapper(student, teacher, batch):
+
+      teacher_output = self.strategy.teacher_forward_fn(
+          model=teacher,
+          input_tokens=batch["input_tokens"],
+          positions=batch["positions"],
+          attention_mask=batch.get("attention_mask"),
+          decoder_segment_ids=batch.get("decoder_segment_ids"),
+          cache=None,
+      )
+
+      teacher_output = jax.tree.map(jax.lax.stop_gradient, teacher_output)
+
+      student_output = self.strategy.student_forward_fn(
+          model=student,
+          input_tokens=batch["input_tokens"],
+          positions=batch["positions"],
+          attention_mask=batch.get("attention_mask"),
+          decoder_segment_ids=batch.get("decoder_segment_ids"),
+          cache=None,
+      )
+      labels = self.strategy.labels_fn(batch["targets"])
+      return self.strategy.compute_loss(student_output, teacher_output, labels)
+
+    # Because student is the 0th argument, argnums=0 guarantees
+    # we only compute gradients for the student.
+    grad_fn = nnx.value_and_grad(
+        loss_wrapper,
+        argnums=0,
+        has_aux=True,
+    )
+
+    out, grads = grad_fn(student_model, teacher_model, batch)
+
+    optimizer.update(student_model, grads)
+
+    return out[0], out[1]  # loss, aux
+
+  def _eval_step(self, models_tuple, inputs):
+    """Evaluation only needs the student."""
+    student_model, _ = models_tuple
+    inputs = self.gen_model_input_fn(inputs)
+
+    student_output = self.strategy.student_forward_fn(
+        model=student_model,
+        input_tokens=inputs["input_tokens"],
+        positions=inputs["positions"],
+        attention_mask=inputs.get("attention_mask"),
+        decoder_segment_ids=inputs.get("decoder_segment_ids"),
+        cache=None,
+    )
+    labels = self.strategy.labels_fn(inputs["targets"])
+    return self.strategy.compute_eval_loss(student_output, labels)
 
   def _prepare_inputs(
       self, input_data: distillation_utils.MaxTextTrainingInput
@@ -194,22 +263,12 @@ class MaxTextDistillationTrainer(distillation_trainer.DistillationTrainer):
     Returns:
       A new MaxTextTrainingInput containing the Teacher's outputs (logits).
     """
-    # 1. Generate inputs dictionary for the Teacher model
-    inputs = self.gen_model_input_fn(input_data)["inputs"]
-
-    if self._mode == metrics_logger.Mode.EVAL:
-      teacher_output = None
-    else:
-      # 2. Run Teacher to get soft targets (logits)
-      # The strategy ensures these are stop_gradient-ed
-      teacher_output = self.strategy.get_teacher_outputs(self.teacher_model, inputs)
 
     # 3. Return extended object so fields are available for Student training step
     # pylint: disable=unexpected-keyword-arg
     return distillation_utils.MaxTextTrainingInput(
         input_tokens=input_data.input_tokens,
         input_mask=input_data.input_mask,
-        teacher_output=teacher_output,
         positions=input_data.positions,
         decoder_segment_ids=input_data.decoder_segment_ids,
         targets=input_data.targets,
@@ -374,8 +433,6 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
       layer_indices=student_config.distill_layer_indices,
   )
 
-  student_model, teacher_model = strategy.pre_process_models(student_model, teacher_model)
-
   # 4. Optimizer & Config
   optimizer = get_distillation_optimizer(student_config, student_config.steps)
 
@@ -399,7 +456,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
       log_dir=student_config.tensorboard_dir, flush_every_n_steps=student_config.log_period
   )
 
-  train_config = distillation_trainer.TrainingConfig(
+  train_config = peft_trainer.TrainingConfig(
       max_steps=student_config.steps,
       eval_every_n_steps=student_config.eval_interval,
       metrics_logging_options=metrics_logging_options,
@@ -412,6 +469,9 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   # We use MaxText's native create_data_iterator which creates both train and eval iterators
   max_logging.log("Initializing Data Iterators via MaxText pipeline...")
   raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
+
+  teacher_model.eval()
+  student_model.train()
 
   # 6. Initialize Trainer
   trainer = MaxTextDistillationTrainer(
