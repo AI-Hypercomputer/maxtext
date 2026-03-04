@@ -109,7 +109,7 @@ jobs:
           SYSTEM_CUDNN_VER=$(dpkg -l | grep libcudnn9-cuda-12 | awk '{print $3}' | cut -d'-' -f1)
           if [ -n "$SYSTEM_CUDNN_VER" ]; then
             echo "Upgrading nvidia-cudnn-cu12 to >=${SYSTEM_CUDNN_VER} to match system cuDNN"
-            .venv/bin/uv pip install "nvidia-cudnn-cu12>=${SYSTEM_CUDNN_VER}"
+            uv pip install --python .venv/bin/python "nvidia-cudnn-cu12>=${SYSTEM_CUDNN_VER}"
           else
             echo "Could not detect system cuDNN version, skipping upgrade."
           fi
