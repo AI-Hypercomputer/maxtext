@@ -55,7 +55,7 @@ from maxtext.common.goodput import (
 from maxtext.common.gcloud_stub import cloud_diagnostics as _cloud_diag, is_decoupled
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common.metric_logger import MetricLogger, record_activation_metrics
-from maxtext.optimizers.gradient_accumulation import gradient_accumulation_loss_and_grad
+from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
