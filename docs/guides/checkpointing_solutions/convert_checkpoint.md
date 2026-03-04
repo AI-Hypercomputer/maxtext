@@ -82,7 +82,7 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext maxtext/configs/base.yml \
 
 **Key arguments:**
 
-- `model_name`: The model identifier, which should be defined in `src/MaxText/utils/utils.py`.
+- `model_name`: The model identifier, which should be defined in `src/maxtext/configs/types.py`.
 - `scan_layers`: Indicates if the output checkpoint is [scanned](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/reference/core_concepts/checkpoints.md) (scan_layers=true) or unscanned (scan_layers=false).
 - `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
 - `hf_access_token`: Your Hugging Face token.
