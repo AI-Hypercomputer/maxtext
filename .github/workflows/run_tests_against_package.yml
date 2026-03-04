@@ -85,22 +85,6 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: maxtext-wheel
-      - name: Fix cuDNN sub-library version mismatch (GPU only)
-        if: inputs.device_type == 'cuda12'
-        shell: bash
-        run: |
-          # Detect installed cuDNN package names (e.g. libcudnn9-cuda-12, libcudnn9-dev-cuda-12)
-          CUDNN_PKGS=$(dpkg -l | grep -i cudnn | awk '{print $2}' | tr '\n' ' ')
-          if [ -z "$CUDNN_PKGS" ]; then
-            echo "No cuDNN packages found, skipping."
-            exit 0
-          fi
-          echo "Detected cuDNN packages: $CUDNN_PKGS"
-          apt-get update -q
-          # Use plain install (not --reinstall) so apt resolves a consistent
-          # version set from the current repository, even if the previously
-          # installed version is no longer downloadable.
-          apt-get install -y --allow-downgrades $CUDNN_PKGS
       - name: Install the maxtext wheel
         shell: bash
         run: |
@@ -112,6 +96,23 @@ jobs:
           python3 --version
           python3 -m pip freeze
           uv pip install pytest-cov
+      - name: Align pip-installed nvidia-cudnn-cu12 with system cuDNN (GPU only)
+        if: inputs.device_type == 'cuda12'
+        shell: bash
+        run: |
+          # The pip package nvidia-cudnn-cu12 (installed as a JAX dependency) bundles
+          # its own libcudnn_graph.so.9. If it is older than the system cuDNN, it gets
+          # loaded first by JAX and causes an undefined symbol error when TE later loads
+          # libcudnn_engines_runtime_compiled.so.9 which requires symbols from the newer
+          # system libcudnn_graph.so.9. Upgrading the pip package to match the system
+          # version ensures a consistent cuDNN is loaded throughout the process.
+          SYSTEM_CUDNN_VER=$(dpkg -l | grep libcudnn9-cuda-12 | awk '{print $3}' | cut -d'-' -f1)
+          if [ -n "$SYSTEM_CUDNN_VER" ]; then
+            echo "Upgrading nvidia-cudnn-cu12 to >=${SYSTEM_CUDNN_VER} to match system cuDNN"
+            .venv/bin/uv pip install "nvidia-cudnn-cu12>=${SYSTEM_CUDNN_VER}"
+          else
+            echo "Could not detect system cuDNN version, skipping upgrade."
+          fi
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
