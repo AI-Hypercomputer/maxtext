@@ -96,11 +96,11 @@ jobs:
             exit 0
           fi
           echo "Detected cuDNN packages: $CUDNN_PKGS"
-          sudo apt-get update -q
+          apt-get update -q
           # Use plain install (not --reinstall) so apt resolves a consistent
           # version set from the current repository, even if the previously
           # installed version is no longer downloadable.
-          sudo apt-get install -y --allow-downgrades $CUDNN_PKGS
+          apt-get install -y --allow-downgrades $CUDNN_PKGS
       - name: Install the maxtext wheel
         shell: bash
         run: |
