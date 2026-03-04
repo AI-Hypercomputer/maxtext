@@ -43,7 +43,7 @@ Example Usage:
     /usr/bin/time -v python src/MaxText/checkpoint_conversion/to_maxtext.py \
     maxtext/configs/base.yml model_name="gemma2-2b" \
     base_output_directory="/path/to/your/output/directory" \
-    hf_access_token=$HF_TOKEN hardware=cpu skip_jax_distributed_system=True \
+    hf_access_token=${HF_TOKEN?} hardware=cpu skip_jax_distributed_system=True \
     scan_layers=False
 
   For models with scanned layers (e.g., some custom architectures), you might
@@ -54,7 +54,7 @@ Example Usage:
    /usr/bin/time -v python src/MaxText/checkpoint_conversion/to_maxtext.py \
     maxtext/configs/base.yml model_name="llama3.1-70b" \
     base_output_directory="gs://my-bucket/maxtext-checkpoints" \
-    hf_access_token=$HF_TOKEN hardware=cpu skip_jax_distributed_system=True \
+    hf_access_token=${HF_TOKEN?} hardware=cpu skip_jax_distributed_system=True \
     --lazy_load_tensors=True
 """
 

@@ -50,7 +50,7 @@ pre-commit install
 
 ```sh
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -62,7 +62,7 @@ Optional: If you want to try training on a Hugging Face dataset, see [Data Input
 
 ```sh
 python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
 ```
@@ -84,7 +84,7 @@ You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/bl
 
 ```sh
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -94,7 +94,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 
 ```sh
 python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
 ```

@@ -47,8 +47,8 @@ Although there are several steps below, most are for the initial setup. Once set
    ```
 
    ```
-   gcloud config set project $PROJECT
-   gcloud config set compute/zone $ZONE
+   gcloud config set project ${PROJECT?}
+   gcloud config set compute/zone ${ZONE?}
    ```
 
    Create ssh keys for gcloud, we recommend leaving a blank password (hit enter twice after running the below command). If you are prompted that the the file already exists you can choose not to overwrite by selecting "n".
@@ -74,7 +74,7 @@ Although there are several steps below, most are for the initial setup. Once set
    Create a multislice environment of nodes using create queued resources
 
    ```
-   gcloud alpha compute tpus queued-resources create $QR_ID --accelerator-type=v4-8 --runtime-version=tpu-ubuntu2204-base --node-count=$NODE_COUNT --node-prefix=$TPU_PREFIX  --reserved
+   gcloud alpha compute tpus queued-resources create ${QR_ID?} --accelerator-type=v4-8 --runtime-version=tpu-ubuntu2204-base --node-count=${NODE_COUNT?} --node-prefix=${TPU_PREFIX?}  --reserved
    ```
 
    We target the `reserved` pool above, but you may instead target the `on-demand` pool by omitting this flag,
@@ -83,14 +83,14 @@ Although there are several steps below, most are for the initial setup. Once set
    You have to wait for the QR to become `ACTIVE` (as opposed to `ACCEPTED` or `PROVISIONING`) which corresponds to the worker nodes becoming `READY` (as opposed to `CREATING`). This may take a minute or two and can be checked via
 
    ```
-   gcloud alpha compute tpus queued-resources list --filter=$QR_ID
+   gcloud alpha compute tpus queued-resources list --filter=${QR_ID?}
    ```
 
 4. **Install dependencies.**
    Install the dependencies of `train.py` on each worker using `multihost_runner.py`:
 
    ```
-   python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash tools/setup/setup.sh"
+   python3 multihost_runner.py --TPU_PREFIX=${TPU_PREFIX?} --COMMAND="bash tools/setup/setup.sh"
    ```
 
    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
@@ -106,7 +106,7 @@ Although there are several steps below, most are for the initial setup. Once set
    Set config values for `base_output_directory` and `dataset_path` in `configs/base.yml` if not set already.
 
    ```
-   python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=$RUN_NAME"
+   python3 multihost_runner.py --TPU_PREFIX=${TPU_PREFIX?} --COMMAND="python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${RUN_NAME?}"
    ```
 
    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
@@ -114,7 +114,7 @@ Although there are several steps below, most are for the initial setup. Once set
 6. **Clean up TPUs and QR when finished.**
 
    ```
-   gcloud alpha compute tpus queued-resources delete $QR_ID --force --async
+   gcloud alpha compute tpus queued-resources delete ${QR_ID?} --force --async
    ```
 
    The `--force` flag deletes both the queued resources and the TPU VMs, without it only a `SUSPENDED` queued resource whose TPUs have already been deleted can itself be deleted. We highly recommend the `--async` flag since deleting the TPUs and QR will take a minute or two.

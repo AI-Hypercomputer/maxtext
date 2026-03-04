@@ -76,7 +76,7 @@ export HF_TOKEN=<Hugging Face access token>
 # -- MaxText configuration --
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
 export WORKLOAD=<Name for this run> # e.g., llama-3-70b-grpo
-export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${WORKLOAD}/0/items
+export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${WORKLOAD?}/0/items
 
 # -- Workload configuration --
 export TPU_TYPE=<TPU Type> # e.g., 'v5p-128'
@@ -185,7 +185,7 @@ bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-trainin
 > project administrator if you don't have this permission.
 
 ```bash
-bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME}
+bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
 ```
 
 ## Submit your RL workload via Pathways
@@ -203,35 +203,35 @@ submit the `train_rl.py` script via XPK.
 ### Submit GRPO workload
 
 ```bash
-xpk workload create-pathways --workload $WORKLOAD \
---docker-image gcr.io/$PROJECT_ID/$CLOUD_IMAGE_NAME --cluster $TPU_CLUSTER \
---tpu-type=$TPU_TYPE --num-slices=1 \
---project=$PROJECT_ID --priority=high \
---command "HF_TOKEN=${HF_TOKEN} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
+xpk workload create-pathways --workload ${WORKLOAD?} \
+--docker-image gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} --cluster ${TPU_CLUSTER?} \
+--tpu-type=${TPU_TYPE?} --num-slices=1 \
+--project=${PROJECT_ID?} --priority=high \
+--command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
 python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
-  model_name=${MODEL} \
-  tokenizer_path=${TOKENIZER} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH} \
-  run_name=${WORKLOAD} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  hf_access_token=${HF_TOKEN}"
+  model_name=${MODEL?} \
+  tokenizer_path=${TOKENIZER?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${WORKLOAD?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  hf_access_token=${HF_TOKEN?}"
 ```
 
 ### Submit GSPO workload
 
 ```bash
-xpk workload create-pathways --workload $WORKLOAD \
---docker-image gcr.io/$PROJECT_ID/$CLOUD_IMAGE_NAME --cluster $TPU_CLUSTER \
---tpu-type=$TPU_TYPE --num-slices=1 \
---project=$PROJECT_ID --priority=high \
---command "HF_TOKEN=${HF_TOKEN} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
+xpk workload create-pathways --workload ${WORKLOAD?} \
+--docker-image gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} --cluster ${TPU_CLUSTER?} \
+--tpu-type=${TPU_TYPE?} --num-slices=1 \
+--project=${PROJECT_ID?} --priority=high \
+--command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
 python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
-  model_name=${MODEL} \
-  tokenizer_path=${TOKENIZER} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH} \
-  run_name=${WORKLOAD} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  hf_access_token=${HF_TOKEN} \
+  model_name=${MODEL?} \
+  tokenizer_path=${TOKENIZER?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${WORKLOAD?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  hf_access_token=${HF_TOKEN?} \
   loss_algo=gspo-token"
 ```
 
@@ -241,9 +241,9 @@ python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_
 - **Delete a workload**: To remove a failed or unwanted Pathways job, use XPK:
   ```bash
   xpk workload delete \
-      --workload $WORKLOAD \
-      --cluster $TPU_CLUSTER \
-      --project $PROJECT_ID
+      --workload ${WORKLOAD?} \
+      --cluster ${TPU_CLUSTER?} \
+      --project ${PROJECT_ID?}
   ```
   In case the job still lingers on, you can use
   `kubectl get pods` to obtain the name of the pod and then run: `kubectl delete pod <pod-name>`.

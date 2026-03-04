@@ -48,8 +48,8 @@ Let's get started!
 # Create a virtual environment
 export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
 pip install uv
-uv venv --python 3.12 --seed $VENV_NAME
-source $VENV_NAME/bin/activate
+uv venv --python 3.12 --seed ${VENV_NAME?}
+source ${VENV_NAME?}/bin/activate
 ```
 
 ### Option 1: From PyPI releases (Recommended)
@@ -134,13 +134,13 @@ Run the following command for GRPO:
 
 ```
 python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
-  model_name=${MODEL} \
-  tokenizer_path=${TOKENIZER} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH} \
-  run_name=${RUN_NAME} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  hf_access_token=${HF_TOKEN} \
-  chips_per_vm=${CHIPS_PER_VM}
+  model_name=${MODEL?} \
+  tokenizer_path=${TOKENIZER?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  hf_access_token=${HF_TOKEN?} \
+  chips_per_vm=${CHIPS_PER_VM?}
 ```
 
 The overview of what this run will do is as follows:
@@ -158,14 +158,14 @@ Run the following command for GSPO:
 
 ```
 python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
-  model_name=${MODEL} \
-  tokenizer_path=${TOKENIZER} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH} \
-  run_name=${RUN_NAME} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  hf_access_token=${HF_TOKEN} \
+  model_name=${MODEL?} \
+  tokenizer_path=${TOKENIZER?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  hf_access_token=${HF_TOKEN?} \
   loss_algo=gspo-token \
-  chips_per_vm=${CHIPS_PER_VM}
+  chips_per_vm=${CHIPS_PER_VM?}
 ```
 
 The overview of what this run will do is as follows:

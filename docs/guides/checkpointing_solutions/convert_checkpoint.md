@@ -37,8 +37,8 @@ First, make sure python3 virtual environment for MaxText is set up and enabled.
 ```bash
 export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
 pip install uv
-uv venv --python 3.12 --seed $VENV_NAME
-source $VENV_NAME/bin/activate
+uv venv --python 3.12 --seed ${VENV_NAME?}
+source ${VENV_NAME?}/bin/activate
 ```
 
 Second, ensure you have the necessary dependencies installed (PyTorch for the conversion script).
@@ -68,16 +68,16 @@ Finally, run below command to complete the conversion
 
 ```bash
 python3 -m maxtext.checkpoint_conversion.to_maxtext maxtext/configs/base.yml \
-    model_name=${HF_MODEL} \
-    hf_access_token=${HF_TOKEN} \
-    base_output_directory=${MODEL_CHECKPOINT_DIRECTORY} \
+    model_name=${HF_MODEL?} \
+    hf_access_token=${HF_TOKEN?} \
+    base_output_directory=${MODEL_CHECKPOINT_DIRECTORY?} \
     scan_layers=True \
     use_multimodal=false \
     hardware=cpu \
     skip_jax_distributed_system=true \
-    checkpoint_storage_use_zarr3=${USE_ZARR3} \
-    checkpoint_storage_use_ocdbt=${USE_OCDBT} \
-    --lazy_load_tensors=${LAZY_LOAD_TENSORS}
+    checkpoint_storage_use_zarr3=${USE_ZARR3?} \
+    checkpoint_storage_use_ocdbt=${USE_OCDBT?} \
+    --lazy_load_tensors=${LAZY_LOAD_TENSORS?}
 ```
 
 **Key arguments:**

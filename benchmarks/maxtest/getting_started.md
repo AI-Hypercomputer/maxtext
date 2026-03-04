@@ -55,7 +55,7 @@ If we want to pass custom flags this is also possible by specifying
 Useful checking for the existence of SDC on TPU hardware.
 
 ```
-bash maxtest.sh --project $TPU_PROJECT --cluster $CLUSTER --region $REGION --nodepool $NODEPOOL_NAME --num_workers $NUM_WORKERS --libtpu_args '--xla_tpu_enable_sdc_checker'
+bash maxtest.sh --project ${TPU_PROJECT?} --cluster ${CLUSTER?} --region ${REGION?} --nodepool ${NODEPOOL_NAME?} --num_workers ${NUM_WORKERS?} --libtpu_args '--xla_tpu_enable_sdc_checker'
 ```
 
 
