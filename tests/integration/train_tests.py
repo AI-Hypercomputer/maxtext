@@ -512,13 +512,17 @@ class TrainTests(unittest.TestCase):
       print("\n[DIAG] nvidia-smi:\n" + smi[:500])
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"\n[DIAG] nvidia-smi unavailable: {e}")
-    # find: capture output even on non-zero exit (permission denied on some dirs is expected)
-    find_result = subprocess.run(
-        ["find", "/", "-name", "libcudnn*.so*", "-not", "-path", "*/proc/*",
-         "-not", "-path", "*/sys/*"],
-        text=True, capture_output=True, timeout=20,
-    )
-    print(f"[DIAG] All cuDNN libs on system:\n{find_result.stdout or '(none found)'}")
+    # Which packages own the conflicting cuDNN sub-libraries
+    for so_file in [
+        "/usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9",
+        "/usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so.9",
+    ]:
+      r = subprocess.run(["dpkg", "-S", so_file], text=True, capture_output=True)
+      print(f"[DIAG] dpkg -S {so_file}: {r.stdout.strip() or r.stderr.strip()}")
+    # Full list of installed packages mentioning cudnn (broader than before)
+    r = subprocess.run(["dpkg", "-l"], text=True, capture_output=True)
+    cudnn_pkgs = [l for l in r.stdout.splitlines() if "cudnn" in l.lower()]
+    print(f"[DIAG] All dpkg cudnn packages:\n" + "\n".join(cudnn_pkgs))
     ld_path = os.environ.get("LD_LIBRARY_PATH", "")
     print(f"[DIAG] LD_LIBRARY_PATH: {ld_path or '(not set)'}")
     # Check each LD_LIBRARY_PATH dir for cuDNN specifically
