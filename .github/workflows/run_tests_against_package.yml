@@ -100,19 +100,29 @@ jobs:
         if: inputs.device_type == 'cuda12'
         shell: bash
         run: |
-          # The pip package nvidia-cudnn-cu12 (installed as a JAX dependency) bundles
-          # its own libcudnn_graph.so.9. If it is older than the system cuDNN, it gets
-          # loaded first by JAX and causes an undefined symbol error when TE later loads
-          # libcudnn_engines_runtime_compiled.so.9 which requires symbols from the newer
-          # system libcudnn_graph.so.9. Upgrading the pip package to match the system
-          # version ensures a consistent cuDNN is loaded throughout the process.
-          SYSTEM_CUDNN_VER=$(dpkg -l | grep libcudnn9-cuda-12 | awk '{print $3}' | cut -d'-' -f1)
-          if [ -n "$SYSTEM_CUDNN_VER" ]; then
-            echo "Upgrading nvidia-cudnn-cu12 to >=${SYSTEM_CUDNN_VER} to match system cuDNN"
-            uv pip install --python .venv/bin/python "nvidia-cudnn-cu12>=${SYSTEM_CUDNN_VER}"
-          else
-            echo "Could not detect system cuDNN version, skipping upgrade."
+          # jax-cuda12-plugin has RPATH pointing to .venv/site-packages/nvidia/cudnn/lib/,
+          # so it loads the pip-bundled libcudnn_graph.so.9 (older) into the process before
+          # TE runs. When TE then loads libcudnn_engines_runtime_compiled.so.9 from the
+          # system, it can't find symbols added in the newer system libcudnn_graph.so.9
+          # because the linker reuses the already-loaded older venv version.
+          # Fix: replace the venv's cuDNN .so files with symlinks to the system 9.10.2
+          # versions so that RPATH resolution lands on the correct library.
+          VENV_CUDNN_LIB=$(find .venv -type d -name "lib" -path "*/nvidia/cudnn/*" 2>/dev/null | head -1)
+          if [ -z "$VENV_CUDNN_LIB" ]; then
+            echo "No nvidia/cudnn/lib found in venv, skipping."
+            exit 0
           fi
+          echo "Replacing venv cuDNN libs in ${VENV_CUDNN_LIB} with symlinks to system cuDNN"
+          for venv_lib in "${VENV_CUDNN_LIB}"/libcudnn*.so.9; do
+            libname=$(basename "${venv_lib}")
+            system_lib="/usr/lib/x86_64-linux-gnu/${libname}"
+            if [ -e "${system_lib}" ]; then
+              ln -sf "${system_lib}" "${venv_lib}"
+              echo "  ${libname} -> ${system_lib}"
+            else
+              echo "  WARNING: ${system_lib} not found, skipping ${libname}"
+            fi
+          done
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests

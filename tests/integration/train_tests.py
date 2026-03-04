@@ -535,13 +535,21 @@ class TrainTests(unittest.TestCase):
       r = subprocess.run(["ldd", te_so], text=True, capture_output=True)
       cudnn_deps = [l for l in r.stdout.splitlines() if "cudnn" in l.lower()]
       print(f"[DIAG] libtransformer_engine.so cuDNN deps:\n" + "\n".join(cudnn_deps))
-    # Find any cuDNN libs inside the venv (bundled by pip packages)
+    # Find any cuDNN libs inside the venv and check if they are symlinks
     venv_root = os.path.dirname(os.path.dirname(site_pkgs))
     r = subprocess.run(
         ["find", venv_root, "-name", "libcudnn*.so*"],
         text=True, capture_output=True,
     )
     print(f"[DIAG] cuDNN libs inside venv:\n{r.stdout or '(none)'}")
+    venv_cudnn_lib = os.path.join(site_pkgs, "nvidia", "cudnn", "lib")
+    if os.path.isdir(venv_cudnn_lib):
+      for fname in sorted(os.listdir(venv_cudnn_lib)):
+        fpath = os.path.join(venv_cudnn_lib, fname)
+        if os.path.islink(fpath):
+          print(f"[DIAG] venv cuDNN {fname} -> {os.readlink(fpath)} (symlink OK)")
+        else:
+          print(f"[DIAG] venv cuDNN {fname} is a regular file (symlink NOT created)")
     ld_path = os.environ.get("LD_LIBRARY_PATH", "")
     print(f"[DIAG] LD_LIBRARY_PATH: {ld_path or '(not set)'}")
     # Check each LD_LIBRARY_PATH dir for cuDNN specifically
