@@ -523,6 +523,21 @@ class TrainTests(unittest.TestCase):
     r = subprocess.run(["dpkg", "-l"], text=True, capture_output=True)
     cudnn_pkgs = [l for l in r.stdout.splitlines() if "cudnn" in l.lower()]
     print(f"[DIAG] All dpkg cudnn packages:\n" + "\n".join(cudnn_pkgs))
+    # Check if the missing symbol actually exists in libcudnn_graph.so.9
+    r = subprocess.run(
+        ["nm", "-D", "/usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9"],
+        text=True, capture_output=True,
+    )
+    insert_kernels = [l for l in r.stdout.splitlines() if "insert_kernels" in l]
+    print(f"[DIAG] insert_kernels in libcudnn_graph.so.9: {insert_kernels or '(NOT FOUND)'}")
+    # File modification timestamps to check if files are from different installs
+    r = subprocess.run(
+        ["stat", "-c", "%n  size=%s  mtime=%y",
+         "/usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9",
+         "/usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so.9"],
+        text=True, capture_output=True,
+    )
+    print(f"[DIAG] .so file stats:\n{r.stdout.strip()}")
     ld_path = os.environ.get("LD_LIBRARY_PATH", "")
     print(f"[DIAG] LD_LIBRARY_PATH: {ld_path or '(not set)'}")
     # Check each LD_LIBRARY_PATH dir for cuDNN specifically
