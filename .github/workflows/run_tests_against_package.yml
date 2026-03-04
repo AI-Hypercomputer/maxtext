@@ -92,7 +92,7 @@ jobs:
           CUDNN_PKGS=$(dpkg -l | grep -i cudnn | awk '{print $2}' | tr '\n' ' ')
           if [ -n "$CUDNN_PKGS" ]; then
             echo "Reinstalling cuDNN packages for consistency: $CUDNN_PKGS"
-            sudo apt-get update -q && sudo apt-get install -y --reinstall $CUDNN_PKGS
+            apt-get update -q && apt-get install -y --reinstall $CUDNN_PKGS
           else
             echo "No cuDNN packages found via dpkg, skipping reinstall."
           fi
