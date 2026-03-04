@@ -523,21 +523,25 @@ class TrainTests(unittest.TestCase):
     r = subprocess.run(["dpkg", "-l"], text=True, capture_output=True)
     cudnn_pkgs = [l for l in r.stdout.splitlines() if "cudnn" in l.lower()]
     print(f"[DIAG] All dpkg cudnn packages:\n" + "\n".join(cudnn_pkgs))
-    # Check if the missing symbol actually exists in libcudnn_graph.so.9
+    # Check what TE bundles in wheel_lib — a stale libcudnn_graph.so.9 there
+    # would be loaded first and shadow the system version
+    import sys
+    site_pkgs = next(p for p in sys.path if "site-packages" in p)
+    te_wheel_lib = os.path.join(site_pkgs, "transformer_engine", "wheel_lib")
+    print(f"[DIAG] TE wheel_lib contents: {os.listdir(te_wheel_lib) if os.path.isdir(te_wheel_lib) else '(not found)'}")
+    # Check ldd of libtransformer_engine.so to see which cuDNN it resolves to
+    te_so = os.path.join(te_wheel_lib, "libtransformer_engine.so")
+    if os.path.exists(te_so):
+      r = subprocess.run(["ldd", te_so], text=True, capture_output=True)
+      cudnn_deps = [l for l in r.stdout.splitlines() if "cudnn" in l.lower()]
+      print(f"[DIAG] libtransformer_engine.so cuDNN deps:\n" + "\n".join(cudnn_deps))
+    # Find any cuDNN libs inside the venv (bundled by pip packages)
+    venv_root = os.path.dirname(os.path.dirname(site_pkgs))
     r = subprocess.run(
-        ["nm", "-D", "/usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9"],
+        ["find", venv_root, "-name", "libcudnn*.so*"],
         text=True, capture_output=True,
     )
-    insert_kernels = [l for l in r.stdout.splitlines() if "insert_kernels" in l]
-    print(f"[DIAG] insert_kernels in libcudnn_graph.so.9: {insert_kernels or '(NOT FOUND)'}")
-    # File modification timestamps to check if files are from different installs
-    r = subprocess.run(
-        ["stat", "-c", "%n  size=%s  mtime=%y",
-         "/usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9",
-         "/usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so.9"],
-        text=True, capture_output=True,
-    )
-    print(f"[DIAG] .so file stats:\n{r.stdout.strip()}")
+    print(f"[DIAG] cuDNN libs inside venv:\n{r.stdout or '(none)'}")
     ld_path = os.environ.get("LD_LIBRARY_PATH", "")
     print(f"[DIAG] LD_LIBRARY_PATH: {ld_path or '(not set)'}")
     # Check each LD_LIBRARY_PATH dir for cuDNN specifically
@@ -558,7 +562,7 @@ class TrainTests(unittest.TestCase):
     print(f"[DIAG] TE version: {transformer_engine.__version__}")
     try:
       pip_out = subprocess.check_output(
-          ["pip", "show", "jax", "jaxlib", "transformer-engine", "transformer-engine-cu12"],
+          [sys.executable, "-m", "pip", "show", "jax", "jaxlib", "transformer-engine", "transformer-engine-cu12"],
           text=True, stderr=subprocess.DEVNULL,
       )
       print(f"[DIAG] pip show:\n{pip_out}")
