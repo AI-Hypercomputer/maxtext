@@ -512,15 +512,20 @@ class TrainTests(unittest.TestCase):
       print("\n[DIAG] nvidia-smi:\n" + smi[:500])
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"\n[DIAG] nvidia-smi unavailable: {e}")
-    try:
-      find_out = subprocess.check_output(
-          ["find", "/", "-name", "libcudnn*.so*", "-not", "-path", "*/proc/*"],
-          text=True, stderr=subprocess.DEVNULL, timeout=15,
-      )
-      print(f"[DIAG] All cuDNN libs on system:\n{find_out}")
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      print(f"[DIAG] find cuDNN libs failed: {e}")
-    print(f"[DIAG] LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', '(not set)')}")
+    # find: capture output even on non-zero exit (permission denied on some dirs is expected)
+    find_result = subprocess.run(
+        ["find", "/", "-name", "libcudnn*.so*", "-not", "-path", "*/proc/*",
+         "-not", "-path", "*/sys/*"],
+        text=True, capture_output=True, timeout=20,
+    )
+    print(f"[DIAG] All cuDNN libs on system:\n{find_result.stdout or '(none found)'}")
+    ld_path = os.environ.get("LD_LIBRARY_PATH", "")
+    print(f"[DIAG] LD_LIBRARY_PATH: {ld_path or '(not set)'}")
+    # Check each LD_LIBRARY_PATH dir for cuDNN specifically
+    for ld_dir in ld_path.split(":"):
+      cudnn_in_dir = _glob.glob(os.path.join(ld_dir, "libcudnn*.so*"))
+      if cudnn_in_dir:
+        print(f"[DIAG] cuDNN in LD_LIBRARY_PATH dir {ld_dir}: {cudnn_in_dir}")
     try:
       ldconfig_out = subprocess.check_output(
           ["ldconfig", "-p"], text=True, stderr=subprocess.DEVNULL
