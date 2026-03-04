@@ -85,17 +85,22 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: maxtext-wheel
-      - name: Reinstall cuDNN to ensure consistent sub-library versions (GPU only)
+      - name: Fix cuDNN sub-library version mismatch (GPU only)
         if: inputs.device_type == 'cuda12'
         shell: bash
         run: |
+          # Detect installed cuDNN package names (e.g. libcudnn9-cuda-12, libcudnn9-dev-cuda-12)
           CUDNN_PKGS=$(dpkg -l | grep -i cudnn | awk '{print $2}' | tr '\n' ' ')
-          if [ -n "$CUDNN_PKGS" ]; then
-            echo "Reinstalling cuDNN packages for consistency: $CUDNN_PKGS"
-            apt-get update -q && apt-get install -y --reinstall $CUDNN_PKGS
-          else
-            echo "No cuDNN packages found via dpkg, skipping reinstall."
+          if [ -z "$CUDNN_PKGS" ]; then
+            echo "No cuDNN packages found, skipping."
+            exit 0
           fi
+          echo "Detected cuDNN packages: $CUDNN_PKGS"
+          sudo apt-get update -q
+          # Use plain install (not --reinstall) so apt resolves a consistent
+          # version set from the current repository, even if the previously
+          # installed version is no longer downloadable.
+          sudo apt-get install -y --allow-downgrades $CUDNN_PKGS
       - name: Install the maxtext wheel
         shell: bash
         run: |
