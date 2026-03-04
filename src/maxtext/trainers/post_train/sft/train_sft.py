@@ -165,24 +165,24 @@ def _build_lora_provider(mt_config, qwix):
   if mt_config.lora_weight_qtype is not None:
     lora_kwargs["weight_qtype"] = mt_config.lora_weight_qtype
     max_logging.log(
-      "QLoRA configured: module_path=%s rank=%s alpha=%s weight_qtype=%s tile_size=%s"
-      % (
-        mt_config.lora_module_path,
-        mt_config.lora_rank,
-        mt_config.lora_alpha,
-        mt_config.lora_weight_qtype,
-        mt_config.lora_tile_size,
-      )
+        "QLoRA configured: module_path=%s rank=%s alpha=%s weight_qtype=%s tile_size=%s"
+        % (
+            mt_config.lora_module_path,
+            mt_config.lora_rank,
+            mt_config.lora_alpha,
+            mt_config.lora_weight_qtype,
+            mt_config.lora_tile_size,
+        )
     )
   else:
     max_logging.log(
-      "LoRA configured: module_path=%s rank=%s alpha=%s tile_size=%s"
-      % (
-        mt_config.lora_module_path,
-        mt_config.lora_rank,
-        mt_config.lora_alpha,
-        mt_config.lora_tile_size,
-      )
+        "LoRA configured: module_path=%s rank=%s alpha=%s tile_size=%s"
+        % (
+            mt_config.lora_module_path,
+            mt_config.lora_rank,
+            mt_config.lora_alpha,
+            mt_config.lora_tile_size,
+        )
     )
   return qwix.LoraProvider(**lora_kwargs)
 
@@ -206,7 +206,7 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
           precision,
           preferred_element_type,
           out_sharding=out_sharding,
-        )
+      )
 
     res = qwix_ptq.PtqProvider.dot_general(
         self,
@@ -226,18 +226,14 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
     if weight_name is None:
       return res
 
-    if (
-        len(rhs.shape) == 3
-        and tuple(dimension_numbers[0][1]) == (0,)
-        and not dimension_numbers[1][1]
-    ):
+    if len(rhs.shape) == 3 and tuple(dimension_numbers[0][1]) == (0,) and not dimension_numbers[1][1]:
       lora_params = qwix_lora._get_or_create_lora_params(
-        name=weight_name,
-        rule=rule,
-        a_shape=(rhs.shape[0], rule.rank),
-        b_shape=(rule.rank, rhs.shape[1] * rhs.shape[2]),
-        a_sharding_transpose=(0, None),
-        b_sharding_transpose=(None, 1),
+          name=weight_name,
+          rule=rule,
+          a_shape=(rhs.shape[0], rule.rank),
+          b_shape=(rule.rank, rhs.shape[1] * rhs.shape[2]),
+          a_sharding_transpose=(0, None),
+          b_sharding_transpose=(None, 1),
       )
       lora_a, lora_b = lora_params[:2]
       if rule.dropout > 0:
@@ -247,11 +243,7 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
       delta = jnp.einsum("...r,rnm->...nm", delta, lora_b)
       return res + delta * (rule.alpha / rule.rank)
 
-    if (
-        len(rhs.shape) == 3
-        and tuple(dimension_numbers[0][1]) == (0, 1)
-        and not dimension_numbers[1][1]
-    ):
+    if len(rhs.shape) == 3 and tuple(dimension_numbers[0][1]) == (0, 1) and not dimension_numbers[1][1]:
       k = rhs.shape[0] * rhs.shape[1]
       lora_params = qwix_lora._get_or_create_lora_params(
           name=weight_name,
@@ -268,7 +260,7 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
       lhs_perm = [i for i in range(lhs.ndim) if i not in contract_axes] + list(contract_axes)
       lhs_trans = jnp.transpose(lhs, lhs_perm)
       lhs_shape = lhs_trans.shape
-      lhs_flat = jnp.reshape(lhs_trans, lhs_shape[:-len(contract_axes)] + (k,))
+      lhs_flat = jnp.reshape(lhs_trans, lhs_shape[: -len(contract_axes)] + (k,))
       if lora_a.shape[0] != k:
         return _fallback_dot_general()
       delta = jnp.einsum("...k,kr->...r", lhs_flat, lora_a)
@@ -364,9 +356,7 @@ def _prepare_dummy_inputs(mt_config, mesh):
   batch_size = getattr(mt_config, "per_device_batch_size", 1)
   seq_len = getattr(mt_config, "max_target_length", 1)
   if batch_size <= 0 or seq_len <= 0:
-    raise ValueError(
-        "per_device_batch_size and max_target_length must be positive when LoRA is enabled."
-    )
+    raise ValueError("per_device_batch_size and max_target_length must be positive when LoRA is enabled.")
 
   devices_data_fsdp = 1
   if mesh is not None:
@@ -435,9 +425,7 @@ def _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util,
       continue
 
     is_scanned_decoder_module = (
-        "decoder/layers/" in module_path
-        and isinstance(num_decoder_layers, int)
-        and num_decoder_layers > 1
+        "decoder/layers/" in module_path and isinstance(num_decoder_layers, int) and num_decoder_layers > 1
     )
 
     if is_scanned_decoder_module:
@@ -543,8 +531,8 @@ def _verify_lora_parameters(lora_model, mt_config):
 
   if not matched_module_paths:
     max_logging.log(
-      f"LoRA module_path='{mt_config.lora_module_path}' did not match any weights. "
-      f"Sample module paths: {sample_module_paths}"
+        f"LoRA module_path='{mt_config.lora_module_path}' did not match any weights. "
+        f"Sample module paths: {sample_module_paths}"
     )
     raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
 
@@ -558,7 +546,7 @@ def _verify_lora_parameters(lora_model, mt_config):
 def maybe_apply_lora(model, mesh, mt_config):
   """Optionally applies LoRA/QLoRA to a MaxText model using Qwix."""
   # Skip Qwix LoRA if MaxText LoRA adapters are loaded
-  if hasattr(mt_config, 'lora_input_adapters_path') and mt_config.lora_input_adapters_path:
+  if hasattr(mt_config, "lora_input_adapters_path") and mt_config.lora_input_adapters_path:
     max_logging.log("MaxText LoRA adapters loaded, skipping Qwix LoRA application")
     return model
 
@@ -580,11 +568,11 @@ def maybe_apply_lora(model, mesh, mt_config):
 
   decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(mt_config, mesh)
   lora_model = qwix.apply_lora_to_model(
-    model,
-    lora_provider,
-    decoder_input_tokens=decoder_input_tokens,
-    decoder_positions=decoder_positions,
-    skip_nnx_init=True,
+      model,
+      lora_provider,
+      decoder_input_tokens=decoder_input_tokens,
+      decoder_positions=decoder_positions,
+      skip_nnx_init=True,
   )
   _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util, qwix_lora, types)
 
