@@ -512,12 +512,23 @@ class TrainTests(unittest.TestCase):
       print("\n[DIAG] nvidia-smi:\n" + smi[:500])
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"\n[DIAG] nvidia-smi unavailable: {e}")
-    cudnn_libs = (
-        _glob.glob("/usr/lib/x86_64-linux-gnu/libcudnn.so.*.*.*")
-        + _glob.glob("/usr/local/cuda*/lib64/libcudnn.so.*.*.*")
-        + _glob.glob("/usr/lib/aarch64-linux-gnu/libcudnn.so.*.*.*")
-    )
-    print(f"[DIAG] cuDNN libs found: {cudnn_libs}")
+    try:
+      find_out = subprocess.check_output(
+          ["find", "/", "-name", "libcudnn*.so*", "-not", "-path", "*/proc/*"],
+          text=True, stderr=subprocess.DEVNULL, timeout=15,
+      )
+      print(f"[DIAG] All cuDNN libs on system:\n{find_out}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"[DIAG] find cuDNN libs failed: {e}")
+    print(f"[DIAG] LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', '(not set)')}")
+    try:
+      ldconfig_out = subprocess.check_output(
+          ["ldconfig", "-p"], text=True, stderr=subprocess.DEVNULL
+      )
+      cudnn_lines = [l for l in ldconfig_out.splitlines() if "cudnn" in l.lower()]
+      print(f"[DIAG] ldconfig cudnn entries:\n" + "\n".join(cudnn_lines))
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"[DIAG] ldconfig failed: {e}")
     import jax, transformer_engine
     print(f"[DIAG] JAX version: {jax.__version__}")
     print(f"[DIAG] TE version: {transformer_engine.__version__}")
