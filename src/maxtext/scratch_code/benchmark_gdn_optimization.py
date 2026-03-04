@@ -302,17 +302,26 @@ def run_comparison():
     # -------------------------------------------------------------------------
     # Helper: Pure Functional wrappers to avoid Flax/JAX Version mismatch issues
     # -------------------------------------------------------------------------
-    def create_jitted_train_step(model):
+    def create_jitted_train_step(model, input_shape):
         graphdef, params = nnx.split(model)
+        
+        # 1. Create a static, deterministic projection tensor
+        # We generate this outside the JIT so it is a frozen constant in the graph
+        proj_key = jax.random.PRNGKey(99)
+        projection = jax.random.normal(proj_key, input_shape)
         
         @jax.jit
         def pure_train_step(params, x):
             m = nnx.merge(graphdef, params)
             def loss_fn(m_inner):
                 y = m_inner(x)
-                return jnp.mean(y)
-            loss, grads = nnx.value_and_grad(loss_fn)(m)
-            return loss, grads
+                # 2. Position-aware loss
+                # Every element is scaled by a unique, random value before averaging
+                loss = jnp.mean(y * projection.astype(y.dtype)) 
+                return loss, y
+                
+            (loss, y), grads = nnx.value_and_grad(loss_fn, has_aux=True)(m)
+            return loss, y, grads
             
         return pure_train_step, params
 
@@ -331,19 +340,26 @@ def run_comparison():
     # ==============================================================================
     print("\n--- Checking Logical Correctness ---")
 
-    # Create safe functional wrappers
-    jit_train_base, params_base = create_jitted_train_step(baseline_model)
-    jit_train_opt, params_opt = create_jitted_train_step(optimized_model)
+    # Pass the input shape so the random projection matches the output dimensions
+    jit_train_base, params_base = create_jitted_train_step(baseline_model, inputs.shape)
+    jit_train_opt, params_opt = create_jitted_train_step(optimized_model, inputs.shape)
 
-    loss_base, grads_base = jit_train_base(params_base, inputs)
-    jax.block_until_ready((loss_base, grads_base))
+    # Unpack loss, the raw output tensor, and gradients
+    loss_base, out_base, grads_base = jit_train_base(params_base, inputs)
+    jax.block_until_ready((loss_base, out_base, grads_base))
 
-    loss_opt, grads_opt = jit_train_opt(params_opt, inputs)
-    jax.block_until_ready((loss_opt, grads_opt))
+    loss_opt, out_opt, grads_opt = jit_train_opt(params_opt, inputs)
+    jax.block_until_ready((loss_opt, out_opt, grads_opt))
 
+    # 1. Compare the Forward Pass Output Tensors (Element-by-Element)
+    max_out_diff = float(jnp.max(jnp.abs(out_base - out_opt)))
+    print(f"Forward Pass Max Output Diff: {max_out_diff:.2e}")
+
+    # 2. Compare the Loss
     diff_loss = jnp.abs(loss_base - loss_opt)
-    print(f"Forward Pass Loss Diff: {float(diff_loss):.2e}")
+    print(f"Loss Scalar Diff: {float(diff_loss):.2e}")
 
+    # 3. Compare the Gradients (Element-by-Element)
     flat_grads_base, _ = jax.tree_util.tree_flatten(grads_base)
     flat_grads_opt, _ = jax.tree_util.tree_flatten(grads_opt)
     
@@ -353,10 +369,13 @@ def run_comparison():
             d = jnp.max(jnp.abs(g1 - g2))
             max_grad_diff = max(max_grad_diff, float(d))
 
-    print(f"Backward Pass Grad Diff: {max_grad_diff:.2e}")
+    print(f"Backward Pass Max Grad Diff: {max_grad_diff:.2e}")
 
-    if max_grad_diff > 1e-2:
-        print("WARNING: Significant divergence in gradients!")
+    # Define a strict tolerance
+    TOLERANCE = 1e-3 if DTYPE == jnp.bfloat16 else 1e-5
+
+    if max_out_diff > TOLERANCE or max_grad_diff > TOLERANCE:
+        print("❌ WARNING: Significant divergence detected!")
     else:
         print("✅ Outputs & Gradients match within tolerance.")
 
