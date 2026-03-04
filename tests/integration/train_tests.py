@@ -512,8 +512,31 @@ class TrainTests(unittest.TestCase):
       print("\n[DIAG] nvidia-smi:\n" + smi[:500])
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"\n[DIAG] nvidia-smi unavailable: {e}")
-    cudnn_libs = _glob.glob("/usr/lib/x86_64-linux-gnu/libcudnn.so.*.*.*")
+    cudnn_libs = (
+        _glob.glob("/usr/lib/x86_64-linux-gnu/libcudnn.so.*.*.*")
+        + _glob.glob("/usr/local/cuda*/lib64/libcudnn.so.*.*.*")
+        + _glob.glob("/usr/lib/aarch64-linux-gnu/libcudnn.so.*.*.*")
+    )
     print(f"[DIAG] cuDNN libs found: {cudnn_libs}")
+    import jax, transformer_engine
+    print(f"[DIAG] JAX version: {jax.__version__}")
+    print(f"[DIAG] TE version: {transformer_engine.__version__}")
+    try:
+      pip_out = subprocess.check_output(
+          ["pip", "show", "jax", "jaxlib", "transformer-engine", "transformer-engine-cu12"],
+          text=True, stderr=subprocess.DEVNULL,
+      )
+      print(f"[DIAG] pip show:\n{pip_out}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"[DIAG] pip show failed: {e}")
+    try:
+      import transformer_engine_jax as _te_jax_ext
+      registered = list(_te_jax_ext.registrations().keys())
+      has_fused_attn = "te_fused_attn_forward_ffi" in registered
+      print(f"[DIAG] TE registered FFI targets: {registered}")
+      print(f"[DIAG] te_fused_attn_forward_ffi registered: {has_fused_attn}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"[DIAG] Failed to inspect TE registrations: {e}")
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     zero1_ga = [  # tests Zero-1 optimizer sharding with gradient accumulation
         None,
