@@ -16,7 +16,7 @@
 
 import os.path
 
-# This is the maxtext package root (src/MaxText)
+# This is the maxtext package root (src/maxtext)
 # Since this file is at src/maxtext/utils/globals.py, we need to go up 2 levels
 MAXTEXT_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
