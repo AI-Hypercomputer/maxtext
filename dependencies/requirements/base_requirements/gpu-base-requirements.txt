@@ -1,2 +1,4 @@
 -r requirements.txt
-transformer-engine[jax]
+jax>=0.9.0
+jaxlib>=0.9.0
+transformer-engine[jax]>=2.11.0
