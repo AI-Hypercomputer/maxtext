@@ -2526,39 +2526,6 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
-    # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
-    # if self.using_pipeline_parallelism and self.mesh_axes and self.mesh_axes[0] == "stage":
-    #   self.ici_parallelism = [
-    #       self.ici_diloco_parallelism,
-    #       self.ici_pipeline_parallelism,
-    #       self.ici_data_parallelism,
-    #       self.ici_fsdp_parallelism,
-    #       self.ici_fsdp_transpose_parallelism,
-    #       self.ici_sequence_parallelism,
-    #       self.ici_context_parallelism,
-    #       self.ici_context_autoregressive_parallelism,
-    #       self.ici_tensor_parallelism,
-    #       self.ici_tensor_transpose_parallelism,
-    #       self.ici_tensor_sequence_parallelism,
-    #       self.ici_expert_parallelism,
-    #       self.ici_autoregressive_parallelism,
-    #   ]
-    #   self.dcn_parallelism = [
-    #       self.dcn_diloco_parallelism,
-    #       self.dcn_pipeline_parallelism,
-    #       self.dcn_data_parallelism,
-    #       self.dcn_fsdp_parallelism,
-    #       self.dcn_fsdp_transpose_parallelism,
-    #       self.dcn_sequence_parallelism,
-    #       self.dcn_context_parallelism,
-    #       self.dcn_context_autoregressive_parallelism,
-    #       self.dcn_tensor_parallelism,
-    #       self.dcn_tensor_transpose_parallelism,
-    #       self.dcn_tensor_sequence_parallelism,
-    #       self.dcn_expert_parallelism,
-    #       self.dcn_autoregressive_parallelism,
-    #   ]
-    # else:
     ici_map = {
         "diloco": self.ici_diloco_parallelism,
         "data": self.ici_data_parallelism,
