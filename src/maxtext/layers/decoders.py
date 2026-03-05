@@ -640,14 +640,32 @@ class Decoder(nn.Module):
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
       ]:
-        jax.debug.print("==== After merging image embeddings, y shape: {shape}", shape=y.shape)
+        jax.debug.print("==== Before merging image embeddings, y shape: {shape}, mean: {mean}", shape=str(y.shape), mean=jnp.mean(y))
+        jax.debug.print("==== Before merging image embeddings, image_embeddings shape: {shape}, mean: {mean}", shape=str(image_embeddings.shape), mean=jnp.mean(image_embeddings))
+        # Tile stub embeddings from (1, T, D) to (B, T, D) using true batch size from text embeddings
+        if image_embeddings.shape[0] != y.shape[0]:
+          image_embeddings = jnp.tile(image_embeddings, (y.shape[0], 1, 1))
+          jax.debug.print("==== Tiled image_embeddings to batch: {shape}", shape=str(image_embeddings.shape))
+        jax.debug.print("==== bidirectional_mask shape {shape}, sum: {sum}", shape=str(bidirectional_mask.shape), sum=jnp.sum(bidirectional_mask))
+        jax.debug.print("==== image_masks: {image_masks}", image_masks=image_masks)
+        # image_embeddings = jnp.load("/home/hengtaoguo_google_com/projects/video_embeds.npy")
+        # image_embeddings = image_embeddings[jnp.newaxis, :, :]  # Add batch dimension
+        # jax.debug.print("==== Loaded image_embeddings shape: {shape}, mean: {mean}", shape=str(image_embeddings.shape), mean=jnp.mean(image_embeddings))
+
+        if bidirectional_mask.ndim == 3:
+          bidirectional_mask = bidirectional_mask.squeeze(0)  # Ensure mask is [batch, seq_len]
         y = mm_utils.merge_mm_embeddings(
             text_embeddings=y,
             multimodal_embeddings=image_embeddings,
             mask=bidirectional_mask,
             token_masks=image_masks,
         )
-        jax.debug.print("==== After merging image embeddings, y shape: {shape}", shape=y.shape)
+        jax.debug.print("==== After merging image embeddings, y shape: {shape}, mean: {mean}", shape=str(y.shape), mean=jnp.mean(y))
+        # if str(y.shape) == "(1, 1071, 2048)":
+        # y = jnp.load("/home/hengtaoguo_google_com/projects/merged.npy")
+        # jax.debug.print("==== Loaded merged embeddings from file, y shape: {shape}, mean: {mean}", shape=str(y.shape), mean=jnp.mean(y))
+
+
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       else:
         raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
@@ -976,6 +994,11 @@ class Decoder(nn.Module):
                 kv_caches[index] = kv_cache
             global_layer_idx_offset += num_layers
         else:
+          jax.debug.print("====!!!! Decoder start y {shape} {mean}", shape=str(y.shape), mean=jnp.mean(y))
+          # if y.shape[1] == 1071:
+          #   y = jnp.load("/home/hengtaoguo_google_com/projects/decoder_array/decoder_hidden_states_a.npy")
+          #   jax.debug.print("====!!!! Loaded hidden states from disk for decoder start, new shape: {shape}, new mean: {mean}", shape=str(y.shape), mean=jnp.mean(y))
+          
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
             layer_kwargs = {}
@@ -1012,14 +1035,19 @@ class Decoder(nn.Module):
                 attention_metadata=attention_metadata,
                 **layer_call_kwargs,
             )
+            # jax.debug.print("Decoder start {layer} {shape} {mean}", layer=lyr, shape=str(y.shape), mean=jnp.mean(y))
+            # if lyr == 27 and y.shape[1] == 1071:
+            #   y = jnp.load(f"/home/hengtaoguo_google_com/projects/decoder_array/decoder_hidden_states_{lyr}.npy") 
+            #   jax.debug.print("==== Loaded hidden states from disk for layer {layer}, new shape: {shape}, new mean: {mean}", layer=lyr, shape=str(y.shape), mean=jnp.mean(y))
+
             if kv_caches is not None and kv_cache is not None:
               kv_caches[lyr] = kv_cache
 
-            if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
-              visual_embeds = deepstack_visual_embeds[lyr]
-              # Use bidirectional_mask to identify visual token positions
-              if bidirectional_mask is not None and visual_embeds is not None:
-                y = deepstack_process(y, bidirectional_mask, visual_embeds)
+            # if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
+            #   visual_embeds = deepstack_visual_embeds[lyr]
+            #   # Use bidirectional_mask to identify visual token positions
+            #   if bidirectional_mask is not None and visual_embeds is not None:
+            #     y = deepstack_process(y, bidirectional_mask, visual_embeds)
 
     assert isinstance(y, jax.Array)
 

@@ -1472,13 +1472,13 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
     self.in_channels = config.num_channels_for_vit
     self.embed_dim = config.hidden_size_for_vit
 
-    kernel_size = (self.temporal_patch_size, self.patch_size, self.patch_size)
+    self.kernel_size = (self.temporal_patch_size, self.patch_size, self.patch_size)
 
     self.proj = nnx.Conv(
         in_features=self.in_channels,
         out_features=self.embed_dim,
-        kernel_size=kernel_size,
-        strides=kernel_size,
+        kernel_size=self.kernel_size,
+        strides=self.kernel_size,
         use_bias=True,
         dtype=dtype,
         param_dtype=weight_dtype,
@@ -1492,8 +1492,11 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
     Returns:
         Output tensor of shape (batch, T*H*W, embed_dim) where T, H, W are the number of patches
     """
+    jax.debug.print("kernel_size: {kernel_size}", kernel_size=str(self.kernel_size))
     hidden_states = jnp.transpose(hidden_states, (0, 2, 3, 4, 1))
+    jax.debug.print("Before Conv3D proj hidden_states shape: {shape}", shape=str(hidden_states.shape))
     hidden_states = self.proj(hidden_states)
+    jax.debug.print("After Conv3D proj hidden_states shape: {shape}", shape=str(hidden_states.shape))
     batch_size = hidden_states.shape[0]
     seq_len = hidden_states.shape[1] * hidden_states.shape[2] * hidden_states.shape[3]
     hidden_states = hidden_states.reshape(batch_size, seq_len, self.embed_dim)
@@ -1709,18 +1712,26 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
         - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
     """
-    jax.debug.print("*Input hidden_states shape: {shape}", shape=hidden_states.shape)
+    jax.debug.print("*Input hidden_states shape: {shape}", shape=str(hidden_states.shape))
     jax.debug.print("*Input hidden_states mean: {mean}", mean=jnp.mean(hidden_states))
+    ve_pass = False
     if hidden_states.ndim != 5:
+        # hidden_states = 0.5 * jnp.ones_like(hidden_states)
+        # hidden_states = jnp.load("/home/hengtaoguo_google_com/projects/vision_encoder_input_hidden_states.npy")
+        # hidden_states = hidden_states.reshape(4200, 2, 16, 16, 3)
         hidden_states = hidden_states.reshape(1, 3, 5*2, 30*16, 28*16)
-    jax.debug.print("*Input hidden_states shape after reshape: {shape}", shape=hidden_states.shape)
+        ve_pass = True
+    jax.debug.print("*Input hidden_states shape after reshape: {shape}", shape=str(hidden_states.shape))
     _, _, num_frames, height, width = hidden_states.shape
     num_frames = num_frames // self.config.temporal_patch_size_for_vit
     height = height // self.config.patch_size_for_vit
     width = width // self.config.patch_size_for_vit
 
     x = self.patch_embed(hidden_states)
-    jax.debug.print("*Patch embedded hidden_states mean: {mean}", mean=jnp.mean(x))
+    # if ve_pass:
+    #     jax.debug.print("*Patch embedded hidden_states mean: {mean}", mean=jnp.mean(x))
+    #     x = jnp.load("/home/hengtaoguo_google_com/projects/patch_embed.npy")
+    jax.debug.print("*Patch embedded hidden_states loaded mean: {mean}", mean=jnp.mean(x))
     pos = self.pos_embed_interpolate(num_frames, height, width)
     jax.debug.print("*Positional embedding mean: {mean}", mean=jnp.mean(pos))
 
@@ -1744,9 +1755,11 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
       deep_feat = merger(h)
       deep_feats.append(deep_feat)
 
-    jax.debug.print("*Output hidden_states shape: {shape}", shape=x.shape)
+    jax.debug.print("*Output hidden_states shape: {shape}", shape=str(x.shape))
     jax.debug.print("*Output hidden_states mean: {mean}", mean=jnp.mean(x))
-    jax.debug.print("*Output deep_feats shapes: {shapes}", shapes=[df.shape for df in deep_feats])
+    jax.debug.print("*self.deep_idx: {deep_idx}", deep_idx=self.deep_idx)
+    for i, deep_feat in enumerate(deep_feats):
+      jax.debug.print("*Deep feature {i} shape: {shape}, mean: {mean}", i=i, shape=str(deep_feat.shape), mean=jnp.mean(deep_feat))
     return x, deep_feats
 
 
