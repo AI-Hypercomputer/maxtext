@@ -9,7 +9,7 @@ The following models are supported:
 | Model Family            | Sizes                  | HF $\\to$ Orbax (scan) | HF $\\to$ Orbax (unscan) | Orbax (scan) $\\to$ HF | Orbax (unscan) $\\to$ HF |
 | :---------------------- | :--------------------- | :--------------------: | :----------------------: | :--------------------: | :----------------------: |
 | **Gemma2**              | 2B, 9B, 27B            |           √            |            √             |           √            |            √             |
-| **Gemma3** (Multimodal) | 4B, 12B, 27B           |           -            |            √             |           -            |            √             |
+| **Gemma3** (Multimodal) | 4B, 12B, 27B           |           √            |            √             |           √            |            √             |
 | **Llama3.1**            | 8B, 70B, 450B          |           √            |            √             |           √            |            √             |
 | **Qwen3**               | 0.6B, 4B, 8B, 14B, 32B |           √            |            √             |           √            |            √             |
 | **Qwen3 MoE**           | 30B, 235B, 480B        |           √            |            √             |           √            |            √             |
