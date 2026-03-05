@@ -367,7 +367,7 @@ class Transformer(nnx.Module):
     else:
       dummy_attention_metadata = None
 
-    if not cfg.pure_nnx_decoder:
+    if isinstance(self.decoder, nn.Module):
       self.decoder.lazy_init(
           shared_embedding=self.token_embedder,
           decoder_input_tokens=dummy_decoder_input_tokens,

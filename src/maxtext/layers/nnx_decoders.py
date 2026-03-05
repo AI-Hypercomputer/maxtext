@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,29 +17,32 @@
 # pylint: disable=no-name-in-module
 
 import functools
-from typing import Any
-import warnings
 import inspect
+import warnings
+from typing import Any
 
 import jax
 import jax.numpy as jnp
-from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
-
 from flax import linen as nn
 from flax import nnx
 from flax.nnx import wrappers as nnx_wrappers
+from jax.ad_checkpoint import checkpoint_name
+from jax.sharding import Mesh
 
-from maxtext.common.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONTEXT
-from maxtext.common.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from maxtext.layers import linears
-from maxtext.layers import mhc
-from maxtext.layers import normalizations
-from maxtext.layers import initializers
-from maxtext.layers import quantizations
+from maxtext.common.common_types import (
+    EP_AS_CONTEXT,
+    MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_PREFILL,
+    MODEL_MODE_TRAIN,
+    Config,
+    DecoderBlockType,
+    ShardMode,
+)
+from maxtext.inference import page_manager
+from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
 from maxtext.layers.attentions import Attention
+from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.layers.embeddings import Embed, attend_on_embedding, PositionalEmbedding
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models import (
     deepseek,
@@ -53,16 +56,13 @@ from maxtext.models import (
     llama4,
     mistral,
     mixtral,
+    olmo3,
     qwen3,
     simple_layer,
-    olmo3,
 )
 from maxtext.multimodal import utils as mm_utils
+from maxtext.utils import max_logging, maxtext_utils, sharding
 from maxtext.utils.sharding import create_sharding
-from maxtext.utils import max_logging
-from maxtext.utils import sharding
-from maxtext.utils import maxtext_utils
-from maxtext.inference import page_manager
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -607,6 +607,7 @@ class NNXDecoder(nnx.Module):
             offload_dst="pinned_host",
         )
       elif cfg.remat_policy == "minimal_offloaded":
+        # offload all except context
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=[],
             names_which_can_be_offloaded=[
@@ -631,7 +632,9 @@ class NNXDecoder(nnx.Module):
             offload_dst="pinned_host",
         )
       elif cfg.remat_policy == "save_out_proj":
-        policy = jax.checkpoint_policies.save_only_these_names("out_proj")
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "out_proj",
+        )
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
@@ -686,6 +689,7 @@ class NNXDecoder(nnx.Module):
 
     y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
+    # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
       if cfg.model_name in [
           "gemma3-4b",
@@ -746,7 +750,9 @@ class NNXDecoder(nnx.Module):
           self.mesh, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
       )
 
+    # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
+      # Use the transpose of embedding matrix for logit transform.
       if isinstance(shared_embedding, nnx.Module):
         embedding_table = shared_embedding.embedding.value
       else:
@@ -757,6 +763,7 @@ class NNXDecoder(nnx.Module):
       logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config, out_sharding)
 
       if self.config.normalize_embedding_logits:
+        # Correctly normalize pre-softmax logits for this shared case.
         logits = logits / jnp.sqrt(y.shape[-1])
       if cfg.final_logits_soft_cap:
         logits = logits / cfg.final_logits_soft_cap
@@ -771,7 +778,7 @@ class NNXDecoder(nnx.Module):
 
   def __call__(
       self,
-      shared_embedding: Any,
+      shared_embedding: nn.Module | nnx.Module,
       decoder_input_tokens,
       decoder_positions,
       decoder_segment_ids=None,
@@ -792,6 +799,7 @@ class NNXDecoder(nnx.Module):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
+    # [batch, length] -> [batch, length, emb_dim]
     y = self._apply_embedding(
         shared_embedding,
         decoder_input_tokens,
