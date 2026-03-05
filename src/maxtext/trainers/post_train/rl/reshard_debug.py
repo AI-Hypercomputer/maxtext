@@ -47,21 +47,17 @@ from __future__ import annotations
 from typing import Sequence
 
 import collections
-import grain
 import jax
 import json
 import logging
 import os
 import pathwaysutils
-import tensorflow_datasets as tfds
 
 from absl import app
 from absl import logging as absl_logging
-from etils import epath
 from flax import nnx
 from jax.sharding import Mesh
 from orbax import checkpoint as ocp
-from pprint import pprint
 from transformers import AutoTokenizer
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
@@ -75,9 +71,7 @@ os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
-from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
-from maxtext.input_pipeline.instruction_data_processing import load_template_from_file
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 
 
@@ -102,51 +96,6 @@ def get_maxtext_model(config, devices=None):
     tunix_model = TunixMaxTextAdapter(base_model=model, use_no_op_mappings=use_no_op_mappings)
     tunix_model.config = None
   return tunix_model, mesh
-
-
-def get_dataset(
-    model_tokenizer, tmvp_config, data_dir, split="train", data_files=None, dataset_name=None
-) -> grain.MapDataset:
-  """Download data"""
-  if not os.path.exists(data_dir):
-    os.makedirs(data_dir)
-
-  if dataset_name is None:
-    raise ValueError("dataset_name must be provided")
-
-  if dataset_name.startswith("huggingface:"):
-    import datasets  # pylint: disable=import-outside-toplevel
-
-    if data_files is None:
-      hf_dataset_name = dataset_name.replace("huggingface:", "")
-      data = datasets.load_dataset(hf_dataset_name, split=split, cache_dir=data_dir)
-      if tmvp_config.debug.rl:
-        max_logging.log(f"Loaded Hugging Face dataset {hf_dataset_name} with split {split}. Size: {len(data)}")
-    else:  # data_files have been provided, useful for using slices of large datasets like nvidia/OpenMathInstruct-2
-      data = datasets.load_dataset(
-          "parquet",
-          data_files={tmvp_config.train_split: data_files},
-          split=split,
-          cache_dir=data_dir,
-      )
-  else:
-    builder_kwargs = {"file_format": tfds.core.FileFormat.ARRAY_RECORD}
-    data = tfds.data_source(
-        dataset_name,
-        split=split,
-        data_dir=data_dir,
-        builder_kwargs=builder_kwargs,
-        download=True,
-    )
-
-  template_config = load_template_from_file(tmvp_config.chat_template_path)
-
-  loaded_dataset = (
-      grain.MapDataset.source(data)
-      .shuffle(seed=tmvp_config.data_shuffle_seed)
-      .map(lambda x: utils_rl.process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x))
-  )
-  return loaded_dataset
 
 
 def setup_configs_and_devices(argv: list[str]):
@@ -423,12 +372,12 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     noise = jax.random.normal(subkey, ()) * 1e-3
     # Update all actor weights to trigger full resharding
     state = nnx.state(actor_model, nnx.Param)
-    new_state = jax.tree.map(lambda x: x + noise, state)
+    new_state = jax.tree_util.tree_map(lambda x: x + noise, state)
     nnx.update(actor_model, new_state)
 
     show_hbm_usage(f"HBM before step {step}:")
     rl_cluster.sync_weights()
-    jax.block_until_ready(rl_cluster.rollout._sampler.transformer_state)
+    jax.tree_util.tree_map(jax.block_until_ready, rl_cluster.rollout._sampler.transformer_state)
     show_hbm_usage(f"HBM after step {step}:")
     max_logging.log(f"Resharding via sync_weights() completed: step {step}")
 
