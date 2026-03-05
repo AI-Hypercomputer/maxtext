@@ -78,7 +78,13 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
   Returns:
     The variable's value, potentially wrapped in `nn.LogicallyPartitioned`.
   """
+
   if isinstance(variable.value, aqt_tensor.QTensor):
+    return variable.value
+
+  # If the value is already explicitly partitioned (e.g. from nnx_pipeline),
+  # return it as-is.
+  if isinstance(variable.value, nn.spmd.LogicallyPartitioned):
     return variable.value
 
   if variable.type.__name__ == "_overwrite_with_gradient":
