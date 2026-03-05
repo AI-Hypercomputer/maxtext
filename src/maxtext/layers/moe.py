@@ -1118,6 +1118,7 @@ class RoutedMoE(nnx.Module):
             pre_bias_logits,
             self.config.use_custom_sort_vjp,
             roll_to_expert_id=num_experts_per_shard * expert_shard_id,
+            rngs=rngs,
         )
 
         # Filter down to the group sizes that apply to only the experts in the

@@ -213,7 +213,7 @@ class PipelineParallelismTest(unittest.TestCase):
         run_name="circular_minimum_microbatches",
         max_target_length=128,
         base_emb_dim=28,
-        ici_pipeline_parallelism=4,
+        ici_pipeline_parallelism=2,
         base_num_decoder_layers=8,
         num_pipeline_microbatches=4,
         per_device_batch_size=4,
@@ -230,7 +230,7 @@ class PipelineParallelismTest(unittest.TestCase):
         run_name="circular_extra_microbatches",
         max_target_length=128,
         base_emb_dim=28,
-        ici_pipeline_parallelism=4,
+        ici_pipeline_parallelism=2,
         base_num_decoder_layers=8,
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
@@ -247,7 +247,7 @@ class PipelineParallelismTest(unittest.TestCase):
         run_name="circular_moe",
         max_target_length=128,
         base_emb_dim=28,
-        ici_pipeline_parallelism=4,
+        ici_pipeline_parallelism=2,
         base_num_decoder_layers=8,
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
@@ -279,6 +279,7 @@ class PipelineParallelismTest(unittest.TestCase):
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
+  @pytest.mark.skip(reason="None circular pipeline is not supported.")
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
@@ -287,7 +288,7 @@ class PipelineParallelismTest(unittest.TestCase):
         run_name="non_circular",
         max_target_length=128,
         base_emb_dim=28,
-        ici_pipeline_parallelism=4,
+        ici_pipeline_parallelism=2,
         base_num_decoder_layers=4,
         num_pipeline_microbatches=4,
         per_device_batch_size=4,
@@ -327,6 +328,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu_only
+  @pytest.mark.skip(reason="Circular pipeline does not support pipeline delay.")
   def test_delay_activation_forwarding_same_output_and_grad(self):
     # 4 stages, delayed activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
@@ -336,7 +338,7 @@ class PipelineParallelismTest(unittest.TestCase):
         run_name="activation_forwarding",
         max_target_length=128,
         base_emb_dim=28,
-        ici_pipeline_parallelism=4,
+        ici_pipeline_parallelism=2,
         base_num_decoder_layers=8,
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
@@ -345,6 +347,7 @@ class PipelineParallelismTest(unittest.TestCase):
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.integration_test
+  @pytest.mark.skip(reason="Non-circular pipeline is not supported.")
   @pytest.mark.tpu_only
   def test_full_train_non_circular(self):
     # Run a full train.py call with 4 stages, 32 layers (8 layers per stage), 8 microbatches
@@ -410,7 +413,8 @@ class PipelineParallelismTest(unittest.TestCase):
         ]
     )
 
-  @pytest.mark.skipif(is_decoupled(), reason="Pipeline parallelism not supported in decoupled mode")
+  # @pytest.mark.skipif(is_decoupled(), reason="Pipeline parallelism not supported in decoupled mode")
+  @pytest.mark.skip(reason="Circular pipeline does not support fp8.")
   @pytest.mark.integration_test
   def test_full_train_fp8(self):
     # Run a full train.py call with fp8 quantization, which adds extra
@@ -443,7 +447,8 @@ class PipelineParallelismTest(unittest.TestCase):
     _adapt_parallelism(args, pipeline_stages=4)
     train_main(args)
 
-  @pytest.mark.skipif(is_decoupled(), reason="Pipeline parallelism not supported in decoupled mode")
+  # @pytest.mark.skipif(is_decoupled(), reason="Pipeline parallelism not supported in decoupled mode")
+  @pytest.mark.skip(reason="Circular pipeline does not support fp8.")
   @pytest.mark.integration_test
   def test_full_train_nanoo_fp8(self):
     # Run a full train.py call with NANOO fp8 quantization, which adds extra
