@@ -152,7 +152,7 @@ max_num_seqs: null
 # If True, enables asynchronous scheduling in vLLM for faster generation
 async_scheduling: True
 # stop generation when any of these strings is generated
-stop_strings: [</answer>]
+stop_strings: null
 
 # ====== Checkpoint Configuration ======
 enable_checkpointing: True
