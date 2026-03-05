@@ -640,6 +640,19 @@ class NANOOFp8Provider(qwix.QtProvider):
     return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
 
 
+def get_fp8_full_qwix_rule(config: Config):
+  return qwix.QtRule(
+      module_path="decoder/.*layers.*",
+      weight_qtype=jnp.float8_e4m3fn,
+      act_qtype=jnp.float8_e4m3fn,
+      bwd_qtype=jnp.float8_e5m2,
+      weight_calibration_method=config.weight_quantization_calibration_method,
+      act_calibration_method=config.act_quantization_calibration_method,
+      bwd_calibration_method=config.bwd_quantization_calibration_method,
+      op_names=("dot_general", "gmm", "ragged_dot"),
+  )
+
+
 def get_quantization_rule(config: Config):
   match config.quantization:
     case "int8":
@@ -661,16 +674,7 @@ def get_quantization_rule(config: Config):
           op_names=("dot_general",),
       )
     case "fp8_full":
-      return qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.float8_e4m3fn,
-          act_qtype=jnp.float8_e4m3fn,
-          bwd_qtype=jnp.float8_e5m2,
-          weight_calibration_method=config.weight_quantization_calibration_method,
-          act_calibration_method=config.act_quantization_calibration_method,
-          bwd_calibration_method=config.bwd_quantization_calibration_method,
-          op_names=("dot_general", "gmm", "ragged_dot"),
-      )
+      return get_fp8_full_qwix_rule(config)
     case "fp8_gpu":
       return qwix.QtRule(
           module_path="decoder/.*layers.*",
@@ -808,7 +812,7 @@ class TransformerEngineQuantization(Quantization):
             postfix=postfix,
             variable_collection=OVERWRITE_WITH_GRADIENT,
             quantization_checkpoint_name="quantization",
-            fp8_recipe=fp8_recipe
+            fp8_recipe=fp8_recipe,
         )
 
       @nn.compact

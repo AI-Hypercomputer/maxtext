@@ -815,6 +815,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
           weight_gather_axes=weight_gather_axes,
           input_buffer_count=input_buffer_count,
           combine_scopes=combine_scopes,
+          qwix_rule=quantizations.get_fp8_full_qwix_rule(config),
       )
     else:
       output = tokamax.ragged_dot(
