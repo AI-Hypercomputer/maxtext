@@ -132,7 +132,15 @@ def use_maxtext_loss_function(trainer, mt_config):
     The trainer configured with the MaxText loss function.
   """
 
-  def loss_func(model, inputs, inputs_position, inputs_segmentation, targets, targets_position, targets_segmentation):
+  def loss_func(
+      model,
+      inputs,
+      inputs_position,
+      inputs_segmentation,
+      targets,
+      targets_position,
+      targets_segmentation,
+  ):
     data = {
         "inputs": inputs,
         "inputs_position": inputs_position,
@@ -148,6 +156,7 @@ def use_maxtext_loss_function(trainer, mt_config):
 
 
 def _validate_lora_config(mt_config):
+  """Validates required LoRA configuration fields."""
   if mt_config.lora_rank <= 0:
     raise ValueError("enable_lora is True but lora_rank is not set to a positive value.")
   if not mt_config.lora_module_path:
@@ -155,6 +164,7 @@ def _validate_lora_config(mt_config):
 
 
 def _build_lora_provider(mt_config, qwix):
+  """Builds a Qwix LoRA provider from MaxText LoRA settings."""
   lora_kwargs = {
       "module_path": mt_config.lora_module_path,
       "rank": mt_config.lora_rank,
@@ -165,29 +175,23 @@ def _build_lora_provider(mt_config, qwix):
   if mt_config.lora_weight_qtype is not None:
     lora_kwargs["weight_qtype"] = mt_config.lora_weight_qtype
     max_logging.log(
-        "QLoRA configured: module_path=%s rank=%s alpha=%s weight_qtype=%s tile_size=%s"
-        % (
-            mt_config.lora_module_path,
-            mt_config.lora_rank,
-            mt_config.lora_alpha,
-            mt_config.lora_weight_qtype,
-            mt_config.lora_tile_size,
-        )
+        f"QLoRA configured: module_path={mt_config.lora_module_path} "
+        f"rank={mt_config.lora_rank} alpha={mt_config.lora_alpha} "
+        f"weight_qtype={mt_config.lora_weight_qtype} "
+        f"tile_size={mt_config.lora_tile_size}"
     )
   else:
     max_logging.log(
-        "LoRA configured: module_path=%s rank=%s alpha=%s tile_size=%s"
-        % (
-            mt_config.lora_module_path,
-            mt_config.lora_rank,
-            mt_config.lora_alpha,
-            mt_config.lora_tile_size,
-        )
+        f"LoRA configured: module_path={mt_config.lora_module_path} "
+        f"rank={mt_config.lora_rank} alpha={mt_config.lora_alpha} "
+        f"tile_size={mt_config.lora_tile_size}"
     )
   return qwix.LoraProvider(**lora_kwargs)
 
 
 def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qwix_ptq, types):
+  """Patches Qwix LoRA dot_general to support selected 3D-kernel paths."""
+
   def _dot_general_with_3d(
       self,
       lhs,
@@ -218,7 +222,7 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
         out_sharding=out_sharding,
     )
 
-    rule, _ = self._get_current_rule_and_op_id("dot_general", repeated_call=True)
+    rule, _ = self._get_current_rule_and_op_id("dot_general", repeated_call=True)  # pylint: disable=protected-access
     if not isinstance(rule, qwix_lora.LoraRule):
       return res
 
@@ -227,7 +231,7 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
       return res
 
     if len(rhs.shape) == 3 and tuple(dimension_numbers[0][1]) == (0,) and not dimension_numbers[1][1]:
-      lora_params = qwix_lora._get_or_create_lora_params(
+      lora_params = qwix_lora._get_or_create_lora_params(  # pylint: disable=protected-access
           name=weight_name,
           rule=rule,
           a_shape=(rhs.shape[0], rule.rank),
@@ -245,7 +249,7 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
 
     if len(rhs.shape) == 3 and tuple(dimension_numbers[0][1]) == (0, 1) and not dimension_numbers[1][1]:
       k = rhs.shape[0] * rhs.shape[1]
-      lora_params = qwix_lora._get_or_create_lora_params(
+      lora_params = qwix_lora._get_or_create_lora_params(  # pylint: disable=protected-access
           name=weight_name,
           rule=rule,
           a_shape=(k, rule.rank),
@@ -272,67 +276,12 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
   lora_provider.dot_general = types.MethodType(_dot_general_with_3d, lora_provider)
 
 
-def _patch_qwix_find_param(qwix_flax_util):
-  if getattr(qwix_flax_util, "_maxtext_find_param_patched", False):
-    return
-
-  original_find_param = qwix_flax_util.find_param
-
-  def _safe_find_param(x, ptq_array_type=None):
-    module = qwix_flax_util.get_current_module()
-    candidates = {}
-
-    # 1) Pure NNX: scan attributes for nnx.Params / ptq arrays.
-    if isinstance(module, nnx.Module):
-      array_types = (nnx.Param,) if ptq_array_type is None else (nnx.Param, ptq_array_type)
-      for name, node in module.__dict__.items():
-        if isinstance(node, array_types):
-          value = getattr(node, "value", None)
-          if value is None:
-            try:
-              value = qwix_flax_util.unbox(node)
-            except Exception:
-              continue
-          candidates[name] = value
-
-    else:
-      return original_find_param(x, ptq_array_type)
-
-    candidates_by_id = {id(c): n for n, c in candidates.items()}
-
-    if id(x) in candidates_by_id:
-      return candidates_by_id[id(x)]
-
-    if isinstance(x, jax.core.Tracer) and hasattr(x, "parent"):
-      while True:
-        if id(x) in candidates_by_id:
-          return candidates_by_id[id(x)]
-        if x.parent and len(x.parent.in_tracers) == 1:
-          x = x.parent.in_tracers[0]
-        elif id(const := x.get_const()) in candidates_by_id:
-          return candidates_by_id[id(const)]
-        else:
-          return None
-
-    if not hasattr(x, "shape"):
-      return None
-    candidates = {n: c for n, c in candidates.items() if getattr(c, "shape", None) == x.shape}
-    if len(candidates) > 2:
-      raise ValueError(f"Multiple candidate params found: {candidates.keys()}")
-    if len(candidates) == 1:
-      return list(candidates.keys())[0]
-
-    return None
-
-  qwix_flax_util.find_param = _safe_find_param
-  qwix_flax_util._maxtext_find_param_patched = True
-
-
 def _patch_with_sharding_constraint():
+  """Patches sharding constraint to tolerate shape/spec rank mismatches."""
   if getattr(jax.lax, "_maxtext_with_sharding_constraint_patched", False):
     return
 
-  jax.lax._original_with_sharding_constraint = jax.lax.with_sharding_constraint
+  jax.lax._original_with_sharding_constraint = jax.lax.with_sharding_constraint  # pylint: disable=protected-access
 
   def _safe_with_sharding_constraint(x, sharding, *args, **kwargs):
     def _safe_leaf_fn(x_leaf, s_leaf):
@@ -342,17 +291,18 @@ def _patch_with_sharding_constraint():
           ndim = getattr(x_leaf, "ndim", None)
           if ndim is not None and len(spec) > ndim:
             return x_leaf
-      except Exception:
+      except Exception:  # pylint: disable=broad-exception-caught
         pass
-      return jax.lax._original_with_sharding_constraint(x_leaf, s_leaf, *args, **kwargs)
+      return jax.lax._original_with_sharding_constraint(x_leaf, s_leaf, *args, **kwargs)  # pylint: disable=protected-access
 
     return jax.tree_util.tree_map(_safe_leaf_fn, x, sharding)
 
   jax.lax.with_sharding_constraint = _safe_with_sharding_constraint
-  jax.lax._maxtext_with_sharding_constraint_patched = True
+  jax.lax._maxtext_with_sharding_constraint_patched = True  # pylint: disable=protected-access
 
 
 def _prepare_dummy_inputs(mt_config, mesh):
+  """Builds dummy decoder inputs used to materialize LoRA parameters."""
   batch_size = getattr(mt_config, "per_device_batch_size", 1)
   seq_len = getattr(mt_config, "max_target_length", 1)
   if batch_size <= 0 or seq_len <= 0:
@@ -371,6 +321,7 @@ def _prepare_dummy_inputs(mt_config, mesh):
 
 
 def _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util, qwix_lora, types):
+  """Pre-creates LoRA parameter tensors for modules matching the target regex."""
   rules = [rule for rule in getattr(lora_provider, "_rules", []) if isinstance(rule, qwix_lora.LoraRule)]
   if not rules:
     max_logging.log("LoRA precreate: no LoRA rules found on provider, skipping.")
@@ -395,7 +346,7 @@ def _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util,
   skipped_modules = []
   precreated_shapes = []
 
-  for path, module in lora_model.iter_modules():
+  for path, module in nnx.iter_modules(lora_model):
     module_path = "/".join(str(p) for p in path)
     if not compiled_module_path.search(module_path):
       continue
@@ -409,7 +360,7 @@ def _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util,
 
     try:
       kernel_value = qwix_flax_util.unbox(kernel)
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
       if len(skipped_modules) < 10:
         skipped_modules.append(f"{module_path}: cannot unbox kernel")
       continue
@@ -486,13 +437,13 @@ def _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util,
       b_sharding_transpose = tuple(range(prefix_rank)) + (None, prefix_rank + 1)
 
     def _init_for_module(
-        self,
+        self,  # pylint: disable=unused-argument
         a_shape=a_shape,
         b_shape=b_shape,
         a_sharding_transpose=a_sharding_transpose,
         b_sharding_transpose=b_sharding_transpose,
     ):
-      qwix_lora._get_or_create_lora_params(
+      qwix_lora._get_or_create_lora_params(  # pylint: disable=protected-access
           name="kernel",
           rule=rule,
           a_shape=a_shape,
@@ -507,17 +458,20 @@ def _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util,
       precreated_shapes.append((module_path, a_shape, b_shape))
 
   max_logging.log(
-      "LoRA precreate: matched_modules=%s precreated_modules=%s skipped_sample=%s shape_sample=%s"
-      % (matched_modules, precreated_modules, skipped_modules, precreated_shapes)
+      f"LoRA precreate: matched_modules={matched_modules} "
+      f"precreated_modules={precreated_modules} "
+      f"skipped_sample={skipped_modules} "
+      f"shape_sample={precreated_shapes}"
   )
 
 
 def _verify_lora_parameters(lora_model, mt_config):
+  """Validates that LoRA is active or that target modules were matched."""
   compiled_module_path = re.compile(mt_config.lora_module_path)
   matched_module_paths = []
   sample_module_paths = []
 
-  for path, _ in lora_model.iter_modules():
+  for path, _ in nnx.iter_modules(lora_model):
     module_path = "/".join(str(p) for p in path)
     if len(sample_module_paths) < 50:
       sample_module_paths.append(module_path)
@@ -537,9 +491,9 @@ def _verify_lora_parameters(lora_model, mt_config):
     raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
 
   max_logging.log(
-      "LoRA verification: matched %s target modules but LoRA params are not yet materialized; "
-      "continuing with lazy LoRA initialization. Sample matches: %s"
-      % (len(matched_module_paths), matched_module_paths[:10])
+      f"LoRA verification: matched {len(matched_module_paths)} target modules but "
+      "LoRA params are not yet materialized; continuing with lazy LoRA initialization. "
+      f"Sample matches: {matched_module_paths[:10]}"
   )
 
 
@@ -553,17 +507,16 @@ def maybe_apply_lora(model, mesh, mt_config):
   if not getattr(mt_config, "enable_lora", False):
     return model
 
-  import qwix
-  import qwix._src.flax_util as qwix_flax_util
-  import qwix._src.providers.lora as qwix_lora
-  import qwix._src.providers.ptq as qwix_ptq
-  import types
+  import qwix  # pylint: disable=import-outside-toplevel
+  import qwix._src.flax_util as qwix_flax_util  # pylint: disable=import-outside-toplevel
+  import qwix._src.providers.lora as qwix_lora  # pylint: disable=import-outside-toplevel
+  import qwix._src.providers.ptq as qwix_ptq  # pylint: disable=import-outside-toplevel
+  import types  # pylint: disable=import-outside-toplevel
 
   _validate_lora_config(mt_config)
   lora_provider = _build_lora_provider(mt_config, qwix)
 
   _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qwix_ptq, types)
-  _patch_qwix_find_param(qwix_flax_util)
   _patch_with_sharding_constraint()
 
   decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(mt_config, mesh)
@@ -574,13 +527,94 @@ def maybe_apply_lora(model, mesh, mt_config):
       decoder_positions=decoder_positions,
       skip_nnx_init=True,
   )
+
+  # Materialize LoRA parameters. Qwix 0.1.5+ unsets RNGs after apply_lora_to_model,
+  # so we manually set them here for the pre-creation pass.
+  lora_model.set_attributes(qwix_rngs=nnx.Rngs(10003))
   _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util, qwix_lora, types)
+  # Unset them after use to avoid keeping them in the model state if not needed.
+  lora_model.set_attributes(qwix_rngs=None)
 
   if mesh is not None:
     lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
 
   _verify_lora_parameters(lora_model, mt_config)
   return lora_model
+
+
+def maybe_restore_lora_from_path(model, mt_config, mesh=None):
+  """Optionally restores LoRA params from a dedicated adapter checkpoint path.
+
+  If `lora_restore_path` is set and LoRA params have not yet been materialized on
+  the model, this function attempts to apply LoRA first (when enabled) before
+  restoring adapter weights.
+  """
+  lora_restore_path = getattr(mt_config, "lora_restore_path", "")
+  if not lora_restore_path:
+    return model
+
+  if not tunix_sft_utils.is_lora_enabled(model):
+    if getattr(mt_config, "enable_lora", False):
+      max_logging.log("lora_restore_path is set but model has no LoRA params yet; " "applying LoRA before restore.")
+      model = maybe_apply_lora(model, mesh, mt_config)
+
+    if not tunix_sft_utils.is_lora_enabled(model):
+      raise ValueError(
+          "lora_restore_path is set but LoRA is not enabled on the model. "
+          "Set enable_lora=True and verify lora_module_path matches model modules."
+      )
+
+  if not os.path.exists(lora_restore_path):
+    raise ValueError(f"lora_restore_path does not exist: {lora_restore_path}")
+
+  max_logging.log(f"Restoring LoRA params from: {lora_restore_path}")
+
+  ckptr = ocp.Checkpointer(
+      ocp.PyTreeCheckpointHandler(
+          restore_concurrent_gb=mt_config.checkpoint_storage_concurrent_gb,
+          save_concurrent_gb=mt_config.checkpoint_storage_concurrent_gb,
+          use_ocdbt=mt_config.checkpoint_storage_use_ocdbt,
+          use_zarr3=mt_config.checkpoint_storage_use_zarr3,
+      )
+  )
+
+  lora_state = nnx.state(model, nnx.LoRAParam)
+  metadata = ckptr.metadata(lora_restore_path)
+
+  # Restore is target-driven from the currently materialized `lora_state`.
+  # Checkpoint adapter paths that do not match these LoRA params are not
+  # remapped automatically by Orbax during restore.
+
+  # LoRA restore path is NNX-only.
+  if "params" in metadata.item_metadata.tree.keys() and "params" in metadata.item_metadata.tree.get("params", {}).keys():
+    raise ValueError("lora_restore_path must point to an NNX LoRA checkpoint (not Linen format).")
+
+  target_for_restore = jax.tree.map(
+      lambda v: {"value": v.value},
+      lora_state,
+      is_leaf=lambda n: isinstance(n, nnx.Variable),
+  )
+  item_to_restore = target_for_restore
+  restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+
+  restored = ckptr.restore(
+      lora_restore_path,
+      item=item_to_restore,
+      transforms={},
+      restore_args=restore_args,
+  )
+
+  restored_lora = jax.tree.map(
+      lambda v: v["value"],
+      restored,
+      is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+  )
+
+  if restored_lora:
+    nnx.update(model, restored_lora)
+    max_logging.log("LoRA restore complete.")
+
+  return model
 
 
 def setup_trainer_state(mt_config, goodput_recorder=None):
@@ -590,6 +624,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.create_nnx_model(mt_config)
     model = maybe_apply_lora(model, mesh, mt_config)
+    model = maybe_restore_lora_from_path(model, mt_config, mesh)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     # pass in model for muon
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
@@ -615,7 +650,10 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
   with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-    trainer.train(trainer.data_hooks.train_data_iterator, trainer.data_hooks.eval_data_iterator)
+    trainer.train(
+        trainer.data_hooks.train_data_iterator,
+        trainer.data_hooks.eval_data_iterator,
+    )
   return trainer
 
 

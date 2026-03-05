@@ -289,7 +289,10 @@ class Checkpointing(BaseModel):
   lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
   hf_lora_adapter_path: PathStr = Field(
       "",
-      description="HuggingFace LoRA adapter repo ID (e.g., 'username/adapter-repo') or local path to directory containing adapter_model.safetensors.",
+      description=(
+          "HuggingFace LoRA adapter repo ID (e.g., 'username/adapter-repo') or local "
+          "path to directory containing adapter_model.safetensors."
+      ),
   )
   load_full_state_path: PathStr = Field("", description="Loads the complete training state from a checkpoint path.")
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
@@ -800,7 +803,10 @@ class LayoutAndSharding(BaseModel):
       description="Allowed percentage of non-sharded parameters.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
-  internal_compile: bool = Field(False, description="Use internal_compile to bypass open-source topology mappings.")
+  internal_compile: bool = Field(
+      False,
+      description="Use internal_compile to bypass open-source topology mappings.",
+  )
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
 
 
@@ -1075,6 +1081,13 @@ class LoRA(BaseModel):
   lora_tile_size: NonNegativeInt | None = Field(
       None,
       description="Optional tile size for QLoRA (e.g., 128 or 256).",
+  )
+  lora_restore_path: PathStr = Field(
+      "",
+      description=(
+          "Optional NNX LoRA checkpoint path to restore adapter weights from."
+          " This must be the direct `model_params` path."
+      ),
   )
 
 
@@ -1412,7 +1425,8 @@ class Profiling(BaseModel):
   xprof_e2e_enable_fw_thermal_event: bool = Field(False, description="Enable FW thermal event.")
   profile_power_events: bool = Field(
       False,
-      description="Enable TPU-specific power/thermal profiling events. Defaults to False to avoid breaking GPU xplane tracing.",
+      description="Enable TPU-specific power/thermal profiling events."
+      " Defaults to False to avoid breaking GPU xplane tracing.",
   )
 
 
