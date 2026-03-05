@@ -1274,7 +1274,7 @@ class RoutedMoE(nnx.Module):
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
-      layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
+      layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
 
       layer_w1 = gmm_fn(
           x,
@@ -1288,7 +1288,7 @@ class RoutedMoE(nnx.Module):
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w1 = layer_w1 + w1_bias
-      layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
+      layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
 
       intermediate_output = gmm_fn(
@@ -1305,7 +1305,7 @@ class RoutedMoE(nnx.Module):
         )
       if self.config.mlp_bias:
         intermediate_output = intermediate_output + wo_bias
-      intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
+      intermediate_output = adc.checkpoint_name(intermediate_output, "moe_mlpwo")
 
       if self.config.use_ring_of_experts:
         # Set the outputs of tokens which were not processed to 0.
@@ -1860,7 +1860,7 @@ class RoutedMoE(nnx.Module):
             layer_w0,
             mlp_axis,
         )
-        layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
+        layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
@@ -1876,7 +1876,7 @@ class RoutedMoE(nnx.Module):
             layer_w1,
             mlp_axis,
         )
-        layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
+        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
@@ -1902,7 +1902,7 @@ class RoutedMoE(nnx.Module):
                   "activation_embed",
               ),
           )
-        intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
+        intermediate_layer = adc.checkpoint_name(intermediate_layer, "moe_mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
         output = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=COMBINE)(
@@ -1931,7 +1931,7 @@ class RoutedMoE(nnx.Module):
           layer_w0 = layer_w0 + w0_bias[None, None, :, :]
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
-        layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
+        layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
       with jax.named_scope("wi_1"):
         layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
@@ -1940,7 +1940,7 @@ class RoutedMoE(nnx.Module):
           layer_w1 = layer_w1 + w1_bias[None, None, :, :]
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
-        layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
+        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
 
       with jax.named_scope("wo"):
@@ -1954,7 +1954,7 @@ class RoutedMoE(nnx.Module):
           intermediate_layer = intermediate_layer + wo_bias[None, None, :, :]
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
-        intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
+        intermediate_layer = adc.checkpoint_name(intermediate_layer, "moe_mlpwo")
       with jax.named_scope("weight_sum"):
         if is_llama4_decoder_layer:
           weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
