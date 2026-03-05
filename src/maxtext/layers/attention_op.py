@@ -70,7 +70,7 @@ from maxtext.common.common_types import (
     Q_LENGTH_NO_EXP,
 )
 from maxtext.inference import page_manager
-from maxtext.inference.kvcache import KVQuant, KVTensor
+from maxtext.inference.kv_quant import KVQuant, KVTensor
 from maxtext.kernels.attention import jax_flash_attention
 from maxtext.kernels.attention.ragged_attention import ragged_gqa
 from maxtext.kernels.attention.ragged_attention import ragged_mha

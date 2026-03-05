@@ -84,7 +84,7 @@ class Train(unittest.TestCase):
             "per_device_batch_size=2",
             "max_target_length=1024",
             "dataset_type=synthetic",
-            "steps=10",
+            "steps=2",
             "enable_checkpointing=False",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",

@@ -31,6 +31,8 @@ from maxtext.layers.linears import Dropout
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.layers.registry import register_model
+from maxtext.layers.strategies import DefaultStrategy
 
 # -----------------------------------------
 # The Decoder Layer for Mixtral
@@ -193,7 +195,9 @@ class MixtralDecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-MixtralDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    MixtralDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+MixtralDecoderLayerToLinen = register_model("mixtral", strategy_class=DefaultStrategy)(
+    nnx_wrappers.to_linen_class(
+        MixtralDecoderLayer,
+        base_metadata_fn=initializers.variable_to_logically_partitioned,
+    )
 )
