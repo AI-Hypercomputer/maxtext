@@ -37,32 +37,25 @@ Example Usage:
 """
 
 import argparse
-import os
-import sys
 import json
+import os
+import shutil
+import sys
 from typing import Sequence
-from functools import partial
 
 import jax
 import jax.numpy as jnp
-import numpy as np
-import torch
-from safetensors import safe_open
-from huggingface_hub import hf_hub_download
-from transformers import AutoConfig
 from etils import epath
-from flax import nnx
+from huggingface_hub import hf_hub_download
+from huggingface_hub import list_repo_files
+from safetensors import safe_open
+from transformers import AutoConfig
 
 from orbax import checkpoint as ocp
+from maxtext.checkpoint_conversion.utils.param_mapping import PARAM_MAPPING
+from maxtext.checkpoint_conversion.utils.utils import HF_IDS
 from maxtext.configs import pyconfig
-from maxtext.common.common_types import MODEL_MODE_TRAIN
-from maxtext.layers import quantizations
-from maxtext.models import models
-from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from maxtext.checkpoint_conversion.utils.utils import apply_hook_fns, HF_IDS
 from maxtext.utils import max_logging
-from maxtext.utils import maxtext_utils
-from maxtext.utils import max_utils
 from absl import logging
 
 
@@ -77,19 +70,20 @@ def load_hf_lora_adapter(adapter_path: str, hf_model_id: str) -> dict:
     adapter_dir = epath.Path(adapter_path)
     config_file = adapter_dir / "adapter_config.json"
     if config_file.exists():
-      with open(config_file, "r") as f:
+      with open(config_file, "r", encoding="utf-8") as f:
         adapter_config = json.load(f)
   else:
     # HF Hub repo
     try:
       config_file = hf_hub_download(adapter_path, "adapter_config.json", token=os.environ.get("HF_AUTH_TOKEN"))
-      with open(config_file, "r") as f:
+      with open(config_file, "r", encoding="utf-8") as f:
         adapter_config = json.load(f)
-    except Exception:
-      max_logging.log("Warning: Could not load adapter_config.json from HF Hub")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      max_logging.log(f"Warning: Could not load adapter_config.json from HF Hub: {exc}")
 
   if adapter_config:
-    base_model = adapter_config.get("base_model_name_or_path")
+    if adapter_config.get("base_model_name_or_path"):
+      max_logging.log(f"Adapter base model: {adapter_config['base_model_name_or_path']}")
     # if base_model and base_model.replace("-Instruct", "") != hf_model_id.replace("-Instruct", ""):
     #   raise ValueError(f"Adapter base model '{base_model}' does not match expected model '{hf_model_id}'")
     max_logging.log(f"Adapter compatible with model {hf_model_id}")
@@ -107,9 +101,6 @@ def load_hf_lora_adapter(adapter_path: str, hf_model_id: str) -> dict:
   else:
     # Assume it's a HF Hub repo ID
     try:
-      # Try to download the adapter config to get the file list
-      from huggingface_hub import list_repo_files
-
       files = list_repo_files(adapter_path, token=os.environ.get("HF_AUTH_TOKEN"))
       safetensor_files = [f for f in files if f.endswith(".safetensors")]
       if not safetensor_files:
@@ -123,7 +114,7 @@ def load_hf_lora_adapter(adapter_path: str, hf_model_id: str) -> dict:
       # Download the adapter file
       adapter_file = hf_hub_download(adapter_path, adapter_file, token=os.environ.get("HF_AUTH_TOKEN"))
     except Exception as e:
-      raise ValueError(f"Failed to load LoRA adapter from {adapter_path}: {e}")
+      raise ValueError(f"Failed to load LoRA adapter from {adapter_path}: {e}") from e
 
   # Load the adapter weights
   if adapter_file.endswith(".safetensors"):
@@ -137,7 +128,7 @@ def load_hf_lora_adapter(adapter_path: str, hf_model_id: str) -> dict:
   return lora_weights
 
 
-def convert_hf_lora_key_to_maxtext(hf_key: str, param_mapping: dict, config) -> str:
+def convert_hf_lora_key_to_maxtext(hf_key: str, param_mapping: dict) -> str:
   """Convert HF LoRA key to MaxText parameter path using the mapping from to_maxtext.py."""
   # HF LoRA keys: base_model.model.layers.{layer}.{module}.lora_A/B.weight
 
@@ -168,17 +159,6 @@ def convert_hf_lora_key_to_maxtext(hf_key: str, param_mapping: dict, config) -> 
 def convert_lora_to_maxtext_adapter(config, lora_weights: dict, output_path: str, hf_model_id: str):
   """Converts HF LoRA weights to MaxText adapter format without merging."""
 
-  # 1. Setup Mesh and Model Structure (Abstractly)
-  devices_array = maxtext_utils.create_device_mesh(config)
-  mesh = jax.sharding.Mesh(devices_array, axis_names=config.mesh_axes)
-  quant = quantizations.configure_quantization(config)
-
-  # Initialize rngs for model creation
-  rngs = nnx.Rngs(params=jax.random.PRNGKey(0), dropout=jax.random.PRNGKey(1))
-
-  # Use the model definition to understand the target parameter paths
-  model = models.Transformer(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
-
   hf_token = config.hf_access_token
 
   # Get the parameter mapping (MT -> HF)
@@ -196,7 +176,7 @@ def convert_lora_to_maxtext_adapter(config, lora_weights: dict, output_path: str
   # 3. Map HF LoRA weights to MaxText keys
   for hf_key, weight in lora_weights.items():
     # Identify the MaxText path for this specific HF weight
-    mt_key = convert_hf_lora_key_to_maxtext(hf_key, param_map_mt_to_hf, config)
+    mt_key = convert_hf_lora_key_to_maxtext(hf_key, param_map_mt_to_hf)
 
     if mt_key:
       # Determine if this is the 'A' or 'B' matrix
@@ -270,8 +250,6 @@ def main(args: Sequence[str]) -> None:
   os.makedirs(os.path.dirname(full_output_path), exist_ok=True)
 
   if os.path.exists(full_output_path):
-    import shutil
-
     max_logging.log(f"Output directory {full_output_path} exists. Removing it to allow Orbax to save.")
     shutil.rmtree(full_output_path)
 
