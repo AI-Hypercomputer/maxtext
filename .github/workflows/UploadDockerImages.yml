@@ -79,31 +79,32 @@ jobs:
       maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
       image_date: ${{ needs.setup.outputs.image_date }}
 
-  tpu-post-training:
-    name: ${{ matrix.image_name }}
-    needs: [setup, tpu-pre-training]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - device: tpu
-            build_mode: post-training
-            image_name: maxtext_post_training_stable
-            dockerfile: ./dependencies/dockerfiles/maxtext_post_training_dependencies.Dockerfile
-          - device: tpu
-            build_mode: post-training
-            image_name: maxtext_post_training_nightly
-            dockerfile: ./dependencies/dockerfiles/maxtext_post_training_local_dependencies.Dockerfile
+  tpu-post-training-stable:
+    name: tpu-post-training-stable
+    needs: setup
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
-      image_name: ${{ matrix.image_name }}
-      device: ${{ matrix.device }}
-      build_mode: ${{ matrix.build_mode }}
-      dockerfile: ${{ matrix.dockerfile }}
+      image_name: maxtext_post_training_stable
+      device: tpu
+      build_mode: stable
+      workflow: post-training
+      dockerfile: ./dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
       maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
       image_date: ${{ needs.setup.outputs.image_date }}
-      base_image: gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:${{ needs.setup.outputs.image_date }}
-      is_post_training: true
+
+  tpu-post-training-nightly:
+    name: tpu-post-training-nightly
+    needs: [setup, tpu-post-training-stable]
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: maxtext_post_training_nightly
+      device: tpu
+      build_mode: nightly
+      workflow: post-training
+      dockerfile: ./dependencies/dockerfiles/maxtext_post_training_local_dependencies.Dockerfile
+      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
+      image_date: ${{ needs.setup.outputs.image_date }}
+      base_image: gcr.io/tpu-prod-env-multipod/maxtext_post_training_stable:${{ needs.setup.outputs.image_date }}
 
   gpu-pre-training:
     name: ${{ matrix.image_name }}

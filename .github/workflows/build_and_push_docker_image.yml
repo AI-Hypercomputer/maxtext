@@ -41,10 +41,10 @@ on:
         required: false
         type: string
         default: ''
-      is_post_training:
+      workflow:
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: 'pre-training'
 
 permissions:
   contents: read
@@ -121,6 +121,7 @@ jobs:
           build-args: |
             DEVICE=${{ inputs.device }}
             MODE=${{ inputs.build_mode }}
+            WORKFLOW=${{ inputs.workflow }}
             JAX_VERSION=NONE
             LIBTPU_VERSION=NONE
             INCLUDE_TEST_ASSETS=true
@@ -144,7 +145,7 @@ jobs:
 
 
           # Add post-training dependencies tags
-          if [ "${{ inputs.is_post_training }}" == "true" ]; then
+          if [ "${{ inputs.workflow }}" == "post-training" ]; then
             for dir in tunix vllm tpu-inference; do
               if [ -d "./$dir" ]; then
                 dir_hash=$(git -C "$dir" rev-parse --short HEAD)
