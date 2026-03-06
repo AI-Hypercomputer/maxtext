@@ -840,7 +840,7 @@ class IciParallelism(BaseModel):
 class PipelineParallelism(BaseModel):
   """Configuration for pipeline parallelism."""
 
-  use_pipeline_weight_prefetching: bool = Field(
+  pipeline_fsdp_ag_per_repeat: bool = Field(
       False, description="Enable weight prefetching for circular pipeline parallelism."
   )
   num_layers_per_pipeline_stage: int = Field(1, description="Number of layers to place on each pipeline stage.")
@@ -2240,7 +2240,7 @@ class MaxTextConfig(
         )
         self.num_pipeline_repeats = num_pipeline_repeats
 
-      if self.use_pipeline_weight_prefetching:
+      if self.pipeline_fsdp_ag_per_repeat:
         assert self.num_pipeline_repeats > 1, "Pipeline weight prefetching only supports circular pipeline."
         assert (
             self.num_layers_per_pipeline_stage == 1
@@ -2556,7 +2556,7 @@ class MaxTextConfig(
         "expert": self.ici_expert_parallelism,
         "autoregressive": self.ici_autoregressive_parallelism,
         "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-          "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
+        "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
     }
     self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
@@ -2576,7 +2576,7 @@ class MaxTextConfig(
         "expert": self.dcn_expert_parallelism,
         "autoregressive": self.dcn_autoregressive_parallelism,
         "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-          "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
+        "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
     }
     self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 

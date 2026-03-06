@@ -796,7 +796,7 @@ class Decoder(nn.Module):
     if cfg.using_pipeline_parallelism:
       logical_partition_spec = (
           self.pipeline_module.get_weight_sharding(y, decoder_segment_ids, decoder_positions, deterministic, model_mode)
-          if cfg.pipeline_fsdp_ag_once or cfg.use_pipeline_weight_prefetching
+          if cfg.pipeline_fsdp_ag_once or cfg.pipeline_fsdp_ag_per_repeat
           else None
       )
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
