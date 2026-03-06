@@ -21,9 +21,9 @@ from jax.sharding import Mesh
 from flax import nnx
 
 from maxtext.configs import pyconfig
-from maxtext.layers.decoders import DecoderLayer
 from maxtext.layers import multi_token_prediction  # The class under test
 from maxtext.layers import embeddings
+from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.common_types import Config
 from maxtext.utils import max_logging
@@ -54,12 +54,11 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
-    # Instantiate the Layer
     self.mtp_layer = multi_token_prediction.MultiTokenPredictionLayer(
         config=self.cfg,
         mesh=self.mesh,
         layer_number=TEST_LAYER_NUM,
-        transformer_layer_module=DecoderLayer,
+        transformer_layer_module=NNXDecoderLayer,
         rngs=self.rngs,
     )
 
@@ -157,7 +156,7 @@ class MTPBlockTestModel(nnx.Module):
     self.mtp_block = multi_token_prediction.MultiTokenPredictionBlock(
         config=self.config,
         mesh=self.mesh,
-        transformer_layer_module=DecoderLayer,
+        transformer_layer_module=NNXDecoderLayer,
         decoder=self.decoder,
         rngs=self.rngs,
     )
