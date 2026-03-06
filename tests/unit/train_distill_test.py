@@ -182,6 +182,12 @@ class TrainDistillTest(unittest.TestCase):
       train_distill.get_distillation_optimizer(config, max_train_steps=100)
 
   def test_monitored_strategy(self):
+    self._test_monitored_strategy(False)
+
+  def test_monitored_strategy_sft(self):
+    self._test_monitored_strategy(True)
+
+  def _test_monitored_strategy(self, sft_mode: bool):
     """Verifies the strategy calculates metrics and returns the correct tuple."""
     strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=lambda m, **k: None,
@@ -191,6 +197,7 @@ class TrainDistillTest(unittest.TestCase):
         alpha=0.5,
         beta_feature=1.0,
         layer_indices=None,
+        sft_mode=sft_mode,
     )
 
     # Dummy inputs (batch=1, seq=2, vocab=4)
