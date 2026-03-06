@@ -805,7 +805,10 @@ class TransformerEngineQuantization(Quantization):
       def generate_quantizer_set(self, postfix: str = ""):
         OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
         return super().generate_quantizer_set(  # pytype: disable=wrong-keyword-args
-            postfix=postfix, variable_collection=OVERWRITE_WITH_GRADIENT, fp8_recipe=fp8_recipe
+            postfix=postfix,
+            variable_collection=OVERWRITE_WITH_GRADIENT, 
+            quantization_checkpoint_name="quantization",
+            fp8_recipe=fp8_recipe
         )
 
       @nn.compact
@@ -834,7 +837,21 @@ class TransformerEngineQuantization(Quantization):
 
     return self._wrap(te_dot_general, "dot_general")
 
-  def einsum(self, dtype: DType = jnp.float32):
+  def einsum(self, *args, **kwargs):
     """Placeholder for einsum implementation in subclasses."""
-    # quant.einsum is only required for MoE or for inference with KVCache.
-    raise ValueError("Einsum is not yet supported for TransformerEngine quantization.")
+    import transformer_engine.jax.flax as te_flax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+    return te_flax.make_einsum_cls(quantization_recipe=self._recipe)
+
+  def gmm(self, inputs, kernel, tiling, group_sizes, expert_assignments):
+    """ Grouped GEMM """
+    import transformer_engine.jax.flax as te_flax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+    # Currently only BF16 is supported for TE GMM v2, so we don't use the quantization recipe here yet.
+    # the_recipe = self._recipe
+    the_recipe = None
+    return te_flax.make_grouped_dense_cls(quantization_recipe=the_recipe)(
+        inputs,
+        kernel,
+        group_sizes,
+    )
+
