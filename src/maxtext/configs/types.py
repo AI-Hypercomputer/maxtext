@@ -81,6 +81,7 @@ class QuantizationType(str, Enum):
   """Supported quantization schemes."""
 
   NONE = ""
+  INT4 = "int4"
   INT8 = "int8"
   INTMP = "intmp"
   FP8 = "fp8"
