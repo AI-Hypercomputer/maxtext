@@ -279,7 +279,24 @@ class PipelineParallelismTest(unittest.TestCase):
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip(reason="None circular pipeline is not supported.")
+  def test_circular_pipeline_prefetching(self):
+    # 2 stages, 8 microbatches, enable pipeline weight prefetching
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        enable_checkpointing=False,
+        enable_goodput_recording=False,
+        run_name="circular_prefetching",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=2,
+        base_num_decoder_layers=8,
+        num_pipeline_microbatches=8,
+        per_device_batch_size=4,
+        use_pipeline_weight_prefetching=True,
+    )
+    self.assert_pipeline_same_output_and_grad(config)
+
+  @pytest.mark.tpu_only
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
@@ -328,6 +345,39 @@ class PipelineParallelismTest(unittest.TestCase):
     )
 
   @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_full_train_circular_pipeline_prefetching(self):
+    # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats),
+    # 8 microbatches and using pipeline weight prefetching
+    train_main(
+        [
+            None,
+            get_test_config_path(),
+            f"base_output_directory={self.base_output_directory}",
+            "run_name=runner_pipeline_parallelism_test",
+            f"dataset_path={self.dataset_path}",
+            "base_emb_dim=28",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "base_mlp_dim=32",
+            "base_num_decoder_layers=32",
+            "head_dim=128",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "vocab_size=32",
+            "dataset_type=synthetic",
+            "steps=3",
+            "enable_checkpointing=False",
+            "enable_goodput_recording=False",
+            "ici_pipeline_parallelism=2",
+            "num_layers_per_pipeline_stage=1",
+            "num_pipeline_microbatches=4",
+            "use_pipeline_weight_prefetching=True",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+            "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
+        ]
+    )
+
   @pytest.mark.tpu_only
   def test_full_train_circular_pipeline_ag_per_repeat(self):
     # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats),

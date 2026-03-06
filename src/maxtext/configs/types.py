@@ -854,7 +854,7 @@ class IciParallelism(BaseModel):
 class PipelineParallelism(BaseModel):
   """Configuration for pipeline parallelism."""
 
-  pipeline_fsdp_ag_per_repeat: bool = Field(
+  use_pipeline_weight_prefetching: bool = Field(
       False, description="Enable weight prefetching for circular pipeline parallelism."
   )
   num_layers_per_pipeline_stage: int = Field(1, description="Number of layers to place on each pipeline stage.")
@@ -2299,12 +2299,14 @@ class MaxTextConfig(
         )
         self.num_pipeline_repeats = num_pipeline_repeats
 
-      if self.pipeline_fsdp_ag_per_repeat:
+      if self.use_pipeline_weight_prefetching:
         assert self.num_pipeline_repeats > 1, "Pipeline weight prefetching only supports circular pipeline."
         assert (
             self.num_layers_per_pipeline_stage == 1
         ), "Pipeline weight prefetching currently only supports one layer per pipeline stage."
-        assert not self.pipeline_delay_activation_forwarding, "Pipeline weight prefetching does not support pipeline delay."
+        assert (
+            not self.pipeline_delay_activation_forwarding
+        ), "Pipeline weight prefetching does not support pipeline delay."
         assert not self.quantization, "Quantization is currently not supported for pipeline prefetching."
         assert not self.scan_layers_per_stage, "Pipeline weight prefetching currently does not support scan."
 

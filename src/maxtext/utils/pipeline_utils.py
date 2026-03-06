@@ -203,7 +203,7 @@ def create_run_scannable(
   """Creates a scannable function for pipeline loop iterations."""
 
   def run_scannable(model, loop_state):
-    loop_state["bsw"] = model.bsw_all_gather_over_fsdp(
+    loop_state["bsw"] = model.weight_prefetching(
         loop_state["weights"], physical_partition_spec, loop_state["loop_iteration"]
     )
 
