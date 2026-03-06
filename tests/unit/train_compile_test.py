@@ -860,7 +860,6 @@ class TrainCompile(unittest.TestCase):
             "use_random_routing=true",
             "allow_split_physical_axes=true",
             "max_target_length=4096",
-            "remat_policy=custom",
         )
     )
 
@@ -881,10 +880,8 @@ class TrainCompile(unittest.TestCase):
             "pipeline_parallel_layers=56",
             "num_pipeline_microbatches=16",
             "model_name=deepseek3-671b",
-            "ici_expert_parallelism=4",
             "allow_split_physical_axes=true",
             "max_target_length=4096",
-            "remat_policy=custom",
         )
     )
 
@@ -910,7 +907,6 @@ class TrainCompile(unittest.TestCase):
             "use_random_routing=false",
             "allow_split_physical_axes=true",
             "max_target_length=4096",
-            "remat_policy=custom",
         )
     )
 
