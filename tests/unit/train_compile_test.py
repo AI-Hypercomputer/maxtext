@@ -839,3 +839,100 @@ class TrainCompile(unittest.TestCase):
             "hf_access_token=fake",
         )
     )
+
+  # @pytest.mark.cpu_only
+  # def test_kimi_k2_1t(self):
+  #   # test kimi-k2-1t with muon-clip
+  #   compiled_trainstep_file = "/tmp/test_kimi_k2_1t.pickle"
+  #   train_compile_main(
+  #       (
+  #           "",
+  #           get_test_config_path(),
+  #           f"compiled_trainstep_file={compiled_trainstep_file}",
+  #           "compile_topology=tpu7x-512",
+  #           "compile_topology_num_slices=1",
+  #           "model_name=kimi-k2-1t",
+  #           "scan_layers=True",
+  #           # moe with megablox
+  #           "sparse_matmul=True",
+  #           "megablox=True",
+  #           "use_tokamax_gmm=False",
+  #           # attention
+  #           "attention=dot_product",  # TODO: update to flash after support
+  #           "use_tokamax_splash=True",
+  #           # size
+  #           "max_target_length=1024",
+  #           "per_device_batch_size=0.0625",
+  #           "ici_tensor_parallelism=16",
+  #           "dtype=bfloat16",
+  #           "weight_dtype=bfloat16",
+  #           # muon
+  #           "opt_type=muon",
+  #           "muon_weight_decay=0.1",
+  #           # qk-clip
+  #           "use_qk_clip=true",
+  #           "qk_clip_threshold=100",
+  #       )
+  #   )
+
+  @pytest.mark.cpu_only
+  def test_kimi_k2_1t(self):
+    # test kimi-k2-1t with qk-clip
+    compiled_trainstep_file = "/tmp/test_kimi_k2_1t.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-512",
+            "compile_topology_num_slices=1",
+            "model_name=kimi-k2-1t",
+            "scan_layers=True",
+            # moe with megablox
+            "sparse_matmul=True",
+            "megablox=True",
+            "use_tokamax_gmm=False",
+            # attention
+            # TODO(agagik): update to flash after support
+            "attention=dot_product",
+            "use_tokamax_splash=True",
+            # size
+            "max_target_length=1024",
+            "per_device_batch_size=1",
+            "dtype=bfloat16",
+            "weight_dtype=float32",
+            # TODO(shuningjin): use `opt_type=muon` when upgrading to optax>=0.2.7
+            # qk-clip
+            "use_qk_clip=true",
+            "qk_clip_threshold=100",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_qk_clip(self):
+    # test deepseek3-tiny with qk-clip
+    compiled_trainstep_file = "/tmp/test_qk_clip.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-tiny",
+            "scan_layers=True",
+            # moe with megablox
+            "sparse_matmul=True",
+            "megablox=True",
+            "use_tokamax_gmm=False",
+            # TODO(agagik): update to flash after support
+            "attention=dot_product",
+            "use_tokamax_splash=True",
+            "max_target_length=1024",
+            "per_device_batch_size=1",
+            "dtype=bfloat16",
+            "weight_dtype=float32",
+            "use_qk_clip=true",
+            "qk_clip_threshold=100",
+        )
+    )
