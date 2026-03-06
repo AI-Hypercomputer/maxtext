@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,27 +21,29 @@ from flax import linen as nn
 from flax.linen.spmd import LogicallyPartitioned
 
 
-def get_fsdp_index_pytree(physical_partition_spec, axis_name="fsdp"):
-  """
-  Finds the index of 'fsdp' within each PartitionSpec in a Pytree.
+def get_mesh_axis_dim_indices(physical_partition_spec, axis_name="fsdp"):
+  """Finds the tensor dimension index sharded across a specific physical mesh axis.
+
+  In JAX sharding, a PartitionSpec maps tensor dimensions to physical device mesh axes.
+  This utility traverses a PyTree of PartitionSpecs and returns the integer index of the
+  tensor dimension that is mapped to the target `axis_name` (e.g., finding which dimension
+  is FSDP-sharded to prepare for an all-gather operation).
 
   Args:
-    physical_partition_spec: A Pytree where leaves are PartitionSpecs.
-    axis_name: physical axis name for indexing
+    physical_partition_spec: A PyTree where leaves are `jax.sharding.PartitionSpec` objects.
+    axis_name: The physical mesh axis string to search for (defaults to "fsdp").
 
   Returns:
-    A Pytree of the same structure where leaves are the integer index
-    of 'fsdp' or -1 if not found.
+    A PyTree of the exact same structure where the leaves are integers representing the
+    dimension index of the target axis, or -1 if the axis is not found in that spec.
   """
 
-  def find_fsdp(pspec):
-    # Ensure we are handling a PartitionSpec or a tuple/list of strings
+  def find_axis_index(pspec):
     if pspec is None:
       return -1
 
-    # PartitionSpecs are essentially tuples (e.g., PartitionSpec('data', 'fsdp'))
     for i, axis in enumerate(pspec):
-      # Handle cases where an axis might be a tuple itself (e.g., ('fsdp', 'tensor'))
+      # Handle compound mesh axes (e.g., when a dimension is sharded over ('fsdp', 'tensor'))
       if isinstance(axis, (list, tuple)):
         if axis_name in axis:
           return i
@@ -49,21 +51,34 @@ def get_fsdp_index_pytree(physical_partition_spec, axis_name="fsdp"):
         return i
     return -1
 
-  return jax.tree.map(find_fsdp, physical_partition_spec)
+  return jax.tree.map(find_axis_index, physical_partition_spec)
 
 
-def generate_bsw_pps_from_pps(physical_partition_spec):
-  """Create bsw physical partition spec from weight physical partition spec."""
+def derive_stage_weight_partition_specs(physical_partition_spec):
+  """Derives the physical partition specs for weights inside the scanned pipeline loop.
+
+  When weights enter the inner `jax.lax.scan` loop for microbatch execution, their
+  sharding requirements change. This function modifies the base weight specs by:
+  1. Removing physical axes that will be all-gathered during the forward pass
+     (e.g., FSDP axes, and Expert axes outside of the routed MoE block).
+  2. Slicing off the first dimension `[1:]`, which typically represents the
+     outer pipeline stage or layer-repeat dimension that the scan operates over.
+
+  Args:
+    physical_partition_spec: A PyTree of `PartitionSpec` objects for the full model weights.
+
+  Returns:
+    A PyTree of `PartitionSpec` objects tailored for the inner scanned execution block.
+  """
 
   def _process_pps(path, pps):
-    # Extract string keys from the JAX KeyPath elements safely
+    # Safely extract string keys from the JAX KeyPath elements to identify the layer type
     path_keys = [getattr(p, "key", str(p)) for p in path]
     is_moe_block_0 = "MoeBlock_0" in path_keys
 
-    # Remove the gathered axes conditionally based on the path
-    processed_pps = remove_gathered_axes_from_physical_partition_spec(pps, is_moe_block_0)
+    processed_pps = remove_gathered_mesh_axes(pps, is_moe_block_0)
 
-    # Keep the original [1:] slicing behavior (e.g., to drop the 'stage' axis)
+    # Drop the first dimension (usually the 'stage' or 'layer' axis handled by the scan)
     return P(*processed_pps[1:])
 
   return jax.tree_util.tree_map_with_path(
@@ -72,52 +87,65 @@ def generate_bsw_pps_from_pps(physical_partition_spec):
   )
 
 
-def remove_gathered_axes_from_physical_partition_spec(pps, is_moe_block_0):
-  """Removes 'fsdp', 'fsdp_transpose', and conditionally 'expert' from a physical PartitionSpec."""
+def remove_gathered_mesh_axes(pps, is_moe_block_0):
+  """Strips FSDP and specific MoE mesh axes from a PartitionSpec.
 
-  # Always remove fsdp and fsdp_transpose as they are always gathered
+  When FSDP or Expert-sharded weights are all-gathered for computation, the resulting
+  tensor is no longer sharded across those physical mesh dimensions. This function
+  removes those axes from the PartitionSpec, replacing them with `None` to indicate
+  replication across that mesh dimension.
+
+  Args:
+    pps: A single `jax.sharding.PartitionSpec` object.
+    is_moe_block_0: Boolean indicating if the target is the routed MoE block. The 'expert'
+                    mesh axis is only retained for the routed block.
+
+  Returns:
+    A new `PartitionSpec` with the gathered axes removed, or the original object if it
+    was not a PartitionSpec.
+  """
   axes_to_remove = ["fsdp", "fsdp_transpose"]
 
-  # Only remove 'expert' if we are NOT in MoeBlock_0
   if not is_moe_block_0:
     axes_to_remove.append("expert")
 
   if isinstance(pps, P):
     new_spec = []
-    # Iterate through each axis in the original PartitionSpec.
     for axis in pps:
       if axis is None:
         new_spec.append(None)
       elif isinstance(axis, str):
-        # If the axis is in our removal list, replace it with None to signify replication.
         if axis not in axes_to_remove:
           new_spec.append(axis)
         else:
-          new_spec.append(None)
+          new_spec.append(None)  # None signifies replication across the removed mesh axis
       elif isinstance(axis, (list, tuple)):
-        # If the axis is a collection, filter out the gathered axes.
         new_axis = [a for a in axis if a not in axes_to_remove]
-        # If all elements are filtered out, new_axis becomes [], which as a tuple ()
-        # correctly signals replication across those mesh axes in JAX.
         new_spec.append(tuple(new_axis))
       else:
         raise ValueError(f"Unsupported_axis_type: {type(axis)}")
 
-    # Return a new sharding object with the modified spec.
     return P(*new_spec)
 
   return pps
 
 
-def get_logical_spec_repeats_removed(full_logical):
-  """Removes 'circular_repeats' from logical partition spec."""
-  if full_logical is None:
+def strip_pipeline_repeat_logical_axis(full_logical_spec):
+  """Removes 'circular_repeats' from a logical PartitionSpec PyTree.
+
+  Args:
+    full_logical_spec: A PyTree of logical PartitionSpecs (strings like 'vocab', 'embed').
+
+  Returns:
+    A PyTree with 'circular_repeats' filtered out of all logical partition tuples.
+  """
+  if full_logical_spec is None:
     return None
 
   def _remove_from_spec(spec):
     return jax.sharding.PartitionSpec(*[dim for dim in spec if dim != "circular_repeats"])
 
-  return jax.tree.map(_remove_from_spec, full_logical)
+  return jax.tree.map(_remove_from_spec, full_logical_spec)
 
 
 # TODO(chengnuojin) Remove this function and its usage after pipeline nnx migration
@@ -134,56 +162,42 @@ def remove_logically_partition(weights):
   )
 
 
-def remove_fsdp_from_physical_partition_spec(pps):
-  """Removes 'fsdp' and 'fsdp_transpose' from a physical PartitionSpec."""
-  if isinstance(pps, P):
-    new_spec = []
-    # Iterate through each axis in the original PartitionSpec.
-    for axis in pps:
-      if axis is None:
-        new_spec.append(None)
-      elif isinstance(axis, str):
-        # If the axis is 'fsdp', replace it with None to signify replication.
-        if axis not in ("fsdp", "fsdp_transpose"):
-          new_spec.append(axis)
-        else:
-          new_spec.append(None)
-      elif isinstance(axis, (list, tuple)):
-        # If the axis is a collection, filter out 'fsdp'.
-        new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
-        new_spec.append(tuple(new_axis))
-      else:
-        raise ValueError(f"Unsupported_axis_type: {type(axis)}")
-      # Return a new sharding object with the modified spec.
-    return P(*new_spec)
-  return pps
-
-
-def create_scanned_function(
+def create_gradient_accumulation_scan(
     model,
     length,
     deterministic=True,
     model_mode=None,
     logical_partition_spec=None,
 ):
-  """
-  Creates a scanned function with custom VJP for pipeline iterations.
+  """Creates a memory-efficient `jax.lax.scan` loop for pipeline microbatches with a custom VJP.
 
-  This helper encapsulates the logic for:
-  1. Creating the forward scan (saving lightweight state)
-  2. Creating the backward scan (recomputing heavy state and accumulating gradients)
-  3. Registering the custom VJP
+  In pipeline parallelism, scanning over microbatches normally forces JAX to save
+  heavy parameter states for every iteration to compute the backward pass. This helper
+  defines a custom Vector-Jacobian Product (VJP) to solve this by:
+
+  1. Forward pass: Separating transient activations (`lightweight_state`) from heavy
+     parameters (`bsw` and `weights`).
+  2. Rematerialization: Recomputing the forward pass of individual steps during the backward
+     pass to save memory.
+  3. Backward pass: Manually accumulating gradients (`d + g`) onto the heavy parameters
+     across the scanned iterations, rather than letting the standard autodiff trace them linearly.
+
+  Args:
+    model: The model instance containing the `run_one_iteration` and rematerialization logic.
+    length: The number of microbatch iterations to scan over.
+    deterministic: Whether to run the model in a deterministic mode (e.g., disable dropout).
+    model_mode: The operational mode of the model (e.g., 'train', 'eval').
+    logical_partition_spec: Rules for logical partitioning in standard tensor parallelism.
+
+  Returns:
+    A JAX custom_vjp function that executes the `length` pipeline iterations.
   """
 
   @functools.partial(jax.custom_vjp)
-  def step_fn_custom(lightweight_state, bsw, weights, pos_arg, seg_arg):
-    s = {**lightweight_state, "bsw": bsw, "weights": weights}
-    out = model.run_one_iteration(
-        s, pos_arg, seg_arg, deterministic, model_mode, logical_partition_spec=logical_partition_spec
-    )
-    return {k: v for k, v in out.items() if k not in ["bsw", "weights"]}, out["bsw"], out["weights"]
+  def run_single_microbatch_custom(lightweight_state, bsw, weights, pos_arg, seg_arg):
+    return run_single_microbatch_custom_fwd(lightweight_state, bsw, weights, pos_arg, seg_arg)[0]
 
-  def step_fn_custom_fwd(lightweight_state, bsw, weights, pos_arg, seg_arg):
+  def run_single_microbatch_custom_fwd(lightweight_state, bsw, weights, pos_arg, seg_arg):
     def _run(l, b, w):
       s = {**l, "bsw": b, "weights": w}
       out = model.run_one_iteration(
@@ -191,30 +205,33 @@ def create_scanned_function(
       )
       return {k: v for k, v in out.items() if k not in ["bsw", "weights"]}, out["bsw"], out["weights"]
 
+    # Rematerialize the inner step to save activation memory
     _run_remat = jax.remat(_run, prevent_cse=False, policy=model.get_pipeline_remat_policy())
     out, vjp_fun = jax.vjp(_run_remat, lightweight_state, bsw, weights)
-
     return out, vjp_fun
 
-  def step_fn_custom_bwd(res, g_out):
+  def run_single_microbatch_custom_bwd(res, g_out):
     vjp_fun = res
     d_l, d_b, d_w = vjp_fun(g_out)
     return d_l, d_b, d_w, None, None
 
-  step_fn_custom.defvjp(step_fn_custom_fwd, step_fn_custom_bwd)
+  run_single_microbatch_custom.defvjp(run_single_microbatch_custom_fwd, run_single_microbatch_custom_bwd)
 
   @functools.partial(jax.custom_vjp)
-  def run_scanned_custom(loop_state, positions, segment_ids):
-    return run_scanned_custom_fwd(loop_state, positions, segment_ids)[0]
+  def run_pipeline_microbatches_custom(loop_state, positions, segment_ids):
+    return run_pipeline_microbatches_custom_fwd(loop_state, positions, segment_ids)[0]
 
-  def run_scanned_custom_fwd(loop_state, positions, segment_ids):
+  def run_pipeline_microbatches_custom_fwd(loop_state, positions, segment_ids):
     initial_lightweight = {k: v for k, v in loop_state.items() if k not in ["bsw", "weights"]}
     bsw = loop_state["bsw"]
     weights = loop_state["weights"]
 
     final_lightweight, scan_vjp_fun = jax.vjp(
         lambda l, b, w: jax.lax.scan(
-            lambda carry, _: (step_fn_custom(carry, b, w, positions, segment_ids)[0], None), l, None, length=length
+            lambda carry, _: (run_single_microbatch_custom(carry, b, w, positions, segment_ids)[0], None),
+            l,
+            None,
+            length=length,
         )[0],
         initial_lightweight,
         bsw,
@@ -224,7 +241,7 @@ def create_scanned_function(
     final_state = {**final_lightweight, "bsw": bsw, "weights": weights}
     return final_state, scan_vjp_fun
 
-  def run_scanned_custom_bwd(residuals, g_final_state):
+  def run_pipeline_microbatches_custom_bwd(residuals, g_final_state):
     scan_vjp_fun = residuals
     g_lightweight = {k: v for k, v in g_final_state.items() if k not in ["bsw", "weights"]}
     d_init_lightweight, d_init_bsw, d_init_weights = scan_vjp_fun(g_lightweight)
@@ -237,11 +254,11 @@ def create_scanned_function(
     d_init_state = {**d_init_lightweight, "bsw": d_init_bsw, "weights": d_init_weights}
     return (d_init_state, None, None)
 
-  run_scanned_custom.defvjp(run_scanned_custom_fwd, run_scanned_custom_bwd)
-  return run_scanned_custom
+  run_pipeline_microbatches_custom.defvjp(run_pipeline_microbatches_custom_fwd, run_pipeline_microbatches_custom_bwd)
+  return run_pipeline_microbatches_custom
 
 
-def create_run_scannable(
+def create_rematerialized_pipeline_stage(
     model,
     run_iteration_scannable,
     length,
@@ -252,38 +269,76 @@ def create_run_scannable(
     positions,
     segment_ids,
 ):
-  """Creates a scannable function for pipeline loop iterations."""
+  """Builds a memory-checkpointed execution block for a single pipeline stage.
 
-  def run_scannable(model, loop_state):
+  This function prepares the state for a specific chunk of pipeline execution by:
+  1. Prefetching the required weights for the current stage/loop iteration.
+  2. Executing `length` microbatches using either a memory-efficient `jax.lax.scan`
+     (if `scan_pipeline_iterations` is True) or an unrolled Python `for` loop.
+  3. Wrapping the entire stage block in `flax.linen.remat` to discard and recompute
+     activations during the backward pass based on the model's policy.
+
+  Args:
+    model: The model instance containing configuration and prefetching logic.
+    run_iteration_scannable: A fallback function for executing a single iteration unrolled.
+    length: The number of microbatches to process in this stage.
+    deterministic: Whether to run deterministically (e.g., disable dropout).
+    model_mode: The operational mode (e.g., 'train').
+    logical_partition_spec: Rules for logical tensor sharding.
+    physical_partition_spec: Rules for physical device mesh mappings (used in prefetching).
+    positions: Position IDs for the sequence.
+    segment_ids: Segment/Attention routing IDs for the sequence.
+
+  Returns:
+    A function decorated with `nn.remat` that takes `(model, loop_state)` and returns
+    the updated `loop_state`.
+  """
+
+  def execute_pipeline_stage(model, loop_state):
+    # Retrieve the specific weights needed for this pipeline chunk
     loop_state["bsw"] = model.weight_prefetching(
         loop_state["weights"], physical_partition_spec, loop_state["loop_iteration"]
     )
 
     if model.config.scan_pipeline_iterations:
-      run_scanned_custom = create_scanned_function(
+      scan_microbatches_fn = create_gradient_accumulation_scan(
           model=model,
           length=length,
           deterministic=deterministic,
           model_mode=model_mode,
           logical_partition_spec=logical_partition_spec,
       )
-      loop_state = run_scanned_custom(loop_state, positions, segment_ids)
+      loop_state = scan_microbatches_fn(loop_state, positions, segment_ids)
     else:
       for _ in range(length):
         loop_state, _ = run_iteration_scannable(model, loop_state)
     return loop_state, None
 
   return nn.remat(
-      run_scannable,
+      execute_pipeline_stage,
       prevent_cse=not model.config.scan_pipeline_iterations,
       policy=model.get_pipeline_remat_policy(),
   )
 
 
-def create_run_repeats_scanned(run_scannable, length):
-  """Creates a scanned function over the pipeline repeats."""
+def create_flax_pipeline_scan(pipeline_stage_fn, length):
+  """Wraps the pipeline stage execution in a `flax.linen.scan`.
+
+  This lifts the pipeline stage function so it can be repeated sequentially over
+  the specified length. It safely handles Flax-specific state collections, ensuring
+  that metrics, intermediate values, and PRNG keys do not collide or overwrite
+  each other across the loop iterations.
+
+  Args:
+    pipeline_stage_fn: The function representing a single pipeline stage
+                       (usually created by `create_rematerialized_pipeline_stage`).
+    length: The total number of pipeline stages/repeats to scan over.
+
+  Returns:
+    A Flax scanned function that executes the full pipeline schedule.
+  """
   return nn.scan(
-      run_scannable,
+      pipeline_stage_fn,
       variable_axes={
           "summaries": 0,
           "aux_loss": 0,
