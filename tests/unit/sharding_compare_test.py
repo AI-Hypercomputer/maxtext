@@ -33,8 +33,6 @@ import pytest
 
 Transformer = models.transformer_as_linen
 
-pytestmark = [pytest.mark.cpu_only, pytest.mark.tpu_backend]
-
 
 def compute_checksum(d: dict) -> str:
   """Compute a checksum (SHA256) of a dictionary."""
