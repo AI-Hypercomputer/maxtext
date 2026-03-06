@@ -320,6 +320,31 @@ class PipelineBase(nn.Module):
         out_sharding=self.output_sharding,
     )
 
+  @staticmethod
+  def _remove_fsdp_from_physical_partition_spec(pps):
+    """Removes 'fsdp' and 'fsdp_transpose' from physical partition spec."""
+    if isinstance(pps, P):
+      new_spec = []
+      # Iterate through each axis in the original PartitionSpec.
+      for axis in pps:
+        if axis is None:
+          new_spec.append(None)
+        elif isinstance(axis, str):
+          # If the axis is 'fsdp', replace it with None to signify replication.
+          if axis not in ("fsdp", "fsdp_transpose"):
+            new_spec.append(axis)
+          else:
+            new_spec.append(None)
+        elif isinstance(axis, (list, tuple)):
+          # If the axis is a collection, filter out 'fsdp'.
+          new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
+          new_spec.append(tuple(new_axis))
+        else:
+          raise ValueError(f"Unsupported_axis_type: {type(axis)}")
+        # Return a new sharding object with the modified spec.
+      return P(*new_spec)
+    return pps
+
 
 class Pipeline(PipelineBase):
   """Original Pipeline implementation."""
@@ -983,31 +1008,6 @@ class Pipeline(PipelineBase):
       partition_spec_tree = jax.tree.map(get_partition_spec_leaf, pytree, is_leaf=_is_leaf)
       return partition_spec_tree
 
-  @staticmethod
-  def _remove_fsdp_from_physical_partition_spec(pps):
-    """Removes 'fsdp' and 'fsdp_transpose' from physical partition spec."""
-    if isinstance(pps, P):
-      new_spec = []
-      # Iterate through each axis in the original PartitionSpec.
-      for axis in pps:
-        if axis is None:
-          new_spec.append(None)
-        elif isinstance(axis, str):
-          # If the axis is 'fsdp', replace it with None to signify replication.
-          if axis not in ("fsdp", "fsdp_transpose"):
-            new_spec.append(axis)
-          else:
-            new_spec.append(None)
-        elif isinstance(axis, (list, tuple)):
-          # If the axis is a collection, filter out 'fsdp'.
-          new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
-          new_spec.append(tuple(new_axis))
-        else:
-          raise ValueError(f"Unsupported_axis_type: {type(axis)}")
-        # Return a new sharding object with the modified spec.
-      return P(*new_spec)
-    return pps
-
   def all_gather_over_fsdp(self, variables, logical_partition_spec):
     """Gathers FSDP partitioned variables to reconstruct them fully."""
     physical_partition_spec = logical_to_mesh(logical_partition_spec, mesh=self.mesh, rules=self.config.logical_axis_rules)
@@ -1146,9 +1146,13 @@ class Pipeline(PipelineBase):
 
 
 class CircularPipeline(PipelineBase):
-  """
-  Circular Pipeline with weight prefetching.
-  It all gather layer weights over FSDP-like physical axes before microbatching.
+  """Implements an circular pipeline schedule with asynchronous weight prefetching.
+
+  Circular pipelining reduces the pipeline "bubble" by interleaving multiple pipeline
+  stages on the same physical devices. To hide the communication overhead of Fully
+  Sharded Data Parallelism (FSDP), this module utilizes a Buffer Sliding Window (BSW)
+  to prefetch and all-gather the weights for the *next* pipeline repeat while the
+  *current* repeat is executing.
   """
 
   def init_states(self, inputs):
@@ -1382,53 +1386,85 @@ class CircularPipeline(PipelineBase):
       repeat_weights,
       physical_partition_spec,
       axes_to_gather=("fsdp", "fsdp_transpose", "expert"),  # three major FSDP-like axes
+      use_shardmap=False,  # using shardmap produces additional reduce-scatter in backward pass
   ):
-    """Generates the buffer sliding window (bsw) from the gathered repeat weights."""
-    bsw_pps = pipeline_utils.generate_bsw_pps_from_pps(physical_partition_spec)
-    repeat_weights_pps = jax.tree.map(lambda p: P(*p[1:]), physical_partition_spec)
+    """Executes the FSDP-like all-gathers to fully materialize a block of weights for the BSW."""
+    axes_to_remove = ["fsdp", "fsdp_transpose"]
+    bsw_pps = pipeline_utils.derive_stage_weight_partition_specs(physical_partition_spec, axes_to_remove)
 
-    # Dynamically gather the index pytrees for all specified axes
-    axis_indices_dict = {
-        axis: pipeline_utils.get_fsdp_index_pytree(physical_partition_spec, axis) for axis in axes_to_gather
-    }
+    def _from_repeat_weights_to_bsw_shardmap(
+        repeat_weights,
+        physical_partition_spec,
+        axes_to_gather,
+    ):
+      repeat_weights_pps = jax.tree.map(lambda p: P(*p[1:]), physical_partition_spec)
 
-    axis_names = list(axis_indices_dict.keys())
-    axis_pytrees = list(axis_indices_dict.values())
+      # Dynamically gather the index pytrees for all specified axes
+      axis_indices_dict = {
+          axis: pipeline_utils.get_mesh_axis_dim_indices(physical_partition_spec, axis) for axis in axes_to_gather
+      }
 
-    def should_skip_gather(axis_name, path_keys):
-      """Defines specific rule-based exceptions for gathering certain axes."""
-      if axis_name == "expert" and "MoeBlock_0" in path_keys:
-        return True
-      # Add more exclusion rules for other axes here if needed in the future
-      return False
+      axis_names = list(axis_indices_dict.keys())
+      axis_pytrees = list(axis_indices_dict.values())
 
-    # Renamed to be more descriptive of its action
-    @jax.shard_map(
-        mesh=self.mesh,
-        in_specs=(repeat_weights_pps, None),  # 'None' covers the entire axis_pytrees list
-        out_specs=bsw_pps,
-        check_vma=True,
-    )
-    def _shard_map_gather_weights(sharded_weights, indices_pytrees_list):
+      def should_skip_gather(axis_name, path_keys):
+        """Defines specific rule-based exceptions for gathering certain axes."""
+        if axis_name == "expert" and "MoeBlock_0" in path_keys:
+          return True
+        # Add more exclusion rules for other axes here if needed in the future
+        return False
 
-      # Renamed to clarify we are gathering a single tensor iteratively along requested axes
-      def _gather_tensor_along_axes(path, x, *indices):
-        path_keys = [getattr(p, "key", str(p)) for p in path]
+      # Renamed to be more descriptive of its action
+      @jax.shard_map(
+          mesh=self.mesh,
+          in_specs=(repeat_weights_pps, None),  # 'None' covers the entire axis_pytrees list
+          out_specs=bsw_pps,
+          check_vma=False,
+      )
+      def _shard_map_gather_weights(sharded_weights, indices_pytrees_list):
 
-        # Iterate through the provided axes and their corresponding indices
-        for axis_name, axis_idx in zip(axis_names, indices):
-          if axis_idx >= 0 and not should_skip_gather(axis_name, path_keys):
-            x = all_gather_invariant(x, axis_name=axis_name, axis=axis_idx - 1, tiled=True)
-        return x
+        # Renamed to clarify we are gathering a single tensor iteratively along requested axes
+        def _gather_tensor_along_axes(path, x, *indices):
+          path_keys = [getattr(p, "key", str(p)) for p in path]
 
-      return jax.tree_util.tree_map_with_path(_gather_tensor_along_axes, sharded_weights, *indices_pytrees_list)
+          # Iterate through the provided axes and their corresponding indices
+          for axis_name, axis_idx in zip(axis_names, indices):
+            if axis_idx >= 0 and not should_skip_gather(axis_name, path_keys):
+              x = jax.lax.all_gather(x, axis_name=axis_name, axis=axis_idx - 1, tiled=True)
+          return x
 
-    return _shard_map_gather_weights(repeat_weights, axis_pytrees)
+        return jax.tree_util.tree_map_with_path(_gather_tensor_along_axes, sharded_weights, *indices_pytrees_list)
+
+      return _shard_map_gather_weights(repeat_weights, axis_pytrees)
+
+    def _from_repeat_weights_to_bsw_hint(
+        repeat_weights,
+    ):
+      def _apply_sharding_hint(weight, pspec):
+        sharding_name = NamedSharding(self.mesh, pspec)
+        return maybe_shard_with_name(
+            weight,
+            sharding_name,
+            shard_mode=self.config.shard_mode,
+            debug_sharding=self.config.shard_mode,
+            extra_stack_level=0,
+        )
+
+      return jax.tree.map(_apply_sharding_hint, repeat_weights, bsw_pps)
+
+    if use_shardmap:
+      return _from_repeat_weights_to_bsw_shardmap(repeat_weights, physical_partition_spec, axes_to_gather=axes_to_gather)
+    return _from_repeat_weights_to_bsw_hint(repeat_weights)
 
   def weight_prefetching(self, weights, physical_partition_spec, loop_iteration):
-    """Fetches bsw_0 and bsw_1 via gather over the FSDP partitions."""
-    cur_repeat_weights = self.from_all_variables_to_repeat_weights(weights, loop_iteration, physical_partition_spec)
-    nxt_repeat_weights = self.from_all_variables_to_repeat_weights(weights, loop_iteration + 1, physical_partition_spec)
+    """Triggers asynchronous FSDP-like all-gathers for the current and next pipeline steps.
+
+    By gathering weights for `loop_iteration + 1` right now, the network communication
+    can overlap with the compute happening in `loop_iteration`. The dual-buffers
+    are returned grouped in an explicit `jax.ad_checkpoint` to strictly control memory.
+    """
+    cur_repeat_weights = self.from_all_variables_to_repeat_weights(weights, loop_iteration)
+    nxt_repeat_weights = self.from_all_variables_to_repeat_weights(weights, loop_iteration + 1)
     bsw_0 = self.from_repeat_weights_to_bsw(cur_repeat_weights, physical_partition_spec)
     bsw_1 = self.from_repeat_weights_to_bsw(nxt_repeat_weights, physical_partition_spec)
     return jax.ad_checkpoint.checkpoint_name((bsw_0, bsw_1), "bsw")
@@ -1595,7 +1631,7 @@ class CircularPipeline(PipelineBase):
 def create_pipeline(config: Config, layers: nn.Module, mesh: Mesh, remat_policy: Any = None) -> PipelineBase:
   """Factory function to instantiate the correct Pipeline module based on config."""
 
-  if config.use_pipeline_weight_prefetching:
+  if config.pipeline_fsdp_ag_per_repeat:
     return CircularPipeline(config=config, layers=layers, mesh=mesh, remat_policy=remat_policy)
 
   return Pipeline(config=config, layers=layers, mesh=mesh, remat_policy=remat_policy)
