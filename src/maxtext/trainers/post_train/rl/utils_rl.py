@@ -105,7 +105,6 @@ def get_match_format_regex(tmvp_config):
   """Returns a compiled regex to extract the answer from a completion."""
   match_format = re.compile(
       (
-          r"^[\s]{0,}"
           rf"{tmvp_config.reasoning_start_token}.+{tmvp_config.reasoning_end_token}.*?"
           rf"{tmvp_config.solution_start_token}(.+?){tmvp_config.solution_end_token}"
       ),
