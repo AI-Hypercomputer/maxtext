@@ -891,6 +891,10 @@ class RoutedMoE(nnx.Module):
     def gmm(
         inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes
     ):
+      tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
+          group_sizes,
+          representative_value=max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+      )
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -921,7 +925,7 @@ class RoutedMoE(nnx.Module):
           output = mblx.gmm(
               lhs=inputs,
               rhs=kernel,
-              group_sizes=group_sizes,
+              group_sizes=tokamax_group_sizes,
               preferred_element_type=self.dtype,
               tiling=tiling,
               lhs_quantize_dtype=lhs_quantize_dtype,
@@ -936,7 +940,7 @@ class RoutedMoE(nnx.Module):
           output = tokamax.ragged_dot(
               lhs=inputs,
               rhs=kernel,
-              group_sizes=group_sizes,
+              group_sizes=tokamax_group_sizes,
               precision=jax.lax.Precision.DEFAULT,
               preferred_element_type=self.dtype,
               implementation="mosaic",
