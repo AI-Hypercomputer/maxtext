@@ -22,7 +22,7 @@ from maxtext.utils import max_logging
 def verify_array_records(output_dir, expected_steps, expected_k, expected_keys):
   """Verifies the contents of ArrayRecord files containing top-k teacher logits."""
 
-  file_pattern = f"{output_dir}/teacher_top_k_process_*.array_record"
+  file_pattern = f"{output_dir}/*.array_record"
   files = tf.io.gfile.glob(file_pattern)
 
   if not files:

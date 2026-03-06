@@ -5,7 +5,8 @@ for distillation purposes in MaxText.
 Example command: 
 python3 src/maxtext/trainers/post_train/distillation/save_top_k_teacher_logits.py \
 src/maxtext/configs/post_train/distillation.yml \
---top_k=128
+--top_k=128 \
+--gcs_upload_path=gs://my-bucket/teacher_logits/
 """
 
 import os
@@ -17,8 +18,6 @@ import sys
 import tensorflow as tf
 
 import jax
-from jax.sharding import PartitionSpec as P
-from jax.sharding import NamedSharding
 import numpy as np
 import functools
 from itertools import islice
@@ -40,20 +39,12 @@ def get_top_k_logits(logits: jax.Array, k: int):
   return top_k_values, top_k_indices
 
 
-def get_local_cpu_array(arr):
-  """Extracts the local data from a sharded JAX array, avoiding duplicates from replication."""
-  unique_shards = {}
-  for s in arr.addressable_shards:
-    if s.index not in unique_shards:
-      unique_shards[s.index] = np.array(s.data)
+def generate_and_save_data(config, local_args):
+  """Generates top-k logits from the teacher model and saves them locally, optionally uploading to GCS."""
+  k_val = local_args.top_k
+  optional_keys = local_args.optional_keys
+  gcs_upload_path = local_args.gcs_upload_path
 
-  # Sort the unique shards by their start position in the batch dimension and concatenate
-  sorted_shards = sorted(unique_shards.items(), key=lambda x: x[0][0].start)
-  return np.concatenate([data for _, data in sorted_shards], axis=0)
-
-
-def generate_and_save_data(config, k_val, optional_keys):
-  """Generates top-k logits from the teacher model and saves them to an ArrayRecord file"""
   devices = jax.devices()
   devices_array = maxtext_utils.create_device_mesh(config, devices)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
@@ -63,26 +54,24 @@ def generate_and_save_data(config, k_val, optional_keys):
   teacher_model, _ = model_creation_utils.create_nnx_model(config, mesh=mesh)
   train_iter, _ = input_pipeline_interface.create_data_iterator(config, mesh)
 
-  output_dir = config.base_output_directory
-  if config.run_name:
-    output_dir = os.path.join(output_dir, config.run_name)
+  # Setup local tmp directory for Host 0
+  local_tmp_dir = "/mnt/ajkv/disks/teacher_logits_output"
+  filename = "teacher_top_k_global.array_record"
+  local_output_path = os.path.join(local_tmp_dir, filename)
 
+  writer = None
   if jax.process_index() == 0:
-    if not tf.io.gfile.exists(output_dir):
-      tf.io.gfile.makedirs(output_dir)
+    if not os.path.exists(local_tmp_dir):
+      os.makedirs(local_tmp_dir)
+    max_logging.log(f"Process 0 writing globally gathered data to local path: {local_output_path}")
+    writer = array_record_module.ArrayRecordWriter(local_output_path, "group_size:1000")
 
-  # Sync all hosts to ensure directory exists before writers open files
-  multihost_utils.sync_global_devices("create_output_dir")
-
-  # Each host writes to a unique file based on its process index to avoid write conflicts
-  filename = f"teacher_top_k_process_{jax.process_index()}.array_record"
-  output_path = os.path.join(output_dir, filename)
-
-  max_logging.log(f"Process {jax.process_index()} writing directly to: {output_path}")
-  writer = array_record_module.ArrayRecordWriter(output_path, "group_size:1000")
+  # Sync all hosts before starting the loop
+  multihost_utils.sync_global_devices("start_generation_loop")
 
   max_logging.log(f"Starting Top-K generation loop for {config.steps} steps...")
   loop_start = time.time()
+  
   for step, batch in enumerate(islice(train_iter, config.steps)):
     step_start = time.time()
     tokens = batch["inputs"]
@@ -93,42 +82,50 @@ def generate_and_save_data(config, k_val, optional_keys):
     )
     top_k_vals, top_k_idx = get_top_k_logits(logits, k=k_val)
 
-    dp_sharding_3d = NamedSharding(mesh, P("data", None, None))
-    dp_sharding_2d = NamedSharding(mesh, P("data", None))
+    # Fetch the global distributed jax arrays
+    global_vals = jax.device_get(top_k_vals)
+    global_idx = jax.device_get(top_k_idx)
+    global_tokens = jax.device_get(tokens)
 
-    # Move data to devices with appropriate sharding for distributed writing
-    top_k_vals = jax.device_put(top_k_vals, dp_sharding_3d)
-    top_k_idx = jax.device_put(top_k_idx, dp_sharding_3d)
-    tokens = jax.device_put(tokens, dp_sharding_2d)
+    if jax.process_index() == 0:
+      record_dict = {
+          "tokens": global_tokens,
+          "top_k_logits": global_vals,
+          "top_k_indices": global_idx,
+      }
+      
+      for key in optional_keys:
+        if key in batch:
+          record_dict[key] = jax.device_get(batch[key])
 
-    # Extract only the local data for this host (Distributed Writing)
-    local_vals = get_local_cpu_array(top_k_vals)
-    local_idx = get_local_cpu_array(top_k_idx)
-    local_tokens = get_local_cpu_array(tokens)
+      writer.write(pickle.dumps(record_dict))
 
-    local_optionals = {}
-    for key in optional_keys:
-      if key in batch:
-        constrained_val = jax.device_put(batch[key], dp_sharding_2d)
-        local_optionals[key] = get_local_cpu_array(constrained_val)
-
-    record_dict = {
-        "tokens": local_tokens,
-        "top_k_logits": local_vals,
-        "top_k_indices": local_idx,
-    }
-    for key, local_val in local_optionals.items():
-      record_dict[key] = local_val
-
-    writer.write(pickle.dumps(record_dict))
-
-    if step % 50 == 0:
-      max_logging.log(f"Successfully processed step {step} in {time.time() - step_start:.4f}s")
+      if step % 50 == 0:
+        max_logging.log(f"Successfully processed step {step} in {time.time() - step_start:.4f}s")
 
   max_logging.log(f"Generation loop finished in {time.time() - loop_start:.2f}s")
 
-  writer.close()
-  max_logging.log(f"Finished writing to {output_path}.")
+  # Sync to ensure all hosts finish the forward passes before host 0 starts uploading
+  multihost_utils.sync_global_devices("loop_finished")
+
+  # Finalize writing and handle GCS upload on Host 0
+  if jax.process_index() == 0:
+    writer.close()
+    max_logging.log(f"Finished writing to local disk: {local_output_path}")
+
+    if gcs_upload_path:
+      gcs_file_path = os.path.join(gcs_upload_path, filename)
+      max_logging.log(f"Flag --gcs_upload_path detected. Uploading to: {gcs_file_path}")
+      
+      if not tf.io.gfile.exists(gcs_upload_path):
+        tf.io.gfile.makedirs(gcs_upload_path)
+        
+      # Perform the bulk copy to GCS
+      tf.io.gfile.copy(local_output_path, gcs_file_path, overwrite=True)
+      max_logging.log("GCS Upload complete.")
+
+  # Sync all hosts one last time so worker hosts don't terminate the job 
+  multihost_utils.sync_global_devices("upload_complete")
 
 
 def main(argv: Sequence[str], local_args):
@@ -138,7 +135,8 @@ def main(argv: Sequence[str], local_args):
   teacher_argv = [argv[0], argv[1]]
   teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
 
-  generate_and_save_data(teacher_config, local_args.top_k, local_args.optional_keys)
+  # Pass the entire local_args object to clean up the function signature
+  generate_and_save_data(teacher_config, local_args)
 
 
 if __name__ == "__main__":
@@ -156,6 +154,13 @@ if __name__ == "__main__":
       nargs="*",
       default=["inputs_position", "inputs_segmentation", "targets_segmentation", "targets"],
       help="Optional keys to save from teacher logits (space-separated).",
+  )
+  parser.add_argument(
+      "--gcs_upload_path",
+      type=str,
+      required=False,
+      default=None,
+      help="Optional GCS directory (e.g., gs://my-bucket/logits/) to upload the locally saved ArrayRecord file.",
   )
   local_arg, remaining_args = parser.parse_known_args()
 
