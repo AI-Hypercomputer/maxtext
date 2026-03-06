@@ -18,7 +18,6 @@ import sys
 import tensorflow as tf
 
 import jax
-import numpy as np
 import functools
 from itertools import islice
 
@@ -71,7 +70,7 @@ def generate_and_save_data(config, local_args):
 
   max_logging.log(f"Starting Top-K generation loop for {config.steps} steps...")
   loop_start = time.time()
-  
+
   for step, batch in enumerate(islice(train_iter, config.steps)):
     step_start = time.time()
     tokens = batch["inputs"]
@@ -93,7 +92,7 @@ def generate_and_save_data(config, local_args):
           "top_k_logits": global_vals,
           "top_k_indices": global_idx,
       }
-      
+
       for key in optional_keys:
         if key in batch:
           record_dict[key] = jax.device_get(batch[key])
@@ -116,15 +115,15 @@ def generate_and_save_data(config, local_args):
     if gcs_upload_path:
       gcs_file_path = os.path.join(gcs_upload_path, filename)
       max_logging.log(f"Flag --gcs_upload_path detected. Uploading to: {gcs_file_path}")
-      
+
       if not tf.io.gfile.exists(gcs_upload_path):
         tf.io.gfile.makedirs(gcs_upload_path)
-        
+
       # Perform the bulk copy to GCS
       tf.io.gfile.copy(local_output_path, gcs_file_path, overwrite=True)
       max_logging.log("GCS Upload complete.")
 
-  # Sync all hosts one last time so worker hosts don't terminate the job 
+  # Sync all hosts one last time so worker hosts don't terminate the job
   multihost_utils.sync_global_devices("upload_complete")
 
 
