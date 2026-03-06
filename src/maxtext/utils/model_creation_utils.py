@@ -17,15 +17,17 @@
 
 from collections.abc import Sequence
 from functools import partial
+import re
 from typing import overload
 
 from etils import epath
 from flax import nnx
 import flax.linen as nn
 import jax
+import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh
 from maxtext.configs import pyconfig
-from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
+from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_utils
@@ -112,7 +114,109 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   return model
 
 
-def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
+def _sort_sublayer_keys(keys):
+  """Sort sub-layer key names numerically by trailing digit."""
+  return sorted(keys, key=lambda k: int(re.search(r"\d+$", k).group()))
+
+
+def _get_decoder_layer_groups(config) -> list[tuple[str, int]]:
+  """Returns [(layer_name, count), ...] tuples based on decoder block type."""
+  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+    return [
+        ("dense_layers", config.first_num_dense_layers),
+        ("moe_layers", config.base_num_decoder_layers - config.first_num_dense_layers),
+    ]
+  return [("layers", config.base_num_decoder_layers)]
+
+
+def _is_scanned_checkpoint(metadata_tree, is_nnx_checkpoint, config) -> bool:
+  """Detects whether a checkpoint uses scanned (stacked) layer storage."""
+  if is_nnx_checkpoint:
+    decoder_tree = metadata_tree.get("decoder", {})
+  else:
+    decoder_tree = metadata_tree.get("params", {}).get("params", {}).get("decoder", {})
+  layer_groups = _get_decoder_layer_groups(config)
+  return any(name in decoder_tree for name, _ in layer_groups)
+
+
+def _build_scanned_restore_target(target, layer_groups, scan_axis, is_nnx_format, metadata_decoder_tree):
+  """Stacks per-layer restore target entries into a single scanned entry.
+
+  Takes an unscanned target (with `layers_0`, `layers_1`, ... entries) and
+  stacks them into a single `layers` entry to match the scanned checkpoint
+  structure, so orbax can load the checkpoint into a matching target.
+
+  For ScannableBlock checkpoints, the checkpoint nests sub-layer keys (e.g.,
+  `layers_0`, `layers_1`) under the layer group name. This function detects
+  that from `metadata_decoder_tree` and groups layers accordingly.
+  """
+  if is_nnx_format:
+    decoder = target["decoder"]
+  else:
+    decoder = target["params"]["params"]["decoder"]
+
+  for layer_name, num_layers in layer_groups:
+    if num_layers == 0:
+      continue
+
+    ckpt_subtree = metadata_decoder_tree.get(layer_name, {})
+    # A ScannableBlock checkpoint nests sub-layer keys (e.g., layers_0, layer_0)
+    # under the layer group name instead of providing a single stacked array.
+    sub_layer_names = _sort_sublayer_keys(k for k in ckpt_subtree)
+
+    if sub_layer_names:
+      # Nested ScannableBlock: group unscanned layers into per-sub-layer stacks.
+      # Mapping: sub_layer j, scan step s → global layer s*K + j
+      K = len(sub_layer_names)
+      scan_steps = num_layers // K
+      sub_layers = {}
+      for j, sub_name in enumerate(sub_layer_names):
+        per_step = [decoder.pop(f"{layer_name}_{s * K + j}") for s in range(scan_steps)]
+        sub_layers[sub_name] = jax.tree.map(lambda *a: jnp.stack(a, axis=scan_axis), *per_step)
+      decoder[layer_name] = sub_layers
+    else:
+      # Flat scan: stack all layers into a single array.
+      per_layer = [decoder.pop(f"{layer_name}_{i}") for i in range(num_layers)]
+      decoder[layer_name] = jax.tree.map(lambda *a: jnp.stack(a, axis=scan_axis), *per_layer)
+
+  return target
+
+
+def _unscan_checkpoint_dict(checkpoint, layer_groups, scan_axis):
+  """Splits stacked scanned layer arrays into per-layer entries.
+
+  For flat scan, converts `checkpoint["decoder"]["layers"]` (shape [N, ...]) into
+  `checkpoint["decoder"]["layers_0"]`, ..., `checkpoint["decoder"]["layers_{N-1}"]`.
+
+  For nested ScannableBlock scan, converts
+  `checkpoint["decoder"]["layers"]["layers_j"]` (shape [S, ...]) into
+  `checkpoint["decoder"]["layers_{s*K+j}"]` for each scan step s and sub-layer j.
+  """
+  decoder = checkpoint["decoder"]
+  for layer_name, num_layers in layer_groups:
+    if layer_name not in decoder:
+      continue
+    scanned = decoder.pop(layer_name)
+
+    if isinstance(scanned, dict):
+      # Nested ScannableBlock: scanned is {sub_name_j: array[scan_steps, ...]}
+      sub_layer_names = _sort_sublayer_keys(scanned.keys())
+      K = len(sub_layer_names)
+      scan_steps = num_layers // K
+      for s in range(scan_steps):
+        for j, sub_name in enumerate(sub_layer_names):
+          decoder[f"{layer_name}_{s * K + j}"] = jax.tree.map(
+              lambda x, s=s: jnp.take(x, s, axis=scan_axis), scanned[sub_name]
+          )
+    else:
+      # Flat scan: scanned is array[N, ...]
+      for i in range(num_layers):
+        decoder[f"{layer_name}_{i}"] = jax.tree.map(
+            lambda x, i=i: jnp.take(x, i, axis=scan_axis), scanned
+        )
+
+
+def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, unscan_checkpoint: bool = False):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
 
   def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
@@ -207,6 +311,37 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
           item_to_restore = target_for_restore
           restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
 
+        # Extract decoder sub-tree from metadata for ScannableBlock sub-layer detection
+        if is_nnx_checkpoint:
+          metadata_decoder_tree = metadata.item_metadata.tree.get("decoder", {})
+        else:
+          metadata_decoder_tree = (
+              metadata.item_metadata.tree.get("params", {})
+              .get("params", {})
+              .get("decoder", {})
+          )
+
+        # Detect if checkpoint is scanned but model expects unscanned
+        layer_groups = _get_decoder_layer_groups(config)
+        checkpoint_is_scanned = (
+            unscan_checkpoint
+            and not config.scan_layers
+            and _is_scanned_checkpoint(metadata.item_metadata.tree, is_nnx_checkpoint, config)
+        )
+
+        if checkpoint_is_scanned:
+          item_to_restore = _build_scanned_restore_target(
+              item_to_restore, layer_groups, config.param_scan_axis, is_nnx_checkpoint, metadata_decoder_tree
+          )
+          if is_nnx_checkpoint:
+            restore_args = ocp.checkpoint_utils.construct_restore_args(item_to_restore)
+          else:
+            restore_args = {
+                "params": {
+                    "params": ocp.checkpoint_utils.construct_restore_args(item_to_restore["params"]["params"])
+                }
+            }
+
         restored = ckptr.restore(
             epath.Path(config.load_parameters_path),
             item=item_to_restore,
@@ -222,6 +357,9 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
           )
         else:
           checkpoint = restored["params"]["params"]
+
+        if checkpoint_is_scanned:
+          _unscan_checkpoint_dict(checkpoint, layer_groups, config.param_scan_axis)
 
         if checkpoint:
           nnx.update(model, checkpoint)

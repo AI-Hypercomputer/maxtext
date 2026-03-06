@@ -234,6 +234,6 @@ class MaxTextForCausalLM(nnx.Module):
 
     with self.mesh, nn.logical_axis_rules(""):
       model, _ = model_creation_utils.create_nnx_model(
-          self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
+          self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key, unscan_checkpoint=True
       )
       self.model = nnx.data(model)
