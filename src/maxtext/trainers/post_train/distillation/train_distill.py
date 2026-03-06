@@ -134,7 +134,6 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
       model, input_tokens, positions, attention_mask, decoder_segment_ids=None, cache=None, **kwargs
   ) -> distillation_utils.DistillationForwardOutput:
     """Forward pass wrapper adapted for raw MaxText models."""
-    del kwargs  # Unused
     del attention_mask  # Unused
     del cache  # Unused
     logits = model(
@@ -142,6 +141,8 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         decoder_positions=positions,
         decoder_segment_ids=decoder_segment_ids,
         enable_dropout=config.enable_dropout,
+        decoder_target_tokens=kwargs.get("targets", None),
+        decoder_target_mask=kwargs.get("targets_segmentation", None),
     )
     out_projection_activations = None
     if config.distill_beta > 0.0:
@@ -213,6 +214,8 @@ class MaxTextDistillationTrainer(distillation_trainer.DistillationTrainer):
         positions=input_data.positions,
         decoder_segment_ids=input_data.decoder_segment_ids,
         targets=input_data.targets,
+        targets_position=input_data.targets_position,
+        targets_segmentation=input_data.targets_segmentation,
     )
 
   def _post_process_train_step(self, aux: dict[str, jax.Array]) -> None:
@@ -352,11 +355,13 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   teacher_model = get_maxtext_model(teacher_config, mesh)
 
   # 3. Define Distillation Strategy
-  def labels_fn(targets, **kwargs):
+  def labels_fn(targets, targets_segmentation=None, **kwargs):
     """Converts integer targets to masked one-hot vectors for hard label loss."""
     del kwargs  # Unused
     one_hot = jax.nn.one_hot(targets, student_config.vocab_size)
     mask = jnp.not_equal(targets, pad_id).astype(one_hot.dtype)[..., None]
+    if targets_segmentation is not None:
+      mask = mask * (targets_segmentation != 0)[..., None]
     return one_hot * mask
 
   # Both Student and Teacher use the same forward logic via the adapter
@@ -372,6 +377,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
       alpha=student_config.distill_alpha,
       beta_feature=student_config.distill_beta,
       layer_indices=student_config.distill_layer_indices,
+      sft_mode=student_config.use_sft,
   )
 
   student_model, teacher_model = strategy.pre_process_models(student_model, teacher_model)
@@ -436,6 +442,8 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
           "attention_mask": batch.input_mask,
           "decoder_segment_ids": batch.decoder_segment_ids,
           "targets": batch.targets,  # Passed to strategy (labels_fn)
+          "targets_position": batch.targets_position,  # Passed to strategy (labels_fn)
+          "targets_segmentation": batch.targets_segmentation,  # Passed to strategy (labels_fn)
           "cache": None,
       }
   )

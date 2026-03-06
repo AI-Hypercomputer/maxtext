@@ -925,6 +925,7 @@ class Tokenizer(BaseModel):
   tokenizer_type: TokenizerType = Field(TokenizerType.SENTENCEPIECE, description="The type of tokenizer.")
   use_chat_template: bool = Field(False, description="Whether to use the chat template for tokenization.")
   chat_template_path: str = Field("", description="Path to chat template json file.")
+  chat_template: str = Field("", description="Chat template to use.")
   tokenize_train_data: bool = Field(True, description="If False, assumes the training dataset is pre-tokenized.")
   tokenize_eval_data: bool = Field(True, description="If False, assumes the evaluation dataset is pre-tokenized.")
   add_bos: bool = Field(True, description="Whether to add a beginning-of-sentence token.")
