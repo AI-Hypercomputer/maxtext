@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-(quantization)=
+(quantization-doc)=
 
 # Quantization
 
