@@ -3,6 +3,7 @@ import numpy as np
 import scipy.linalg
 
 import torch
+import math
 from torch import nn
 import torch.nn.functional as F
 
@@ -60,9 +61,39 @@ class RMSNorm_PT(nn.Module):
         var = x.pow(2).mean(-1, keepdim=True)
         return self.weight * (x * torch.rsqrt(var + self.eps))
 
-def precompute_freqs_cis_pt(dim: int, end: int, theta: float = 10000.0):
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device, dtype=torch.float32)
+def precompute_freqs_cis_pt(config: DeepseekV32Config):
+    dim = config.qk_rope_head_dim
+    seqlen = config.max_seq_len
+    base = config.rope_theta
+    
+    # YaRN parameters (from official config)
+    factor = getattr(config, 'rope_factor', 40.0)
+    beta_fast = getattr(config, 'beta_fast', 32)
+    beta_slow = getattr(config, 'beta_slow', 1)
+    original_seq_len = getattr(config, 'original_seq_len', 4096)
+
+    freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+
+    if seqlen > original_seq_len:
+        def find_correction_dim(num_rotations, dim, base, max_seq_len):
+            return dim * math.log(max_seq_len / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
+
+        def find_correction_range(low_rot, high_rot, dim, base, max_seq_len):
+            low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
+            high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
+            return max(low, 0), min(high, dim - 1)
+
+        def linear_ramp_factor(min_val, max_val, dim):
+            if min_val == max_val:
+                max_val += 0.001
+            linear_func = (torch.arange(dim, dtype=torch.float32) - min_val) / (max_val - min_val)
+            return torch.clamp(linear_func, 0, 1)
+
+        low, high = find_correction_range(beta_fast, beta_slow, dim, base, original_seq_len)
+        smooth = 1 - linear_ramp_factor(low, high, dim // 2)
+        freqs = freqs / factor * (1 - smooth) + freqs * smooth
+
+    t = torch.arange(seqlen, dtype=torch.float32)
     freqs = torch.outer(t, freqs)
     return torch.polar(torch.ones_like(freqs), freqs)
 
@@ -127,6 +158,12 @@ class MLA_PT(nn.Module):
         self.qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
         self.v_head_dim = config.v_head_dim
         self.softmax_scale = self.qk_head_dim ** -0.5
+        original_seq_len = getattr(config, 'original_seq_len', 4096)
+        if config.max_seq_len > original_seq_len:
+            mscale_base = getattr(config, 'mscale', 1.0)
+            rope_factor = getattr(config, 'rope_factor', 40.0)
+            mscale = 0.1 * mscale_base * math.log(rope_factor) + 1.0
+            self.softmax_scale = self.softmax_scale * mscale * mscale
         self.kv_lora_rank = config.kv_lora_rank
 
         self.wq_a = nn.Linear(config.hidden_size, config.q_lora_rank, bias=False)
@@ -244,10 +281,16 @@ class DeepseekV32ForCausalLM_PT(nn.Module):
         self.norm = RMSNorm_PT(config.hidden_size, eps=config.layer_norm_eps)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-    def forward(self, input_ids: torch.Tensor):
+        # Precompute RoPE frequencies up to max_seq_len ONCE
+        self.register_buffer("freqs_cis", precompute_freqs_cis_pt(config), persistent=False)
+
+    def forward(self, input_ids: torch.Tensor, start_pos: int = 0):
         bsz, seqlen = input_ids.shape
         x = self.embed_tokens(input_ids)
-        freqs_cis = precompute_freqs_cis_pt(self.config.qk_rope_head_dim, seqlen, self.config.rope_theta).to(x.device)
+        
+        # Slice the precomputed frequencies instead of recalculating
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen].to(x.device)
+        
         causal_mask = torch.triu(torch.full((seqlen, seqlen), float('-inf'), device=x.device), diagonal=1)
 
         for layer in self.layers:
