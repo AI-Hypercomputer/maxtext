@@ -419,61 +419,64 @@ def eval_step(model, config, state, data, dropout_rng):
 
 def train_loop(config, recorder, state=None):
   """Main Training loop."""
-  (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      data_loader,
-      rampup_manager,
-      eval_data_iterator,
-      state,
-  ) = train_utils.setup_train_loop(config, recorder)
+  # Kills the workload if initialization takes longer than 20 minutes
+  with watchdog.watchdog(20 * 60, repeat=False):
+    (
+        init_rng,
+        checkpoint_manager,
+        state_mesh_shardings,
+        model,
+        mesh,
+        learning_rate_schedule,
+        data_iterator,
+        data_loader,
+        rampup_manager,
+        eval_data_iterator,
+        state,
+    ) = train_utils.setup_train_loop(config, recorder)
 
-  if config.use_dpo:
-    if "reference_params" not in state.params:
-      reference_params = jax.tree.map(jnp.copy, state.params["params"])
-      state = _merge_dpo_state(state, reference_params)
-    state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
+    if config.use_dpo:
+      if "reference_params" not in state.params:
+        reference_params = jax.tree.map(jnp.copy, state.params["params"])
+        state = _merge_dpo_state(state, reference_params)
+      state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
-  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+    params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
-  p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config,
-      model,
-      mesh,
-      state,
-      state_mesh_shardings,
-      train_step,
-      eval_step,
-      eval_data_iterator,
-      params_shardings,
-  )
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config,
+        model,
+        mesh,
+        state,
+        state_mesh_shardings,
+        train_step,
+        eval_step,
+        eval_data_iterator,
+        params_shardings,
+    )
 
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    shaped_batch = maxtext_utils.get_shaped_batch(config)
-    if config.shard_optimizer_over_data:
-      state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
-    maxtext_utils.maybe_dump_jaxpr(config, p_train_step, (state, shaped_batch, init_rng))
-    if config.compiled_trainstep_file == "":  # compile only when there is no pre-compiled file loaded
-      compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
-      compiled_stats = compiled.memory_analysis()
-      max_utils.print_compiled_memory_stats(compiled_stats)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+      shaped_batch = maxtext_utils.get_shaped_batch(config)
+      if config.shard_optimizer_over_data:
+        state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
+      maxtext_utils.maybe_dump_jaxpr(config, p_train_step, (state, shaped_batch, init_rng))
+      if config.compiled_trainstep_file == "":  # compile only when there is no pre-compiled file loaded
+        compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
+        compiled_stats = compiled.memory_analysis()
+        max_utils.print_compiled_memory_stats(compiled_stats)
 
-  start_step = get_first_step(state)  # this is the start_step for training
-  prof = profiler.Profiler(config, offset_step=start_step)
-  metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
+    start_step = get_first_step(state)  # this is the start_step for training
+    prof = profiler.Profiler(config, offset_step=start_step)
+    metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
-  # Write train config params, num model params, and XLA flags to tensorboard
-  metric_logger.write_setup_info_to_tensorboard(state.params)
+    # Write train config params, num model params, and XLA flags to tensorboard
+    metric_logger.write_setup_info_to_tensorboard(state.params)
 
   try:
     last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
-      with watchdog.watchdog(60):
+      # Print the stacktrace every 60s and also exit the workload if longer than 600s
+      with watchdog.watchdog(60), watchdog.watchdog(10 * 60, repeat=False):
         prof.maybe_activate_profiler(step, state)
 
         with jax.profiler.StepTraceAnnotation("train", step_num=step):
