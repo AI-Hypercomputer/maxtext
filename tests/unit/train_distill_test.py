@@ -91,7 +91,7 @@ class TrainDistillTest(unittest.TestCase):
     self.assertTrue(np.all(tunix_input.input_mask))
 
   def test_prepare_inputs_logic(self):
-    """Verifies the filtering and teacher call logic in the custom trainer."""
+    """Verifies the filtering in the custom trainer."""
     # 1. Initialize Trainer (bypass init)
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
@@ -112,17 +112,87 @@ class TrainDistillTest(unittest.TestCase):
         targets=jnp.array([[1]]),
     )
 
-    # 3. Mock Strategy Output
-    fake_teacher_logits = jnp.zeros((1, 1, 10))
-    trainer.strategy.get_teacher_outputs.return_value = fake_teacher_logits
-
     # 4. Run
-    result = trainer._prepare_inputs(input_data)
+    _ = trainer._prepare_inputs(input_data)
 
     # 5. Verify
-    trainer.strategy.get_teacher_outputs.assert_called_once()
-    self.assertIsNotNone(result.teacher_output)
-    self.assertEqual(result.teacher_output.shape, (1, 1, 10))
+    trainer.strategy.get_teacher_outputs.assert_not_called()
+
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.tree.map")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.value_and_grad")
+  def test_train_step(self, mock_value_and_grad, mock_tree_map):
+    """Verifies train step calls teacher/student forward functions."""
+    # 1. Initialize Trainer (bypass init)
+    # pylint: disable=no-value-for-parameter
+    trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
+
+    # 2. Setup Trainer State Mocks
+    trainer.strategy = mock.Mock()
+
+    # Setup the batch that gen_model_input_fn will return
+    mock_batch = {
+        "input_tokens": mock.Mock(),
+        "positions": mock.Mock(),
+        "attention_mask": mock.Mock(),
+        "decoder_segment_ids": mock.Mock(),
+        "targets": mock.Mock(),
+    }
+    trainer.gen_model_input_fn = mock.Mock(return_value=mock_batch)
+
+    # 3. Setup Input Mocks
+    teacher_model = mock.Mock()
+    student_model = mock.Mock()
+    models_tuple = (student_model, teacher_model)
+    optimizer = mock.Mock()
+    inputs = mock.Mock()
+
+    # 4. Configure the mocked nnx.value_and_grad
+    # grad_fn returns a tuple of (output, grads). Output is (loss, aux)
+    mock_loss, mock_aux, mock_grads = mock.Mock(), mock.Mock(), mock.Mock()
+    mock_grad_fn = mock.Mock(return_value=((mock_loss, mock_aux), mock_grads))
+    mock_value_and_grad.return_value = mock_grad_fn
+
+    # 5. Execute the outer _train_step function
+    loss, aux = trainer._train_step(models_tuple, optimizer, inputs)
+
+    # 6. Extract and trigger the inner `loss_wrapper` manually
+    # mock_value_and_grad was called like: nnx.value_and_grad(loss_wrapper, ...)
+    # We grab the first argument (index 0) passed to it.
+    loss_wrapper = mock_value_and_grad.call_args[0][0]
+
+    # Execute it with our mock models and mock batch to trigger the inner logic
+    loss_wrapper(student_model, teacher_model, mock_batch)
+
+    # --- ASSERTIONS ---
+
+    # Verify teacher forward was called with right arguments
+    trainer.strategy.teacher_forward_fn.assert_called_once_with(
+        model=teacher_model,
+        input_tokens=mock_batch["input_tokens"],
+        positions=mock_batch["positions"],
+        attention_mask=mock_batch["attention_mask"],
+        decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        cache=None,
+    )
+
+    # Verify student forward was called with right arguments
+    trainer.strategy.student_forward_fn.assert_called_once_with(
+        model=student_model,
+        input_tokens=mock_batch["input_tokens"],
+        positions=mock_batch["positions"],
+        attention_mask=mock_batch["attention_mask"],
+        decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        cache=None,
+    )
+
+    # Verify loss computation and optimizer update
+    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"])
+    trainer.strategy.compute_loss.assert_called_once()
+    optimizer.update.assert_called_once_with(student_model, mock_grads)
+
+    # Verify the final returns match what grad_fn produced
+    self.assertEqual(loss, mock_loss)
+    self.assertEqual(aux, mock_aux)
 
   def test_optimizer_factory(self):
     """Verifies the optimizer factory injects hyperparams and handles configs."""
