@@ -44,12 +44,14 @@ def gmm(
     weight_gather_axes: List[Tuple[str, int]] | None = None,
     input_buffer_count: tuple[int, int, int] = (2, 2, 2),
     combine_scopes: bool = False,
+    # TODO(amandaliang): get rid of the qwix_rule in favor of Qwix's interception feature
+    qwix_rule: qwix.QtRule | None = None,
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
   if use_qwix_quantization:
     # get_current_rule has to be called outside of the _gmm_fwd function.
-    quantization_rule = qpl.get_current_rule("gmm")
+    quantization_rule = qwix_rule if qwix_rule else qpl.get_current_rule("gmm")
     if quantization_rule and not isinstance(quantization_rule, qwix.QtRule):
       raise ValueError("Expect a QtRule for quantized training.")
   else:

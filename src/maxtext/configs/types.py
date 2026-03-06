@@ -476,6 +476,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, etc).",
   )
+  share_kv_projections: bool = Field(False, description="If True, Key and Value use the same projection.")
   attention_type: Literal["global", "local_sliding", "chunk", "mla", "full"] = Field(
       "global", description="The variant of attention to use."
   )
@@ -794,6 +795,8 @@ class LayoutAndSharding(BaseModel):
       description="Allowed percentage of non-sharded parameters.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
+  internal_compile: bool = Field(False, description="Use internal_compile to bypass open-source topology mappings.")
+  internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
 
 
 class DcnParallelism(BaseModel):
@@ -1380,6 +1383,11 @@ class Profiling(BaseModel):
   xprof_e2e_enable_fw_throttle_event: bool = Field(False, description="Enable FW throttle event.")
   xprof_e2e_enable_fw_power_level_event: bool = Field(False, description="Enable FW power level event.")
   xprof_e2e_enable_fw_thermal_event: bool = Field(False, description="Enable FW thermal event.")
+  profile_power_events: bool = Field(
+      False,
+      description="Enable TPU-specific power/thermal profiling events."
+      " Defaults to False to avoid breaking GPU xplane tracing.",
+  )
 
 
 class HloDump(BaseModel):
@@ -1577,6 +1585,7 @@ class RLHardware(BaseModel):
       -1,
       description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined.",
   )
+  rollout_expert_parallelism: int = Field(1, description="Expert parallelism per replica for rollout")
 
 
 class VLLM(BaseModel):
@@ -1586,8 +1595,10 @@ class VLLM(BaseModel):
   hbm_utilization_vllm: float = Field(0.72, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, description="Swap space in GB for vLLM.")
   enable_dp_attention: bool = Field(False, description="Enable the attn_dp mesh axis in vLLM.")
+  async_scheduling: bool = Field(False, description="Enable asynchronous scheduling in vLLM.")
   max_num_batched_tokens: Optional[int] = Field(None, description="Max number of batched tokens in vLLM.")
   max_num_seqs: Optional[int] = Field(None, description="Max number of sequences in vLLM.")
+  stop_strings: Optional[list[str]] = Field(None, description="List of stop strings for vLLM decoding.")
   vllm_additional_config: dict[str, Any] = Field(default_factory=dict, description="Additional vLLM config options.")
   vllm_hf_overrides: dict[str, Any] = Field(
       default_factory=dict,
@@ -2063,6 +2074,11 @@ class MaxTextConfig(
     # E. HARDWARE-DEPENDENT CALCULATIONS
     def get_num_target_devices():
       """Get the number of devices for the target topology, handling AOT compilation and single-controller modes."""
+      if self.internal_compile:
+        if self.internal_compile_num_devices <= 0:
+          raise ValueError("Set internal_compile_num_devices to a positive integer.")
+        # User bypassing topology mappings should supply explicit device count
+        return self.internal_compile_num_devices
       if self.compile_topology:
         spec = accelerator_to_spec_map.get_system_characteristics(self.compile_topology)
         return int(spec.devices_per_slice * self.compile_topology_num_slices)
@@ -2333,8 +2349,6 @@ class MaxTextConfig(
         raise ValueError(
             "Engram requires both 'hf_access_token' and 'tokenizer_path' " "to load the Hugging Face tokenizer."
         )
-      if self.scan_layers:
-        raise NotImplementedError("Currently Engram only supports unscanned version. Please set scan_layers=False.")
       if len(self.engram_vocab_bases) != (self.engram_max_ngram_size - 1):
         raise ValueError(
             f"Engram vocab size mismatch: expected {self.engram_max_ngram_size - 1} (max_ngram_size - 1), "
@@ -2505,6 +2519,11 @@ class MaxTextConfig(
           "Please disable attn_logits_soft_cap when using use_qk_clip."
       )
 
+    if self.share_kv_projections and self.fused_qkv:
+      raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
+    if self.share_kv_projections and self.attention_type == "mla":
+      raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
+
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
     if self.using_pipeline_parallelism and self.mesh_axes and self.mesh_axes[0] == "stage":
@@ -2555,6 +2574,7 @@ class MaxTextConfig(
           "expert": self.ici_expert_parallelism,
           "autoregressive": self.ici_autoregressive_parallelism,
           "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+          "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
       }
       self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
@@ -2574,6 +2594,7 @@ class MaxTextConfig(
           "expert": self.dcn_expert_parallelism,
           "autoregressive": self.dcn_autoregressive_parallelism,
           "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+          "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
       }
       self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 

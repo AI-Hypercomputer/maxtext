@@ -44,7 +44,9 @@ jobs:
       
   publish_maxtext_package_to_pypi:
     name: Publish MaxText package to PyPI
-    needs: [build_and_test_maxtext_package]
+    # Temporarily only require release_approval for a one-time upload.
+    # Immediately revert this to `needs: [build_and_test_maxtext_package]`.
+    needs: [release_approval]
     runs-on: ubuntu-latest
     environment: release
     steps:

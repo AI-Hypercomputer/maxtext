@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -48,14 +48,16 @@ from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate,
 from maxtext.common import checkpointing, profiler
 from maxtext.common.goodput import (
     GoodputEvent,
+    RECORD_JOB_END_TIME,
+    RECORD_JOB_START_TIME,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
+    record_goodput,
 )
 from maxtext.common.gcloud_stub import cloud_diagnostics as _cloud_diag, is_decoupled
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common.metric_logger import MetricLogger, record_activation_metrics
-from maxtext.optimizers.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
@@ -65,6 +67,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import qk_clip_utils
 from maxtext.utils import sharding
 from maxtext.utils import train_utils
+from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss
 
 _diag_modules = _cloud_diag()
@@ -493,6 +496,7 @@ def train_loop(config, recorder, state=None):
   # Write train config params, num model params, and XLA flags to tensorboard
   metric_logger.write_setup_info_to_tensorboard(state.params)
 
+  _job_completed_gracefully = False
   try:
     last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
@@ -558,9 +562,13 @@ def train_loop(config, recorder, state=None):
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
       checkpoint_manager.wait_until_finished()
+    _job_completed_gracefully = True
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
+    _job_completed_gracefully = True
   finally:
+    if _job_completed_gracefully:
+      record_goodput(recorder, RECORD_JOB_END_TIME)
     metric_logger.flush_metrics_and_cleanup()
 
   return state
@@ -623,7 +631,6 @@ def run(config, recorder, diagnostic_config):
 
   with (
       diagnostics_context,
-      maybe_record_goodput(recorder, GoodputEvent.JOB),
       max_utils.maybe_get_transformer_engine_context(config),
   ):
     train_loop(config, recorder)
@@ -631,6 +638,7 @@ def run(config, recorder, diagnostic_config):
 
 def main(argv: Sequence[str]) -> None:
   config, recorder, diagnostic_config = initialize(argv)
+  record_goodput(recorder, RECORD_JOB_START_TIME)
   with maybe_monitor_goodput(config):
     run(config, recorder, diagnostic_config)
 

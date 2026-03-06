@@ -113,16 +113,10 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
   ]
 
   # Vision layers mapping
-  if scan_layers:
-    for i in range(Nvis):
-      for mx, hf in vision_params:
-        key = f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock-{mx}"
-        mapping[key] = f"model.vision_tower.vision_model.encoder.layers.{i}.{hf}"
-  else:
-    for i in range(Nvis):
-      for mx, hf in vision_params:
-        key = f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-{mx}"
-        mapping[key] = f"model.vision_tower.vision_model.encoder.layers.{i}.{hf}"
+  for i in range(Nvis):
+    for mx, hf in vision_params:
+      key = f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-{mx}"
+      mapping[key] = f"model.vision_tower.vision_model.encoder.layers.{i}.{hf}"
 
   # Text decoder mapping
   text_params = [
@@ -142,9 +136,26 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
   ]
 
   if scan_layers:
-    for mx, hf in text_params:
-      key = f"params-decoder-layers-{mx}"
-      mapping[key] = [f"model.language_model.layers.{i}.{hf}" for i in range(Ndec)]
+    # Gemma3 repeats a 6-layer attention pattern (5 local + 1 global),
+    # scanned as layers_0..layers_5 with leftovers in layers_remainder.
+    attention_pattern_length = 6
+    num_remaining = Ndec % attention_pattern_length
+    num_scanned = Ndec - num_remaining
+
+    # Main scanned blocks: params-decoder-layers-layers_{block_idx}-{param}
+    for block_idx in range(attention_pattern_length):
+      hf_indices = list(range(block_idx, num_scanned, attention_pattern_length))
+      for mx, hf in text_params:
+        key = f"params-decoder-layers-layers_{block_idx}-{mx}"
+        mapping[key] = [f"model.language_model.layers.{i}.{hf}" for i in hf_indices]
+
+    # Remainder layers (unscanned): params-decoder-layers_remainder-layers_{rem_idx}-{param}
+    if num_remaining > 0:
+      for rem_idx in range(num_remaining):
+        hf_layer_idx = num_scanned + rem_idx
+        for mx, hf in text_params:
+          key = f"params-decoder-layers_remainder-layers_{rem_idx}-{mx}"
+          mapping[key] = f"model.language_model.layers.{hf_layer_idx}.{hf}"
   else:
     for i in range(Ndec):
       for mx, hf in text_params:
@@ -262,9 +273,17 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
   # Text layers
   tc = config.get("text_config", {})
   nlayers = tc.get("num_hidden_layers", 0)
-  layer_ids = [None] if scan_layers else list(range(nlayers))
-  for i in layer_ids:
-    pref = f"params-decoder-layers_{i}-" if i is not None else "params-decoder-layers-"
+  if scan_layers:
+    attention_pattern_length = 6
+    num_remaining = nlayers % attention_pattern_length
+    # Scanned sub-layer prefixes
+    prefixes = [f"params-decoder-layers-layers_{block_idx}-" for block_idx in range(attention_pattern_length)]
+    # Remainder sub-layer prefixes
+    if num_remaining > 0:
+      prefixes += [f"params-decoder-layers_remainder-layers_{rem_idx}-" for rem_idx in range(num_remaining)]
+  else:
+    prefixes = [f"params-decoder-layers_{i}-" for i in range(nlayers)]
+  for pref in prefixes:
     # Attention Q/K/V/O
     hooks[pref + "self_attention-query-kernel"] = reshape_kernel
     hooks[pref + "self_attention-key-kernel"] = reshape_kernel
@@ -288,13 +307,8 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
   # Vision layers
   vc = config.get("vision_config", {})
   nvis = vc.get("num_hidden_layers", 0)
-  vision_layer_ids = [None] if scan_layers else list(range(nvis))
-  for i in vision_layer_ids:
-    base = (
-        f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-"
-        if i is not None
-        else "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock-"
-    )
+  for i in range(nvis):
+    base = f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-"
     # Attention kernels & biases
     for qkv in ["query", "key", "value"]:
       hooks[base + f"MultiHeadDotProductAttention_0-{qkv}-kernel"] = reshape_kernel

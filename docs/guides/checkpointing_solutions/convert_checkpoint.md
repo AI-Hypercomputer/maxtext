@@ -9,7 +9,7 @@ The following models are supported:
 | Model Family            | Sizes                  | HF $\\to$ Orbax (scan) | HF $\\to$ Orbax (unscan) | Orbax (scan) $\\to$ HF | Orbax (unscan) $\\to$ HF |
 | :---------------------- | :--------------------- | :--------------------: | :----------------------: | :--------------------: | :----------------------: |
 | **Gemma2**              | 2B, 9B, 27B            |           √            |            √             |           √            |            √             |
-| **Gemma3** (Multimodal) | 4B, 12B, 27B           |           -            |            √             |           -            |            √             |
+| **Gemma3** (Multimodal) | 4B, 12B, 27B           |           √            |            √             |           √            |            √             |
 | **Llama3.1**            | 8B, 70B, 450B          |           √            |            √             |           √            |            √             |
 | **Qwen3**               | 0.6B, 4B, 8B, 14B, 32B |           √            |            √             |           √            |            √             |
 | **Qwen3 MoE**           | 30B, 235B, 480B        |           √            |            √             |           √            |            √             |
@@ -82,7 +82,7 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext maxtext/configs/base.yml \
 
 **Key arguments:**
 
-- `model_name`: The model identifier, which should be defined in `src/MaxText/utils/utils.py`.
+- `model_name`: The model identifier, which should be defined in `src/maxtext/configs/types.py`.
 - `scan_layers`: Indicates if the output checkpoint is [scanned](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/reference/core_concepts/checkpoints.md) (scan_layers=true) or unscanned (scan_layers=false).
 - `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
 - `hf_access_token`: Your Hugging Face token.

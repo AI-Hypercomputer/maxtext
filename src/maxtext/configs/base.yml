@@ -331,6 +331,7 @@ param_scan_axis: 1
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
+share_kv_projections: False # Note: Not compatible with attention_type='mla'
 attention_bias: False # If True, adds a learnable bias to the query, key, and value projections
 attention_sink: False
 sliding_window_size: 0
@@ -411,6 +412,10 @@ jax_cache_dir: "~/jax_cache"
 
 # Hardware
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
+
+# internal_compile allows bypassing open-source topology name mappings when using internal topologies directly via get_topology_desc.
+internal_compile: False
+internal_compile_num_devices: -1 # You must specify the number of devices when using internal_compile.
 
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
@@ -911,6 +916,7 @@ xprof_tpu_power_trace_level: 0
 xprof_e2e_enable_fw_throttle_event: False
 xprof_e2e_enable_fw_power_level_event: False
 xprof_e2e_enable_fw_thermal_event: False
+profile_power_events: False # Set to True to enable TPU-specific power/thermal profiling events. Defaults to False to avoid breaking GPU xplane tracing.
 
 log_config: True # Prints the config (after defaults have been set by pyconfig logic)
 debug_sharding: False # Prints model weights sharding info

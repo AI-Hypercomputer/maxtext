@@ -24,22 +24,21 @@ We use [Tunix](https://github.com/google/tunix), a JAX-based library designed fo
 
 In this tutorial we use a single host TPU VM such as `v6e-8/v5p-8`. Let's get started!
 
-## Install dependencies
+## Install MaxText and Post-Training dependencies
 
-```sh
-# 1. Clone the repository
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-cd maxtext
-
-# 2. Create virtual environment
+```bash
+# Create a virtual environment
 export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
 pip install uv
 uv venv --python 3.12 --seed $VENV_NAME
 source $VENV_NAME/bin/activate
+```
 
-# 3. Install dependencies in editable mode
-uv pip install -e .[tpu] --resolution=lowest
-bash tools/setup/setup_post_training_requirements.sh
+Run the following commands to get all the necessary installations.
+
+```bash
+uv pip install maxtext[tpu-post-train] --resolution=lowest
+install_maxtext_tpu_post_train_extra_deps
 ```
 
 ## Setup environment variables

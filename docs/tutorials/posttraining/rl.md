@@ -44,73 +44,45 @@ Let's get started!
 
 ## Create virtual environment and Install MaxText dependencies
 
-If you have already completed the
-[MaxText installation](../../install_maxtext.md), you can skip to the next
-section for post-training dependencies installations. Otherwise, please install
-`MaxText` using the following commands before proceeding.
-
 ```bash
-# 1. Clone the repository
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-cd maxtext
-
-# 2. Create virtual environment
+# Create a virtual environment
 export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
 pip install uv
 uv venv --python 3.12 --seed $VENV_NAME
 source $VENV_NAME/bin/activate
-
-# 3. Install dependencies in editable mode
-uv pip install -e .[tpu] --resolution=lowest
-install_maxtext_github_deps
 ```
 
-## Install Post-Training dependencies
+### Option 1: From PyPI releases (Recommended)
 
-### Option 1: From PyPI releases
+Run the following commands to get all the necessary installations.
 
-> **Caution:** RL in MaxText is currently broken with PyPI releases of
-> post-training dependencies. We are working on fixing this and recommend
-> following [Option 2: From Github](#option-2-from-github) in the meantime.
-
-Next, run the following bash script to get all the necessary installations
-inside the virtual environment (for e.g., `maxtext_venv`). This will take few
-minutes. Follow along the installation logs and look out for any issues!
-
-```
-bash tools/setup/setup_post_training_requirements.sh
+```bash
+uv pip install maxtext[tpu-post-train] --resolution=lowest
+install_maxtext_tpu_post_train_extra_deps
 ```
 
-Primarily, it installs `Tunix`, and `vllm-tpu` which is
+It installs MaxText and then for post-training, it installs primarily the following:
+
+a. [Tunix](https://github.com/google/tunix) as the LLM Post-Training Library, and
+
+b. `vllm-tpu` which is
 [vllm](https://github.com/vllm-project/vllm) and
 [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby
 providing TPU inference for vLLM, with unified JAX and PyTorch support.
 
 ### Option 2: From Github
 
-You can also locally git clone [tunix](https://github.com/google/tunix) and
-install using the instructions
-[here](https://github.com/google/tunix?tab=readme-ov-file#installation).
-Similarly install [vllm](https://github.com/vllm-project/vllm) and
-[tpu-inference](https://github.com/vllm-project/tpu-inference) from source
-following the instructions
-[here](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/#install-from-source).
-To get a set of compatible commit IDs for `maxtext`, `tunix`, `tpu-inference`,
-and `vllm`, follow these steps:
+For using a version newer than the latest PyPI release, you could also install the latest vetted versions of the dependencies from MaxText in the following way:
 
-1. Navigate to the
-   [MaxText Package Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/build_and_test_maxtext.yml?query=event%3Aschedule)
-   GitHub Actions workflow.
+```bash
+# 1. Clone the repository
+git clone https://github.com/AI-Hypercomputer/maxtext.git
+cd maxtext
 
-2. Select the latest successful run.
-
-3. Within the workflow run, find and click on the `maxtext_jupyter_notebooks (py312)` job, then expand the `run` job.
-
-4. Locate the `Record Commit IDs` step. The commit SHAs for `maxtext`, `tunix`,
-   `tpu-inference`, and `vllm` that were used in that successful run are listed
-   in the logs of this step.
-
-5. Prior to installation, ensure that the `maxtext`, `tunix`, `vllm`, and `tpu-inference` repositories are synchronized to the specific commits recorded from the CI logs. For each repository, use the following command to switch to the correct commit: `git checkout <commit_id>`.
+# 2. Install dependencies in editable mode
+uv pip install -e .[tpu-post-train] --resolution=lowest
+install_maxtext_tpu_post_train_extra_deps
+```
 
 ## Setup environment variables
 
