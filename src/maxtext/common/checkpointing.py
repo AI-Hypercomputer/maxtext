@@ -247,6 +247,7 @@ def create_orbax_checkpoint_manager(
   # local storage checkpoint needs parent directory created
   p = epath.Path(checkpoint_dir)
   p.mkdir(exist_ok=True, parents=True)
+  assert p.exists(), f"Unable to create '{checkpoint_dir=}'. Make sure you have access rights."
   if enable_continuous_checkpointing:
     save_decision_policy = save_decision_policy_lib.ContinuousCheckpointingPolicy()
     preservation_policy = preservation_policy_lib.LatestN(max_num_checkpoints_to_keep)
