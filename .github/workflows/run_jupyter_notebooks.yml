@@ -84,7 +84,7 @@ jobs:
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
             filename=$(basename "$notebook")
-            if [[ "$filename" == "sft_qwen3_demo.ipynb" ]]; then
+            if [[ "$filename" == "sft_qwen3_demo.ipynb" || "$filename" == "sft_llama3_demo_gpu.ipynb" ]]; then
               echo "Skipping $filename"
               continue
             fi

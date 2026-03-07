@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Mixture of Experts (MoE) tests. """
+"""Mixture of Experts (MoE) tests."""
 
 import unittest
 
@@ -22,7 +22,6 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.common_types import Config, DType
 from maxtext.layers import linears
 from maxtext.layers import moe
@@ -30,14 +29,15 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import Fp8Quantization
 from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 import pytest
+
 
 class TokenDroppingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="token_dropping_test",
@@ -203,7 +203,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="deepseek_routing_test",

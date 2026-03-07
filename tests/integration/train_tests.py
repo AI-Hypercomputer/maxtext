@@ -22,7 +22,13 @@ from absl.testing import absltest
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
+from tests.utils.test_helpers import (
+    get_test_config_path,
+    get_test_dataset_path,
+    get_test_base_output_directory,
+    get_decoupled_parallelism_overrides,
+    is_rocm_backend,
+)
 
 
 class TrainTests(unittest.TestCase):
@@ -37,9 +43,9 @@ class TrainTests(unittest.TestCase):
   _fsdp_tp4_override = []
   if decoupled:
     if dev_count >= 4 and dev_count % 4 == 0:
-      _fsdp_tp4_override = [f"ici_fsdp_parallelism={dev_count // 4}"]
+      _fsdp_tp4_override = get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count // 4, as_argv=True)
     elif dev_count < 4:
-      _fsdp_tp4_override = [f"ici_fsdp_parallelism={dev_count}"]
+      _fsdp_tp4_override = get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True)
 
   CONFIGS = {
       "base": [  # short test for train.py with TFDS c4
@@ -53,7 +59,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "synthetic": [  # tests base config with synthetic dataset
           None,
           get_test_config_path(),
@@ -66,7 +72,7 @@ class TrainTests(unittest.TestCase):
           "dataset_type=synthetic",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "pdb_lt_1": [  # tests base config with per_device_batch_size < 1
           None,
           get_test_config_path(),
@@ -80,7 +86,7 @@ class TrainTests(unittest.TestCase):
           "ici_tensor_parallelism=4",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
           None,
           get_test_config_path(),
@@ -92,7 +98,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "int8": [  # tests base config with int8
           None,
           get_test_config_path(),
@@ -105,7 +111,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "fp8": [  # tests base config with fp8
           None,
           get_test_config_path(),
@@ -118,7 +124,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "nanoo_fp8": [  # tests base config with nanoo_fp8
           None,
           get_test_config_path(),
@@ -131,7 +137,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "te_fp8_delayedscaling": [  # tests base config with te_fp8_delayedscaling
           None,
           get_test_config_path(),
@@ -144,7 +150,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "te_fp8_currentscaling": [  # tests base config with te_fp8_currentscaling
           None,
           get_test_config_path(),
@@ -157,7 +163,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "te_mxfp8": [  # tests base config with te_mxfp8
           None,
           get_test_config_path(),
@@ -170,7 +176,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "dropout": [  # tests base config with dropout
           None,
           get_test_config_path(),
@@ -185,7 +191,7 @@ class TrainTests(unittest.TestCase):
           "dropout_rate=0.02",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "hf_input_pipeline": [  # test for train.py with TFDS c4, using HF input pipeline
           None,
           get_test_config_path(),
@@ -199,7 +205,7 @@ class TrainTests(unittest.TestCase):
           f"hf_train_files={dataset_path}/hf/c4/c4-train-00000-of-01637.parquet",
           "tokenizer_path=google-t5/t5-large",
       ]
-      + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
+      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
   }
 
   @pytest.mark.integration_test
@@ -427,7 +433,7 @@ class TrainTests(unittest.TestCase):
         "enable_goodput_recording=False",
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
     ]
-    train_main(optimizer_offload + ([f"ici_fsdp_parallelism={self.dev_count}"] if self.decoupled else []))
+    train_main(optimizer_offload + get_decoupled_parallelism_overrides(fsdp_parallelism=self.dev_count, as_argv=True))
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
@@ -448,7 +454,7 @@ class TrainTests(unittest.TestCase):
         "enable_goodput_recording=False",
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
     ]
-    train_main(parameter_offload + ([f"ici_fsdp_parallelism={self.dev_count}"] if self.decoupled else []))
+    train_main(parameter_offload + get_decoupled_parallelism_overrides(fsdp_parallelism=self.dev_count, as_argv=True))
 
   @pytest.mark.gpu_only
   def test_gpu_cudnn_flash_jax(self):
@@ -567,6 +573,8 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   @pytest.mark.skip(reason="b/489133823. Previously transient in b/462548581.")
   def test_gpu_ring_attention(self):
+    if is_rocm_backend():
+      pytest.skip("TE ring attention context parallelism not supported on ROCm.")
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"  # Disable scan for ring attention
     ring_attention = [  # tests base config on GPU with ring attention

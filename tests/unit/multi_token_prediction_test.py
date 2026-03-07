@@ -26,11 +26,10 @@ from maxtext.layers import multi_token_prediction  # The class under test
 from maxtext.layers import embeddings
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.common_types import Config
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 
 
 TEST_LAYER_NUM = 1
@@ -42,7 +41,7 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="multi_token_prediction_layer_test",
@@ -200,7 +199,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
     super().setUp()
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
     num_devices = jax.device_count()
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="mtp_block_test",

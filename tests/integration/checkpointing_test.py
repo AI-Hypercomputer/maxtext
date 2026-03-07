@@ -30,13 +30,16 @@ import json
 from math import isclose
 import os.path
 
-import jax
 import pytest
 
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
-from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
+from tests.utils.test_helpers import (
+    get_test_config_path,
+    get_test_base_output_directory,
+    get_decoupled_parallelism_overrides,
+)
 
 
 def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention_type, dataset_type, dataset_path):
@@ -72,10 +75,7 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
 
   extra_parallelism = []
   if is_decoupled():  # Match device topology in decoupled/local mode
-    try:
-      extra_parallelism.append(f"ici_fsdp_parallelism={jax.device_count()}")
-    except Exception as e:  # pragma: no cover - defensive  # pylint: disable=broad-exception-caught
-      print(f"Warning: unable to determine jax.device_count(): {e}")
+    extra_parallelism.extend(get_decoupled_parallelism_overrides(as_argv=True))
 
   return (
       [
