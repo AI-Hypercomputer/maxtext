@@ -1078,7 +1078,8 @@ position_id_per_seconds: 25
 subslice_shape: ""
 
 # NNX
-enable_nnx: false
+enable_nnx: False
+pure_nnx_decoder: False
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
