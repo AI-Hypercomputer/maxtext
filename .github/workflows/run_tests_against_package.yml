@@ -96,6 +96,25 @@ jobs:
           python3 --version
           python3 -m pip freeze
           uv pip install pytest-cov
+      - name: Ensure pip cuDNN takes precedence over system cuDNN (GPU only)
+        if: inputs.device_type == 'cuda12'
+        shell: bash
+        run: |
+          # jax-cuda12-plugin RPATH points to .venv/site-packages/nvidia/cudnn/lib/ and
+          # loads the pip-bundled cuDNN (e.g. 9.16.x) first. When TE then tries to load
+          # libcudnn_engines_runtime_compiled.so.9 from the system (9.10.2), a conflict
+          # arises: system 9.10.2's libcudnn_engines_runtime_compiled references symbols
+          # in libcudnn_graph.so.9 that differ between 9.16 (already loaded) and 9.10.2.
+          # Fix: prepend the pip cuDNN directory to LD_LIBRARY_PATH so that ALL cuDNN
+          # loads (both jax-cuda12-plugin and TE) resolve to the same pip version,
+          # eliminating the system/pip mismatch entirely.
+          VENV_CUDNN_LIB=$(find .venv -type d -name "lib" -path "*/nvidia/cudnn/*" 2>/dev/null | head -1)
+          if [ -z "$VENV_CUDNN_LIB" ]; then
+            echo "No nvidia/cudnn/lib found in venv, skipping."
+            exit 0
+          fi
+          echo "Prepending pip cuDNN to LD_LIBRARY_PATH: ${VENV_CUDNN_LIB}"
+          echo "LD_LIBRARY_PATH=${VENV_CUDNN_LIB}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> $GITHUB_ENV
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
