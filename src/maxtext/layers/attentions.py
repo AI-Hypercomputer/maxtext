@@ -533,14 +533,14 @@ class Attention(nnx.Module):
     elif self.is_qwen3_next:
       self.query_norm = Qwen3NextRMSNorm(
           num_features=self.config.head_dim,
-          eps=self.config.normalization_layer_epsilon,
+          epsilon=self.config.normalization_layer_epsilon,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           rngs=self.rngs,
       )
       self.key_norm = Qwen3NextRMSNorm(
           num_features=self.config.head_dim,
-          eps=self.config.normalization_layer_epsilon,
+          epsilon=self.config.normalization_layer_epsilon,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           rngs=self.rngs,

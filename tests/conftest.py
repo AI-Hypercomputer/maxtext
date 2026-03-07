@@ -21,7 +21,7 @@ are not marked.
 """
 
 import pytest
-from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.common.gcloud_stub import is_decoupled, is_pure_nnx
 import jax
 import importlib.util
 
@@ -79,8 +79,15 @@ def pytest_collection_modifyitems(config, items):
   skip_no_tpu = None
   skip_no_gpu = None
   skip_no_tpu_backend = None
+  skip_linen_only = None
+  skip_nnx_only = None
   if not _HAS_TPU:
     skip_no_tpu = pytest.mark.skip(reason="Skipped: requires TPU hardware, none detected")
+
+  if is_pure_nnx():
+    skip_linen_only = pytest.mark.skip(reason="Skipped: test requires Linen mode (set PURE_NNX=FALSE to run)")
+  else:
+    skip_nnx_only = pytest.mark.skip(reason="Skipped: test requires NNX mode (set PURE_NNX=TRUE to run)")
 
   if not _HAS_GPU:
     skip_no_gpu = pytest.mark.skip(reason="Skipped: requires GPU hardware, none detected")
@@ -96,6 +103,18 @@ def pytest_collection_modifyitems(config, items):
   for item in items:
     # Iterate thru the markers of every test.
     cur_test_markers = {m.name for m in item.iter_markers()}
+
+    # Linen-only skip: when running in NNX mode, skip tests not yet migrated.
+    if skip_linen_only and "linen_only" in cur_test_markers:
+      item.add_marker(skip_linen_only)
+      remaining.append(item)
+      continue
+
+    # NNX-only skip: by default (Linen mode), skip NNX-specific tests.
+    if skip_nnx_only and "nnx_only" in cur_test_markers:
+      item.add_marker(skip_nnx_only)
+      remaining.append(item)
+      continue
 
     # Hardware skip retains skip semantics.
     if skip_no_tpu and "tpu_only" in cur_test_markers:
@@ -132,6 +151,7 @@ def pytest_collection_modifyitems(config, items):
 
 
 def pytest_configure(config):
+  """Register custom pytest markers."""
   for m in [
       "gpu_only: tests that require GPU hardware",
       "tpu_only: tests that require TPU hardware",
@@ -139,5 +159,7 @@ def pytest_configure(config):
       "external_serving: JetStream / serving / decode server components",
       "external_training: goodput integrations",
       "decoupled: marked on tests that are not skipped due to GCP deps, when DECOUPLE_GCLOUD=TRUE",
+      "linen_only: tests that require Linen (not yet migrated to NNX); skipped when PURE_NNX=TRUE",
+      "nnx_only: tests that require NNX; skipped by default, run with PURE_NNX=TRUE",
   ]:
     config.addinivalue_line("markers", m)
