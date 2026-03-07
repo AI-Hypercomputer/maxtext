@@ -187,7 +187,7 @@ def add_parser_arguments(parser: argparse.ArgumentParser):
 
 
 def download_metrics_file_locally(metrics_gcs_file: str, local_file: str) -> int:
-  command = f"gsutil cp -r {metrics_gcs_file} {local_file}"
+  command = f"gcloud storage cp --recursive {metrics_gcs_file} {local_file}"
   return run_command_with_updates(command, f"Download {metrics_gcs_file} in {local_file}")
 
 
