@@ -925,7 +925,9 @@ class Tokenizer(BaseModel):
   tokenizer_type: TokenizerType = Field(TokenizerType.SENTENCEPIECE, description="The type of tokenizer.")
   use_chat_template: bool = Field(False, description="Whether to use the chat template for tokenization.")
   chat_template_path: str = Field("", description="Path to chat template json file.")
-  chat_template: str = Field("", description="Chat template to use.")
+  chat_template: str = Field(
+      "", description="Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template."
+  )
   tokenize_train_data: bool = Field(True, description="If False, assumes the training dataset is pre-tokenized.")
   tokenize_eval_data: bool = Field(True, description="If False, assumes the evaluation dataset is pre-tokenized.")
   add_bos: bool = Field(True, description="Whether to add a beginning-of-sentence token.")
@@ -1990,6 +1992,18 @@ class MaxTextConfig(
           tokenizer_path,
       )
       self.tokenizer_path = tokenizer_path
+
+    # validate chat_template format if defined
+    chat_template = getattr(self, "chat_template", "")
+    # breakpoint()
+    if chat_template:
+      try:
+        from jinja2 import Environment, TemplateSyntaxError
+
+        env = Environment()
+        env.parse(chat_template)
+      except TemplateSyntaxError as e:
+        raise ValueError(f"Specified chat_template is invalid: {e}")
 
     # C. SET PRIMARY DEPENDENCIES & DEFAULTS
     # If learning_rate_schedule_steps is -1, it defaults to the total number of training steps.
