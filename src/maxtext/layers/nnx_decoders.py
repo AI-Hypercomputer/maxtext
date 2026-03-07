@@ -468,9 +468,8 @@ class NNXDecoder(nnx.Module):
 
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
-      # Extract the updated state to return it
-      # _, new_current_state = nnx.split(layer, nnx.Param, ...)
-      new_current_state = nnx.state(layer)
+      # Extract the updated state to return it, excluding nnx.Intermediate variables.
+      _, _, new_current_state = nnx.split(layer, nnx.Intermediate, ...)
       return new_carry, new_current_state
 
     layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
@@ -668,7 +667,7 @@ class NNXDecoder(nnx.Module):
       )
     elif self.config.decoder_block == DecoderBlockType.QWEN3_NEXT:
       return functools.partial(
-          normalizations.Qwen3NextRMSNorm, num_features=num_features, shard_mode=self.config.shard_mode
+          normalizations.Qwen3NextRMSNorm, num_features=num_features, shard_mode=self.config.shard_mode, rngs=rngs
       )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
