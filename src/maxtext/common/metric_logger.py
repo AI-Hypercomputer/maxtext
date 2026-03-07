@@ -96,6 +96,7 @@ class MetricLogger:
     self.metadata = {}
     self.running_gcs_metrics = [] if config.gcs_metrics else None
     self.performance_metric_queue = self.get_performance_metric_queue(config)
+    self.all_step_times = []
     self.learning_rate_schedule = learning_rate_schedule
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     self.buffered_train_metrics = None
@@ -323,6 +324,8 @@ class MetricLogger:
       metrics["scalar"].update(
           {"perf/per_device_tokens_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TOKENS] / step_time)}
       )
+    # Record step time in ms for perfgate.
+    self.all_step_times.append(step_time * 1000)
     if self.performance_metric_queue:
       self.performance_metric_queue.put(step_time)
 
