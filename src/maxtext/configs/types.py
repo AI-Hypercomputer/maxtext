@@ -19,6 +19,7 @@
 import datetime
 import enum
 from enum import Enum
+from jinja2 import Environment, TemplateSyntaxError
 import logging
 import math
 from math import prod
@@ -1995,15 +1996,12 @@ class MaxTextConfig(
 
     # validate chat_template format if defined
     chat_template = getattr(self, "chat_template", "")
-    # breakpoint()
     if chat_template:
       try:
-        from jinja2 import Environment, TemplateSyntaxError
-
         env = Environment()
         env.parse(chat_template)
       except TemplateSyntaxError as e:
-        raise ValueError(f"Specified chat_template is invalid: {e}")
+        raise ValueError(f"Specified chat_template is invalid: {e}") from e
 
     # C. SET PRIMARY DEPENDENCIES & DEFAULTS
     # If learning_rate_schedule_steps is -1, it defaults to the total number of training steps.
