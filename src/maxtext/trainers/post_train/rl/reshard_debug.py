@@ -178,32 +178,56 @@ def setup_configs_and_devices(argv: list[str]):
   return trainer_config, sampler_config, trainer_devices, sampler_devices
 
 
-def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices):
+def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
   """Get rollout kwargs for vLLM rollout when using data parallelism."""
   dp = sampler_config.rollout_data_parallelism
-  if dp == -1:
-    return {}
-
-  rollout_kwargs = {}
   tp = sampler_config.rollout_tensor_parallelism
+  ep = sampler_config.rollout_expert_parallelism
 
-  if tp == -1:
-    if num_sampler_devices % dp != 0:
+  # -1 means "auto-derive from the other two". At most one can be -1.
+  num_auto = sum(1 for x in [tp, dp, ep] if x == -1)
+  if num_auto > 1:
+    raise ValueError(
+        "At most one of rollout_tensor_parallelism, rollout_data_parallelism, "
+        "rollout_expert_parallelism can be -1 (auto-derived)."
+    )
+
+  if dp == -1:
+    if num_sampler_devices % (tp * ep) != 0:
       raise ValueError(
           f"num_sampler_devices({num_sampler_devices}) must be divisible by "
-          f"rollout_data_parallelism({dp}) "
+          f"rollout_tensor_parallelism({tp}) * rollout_expert_parallelism({ep}) "
+          f"when rollout_data_parallelism is -1."
+      )
+    dp = num_sampler_devices // tp // ep
+  elif tp == -1:
+    if num_sampler_devices % (dp * ep) != 0:
+      raise ValueError(
+          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
+          f"rollout_data_parallelism({dp}) * rollout_expert_parallelism({ep}) "
           f"when rollout_tensor_parallelism is -1."
       )
-    tp = num_sampler_devices // dp
-  elif tp * dp != num_sampler_devices:
+    tp = num_sampler_devices // dp // ep
+  elif ep == -1:
+    if num_sampler_devices % (tp * dp) != 0:
+      raise ValueError(
+          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
+          f"rollout_tensor_parallelism({tp}) * rollout_data_parallelism({dp}) "
+          f"when rollout_expert_parallelism is -1."
+      )
+    ep = num_sampler_devices // tp // dp
+  elif tp * dp * ep != num_sampler_devices:
     raise ValueError(
         f"rollout_tensor_parallelism({tp}) * "
-        f"rollout_data_parallelism({dp}) "
+        f"rollout_data_parallelism({dp}) * "
+        f"rollout_expert_parallelism({ep}) "
         f"!= len(sampler_devices)({num_sampler_devices})"
     )
+
+  rollout_kwargs = {}
   rollout_kwargs["tensor_parallel_size"] = tp
   rollout_kwargs["data_parallel_size"] = dp
-  rollout_kwargs["rollout_vllm_async_scheduling"] = True
+  rollout_kwargs["expert_parallel_size"] = ep
 
   return rollout_kwargs
 
@@ -346,10 +370,17 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
           rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
           rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
+          rollout_vllm_async_scheduling=trainer_config.async_scheduling,
           rollout_vllm_kwargs={
               "hf_overrides": trainer_config.vllm_hf_overrides,
+              "enable_expert_parallel": sampler_config.rollout_expert_parallelism > 1,
           },
-          **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
+          rollout_vllm_sampling_kwargs={
+              "stop": trainer_config.stop_strings,
+              "detokenize": trainer_config.stop_strings is not None,
+              "include_stop_str_in_output": trainer_config.stop_strings is not None,
+          },
+          **get_rollout_kwargs_for_parallelism(sampler_config, len(sampler_devices)),
       ),
   )
   # Create RL cluster
