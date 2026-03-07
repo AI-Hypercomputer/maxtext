@@ -56,8 +56,30 @@ if [[ ! -v CLOUD_IMAGE_NAME ]]; then
   exit 1
 fi
 
-# Check for dangling symbolic links (target does not exist).
-DANGLING_LINKS=$(find -L . -type l)
+# In the following sections we will want to check that the files that we are
+# packaging in the Docker image don't have outside symbolic links.
+# However, we want to exclude files and dirs listed in `.dockerignore` from this check
+
+# Build find exclusion arguments
+EXCLUDE_PATHS=()
+if [ -f .dockerignore ]; then
+  while IFS= read -r pattern; do
+    # Ignore empty lines and comments
+    if [[ -n "$pattern" && ! "$pattern" =~ ^# ]]; then
+      EXCLUDE_PATHS+=(-o -path "./$pattern")
+    fi
+  done < .dockerignore
+fi
+
+PRUNE_ARGS=()
+if [ ${#EXCLUDE_PATHS[@]} -gt 0 ]; then
+  # Remove leading -o and create the prune expression for find
+  # This tells find not to descend into these paths.
+  PRUNE_ARGS=(\( "${EXCLUDE_PATHS[@]:1}" \) -prune -o)
+fi
+
+# Check for dangling symbolic links (target does not exist), excluding .dockerignore paths.
+DANGLING_LINKS=$(find -L . "${PRUNE_ARGS[@]}" -type l -print)
 if [ -n "$DANGLING_LINKS" ]; then
   echo "ERROR: Found dangling symbolic links in the build context:"
   echo "$DANGLING_LINKS"
@@ -67,7 +89,7 @@ if [ -n "$DANGLING_LINKS" ]; then
 fi
 
 # Check for absolute symbolic links, which Docker can't follow outside the build context.
-ABSOLUTE_LINKS=$(find . -type l -lname '/*')
+ABSOLUTE_LINKS=$(find . "${PRUNE_ARGS[@]}" -type l -lname '/*' -print)
 if [ -n "$ABSOLUTE_LINKS" ]; then
   echo "ERROR: Found symbolic links with absolute paths in the build context:"
   echo "$ABSOLUTE_LINKS"
