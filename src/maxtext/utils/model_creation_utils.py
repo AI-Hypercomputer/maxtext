@@ -15,6 +15,7 @@
 # pylint: disable=bare-except, consider-using-generator
 """ Utils that are only interesting for creating a model in MaxText. """
 
+import os
 from collections.abc import Sequence
 from functools import partial
 from typing import overload
@@ -30,6 +31,10 @@ from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import max_logging
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from maxtext.checkpoint_conversion import to_maxtext
+from maxtext.checkpoint_conversion.utils.utils import HF_IDS
 from orbax import checkpoint as ocp
 
 
@@ -110,6 +115,125 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   model = get_transformer_model(config, mesh, quant, model_mode=model_mode, rngs=rngs)
   model = quantizations.maybe_quantize_model(model, config)
   return model
+
+
+def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kwargs):
+  """
+  Obtain a MaxText model by providing minimal configs
+  It at least needs the following argument
+    Args:
+      argv: List of configs in string format.
+      lazy_load_tensors: Whether to use lazy loading of HF tensors.
+  """
+  if argv is None:
+    argv = [""]
+  for k, v in kwargs.items():
+    argv.append(f"{k}={v}")
+
+  yaml_file = False
+  model_name_seen = False
+  base_output_directory_seen = False
+  load_parameters_path_seen = None
+  hf_access_token_seen = False
+  tokenizer_path_seen = False
+
+  base_output_directory = os.path.abspath("maxtext_output")
+  model_name = None
+
+  for a in argv:
+    if "model_name" in a:
+      model_name_seen = True
+      if "=" in a:
+        model_name = a.split("=", 1)[1].strip().strip("\"'")
+    if "base_output_directory" in a:
+      base_output_directory_seen = True
+      if "=" in a:
+        base_output_directory = a.split("=", 1)[1].strip().strip("\"'")
+    if "load_parameters_path" in a:
+      load_parameters_path_seen = True
+    if "hf_access_token" in a:
+      hf_access_token_seen = True
+    if "tokenizer_path" in a:
+      tokenizer_path_seen = True
+    if ".yml" in a:
+      yaml_file = a
+
+  if not yaml_file:
+    max_logging.warning(
+        "yaml file not provided, using default base.yml. If this is not intended,"
+        " then please provide the intended .yml file as an argument. e.g., "
+        "src/maxtext/configs/post_train/rl.yml for post-training"
+    )
+    yaml_file = True
+    argv.insert(1, f"{MAXTEXT_PKG_DIR}/configs/base.yml")
+  else:
+    # verify that the .yml is in index 1 in the list
+    if ".yml" not in argv[1]:
+      # move yaml_file to index 1 in the list
+      argv.insert(1, argv.pop(argv.index(yaml_file)))
+
+  if not model_name_seen:
+    raise ValueError("model_name must be provided")
+  if not base_output_directory_seen:
+    max_logging.warning("base_output_directory is not provided; Using local directory called maxtext_output")
+    argv.append(f"base_output_directory={base_output_directory}")
+
+  # take HF_TOKEN from env
+  if not hf_access_token_seen:
+    hf_access_token = os.environ.get("HF_TOKEN")
+    if hf_access_token:
+      argv.append(f"hf_access_token={hf_access_token}")
+
+  if not load_parameters_path_seen:
+    if not hf_access_token_seen:
+      raise ValueError("hf_access_token must be provided when not providing a pre-existing checkpoint")
+    max_logging.warning("Checkpoint path is not provided, converting checkpoint to orbax format for MaxText")
+    argv.extend(
+        [
+            "use_multimodal=false",
+            "scan_layers=true",
+            "skip_jax_distributed_system=True",
+        ]
+    )
+
+  hf_model_path = None
+  revision = None
+  simulated_cpu_devices_count = 16
+
+  if not tokenizer_path_seen and model_name:
+
+    model_name_original = model_name.replace("-Instruct", "") if "-Instruct" in model_name else model_name
+    tokenizer_path = hf_model_path or HF_IDS.get(model_name_original)
+    if tokenizer_path:
+      argv.append(f"tokenizer_path={tokenizer_path}")
+
+  prev_xla_flags = os.environ.get("XLA_FLAGS")
+  os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
+
+  prev_jax_platforms = jax.config.jax_platforms
+  jax.config.update("jax_platforms", "cpu")
+  to_maxtext.main(
+      argv,
+      hf_model_path=hf_model_path,
+      revision=revision,
+      lazy_load_tensors=lazy_load_tensors,
+      simulated_cpu_devices_count=simulated_cpu_devices_count,
+  )
+  jax.config.update("jax_platforms", prev_jax_platforms)
+
+  if prev_xla_flags is None:
+    os.environ.pop("XLA_FLAGS", None)
+  else:
+    os.environ["XLA_FLAGS"] = prev_xla_flags
+
+    load_parameters_path = os.path.join(base_output_directory, "0", "items")
+    argv.append(f"load_parameters_path={load_parameters_path}")
+
+  print(f"Anisha: {argv}")
+  config = pyconfig.initialize_pydantic(argv)
+
+  model, mesh = create_nnx_model(config)
+  return model, mesh, config
 
 
 def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
