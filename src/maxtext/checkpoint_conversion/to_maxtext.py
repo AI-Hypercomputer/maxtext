@@ -384,14 +384,22 @@ def _build_single_axis_stacked_tensor(
       The final, assembled NumPy array for the MaxText parameter.
   """
   tensors_to_stack = []
+  # Heuristic to determine if we are stacking layers or experts.
+  # If the number of items to stack equals the number of layers, it's a standard
+  # scanned layer, and we use the configured param_scan_axis. Otherwise, it's
+  # an unscanned MoE layer, and we stack along the expert axis (0).
+  """
+  axis_to_stack = config.param_scan_axis if len(hf_source_keys) == config.base_num_decoder_layers else 0 
+  """
 
-  if config.scan_layers:
-    # If it's a standard scanned layer, we use the configured param_scan_axis.
-    axis_to_stack = config.param_scan_axis
+  # Workaround to load the HF model due to mismatched tensor ordering
+  if len(hf_source_keys) == config.base_num_decoder_layers:
+    if getattr(config, "enable_nnx", False):
+      axis_to_stack = 0
+    else:
+      axis_to_stack = config.param_scan_axis
   else:
-    # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
     axis_to_stack = 0
-
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
   mt_slice_shape_list = list(target_shape)
