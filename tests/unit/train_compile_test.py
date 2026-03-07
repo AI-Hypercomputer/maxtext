@@ -839,6 +839,102 @@ class TrainCompile(unittest.TestCase):
     )
 
   @pytest.mark.cpu_only
+  def test_circular_pipeline_compile_pp_fsdp_fsdpt_ep_ds3(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_circular_pipeline_compile_pp_fsdp_fsdpt_ep_ds3.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-4096",
+            "compile_topology_num_slices=1",
+            "per_device_batch_size=4",
+            "ici_pipeline_parallelism=8",
+            "ici_fsdp_transpose_parallelism=2",
+            "pipeline_parallel_layers=56",
+            "num_pipeline_microbatches=16",
+            "model_name=deepseek3-671b",
+            "ici_expert_parallelism=4",
+            "use_ring_of_experts=true",
+            "use_random_routing=true",
+            "allow_split_physical_axes=true",
+            "max_target_length=4096",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_circular_pipeline_compile_pp_fsdp_tp_ds3(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_circular_pipeline_compile_pp_fsdp_tp_ds3.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-8192",
+            "compile_topology_num_slices=1",
+            "per_device_batch_size=1",
+            "ici_pipeline_parallelism=8",
+            "ici_tensor_parallelism=2",
+            "pipeline_parallel_layers=56",
+            "num_pipeline_microbatches=16",
+            "model_name=deepseek3-671b",
+            "allow_split_physical_axes=true",
+            "max_target_length=4096",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_circular_pipeline_compile_pp_fsdp_tp_ep_ds3(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_circular_pipeline_compile_pp_fsdp_tp_ep_ds3.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-8192",
+            "compile_topology_num_slices=1",
+            "per_device_batch_size=1",
+            "ici_pipeline_parallelism=8",
+            "ici_tensor_parallelism=2",
+            "pipeline_parallel_layers=56",
+            "num_pipeline_microbatches=16",
+            "model_name=deepseek3-671b",
+            "ici_expert_parallelism=4",
+            "use_ring_of_experts=false",
+            "use_random_routing=false",
+            "allow_split_physical_axes=true",
+            "max_target_length=4096",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_circular_pipeline_compile_pp_fsdp_ep_ds3_batch_split(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_circular_pipeline_compile_pp_fsdp_ep_ds3_batch_split.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-1024",
+            "compile_topology_num_slices=1",
+            "per_device_batch_size=2",
+            "ici_pipeline_parallelism=4",
+            "pipeline_parallel_layers=56",
+            "num_pipeline_microbatches=8",
+            "model_name=deepseek3-671b-2dfsdp",
+            "ici_expert_parallelism=4",
+            "ici_fsdp_transpose_parallelism=2",
+            "use_random_routing=false",
+            "allow_split_physical_axes=true",
+            "max_target_length=4096",
+        )
+    )
+
+  @pytest.mark.cpu_only
   def test_qk_clip(self):
     """AOT test for qk-clip with DeepSeek3 Tiny model"""
     compiled_trainstep_file = "/tmp/test_qk_clip.pickle"
