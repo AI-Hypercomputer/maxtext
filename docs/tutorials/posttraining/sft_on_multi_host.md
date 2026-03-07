@@ -61,7 +61,7 @@ bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-trainin
 
 ```bash
 export DOCKER_IMAGE_NAME=<Docker Image Name>
-bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$DOCKER_IMAGE_NAME
+bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${DOCKER_IMAGE_NAME?}
 ```
 
 The `docker_upload_runner.sh` script uploads your Docker image to Artifact Registry.
@@ -86,7 +86,7 @@ export ZONE=<GKE Cluster Zone>
 export WORKLOAD_NAME=<Name of Workload> # e.g., sft-$(date +%s)
 export TPU_TYPE=<TPU Type> # e.g., v6e-256
 export TPU_SLICE=<number of slices>
-export DOCKER_IMAGE="gcr.io/${PROJECT}/${DOCKER_IMAGE_NAME}"
+export DOCKER_IMAGE="gcr.io/${PROJECT?}/${DOCKER_IMAGE_NAME?}"
 
 # -- MaxText Configuration --
 export OUTPUT_PATH=<GCS Path for Output/Logs> # e.g., gs://my-bucket/my-output-directory
@@ -136,14 +136,14 @@ This section provides the command to run SFT on a GKE cluster.
 
 ```bash
 xpk workload create \
---cluster=${CLUSTER_NAME} \
---project=${PROJECT} \
---zone=${ZONE} \
---docker-image=${DOCKER_IMAGE} \
---workload=${WORKLOAD_NAME} \
---tpu-type=${TPU_TYPE} \
---num-slices=${TPU_SLICE} \
---command "python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml run_name=$WORKLOAD_NAME base_output_directory=$OUTPUT_PATH model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH hf_access_token=$HF_TOKEN tokenizer_path=$TOKENIZER_PATH per_device_batch_size=1 steps=$STEPS profiler=xplane hf_path=$DATASET_NAME train_split=$TRAIN_SPLIT train_data_columns=$TRAIN_DATA_COLUMNS"
+--cluster=${CLUSTER_NAME?} \
+--project=${PROJECT?} \
+--zone=${ZONE?} \
+--docker-image=${DOCKER_IMAGE?} \
+--workload=${WORKLOAD_NAME?} \
+--tpu-type=${TPU_TYPE?} \
+--num-slices=${TPU_SLICE?} \
+--command "python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=${MODEL_NAME?} load_parameters_path=${MODEL_CHECKPOINT_PATH?} hf_access_token=${HF_TOKEN?} tokenizer_path=${TOKENIZER_PATH?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane hf_path=${DATASET_NAME?} train_split=${TRAIN_SPLIT?} train_data_columns=${TRAIN_DATA_COLUMNS?}"
 ```
 
 Once the fine-tuning is completed, you can access your model checkpoints at `$OUTPUT_PATH/$WORKLOAD_NAME/checkpoints`.
@@ -152,14 +152,14 @@ Once the fine-tuning is completed, you can access your model checkpoints at `$OU
 
 ```bash
 xpk workload create-pathways \
---cluster=${CLUSTER_NAME} \
---project=${PROJECT} \
---zone=${ZONE} \
---docker-image=${DOCKER_IMAGE} \
---workload=${WORKLOAD_NAME} \
---tpu-type=${TPU_TYPE} \
---num-slices=${TPU_SLICE} \
---command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml run_name=$WORKLOAD_NAME base_output_directory=$OUTPUT_PATH model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH hf_access_token=$HF_TOKEN tokenizer_path=$TOKENIZER_PATH per_device_batch_size=1 steps=$STEPS profiler=xplane checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False enable_single_controller=True"
+--cluster=${CLUSTER_NAME?} \
+--project=${PROJECT?} \
+--zone=${ZONE?} \
+--docker-image=${DOCKER_IMAGE?} \
+--workload=${WORKLOAD_NAME?} \
+--tpu-type=${TPU_TYPE?} \
+--num-slices=${TPU_SLICE?} \
+--command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=${MODEL_NAME?} load_parameters_path=${MODEL_CHECKPOINT_PATH?} hf_access_token=${HF_TOKEN?} tokenizer_path=${TOKENIZER_PATH?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False enable_single_controller=True"
 ```
 
 Once the fine-tuning is completed, you can access your model checkpoints at `$OUTPUT_PATH/$WORKLOAD_NAME/checkpoints`.

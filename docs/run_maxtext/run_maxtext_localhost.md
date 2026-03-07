@@ -59,7 +59,7 @@ After the installation is complete, run a short training job using synthetic dat
 
 ```bash
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -73,7 +73,7 @@ To demonstrate model output, run the following command:
 
 ```bash
 python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
 ```
@@ -94,7 +94,7 @@ To use a pre-configured model for TPUs, you override the `model_name` parameter,
 ```bash
 python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
   model_name=llama3-8b \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -108,7 +108,7 @@ python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
 ```bash
 python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
   model_name=qwen3-4b \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -125,7 +125,7 @@ To use a GPU-optimized configuration, you should specify the path to the model's
 
 ```bash
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/mixtral_8x7b.yml \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -140,7 +140,7 @@ This will load `gpu/mixtral_8x7b.yml`, which inherits from `base.yml`.
 
 ```bash
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/llama3-8b.yml \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10

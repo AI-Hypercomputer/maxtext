@@ -35,7 +35,7 @@ You can train from scratch to generate a new checkpoint. One example command to 
 
 ```sh
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     run_name=matmul_pre_training \
     per_device_batch_size=4 \
     enable_checkpointing=false \
@@ -69,9 +69,9 @@ One example command to run general finetuning with V3 on v5p-256.
 
 ```sh
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-    dataset_path=${DATASET_PATH} \
-    load_parameters_path=${CONVERTED_CHECKPOINT} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    dataset_path=${DATASET_PATH?} \
+    load_parameters_path=${CONVERTED_CHECKPOINT?} \
     run_name=matmul_fine_tuning \
     per_device_batch_size=4 \
     model_name=deepseek3-671b \
@@ -115,8 +115,8 @@ One example command to run supervised finetuning with V3 on v5p-256. Supervised 
 
 ```sh
 python3 -m maxtext.trainers.post_train.sft.train_sft_deprecated src/maxtext/configs/post_train/sft.yml \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-    load_parameters_path=${CONVERTED_CHECKPOINT} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    load_parameters_path=${CONVERTED_CHECKPOINT?} \
     run_name=matmul_supervised_fine_tuning \
     per_device_batch_size=4 \
     model_name=deepseek3-671b \
@@ -141,8 +141,8 @@ One example command to run decoding with V3 on v5p-256 with unscanned checkpoint
 
 ```sh
 python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-    load_parameters_path=${CONVERTED_CHECKPOINT} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    load_parameters_path=${CONVERTED_CHECKPOINT?} \
     run_name=decode \
     per_device_batch_size=1 \
     enable_checkpointing=false \
@@ -191,7 +191,7 @@ python3 -m tests.utils.forward_pass_logit_checker \
     src/maxtext/configs/base.yml \
     tokenizer_type=huggingface \
     tokenizer_path=deepseek-ai/DeepSeek-V2-Lite \
-    load_parameters_path=${CONVERTED_CHECKPOINT} \
+    load_parameters_path=${CONVERTED_CHECKPOINT?} \
     run_name=forward_pass_test_deepseek2-16b \
     per_device_batch_size=1 \
     model_name=deepseek2-16b \
