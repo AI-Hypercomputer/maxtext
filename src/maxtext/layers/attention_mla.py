@@ -1045,6 +1045,7 @@ class MLA(Attention):
           key,
           value,
           decoder_segment_ids,
+          inputs_positions,
           model_mode,
           cached_values,
           index_mask=index_mask,
