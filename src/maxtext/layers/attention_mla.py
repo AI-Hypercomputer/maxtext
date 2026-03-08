@@ -801,6 +801,11 @@ class MLA(Attention):
     # last dimension: qk_nope_head_dim, qk_rope_head_dim
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
     q_nope = self._maybe_shard_with_logical(q_nope, query_logical_name)
+
+    if model_mode == MODEL_MODE_PREFILL:
+      replicated_sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(None, None, None, None))
+      q_pe = jax.lax.with_sharding_constraint(q_pe, replicated_sharding)
+
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions)
     q_pe = self._maybe_shard_with_logical(q_pe, query_logical_name)
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
@@ -938,6 +943,10 @@ class MLA(Attention):
     # Apply rotary embedding to key_rope.
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
     key_rope = self.apply_rotary_embedding(key_rope, inputs_positions=inputs_positions)
+
+    if model_mode == MODEL_MODE_PREFILL:
+      replicated_sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(None, None, None, None))
+      key_rope = jax.lax.with_sharding_constraint(key_rope, replicated_sharding)
 
     key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
     cached_values = [None, None]
