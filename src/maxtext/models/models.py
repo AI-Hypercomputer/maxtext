@@ -27,7 +27,7 @@ from flax import nnx
 
 from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.inference import page_manager
-from maxtext.layers.nnx_decoders import NNXDecoder, decoder_as_linen
+from maxtext.layers.nnx_decoders import NNXDecoder
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.decoders import Decoder
@@ -88,12 +88,7 @@ class TransformerLinenPure(nn.Module):
     )
     self.vision_encoder = vision_encoder_as_linen(config=cfg, mesh=mesh) if cfg.use_multimodal else None
     self.audio_encoder = audio_encoder_as_linen(config=cfg, mesh=mesh) if cfg.use_audio else None
-    if cfg.pure_nnx_decoder:
-      self.decoder = decoder_as_linen(
-          config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=nnx.Rngs(0)
-      )
-    else:
-      self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
+    self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
 
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:

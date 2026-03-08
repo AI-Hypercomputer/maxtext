@@ -668,7 +668,7 @@ class NNXDecoder(nnx.Module):
       )
     elif self.config.decoder_block == DecoderBlockType.QWEN3_NEXT:
       return functools.partial(
-          normalizations.Qwen3NextRMSNorm, num_features=num_features, shard_mode=self.config.shard_mode
+          normalizations.Qwen3NextRMSNorm, num_features=num_features, shard_mode=self.config.shard_mode, rngs=rngs
       )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
