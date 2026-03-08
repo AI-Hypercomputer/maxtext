@@ -182,7 +182,7 @@ else:
 # Initialize MaxText config
 config_ref = pyconfig.initialize(
     [ "", BASE_YAML_PATH, ],
-    base_output_directory="gs://abhinavsing_bucket/",  # Not used in Tunix.
+    base_output_directory="gs://wyzhang-dev/tmp",  # Not used in Tunix.
     run_name="test-tunix-maxtext-qwen3-8b",
     tokenizer_type="huggingface",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "qwen3-tokenizer"),
@@ -406,14 +406,23 @@ for layer_idx, expert_dict in layer_expert_buffers.items():
 print(f"Assigning {len(direct_assignments)} weights to vLLM state...")
 for vllm_key, weight in direct_assignments.items():
   assert vllm_key in dst_golden_state, f"Key not found: {vllm_key}"
-  assert weight.shape == dst_golden_state[vllm_key].shape, f"Shape mismatch for {vllm_key}: {weight.shape} vs {dst_golden_state[vllm_key].shape}"
-  dst_golden_state[vllm_key] = weight
+  target_shape = dst_golden_state[vllm_key].shape
+  # NOTE(wyzhang): Hack to workaround incompatible shape between weights and code.
+  if weight.shape == target_shape:
+    dst_golden_state[vllm_key] = weight
+  elif len(weight.shape) == 3 and weight.shape == (target_shape[0], target_shape[2], target_shape[1]):
+    @jax.jit(donate_argnums=(0,))
+    def _transpose_weight(w):
+      return w.transpose(0, 2, 1)
+    dst_golden_state[vllm_key] = _transpose_weight(weight)
+  else:
+    assert weight.shape == target_shape, f"Shape mismatch for {vllm_key}: {weight.shape} vs {target_shape}"
 
 print(f"✅ Phase 3 complete: All weights assigned in {time.time() - phase3_start:.2f}s")
 
 # Single cleanup at end
 del all_processed_weights, layer_qkv_buffers, layer_expert_buffers, direct_assignments
-gc.collect()
+gc.collect()  
 
 end_time = time.time()
 elapsed_time = end_time - start_time
