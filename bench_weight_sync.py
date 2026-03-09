@@ -359,7 +359,7 @@ for layer_idx, qkv_dict in layer_qkv_buffers.items():
     
     vllm_qkv_key = f"vllm_model.model.layers.{layer_idx}.self_attn.qkv_proj.weight"
     direct_assignments[vllm_qkv_key] = qkv_fused
-print(f"✅ QKV fusion complete in {time.time() - qkv_fuse_start:.2f}s")
+print(f"  QKV fusion complete in {time.time() - qkv_fuse_start:.2f}s")
 
 # Batch fuse all expert layers
 print(f"Fusing experts for {len(layer_expert_buffers)} layers...")
@@ -396,7 +396,7 @@ for layer_idx, expert_dict in layer_expert_buffers.items():
     w2_key = f"vllm_model.model.layers.{layer_idx}.mlp.experts.w2_weight"
     direct_assignments[w13_key] = w13_fused
     direct_assignments[w2_key] = w2_fused
-print(f"✅ Expert fusion complete in {time.time() - expert_fuse_start:.2f}s")
+print(f"  Expert fusion complete in {time.time() - expert_fuse_start:.2f}s")
 
 # Batch assign all weights to vLLM state
 print(f"Assigning {len(direct_assignments)} weights to vLLM state...")
