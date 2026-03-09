@@ -243,6 +243,7 @@ mappings = to_hf_utils._get_model_mappings(config_ref.model_name,
 param_map = mappings["param_mapping"]
 shape_map = mappings["shape_mapping"]
 hook_fn_map = mappings["hook_fn_mapping"]
+print(f'wyzhangd: hook fn map is {hook_fn_map}')
 
 print("\n" + "="*80)
 print("Starting BATCHED weight transfer (3-phase approach)...")
