@@ -82,6 +82,7 @@ def decode_with_vllm(config: Config) -> None:
               "weight_dtype": "bfloat16",
               "allow_split_physical_axes": True,
               "debug_sharding": config.debug_sharding,
+              "prefuse_moe_weights": config.prefuse_moe_weights,
           },
           "sharding": {
               "sharding_strategy": {

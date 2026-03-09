@@ -30,17 +30,19 @@ weight_dtype: bfloat16
 mesh_axes: ['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert']
 logical_axis_rules: [
                       ['activation_batch', ['data']],
-                      ['activation_batch_moe', []],
+                      ['activation_batch_moe', ['data']],
                       ['activation_embed_and_logits_batch', ['data', 'expert']],
                       ['activation_embed_and_logits_batch_sequence', ['data', 'expert']],
                       ['activation_heads', ['model', 'expert']],
                       ['activation_kv_heads', ['model', 'expert']],
                       ['activation_attn_length', []],
-                      ['activation_length', ['data']],
-                      ['activation_length_moe', ['data', 'expert']],
-                      ['activation_length_moe', 'data'],
+                      ['activation_length', []],
+                      ['activation_length_moe', []],
                       ['activation_q_length', ['expert', 'attn_dp_expert']],
                       ['activation_attn_embed', 'model'],
+                      # Expert is missing explicitly from activation_embed despite using TP.
+                      # We are going for a replicate-AR style of TP as opposed to our typical AG-RS style of TP
+                      # due to the output sharding of the fused_moe_gmm kernel in tpu-inference.
                       ['activation_embed', ['model', 'attn_dp']],
                       ['activation_embed_moe', ['model', 'attn_dp']],
                       ['activation_mlp', ['model', 'attn_dp']],
@@ -53,14 +55,16 @@ logical_axis_rules: [
                       ['activation_norm_length', []],
                       ['activation_norm_length_moe', []],
                       ['activation_exp', ['expert', 'attn_dp_expert']],
-                      ['decode_batch', ['expert', 'attn_dp_expert']],
-                      ['decode_batch_moe', []],
+                      ['decode_batch', ['data']],
+                      ['decode_batch_moe', ['data']],
                       ['decode_length', []],
                       ['mlp', ['model', 'attn_dp']],
                       ['mlp_moe', ['model', 'attn_dp']],
                       ['mlp_no_fsdp', ['model', 'attn_dp']],
                       ['vocab', ['model', 'attn_dp']],
-                      ['heads', ['model']],
+                      # Expert is intended to act like TP for attention.
+                      # We target two all-reduces, one at the end of attention out projection and one at the end of the feedforward.
+                      ['heads', ['model', 'expert']],
                       ['q_heads', ['model', 'expert']],
                       ['kv_heads', ['model', 'expert']],
                       ['kv_head_dim', []],

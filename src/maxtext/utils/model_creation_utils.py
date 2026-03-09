@@ -25,6 +25,7 @@ from flax import nnx
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import AxisType, Mesh
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
@@ -330,6 +331,39 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
         # Get the structure of checkpoint in `config.load_parameters_path`
         metadata = ckptr.metadata(config.load_parameters_path)
 
+        def _adjust_target_for_moe_fusion(target, meta_tree, is_nnx):
+          if not hasattr(target, "items") or not hasattr(meta_tree, "items"):
+            return target
+          new_target = {}
+          for k, v in target.items():
+            if k == "wi" and "wi" not in meta_tree and "wi_0" in meta_tree and "wi_1" in meta_tree:
+              if not is_nnx:
+                arr = v
+                half_dim = arr.shape[-1] // 2
+                new_target["wi_0"] = jax.ShapeDtypeStruct(
+                    shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                )
+                new_target["wi_1"] = jax.ShapeDtypeStruct(
+                    shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                )
+              else:
+                arr = v["value"]
+                half_dim = arr.shape[-1] // 2
+                new_target["wi_0"] = {
+                    "value": jax.ShapeDtypeStruct(
+                        shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                    )
+                }
+                new_target["wi_1"] = {
+                    "value": jax.ShapeDtypeStruct(
+                        shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                    )
+                }
+            else:
+              new_target[k] = _adjust_target_for_moe_fusion(v, meta_tree.get(k, {}), is_nnx)
+
+          return new_target
+
         is_nnx_checkpoint = True
         if (
             "params" in metadata.item_metadata.tree.keys()
@@ -341,6 +375,10 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
               lambda v: v.value,
               sharded_state,
               is_leaf=lambda n: hasattr(n, "value"),
+          )
+
+          target_for_restore = _adjust_target_for_moe_fusion(
+              target_for_restore, metadata.item_metadata.tree["params"]["params"], False
           )
 
           item_to_restore = {"params": {"params": target_for_restore}}
@@ -361,6 +399,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
               sharded_state,
               is_leaf=lambda n: isinstance(n, nnx.Variable),
           )
+          target_for_restore = _adjust_target_for_moe_fusion(target_for_restore, metadata.item_metadata.tree, True)
           item_to_restore = target_for_restore
           base_restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
           restore_args = _fix_restore_args_for_shape_mismatch(
@@ -400,6 +439,36 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
               sharded_state,
               is_leaf=lambda n: isinstance(n, nnx.Variable),
           )
+
+          def to_dict(tree):
+            if hasattr(tree, "items"):
+              return {k: to_dict(v) for k, v in tree.items()}
+            return tree
+
+          model_arrays = to_dict(model_arrays)
+          checkpoint = to_dict(checkpoint)
+
+          def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
+            if not hasattr(ckpt_tree, "items") or not hasattr(model_arrays_tree, "items"):
+              return ckpt_tree
+            new_ckpt = {}
+            for k, v in ckpt_tree.items():
+              if k in ("wi_0", "wi_1") and "wi" in model_arrays_tree:
+                continue
+              new_ckpt[k] = _fuse_moe_weights(v, model_arrays_tree.get(k, {}))
+
+            if "wi" in model_arrays_tree and "wi_0" in ckpt_tree and "wi_1" in ckpt_tree:
+              wi_0 = ckpt_tree["wi_0"]
+              wi_1 = ckpt_tree["wi_1"]
+              new_ckpt["wi"] = np.concatenate([wi_0, wi_1], axis=-1)
+
+            return new_ckpt
+
+          checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
+          # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
+          # This prevents the replicated intermediate copies from persisting until function return.
+          del restored
+
           checkpoint = jax.tree.map(_expand_checkpoint_to_model_shapes, checkpoint, model_arrays)
           nnx.update(model, checkpoint)
 

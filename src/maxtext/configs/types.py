@@ -686,6 +686,11 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to cast inputs to fp32 to compute MoE gate logits for numerical stability.",
   )
+  prefuse_moe_weights: bool = Field(
+      False,
+      description="Whether to pre-fuse MoE weights (w0 and w1) during initialization. "
+      "This is useful for inference performance in vllm_rpa mode.",
+  )
 
 
 class MoEKernels(BaseModel):

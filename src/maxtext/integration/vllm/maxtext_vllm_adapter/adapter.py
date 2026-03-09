@@ -124,6 +124,9 @@ class MaxTextForCausalLM(nnx.Module):
     # Model creation
     self.model: nnx.Module | None = None
 
+    # Indicates that the model handles its own sharding logic
+    self._self_manages_sharding = True
+
     # Handle dummy weight loading during initialization
     if vllm_config.load_config.load_format == "dummy":
       self.load_weights(rng_key)
@@ -161,8 +164,8 @@ class MaxTextForCausalLM(nnx.Module):
       raise ValueError("Model must be an instance of type nnx.Module.")
 
     # Ensure inputs are at least 2D with a batch dimension
-    input_ids = jnp.atleast_2d(input_ids)
-    input_positions = jnp.atleast_2d(attention_metadata.input_positions)
+    input_ids = jnp.expand_dims(input_ids, axis=1)
+    input_positions = jnp.expand_dims(attention_metadata.input_positions, axis=1)
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
@@ -233,7 +236,7 @@ class MaxTextForCausalLM(nnx.Module):
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       # Reshape to (num_tokens, 1, hidden_dim) for decoder output head
-      y = hidden_states[:, jnp.newaxis, :]
+      y = jnp.expand_dims(hidden_states, axis=1)
 
       # Compute logits using the MaxText decoder's output head
       logits = self.model.decoder.apply_output_head(self.model.token_embedder, y, True, self.model_mode)
@@ -250,7 +253,7 @@ class MaxTextForCausalLM(nnx.Module):
     if self.model is not None:
       return
 
-    with self.mesh, nn.logical_axis_rules(""):
+    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       model, _ = model_creation_utils.create_nnx_model(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )

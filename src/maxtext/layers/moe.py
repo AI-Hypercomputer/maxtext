@@ -384,7 +384,10 @@ class RoutedMoE(nnx.Module):
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
         use_bias=self.config.routed_bias,
-        score_func=self.config.routed_score_func,
+        # tpu-inference applies the score function in the fused_moe_gmm kernel,
+        # so we don't apply it here to avoid redundant computation.
+        # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
+        score_func="" if self.config.attention == "vllm_rpa" else self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
         shard_mode=config.shard_mode,
         rngs=self.rngs,
@@ -403,6 +406,27 @@ class RoutedMoE(nnx.Module):
       self.wi_0 = jnp.zeros((num_experts, self.config.emb_dim, intermediate_dim))
       self.wi_1 = jnp.zeros((num_experts, self.config.emb_dim, intermediate_dim))
       self.wo = jnp.zeros((num_experts, intermediate_dim, self.config.emb_dim))
+    elif self.config.prefuse_moe_weights and self.config.attention == "vllm_rpa":
+      self.wi = nnx.Param(
+          self.kernel_init(
+              self.rngs.params(),
+              (num_experts, self.config.emb_dim, intermediate_dim * 2),
+              weight_dtype,
+              kernel_in_axis,
+              kernel_out_axis,
+          ),
+          sharding=self.wi_kernel_axes,
+      )
+      self.wo = nnx.Param(
+          self.kernel_init(
+              self.rngs.params(),
+              (self.num_experts, self.intermediate_dim, self.config.emb_dim),
+              self.weight_dtype,
+              kernel_in_axis,
+              kernel_out_axis,
+          ),
+          sharding=self.wo_kernel_axes,
+      )
     else:
       self.wi_0 = nnx.Param(
           self.kernel_init(
@@ -1970,6 +1994,72 @@ class RoutedMoE(nnx.Module):
         ).astype(self.dtype)
       return output, lb_loss, bias_updates
 
+  def fused_moe_matmul(
+      self,
+      inputs,
+      gate_logits,
+      wo_kernel,
+      w0_kernel=None,
+      w1_kernel=None,
+      fused_kernel=None,
+  ) -> tuple[jax.Array, None, None]:
+    """Fused MoE via tpu_inference fused_moe_func (vllm_rpa path only).
+
+    fused_moe_func handles routing, GMM, and weighted combination internally.
+    It does not compute lb_loss or bias_updates (inference-only).
+    """
+    try:
+      # pylint: disable=import-outside-toplevel
+      # pytype: disable=import-error
+      from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
+    except ImportError as e:
+      raise ImportError("fused_moe_matmul requires the tpu-inference package.") from e
+
+    # Reshape 3D [B, S, D] -> 2D [T, D] (fused_moe_func expects 2D input)
+    batch_size, seq_len, emb_dim = inputs.shape
+    hidden_states = jnp.reshape(inputs, (batch_size * seq_len, emb_dim))
+    gating_output = jnp.reshape(gate_logits, (batch_size * seq_len, self.num_experts))
+
+    # Concatenate gate and up projections: [E, D, H] + [E, D, H] -> [E, D, 2H]
+    # fused_moe_func splits this internally: gate=w1[..., :H], up=w1[..., H:]
+    if fused_kernel is None:
+      fused_kernel = jnp.concatenate([w0_kernel, w1_kernel], axis=-1)
+
+    # Use expert parallelism if the expert axis has size > 1
+    use_ep = self.get_expert_parallelism_size() > 1
+
+    # Map MaxText config fields to fused_moe_func args
+    activation = self.config.mlp_activations[0]  # e.g. "silu"
+    scoring_fn = self.config.routed_score_func if self.config.routed_score_func else "softmax"
+
+    # Check if the model architecture intrinsically renormalizes weights
+    renormalize = self.config.norm_topk_prob or (
+        self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4)
+    )
+
+    output_2d = fused_moe_func(
+        hidden_states=hidden_states,
+        w1=fused_kernel,
+        w2=wo_kernel,
+        w1_scale=None,
+        w2_scale=None,
+        w1_bias=None,
+        w2_bias=None,
+        gating_output=gating_output,
+        topk=self.num_experts_per_tok,
+        renormalize=renormalize,
+        mesh=self.mesh,
+        use_ep=use_ep,
+        activation=activation,
+        scoring_fn=scoring_fn,
+        sc_kernel_threshold=16777216,
+        sc_kernel_col_chunk_size=1024,
+    )
+
+    # Reshape output 2D [T, D] -> 3D [B, S, D]
+    output = jnp.reshape(output_2d, (batch_size, seq_len, emb_dim))
+    return output, None, None
+
   def retrieve_quantized_weight(
       self,
       inputs,
@@ -2008,9 +2098,16 @@ class RoutedMoE(nnx.Module):
     routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
-    w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
-    w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
+
+    fused_kernel = None
+    w0_kernel = None
+    w1_kernel = None
+    if cfg.prefuse_moe_weights and cfg.attention == "vllm_rpa":
+      fused_kernel = jnp.asarray(self.wi[...], self.dtype)
+    else:
+      w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
+      w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
 
     if self.per_expert_scale is not None:
       wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
@@ -2022,7 +2119,12 @@ class RoutedMoE(nnx.Module):
     else:
       w0_bias, w1_bias, wo_bias = None, None, None
 
-    if cfg.sparse_matmul:
+    # vllm_rpa codepath uses fused_moe_func from tpu_inference for optimized inference.
+    if cfg.attention == "vllm_rpa":
+      output, lb_loss, bias_updates = self.fused_moe_matmul(
+          inputs, gate_logits, wo_kernel, w0_kernel=w0_kernel, w1_kernel=w1_kernel, fused_kernel=fused_kernel
+      )
+    elif cfg.sparse_matmul:
       if quantizations.in_serve_mode(self.quant):
         w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
             inputs,
