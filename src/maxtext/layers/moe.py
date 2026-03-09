@@ -1318,7 +1318,7 @@ class RoutedMoE(nnx.Module):
         )
 
         # Sum up the partial outputs across the expert shards.
-        output = jnp.reshape(output, (-1, sequence_length, self.config.emb_dim))
+        output = jnp.reshape(output, (-1, sequence_length, self.config.emb_dim // self.get_tensor_parallelism_size()))
         output = jax.lax.psum_scatter(output, self._expert_parallelism_name, scatter_dimension=0, tiled=True)
 
       else:
