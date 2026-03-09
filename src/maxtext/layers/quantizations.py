@@ -17,7 +17,7 @@
 import functools
 import json
 import re
-from typing import Tuple, Sequence, Dict, Union
+from typing import Tuple, Sequence, Dict, Union, Any
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -57,6 +57,7 @@ class Quantization:
   def einsum(self, dtype: DType = jnp.float32):
     """Placeholder for einsum implementation in subclasses."""
 
+# ORIGINAL AQT
 
 # def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
 #   """apply tiling function"""
@@ -193,6 +194,39 @@ class Quantization:
 #     return aqt_einsum
 
 
+# # QWIX V1
+# @dataclass
+# class AqtQuantization(Quantization):
+#   """Configures Qwix quantization as a drop-in replacement for AQT."""
+
+#   # Replace with the specific Qwix configuration class when available
+#   qwix_cfg: Any
+#   # quant_mode: str = "TRAIN"
+
+#   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+#     """Returns dot_general configured with Qwix params."""
+
+#     # Initialize the Qwix provider with your configuration
+#     provider = qwix.QuantizationProvider(self.qwix_cfg)
+
+#     # If Qwix's dot_general requires instantiation per layer (like AQT),
+#     # you might need to use functools.partial.
+#     # If it's a ready-to-use function, you can just return it directly.
+#     # Example using partial:
+#     # return functools.partial(provider.dot_general, mesh_axes=mesh_axes)
+
+#     return provider.dot_general
+
+#   def einsum(self, mesh_axes: Tuple[str, ...] = ()):
+#     """Returns einsum configured with Qwix params."""
+
+#     provider = qwix.QuantizationProvider(self.qwix_cfg)
+
+#     # Return the Qwix einsum implementation
+#     return provider.einsum
+
+
+# QWIX V2
 @dataclass
 class AqtQuantization(Quantization):
   """Configures Qwix quantization for high-performance JAX/Flax."""
