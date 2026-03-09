@@ -1961,6 +1961,66 @@ class RoutedMoE(nnx.Module):
         ).astype(self.dtype)
       return output, lb_loss, bias_updates
 
+  def fused_moe_matmul(
+      self,
+      inputs,
+      gate_logits,
+      w0_kernel,
+      w1_kernel,
+      wo_kernel,
+  ) -> tuple[jax.Array, None, None]:
+    """Fused MoE via tpu_inference fused_moe_func (vllm_rpa path only).
+
+    fused_moe_func handles routing, GMM, and weighted combination internally.
+    It does not compute lb_loss or bias_updates (inference-only).
+    """
+    try:
+      # pylint: disable=import-outside-toplevel
+      # pytype: disable=import-error
+      from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
+    except ImportError as e:
+      raise ImportError(
+          "fused_moe_matmul requires the tpu_inference package."
+      ) from e
+
+    # Reshape 3D [B, S, D] -> 2D [T, D] (fused_moe_func expects 2D input)
+    batch_size, seq_len, emb_dim = inputs.shape
+    hidden_states = jnp.reshape(inputs, (batch_size * seq_len, emb_dim))
+    gating_output = jnp.reshape(gate_logits, (batch_size * seq_len, self.num_experts))
+
+    # Concatenate gate and up projections: [E, D, H] + [E, D, H] -> [E, D, 2H]
+    # fused_moe_func splits this internally: gate=w1[..., :H], up=w1[..., H:]
+    w1_fused = jnp.concatenate([w0_kernel, w1_kernel], axis=-1)
+
+    # Use expert parallelism if the expert axis has size > 1
+    use_ep = self.get_expert_parallelism_size() > 1
+
+    # Map MaxText config fields to fused_moe_func args
+    activation = self.config.mlp_activations[0]  # e.g. "silu"
+    scoring_fn = self.config.routed_score_func    # "softmax" or "sigmoid"
+    renormalize = self.config.norm_topk_prob
+
+    output_2d = fused_moe_func(
+        hidden_states=hidden_states,
+        w1=w1_fused,
+        w2=wo_kernel,
+        w1_scale=None,
+        w2_scale=None,
+        w1_bias=None,
+        w2_bias=None,
+        gating_output=gating_output,
+        topk=self.num_experts_per_tok,
+        renormalize=renormalize,
+        mesh=self.mesh,
+        use_ep=use_ep,
+        activation=activation,
+        scoring_fn=scoring_fn,
+    )
+
+    # Reshape output 2D [T, D] -> 3D [B, S, D]
+    output = jnp.reshape(output_2d, (batch_size, seq_len, emb_dim))
+    return output, None, None
+
   def retrieve_quantized_weight(
       self,
       inputs,
@@ -2008,7 +2068,12 @@ class RoutedMoE(nnx.Module):
     else:
       w0_bias, w1_bias, wo_bias = None, None, None
 
-    if cfg.sparse_matmul:
+    # vllm_rpa uses fused_moe_func from tpu_inference (highest priority)
+    if cfg.attention == "vllm_rpa":
+      output, lb_loss, bias_updates = self.fused_moe_matmul(
+          inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
+      )
+    elif cfg.sparse_matmul:
       if quantizations.in_serve_mode(self.quant):
         w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
             inputs,
