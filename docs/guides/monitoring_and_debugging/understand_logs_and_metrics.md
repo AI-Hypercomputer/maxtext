@@ -35,7 +35,7 @@ The first section of the log details the configuration of your run. This is cruc
 
 MaxText builds its configuration in layers.
 
-- It starts with the **default configuration** from a YAML file. In our example, the file is [`src/maxtext/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/maxtext/configs/base.yml).
+- It starts with the **default configuration** from a YAML file. In our example, the file is [`src/maxtext/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/base.yml).
 
 - Then, it overwrites any of these values with the arguments you provide in the **command line**.
 
@@ -43,7 +43,7 @@ MaxText builds its configuration in layers.
   Updating keys from env and command line: ['run_name', 'model_name', 'enable_checkpointing', 'base_output_directory', 'per_device_batch_size', 'dataset_type', 'steps', 'max_target_length']
   ```
 
-- It updates keys based on the **model-specific configuration** file. When you specify a model, like `deepseek2-16b`, MaxText reads the corresponding parameters from the [deepseek2-16b.yml](https://github.com/AI-Hypercomputer/maxtext/blob/fafdeaa14183a8f5ca7b9f7b7542ce1655237574/src/maxtext/configs/models/deepseek2-16b.yml) file.
+- It updates keys based on the **model-specific configuration** file. When you specify a model, like `deepseek2-16b`, MaxText reads the corresponding parameters from the [deepseek2-16b.yml](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/models/deepseek2-16b.yml) file.
 
   ```none
   Running Model: deepseek2-16b
@@ -212,7 +212,7 @@ In this example, given `model=deepseek2-16b`, `per_device_batch_size=24`, `max_t
 - 94.54% of the TFLOPs are attributed to learnable weight and 5.46% are attributed to attention.
 - As you will see next, this number is important for calculating performance metrics, such as TFLOP/s/device and Model FLOPs Utilization (MFU).
 
-You can find more information about model FLOPs and MFU in the [Performance Metrics](performance-metrics) topic.
+You can find more information about model FLOPs and MFU in the [Performance Metrics](../../reference/performance_metrics.md#performance-metrics) topic.
 
 ## 4. Training metrics
 
@@ -283,4 +283,4 @@ $$\text{number of tokens per device} = \text{per device batch size} \times \text
   completed step: 8, seconds: 5.670, TFLOP/s/device: 134.856, Tokens/s/device: 8668.393, total_weights: 163259, loss: 9.596
   completed step: 9, seconds: 5.669, TFLOP/s/device: 134.884, Tokens/s/device: 8670.184, total_weights: 155934, loss: 9.580
   ```
-- For better convergence, we want to have large total weights. Towards this end, MaxText supports [packing](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/sequence_packing.py#L37) multiple short sequences into one. This is enabled by default with `packing=True` in [base.yml](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/maxtext/configs/base.yml#L465).
+- For better convergence, we want to have large total weights. Towards this end, MaxText supports [packing](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/sequence_packing.py#L37) multiple short sequences into one. This is enabled by default with `packing=True` in [base.yml](https://github.com/AI-Hypercomputer/maxtext/blob/ccd91f48454ed887c1ba2fe27d5c6214cff2817c/src/maxtext/configs/base.yml#L598).
