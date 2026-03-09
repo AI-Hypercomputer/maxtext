@@ -824,26 +824,46 @@ class NNXDecoder(nnx.Module):
   def _apply_single_engram_layer(self, y, current_idx, layer_stack, *args, **kwargs):
     """Applies a single, unscanned Engram layer by dynamically slicing the NNX state."""
     graphdef, state = nnx.split(layer_stack)
-
-    # Slice the parameters for the current index (assuming scan axis is 0)
-    sliced_state = jax.tree.map(lambda x: x[current_idx], state)
-    single_layer = nnx.merge(graphdef, sliced_state)
-
+    params, rest = state.split(nnx.Param, ...)
+    scan_axis = self.config.param_scan_axis
+    
+    # Helper to generate N-dimensional basic slices (e.g., x[:, idx, :])
+    def _extract_slice(x, idx, axis):
+      slices = tuple(idx if i == axis else slice(None) for i in range(x.ndim))
+      return x[slices]
+    
+    # Slice using native indexing instead of jnp.take
+    sliced_params = jax.tree.map(lambda x: _extract_slice(x, current_idx, scan_axis), params)
+    sliced_rest = jax.tree.map(lambda x: _extract_slice(x, current_idx, 0), rest)
+    
+    single_layer = nnx.merge(graphdef, sliced_params, sliced_rest)
+    
     # Run the single layer
     out = single_layer(
-        y, *args, decoder_input_tokens=kwargs.get("decoder_input_tokens"), **kwargs.get("layer_kwargs", {})
+        y, *args, 
+        decoder_input_tokens=kwargs.get("decoder_input_tokens"), 
+        **kwargs.get("layer_kwargs", {})
     )
     y = out[0] if isinstance(out, tuple) else out
-
+    
     # Re-merge the updated state back into the specific slice of the stack
-    new_single_state = nnx.state(single_layer)
-    updated_state = jax.tree.map(
-        lambda s, new_s: jax.lax.dynamic_update_slice_in_dim(s, jnp.expand_dims(new_s, axis=0), current_idx, axis=0),
-        state,
-        new_single_state,
+    new_state = nnx.state(single_layer)
+    new_params, new_rest = new_state.split(nnx.Param, ...)
+    
+    updated_params = jax.tree.map(
+        lambda s, new_s: jax.lax.dynamic_update_slice_in_dim(
+            s, jnp.expand_dims(new_s, axis=scan_axis), current_idx, axis=scan_axis
+        ), 
+        params, new_params
     )
-    nnx.update(layer_stack, updated_state)
-
+    updated_rest = jax.tree.map(
+        lambda s, new_s: jax.lax.dynamic_update_slice_in_dim(
+            s, jnp.expand_dims(new_s, axis=0), current_idx, axis=0
+        ), 
+        rest, new_rest
+    )
+    
+    nnx.update(layer_stack, updated_params, updated_rest)
     return y
 
   def _apply_scanned_chunk(self, y, current_idx, next_boundary, layer_stack, *args, **kwargs):
@@ -851,23 +871,40 @@ class NNXDecoder(nnx.Module):
     scan_length = next_boundary - current_idx
     if scan_length > 0:
       graphdef, state = nnx.split(layer_stack)
-
-      # Slice the chunk state
-      chunk_state = jax.tree.map(lambda x: jax.lax.dynamic_slice_in_dim(x, current_idx, scan_length, axis=0), state)
-      chunk_stack = nnx.merge(graphdef, chunk_state)
-
+      params, rest = state.split(nnx.Param, ...)
+      scan_axis = self.config.param_scan_axis
+      
+      # Slice the chunk state along the correct axes
+      chunk_params = jax.tree.map(
+          lambda x: jax.lax.dynamic_slice_in_dim(x, current_idx, scan_length, axis=scan_axis), 
+          params
+      )
+      chunk_rest = jax.tree.map(
+          lambda x: jax.lax.dynamic_slice_in_dim(x, current_idx, scan_length, axis=0), 
+          rest
+      )
+      chunk_stack = nnx.merge(graphdef, chunk_params, chunk_rest)
+      
       # Apply sequentially
       y, chunk_stack = self._apply_layers_sequentially(
           chunk_stack, y, *args, length=scan_length, **kwargs.get("layer_kwargs", {})
       )
-
+      
       # Update the original stack state
-      new_chunk_state = nnx.state(chunk_stack)
-      updated_state = jax.tree.map(
-          lambda s, new_s: jax.lax.dynamic_update_slice_in_dim(s, new_s, current_idx, axis=0), state, new_chunk_state
+      new_state = nnx.state(chunk_stack)
+      new_params, new_rest = new_state.split(nnx.Param, ...)
+      
+      updated_params = jax.tree.map(
+          lambda s, new_s: jax.lax.dynamic_update_slice_in_dim(s, new_s, current_idx, axis=scan_axis),
+          params, new_params
       )
-      nnx.update(layer_stack, updated_state)
-
+      updated_rest = jax.tree.map(
+          lambda s, new_s: jax.lax.dynamic_update_slice_in_dim(s, new_s, current_idx, axis=0),
+          rest, new_rest
+      )
+      
+      nnx.update(layer_stack, updated_params, updated_rest)
+        
     return y
 
   def _apply_interleaved_scanned_layers(self, y, layer_stack, start_idx, end_idx, engram_indices, *args, **kwargs):
