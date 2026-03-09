@@ -7,6 +7,8 @@ import sys
 os.environ.setdefault('TMPDIR', '/tmp')
 os.environ.setdefault('TEST_TMPDIR', '/tmp')
 
+from jax import config as jax_config
+import jax.sharding as jax_sharding
 import humanize
 import jax
 import jax.numpy as jnp
@@ -29,6 +31,13 @@ from vllm import LLM
 import maxtext.checkpoint_conversion.to_huggingface as to_hf_utils
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
+
+_JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
+
+jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
+jax_config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+jax_config.update("jax_persistent_cache_min_compile_time_secs", 0)
+jax_config.update("jax_enable_compilation_cache", True)
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -255,7 +264,14 @@ phase2_start = time.time()
 
 all_processed_weights = []
 for maxtext_key, weight in all_maxtext_weights.items():
-  processed_params = process_maxtext_param(maxtext_key, weight, param_map, hook_fn_map, shape_map, config_ref)
+  print(f"MaxText Key: {maxtext_key}, Shape: {weight.shape}")
+  
+  jax_to_numpy = False
+  processed_params = process_maxtext_param(maxtext_key, weight, param_map, hook_fn_map, shape_map, config_ref, jax_to_numpy=jax_to_numpy)
+  # NOTE(wyzhang): verify all processed weights are JAX arrays
+  if jax_to_numpy:
+    for _, w in processed_params:
+      assert isinstance(w, jax.Array), f"Expected JAX array, got {type(w)}"
   all_processed_weights.extend(processed_params)
 
 print(f"✅ Phase 2 complete: Processed {len(all_processed_weights)} HF weights in {time.time() - phase2_start:.2f}s")
@@ -317,6 +333,7 @@ for hf_key, hf_weight in all_processed_weights:
 
 # Batch fuse all QKV layers
 print(f"Fusing QKV for {len(layer_qkv_buffers)} layers...")
+qkv_fuse_start = time.time()
 for layer_idx, qkv_dict in layer_qkv_buffers.items():
   if len(qkv_dict) == 3:  # All Q, K, V present
     q_proj = qkv_dict['q']
@@ -326,35 +343,27 @@ for layer_idx, qkv_dict in layer_qkv_buffers.items():
     # Calculate dimensions
     num_q_heads = 32  # Adjust based on model
     num_kv_heads = 4  # Adjust based on model
-    head_dim = q_proj.shape[0] // num_q_heads
-    hidden_size = q_proj.shape[1]
     
-    # Reshape to separate heads
-    q_heads = q_proj.reshape(num_q_heads, head_dim, hidden_size)
-    k_heads = k_proj.reshape(num_kv_heads, head_dim, hidden_size)
-    v_heads = v_proj.reshape(num_kv_heads, head_dim, hidden_size)
-    
-    # Interleave by GQA groups
-    heads_per_group = num_q_heads // num_kv_heads
-    qkv_groups = []
-    
-    for group_idx in range(num_kv_heads):
-      q_group_start = group_idx * heads_per_group
-      q_group_end = (group_idx + 1) * heads_per_group
-      q_group = q_heads[q_group_start:q_group_end]
-      k_head = k_heads[group_idx:group_idx+1]
-      v_head = v_heads[group_idx:group_idx+1]
-      group = jnp.concatenate([q_group, k_head, v_head], axis=0)
-      qkv_groups.append(group)
-    
-    qkv_interleaved = jnp.concatenate(qkv_groups, axis=0)
-    qkv_fused = qkv_interleaved.reshape(-1, hidden_size)
+    @functools.partial(jax.jit, static_argnames=['num_q_heads', 'num_kv_heads'])
+    def fuse_qkv(q, k, v, num_q_heads, num_kv_heads):
+      head_dim = q.shape[0] // num_q_heads
+      hidden_size = q.shape[1]
+      heads_per_group = num_q_heads // num_kv_heads
+      q_r = q.reshape(num_kv_heads, heads_per_group, head_dim, hidden_size)
+      k_r = k.reshape(num_kv_heads, 1, head_dim, hidden_size)
+      v_r = v.reshape(num_kv_heads, 1, head_dim, hidden_size)
+      fused = jnp.concatenate([q_r, k_r, v_r], axis=1)
+      return fused.reshape(-1, hidden_size)
+
+    qkv_fused = fuse_qkv(q_proj, k_proj, v_proj, num_q_heads, num_kv_heads)
     
     vllm_qkv_key = f"vllm_model.model.layers.{layer_idx}.self_attn.qkv_proj.weight"
     direct_assignments[vllm_qkv_key] = qkv_fused
+print(f"✅ QKV fusion complete in {time.time() - qkv_fuse_start:.2f}s")
 
 # Batch fuse all expert layers
 print(f"Fusing experts for {len(layer_expert_buffers)} layers...")
+expert_fuse_start = time.time()
 for layer_idx, expert_dict in layer_expert_buffers.items():
   gate_list = expert_dict['gate']
   up_list = expert_dict['up']
@@ -368,55 +377,44 @@ for layer_idx, expert_dict in layer_expert_buffers.items():
   
   if all_present:
     # Fuse w13 (gate + up interleaved)
-    gate_sample = gate_list[0]
-    intermediate_dim = gate_sample.shape[0]
-    hidden_dim = gate_sample.shape[1]
     tensor_parallel_size = 4
-    chunk_size = intermediate_dim // tensor_parallel_size
     num_chunks = tensor_parallel_size
     
-    w13_fused_list = []
-    for expert_idx in range(num_experts):
-      gate = gate_list[expert_idx]
-      up = up_list[expert_idx]
-      
-      w13_expert = jnp.empty((2 * intermediate_dim, hidden_dim), dtype=gate.dtype)
-      for chunk_idx in range(num_chunks):
-        src_start = chunk_idx * chunk_size
-        src_end = (chunk_idx + 1) * chunk_size
-        dst_gate_start = chunk_idx * chunk_size * 2
-        dst_gate_end = dst_gate_start + chunk_size
-        dst_up_start = dst_gate_end
-        dst_up_end = dst_up_start + chunk_size
-        
-        w13_expert = w13_expert.at[dst_gate_start:dst_gate_end].set(gate[src_start:src_end])
-        w13_expert = w13_expert.at[dst_up_start:dst_up_end].set(up[src_start:src_end])
-      
-      w13_fused_list.append(w13_expert)
-    
-    w13_fused = jnp.stack(w13_fused_list, axis=0)
+    @functools.partial(jax.jit, static_argnames=['num_chunks'])
+    def fuse_w13_experts(gates, ups, num_chunks):
+      n_experts, inter_dim, hidden = gates.shape
+      chunk_size = inter_dim // num_chunks
+      g = gates.reshape(n_experts, num_chunks, chunk_size, hidden)
+      u = ups.reshape(n_experts, num_chunks, chunk_size, hidden)
+      fused = jnp.stack([g, u], axis=2)
+      return fused.reshape(n_experts, num_chunks * 2 * chunk_size, hidden)
+
+    w13_fused = fuse_w13_experts(jnp.stack(gate_list), jnp.stack(up_list), num_chunks)
     w2_fused = jnp.stack(down_list, axis=0)
     
     w13_key = f"vllm_model.model.layers.{layer_idx}.mlp.experts.w13_weight"
     w2_key = f"vllm_model.model.layers.{layer_idx}.mlp.experts.w2_weight"
     direct_assignments[w13_key] = w13_fused
     direct_assignments[w2_key] = w2_fused
+print(f"✅ Expert fusion complete in {time.time() - expert_fuse_start:.2f}s")
 
 # Batch assign all weights to vLLM state
 print(f"Assigning {len(direct_assignments)} weights to vLLM state...")
 for vllm_key, weight in direct_assignments.items():
   assert vllm_key in dst_golden_state, f"Key not found: {vllm_key}"
   target_shape = dst_golden_state[vllm_key].shape
-  # NOTE(wyzhang): Hack to workaround incompatible shape between weights and code.
+  # NOTE(wyzhang): Hack to workaround incompatible shape between downloaded weights and this benchmark code.
   if weight.shape == target_shape:
-    dst_golden_state[vllm_key] = weight
+    pass
   elif len(weight.shape) == 3 and weight.shape == (target_shape[0], target_shape[2], target_shape[1]):
     @jax.jit(donate_argnums=(0,))
     def _transpose_weight(w):
       return w.transpose(0, 2, 1)
-    dst_golden_state[vllm_key] = _transpose_weight(weight)
+    weight = _transpose_weight(weight)
   else:
     assert weight.shape == target_shape, f"Shape mismatch for {vllm_key}: {weight.shape} vs {target_shape}"
+  assert(isinstance(weight, jax.Array)), f"Expected JAX array for {vllm_key}, got {type(weight)}"
+  dst_golden_state[vllm_key] = weight
 
 print(f"✅ Phase 3 complete: All weights assigned in {time.time() - phase3_start:.2f}s")
 
@@ -433,4 +431,9 @@ print(f"{'='*80}")
 _show_hbm_usage()
 print("\n" + "="*80)
 print("Generation test after weight transfer:")
+# NOTE(wyzhang): Remain the same behavior to assign numpy to vllm state.
+# TODO(wyzhang): When passing jax array directly here, vllm seems to not recognize and handle it properly.
+for key, jax_array in dst_golden_state.items():
+    # This blocks until the array is ready and copies it to Host RAM
+    dst_golden_state[key] = np.array(jax_array)
 print(golden_llm.generate("Paris is", sampling_params=sampling_params))

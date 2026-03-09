@@ -14,6 +14,7 @@
 
 """ Checkpoint conversion utility functions. """
 
+import jax.numpy as jnp
 import contextlib
 import io
 import os
@@ -165,7 +166,7 @@ def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = Non
   return np_array.reshape(expected_shape)  # Reshape for safety, though usually preserved.
 
 
-def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map):
+def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map, jax_to_numpy: bool = True):
   """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list, used in to_huggingface"""
   if hf_path not in hf_shape_map:
     raise ValueError(f"HF path '{hf_path}' not found in hf_shape_map.")
@@ -173,10 +174,14 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shap
   # If hook is unsepecified, use identity
   if current_hook_fns:
     processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
-  numpy_slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
-  if numpy_slice.shape != tuple(target_hf_shape):
-    raise ValueError(f"Shape mismatch for {hf_path}: Expect {target_hf_shape}, got {numpy_slice.shape}")
-  output_weights.append((hf_path, numpy_slice))
+  if jax_to_numpy:
+    slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
+  else:
+    # NOTE(wyzhang): sharding: NamedSharding(mesh=Mesh('diloco': 1, 'data': 1, 'stage': 1, 'fsdp': 2, 'fsdp_transpose': 1, 'sequence': 1, 'context': 1, 'context_autoregressive': 1, 'tensor': 4, 'tensor_transpose': 1, 'tensor_sequence': 1, 'expert': 1, 'autoregressive': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto, Auto, Auto, Auto, Auto, Auto, Auto, Auto)), spec=PartitionSpec('fsdp', 'tensor'), memory_kind=device)
+    slice = jnp.squeeze(processed_slice)
+  if slice.shape != tuple(target_hf_shape):
+    raise ValueError(f"Shape mismatch for {hf_path}: Expect {target_hf_shape}, got {slice.shape}")
+  output_weights.append((hf_path, slice))
 
 
 def process_maxtext_param(
@@ -186,7 +191,8 @@ def process_maxtext_param(
     hook_fn_map: dict[str, Any],
     hf_shape_map: dict[str, Any],
     maxtext_config: Any,
-) -> list[tuple[str, np.ndarray]]:
+    jax_to_numpy: bool = True,
+) -> list[tuple[str, Any]]:
   """Processes a single MaxText parameter (or a group of parameters) for conversion, used in to_huggingface.
 
   This function is responsible for taking a MaxText parameter and transforming
@@ -236,7 +242,7 @@ def process_maxtext_param(
   if not isinstance(hf_target_paths, list):
     max_logging.log("\tunscan")
     hf_path = hf_target_paths
-    _process(hf_path, maxtext_param_weight, output_weights, current_hook_fns, hf_shape_map)
+    _process(hf_path, maxtext_param_weight, output_weights, current_hook_fns, hf_shape_map, jax_to_numpy=jax_to_numpy)
     return output_weights
 
   # Stacked MaxText weight
@@ -270,7 +276,7 @@ def process_maxtext_param(
       else:
         # For `atomic_mt_key` mappings, slice the single MaxText tensor.
         weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
-      _process(hf_path, weight_slice, output_weights, current_hook_fns, hf_shape_map)
+      _process(hf_path, weight_slice, output_weights, current_hook_fns, hf_shape_map, jax_to_numpy=jax_to_numpy)
 
     return output_weights
 
@@ -292,7 +298,7 @@ def process_maxtext_param(
       # Slice the expert tensor along the layer axis to get the final individual weight.
       # axis is 0 on the new sliced tensor
       layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
-      _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, hf_shape_map)
+      _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, hf_shape_map, jax_to_numpy=jax_to_numpy)
 
   return output_weights
 
