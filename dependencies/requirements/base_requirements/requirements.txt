@@ -17,6 +17,7 @@ jax
 jaxlib
 jaxtyping
 jsonlines
+math-verify
 ml-collections
 ml-goodput-measurement
 numpy
