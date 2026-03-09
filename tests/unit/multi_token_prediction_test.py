@@ -25,11 +25,7 @@ from maxtext.layers import multi_token_prediction  # The class under test
 from maxtext.layers import embeddings
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.common_types import Config
-<<<<<<< HEAD
-=======
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
->>>>>>> 2f6724362 (Migrate Decoder (Gemma3/Deepseek/Llama4) and utils to NNX)
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 

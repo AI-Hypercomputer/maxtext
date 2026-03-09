@@ -814,6 +814,75 @@ class NNXDecoder(nnx.Module):
         },
     }
 
+  def _find_next_boundary(self, current_idx, end_idx, engram_indices):
+    """Finds the next index boundary, either the next Engram layer index or the overall end index."""
+    next_engrams = [l for l in engram_indices if l > current_idx]
+    if next_engrams:
+      return min(end_idx, *next_engrams)
+    return end_idx
+
+  def _apply_single_engram_layer(self, y, current_idx, layer_stack, *args, **kwargs):
+    """Applies a single, unscanned Engram layer by dynamically slicing the NNX state."""
+    graphdef, state = nnx.split(layer_stack)
+
+    # Slice the parameters for the current index (assuming scan axis is 0)
+    sliced_state = jax.tree.map(lambda x: x[current_idx], state)
+    single_layer = nnx.merge(graphdef, sliced_state)
+
+    # Run the single layer
+    out = single_layer(
+        y, *args, decoder_input_tokens=kwargs.get("decoder_input_tokens"), **kwargs.get("layer_kwargs", {})
+    )
+    y = out[0] if isinstance(out, tuple) else out
+
+    # Re-merge the updated state back into the specific slice of the stack
+    new_single_state = nnx.state(single_layer)
+    updated_state = jax.tree.map(
+        lambda s, new_s: jax.lax.dynamic_update_slice_in_dim(s, jnp.expand_dims(new_s, axis=0), current_idx, axis=0),
+        state,
+        new_single_state,
+    )
+    nnx.update(layer_stack, updated_state)
+
+    return y
+
+  def _apply_scanned_chunk(self, y, current_idx, next_boundary, layer_stack, *args, **kwargs):
+    """Applies a contiguous chunk of layers using scan over a state slice."""
+    scan_length = next_boundary - current_idx
+    if scan_length > 0:
+      graphdef, state = nnx.split(layer_stack)
+
+      # Slice the chunk state
+      chunk_state = jax.tree.map(lambda x: jax.lax.dynamic_slice_in_dim(x, current_idx, scan_length, axis=0), state)
+      chunk_stack = nnx.merge(graphdef, chunk_state)
+
+      # Apply sequentially
+      y, chunk_stack = self._apply_layers_sequentially(
+          chunk_stack, y, *args, length=scan_length, **kwargs.get("layer_kwargs", {})
+      )
+
+      # Update the original stack state
+      new_chunk_state = nnx.state(chunk_stack)
+      updated_state = jax.tree.map(
+          lambda s, new_s: jax.lax.dynamic_update_slice_in_dim(s, new_s, current_idx, axis=0), state, new_chunk_state
+      )
+      nnx.update(layer_stack, updated_state)
+
+    return y
+
+  def _apply_interleaved_scanned_layers(self, y, layer_stack, start_idx, end_idx, engram_indices, *args, **kwargs):
+    """Applies a mix of scanned standard layers and unscanned Engram layers."""
+    current_idx = start_idx
+    while current_idx < end_idx:
+      if current_idx in engram_indices:
+        y = self._apply_single_engram_layer(y, current_idx, layer_stack, *args, **kwargs)
+        current_idx += 1
+      else:
+        next_boundary = self._find_next_boundary(current_idx, end_idx, engram_indices)
+        y = self._apply_scanned_chunk(y, current_idx, next_boundary, layer_stack, *args, **kwargs)
+        current_idx = next_boundary
+    return y
+
   def __call__(
       self,
       shared_embedding: Any,
@@ -873,32 +942,53 @@ class NNXDecoder(nnx.Module):
             "page_state": page_state,
             "slot": slot,
         }
-        y, self.dense_layers = self._apply_layers_sequentially(
-            self.dense_layers, y, *layer_args, length=cfg.first_num_dense_layers, **layer_kwargs
-        )
 
-        num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
+        if cfg.engram_layers:
+          common_kwargs = {
+              "layer_kwargs": layer_kwargs,
+              "decoder_input_tokens": decoder_input_tokens,
+          }
 
-        if cfg.use_batch_split_schedule:
-          policy = self.get_remat_policy()
+          y = self._apply_interleaved_scanned_layers(
+              y, self.dense_layers, 0, cfg.first_num_dense_layers, cfg.engram_layers, *layer_args, **common_kwargs
+          )
 
-          mock_params = self._build_linen_params(self.moe_layer)
-
-          y = deepseek_batchsplit.scan_batch_split_layers(
+          y = self._apply_interleaved_scanned_layers(
               y,
-              mock_params,
-              decoder_positions,
-              decoder_segment_ids,
-              model_mode=model_mode,
-              mesh=self.mesh,
-              quant=self.quant,
-              cfg=cfg,
-              policy=policy,
+              self.moe_layer,
+              0,
+              (cfg.num_decoder_layers - cfg.first_num_dense_layers),
+              [e - cfg.first_num_dense_layers for e in cfg.engram_layers],
+              *layer_args,
+              **common_kwargs,
           )
         else:
-          y, self.moe_layer = self._apply_layers_sequentially(
-              self.moe_layer, y, *layer_args, length=num_moe, **layer_kwargs
+          y, self.dense_layers = self._apply_layers_sequentially(
+              self.dense_layers, y, *layer_args, length=cfg.first_num_dense_layers, **layer_kwargs
           )
+
+          num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
+
+          if cfg.use_batch_split_schedule:
+            policy = self.get_remat_policy()
+
+            mock_params = self._build_linen_params(self.moe_layer)
+
+            y = deepseek_batchsplit.scan_batch_split_layers(
+                y,
+                mock_params,
+                decoder_positions,
+                decoder_segment_ids,
+                model_mode=model_mode,
+                mesh=self.mesh,
+                quant=self.quant,
+                cfg=cfg,
+                policy=policy,
+            )
+          else:
+            y, self.moe_layer = self._apply_layers_sequentially(
+                self.moe_layer, y, *layer_args, length=num_moe, **layer_kwargs
+            )
       elif self.is_gemma3:
         y = self._apply_gemma3_scanned_blocks(
             y,
@@ -912,9 +1002,8 @@ class NNXDecoder(nnx.Module):
             slot,
         )
       else:
-        y, self.layers = self._apply_layers_sequentially(
-            self.layers, y, *layer_args, length=cfg.num_decoder_layers, **layer_kwargs
-        )
+        scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
+        y, self.layers = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
     else:
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 
