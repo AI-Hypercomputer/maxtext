@@ -468,9 +468,8 @@ class NNXDecoder(nnx.Module):
 
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
-      # Extract the updated state to return it
-      # _, new_current_state = nnx.split(layer, nnx.Param, ...)
-      new_current_state = nnx.state(layer)
+      # Extract the updated state to return it.
+      _, _, new_current_state = nnx.split(layer, nnx.Intermediate, ...)
       return new_carry, new_current_state
 
     layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)

@@ -100,7 +100,7 @@ class TestNNXDecoderLayerLogicalAxesUnmocked(unittest.TestCase):
 
   def test_forward_pass_default_axes(self):
     """Forces execution of the default 'else' fallback."""
-    cfg = _make_config(expert_shard_attention_option="none")
+    cfg = _make_config(expert_shard_attention_option="fsdp")
     layer = NNXDecoderLayer(config=cfg, mesh=self.mesh, model_mode=MODEL_MODE_TRAIN, rngs=self.rngs)
     inputs, segment_ids, positions = self._make_dummy_inputs(cfg)
     out, _ = layer(inputs, segment_ids, positions, deterministic=True, model_mode=MODEL_MODE_TRAIN)
