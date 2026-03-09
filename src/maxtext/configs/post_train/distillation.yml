@@ -51,7 +51,7 @@ per_device_batch_size: 2
 gradient_accumulation_steps: 8
 
 # --- Learning Rate Schedule ---
-learning_rate: 2.0e-4 
+learning_rate: 2.0e-4
 learning_rate_schedule_steps: 200000
 warmup_steps_fraction: 0.1
-cosine_learning_rate_final_fraction: 0.1
+learning_rate_final_fraction: 0.1
