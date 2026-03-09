@@ -184,20 +184,21 @@ def _transform_weight(weight, indices, axes, hook_fns, target_shape):
   return jnp.squeeze(weight)
 
 
-@functools.partial(jax.jit, donate_argnums=(0,), static_argnames=["hook_fns", "target_shape", "num_experts", "num_layers"])
-def _transform_moe_block_tpu(maxtext_param_weight, hook_fns, target_shape, num_experts, num_layers):
-
+@functools.partial(jax.jit, donate_argnums=(0,), static_argnames=["target_shape", "num_experts", "num_layers"])
+def _transform_moe_block_tpu(maxtext_param_weight, target_shape, num_experts, num_layers):
+  # TODO(wyzhang): Fix hack. Directly use the code from follow reshape_kernel in the _transform_moe_block_tpu
+  # current hook fns is params-decoder-layers-moe_block-wi_0 (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
+  # current hook fns is params-decoder-layers-moe_block-wi_1 (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
+  # current hook fns is params-decoder-layers-moe_block-wo (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
   def _apply_hooks(w):
-    if hook_fns is not None:
-      for hook_fn in hook_fns:
-        w = hook_fn(w, target_shape)
-    return w
+    return w.T.reshape(target_shape)
 
   def process_expert(expert_weights):
     return jax.lax.map(_apply_hooks, expert_weights)
   transformed_weight = jax.lax.map(process_expert, maxtext_param_weight)
   stacked = transformed_weight.reshape((num_experts * num_layers,) + transformed_weight.shape[2:])
-  return [jax.lax.index_in_dim(stacked, i, keepdims=False) for i in range(num_experts * num_layers)]
+  # return [jax.lax.index_in_dim(stacked, i, keepdims=False) for i in range(num_experts * num_layers)]
+  return jnp.unstack(stacked, axis=0)
 
 def process_maxtext_param(
     maxtext_param_key: str | tuple[str, ...],
@@ -316,11 +317,19 @@ def process_maxtext_param(
   num_experts = maxtext_param_weight.shape[0]
   num_layers = maxtext_param_weight.shape[1]
   target_shape = tuple(hf_shape_map[hf_target_paths[0][0]])
-  all_slices = _transform_moe_block_tpu(maxtext_param_weight, current_hook_fns, target_shape, num_experts, num_layers)
-  hf_paths = [path for expert_list in hf_target_paths for path in expert_list]
-  for i, hf_path in enumerate(hf_paths):
-    w = all_slices[i]
-    _finalize(hf_path, w, target_shape)
+  print(f'wyzhangd: current hook fns is {maxtext_param_key} {current_hook_fns}')
+  # TODO(wyzhang): Fix hack. Not passing a function. Directly use the code from follow reshape_kernel in the _transform_moe_block_tpu
+  # current hook fns is params-decoder-layers-moe_block-wi_0 (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
+  # current hook fns is params-decoder-layers-moe_block-wi_1 (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
+  # current hook fns is params-decoder-layers-moe_block-wo (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
+  all_slices = _transform_moe_block_tpu(maxtext_param_weight, target_shape, num_experts, num_layers)
+  with jax.named_scope("hf_path"):
+    hf_paths = [path for expert_list in hf_target_paths for path in expert_list]
+  with jax.named_scope("finalize_loop"):
+    for i, hf_path in enumerate(hf_paths):
+      w = all_slices[i]
+      with jax.named_scope("_finalize"):
+        _finalize(hf_path, w, target_shape)
   return output_weights
 
 
