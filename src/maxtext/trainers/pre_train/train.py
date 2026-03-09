@@ -218,6 +218,24 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     mtp_loss = calculate_mtp_loss(intermediate_outputs, config)
     loss += mtp_loss
 
+  # get indexer loss
+  indexer_loss = 0.0
+  if config.use_sparse_indexer and config.indexer_loss_scaling_factor > 0.0:
+    indexer_losses = []
+    # Extract 'indexer_loss' from model intermediates.
+    # We check for paths ending in ('self_attention', 'indexer_loss').
+    # This handles varying paths caused by different layer names.
+    for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
+      path_keys = tuple(k.key for k in path if hasattr(k, "key"))
+      if path_keys[-2:] == ("self_attention", "indexer_loss"):
+        indexer_losses.append(jnp.ravel(val))
+
+    if indexer_losses:
+      indexer_loss = jnp.mean(jnp.concatenate(indexer_losses))
+      loss += indexer_loss
+    else:
+      max_logging.debug("No indexer loss found.")
+
   # get MoE load balance loss
   moe_lb_loss = 0.0
   if config.num_experts > 1:
@@ -257,6 +275,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       "z_loss": total_z_loss,
       "total_weights": total_weights,
       "moe_lb_loss": moe_lb_loss,
+      "indexer_loss": indexer_loss,
       "moe_bias_updates": moe_bias_updates,
       "mtp_loss": mtp_loss,
   }
@@ -327,6 +346,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
+  indexer_loss = aux["indexer_loss"]
   z_loss = aux["z_loss"]
   moe_bias_updates = aux["moe_bias_updates"]
   mtp_loss = aux["mtp_loss"]
@@ -373,6 +393,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/loss": loss,
       "learning/z_loss": z_loss,
       "learning/moe_lb_loss": moe_lb_loss,
+      "learning/indexer_loss": indexer_loss,
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
   }
@@ -425,6 +446,7 @@ def eval_step(model, config, state, data, dropout_rng):
   z_loss = aux["z_loss"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
+  indexer_loss = aux["indexer_loss"]
   mtp_loss = aux["mtp_loss"]
   metrics = {
       "scalar": {
@@ -433,6 +455,7 @@ def eval_step(model, config, state, data, dropout_rng):
           "evaluation/total_loss": total_loss,
           "evaluation/total_weights": total_weights,
           "evaluation/moe_lb_loss": moe_lb_loss,
+          "evaluation/indexer_loss": indexer_loss,
           "evaluation/mtp_loss": mtp_loss,
           "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
       },

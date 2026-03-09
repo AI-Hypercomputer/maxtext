@@ -34,6 +34,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
+    DEFAULT_MASK_VALUE,
 )
 from maxtext.layers.attention_mla import MLA
 from maxtext.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
@@ -1590,6 +1591,107 @@ class MLATest(attention_test_util.MLATestBase):
         f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
         f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
     )
+
+  def get_indexer_test_data(self, batch_size, q_len, kv_len, num_heads, head_dim):
+    """Helper to generate random data for indexer tests."""
+    key_q, key_k, key_is = jax.random.split(self.rng, 3)
+    query = jax.random.normal(key_q, (batch_size, q_len, num_heads, head_dim))
+    key = jax.random.normal(key_k, (batch_size, kv_len, num_heads, head_dim))
+    indexer_score = jax.random.normal(key_is, (batch_size, q_len, kv_len))
+    return query, key, indexer_score
+
+  def get_causal_mask_for_indexer(self, batch_size, q_len, kv_len):
+    """Helper to generate a causal mask with DEFAULT_MASK_VALUE."""
+    row_ids = jnp.arange(q_len)[:, None]
+    col_ids = jnp.arange(kv_len)[None, :]
+    attention_mask = jnp.where(col_ids <= row_ids, 0.0, DEFAULT_MASK_VALUE)
+    attention_mask = jnp.broadcast_to(attention_mask, (batch_size, q_len, kv_len))
+    return attention_mask
+
+  def test_indexer_loss(self):
+    """Test indexer loss computation."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_sparse_indexer"] = True
+    mla_config_args["attention"] = "dot_product"
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    batch_size = 2
+    q_len = 3
+    kv_len = 4
+    num_heads = 5
+    head_dim = 6
+    scaling_factor = 0.5
+
+    query, key, indexer_score = self.get_indexer_test_data(batch_size, q_len, kv_len, num_heads, head_dim)
+
+    # Causal mask
+    attention_mask = self.get_causal_mask_for_indexer(batch_size, q_len, kv_len)
+    indexer_score += attention_mask
+
+    topk_indices = jnp.array([[[0, 1], [0, 1], [0, 1]], [[0, 1], [0, 1], [0, 1]]])
+    indexer_mask = mla.indexer.generate_mask(topk_indices, kv_len) + attention_mask
+
+    loss_dense = mla.calculate_indexer_loss(
+        indexer_score=indexer_score,
+        query=query,
+        key=key,
+        attention_mask=attention_mask,
+        indexer_mask=indexer_mask,
+        sparse_loss=False,
+        scaling_factor=scaling_factor,
+    )
+
+    loss_sparse = mla.calculate_indexer_loss(
+        indexer_score=indexer_score,
+        query=query,
+        key=key,
+        attention_mask=attention_mask,
+        indexer_mask=indexer_mask,
+        sparse_loss=True,
+        scaling_factor=scaling_factor,
+    )
+
+    np.testing.assert_array_less(0.0, loss_dense)
+    np.testing.assert_array_less(0.0, loss_sparse)
+
+  def test_indexer_loss_kl_divergence_zero(self):
+    """Test that KL divergence is 0 when target and pred distributions match exactly."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_sparse_indexer"] = True
+    mla_config_args["attention"] = "dot_product"
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    batch_size = 2
+    q_len = 3
+    kv_len = 4
+    num_heads = 5
+    head_dim = 6
+
+    # Setup perfectly matching distributions
+    # Make query and key such that einsum yields zeros (so softmax gives uniform distribution over unmasked)
+    query = jnp.zeros((batch_size, q_len, num_heads, head_dim))
+    key = jnp.zeros((batch_size, kv_len, num_heads, head_dim))
+
+    # Causal mask
+    attention_mask = self.get_causal_mask_for_indexer(batch_size, q_len, kv_len)
+
+    # Indexer score matches the shape and is uniform
+    indexer_score = jnp.zeros((batch_size, q_len, kv_len)) + attention_mask
+
+    topk_indices = jnp.array([[[0, 1], [0, 1], [0, 1]], [[0, 1], [0, 1], [0, 1]]])
+    indexer_mask = mla.indexer.generate_mask(topk_indices, kv_len) + attention_mask
+
+    loss = mla.calculate_indexer_loss(
+        indexer_score=indexer_score,
+        query=query,
+        key=key,
+        attention_mask=attention_mask,
+        indexer_mask=indexer_mask,
+        sparse_loss=False,
+        scaling_factor=1.0,
+    )
+
+    np.testing.assert_allclose(loss, 0.0, atol=1e-5)
 
 
 class Qwen3NextGatedDeltaNetTest(unittest.TestCase):

@@ -359,6 +359,13 @@ use_sparse_indexer: False
 index_head_dim: 128
 index_n_heads: 64
 index_topk: 2048
+# Determines the token selection strategy for indexer loss: 
+# - False: Uses all tokens (Dense Warm-up).
+# - True: Uses only top-k tokens (Sparse Training).
+# Note: This is only active when `indexer_loss_scaling_factor` > 0.
+sparse_indexer_loss: False
+# Multiplier for the indexer KL divergence loss
+indexer_loss_scaling_factor: 0.0
 
 # MLA parameters
 q_lora_rank: 0
