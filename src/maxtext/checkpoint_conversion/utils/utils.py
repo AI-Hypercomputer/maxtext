@@ -167,22 +167,14 @@ def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = Non
   return np_array.reshape(expected_shape)  # Reshape for safety, though usually preserved.
 
 
-@functools.partial(jax.jit, static_argnames=["axes", "hook_fns", "target_shape"])
+@functools.partial(jax.jit, donate_argnums=(0,), static_argnames=["axes", "hook_fns", "target_shape"])
 def _transform_weight(weight, indices, axes, hook_fns, target_shape):
   """Applies slicing and hooks to a MaxText weight."""
   # Slicing
   if indices is not None:
-    if isinstance(weight, (list, tuple)):
-      # Composite key: apply slicing to each element.
-      # Assumption: composite keys only support single-axis slicing.
-      idx = indices[0]
-      ax = axes[0]
-      weight = [jnp.squeeze(jax.lax.dynamic_slice_in_dim(w, idx, 1, axis=ax), axis=ax) for w in weight]
-    else:
-      # Atomic key: apply slicing sequentially.
-      for idx, ax in zip(indices, axes):
-        weight = jax.lax.dynamic_slice_in_dim(weight, idx, 1, axis=ax)
-        weight = jnp.squeeze(weight, axis=ax)
+    for idx, ax in zip(indices, axes):
+      weight = jax.lax.dynamic_slice_in_dim(weight, idx, 1, axis=ax)
+      weight = jnp.squeeze(weight, axis=ax)
 
   # Hooks
   if hook_fns is not None:
@@ -190,6 +182,22 @@ def _transform_weight(weight, indices, axes, hook_fns, target_shape):
       weight = hook_fn(weight, target_shape)
 
   return jnp.squeeze(weight)
+
+
+@functools.partial(jax.jit, donate_argnums=(0,), static_argnames=["hook_fns", "target_shape", "num_experts", "num_layers"])
+def _transform_moe_block_tpu(maxtext_param_weight, hook_fns, target_shape, num_experts, num_layers):
+
+  def _apply_hooks(w):
+    if hook_fns is not None:
+      for hook_fn in hook_fns:
+        w = hook_fn(w, target_shape)
+    return w
+
+  def process_expert(expert_weights):
+    return jax.lax.map(_apply_hooks, expert_weights)
+  transformed_weight = jax.lax.map(process_expert, maxtext_param_weight)
+  stacked = transformed_weight.reshape((num_experts * num_layers,) + transformed_weight.shape[2:])
+  return [jax.lax.index_in_dim(stacked, i, keepdims=False) for i in range(num_experts * num_layers)]
 
 def process_maxtext_param(
     maxtext_param_key: str | tuple[str, ...],
@@ -303,18 +311,16 @@ def process_maxtext_param(
   # Case 4: Scanned MoE layer, e.g., from 'layers-moe_block-wi_0'.
   # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
   # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
-  expert_axis_to_slice = 0
-
-  # Outer loop for experts
-  for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
-    # Inner loop for layers
-    for layer_idx, hf_path in enumerate(expert_paths_for_layer):
-      target_shape = tuple(hf_shape_map[hf_path])
-      indices = (jnp.array(expert_idx), jnp.array(layer_idx))
-      axes = (expert_axis_to_slice, 0)
-      w = _transform_weight(maxtext_param_weight, indices, axes, current_hook_fns, target_shape)
-      _finalize(hf_path, w, target_shape)
-
+  # TODO(wyzhang): The weight must be a single array in RL weight conversion. Assert that to simplify the logic
+  assert isinstance(maxtext_param_weight, jax.Array)
+  num_experts = maxtext_param_weight.shape[0]
+  num_layers = maxtext_param_weight.shape[1]
+  target_shape = tuple(hf_shape_map[hf_target_paths[0][0]])
+  all_slices = _transform_moe_block_tpu(maxtext_param_weight, current_hook_fns, target_shape, num_experts, num_layers)
+  hf_paths = [path for expert_list in hf_target_paths for path in expert_list]
+  for i, hf_path in enumerate(hf_paths):
+    w = all_slices[i]
+    _finalize(hf_path, w, target_shape)
   return output_weights
 
 

@@ -4,6 +4,7 @@ import gc
 import sys
 
 # Fix for temp directory error in absl.testing (imported by chex -> optax -> flax)
+from absl import flags
 os.environ.setdefault('TMPDIR', '/tmp')
 os.environ.setdefault('TEST_TMPDIR', '/tmp')
 
@@ -33,11 +34,15 @@ from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIG
 from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
 
 _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
+_XPROF_PATH="/home/wyzhang_google_com/mnt/xprof"
 
 jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
 jax_config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax_config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax_config.update("jax_enable_compilation_cache", True)
+
+FLAGS = flags.FLAGS
+flags.DEFINE_bool('xprof', False, 'Enable xprof profiling.')
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -138,6 +143,7 @@ def get_nested_attr(obj, attr_path: str):
 # Main Execution
 # ==============================================================================
 
+FLAGS(sys.argv)
 print("Starting script...")
 print(f"Current working directory: {os.getcwd()}")
 print(f"JAX devices: {jax.devices()}")
@@ -262,12 +268,18 @@ print(f"✅ Phase 1 complete: Extracted {len(all_maxtext_weights)} weight tensor
 print("\n[Phase 2/3] Processing all weight transformations...")
 phase2_start = time.time()
 
+
 all_processed_weights = []
 for maxtext_key, weight in all_maxtext_weights.items():
-  print(f"MaxText Key: {maxtext_key}, Shape: {weight.shape}")
-  
+  xprof = FLAGS.xprof and (maxtext_key == "params-decoder-layers-moe_block-wi_0")
+
+  if xprof:
+    jax.profiler.start_trace(_XPROF_PATH)
   jax_to_numpy = False
   processed_params = process_maxtext_param(maxtext_key, weight, param_map, hook_fn_map, shape_map, config_ref, jax_to_numpy=jax_to_numpy)
+  if xprof:
+    jax.profiler.stop_trace()
+
   # NOTE(wyzhang): verify all processed weights are JAX arrays
   if jax_to_numpy:
     for _, w in processed_params:
@@ -344,7 +356,7 @@ for layer_idx, qkv_dict in layer_qkv_buffers.items():
     num_q_heads = 32  # Adjust based on model
     num_kv_heads = 4  # Adjust based on model
     
-    @functools.partial(jax.jit, static_argnames=['num_q_heads', 'num_kv_heads'])
+    @functools.partial(jax.jit, donate_argnums=(0, 1, 2), static_argnames=['num_q_heads', 'num_kv_heads'])
     def fuse_qkv(q, k, v, num_q_heads, num_kv_heads):
       head_dim = q.shape[0] // num_q_heads
       hidden_size = q.shape[1]
@@ -359,12 +371,14 @@ for layer_idx, qkv_dict in layer_qkv_buffers.items():
     
     vllm_qkv_key = f"vllm_model.model.layers.{layer_idx}.self_attn.qkv_proj.weight"
     direct_assignments[vllm_qkv_key] = qkv_fused
+
 print(f"  QKV fusion complete in {time.time() - qkv_fuse_start:.2f}s")
 
 # Batch fuse all expert layers
 print(f"Fusing experts for {len(layer_expert_buffers)} layers...")
 expert_fuse_start = time.time()
-for layer_idx, expert_dict in layer_expert_buffers.items():
+while layer_expert_buffers:
+  layer_idx, expert_dict = layer_expert_buffers.popitem()
   gate_list = expert_dict['gate']
   up_list = expert_dict['up']
   down_list = expert_dict['down']
@@ -380,16 +394,18 @@ for layer_idx, expert_dict in layer_expert_buffers.items():
     tensor_parallel_size = 4
     num_chunks = tensor_parallel_size
     
-    @functools.partial(jax.jit, static_argnames=['num_chunks'])
-    def fuse_w13_experts(gates, ups, num_chunks):
-      n_experts, inter_dim, hidden = gates.shape
-      chunk_size = inter_dim // num_chunks
-      g = gates.reshape(n_experts, num_chunks, chunk_size, hidden)
-      u = ups.reshape(n_experts, num_chunks, chunk_size, hidden)
-      fused = jnp.stack([g, u], axis=2)
-      return fused.reshape(n_experts, num_chunks * 2 * chunk_size, hidden)
+    @functools.partial(jax.jit, donate_argnums=(0, 1), static_argnames=['num_chunks'])
+    def fuse_w13_experts_optimized(gates, ups, num_chunks):
+        n_experts, inter_dim, hidden = gates.shape
+        chunk_size = inter_dim // num_chunks
+        g = gates.reshape(n_experts, num_chunks, chunk_size, hidden)
+        u = ups.reshape(n_experts, num_chunks, chunk_size, hidden)
+        # Interleave: stack on a new axis then flatten the chunk+interleave axes
+        # This is more efficient than manual concatenation in a loop
+        fused = jnp.stack([g, u], axis=2) # (n_experts, num_chunks, 2, chunk_size, hidden)
+        return fused.reshape(n_experts, -1, hidden)
 
-    w13_fused = fuse_w13_experts(jnp.stack(gate_list), jnp.stack(up_list), num_chunks)
+    w13_fused = fuse_w13_experts_optimized( jnp.array(gate_list), jnp.array(up_list), num_chunks)
     w2_fused = jnp.stack(down_list, axis=0)
     
     w13_key = f"vllm_model.model.layers.{layer_idx}.mlp.experts.w13_weight"
@@ -419,7 +435,7 @@ for vllm_key, weight in direct_assignments.items():
 print(f"✅ Phase 3 complete: All weights assigned in {time.time() - phase3_start:.2f}s")
 
 # Single cleanup at end
-del all_processed_weights, layer_qkv_buffers, layer_expert_buffers, direct_assignments
+del layer_qkv_buffers, layer_expert_buffers, direct_assignments
 gc.collect()  
 
 end_time = time.time()
