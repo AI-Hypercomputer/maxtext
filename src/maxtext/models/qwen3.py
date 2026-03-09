@@ -962,7 +962,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # First LayerNorm, applied before the attention block.
     self.input_layernorm = Qwen3NextRMSNorm(
         num_features=cfg.emb_dim,
-        eps=cfg.normalization_layer_epsilon,
+        epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         rngs=rngs,
@@ -987,7 +987,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
         num_features=cfg.emb_dim,
-        eps=cfg.normalization_layer_epsilon,
+        epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         rngs=rngs,
