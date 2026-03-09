@@ -275,32 +275,6 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
 
   lora_provider.dot_general = types.MethodType(_dot_general_with_3d, lora_provider)
 
-
-def _patch_with_sharding_constraint():
-  """Patches sharding constraint to tolerate shape/spec rank mismatches."""
-  if getattr(jax.lax, "_maxtext_with_sharding_constraint_patched", False):
-    return
-
-  jax.lax._original_with_sharding_constraint = jax.lax.with_sharding_constraint  # pylint: disable=protected-access
-
-  def _safe_with_sharding_constraint(x, sharding, *args, **kwargs):
-    def _safe_leaf_fn(x_leaf, s_leaf):
-      try:
-        spec = getattr(s_leaf, "spec", s_leaf)
-        if hasattr(spec, "__len__"):
-          ndim = getattr(x_leaf, "ndim", None)
-          if ndim is not None and len(spec) > ndim:
-            return x_leaf
-      except Exception:  # pylint: disable=broad-exception-caught
-        pass
-      return jax.lax._original_with_sharding_constraint(x_leaf, s_leaf, *args, **kwargs)  # pylint: disable=protected-access
-
-    return jax.tree_util.tree_map(_safe_leaf_fn, x, sharding)
-
-  jax.lax.with_sharding_constraint = _safe_with_sharding_constraint
-  jax.lax._maxtext_with_sharding_constraint_patched = True  # pylint: disable=protected-access
-
-
 def _prepare_dummy_inputs(mt_config, mesh):
   """Builds dummy decoder inputs used to materialize LoRA parameters."""
   batch_size = getattr(mt_config, "per_device_batch_size", 1)
@@ -517,7 +491,6 @@ def maybe_apply_lora(model, mesh, mt_config):
   lora_provider = _build_lora_provider(mt_config, qwix)
 
   _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qwix_ptq, types)
-  _patch_with_sharding_constraint()
 
   decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(mt_config, mesh)
   lora_model = qwix.apply_lora_to_model(
