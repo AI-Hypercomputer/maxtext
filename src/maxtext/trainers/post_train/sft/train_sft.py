@@ -201,17 +201,6 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
       preferred_element_type=None,
       out_sharding=None,
   ):
-    def _fallback_dot_general():
-      return qwix_lora.LoraProvider.dot_general(
-          self,
-          lhs,
-          rhs,
-          dimension_numbers,
-          precision,
-          preferred_element_type,
-          out_sharding=out_sharding,
-      )
-
     res = qwix_ptq.PtqProvider.dot_general(
         self,
         lhs,
@@ -222,56 +211,74 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
         out_sharding=out_sharding,
     )
 
-    rule, _ = self._get_current_rule_and_op_id("dot_general", repeated_call=True)  # pylint: disable=protected-access
+    rule, _ = self._get_current_rule_and_op_id("dot_general", repeated_call=True)
     if not isinstance(rule, qwix_lora.LoraRule):
       return res
 
     weight_name = qwix_flax_util.find_param(rhs, qwix_lora.ptq.WithAux)
     if weight_name is None:
-      return res
-
-    if len(rhs.shape) == 3 and tuple(dimension_numbers[0][1]) == (0,) and not dimension_numbers[1][1]:
-      lora_params = qwix_lora._get_or_create_lora_params(  # pylint: disable=protected-access
-          name=weight_name,
-          rule=rule,
-          a_shape=(rhs.shape[0], rule.rank),
-          b_shape=(rule.rank, rhs.shape[1] * rhs.shape[2]),
-          a_sharding_transpose=(0, None),
-          b_sharding_transpose=(None, 1),
+      return qwix_lora.LoraProvider.dot_general(
+          self, lhs, rhs, dimension_numbers, precision, preferred_element_type, out_sharding=out_sharding
       )
-      lora_a, lora_b = lora_params[:2]
-      if rule.dropout > 0:
-        lhs = nnx.Dropout(rule.dropout)(lhs, rngs=qwix_flax_util.make_rng("dropout"))
-      lora_b = jnp.reshape(lora_b, (rule.rank, rhs.shape[1], rhs.shape[2]))
-      delta = jnp.einsum("...k,kr->...r", lhs, lora_a)
-      delta = jnp.einsum("...r,rnm->...nm", delta, lora_b)
-      return res + delta * (rule.alpha / rule.rank)
 
-    if len(rhs.shape) == 3 and tuple(dimension_numbers[0][1]) == (0, 1) and not dimension_numbers[1][1]:
-      k = rhs.shape[0] * rhs.shape[1]
-      lora_params = qwix_lora._get_or_create_lora_params(  # pylint: disable=protected-access
-          name=weight_name,
-          rule=rule,
-          a_shape=(k, rule.rank),
-          b_shape=(rule.rank, rhs.shape[2]),
-          a_sharding_transpose=(0, None),
-          b_sharding_transpose=(None, 1),
+    try:
+      current_module = qwix_flax_util.get_current_module()
+      lora_a = getattr(current_module, f"{weight_name}_lora_a", None)
+      lora_b = getattr(current_module, f"{weight_name}_lora_b", None)
+      
+      if lora_a is None or lora_b is None:
+        return qwix_lora.LoraProvider.dot_general(
+            self, lhs, rhs, dimension_numbers, precision, preferred_element_type, out_sharding=out_sharding
+        )
+          
+      if isinstance(lora_a, nnx.Variable):
+        lora_a = lora_a[...]
+      if isinstance(lora_b, nnx.Variable):
+        lora_b = lora_b[...]
+    except Exception:
+      return qwix_lora.LoraProvider.dot_general(
+          self, lhs, rhs, dimension_numbers, precision, preferred_element_type, out_sharding=out_sharding
       )
-      lora_a, lora_b = lora_params[:2]
-      if rule.dropout > 0:
-        lhs = nnx.Dropout(rule.dropout)(lhs, rngs=qwix_flax_util.make_rng("dropout"))
-      contract_axes = tuple(dimension_numbers[0][0])
-      lhs_perm = [i for i in range(lhs.ndim) if i not in contract_axes] + list(contract_axes)
-      lhs_trans = jnp.transpose(lhs, lhs_perm)
-      lhs_shape = lhs_trans.shape
-      lhs_flat = jnp.reshape(lhs_trans, lhs_shape[: -len(contract_axes)] + (k,))
-      if lora_a.shape[0] != k:
-        return _fallback_dot_general()
-      delta = jnp.einsum("...k,kr->...r", lhs_flat, lora_a)
-      delta = jnp.einsum("...r,rm->...m", delta, lora_b)
-      return res + delta * (rule.alpha / rule.rank)
 
-    return _fallback_dot_general()
+    if rule.dropout > 0:
+      lhs = nnx.Dropout(rule.dropout)(lhs, rngs=qwix_flax_util.make_rng("dropout"))
+
+    contract_axes_lhs = tuple(dimension_numbers[0][0])
+    contract_axes_rhs = tuple(dimension_numbers[0][1])
+
+    # If the default provider fails due to shape, we handle it universally here.
+    if len(rhs.shape) > 2:
+      k = 1
+      for axis in contract_axes_rhs:
+          k *= rhs.shape[axis]
+
+      out_dim = lora_b.size // rule.rank
+
+      # Validate that LoRA shapes make mathematical sense
+      if lora_a.size == k * rule.rank and lora_b.size == rule.rank * out_dim:
+          # Reshape A to 2D
+          lora_a_flat = jnp.reshape(lora_a, (k, rule.rank))
+          
+          # Reshape B to 2D
+          lora_b_flat = jnp.reshape(lora_b, (rule.rank, out_dim))
+          
+          # Flatten LHS to abstract over multiple batch/sequence dimensions
+          lhs_perm = [i for i in range(lhs.ndim) if i not in contract_axes_lhs] + list(contract_axes_lhs)
+          lhs_trans = jnp.transpose(lhs, lhs_perm)
+          lhs_shape = lhs_trans.shape
+          lhs_flat = jnp.reshape(lhs_trans, (-1, k))
+          
+          # Do the 2D LoRA math
+          delta_flat = lhs_flat @ lora_a_flat @ lora_b_flat
+          
+          # Unflatten the delta to match the original result shape
+          delta = jnp.reshape(delta_flat, res.shape)
+          
+          return res + delta * (rule.alpha / rule.rank)
+
+    return qwix_lora.LoraProvider.dot_general(
+        self, lhs, rhs, dimension_numbers, precision, preferred_element_type, out_sharding=out_sharding
+    )
 
   lora_provider.dot_general = types.MethodType(_dot_general_with_3d, lora_provider)
 
@@ -315,110 +322,101 @@ def _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util,
     values.insert(axis, layer_value)
     return tuple(values)
 
-  matched_modules = 0
-  precreated_modules = 0
-  skipped_modules = []
-  precreated_shapes = []
-
-  for path, module in nnx.iter_modules(lora_model):
-    module_path = "/".join(str(p) for p in path)
-    if not compiled_module_path.search(module_path):
-      continue
-
-    matched_modules += 1
-    kernel = getattr(module, "kernel", None)
-    if kernel is None:
-      if len(skipped_modules) < 10:
-        skipped_modules.append(f"{module_path}: no kernel")
-      continue
-
-    try:
-      kernel_value = qwix_flax_util.unbox(kernel)
-    except Exception:  # pylint: disable=broad-exception-caught
-      if len(skipped_modules) < 10:
-        skipped_modules.append(f"{module_path}: cannot unbox kernel")
-      continue
-
+  def _extract_kernel_shape(kernel_value):
     kernel_shape = getattr(kernel_value, "shape", None)
     if kernel_shape is None and hasattr(kernel_value, "array"):
       kernel_shape = getattr(kernel_value.array, "shape", None)
       if kernel_shape is None and hasattr(kernel_value.array, "qvalue"):
         kernel_shape = getattr(kernel_value.array.qvalue, "shape", None)
+    if kernel_shape is None:
+      return None
+    return tuple(int(dim) for dim in kernel_shape)
+
+  matched_modules = 0
+  precreated_modules = 0
+  skipped_modules = []
+  precreated_shapes = []
+
+  def _process_param(module, module_path, param_name, param_obj, in_features_shape, out_features_shape):
+    nonlocal precreated_modules
+    try:
+      kernel_value = qwix_flax_util.unbox(param_obj)
+    except Exception:
+      if len(skipped_modules) < 10:
+        skipped_modules.append(f"{module_path}.{param_name}: cannot unbox kernel")
+      return False
+
+    kernel_shape = _extract_kernel_shape(kernel_value)
     if kernel_shape is None or len(kernel_shape) < 2:
       if len(skipped_modules) < 10:
-        skipped_modules.append(f"{module_path}: unsupported kernel shape {kernel_shape}")
-      continue
+        skipped_modules.append(f"{module_path}.{param_name}: unsupported kernel shape {kernel_shape}")
+      return False
 
-    is_scanned_decoder_module = (
-        "decoder/layers/" in module_path and isinstance(num_decoder_layers, int) and num_decoder_layers > 1
-    )
+    expected_suffix = in_features_shape + out_features_shape
+    layer_axis = None
+    base_kernel_shape = None
 
-    if is_scanned_decoder_module:
-      layer_axis = None
-      if 0 <= param_scan_axis < len(kernel_shape):
-        layer_axis = int(param_scan_axis)
-      elif len(kernel_shape) > 1 and int(kernel_shape[1]) == int(num_decoder_layers):
-        layer_axis = 1
-      else:
-        for axis, dim in enumerate(kernel_shape):
-          if int(dim) == int(num_decoder_layers):
-            layer_axis = axis
-            break
+    # 1. Determine if this parameter is scanned over layers
+    if isinstance(num_decoder_layers, int) and len(kernel_shape) >= len(expected_suffix) + 1:
+      # Prefer param_scan_axis if it matches the expected layer count
+      if kernel_shape[param_scan_axis] == num_decoder_layers:
+        candidate_base = tuple(dim for i, dim in enumerate(kernel_shape) if i != param_scan_axis)
+        if candidate_base[-len(expected_suffix):] == expected_suffix:
+          layer_axis = param_scan_axis
+          base_kernel_shape = candidate_base
+      
+      # If not found at param_scan_axis, search other axes (for edge cases where scan axis might differ)
       if layer_axis is None:
-        if len(skipped_modules) < 10:
-          skipped_modules.append(f"{module_path}: unable to infer layer axis from kernel shape {kernel_shape}")
-        continue
+        for axis in range(len(kernel_shape)):
+          if kernel_shape[axis] == num_decoder_layers:
+            candidate_base = tuple(dim for i, dim in enumerate(kernel_shape) if i != axis)
+            if candidate_base[-len(expected_suffix):] == expected_suffix:
+              layer_axis = axis
+              base_kernel_shape = candidate_base
+              break
 
-      effective_shape = tuple(int(dim) for i, dim in enumerate(kernel_shape) if i != layer_axis)
-      if len(effective_shape) < 2:
-        if len(skipped_modules) < 10:
-          skipped_modules.append(f"{module_path}: unsupported effective shape {effective_shape}")
-        continue
+    # 2. Check if it's an unscanned parameter
+    if layer_axis is None and len(kernel_shape) >= len(expected_suffix):
+      if kernel_shape[-len(expected_suffix):] == expected_suffix:
+        base_kernel_shape = kernel_shape
 
-      if "decoder/layers/self_attention/out" in module_path and len(effective_shape) >= 3:
-        in_dim = int(math.prod(effective_shape[:-1]))
-        out_dim = int(effective_shape[-1])
-      else:
-        in_dim = int(effective_shape[0])
-        out_dim = int(math.prod(effective_shape[1:]))
-      if in_dim <= 0 or out_dim <= 0:
-        if len(skipped_modules) < 10:
-          skipped_modules.append(f"{module_path}: non-positive dims in={in_dim} out={out_dim}")
-        continue
+    # 3. If neither matched, skip this parameter
+    if base_kernel_shape is None:
+      if len(skipped_modules) < 10:
+        skipped_modules.append(f"{module_path}.{param_name}: kernel shape {kernel_shape} does not match expected suffix {expected_suffix}")
+      return False
 
-      in_axis = next(i for i in range(len(kernel_shape)) if i != layer_axis)
-      out_axis = next(i for i in range(len(kernel_shape) - 1, -1, -1) if i != layer_axis)
+    prefix_shape = base_kernel_shape[:-len(expected_suffix)] if len(expected_suffix) > 0 else base_kernel_shape
 
-      a_shape = _with_layer_axis((in_dim, rule.rank), num_decoder_layers)
-      b_shape = _with_layer_axis((rule.rank, out_dim), num_decoder_layers)
-      a_sharding_transpose = _with_layer_axis((in_axis, None), layer_axis)
-      b_sharding_transpose = _with_layer_axis((None, out_axis), layer_axis)
+    # 4. Compute axes mapped sequentially for the base (unscanned) shape
+    prefix_axes_base = tuple(range(len(prefix_shape)))
+    input_axes_base = tuple(range(len(prefix_shape), len(prefix_shape) + len(in_features_shape)))
+    output_axes_base = tuple(range(len(prefix_shape) + len(in_features_shape), len(base_kernel_shape)))
+
+    # 5. Shift axes to account for the layer_axis insertion
+    if layer_axis is not None:
+      def shift_axes(axes):
+        return tuple(axis if axis < layer_axis else axis + 1 for axis in axes)
+
+      a_shape = _with_layer_axis(prefix_shape + in_features_shape + (rule.rank,), num_decoder_layers)
+      b_shape = _with_layer_axis(prefix_shape + (rule.rank,) + out_features_shape, num_decoder_layers)
+      a_sharding_transpose = _with_layer_axis(shift_axes(prefix_axes_base + input_axes_base) + (None,), layer_axis)
+      b_sharding_transpose = _with_layer_axis(shift_axes(prefix_axes_base) + (None,) + shift_axes(output_axes_base), layer_axis)
     else:
-      prefix_shape = tuple(kernel_shape[:-2])
-      in_dim = int(kernel_shape[-2])
-      out_dim = int(kernel_shape[-1])
-      if in_dim <= 0 or out_dim <= 0:
-        if len(skipped_modules) < 10:
-          skipped_modules.append(f"{module_path}: non-positive dims in={in_dim} out={out_dim}")
-        continue
-
-      full_prefix_shape = prefix_shape
-      a_shape = full_prefix_shape + (in_dim, rule.rank)
-      b_shape = full_prefix_shape + (rule.rank, out_dim)
-
-      prefix_rank = len(full_prefix_shape)
-      a_sharding_transpose = tuple(range(prefix_rank)) + (prefix_rank, None)
-      b_sharding_transpose = tuple(range(prefix_rank)) + (None, prefix_rank + 1)
+      a_shape = prefix_shape + in_features_shape + (rule.rank,)
+      b_shape = prefix_shape + (rule.rank,) + out_features_shape
+      a_sharding_transpose = prefix_axes_base + input_axes_base + (None,)
+      b_sharding_transpose = prefix_axes_base + (None,) + output_axes_base
 
     def _init_for_module(
-        self,  # pylint: disable=unused-argument
+        self,
         a_shape=a_shape,
         b_shape=b_shape,
         a_sharding_transpose=a_sharding_transpose,
         b_sharding_transpose=b_sharding_transpose,
     ):
       qwix_lora._get_or_create_lora_params(  # pylint: disable=protected-access
-          name="kernel",
+          name=param_name,
           rule=rule,
           a_shape=a_shape,
           b_shape=b_shape,
@@ -429,7 +427,36 @@ def _precreate_lora_params(lora_model, lora_provider, mt_config, qwix_flax_util,
     types.MethodType(_init_for_module, module)()
     precreated_modules += 1
     if len(precreated_shapes) < 10:
-      precreated_shapes.append((module_path, a_shape, b_shape))
+      precreated_shapes.append((f"{module_path}.{param_name}", a_shape, b_shape))
+    return True
+
+
+  for path, module in nnx.iter_modules(lora_model):
+    module_path = "/".join(str(p) for p in path)
+    if not compiled_module_path.search(module_path):
+      continue
+
+    matched_modules += 1
+
+    # DenseGeneral-style layers (Standard, Vision, Audio)
+    if hasattr(module, "in_features_shape") and hasattr(module, "out_features_shape"):
+      in_features_shape = tuple(int(dim) for dim in getattr(module, "in_features_shape", ()))
+      out_features_shape = tuple(int(dim) for dim in getattr(module, "out_features_shape", ()))
+      if hasattr(module, "kernel"):
+        _process_param(module, module_path, "kernel", module.kernel, in_features_shape, out_features_shape)
+    
+    # MoE-style layers (RoutedMoE, RoutedAndSharedMoE)
+    elif type(module).__name__ in ["RoutedMoE", "RoutedAndSharedMoE"]:
+      emb_dim = getattr(getattr(module, "config", None), "emb_dim", None)
+      if emb_dim is not None:
+        intermediate_dim = getattr(module, "intermediate_dim", getattr(getattr(module, "config", None), "moe_mlp_dim", None))
+        if intermediate_dim is not None:
+          if hasattr(module, "wi_0"):
+            _process_param(module, module_path, "wi_0", module.wi_0, (emb_dim,), (intermediate_dim,))
+          if hasattr(module, "wi_1"):
+            _process_param(module, module_path, "wi_1", module.wi_1, (emb_dim,), (intermediate_dim,))
+          if hasattr(module, "wo"):
+            _process_param(module, module_path, "wo", module.wo, (intermediate_dim,), (emb_dim,))
 
   max_logging.log(
       f"LoRA precreate: matched_modules={matched_modules} "
@@ -549,44 +576,64 @@ def maybe_restore_lora_from_path(model, mt_config, mesh=None):
       )
   )
 
-  lora_state = nnx.state(model, nnx.LoRAParam)
   metadata = ckptr.metadata(lora_restore_path)
 
-  # Restore is target-driven from the currently materialized `lora_state`.
-  # Checkpoint adapter paths that do not match these LoRA params are not
-  # remapped automatically by Orbax during restore.
-
-  # LoRA restore path is NNX-only.
   if "params" in metadata.item_metadata.tree.keys() and "params" in metadata.item_metadata.tree.get("params", {}).keys():
     raise ValueError("lora_restore_path must point to an NNX LoRA checkpoint (not Linen format).")
 
-  target_for_restore = jax.tree.map(
-      lambda v: {"value": v.value},
-      lora_state,
-      is_leaf=lambda n: isinstance(n, nnx.Variable),
-  )
-  item_to_restore = target_for_restore
-  restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+  lora_state = nnx.state(model, nnx.LoRAParam)
 
-  restored = ckptr.restore(
-      lora_restore_path,
-      item=item_to_restore,
-      transforms={},
-      restore_args=restore_args,
-  )
+  # Restore without target to avoid shape mismatch issues during restoration.
+  # We will handle shape matching and potential reshaping manually.
+  restored = ckptr.restore(lora_restore_path)
 
-  restored_lora = jax.tree.map(
-      lambda v: v["value"],
-      restored,
-      is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
-  )
+  if restored:
+    flat_restored, _ = jax.tree_util.tree_flatten_with_path(restored)
+    for path, source in flat_restored:
+      try:
+        var_key_path = path
+        last_k = path[-1]
+        last_key = last_k.key if isinstance(last_k, jax.tree_util.DictKey) else (last_k.idx if hasattr(last_k, "idx") else last_k)
+        if last_key == 'value':
+          var_key_path = path[:-1]
+          val = source
+        else:
+          val = source["value"] if isinstance(source, dict) and "value" in source else source
+        
+        target = lora_state
+        for k in var_key_path:
+          k_val = k.key if isinstance(k, jax.tree_util.DictKey) else (k.idx if hasattr(k, "idx") else k)
+          target = target[k_val]
+        
+        if isinstance(target, nnx.Variable):
+          if hasattr(val, "shape") and val.shape != target.value.shape:
+            val = jnp.reshape(val, target.value.shape)
+          target.value = val
+      except Exception as e:
+        max_logging.log(f"Failed to restore path {path}: {e}")
 
-  if restored_lora:
-    nnx.update(model, restored_lora)
+    nnx.update(model, lora_state)
     max_logging.log("LoRA restore complete.")
 
   return model
 
+def _maybe_resume_trainer_from_lora_restore_path(trainer, mt_config, tunix_config):
+  """Updates trainer steps if restoring from a dedicated LoRA checkpoint."""
+  lora_restore_path = getattr(mt_config, "lora_restore_path", "")
+  if lora_restore_path and getattr(trainer, "_train_steps", 0) == 0:
+    parts = lora_restore_path.strip('/').split('/')
+    if len(parts) >= 2 and parts[-1] == 'model_params':
+      try:
+        start_step = int(parts[-2])
+        trainer._train_steps = start_step
+        grad_accum = getattr(tunix_config, "gradient_accumulation_steps", None) or 1
+        trainer._iter_steps = start_step * grad_accum
+        if hasattr(trainer, "_prof") and trainer._prof:
+          trainer._prof.initial_step = trainer._iter_steps
+        max_logging.log(f"Resuming trainer manually from step {start_step} based on lora_restore_path.")
+      except ValueError:
+        pass
+  return trainer
 
 def setup_trainer_state(mt_config, goodput_recorder=None):
   """Set up prerequisites for training loop."""
@@ -611,6 +658,8 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
     trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
+    trainer = _maybe_resume_trainer_from_lora_restore_path(trainer, mt_config, tunix_config)
+
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
     trainer = use_maxtext_loss_function(trainer, mt_config)
