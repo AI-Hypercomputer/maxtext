@@ -79,7 +79,7 @@ You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/bl
 
 ### Run MaxText on NVIDIA GPUs
 
-1. Use `bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu` to build a container with the required dependencies.
+1. Use `bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu` to build a container with the required dependencies.
 2. After installation is complete, run training with the following command on synthetic data:
 
 ```sh

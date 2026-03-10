@@ -45,7 +45,7 @@ WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
 COPY tools/setup tools/setup/
-COPY dependencies/requirements/ dependencies/requirements/
+COPY src/dependencies/requirements/ src/dependencies/requirements/
 COPY src/install_maxtext_extra_deps/ src/install_maxtext_extra_deps/
 COPY src/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 

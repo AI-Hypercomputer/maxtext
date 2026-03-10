@@ -142,13 +142,13 @@ Run the following script to create a Docker image with stable releases of
 MaxText, and its post-training dependencies. The build process takes approximately 10-15 minutes.
 
 ```bash
-bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
+bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
 ```
 
 For experimental features (such as improved pathwaysutils resharding API), use:
 
 ```bash
-bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training-experimental
+bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training-experimental
 ```
 
 ### Option 2: From Github
@@ -159,7 +159,7 @@ For using a version newer than the latest PyPI release, you could also build the
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
 
-bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
+bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
 ```
 
 ### Upload the Docker Image
@@ -170,7 +170,7 @@ bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-trainin
 > project administrator if you don't have this permission.
 
 ```bash
-bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
+bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
 ```
 
 ## Submit your RL workload via Pathways

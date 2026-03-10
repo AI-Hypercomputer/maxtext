@@ -32,7 +32,7 @@ else
   this_file="${0}"
 fi
 
-MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(CDPATH='' cd -- "$(dirname -- "${this_file}")"'/../..' && pwd)}"
+MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(CDPATH='' cd -- "$(dirname -- "${this_file}")"'/../../..' && pwd)}"
 
 set -e
 
@@ -111,7 +111,7 @@ if ! docker image inspect "${LOCAL_IMAGE_NAME}" &> /dev/null; then
 fi
 
 docker build --no-cache --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
-             -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_runner.Dockerfile' \
+             -f "$MAXTEXT_REPO_ROOT"'/src/dependencies/dockerfiles/maxtext_runner.Dockerfile' \
              -t ${LOCAL_IMAGE_NAME_RUNNER} .
 
 docker tag ${LOCAL_IMAGE_NAME_RUNNER} gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest

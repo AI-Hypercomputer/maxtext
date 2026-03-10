@@ -130,13 +130,13 @@ ______________________________________________________________________
    - **For TPUs:**
 
      ```
-     bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
+     bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
      ```
 
    - **For GPUs:**
 
      ```
-     bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=stable
+     bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=stable
      ```
 
 ______________________________________________________________________
