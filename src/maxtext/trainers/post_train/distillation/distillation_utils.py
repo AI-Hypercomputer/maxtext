@@ -30,8 +30,7 @@ from orbax import checkpoint
 from maxtext.utils import max_logging
 # Reuse MaxText's native checkpointing logic
 from maxtext.common.checkpointing import GrainCheckpointHandler, GrainCheckpointSave, GrainCheckpointRestore
-from tunix.distillation import distillation_trainer
-from tunix.distillation.strategies import logit
+from tunix.sft import peft_trainer
 from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 
 
@@ -51,7 +50,7 @@ class DistillationForwardOutput:
 
 
 @flax.struct.dataclass(frozen=True)
-class MaxTextTrainingInput(distillation_trainer.TrainingInput):
+class MaxTextTrainingInput(peft_trainer.TrainingInput):
   """Extended TrainingInput dataclass to carry MaxText-specific fields."""
 
   #: Position indices for the tokens (for RoPE).
@@ -119,7 +118,6 @@ class MaxTextToTunixIterator:
     return MaxTextTrainingInput(
         input_tokens=batch["inputs"],
         input_mask=input_mask,
-        teacher_output=None,
         positions=batch["inputs_position"],
         decoder_segment_ids=seg_ids,
         targets=batch["targets"],
@@ -131,8 +129,8 @@ class MaxTextToTunixIterator:
 # -----------------------------------------------------------------------------
 # Distillation Strategy
 # -----------------------------------------------------------------------------
-class CombinedDistillationStrategy(logit.LogitStrategy):
-  """Logit Strategy that returns detailed metrics for TensorBoard."""
+class CombinedDistillationStrategy:
+  """Strategy that returns detailed metrics for TensorBoard."""
 
   def __init__(
       self,
@@ -150,11 +148,11 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
     """Initializes the Combined strategy using tunix logit.LogitStrategy.
 
     Args:
-        student_forward_fn: Inherited from `logit.LogitStrategy`. Function to compute student model outputs.
-        teacher_forward_fn: Inherited from `logit.LogitStrategy`. Function to compute teacher model outputs.
-        labels_fn: Inherited from `logit.LogitStrategy`. Function to compute labels from model inputs.
-        temperature: Inherited from `logit.LogitStrategy`. Temperature for softening probabilities (> 0).
-        alpha: Inherited from `logit.LogitStrategy`. Weight to balance distillation loss and task loss (0.0 to 1.0).
+        student_forward_fn: Function to compute student model outputs.
+        teacher_forward_fn: Function to compute teacher model outputs.
+        labels_fn: Function to compute labels from model inputs.
+        temperature: Temperature for softening probabilities (> 0).
+        alpha: Weight to balance distillation loss and task loss (0.0 to 1.0).
         beta_feature: Weight to balance feature loss (0.0 to 1.0). 0.0 disables feature loss.
         layer_indices: Layer indices to apply feature loss.
         feature_loss_fn: A function that takes two jax. Arrays (student_map,
@@ -162,13 +160,11 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
         cosine_distance_axis: The axis to use for cosine distance computation if
           feature_loss_fn is not provided. Defaults to -1.
     """
-    super().__init__(
-        student_forward_fn=student_forward_fn,
-        teacher_forward_fn=teacher_forward_fn,
-        labels_fn=labels_fn,
-        temperature=temperature,
-        alpha=alpha,
-    )
+    self.student_forward_fn = student_forward_fn
+    self.teacher_forward_fn = teacher_forward_fn
+    self.labels_fn = labels_fn
+    self.temperature = temperature
+    self.alpha = alpha
     self.beta_feature = beta_feature
     self.layer_indices = jnp.array(layer_indices) if layer_indices is not None else None
 
@@ -325,9 +321,9 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
 
     # Standard Tunix Logic for Model/Optimizer
     if save_only_lora_params:
-      params = nnx.state(model, nnx.LoRAParam)
+      params = nnx.state(model.student_model, nnx.LoRAParam)
     else:
-      params = nnx.state(model)
+      params = nnx.state(model.student_model)
 
     # Define standard SaveArgs once to reuse
     default_save_args = checkpoint.SaveArgs()
