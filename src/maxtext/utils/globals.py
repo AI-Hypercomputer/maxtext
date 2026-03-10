@@ -24,9 +24,7 @@ MAXTEXT_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAXTEXT_REPO_ROOT = os.environ.get(
     "MAXTEXT_REPO_ROOT",
     r
-    if os.path.isdir(
-        os.path.join(r := os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".git")
-    )
+    if os.path.isdir(os.path.join(r := os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".git"))
     else MAXTEXT_PKG_DIR,
 )
 
@@ -50,8 +48,6 @@ HF_IDS = {
     "gemma3-4b": "google/gemma-3-4b-it",  # hf multi-modal should also support the pure-text
     "gemma3-12b": "google/gemma-3-12b-it",
     "gemma3-27b": "google/gemma-3-27b-it",
-    "qwen2.5-7b": "Qwen/Qwen2.5-7B-Instruct",
-    "qwen2.5-14b": "Qwen/Qwen2.5-14B-Instruct",
     "qwen3-0.6b": "Qwen/Qwen3-0.6B",
     "qwen3-4b": "Qwen/Qwen3-4B",
     "qwen3-4b-thinking-2507": "Qwen/Qwen3-4B-Thinking-2507",
@@ -76,8 +72,6 @@ HF_IDS = {
     "olmo3-7b": "allenai/Olmo-3-7B-Instruct",
     "olmo3-7b-pt": "allenai/Olmo-3-1025-7B",
     "olmo3-32b": "allenai/Olmo-3-32B-Think",
-    # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path
-    "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),
 }
 
 __all__ = [

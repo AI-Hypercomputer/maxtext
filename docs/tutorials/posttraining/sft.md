@@ -40,7 +40,7 @@ Set the following environment variables before running SFT.
 
 ```sh
 # -- Model configuration --
-export MODEL=<MaxText Model> # e.g., 'llama3.1-8b-Instruct'
+export PRE_TRAINED_MODEL=<model name> # e.g., 'llama3.1-8b-Instruct'
 
 # -- MaxText configuration --
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
@@ -82,8 +82,8 @@ Now you are ready to run SFT using the following command:
 python3 -m maxtext.trainers.post_train.sft.train_sft \
     run_name=${RUN_NAME?} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-    model_name=${MODEL?} \
-    load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+    model_name=${PRE_TRAINED_MODEL?} \
+    load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH?} \
     per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
     steps=${STEPS?} \
     hf_path=${DATASET_NAME?} \
