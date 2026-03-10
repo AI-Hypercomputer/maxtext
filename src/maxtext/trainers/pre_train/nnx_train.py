@@ -21,9 +21,10 @@ in contrast to train.py which wraps NNX models inside Linen's TrainState.
   Architecture
 
   ┌─────────────────────────────────┬──────────────────────────────────────────────────────────────────────────┐
-  │                Layer            │                               What it does                               │
+  │function                         │                               What it does                               │
   ├─────────────────────────────────┼──────────────────────────────────────────────────────────────────────────┤
-  │ loss_fn / eval_loss_fn          │ Forward-pass + cross-entropy; called directly on an nnx.Module           │
+  │ loss_fn                         │   Forward-pass + cross-entropy; for both train and eval;                 │
+  │                                 │   called directly on an nnx.Module                                       │
   ├─────────────────────────────────┼──────────────────────────────────────────────────────────────────────────┤
   │ train_step                      │ Functional step — merges (graphdef, opt_state) → runs nnx.value_and_grad │
   │                                 │  → updates optimizer → returns new nnx.State                             │
@@ -79,7 +80,7 @@ from flax.linen import partitioning as nn_partitioning
 from jax.sharding import Mesh
 
 from maxtext.common import checkpointing, profiler
-from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
+from maxtext.common.common_types import ShardMode
 from maxtext.common.data_loader import create_dataloader
 from maxtext.common.gcloud_stub import cloud_diagnostics as _cloud_diag
 from maxtext.common.gcloud_stub import is_decoupled, vertex_tensorboard_modules
@@ -95,6 +96,7 @@ from maxtext.common.goodput import (
 from maxtext.common.metric_logger import MetricLogger
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
+from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from maxtext.optimizers import optimizers
 from maxtext.utils import exceptions, max_logging, max_utils, maxtext_utils, model_creation_utils, sharding
 from maxtext.utils.globals import EPS
@@ -106,11 +108,11 @@ VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
 
 # ---------------------------------------------------------------------------
-# Loss computation
+# Loss computation for both train and eval
 # ---------------------------------------------------------------------------
 
 
-def loss_fn(model: nnx.Module, config, data: dict[str, jax.Array], dropout_rng: jax.Array):
+def loss_fn(model: nnx.Module, config, data: dict[str, jax.Array], dropout_rng: jax.Array, is_train=True):
   """Compute cross-entropy loss for one batch using an NNX model.
 
   Args:
@@ -120,6 +122,7 @@ def loss_fn(model: nnx.Module, config, data: dict[str, jax.Array], dropout_rng: 
     data: Batch dict with keys "inputs", "inputs_position", "inputs_segmentation",
       "targets", "targets_segmentation".
     dropout_rng: PRNG key used to seed dropout layers.
+    is_train: True for train_step and False for eval_step.
 
   Returns:
     (loss, aux) where loss is a scalar and aux is a dict of auxiliary metrics.
@@ -127,51 +130,109 @@ def loss_fn(model: nnx.Module, config, data: dict[str, jax.Array], dropout_rng: 
   rng1, aqt_rng = jax.random.split(dropout_rng)
 
   # Trim to micro-batch size (handles per_device_batch_size < 1 cases)
-  batch = {k: v[: config.micro_batch_size_to_train_on, :] for k, v in data.items()}
+  # decimate proportion of data when per_device_batch_size<1
+  if is_train:
+    batch = {k: v[: config.micro_batch_size_to_train_on, :] for k, v in data.items()}
+  else:
+    batch = {k: v[: config.micro_batch_size_to_eval_on, :] for k, v in data.items()}
 
+  # Flax NNX model
   logits = model(
       decoder_input_tokens=batch["inputs"],
       decoder_positions=batch["inputs_position"],
       decoder_segment_ids=batch["inputs_segmentation"],
-      enable_dropout=config.enable_dropout,
+      encoder_images=batch["images"] if config.use_multimodal else None,
+      encoder_image_masks=batch["image_masks"] if config.use_multimodal and "image_masks" in batch else None,
+      enable_dropout=config.enable_dropout if is_train else False,
+      decoder_target_tokens=batch["targets"],
+      decoder_target_mask=batch["targets_segmentation"],
   )
-
+  intermediate_outputs = {}
   one_hot_targets = jax.nn.one_hot(batch["targets"], config.vocab_size)
   xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
-  # Zero out padding positions
-  target_mask = batch["targets_segmentation"] != 0
-  xent = xent * target_mask
-  z_loss = z_loss * target_mask
+  xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+  z_loss = nn.with_logical_constraint(z_loss, ("activation_embed_and_logits_batch", "activation_length"))
+
+  # Mask out paddings at the end of each example.
+  xent = xent * (batch["targets_segmentation"] != 0)
+  z_loss = z_loss * (batch["targets_segmentation"] != 0)
 
   total_loss = jnp.sum(xent)
-  total_weights = jnp.sum(target_mask)
-  total_z_loss = jnp.sum(z_loss) / (total_weights + EPS)
+  total_z_loss = jnp.sum(z_loss)
 
-  loss = total_loss / (total_weights + EPS)
+  total_weights = jnp.sum(batch["targets_segmentation"] != 0)
+  # If gradient accumulation is enabled, we don't need to divide total_loss
+  # by total_weights and then multiply the computed gradient by total_weights,
+  # since it's equivalent to computing the gradient from total_loss.
+  # This simplification reduces the number of operations and makes it easier
+  # for XLA to move all-reduce out of the gradient accumulation loop when use
+  # Zero1+GA to reduce communication overhead.
+  # EPS was used to avoid division by zero, but it's not needed when gradient
+  # accumulation is enabled since there's no division.
+  if config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation:
+    loss = total_loss
+  else:
+    # When using Tunix gradient accumulation, we revert to standard normalization.
+    # Unlike the manual accumulation path above, Tunix (via optax.MultiSteps) expects
+    # a normalized loss for each step. It handles the accumulation state
+    # updates and scaling internally.
+    loss = total_loss / (total_weights + EPS)
+
+  # We keep z-loss normalized by total_weights.
+  total_z_loss = total_z_loss / (total_weights + EPS)
+
+  # Calculate and Add MTP Loss
+  mtp_loss = 0.0
+  if config.mtp_num_layers > 0 and is_train:
+    mtp_loss = calculate_mtp_loss(intermediate_outputs, config)
+    loss += mtp_loss
+
+  # get MoE load balance loss
+  moe_lb_loss = 0.0
+  if config.num_experts > 1:
+    # Note: the key is affected by the model implementation
+    possible_keys = [
+        ("intermediates", "decoder", "layers", "moe_lb_loss"),
+        ("intermediates", "decoder", "moe_layers", "moe_lb_loss"),
+    ]
+
+    total_moe_lb_loss = 0.0
+    found_loss = False
+    for nested_key in possible_keys:
+      total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+      if total_moe_lb_loss != 0.0:
+        found_loss = True
+        break
+
+    if not found_loss:
+      max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
+
+    moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
+    loss += moe_lb_loss
+
+  # get MoE routed bias term updates
+  moe_bias_updates = None
+  if config.routed_bias and config.routed_bias_update_rate > 0.0:
+    nested_key = ("intermediates", "decoder", "moe_layers", "moe_bias_updates")
+    moe_bias_updates = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, None)
+
+  # Add the model's primary output to the intermediates dict so it can be used
+  # by the acceptance rate calculation in eval_step.
+  intermediate_outputs["logits"] = logits
 
   aux = {
+      "intermediate_outputs": intermediate_outputs,
       "total_loss": total_loss,
       "z_loss": total_z_loss,
       "total_weights": total_weights,
+      "moe_lb_loss": moe_lb_loss,
+      "moe_bias_updates": moe_bias_updates,
+      "mtp_loss": mtp_loss,
   }
   return loss, aux
 
-
-def eval_loss_fn(model: nnx.Module, config, data: dict[str, jax.Array], dropout_rng: jax.Array):
-  """Evaluation variant of loss_fn (no dropout, full batch size)."""
-  batch = {k: v[: config.micro_batch_size_to_eval_on, :] for k, v in data.items()}
-
-  logits = model(
-      decoder_input_tokens=batch["inputs"],
-      decoder_positions=batch["inputs_position"],
-      decoder_segment_ids=batch["inputs_segmentation"],
-      enable_dropout=False,
-  )
-
-  one_hot_targets = jax.nn.one_hot(batch["targets"], config.vocab_size)
-  xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
-
+  # Zero out padding positions
   target_mask = batch["targets_segmentation"] != 0
   xent = xent * target_mask
   z_loss = z_loss * target_mask
@@ -226,7 +287,7 @@ def train_step(
   # nnx.value_and_grad differentiates only through nnx.Param variables,
   # keeping non-differentiable state (RNGs, cache, etc.) frozen.
   grad_fn = nnx.value_and_grad(loss_fn, argnums=0, has_aux=True)
-  (loss, aux), raw_grads = grad_fn(model, config, data, dropout_rng)
+  (loss, aux), raw_grads = grad_fn(model, config, data, dropout_rng, is_train=True)
 
   # Cast gradients to configured dtype before clipping / accumulation
   raw_grads = jax.tree.map(
@@ -279,16 +340,31 @@ def eval_step(
     metrics: Dict of scalar evaluation metrics.
   """
   model: nnx.Module = nnx.merge(model_graphdef, model_state)
-  loss, aux = eval_loss_fn(model, config, data, dropout_rng)
+  loss, aux = loss_fn(model, config, data, dropout_rng, is_train=False)
 
+  mtp_acceptance_rate = 0.0
+  if config.mtp_eval_target_module > 0:
+    mtp_acceptance_rate = calculate_mtp_acceptance_rate(aux["intermediate_outputs"], config)
+
+  total_loss = aux["total_loss"]
+  z_loss = aux["z_loss"]
+  total_weights = aux["total_weights"]
+  moe_lb_loss = aux["moe_lb_loss"]
+  mtp_loss = aux["mtp_loss"]
   metrics = {
       "scalar": {
           "evaluation/loss": loss,
-          "evaluation/z_loss": aux["z_loss"],
-          "evaluation/total_loss": aux["total_loss"],
-          "evaluation/total_weights": aux["total_weights"],
-      }
+          "evaluation/z_loss": z_loss,
+          "evaluation/total_loss": total_loss,
+          "evaluation/total_weights": total_weights,
+          "evaluation/moe_lb_loss": moe_lb_loss,
+          "evaluation/mtp_loss": mtp_loss,
+          "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
+      },
   }
+  # if config.use_dpo:
+  #  metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux["reward_accuracy"]
+
   return metrics
 
 
