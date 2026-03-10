@@ -60,6 +60,10 @@ class MaxTextTrainingInput(distillation_trainer.TrainingInput):
   decoder_segment_ids: jax.Array = None
   #: Ground truth target tokens (used for loss calculation and logging).
   targets: jax.Array = None
+  #: Position indices for the target tokens.
+  targets_position: jax.Array = None
+  #: Segment IDs for packed target tokens.
+  targets_segmentation: jax.Array = None
 
 
 # -----------------------------------------------------------------------------
@@ -106,6 +110,11 @@ class MaxTextToTunixIterator:
       input_mask = jnp.ones_like(batch["inputs"], dtype=bool)
       seg_ids = None
 
+    # If in SFT-mode, 'targets' contains prompts which should be masked out when computing the loss.
+    # If using with packing the targets_segmentation mask is supposed to be a combined target+packing mask
+    targets_segmentation = batch.get("targets_segmentation", jnp.ones_like(batch["targets"]))
+    targets_position = batch.get("targets_position", batch.get("inputs_position"))
+
     # pylint: disable=unexpected-keyword-arg
     return MaxTextTrainingInput(
         input_tokens=batch["inputs"],
@@ -114,6 +123,8 @@ class MaxTextToTunixIterator:
         positions=batch["inputs_position"],
         decoder_segment_ids=seg_ids,
         targets=batch["targets"],
+        targets_position=targets_position,
+        targets_segmentation=targets_segmentation,
     )
 
 
@@ -134,6 +145,7 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
       layer_indices: Optional[List[int]] = None,
       feature_loss_fn: Callable[[jax.Array, jax.Array], jax.Array] | None = None,
       cosine_distance_axis: int | tuple[int, ...] = -1,
+      sft_mode: bool = False,
   ):
     """Initializes the Combined strategy using tunix logit.LogitStrategy.
 
@@ -165,6 +177,7 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
       self.feature_loss_fn = lambda student_features, teacher_features: jnp.mean(
           optax.cosine_distance(student_features, teacher_features, axis=cosine_distance_axis)
       )
+    self.sft_mode = sft_mode
 
   def compute_loss(
       self,
@@ -192,19 +205,23 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
     log_student_probs_temp = jax.nn.log_softmax(s_logits / self.temperature, axis=-1)
     teacher_probs_temp = jax.nn.softmax(t_logits / self.temperature, axis=-1)
 
+    # labels are supposed to have all sft masks applied by this moment
+    labels_mask = jnp.any(labels != 0, axis=-1, keepdims=True) if self.sft_mode else None
+    mean_mask = jnp.squeeze(labels_mask, axis=-1) if labels_mask is not None else None
+
     # KL(Teacher || Student)
-    kl_div = optax.kl_divergence(log_student_probs_temp, teacher_probs_temp)
+    kl_div = optax.kl_divergence(log_student_probs_temp, teacher_probs_temp, where=labels_mask)
 
     # Scale gradients by T^2 (Hinton et al.)
-    soft_loss = jnp.mean(kl_div) * (self.temperature**2)
+    soft_loss = jnp.mean(kl_div, where=mean_mask) * (self.temperature**2)
 
     # 1. Student Hard Loss (Existing)
-    ce_loss_student = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
-    hard_loss = jnp.mean(ce_loss_student)
+    ce_loss_student = optax.softmax_cross_entropy(logits=s_logits, labels=labels, where=labels_mask)
+    hard_loss = jnp.mean(ce_loss_student, where=mean_mask)
 
     # 2. Teacher Hard Loss (For Verification)
-    ce_loss_teacher = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
-    teacher_hard_loss = jnp.mean(ce_loss_teacher)
+    ce_loss_teacher = optax.softmax_cross_entropy(logits=t_logits, labels=labels, where=labels_mask)
+    teacher_hard_loss = jnp.mean(ce_loss_teacher, where=mean_mask)
 
     # 3. Combine losses
     base_logit_loss = (self.alpha * soft_loss) + ((1.0 - self.alpha) * hard_loss)

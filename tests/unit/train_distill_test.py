@@ -76,6 +76,27 @@ class TrainDistillTest(unittest.TestCase):
     expected_mask = dummy_batch["inputs_segmentation"] != 0
     np.testing.assert_array_equal(tunix_input.input_mask, expected_mask)
 
+  def test_maxtext_to_tunix_iterator_sft(self):
+    """Verifies SFT-related fields are handled correctly."""
+    # 1. Create a dummy batch with SFT fields
+    dummy_batch_sft = {
+        "inputs": np.array([[10, 11]]),
+        "inputs_position": np.array([[0, 1]]),
+        "targets": np.array([[11, 12]]),
+        "targets_position": np.array([[100, 101]]),  # Custom position
+        "targets_segmentation": np.array([[0, 1]]),  # Custom segmentation (mask)
+    }
+    dummy_iter_sft = iter([dummy_batch_sft])
+
+    # 2. Initialize Adapter and get output
+    adapter_sft = distillation_utils.MaxTextToTunixIterator(dummy_iter_sft)
+    tunix_input_sft = next(adapter_sft)
+
+    # 3. Verify SFT fields are passed through
+    self.assertIsInstance(tunix_input_sft, distillation_utils.MaxTextTrainingInput)
+    np.testing.assert_array_equal(tunix_input_sft.targets_position, dummy_batch_sft["targets_position"])
+    np.testing.assert_array_equal(tunix_input_sft.targets_segmentation, dummy_batch_sft["targets_segmentation"])
+
   def test_maxtext_to_tunix_iterator_packed_fallback(self):
     """Verifies fallback behavior when segmentation is missing."""
     dummy_batch = {
@@ -161,6 +182,12 @@ class TrainDistillTest(unittest.TestCase):
       train_distill.get_distillation_optimizer(config, max_train_steps=100)
 
   def test_monitored_strategy(self):
+    self._test_monitored_strategy(False)
+
+  def test_monitored_strategy_sft(self):
+    self._test_monitored_strategy(True)
+
+  def _test_monitored_strategy(self, sft_mode: bool):
     """Verifies the strategy calculates metrics and returns the correct tuple."""
     strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=lambda m, **k: None,
@@ -170,6 +197,7 @@ class TrainDistillTest(unittest.TestCase):
         alpha=0.5,
         beta_feature=1.0,
         layer_indices=None,
+        sft_mode=sft_mode,
     )
 
     # Dummy inputs (batch=1, seq=2, vocab=4)
@@ -210,9 +238,17 @@ class TrainDistillTest(unittest.TestCase):
     self.assertLess(metrics["distill/out_proj_feature_loss"], 1e-5)
 
   def test_strategy_compute_eval_loss(self):
+    self._verify_strategy_compute_eval_loss(sft_mode=False)
+
+  def _verify_strategy_compute_eval_loss(self, sft_mode):
     """Covers MonitoredLogitStrategy.compute_eval_loss."""
     strategy = distillation_utils.CombinedDistillationStrategy(
-        student_forward_fn=mock.Mock(), teacher_forward_fn=mock.Mock(), labels_fn=mock.Mock(), temperature=1.0, alpha=0.5
+        student_forward_fn=mock.Mock(),
+        teacher_forward_fn=mock.Mock(),
+        labels_fn=mock.Mock(),
+        temperature=1.0,
+        alpha=0.5,
+        sft_mode=sft_mode,
     )
     # Case where feature loss is enabled
     logits = distillation_utils.DistillationForwardOutput(
@@ -233,6 +269,9 @@ class TrainDistillTest(unittest.TestCase):
     loss, aux = strategy.compute_eval_loss(logits, labels)
     self.assertTrue(isinstance(loss, jax.Array))
     self.assertEqual(aux, {})
+
+  def test_strategy_compute_eval_loss_sft(self):
+    self._verify_strategy_compute_eval_loss(sft_mode=True)
 
   def test_setup_pipeline_grain_enabled(self):
     """Covers _setup_and_restore_input_pipeline when Grain IS detected."""
