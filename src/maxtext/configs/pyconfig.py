@@ -59,6 +59,12 @@ def resolve_config_path(param: str) -> str:
     lowercase_param = param.replace("MaxText", "maxtext")
     if os.path.isfile(lowercase_param):
       return lowercase_param
+  # For pip-installed packages, strip the src prefix and resolve against
+  # the installed configs directory (MAXTEXT_CONFIGS_DIR).
+  if param.startswith("src/maxtext/configs/"):
+    candidate = os.path.join(MAXTEXT_CONFIGS_DIR, param[len("src/maxtext/configs/"):])
+    if os.path.isfile(candidate):
+      return candidate
   return os.path.join("src", param)
 
 

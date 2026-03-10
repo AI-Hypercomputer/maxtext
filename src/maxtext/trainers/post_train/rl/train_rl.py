@@ -23,22 +23,22 @@ GSM8K math reasoning benchmark. The script is also flexible enough to run Group 
 Usage Examples:
 
 # GRPO on Llama3.1-8B-Instruct
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=llama3.1-8b \
   tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
   load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN
+  run_name=${WORKLOAD?} \
+  base_output_directory=${OUTPUT_PATH?} \
+  hf_access_token=${HF_TOKEN?}
 
 # GSPO on Llama3.1-70B-Instruct
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=llama3.1-70b \
   tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
   load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN \
+  run_name=${WORKLOAD?} \
+  base_output_directory=${OUTPUT_PATH?} \
+  hf_access_token=${HF_TOKEN?} \
   loss_algo=gspo-token
 
 """

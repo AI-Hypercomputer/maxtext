@@ -59,7 +59,7 @@ You can train from scratch to generate a new checkpoint. One example command to 
 
 ```sh
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_PATH} \
+    base_output_directory=${BASE_OUTPUT_PATH?} \
     run_name=megablox_pre_training \
     model_name=gpt-oss-20b \
     tokenizer_type=huggingface \
@@ -85,15 +85,15 @@ One example command to run general finetuning with gpt-oss-20b on v5p-8.
 
 ```sh
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_PATH} \
+    base_output_directory=${BASE_OUTPUT_PATH?} \
     run_name=megablox_fine_tuning \
     model_name=gpt-oss-20b \
     tokenizer_type=huggingface \
     tokenizer_path=openai/gpt-oss-20b \
-    dataset_path=${DATASET_PATH} \
+    dataset_path=${DATASET_PATH?} \
     enable_checkpointing=true \
     async_checkpointing=false \
-    load_parameters_path=${SCANNED_CKPT_PATH} \
+    load_parameters_path=${SCANNED_CKPT_PATH?} \
     scan_layers=True \
     attention=flash \
     sparse_matmul=True \
@@ -111,7 +111,7 @@ One example command to run supervised finetuning with gpt-oss-20b on v5p-8. Supe
 
 ```sh
 python3 -m maxtext.trainers.post_train.sft.train_sft_deprecated src/maxtext/configs/post_train/sft.yml \
-    base_output_directory=${BASE_OUTPUT_PATH} \
+    base_output_directory=${BASE_OUTPUT_PATH?} \
     run_name=megablox_supervised_fine_tuning \
     model_name=gpt-oss-20b \
     tokenizer_type=huggingface \
@@ -119,7 +119,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft_deprecated src/maxtext/conf
     dataset_type=hf \
     enable_checkpointing=true \
     async_checkpointing=false \
-    load_parameters_path=${SCANNED_CKPT_PATH} \
+    load_parameters_path=${SCANNED_CKPT_PATH?} \
     scan_layers=True \
     attention=flash \
     sparse_matmul=True \
@@ -138,13 +138,13 @@ One example command to run decoding with gpt-oss-20b on v5p-8 with unscanned che
 
 ```sh
 python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_PATH} \
+    base_output_directory=${BASE_OUTPUT_PATH?} \
     run_name=decode \
     model_name=gpt-oss-20b \
     tokenizer_type=huggingface \
     tokenizer_path=openai/gpt-oss-20b \
-    hf_access_token=${HF_TOKEN} \
-    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    hf_access_token=${HF_TOKEN?} \
+    load_parameters_path=${UNSCANNED_CKPT_PATH?} \
     scan_layers=False \
     attention=dot_product \
     sparse_matmul=True \
@@ -183,10 +183,10 @@ Run command below to compare logits between HuggingFace and MaxText.
 ```sh
 python3 -m tests.utils.forward_pass_logit_checker \
     src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_PATH} \
+    base_output_directory=${BASE_OUTPUT_PATH?} \
     run_name=forward_logits_check \
     model_name=gpt-oss-20b \
-    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    load_parameters_path=${UNSCANNED_CKPT_PATH?} \
     scan_layers=false \
     attention=dot_product \
     sparse_matmul=True \

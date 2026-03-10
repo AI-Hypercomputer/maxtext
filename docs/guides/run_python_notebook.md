@@ -118,9 +118,9 @@ uv pip install ipykernel
 Before you can run the notebook, you must tell VS Code which Python environment to use.
 
 1. Look at the top-right corner of the notebook editor.
-1. Click `Select Kernel`.
-1. Choose Python Environments and select the virtual environment you created in Step 4.
-1. Open [available post-training notebooks in MaxText](#available-examples) inside VS Code and run the jupyter notebook cells.
+2. Click `Select Kernel`.
+3. Choose Python Environments and select the virtual environment you created in Step 4.
+4. Open [available post-training notebooks in MaxText](#available-examples) inside VS Code and run the jupyter notebook cells.
 
 ## Method 3: Local Jupyter Lab with TPU (Recommended)
 
@@ -202,7 +202,7 @@ jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
 ### Supervised Fine-Tuning (SFT)
 
 - **`sft_qwen3_demo.ipynb`** → Qwen3-0.6B SFT training and evaluation on [OpenAI's GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k). This notebook is friendly for beginners and runs successfully on Google Colab's free-tier v5e-1 TPU runtime.
-- **`sft_llama3_demo.ipynb`** → Llama3.1-8B SFT training on [Hugging Face ultrachat_200k dataset](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k). We recommend running this on a v5p-8 TPU VM using the port-forwarding method.
+- **`sft_llama3_demo_tpu.ipynb`** → Llama3.1-8B SFT training on [Hugging Face ultrachat_200k dataset](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k). We recommend running this on a v5p-8 TPU VM using the port-forwarding method.
 
 ### Reinforcement Learning (GRPO/GSPO) Training
 
@@ -230,8 +230,8 @@ jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
 If you encounter issues or have improvements for this guide, please:
 
 1. Open an issue on the MaxText repository
-1. Submit a pull request with your improvements
-1. Share your experience in the discussions
+2. Submit a pull request with your improvements
+3. Share your experience in the discussions
 
 ______________________________________________________________________
 

@@ -118,6 +118,19 @@ def get_match_format_regex(tmvp_config):
   return match_format
 
 
+def get_answer_fallback_regex(tmvp_config):
+  """Returns a compiled regex that finds the *last* answer tag in a completion.
+
+  Used as a fallback when the full <reasoning>...</reasoning><answer>...</answer>
+  format is incomplete (e.g. missing the closing reasoning tag).  The result
+  reward can still be computed independently from the format reward.
+  """
+  return re.compile(
+      rf"{re.escape(tmvp_config.solution_start_token)}(.+?){re.escape(tmvp_config.solution_end_token)}",
+      flags=re.MULTILINE | re.DOTALL,
+  )
+
+
 def match_format_exactly(prompts, completions, tmvp_config, **kargs):
   """
   Give the model a reward of tmvp_config.reward_exact_format_match points if the format matches exactly.

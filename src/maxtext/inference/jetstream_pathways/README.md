@@ -4,8 +4,8 @@ These instructions are to build the MaxText + JetStream + Pathways Server image,
 
 ```
 docker build -t jetstream-pathways .
-docker tag jetstream-pathways us-docker.pkg.dev/${PROJECT_ID}/jetstream/jetstream-pathways:latest
-docker push us-docker.pkg.dev/${PROJECT_ID}/jetstream/jetstream-pathways:latest
+docker tag jetstream-pathways us-docker.pkg.dev/${PROJECT_ID?}/jetstream/jetstream-pathways:latest
+docker push us-docker.pkg.dev/${PROJECT_ID?}/jetstream/jetstream-pathways:latest
 ```
 
 If you would like to change the version of MaxText or JetStream the image is built off of, change the `MAXTEXT_VERSION` / `JETSTREAM_VERSION` environment variable:
