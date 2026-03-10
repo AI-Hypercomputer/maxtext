@@ -57,8 +57,8 @@ jobs:
             exit 0
           fi
 
-          git fetch origin ${{ github.base_ref }}
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          git fetch origin ${GITHUB_BASE_REF}
+          CHANGED_FILES=$(git diff --name-only origin/${GITHUB_BASE_REF}...HEAD)
 
           echo "Changed files:"
           echo "$CHANGED_FILES"
@@ -273,20 +273,20 @@ jobs:
       - name: Check test results
         run: |
           # If doc-only, all tests should be skipped
-          if [ "${{ needs.doc_only_check.outputs.run_tests }}" == "false" ]; then
+          if [ "${NEEDS_DOC_ONLY_CHECK_OUTPUTS_RUN_TESTS}" == "false" ]; then
             echo "Documentation-only changes detected, tests were skipped"
             exit 0
           fi
 
           # Otherwise, check that build and all tests passed or were skipped
-          echo "Build result: ${{ needs.build_and_upload_maxtext_package.result }}"
-          echo "CPU tests: ${{ needs.maxtext_cpu_unit_tests.result }}"
-          echo "TPU tests: ${{ needs.maxtext_tpu_unit_tests.result }}"
-          echo "TPU integration: ${{ needs.maxtext_tpu_integration_tests.result }}"
-          echo "TPU pathways: ${{ needs.maxtext_tpu_pathways_unit_tests.result }}"
-          echo "TPU pathways integration: ${{ needs.maxtext_tpu_pathways_integration_tests.result }}"
-          echo "GPU tests: ${{ needs.maxtext_gpu_unit_tests.result }}"
-          echo "GPU integration: ${{ needs.maxtext_gpu_integration_tests.result }}"
+          echo "Build result: ${NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT}"
+          echo "CPU tests: ${NEEDS_MAXTEXT_CPU_UNIT_TESTS_RESULT}"
+          echo "TPU tests: ${NEEDS_MAXTEXT_TPU_UNIT_TESTS_RESULT}"
+          echo "TPU integration: ${NEEDS_MAXTEXT_TPU_INTEGRATION_TESTS_RESULT}"
+          echo "TPU pathways: ${NEEDS_MAXTEXT_TPU_PATHWAYS_UNIT_TESTS_RESULT}"
+          echo "TPU pathways integration: ${NEEDS_MAXTEXT_TPU_PATHWAYS_INTEGRATION_TESTS_RESULT}"
+          echo "GPU tests: ${NEEDS_MAXTEXT_GPU_UNIT_TESTS_RESULT}"
+          echo "GPU integration: ${NEEDS_MAXTEXT_GPU_INTEGRATION_TESTS_RESULT}"
 
           # Fail only if any job failed or was cancelled (skipped is OK)
           if [ "${{ contains(needs.*.result, 'failure') }}" == "true" ] || [ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]; then
@@ -295,6 +295,16 @@ jobs:
           fi
 
           echo "All required tests passed successfully"
+        env:
+          NEEDS_DOC_ONLY_CHECK_OUTPUTS_RUN_TESTS: ${{ needs.doc_only_check.outputs.run_tests }}
+          NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT: ${{ needs.build_and_upload_maxtext_package.result }}
+          NEEDS_MAXTEXT_CPU_UNIT_TESTS_RESULT: ${{ needs.maxtext_cpu_unit_tests.result }}
+          NEEDS_MAXTEXT_TPU_UNIT_TESTS_RESULT: ${{ needs.maxtext_tpu_unit_tests.result }}
+          NEEDS_MAXTEXT_TPU_INTEGRATION_TESTS_RESULT: ${{ needs.maxtext_tpu_integration_tests.result }}
+          NEEDS_MAXTEXT_TPU_PATHWAYS_UNIT_TESTS_RESULT: ${{ needs.maxtext_tpu_pathways_unit_tests.result }}
+          NEEDS_MAXTEXT_TPU_PATHWAYS_INTEGRATION_TESTS_RESULT: ${{ needs.maxtext_tpu_pathways_integration_tests.result }}
+          NEEDS_MAXTEXT_GPU_UNIT_TESTS_RESULT: ${{ needs.maxtext_gpu_unit_tests.result }}
+          NEEDS_MAXTEXT_GPU_INTEGRATION_TESTS_RESULT: ${{ needs.maxtext_gpu_integration_tests.result }}
 
   all_notebooks_passed:
     name: All Notebooks Passed
@@ -304,14 +314,14 @@ jobs:
     steps:
       - name: Check notebooks results
         run: |
-          if [ "${{ needs.doc_only_check.outputs.run_notebooks }}" == "false" ]; then
+          if [ "${NEEDS_DOC_ONLY_CHECK_OUTPUTS_RUN_NOTEBOOKS}" == "false" ]; then
             echo "Non-notebook changes detected, runs were skipped"
             exit 0
           fi
 
           # Otherwise, check that build and notebooks run passed or were skipped
-          echo "Build result: ${{ needs.build_and_upload_maxtext_package.result }}"
-          echo "Jupyter Notebooks result: ${{ needs.maxtext_jupyter_notebooks.result }}"
+          echo "Build result: ${NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT}"
+          echo "Jupyter Notebooks result: ${NEEDS_MAXTEXT_JUPYTER_NOTEBOOKS_RESULT}"
 
           # Fail only if any job failed or was cancelled (skipped is OK)
           if [ "${{ contains(needs.*.result, 'failure') }}" == "true" ] || [ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]; then
@@ -320,6 +330,10 @@ jobs:
           fi
 
           echo "All required notebooks passed successfully"
+        env:
+          NEEDS_DOC_ONLY_CHECK_OUTPUTS_RUN_NOTEBOOKS: ${{ needs.doc_only_check.outputs.run_notebooks }}
+          NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT: ${{ needs.build_and_upload_maxtext_package.result }}
+          NEEDS_MAXTEXT_JUPYTER_NOTEBOOKS_RESULT: ${{ needs.maxtext_jupyter_notebooks.result }}
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build

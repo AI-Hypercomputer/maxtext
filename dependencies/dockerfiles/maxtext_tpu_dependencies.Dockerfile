@@ -23,6 +23,9 @@ ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/bin/python3.12:${PATH}"
 ARG MODE
 ENV ENV_MODE=$MODE
 
+ARG WORKFLOW
+ENV ENV_WORKFLOW=$WORKFLOW
+
 ARG JAX_VERSION
 ENV ENV_JAX_VERSION=$JAX_VERSION
 
@@ -34,7 +37,7 @@ ENV ENV_DEVICE=$DEVICE
 
 ENV MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets
 ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/tests/assets
-ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
+ENV MAXTEXT_PKG_DIR=/deps/src/maxtext
 ENV MAXTEXT_REPO_ROOT=/deps
 
 # Set the working directory in the container
@@ -43,14 +46,15 @@ WORKDIR /deps
 # Copy setup files and dependency files separately for better caching
 COPY tools/setup tools/setup/
 COPY dependencies/requirements/ dependencies/requirements/
-COPY src/install_maxtext_extra_deps/extra_deps_from_github.txt src/install_maxtext_extra_deps/
+COPY src/install_maxtext_extra_deps/ src/install_maxtext_extra_deps/
+COPY src/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 
 # Copy the custom libtpu.so file if it exists inside maxtext repository
 COPY libtpu.so* /root/custom_libtpu/
 
 # Install dependencies - these steps are cached unless the copied files change
-RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_VERSION=$ENV_LIBTPU_VERSION DEVICE=${ENV_DEVICE}"
-RUN --mount=type=cache,target=/root/.cache/pip bash /deps/tools/setup/setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_VERSION=${ENV_LIBTPU_VERSION} DEVICE=${ENV_DEVICE}
+RUN echo "Running command: bash setup.sh MODE=$ENV_MODE WORKFLOW=$ENV_WORKFLOW JAX_VERSION=$ENV_JAX_VERSION LIBTPU_VERSION=$ENV_LIBTPU_VERSION DEVICE=${ENV_DEVICE}"
+RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv bash /deps/tools/setup/setup.sh MODE=${ENV_MODE} WORKFLOW=${ENV_WORKFLOW} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_VERSION=${ENV_LIBTPU_VERSION} DEVICE=${ENV_DEVICE}
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
@@ -65,4 +69,4 @@ RUN if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
     fi
 
 # Install (editable) MaxText
-RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .
+RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .

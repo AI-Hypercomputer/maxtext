@@ -32,8 +32,7 @@ from flax import nnx
 from tunix.sft import peft_trainer
 from tunix.sft.hooks import DataHooks, TrainingHooks
 
-from MaxText import sharding
-from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
 from maxtext.common.data_loader import DataLoader
 from maxtext.common.goodput import GoodputEvent, record_goodput
 from maxtext.common.metric_logger import MetricLogger, MetadataKey
@@ -41,6 +40,7 @@ from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils import sharding
 
 
 class SFTTrainingHooks(TrainingHooks):

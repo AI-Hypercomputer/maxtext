@@ -14,7 +14,6 @@
 
 """Test for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
-import os.path
 import unittest
 import pytest
 
@@ -25,12 +24,13 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 import numpy as np
 
-from MaxText import pyconfig
-from MaxText.common_types import HyperConnectionType
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import attention_mla, linears, mhc, moe
-from MaxText.layers.initializers import nd_dense_init
+from maxtext.configs import pyconfig
+from maxtext.common.common_types import HyperConnectionType
+from maxtext.layers import attention_mla, linears, mhc, moe
+from maxtext.layers.initializers import nd_dense_init
+from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 
 
 class TestExpandReduce(unittest.TestCase):
@@ -91,8 +91,10 @@ class TestMHC(unittest.TestCase):
 
   def setUp(self):
     self.dim = 16
+    extra_args = get_decoupled_parallelism_overrides()
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
+        **extra_args,
         run_name="test_mhc",
         enable_checkpointing=False,
         model_name="deepseek-custom",
@@ -104,6 +106,9 @@ class TestMHC(unittest.TestCase):
         num_experts=4,
         num_experts_per_tok=2,
         attention="dot_product",
+        routed_bias_update_rate=0.01,
+        load_balance_loss_weight=0.02,
+        engram_layers=[],
     )
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
@@ -117,6 +122,15 @@ class TestMHC(unittest.TestCase):
             self.config.mhc_expansion_rate,
             self.config.emb_dim,
         ),
+    )
+
+    self.pre_norm = RMSNorm(
+        num_features=self.dim,
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=self.config.normalization_layer_epsilon,
+        rngs=self.rngs,
     )
 
   # Skip GPU due to NotImplementedError: dynamic grid bounds not supported in the Triton backend
@@ -138,7 +152,11 @@ class TestMHC(unittest.TestCase):
       )
 
       b, s, k, d = self.x.shape
-      output = module(layer, x=self.x, mhc_type=HyperConnectionType.MLP_MOE)
+      output, metadata = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.MLP_MOE)
+      # metadata includes load_balance_loss & moe_bias_updates
+      self.assertEqual(len(metadata), 2)
+      for key, value in metadata.items():
+        self.assertIsNotNone(value, f"Key '{key}' has a value of None")
       self.assertEqual(output.shape, (b, s, k, d))
 
   def test_dense_layer_output_shape(self):
@@ -158,7 +176,8 @@ class TestMHC(unittest.TestCase):
       )
 
       b, s, k, d = self.x.shape
-      output = module(layer, x=self.x, mhc_type=HyperConnectionType.MLP_DENSE)
+      output, metadata = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.MLP_DENSE)
+      self.assertDictEqual(metadata, {})
       self.assertEqual(output.shape, (b, s, k, d))
 
   def test_attention_layer_output_shape(self):
@@ -196,7 +215,8 @@ class TestMHC(unittest.TestCase):
       )
 
       b, s, k, d = self.x.shape
-      output = module(layer, x=self.x, mhc_type=HyperConnectionType.ATTENTION)
+      output, metadata = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.ATTENTION)
+      self.assertDictEqual(metadata, {})
       self.assertEqual(output.shape, (b, s, k, d))
 
 

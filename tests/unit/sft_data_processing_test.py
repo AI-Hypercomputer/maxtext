@@ -25,11 +25,11 @@ from datasets import Dataset
 import transformers
 from parameterized import parameterized_class
 
-from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
-from MaxText.input_pipeline import _hf_data_processing
-from MaxText.input_pipeline import input_pipeline_interface
-from MaxText.input_pipeline._hf_data_processing import _get_pad_id
+from maxtext.configs import pyconfig
+from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
+from maxtext.input_pipeline import hf_data_processing
+from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline.hf_data_processing import _get_pad_id
 
 PROMPT_DATA = [
     [
@@ -208,16 +208,20 @@ QWEN_DATA = {
         "truncated_exp1_targets": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
             + "<|endoftext|>" * 9
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer two<|endoftext|>"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer two<|endoftext|>"
         ),
         "truncated_exp1_targets_predictable": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
             + "<|endoftext|>" * 9
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer two<|endoftext|>"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer two<|endoftext|>"
         ),
         "packed_exp2_inputs": (
             "<|im_start|>user\nquestion two<|im_end|>\n"
@@ -227,15 +231,22 @@ QWEN_DATA = {
         ),
         "packed_exp2_targets": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer two<|im_end|>\n"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer three<|im_end|>\n" + "!" * 14 + "<|endoftext|>"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer three<|im_end|>\n"
+            + "!" * 14
+            + "<|endoftext|>"
         ),
         "packed_exp2_targets_predictable": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer two<|im_end|>\n"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer three<|im_end|>\n" + "<|endoftext|>" * 15
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer three<|im_end|>\n"
+            + "<|endoftext|>" * 15
         ),
     },
     "prompt_completion": {
@@ -248,16 +259,20 @@ QWEN_DATA = {
         ),
         "truncated_exp1_targets": (
             "<|endoftext|>" * 8
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
             + "<|endoftext|>" * 9
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
             + "<|endoftext|>" * 7
         ),
         "truncated_exp1_targets_predictable": (
             "<|endoftext|>" * 8
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
             + "<|endoftext|>" * 9
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
             + "<|endoftext|>" * 7
         ),
         "packed_exp2_inputs": (
@@ -268,15 +283,22 @@ QWEN_DATA = {
         ),
         "packed_exp2_targets": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer two<|im_end|>\n"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer three<|im_end|>\n" + "!" * 14 + "<|endoftext|>"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer three<|im_end|>\n"
+            + "!" * 14
+            + "<|endoftext|>"
         ),
         "packed_exp2_targets_predictable": (
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer two<|im_end|>\n"
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer two<|im_end|>\n"
             "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer three<|im_end|>\n" + "<|endoftext|>" * 15
+            + "<|endoftext|>" * 3
+            + "<think>\n\n</think>\n\nanswer three<|im_end|>\n"
+            + "<|endoftext|>" * 15
         ),
     },
 }
@@ -314,7 +336,7 @@ class SFTDataProcessingTest(unittest.TestCase):
       tokenizer_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
 
     self.config = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "sft_trainer"), os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+        [os.path.join(MAXTEXT_PKG_DIR, "sft_trainer"), os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml")],
         per_device_batch_size=2,
         run_name="test",
         mesh_axes=["data"],
@@ -347,7 +369,7 @@ class SFTDataProcessingTest(unittest.TestCase):
 
   def get_data_iterator(self, train_ds, data_columns):
     """Get data iterator."""
-    return _hf_data_processing.preprocessing_pipeline(
+    return hf_data_processing.preprocessing_pipeline(
         dataloading_host_index=self.process_indices.index(jax.process_index()),
         dataloading_host_count=len(self.process_indices),
         global_mesh=self.mesh,

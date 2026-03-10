@@ -33,13 +33,14 @@ fixes:
   - "/github/workspace/::"
 ignore:
   - "src/maxtext/assets"
-  - "src/MaxText/configs"
+  - "src/maxtext/configs"
   - "src/maxtext/examples"
   - "src/MaxText/experimental"
   - "src/maxtext/inference"
   - "src/maxtext/scratch_code"
   - "src/MaxText/distillation" # code moved to src/maxtext/trainers/post_train/distillation
   - "src/MaxText/sft" # code moved to src/maxtext/trainers/post_train/sft
+  - "src/MaxText/rl" # code moved to src/maxtext/trainers/post_train/rl
 
 
 flags:

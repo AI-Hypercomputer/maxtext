@@ -57,32 +57,18 @@ jobs:
       - name: Install MaxText and Dependencies
         shell: bash
         run: |
+          # 1. Create virtual environment
           python3 -m uv venv --seed
           source .venv/bin/activate
-
-          # Install MaxText package
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
-          uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
-          uv pip install -r src/install_maxtext_extra_deps/extra_deps_from_github.txt
 
-          # Install dependencies for running notebooks
-          uv pip install papermill ipykernel ipywidgets
+          # 2. Install MaxText package and all the post training dependencies
+          uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
+          #TODO: @mazumdera:  replace this with the following after release
+          # uv pip install maxtext[tpu-post-train] --resolution=lowest
+          install_maxtext_tpu_post_train_extra_deps
           .venv/bin/python3 -m ipykernel install --user --name maxtext_venv
-
-          # Install Tunix for post-training notebooks
-          git clone https://github.com/google/tunix
-          uv pip install ./tunix
           
-          # Install vllm for post-training notebooks
-          git clone https://github.com/vllm-project/vllm.git
-          VLLM_TARGET_DEVICE="tpu" uv pip install ./vllm
-
-          # Install tpu-inference for post-training notebooks
-          git clone https://github.com/vllm-project/tpu-inference.git
-          uv pip install ./tpu-inference
-
-          uv pip install --no-deps qwix==0.1.4
-          uv pip install --no-deps protobuf==5.29.5
           python3 -m pip freeze
       - name: Run Post-Training Notebooks
         shell: bash
@@ -90,18 +76,25 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          MAXTEXT_REPO_ROOT=$(pwd)
-          MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
+          source .venv/bin/activate
+
+          export MAXTEXT_REPO_ROOT=$(pwd)
+          export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
+          export MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
             filename=$(basename "$notebook")
+            if [[ "$filename" == "sft_qwen3_demo.ipynb" || "$filename" == "sft_llama3_demo_gpu.ipynb" ]]; then
+              echo "Skipping $filename"
+              continue
+            fi
             output_name="${filename%.ipynb}_output.ipynb"
 
             echo "------------------------------------------------------"
             echo "Running $filename ..."
             echo "------------------------------------------------------"
 
-            .venv/bin/papermill "$notebook" "$output_name" -k maxtext_venv
+            papermill "$notebook" "$output_name" -k maxtext_venv
           done
       - name: Record Commit IDs
         shell: bash

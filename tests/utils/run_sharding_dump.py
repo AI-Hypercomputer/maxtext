@@ -46,9 +46,9 @@ Example:
 
 from typing import Sequence
 
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_REPO_ROOT
+from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from tests.utils.sharding_dump import TEST_CASES
-import os
+from tests.utils.test_helpers import get_test_config_path
 import subprocess
 from absl import app, flags
 from pathlib import Path
@@ -67,11 +67,13 @@ def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
           "python3",
           "-m",
           "tests.utils.sharding_dump",
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          get_test_config_path(),
           f"compile_topology={topology}",
           f"compile_topology_num_slices={num_slice}",
           f"model_name={model_name}",
           "weight_dtype=float32",
+          "log_config=false",
+          "debug_sharding=true",
       ],
       check=True,
   )
@@ -101,8 +103,7 @@ def main(argv: Sequence[str]) -> None:
     json_path_logical = base_path / "logical_shardings.json"
 
     if json_path_named.exists() and json_path_logical.exists():
-      print("  -> Sharding files already exist. Skipping.")
-      continue
+      print("  -> Sharding files already exist. Regenerating to overwrite.")
 
     try:
       run_single_dump(model_name, topology, str(num_slice))

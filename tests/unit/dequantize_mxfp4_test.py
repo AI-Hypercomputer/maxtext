@@ -16,7 +16,7 @@
 
 import unittest
 import torch
-from MaxText.utils.ckpt_scripts import dequantize_mxfp4
+from maxtext.checkpoint_conversion.standalone_scripts import dequantize_mxfp4
 
 
 FP4_VALUES = [+0.0, +0.5, +1.0, +1.5, +2.0, +3.0, +4.0, +6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]

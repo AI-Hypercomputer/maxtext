@@ -2,6 +2,7 @@
   ".step": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -16,6 +17,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -36,6 +38,7 @@
   ".params/['params']/['decoder']/['decoder_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -50,6 +53,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -77,6 +81,7 @@
   ".params/['params']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -91,6 +96,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -130,6 +136,7 @@
   ".params/['params']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -144,6 +151,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -183,6 +191,7 @@
   ".params/['params']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -197,6 +206,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -236,6 +246,7 @@
   ".params/['params']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -250,6 +261,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -279,6 +291,7 @@
   ".params/['params']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -293,6 +306,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -322,6 +336,7 @@
   ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -336,6 +351,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -365,6 +381,7 @@
   ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -379,6 +396,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -420,6 +438,7 @@
   ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -434,6 +453,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -475,6 +495,7 @@
   ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -489,6 +510,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -524,6 +546,7 @@
   ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -538,6 +561,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -579,6 +603,7 @@
   ".params/['params']/['decoder']/['logits_dense']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -593,6 +618,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -630,6 +656,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -644,6 +671,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -679,6 +707,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -693,6 +722,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -733,6 +763,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -747,6 +778,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -787,6 +819,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -801,6 +834,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -841,6 +875,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -855,6 +890,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -894,6 +930,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -908,6 +945,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -947,6 +985,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -961,6 +1000,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1000,6 +1040,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1014,6 +1055,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1043,6 +1085,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1057,6 +1100,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1086,6 +1130,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1100,6 +1145,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1129,6 +1175,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1143,6 +1190,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1184,6 +1232,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1198,6 +1247,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1239,6 +1289,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1253,6 +1304,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1288,6 +1340,7 @@
   ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1302,6 +1355,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1343,6 +1397,7 @@
   ".params/['params']/['token_embedder']/['embedding']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1357,6 +1412,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1394,6 +1450,7 @@
   ".opt_state/[0]/.count": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1408,6 +1465,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1428,6 +1486,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['decoder_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1442,6 +1501,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1469,6 +1529,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1483,6 +1544,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1522,6 +1584,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1536,6 +1599,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1575,6 +1639,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1589,6 +1654,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1628,6 +1694,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1642,6 +1709,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1671,6 +1739,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1685,6 +1754,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1714,6 +1784,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1728,6 +1799,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1757,6 +1829,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1771,6 +1844,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1812,6 +1886,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1826,6 +1901,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1867,6 +1943,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1881,6 +1958,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1916,6 +1994,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1930,6 +2009,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1971,6 +2051,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['logits_dense']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1985,6 +2066,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2022,6 +2104,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2036,6 +2119,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2071,6 +2155,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2085,6 +2170,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2125,6 +2211,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2139,6 +2226,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2179,6 +2267,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2193,6 +2282,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2233,6 +2323,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2247,6 +2338,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2286,6 +2378,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2300,6 +2393,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2339,6 +2433,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2353,6 +2448,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2392,6 +2488,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2406,6 +2503,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2435,6 +2533,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2449,6 +2548,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2478,6 +2578,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2492,6 +2593,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2521,6 +2623,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2535,6 +2638,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2576,6 +2680,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2590,6 +2695,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2631,6 +2737,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2645,6 +2752,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2680,6 +2788,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2694,6 +2803,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2735,6 +2845,7 @@
   ".opt_state/[0]/.mu/['params']/['token_embedder']/['embedding']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2749,6 +2860,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2786,6 +2898,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['decoder_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2800,6 +2913,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2827,6 +2941,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2841,6 +2956,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2880,6 +2996,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2894,6 +3011,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2933,6 +3051,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2947,6 +3066,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2986,6 +3106,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3000,6 +3121,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3029,6 +3151,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3043,6 +3166,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3072,6 +3196,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3086,6 +3211,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3115,6 +3241,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3129,6 +3256,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3170,6 +3298,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3184,6 +3313,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3225,6 +3355,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3239,6 +3370,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3274,6 +3406,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3288,6 +3421,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3329,6 +3463,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['logits_dense']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3343,6 +3478,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3380,6 +3516,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3394,6 +3531,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3429,6 +3567,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3443,6 +3582,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3483,6 +3623,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3497,6 +3638,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3537,6 +3679,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3551,6 +3694,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3591,6 +3735,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3605,6 +3750,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3644,6 +3790,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3658,6 +3805,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3697,6 +3845,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3711,6 +3860,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3750,6 +3900,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3764,6 +3915,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3793,6 +3945,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3807,6 +3960,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3836,6 +3990,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3850,6 +4005,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3879,6 +4035,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3893,6 +4050,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3934,6 +4092,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3948,6 +4107,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3989,6 +4149,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4003,6 +4164,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4038,6 +4200,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4052,6 +4215,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4093,6 +4257,7 @@
   ".opt_state/[0]/.nu/['params']/['token_embedder']/['embedding']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4107,6 +4272,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4144,6 +4310,7 @@
   ".opt_state/[2]/.count": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4158,6 +4325,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,

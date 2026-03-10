@@ -11,27 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Model test.
-"""
+"""Model test."""
 
 import sys
 import unittest
 
-import numpy as np
-import pytest
-
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
+from maxtext.configs import pyconfig
+from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import maxtext_utils
-from maxtext.common.gcloud_stub import is_decoupled
-from MaxText import pyconfig
-from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText.layers import models
-from MaxText.layers import quantizations
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+import numpy as np
+import pytest
 
 MAX_PREFILL_PREDICT_LENGTH = 4
 
@@ -48,7 +43,7 @@ class TestModel(unittest.TestCase):
   def init_pyconfig(self, **kwargs):
     """Init pyconfig."""
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1.0,
@@ -79,8 +74,8 @@ class TestModel(unittest.TestCase):
     return ids, decoder_segment_ids, decoder_positions
 
   def _test_logits_cast_driver(self, cast_logits_to_fp32, expected_dtype):
-    """
-    Helper method to test the dtype of the logits returned by the full model at the end.
+    """Helper method to test the dtype of the logits returned by the full model at the end.
+
     Does not perform any actual flops.
     """
     new_config = self.init_pyconfig(cast_logits_to_fp32=cast_logits_to_fp32, logits_dot_in_fp32=False)
@@ -173,7 +168,11 @@ class TestModel(unittest.TestCase):
     )
 
     np.testing.assert_allclose(
-        full_train_logits[:, :PREFILL_RANGE, :], partial_prefill_logits, rtol=1e-01, atol=1e-01, equal_nan=False
+        full_train_logits[:, :PREFILL_RANGE, :],
+        partial_prefill_logits,
+        rtol=1e-01,
+        atol=1e-01,
+        equal_nan=False,
     )
 
     for idx in range(PREFILL_RANGE, self.cfg.max_target_length):
@@ -192,7 +191,13 @@ class TestModel(unittest.TestCase):
 
       full_train_logits_idx = full_train_logits[:, idx : idx + 1, :]
       self.assertTrue(full_train_logits_idx.shape == ar_logits.shape)
-      np.testing.assert_allclose(full_train_logits_idx, ar_logits, rtol=1e-01, atol=1e-01, equal_nan=False)
+      np.testing.assert_allclose(
+          full_train_logits_idx,
+          ar_logits,
+          rtol=1e-01,
+          atol=1e-01,
+          equal_nan=False,
+      )
 
 
 if __name__ == "__main__":

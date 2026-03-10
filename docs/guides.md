@@ -55,6 +55,13 @@ Tools for observability: goodput monitoring, hung job debugging, and Vertex AI T
 
 Interactive development guides for running MaxText on Google Colab or local JupyterLab environments.
 :::
+
+:::{grid-item-card} 🌱 Model Bringup
+:link: guides/model_bringup
+:link-type: doc
+
+A step-by-step guide for the community to help expand MaxText's model library.
+:::
 ::::
 
 ```{toctree}
@@ -66,4 +73,5 @@ guides/data_input_pipeline.md
 guides/checkpointing_solutions.md
 guides/monitoring_and_debugging.md
 guides/run_python_notebook.md
+guides/model_bringup.md
 ```

@@ -1,0 +1,148 @@
+{
+  "Activation Sharding Dump": [
+    {
+      "deepseek/inputs: bfloat16[768,2048,2048]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', 'activation_embed')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "deepseek/pre_attention_norm: bfloat16[768,2048,2048]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', 'activation_embed')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "attention_mla/inputs_q: bfloat16[768,2048,2048]": {
+        "logic_axes": "('activation_batch', 'activation_length_no_exp', 'activation_embed')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "attention_mla/inputs_kv: bfloat16[768,2048,2048]": {
+        "logic_axes": "('activation_batch', 'activation_length_no_exp', 'activation_embed')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "attention_mla/q_nope: bfloat16[768,2048,16,128]": {
+        "logic_axes": "('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_mla/q_pe: bfloat16[768,2048,16,64]": {
+        "logic_axes": "('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_mla/query: bfloat16[768,2048,16,192]": {
+        "logic_axes": "('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_mla/key_nope: bfloat16[768,2048,16,128]": {
+        "logic_axes": "('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_mla/key_rope: bfloat16[768,2048,16,64]": {
+        "logic_axes": "('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_mla/key: bfloat16[768,2048,16,192]": {
+        "logic_axes": "('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_mla/value: bfloat16[768,2048,16,128]": {
+        "logic_axes": "('activation_kv_batch', 'activation_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_op/query: bfloat16[768,16,2048,192]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_op/key: bfloat16[768,16,2048,192]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_op/value: bfloat16[768,16,2048,128]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_mla/out: bfloat16[768,2048,16,128]": {
+        "logic_axes": "('activation_batch', 'activation_length_no_exp', 'activation_heads', 'activation_kv')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "deepseek/attention_result: bfloat16[768,2048,2048]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', 'activation_embed')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "deepseek/post_attention_norm: bfloat16[768,2048,2048]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', 'activation_embed')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "linears/x: bfloat16[768,2048,10944]": {
+        "logic_axes": "('activation_batch', 'activation_length_no_exp', 'activation_mlp')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "deepseek/mlp: bfloat16[768,2048,2048]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', 'activation_embed')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "deepseek/x: bfloat16[768,2048,2048]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', 'activation_embed')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "moe/inputs: bfloat16[768,2048,2048]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', None)",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "moe/gate_logits: bfloat16[768,2048,64]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', None)",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "linears/x: bfloat16[768,2048,2816]": {
+        "logic_axes": "('activation_batch', 'activation_length_no_exp', 'activation_mlp')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "deepseek/mlp_lnx: bfloat16[768,2048,2048]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', 'activation_embed')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    }
+  ]
+}

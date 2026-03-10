@@ -15,6 +15,7 @@
 """Tests for training and data loading hooks for SFT"""
 import pytest
 
+pytest.importorskip("tunix")
 pytestmark = [pytest.mark.tpu_only, pytest.mark.external_training]
 
 import jax
@@ -25,8 +26,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 from jax.sharding import Mesh
 
-from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.configs import pyconfig
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.trainers.post_train.sft import hooks
 from maxtext.utils import maxtext_utils
 
@@ -36,7 +37,7 @@ class SFTHooksTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        ["", os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+        ["", os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml")],
         per_device_batch_size=1,
         run_name="test",
         base_output_directory="test",

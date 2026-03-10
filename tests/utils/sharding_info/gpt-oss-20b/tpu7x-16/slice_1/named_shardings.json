@@ -2,6 +2,7 @@
   ".step": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -16,6 +17,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -36,6 +38,7 @@
   ".params/['params']/['decoder']/['decoder_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -50,6 +53,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -77,6 +81,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -91,6 +96,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -124,6 +130,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -138,6 +145,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -179,6 +187,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -193,6 +202,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -226,6 +236,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -240,6 +251,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -281,6 +293,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -295,6 +308,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -328,6 +342,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -342,6 +357,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -383,6 +399,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['sinks']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -397,6 +414,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -423,6 +441,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -437,6 +456,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -470,6 +490,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -484,6 +505,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -525,6 +547,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -539,6 +562,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -565,6 +589,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -579,6 +604,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -614,6 +640,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -628,6 +655,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -668,6 +696,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -682,6 +711,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -714,6 +744,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -728,6 +759,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -768,6 +800,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -782,6 +815,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -814,6 +848,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -828,6 +863,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -868,6 +904,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -882,6 +919,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -913,6 +951,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -927,6 +966,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -956,6 +996,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_0']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -970,6 +1011,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -999,6 +1041,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1013,6 +1056,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1046,6 +1090,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1060,6 +1105,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1101,6 +1147,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1115,6 +1162,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1148,6 +1196,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1162,6 +1211,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1203,6 +1253,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1217,6 +1268,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1250,6 +1302,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1264,6 +1317,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1305,6 +1359,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['sinks']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1319,6 +1374,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1345,6 +1401,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1359,6 +1416,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1392,6 +1450,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1406,6 +1465,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1447,6 +1507,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1461,6 +1522,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1487,6 +1549,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1501,6 +1564,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1536,6 +1600,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1550,6 +1615,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1590,6 +1656,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1604,6 +1671,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1636,6 +1704,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1650,6 +1719,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1690,6 +1760,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1704,6 +1775,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1736,6 +1808,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1750,6 +1823,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1790,6 +1864,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1804,6 +1879,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1835,6 +1911,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1849,6 +1926,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1878,6 +1956,7 @@
   ".params/['params']/['decoder']/['layers']/['layers_1']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1892,6 +1971,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1921,6 +2001,7 @@
   ".params/['params']/['decoder']/['logits_dense']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1935,6 +2016,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -1972,6 +2054,7 @@
   ".params/['params']/['token_embedder']/['embedding']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -1986,6 +2069,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2023,6 +2107,7 @@
   ".opt_state/[0]/.count": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2037,6 +2122,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2057,6 +2143,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['decoder_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2071,6 +2158,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2098,6 +2186,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2112,6 +2201,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2145,6 +2235,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2159,6 +2250,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2200,6 +2292,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2214,6 +2307,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2247,6 +2341,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2261,6 +2356,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2302,6 +2398,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2316,6 +2413,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2349,6 +2447,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2363,6 +2462,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2404,6 +2504,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['sinks']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2418,6 +2519,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2444,6 +2546,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2458,6 +2561,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2491,6 +2595,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2505,6 +2610,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2546,6 +2652,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2560,6 +2667,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2586,6 +2694,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2600,6 +2709,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2635,6 +2745,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2649,6 +2760,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2689,6 +2801,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2703,6 +2816,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2735,6 +2849,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2749,6 +2864,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2789,6 +2905,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2803,6 +2920,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2835,6 +2953,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2849,6 +2968,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2889,6 +3009,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2903,6 +3024,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2934,6 +3056,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2948,6 +3071,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -2977,6 +3101,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_0']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -2991,6 +3116,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3020,6 +3146,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3034,6 +3161,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3067,6 +3195,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3081,6 +3210,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3122,6 +3252,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3136,6 +3267,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3169,6 +3301,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3183,6 +3316,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3224,6 +3358,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3238,6 +3373,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3271,6 +3407,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3285,6 +3422,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3326,6 +3464,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['sinks']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3340,6 +3479,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3366,6 +3506,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3380,6 +3521,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3413,6 +3555,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3427,6 +3570,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3468,6 +3612,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3482,6 +3627,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3508,6 +3654,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3522,6 +3669,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3557,6 +3705,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3571,6 +3720,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3611,6 +3761,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3625,6 +3776,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3657,6 +3809,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3671,6 +3824,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3711,6 +3865,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3725,6 +3880,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3757,6 +3913,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3771,6 +3928,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3811,6 +3969,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3825,6 +3984,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3856,6 +4016,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3870,6 +4031,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3899,6 +4061,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['layers_1']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3913,6 +4076,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3942,6 +4106,7 @@
   ".opt_state/[0]/.mu/['params']/['decoder']/['logits_dense']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -3956,6 +4121,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -3993,6 +4159,7 @@
   ".opt_state/[0]/.mu/['params']/['token_embedder']/['embedding']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4007,6 +4174,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4044,6 +4212,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['decoder_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4058,6 +4227,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4085,6 +4255,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4099,6 +4270,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4132,6 +4304,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['key']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4146,6 +4319,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4187,6 +4361,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4201,6 +4376,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4234,6 +4410,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4248,6 +4425,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4289,6 +4467,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4303,6 +4482,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4336,6 +4516,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4350,6 +4531,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4391,6 +4573,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['sinks']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4405,6 +4588,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4431,6 +4615,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4445,6 +4630,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4478,6 +4664,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssAttention']/['value']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4492,6 +4679,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4533,6 +4721,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4547,6 +4736,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4573,6 +4763,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['gate']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4587,6 +4778,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4622,6 +4814,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4636,6 +4829,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4676,6 +4870,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_0_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4690,6 +4885,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4722,6 +4918,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4736,6 +4933,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4776,6 +4974,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wi_1_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4790,6 +4989,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4822,6 +5022,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4836,6 +5037,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4876,6 +5078,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['GptOssMlp']/['wo_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4890,6 +5093,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4921,6 +5125,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4935,6 +5140,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -4964,6 +5170,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_0']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -4978,6 +5185,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5007,6 +5215,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5021,6 +5230,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5054,6 +5264,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['key']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5068,6 +5279,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5109,6 +5321,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5123,6 +5336,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5156,6 +5370,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['out']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5170,6 +5385,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5211,6 +5427,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5225,6 +5442,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5258,6 +5476,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['query']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5272,6 +5491,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5313,6 +5533,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['sinks']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5327,6 +5548,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5353,6 +5575,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5367,6 +5590,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5400,6 +5624,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssAttention']/['value']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5414,6 +5639,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5455,6 +5681,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5469,6 +5696,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5495,6 +5723,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['gate']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5509,6 +5738,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5544,6 +5774,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5558,6 +5789,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5598,6 +5830,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_0_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5612,6 +5845,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5644,6 +5878,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5658,6 +5893,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5698,6 +5934,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wi_1_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5712,6 +5949,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5744,6 +5982,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5758,6 +5997,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5798,6 +6038,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['GptOssMlp']/['wo_bias']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5812,6 +6053,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5843,6 +6085,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['post_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5857,6 +6100,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5886,6 +6130,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['layers_1']/['pre_self_attention_layer_norm']/['scale']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5900,6 +6145,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5929,6 +6175,7 @@
   ".opt_state/[0]/.nu/['params']/['decoder']/['logits_dense']/['kernel']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5943,6 +6190,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -5980,6 +6228,7 @@
   ".opt_state/[0]/.nu/['params']/['token_embedder']/['embedding']": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -5994,6 +6243,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,
@@ -6031,6 +6281,7 @@
   ".opt_state/[2]/.count": {
     "mesh": {
       "axis_names": [
+        "diloco",
         "data",
         "stage",
         "fsdp",
@@ -6045,6 +6296,7 @@
         "autoregressive"
       ],
       "shape": {
+        "diloco": 1,
         "data": 1,
         "stage": 1,
         "fsdp": 16,

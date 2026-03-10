@@ -17,20 +17,19 @@
 import hashlib
 import json
 import os
-import pytest
 import jax
 import jax.numpy as jnp
+from maxtext.configs import pyconfig
+from maxtext.utils import maxtext_utils
 # import optax
 
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
-from MaxText import pyconfig
-from MaxText import maxtext_utils
-from MaxText.layers import models
-from MaxText.layers import quantizations
-from MaxText import optimizers
-
-from tests.utils.sharding_dump import load_json, TEST_CASES, named_shardings_to_json, partition_specs_to_json
+from maxtext.layers import quantizations
+from maxtext.models import models
+from maxtext.optimizers import optimizers
+from maxtext.trainers.pre_train.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
+from tests.utils.sharding_dump import TEST_CASES, load_json, named_shardings_to_json, partition_specs_to_json
+from tests.utils.test_helpers import get_test_config_path
+import pytest
 
 Transformer = models.transformer_as_linen
 
@@ -110,6 +109,8 @@ def compare_sharding_jsons(json1: dict, model1_name: str, json2: dict, model2_na
   return has_diff
 
 
+# Requires JAX TPU support to generate the simulated TPU topology.
+@pytest.mark.tpu_only
 @pytest.mark.parametrize("model_name, topology, num_slice", TEST_CASES)
 def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str) -> None:
   """
@@ -118,7 +119,7 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
   """
   params = [
       "/deps/MaxText/tests/unit/sharding_compare_test",
-      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      get_test_config_path(),
       f"compile_topology={topology}",
       f"compile_topology_num_slices={num_slice}",
       f"model_name={model_name}",
@@ -184,7 +185,7 @@ def abstract_state_and_shardings(request):
   print(f"Testing model: {model_name}, topology: {topology}, num_slices: {num_slice}", flush=True)
   params = [
       "/deps/MaxText/tests/unit/sharding_compare_test",
-      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      get_test_config_path(),
       f"compile_topology={topology}",
       f"compile_topology_num_slices={num_slice}",
       f"model_name={model_name}",
@@ -216,6 +217,8 @@ def abstract_state_and_shardings(request):
 class TestGetAbstractState:
   """Test class for get_abstract_state function and sharding comparison."""
 
+  # Requires JAX TPU support to generate the simulated TPU topology.
+  @pytest.mark.tpu_only
   def test_get_abstract_state_sharding(self, abstract_state_and_shardings):  # pylint: disable=redefined-outer-name
     """Tests that get_abstract_state returns a state with the correct abstract structure and compares sharding."""
 

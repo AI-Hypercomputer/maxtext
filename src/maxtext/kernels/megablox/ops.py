@@ -43,12 +43,15 @@ def gmm(
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
     input_buffer_count: tuple[int, int, int] = (2, 2, 2),
+    combine_scopes: bool = False,
+    # TODO(amandaliang): get rid of the qwix_rule in favor of Qwix's interception feature
+    qwix_rule: qwix.QtRule | None = None,
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
   if use_qwix_quantization:
     # get_current_rule has to be called outside of the _gmm_fwd function.
-    quantization_rule = qpl.get_current_rule("gmm")
+    quantization_rule = qwix_rule if qwix_rule else qpl.get_current_rule("gmm")
     if quantization_rule and not isinstance(quantization_rule, qwix.QtRule):
       raise ValueError("Expect a QtRule for quantized training.")
   else:
@@ -62,7 +65,7 @@ def gmm(
       )
 
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
-  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 5, 8, 9, 10, 11, 12))
+  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 5, 6, 9, 10, 11, 12, 13))
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
       lhs,
@@ -71,6 +74,7 @@ def gmm(
       preferred_element_type,
       tiling,
       input_buffer_count,
+      combine_scopes,
       group_offset,
       existing_out,
       transpose_rhs,
@@ -88,6 +92,7 @@ def _gmm_fwd(
     preferred_element_type: jnp.dtype = jnp.float32,
     tiling: tuple[int, int, int, int, int, int, int, int, int] = (128, 128, 128, 128, 128, 128, 128, 128, 128),
     input_buffer_count: tuple[int, int, int] = (2, 2, 2),
+    combine_scopes: bool = False,
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
@@ -106,15 +111,14 @@ def _gmm_fwd(
 ]:
   """Forward function for GMM VJP."""
   if quantization_rule:
-    if quantization_rule.act_qtype:
+    if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray):
       lhs = qpl.quantize(
           lhs,
           quantization_rule.act_qtype,
           channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
           calibration_method=quantization_rule.act_calibration_method,
-          scale_dtype=jnp.float32,
       )
-    if quantization_rule.weight_qtype:
+    if quantization_rule.weight_qtype and not isinstance(rhs, qpl.QArray):
       rhs = qpl.quantize(
           rhs,
           quantization_rule.weight_qtype,
@@ -123,7 +127,6 @@ def _gmm_fwd(
           # bwd pass unable to reuse the scale easily.
           channelwise_axes=[] if quantization_rule.disable_channelwise_axes else ([1] if transpose_rhs else [2]),
           calibration_method=quantization_rule.weight_calibration_method,
-          scale_dtype=jnp.float32,
       )
       # QAG is only supported for following conditions
   if use_tokamax_backend:
@@ -166,6 +169,7 @@ def _gmm_bwd(
     preferred_element_type: jnp.dtype,
     tiling: tuple[int, int, int, int, int, int, int, int, int],
     input_buffer_count: tuple[int, int, int],
+    combine_scopes: bool,
     transpose_rhs: bool,
     interpret: bool,
     quantization_rule: qwix.QtRule | None,
@@ -212,14 +216,12 @@ def _gmm_bwd(
         quantization_rule.bwd_qtype,
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
         calibration_method=quantization_rule.bwd_calibration_method,
-        scale_dtype=jnp.float32,
     )
     drhs_dout = qpl.quantize(
         drhs_dout,
         quantization_rule.bwd_qtype,
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
         calibration_method=quantization_rule.bwd_calibration_method,
-        scale_dtype=jnp.float32,
     )
   if use_tokamax_backend:
     dlhs = tokamax_backend.gmm(
@@ -245,6 +247,7 @@ def _gmm_bwd(
         num_actual_groups=num_actual_groups,
         interpret=interpret,
         input_buffer_count=input_buffer_count[2],
+        combine_scopes=combine_scopes,
     )
     if quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
       # Scatter back in reverse order of gather

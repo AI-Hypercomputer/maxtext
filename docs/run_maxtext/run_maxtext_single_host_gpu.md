@@ -21,6 +21,7 @@ This is a short guide to run Maxtext on GPU. For this current set of instruction
 ## Create a GPU VM
 
 Follow the instructions to create a3 high or an a3 Mega VM
+
 - https://cloud.google.com/compute/docs/gpus/create-gpu-vm-accelerator-optimized#console
 - Add enough disk space to work through the examples (at least 500GB)
 
@@ -42,9 +43,9 @@ Related NVIDIA Content:
 
 - NVIDIA JAX Session:
 - Learn more about Jax on GPUs:
-    - https://www.nvidia.com/en-us/on-demand/session/gtc24-s62246/
+  - https://www.nvidia.com/en-us/on-demand/session/gtc24-s62246/
 - NVIDIA JAX Toolbox:
-    - https://github.com/NVIDIA/JAX-Toolbox
+  - https://github.com/NVIDIA/JAX-Toolbox
 
 ## Install Docker
 
@@ -109,7 +110,7 @@ You should see the following:
 
 Note: If you only see CPUDevice, that means there is a issue with NVIDIA Container and you need to stop and fix the issue.
 
-We will Run the next commands from inside the docker for convenience. 
+We will Run the next commands from inside the docker for convenience.
 
 ## SSH into the docker
 
@@ -147,7 +148,7 @@ Hardware: GPU
 ```
 
 ```bash
-python3 -m MaxText.train src/MaxText/configs/base.yml run_name=gpu01 base_output_directory=/deps/output  \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=gpu01 base_output_directory=/deps/output  \
   dataset_type=synthetic enable_checkpointing=True steps=10 attention=cudnn_flash_te scan_layers=False \
   use_iota_embed=True hardware=gpu per_device_batch_size=12
 ```
@@ -156,7 +157,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml run_name=gpu01 base_output
 
 You can find the optimized running of LLama Models for various host configurations here:
 
-https://github.com/AI-Hypercomputer/maxtext/tree/main/src/MaxText/configs/a3/llama_2_7b
+https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/configs/gpu/a3/llama_2_7b
 
 `1vm.sh` modified script below:
 
@@ -167,7 +168,7 @@ echo "Running 1vm.sh"
 # python3 xpk/xpk.py workload create --cluster ${CLUSTER_NAME} \
 # --workload ${WORKLOAD_NAME} --docker-image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME} \
 # --device-type ${DEVICE_TYPE} --num-slices 1 \
-# --command "bash src/MaxText/configs/a3/llama_2_7b/1vm.sh"
+# --command "bash src/maxtext/configs/gpu/a3/llama_2_7b/1vm.sh"
 
 # Stop execution if any command exits with error
 set -e
@@ -193,7 +194,7 @@ export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$RUN_NAME/HLO_dumps/
 
 
 # 1 node, DATA_DP=1, ICI_FSDP=8
-python3 -m MaxText.train src/MaxText/configs/models/gpu/llama2_7b.yml run_name=$RUN_NAME dcn_data_parallelism=1 \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/llama2_7b.yml run_name=$RUN_NAME dcn_data_parallelism=1 \
   ici_fsdp_parallelism=8 base_output_directory=$OUTPUT_PATH attention=cudnn_flash_te scan_layers=False \
   use_iota_embed=True hardware=gpu
 ```

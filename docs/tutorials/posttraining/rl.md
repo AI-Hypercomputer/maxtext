@@ -44,73 +44,45 @@ Let's get started!
 
 ## Create virtual environment and Install MaxText dependencies
 
-If you have already completed the
-[MaxText installation](../../install_maxtext.md), you can skip to the next
-section for post-training dependencies installations. Otherwise, please install
-`MaxText` using the following commands before proceeding.
-
 ```bash
-# 1. Clone the repository
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-cd maxtext
-
-# 2. Create virtual environment
+# Create a virtual environment
 export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
 pip install uv
 uv venv --python 3.12 --seed $VENV_NAME
 source $VENV_NAME/bin/activate
-
-# 3. Install dependencies in editable mode
-uv pip install -e .[tpu] --resolution=lowest
-install_maxtext_github_deps
 ```
 
-## Install Post-Training dependencies
+### Option 1: From PyPI releases (Recommended)
 
-### Option 1: From PyPI releases
+Run the following commands to get all the necessary installations.
 
-> **Caution:** RL in MaxText is currently broken with PyPI releases of
-> post-training dependencies. We are working on fixing this and recommend
-> following [Option 2: From Github](#option-2-from-github) in the meantime.
-
-Next, run the following bash script to get all the necessary installations
-inside the virtual environment (for e.g., `maxtext_venv`). This will take few
-minutes. Follow along the installation logs and look out for any issues!
-
-```
-bash tools/setup/setup_post_training_requirements.sh
+```bash
+uv pip install maxtext[tpu-post-train] --resolution=lowest
+install_maxtext_tpu_post_train_extra_deps
 ```
 
-Primarily, it installs `Tunix`, and `vllm-tpu` which is
+It installs MaxText and then for post-training, it installs primarily the following:
+
+a. [Tunix](https://github.com/google/tunix) as the LLM Post-Training Library, and
+
+b. `vllm-tpu` which is
 [vllm](https://github.com/vllm-project/vllm) and
 [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby
 providing TPU inference for vLLM, with unified JAX and PyTorch support.
 
 ### Option 2: From Github
 
-You can also locally git clone [tunix](https://github.com/google/tunix) and
-install using the instructions
-[here](https://github.com/google/tunix?tab=readme-ov-file#installation).
-Similarly install [vllm](https://github.com/vllm-project/vllm) and
-[tpu-inference](https://github.com/vllm-project/tpu-inference) from source
-following the instructions
-[here](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/#install-from-source).
-To get a set of compatible commit IDs for `maxtext`, `tunix`, `tpu-inference`,
-and `vllm`, follow these steps:
+For using a version newer than the latest PyPI release, you could also install the latest vetted versions of the dependencies from MaxText in the following way:
 
-1. Navigate to the
-   [MaxText Package Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/build_and_test_maxtext.yml?query=event%3Aschedule)
-   GitHub Actions workflow.
+```bash
+# 1. Clone the repository
+git clone https://github.com/AI-Hypercomputer/maxtext.git
+cd maxtext
 
-1. Select the latest successful run.
-
-1. Within the workflow run, find and click on the `maxtext_jupyter_notebooks (py312)` job, then expand the `run` job.
-
-1. Locate the `Record Commit IDs` step. The commit SHAs for `maxtext`, `tunix`,
-   `tpu-inference`, and `vllm` that were used in that successful run are listed
-   in the logs of this step.
-
-1. Prior to installation, ensure that the `maxtext`, `tunix`, `vllm`, and `tpu-inference` repositories are synchronized to the specific commits recorded from the CI logs. For each repository, use the following command to switch to the correct commit: `git checkout <commit_id>`.
+# 2. Install dependencies in editable mode
+uv pip install -e .[tpu-post-train] --resolution=lowest
+install_maxtext_tpu_post_train_extra_deps
+```
 
 ## Setup environment variables
 
@@ -127,7 +99,15 @@ export HF_TOKEN=<Hugging Face access token>
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
 
 export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
+
+export CHIPS_PER_VM=<the number of chips per VM> # depends on hardware, for v5p this is 4, for v6e this is 8
 ```
+
+For the value of `CHIPS_PER_VM` on different TPU hardware, refer the official document
+
+- [TPU v5e](https://docs.cloud.google.com/tpu/docs/v5e) (single host, chips_per_vm=8)
+- [TPU v5p](https://docs.cloud.google.com/tpu/docs/v5p) (single host, chips_per_vm=4)
+- [TPU v6e](https://docs.cloud.google.com/tpu/docs/v6e) (single host, chips_per_vm=8)
 
 ## Get your model checkpoint
 
@@ -153,22 +133,23 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 Run the following command for GRPO:
 
 ```
-python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL} \
   tokenizer_path=${TOKENIZER} \
   load_parameters_path=${MAXTEXT_CKPT_PATH} \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  hf_access_token=${HF_TOKEN}
+  hf_access_token=${HF_TOKEN} \
+  chips_per_vm=${CHIPS_PER_VM}
 ```
 
 The overview of what this run will do is as follows:
 
 1. We load a policy model and a reference model. Both are copies of the model
    checkpoint you specified (e.g., `Llama3.1-8b-Instruct`).
-1. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
-1. Train the policy model using GRPO.
-1. Evaluate the policy model's performance on GSM8K math reasoning benchmark
+2. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
+3. Train the policy model using GRPO.
+4. Evaluate the policy model's performance on GSM8K math reasoning benchmark
    after the post-training with GRPO.
 
 ## Run GSPO
@@ -176,21 +157,22 @@ The overview of what this run will do is as follows:
 Run the following command for GSPO:
 
 ```
-python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL} \
   tokenizer_path=${TOKENIZER} \
   load_parameters_path=${MAXTEXT_CKPT_PATH} \
   run_name=${RUN_NAME} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   hf_access_token=${HF_TOKEN} \
-  loss_algo=gspo-token
+  loss_algo=gspo-token \
+  chips_per_vm=${CHIPS_PER_VM}
 ```
 
 The overview of what this run will do is as follows:
 
 1. We load a policy model and a reference model. Both are copies of the model
    checkpoint you specified (e.g., `Llama3.1-8b-Instruct`).
-1. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
-1. Train the policy model using GSPO.
-1. Evaluate the policy model's performance on GSM8K math reasoning benchmark
+2. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
+3. Train the policy model using GSPO.
+4. Evaluate the policy model's performance on GSM8K math reasoning benchmark
    after the post-training with GSPO.

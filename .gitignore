@@ -76,7 +76,6 @@ instance/
 # Sphinx documentation
 docs/_build/
 
-# src/MaxText/experimental/agent/integrative_rag_agent
 *.db
 
 # PyBuilder
@@ -84,6 +83,8 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+.jupyter/
+.local/share/jupyter/
 
 # IPython
 profile_default/
@@ -149,3 +150,6 @@ dmypy.json
 # Gemini CLI
 .gemini/
 gha-creds-*.json
+
+# vscode workspace
+maxtext.code-workspace

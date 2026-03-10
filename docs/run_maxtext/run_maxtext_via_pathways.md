@@ -15,6 +15,7 @@
 -->
 
 (run-pathways)=
+
 # Via Pathways
 
 This guide provides a comprehensive walkthrough for running MaxText workloads on a Google Kubernetes Engine (GKE) cluster using Pathways. Pathways acts as a powerful orchestrator for large-scale JAX jobs on AI Hypercomputer infrastructure.
@@ -22,31 +23,37 @@ This guide provides a comprehensive walkthrough for running MaxText workloads on
 This document assumes you have already created a Pathways GKE cluster using `xpk`. If you haven't, follow the instructions at the [Google Cloud Pathways & XPK documentation](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster#xpk).
 
 We will cover two primary modes of operation:
-*   **Batch workload**: Ideal for long-running, non-interactive training jobs.
-*   **Headless workload**: Ideal for interactive development, debugging, and running code from a local machine or CPU VM.
+
+- **Batch workload**: Ideal for long-running, non-interactive training jobs.
+- **Headless workload**: Ideal for interactive development, debugging, and running code from a local machine or CPU VM.
 
 ## 1. Prerequisites
 
 Before you can run a MaxText workload, you must complete the following setup steps.
 
-1.  **Install XPK and its dependencies**. Ensure that the `xpk` command-line tool is installed.
-2.  **Create a GKE cluster** configured for Pathways.
-3.  **Build and upload a MaxText Docker image** to your project's Artifact Registry.
+1. **Install XPK and its dependencies**. Ensure that the `xpk` command-line tool is installed.
 
-    Step 1: Build the Docker image for a TPU device. This image contains MaxText and its dependencies.
-    ```shell
-    bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
-    ```
+2. **Create a GKE cluster** configured for Pathways.
 
-    Step 2: Configure Docker to authenticate with Google Cloud
-    ```shell
-    gcloud auth configure-docker
-    ```
+3. **Build and upload a MaxText Docker image** to your project's Artifact Registry.
 
-    Step 3: Upload the image to your project's registry. Replace `$USER_runner` with your desired image name.
-    ```shell
-    bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$USER_runner
-    ```
+   Step 1: Build the Docker image for a TPU device. This image contains MaxText and its dependencies.
+
+   ```shell
+   bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
+   ```
+
+   Step 2: Configure Docker to authenticate with Google Cloud
+
+   ```shell
+   gcloud auth configure-docker
+   ```
+
+   Step 3: Upload the image to your project's registry. Replace `$USER_runner` with your desired image name.
+
+   ```shell
+   bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$USER_runner
+   ```
 
 ## 2. Environment configuration
 
@@ -87,7 +94,7 @@ xpk workload create-pathways \
   --project=$PROJECT \
   --zone=$ZONE \
   --docker-image=${DOCKER_IMAGE} \
-  --command="python3 -m MaxText.train src/MaxText/configs/base.yml \
+  --command="python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=gs://${BUCKET_NAME} \
     per_device_batch_size=1 \
     enable_checkpointing=false \
@@ -145,7 +152,7 @@ export JAX_PLATFORMS=proxy
 export JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 
 # Run the training script
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
   base_output_directory=gs://${BUCKET_NAME} \
   per_device_batch_size=1 \
   enable_checkpointing=false \
@@ -153,19 +160,20 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
   enable_single_controller=True \
   run_name=${RUN_NAME}-pathways-headless
 ```
+
 The output streams directly to your terminal, just as if you were running on a local accelerator.
 
 ## Troubleshooting
 
-*   **Permission denied errors for Cloud Storage bucket**: Check that the service account used by your GKE nodes has "Storage Object Admin" permissions on your GCS bucket.
-*   **`Image not found` or `ImagePullBackOff`**:
-    *   Verify your `DOCKER_IMAGE` variable is correct.
-    *   Ensure you have successfully pushed the image to your project's Artifact Registry.
-    *   Check that your GKE cluster has permissions to pull from the registry.
-*   **`kubectl port-forward` fails**:
-    *   Confirm that the pod from Step 1 is running (`kubectl get pods`). The name should match `${WORKLOAD_NAME}-pathways-head-0`.
-    *   Ensure you are authenticated with `kubectl` and have the correct context set for your GKE cluster.
-* Make sure you import `pathwaysutils` package and call `pathwaysutils.initialize()` in your script when running the workload.
+- **Permission denied errors for Cloud Storage bucket**: Check that the service account used by your GKE nodes has "Storage Object Admin" permissions on your GCS bucket.
+- **`Image not found` or `ImagePullBackOff`**:
+  - Verify your `DOCKER_IMAGE` variable is correct.
+  - Ensure you have successfully pushed the image to your project's Artifact Registry.
+  - Check that your GKE cluster has permissions to pull from the registry.
+- **`kubectl port-forward` fails**:
+  - Confirm that the pod from Step 1 is running (`kubectl get pods`). The name should match `${WORKLOAD_NAME}-pathways-head-0`.
+  - Ensure you are authenticated with `kubectl` and have the correct context set for your GKE cluster.
+- Make sure you import `pathwaysutils` package and call `pathwaysutils.initialize()` in your script when running the workload.
 
 ## More information
 

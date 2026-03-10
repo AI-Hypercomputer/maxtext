@@ -16,17 +16,15 @@
 import unittest
 
 import jax
-from jax.sharding import Mesh
 import jax.numpy as jnp
-
-from MaxText import optimizers
-from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.layers import models
-from MaxText.layers import quantizations
+from jax.sharding import Mesh
+from maxtext.configs import pyconfig
+from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.layers import quantizations
+from maxtext.models import models
+from maxtext.optimizers import optimizers
 from maxtext.utils import maxtext_utils
-from maxtext.common.gcloud_stub import is_decoupled
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 
 Transformer = models.transformer_as_linen
 
@@ -37,8 +35,7 @@ class StateDtypes(unittest.TestCase):
   def get_state(self, argv):
     """Gets model state including weights and optimizer state"""
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    if is_decoupled():
-      argv = list(argv) + [f"ici_fsdp_parallelism={jax.device_count()}"]
+    argv = list(argv) + get_decoupled_parallelism_overrides(as_argv=True)
 
     # Setup necessary inputs to build a model state
     config = pyconfig.initialize(argv)

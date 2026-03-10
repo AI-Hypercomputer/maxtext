@@ -11,39 +11,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Mixture of Experts (MoE) tests. """
+"""Mixture of Experts (MoE) tests."""
 
-import os.path
 import unittest
 
-import pytest
-
+from flax import nnx
+import flax.linen as nn
+from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
-import flax.linen as nn
-from flax import nnx
-from flax.linen import partitioning as nn_partitioning
-
+from maxtext.configs import pyconfig
+from maxtext.common.common_types import Config, DType
+from maxtext.layers import linears
+from maxtext.layers import moe
+from maxtext.layers import nnx_wrappers
+from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
+from maxtext.layers.quantizations import Fp8Quantization
 from maxtext.utils import maxtext_utils
-from maxtext.common.gcloud_stub import is_decoupled
-from MaxText import pyconfig
-from MaxText.common_types import Config, DType
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import linears
-from MaxText.layers import moe
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
-from MaxText.layers.quantizations import Fp8Quantization
-from MaxText.layers import nnx_wrappers
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+import pytest
 
 
 class TokenDroppingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="token_dropping_test",
@@ -209,7 +203,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="deepseek_routing_test",
@@ -687,7 +681,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_expert_context_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_ep_cp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -720,7 +714,7 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_expert_tensor_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
         run_name="moe_block_megablox_ep_tp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",

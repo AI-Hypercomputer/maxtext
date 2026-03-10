@@ -1,0 +1,70 @@
+{
+  "Activation Sharding Dump": [
+    {
+      "attentions/inputs_q: bfloat16[192,2048,2880]": {
+        "logic_axes": "('activation_batch', 'activation_attn_length_no_exp', 'activation_attn_embed')",
+        "PartitionSpec": "P('fsdp', None, None)"
+      }
+    },
+    {
+      "attentions/inputs_kv: bfloat16[192,2048,2880]": {
+        "logic_axes": "('activation_batch', 'activation_attn_length_no_exp', 'activation_attn_embed')",
+        "PartitionSpec": "P('fsdp', None, None)"
+      }
+    },
+    {
+      "attentions/query: bfloat16[192,2048,64,64]": {
+        "logic_axes": "('activation_kv_batch', 'activation_attn_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P('fsdp', None, None, None)"
+      }
+    },
+    {
+      "attentions/key: bfloat16[192,2048,8,64]": {
+        "logic_axes": "('activation_kv_batch', 'activation_attn_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P('fsdp', None, None, None)"
+      }
+    },
+    {
+      "attentions/value: bfloat16[192,2048,8,64]": {
+        "logic_axes": "('activation_kv_batch', 'activation_attn_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P('fsdp', None, None, None)"
+      }
+    },
+    {
+      "attention_op/query: bfloat16[192,64,2048,64]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P('fsdp', None, None, None)"
+      }
+    },
+    {
+      "attention_op/key: bfloat16[192,8,2048,64]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P('fsdp', None, None, None)"
+      }
+    },
+    {
+      "attention_op/value: bfloat16[192,8,2048,64]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P('fsdp', None, None, None)"
+      }
+    },
+    {
+      "attentions/out: bfloat16[192,2048,64,64]": {
+        "logic_axes": "('activation_batch', 'activation_attn_length_no_exp', 'activation_heads', 'activation_kv')",
+        "PartitionSpec": "P('fsdp', None, None, None)"
+      }
+    },
+    {
+      "moe/inputs: bfloat16[192,2048,2880]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', None)",
+        "PartitionSpec": "P('fsdp', None, None)"
+      }
+    },
+    {
+      "moe/gate_logits: bfloat16[192,2048,32]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', None)",
+        "PartitionSpec": "P('fsdp', None, None)"
+      }
+    }
+  ]
+}

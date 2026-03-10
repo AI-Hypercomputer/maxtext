@@ -53,7 +53,7 @@ CMD="export HF_TOKEN=${HF_TOKEN} && \
      pip install --upgrade pip && \
      pip install -r benchmarks/api_server/requirements.txt && \
      bash benchmarks/api_server/start_server.sh \
-        MaxText/configs/base.yml \
+        maxtext/configs/base.yml \
         model_name=\"${MODEL_NAME}\" \
         tokenizer_path=\"${TOKENIZER_PATH}\" \
         load_parameters_path=\"${LOAD_PARAMETERS_PATH}\" \

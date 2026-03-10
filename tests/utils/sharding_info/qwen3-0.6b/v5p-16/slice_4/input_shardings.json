@@ -1,0 +1,64 @@
+{
+  "Activation Sharding Dump": [
+    {
+      "attentions/inputs_q: bfloat16[384,2048,1024]": {
+        "logic_axes": "('activation_batch', 'activation_attn_length_no_exp', 'activation_attn_embed')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "attentions/inputs_kv: bfloat16[384,2048,1024]": {
+        "logic_axes": "('activation_batch', 'activation_attn_length_no_exp', 'activation_attn_embed')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    },
+    {
+      "attentions/query: bfloat16[384,2048,16,128]": {
+        "logic_axes": "('activation_kv_batch', 'activation_attn_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attentions/key: bfloat16[384,2048,8,128]": {
+        "logic_axes": "('activation_kv_batch', 'activation_attn_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attentions/value: bfloat16[384,2048,8,128]": {
+        "logic_axes": "('activation_kv_batch', 'activation_attn_length_no_exp', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_op/query: bfloat16[384,16,2048,128]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_op/key: bfloat16[384,8,2048,128]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attention_op/value: bfloat16[384,8,2048,128]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "attentions/out: bfloat16[384,2048,16,128]": {
+        "logic_axes": "('activation_batch', 'activation_attn_length_no_exp', 'activation_heads', 'activation_kv')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None, None)"
+      }
+    },
+    {
+      "linears/x: bfloat16[384,2048,3072]": {
+        "logic_axes": "('activation_batch', 'activation_length_no_exp', 'activation_mlp')",
+        "PartitionSpec": "P(('data', 'fsdp'), None, None)"
+      }
+    }
+  ]
+}

@@ -34,9 +34,9 @@ from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
 
-from MaxText import pyconfig
-from MaxText.layers import attentions, moe, embeddings
-from MaxText.layers.initializers import nd_dense_init
+from maxtext.configs import pyconfig
+from maxtext.layers import attentions, moe, embeddings
+from maxtext.layers.initializers import nd_dense_init
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 

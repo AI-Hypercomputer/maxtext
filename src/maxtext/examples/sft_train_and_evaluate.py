@@ -21,11 +21,19 @@ The primary goal is to demonstrate the end-to-end process of:
 
 ## Example command to run on single-host TPU:
 ```
-# Install dependencies in virtual environment:
-# https://maxtext.readthedocs.io/en/latest/install_maxtext.html#from-pypi-recommended
 
-# Install post-training dependencies in virtual environment:
-bash tools/setup/setup_post_training_requirements.sh
+# Create a virtual environment
+export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
+pip install uv
+uv venv --python 3.12 --seed $VENV_NAME
+source $VENV_NAME/bin/activate
+
+# Run the following commands to get all the necessary installations.
+
+uv pip install maxtext[tpu-post-train] --resolution=lowest
+install_maxtext_tpu_post_train_extra_deps
+
+
 
 # Environment configurations
 export RUN_NAME=$(date +%Y-%m-%d-%H-%M-%S)
@@ -35,7 +43,7 @@ export TOKENIZER_PATH=meta-llama/Llama-3.1-8B-Instruct
 export MODEL_CHECKPOINT_PATH=<GCS path to model checkpoint>
 export HF_ACCESS_TOKEN=<Hugging Face access token>
 
-python3 -m maxtext.examples.sft_train_and_evaluate MaxText/configs/sft.yml \
+python3 -m maxtext.examples.sft_train_and_evaluate maxtext/configs/post_train/sft.yml \
   run_name=$RUN_NAME base_output_directory=$OUTPUT_PATH \
   model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH \
   hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH
@@ -67,7 +75,7 @@ xpk workload create \
 --workload=sft-${RUN_NAME} \
 --tpu-type ${TPU_TYPE} --num-slices=1 --zone=${ZONE} \
 --project=${PROJECT} \
---command "HF_TOKEN=$HF_ACCESS_TOKEN python3 -m maxtext.examples.sft_train_and_evaluate MaxText/configs/sft.yml \
+--command "HF_TOKEN=$HF_ACCESS_TOKEN python3 -m maxtext.examples.sft_train_and_evaluate maxtext/configs/post_train/sft.yml \
   run_name=$RUN_NAME base_output_directory=$OUTPUT_PATH \
     model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH \
       hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH"
@@ -78,7 +86,6 @@ from absl import app
 from tqdm.auto import tqdm
 from typing import Sequence
 
-import datasets
 import grain
 import os
 import re
@@ -86,10 +93,10 @@ import transformers
 
 from flax import nnx
 
-from MaxText.globals import MAXTEXT_REPO_ROOT
-from MaxText import pyconfig
-from MaxText.input_pipeline import instruction_data_processing
-from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.configs import pyconfig
+from maxtext.utils.globals import MAXTEXT_REPO_ROOT
+from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.input_pipeline import instruction_data_processing
 from maxtext.trainers.post_train.sft import train_sft
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -140,6 +147,8 @@ def get_test_dataset(config, tokenizer):
     A grain.MapDataset instance for the test split, with prompts and target
     answers.
   """
+  import datasets  # pylint: disable=import-outside-toplevel
+
   template_config = instruction_data_processing.load_template_from_file(config.chat_template_path)
   dataset = datasets.load_dataset(
       DATASET_NAME,
@@ -300,6 +309,7 @@ def create_vllm_rollout(config, model, mesh, tokenizer):
           rollout_vllm_hbm_utilization=0.2,
           rollout_vllm_init_with_random_weights=True,
           rollout_vllm_tpu_backend_type="jax",
+          data_type="bfloat16",
       ),
   )
 

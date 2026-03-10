@@ -33,7 +33,7 @@ export HF_TOKEN=<your_hugging_face_token>
 
 The primary way to launch the API server is by using the `start_server.sh` script. This script ensures that the server is run from the project's root directory, which is necessary for the Python interpreter to find all the required modules.
 
-The script takes the path to a base configuration file (e.g., `MaxText/configs/base.yml`) followed by any number of model-specific configuration overrides.
+The script takes the path to a base configuration file (e.g., `maxtext/configs/base.yml`) followed by any number of model-specific configuration overrides.
 
 ### Benchmarking Configuration
 
@@ -56,7 +56,7 @@ Here is an example of how to launch the server with a `qwen3-30b-a3b` model, con
 # Make sure you are in the root directory of the maxtext project.
 
 bash benchmarks/api_server/start_server.sh \
-    MaxText/configs/base.yml \
+    maxtext/configs/base.yml \
     model_name="qwen3-30b-a3b" \
     tokenizer_path="Qwen/Qwen3-30B-A3B-Thinking-2507" \
     load_parameters_path="<path_to_your_checkpoint>" \
@@ -135,7 +135,7 @@ CMD="export HF_TOKEN=${HF_TOKEN} && \
      pip install --upgrade pip && \
      pip install -r benchmarks/api_server/requirements.txt && \
      bash benchmarks/api_server/start_server.sh \
-        MaxText/configs/base.yml \
+        maxtext/configs/base.yml \
         model_name="${MODEL_NAME}" \
         tokenizer_path="${TOKENIZER_PATH}" \
         load_parameters_path="${LOAD_PARAMETERS_PATH}" \

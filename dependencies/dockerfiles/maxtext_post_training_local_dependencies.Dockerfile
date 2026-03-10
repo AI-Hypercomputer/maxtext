@@ -21,26 +21,28 @@ ENV MODE=$MODE
 RUN echo "Installing Post-Training dependencies (tunix, vLLM, tpu-inference) with MODE=${MODE}"
 RUN pip uninstall -y jax jaxlib libtpu
 
-RUN pip install aiohttp==3.12.15
+RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv pip install aiohttp==3.12.15
 
 # Install Python packages that enable pip to authenticate with Google Artifact Registry automatically.
-RUN pip install keyring keyrings.google-artifactregistry-auth
+RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv pip install keyring keyrings.google-artifactregistry-auth
 
-RUN pip install numba==0.61.2
+RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv pip install numba==0.61.2
 
 COPY tunix /tunix
 RUN pip uninstall -y google-tunix
-RUN pip install -e /tunix --no-cache-dir
+RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv pip install -e /tunix
 
 COPY vllm /vllm
-RUN VLLM_TARGET_DEVICE="tpu" pip install -e /vllm --no-cache-dir
+RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv VLLM_TARGET_DEVICE="tpu" pip install -e /vllm
 
 COPY tpu-inference /tpu-inference
-RUN pip install -e /tpu-inference --no-cache-dir
+RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv pip install -e /tpu-inference
 
-RUN pip install --no-deps qwix==0.1.4
+RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv pip install --no-deps qwix==0.1.4
 
-RUN if [ "$MODE" = "post-training-experimental" ]; then \
+RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv pip install math-verify==0.9.0
+
+RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv if [ "$MODE" = "post-training-experimental" ]; then \
     echo "MODE=post-training-experimental: Re-installing JAX/libtpu"; \
     pip uninstall -y jax jaxlib libtpu && \
     pip install --pre -U jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ && \

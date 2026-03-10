@@ -1,0 +1,43 @@
+base_config: "inference/inference_jetstream.yml"
+
+# tensor = 8, autoregressive=2
+# per_device_batch_size=6
+# weight bf16, kv cache bf16
+
+model_name: "llama2-70b"
+sharding_strategy: "experimental"
+attention: 'dot_product'
+allow_split_physical_axes: True
+# Used to replicate the quantization scale to avoid the inefficient XLA fusion.
+replicate_quant_scale: True
+
+logical_axis_rules: [
+                      ['embed', []],
+                      ['vocab', ['tensor', 'autoregressive']],
+                      ['activation_batch', []],
+                      ['activation_length', []],
+                      ['activation_embed', []],
+                      ['activation_vocab', ['tensor']],
+                      ['heads', ['tensor', 'autoregressive']],
+                      ['kv', []],
+                      # TODO: fix the wrong XLA ops for the following sharding.
+                      # ['q_heads', ['tensor', 'autoregressive']],
+                      # ['kv_head_dim', ['autoregressive']],
+                      ['q_heads', ['tensor']],
+                      ['kv_heads', ['tensor']],
+                      ['kv_head_dim', []],
+                      ['activation_prefill_kv_batch', []],
+                      ['activation_kv_batch', ['autoregressive']],
+                      ['activation_kv_heads', ['tensor']],
+                      ['activation_kv_head_dim', []],
+                      ['activation_heads', ['tensor']],
+                      ['activation_kv', ['tensor', 'autoregressive']],
+                      ['norm', []],
+                      ['mlp', ['tensor', 'autoregressive']],
+                      ['activation_mlp', ['tensor', 'autoregressive']],
+                      ['cache_batch_prefill', []],
+                      ['cache_batch', ['autoregressive']],
+                      ['cache_sequence', []],
+                      ['cache_heads', ['tensor']],
+                      ['cache_kv', []],
+                    ]
