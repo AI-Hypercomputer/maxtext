@@ -52,26 +52,6 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 # ==============================================================================
 # Helper Functions
 # ==============================================================================
-def _normalize_vllm_state(vllm_state):
-  """Normalize vLLM state to provide consistent interface.
-  
-  Args:
-    vllm_state: Either an NNX State object (JAX backend) or a dictionary (Torchax backend)
-    
-  Returns:
-    State object with flat_state() method
-  """
-  # Check if it's already an NNX state with flat_state method
-  if hasattr(vllm_state, 'flat_state') and callable(vllm_state.flat_state):
-    return vllm_state
-  # Otherwise, assume it's a dictionary from Torchax backend
-  elif isinstance(vllm_state, dict):
-    return DictStateAdapter(vllm_state)
-  else:
-    raise TypeError(
-      f"Unsupported vLLM state type: {type(vllm_state)}. "
-      "Expected NNX State (JAX backend) or dict (Torchax backend)."
-    )
 
 def _show_hbm_usage():
   """Displays memory usage per device."""
@@ -226,7 +206,6 @@ config_ref = pyconfig.initialize(
     ici_fsdp_parallelism=1,
     ici_tensor_parallelism=4,
     override_model_config="true",
-    # base_num_decoder_layers=2,
 )
 
 # Create the MaxText model
