@@ -34,7 +34,7 @@ from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIG
 from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
 
 _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
-_XPROF_PATH="/home/wyzhang_google_com/mnt/xprof"
+_XPROF_PATH="/home/hengtaoguo_google_com/mnt/xprof"
 
 jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
 jax_config.update("jax_persistent_cache_min_entry_size_bytes", -1)
@@ -167,8 +167,8 @@ golden_llm = LLM(
   VLLM_MODEL_PATH,
   max_model_len=16,
   tensor_parallel_size=4,
-  gpu_memory_utilization=0.25,  # Limit to 40% memory per device
-  download_dir="/home/wyzhang_google_com/ckpt/hf",
+  gpu_memory_utilization=0.4,  # Limit to 40% memory per device
+  # download_dir="/home/wyzhang_google_com/ckpt/hf",
 )
 dst_golden_state = golden_llm.llm_engine.model_executor.driver_worker.model_runner.state
 
@@ -183,7 +183,7 @@ print("="*80)
 
 # Find base.yml config path
 HOME = os.path.expanduser("~")
-path1 = "/home/wyzhang_google_com/mnt/rl/maxtext/src/maxtext/configs/base.yml"
+path1 = "/home/hengtaoguo_google_com/projects/maxtext/src/maxtext/configs/base.yml"
 path2 = os.path.join(HOME, "mnt/rl/maxtext/src/maxtext/configs/base.yml")
 if os.path.exists(path1):
   BASE_YAML_PATH = path1
@@ -197,7 +197,7 @@ else:
 # Initialize MaxText config
 config_ref = pyconfig.initialize(
     [ "", BASE_YAML_PATH, ],
-    base_output_directory="gs://wyzhang-dev/tmp",  # Not used in Tunix.
+    base_output_directory="gs://hengtaoguo-maxtext-logs/tmp",  # Not used in Tunix.
     run_name="test-tunix-maxtext-qwen3-8b",
     tokenizer_type="huggingface",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "qwen3-tokenizer"),
@@ -223,7 +223,7 @@ config_ref = pyconfig.initialize(
     query_proj="offload",
     key_proj="offload",
     value_proj="offload",
-    ici_fsdp_parallelism=2,
+    ici_fsdp_parallelism=1,
     ici_tensor_parallelism=4,
     override_model_config="true",
     # base_num_decoder_layers=2,
