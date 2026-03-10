@@ -91,7 +91,8 @@ class MaxTextCheckpointManagerTest(absltest.TestCase):
     )
 
     # Create dummy model so 'model_params' is not empty
-    model = DummyModel(nnx.Rngs(0))
+    model = mock.Mock()
+    model.student_model = DummyModel(nnx.Rngs(0))
 
     # Mock jax.process_index/count to simulate single host
     with mock.patch.object(jax, "process_index", return_value=0), mock.patch.object(jax, "process_count", return_value=1):
