@@ -69,9 +69,7 @@ actual values.
 
 ```bash
 # -- Model configuration --
-export HF_MODEL=<Hugging Face Model> # e.g. 'llama3.1-70b-Instruct'
-export MODEL=<MaxText Model> # e.g. 'llama3.1-70b'
-export TOKENIZER=<Tokenizer> # e.g. 'meta-llama/Llama-3.1-70B-Instruct'
+export MODEL=<MaxText Model> # e.g. 'llama3.1-70b-Instruct'
 export HF_TOKEN=<Hugging Face access token>
 
 # -- MaxText configuration --
@@ -200,7 +198,6 @@ xpk workload create-pathways --workload ${WORKLOAD?} \
 --command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
 python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL?} \
-  tokenizer_path=${TOKENIZER?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${WORKLOAD?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
@@ -218,7 +215,6 @@ xpk workload create-pathways --workload ${WORKLOAD?} \
 --command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
 python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL?} \
-  tokenizer_path=${TOKENIZER?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${WORKLOAD?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \

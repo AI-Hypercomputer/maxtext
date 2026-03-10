@@ -43,13 +43,17 @@ install_maxtext_tpu_post_train_extra_deps
 
 ## Setup environment variables
 
+Follow the instructions [here](https://huggingface.co/docs/huggingface_hub/v0.21.2/guides/cli) to login to Hugging Face using your access token using
+
+```bash
+huggingface-cli login
+```
+
 Set the following environment variables before running SFT.
 
 ```sh
 # -- Model configuration --
-export PRE_TRAINED_MODEL=<model name> # e.g., 'llama3.1-8b'
-export PRE_TRAINED_MODEL_TOKENIZER=<tokenizer path> # e.g., 'meta-llama/Llama-3.1-8B-Instruct'
-export HF_TOKEN=<Hugging Face access token>
+export PRE_TRAINED_MODEL=<model name> # e.g., 'llama3.1-8b-Instruct'
 
 # -- MaxText configuration --
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
@@ -93,8 +97,6 @@ python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_tr
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     model_name=${PRE_TRAINED_MODEL?} \
     load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH?} \
-    hf_access_token=${HF_TOKEN?} \
-    tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER?} \
     per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
     steps=${STEPS?} \
     hf_path=${DATASET_NAME?} \

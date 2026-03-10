@@ -18,7 +18,7 @@ Orbax checkpoint.
 
 Key Parameters (to be set in the config file or as command-line overrides):
   model_name: (Required) The name of the model to convert (e.g., "gemma2-2b").
-              Must be a key in `maxtext.checkpoint_conversion.utils.utils.HF_IDS`.
+              Must be a key in `maxtext.utils.globals.HF_IDS`.
   base_output_directory: (Optional) The directory where the converted HuggingFace
                          checkpoint will be saved. Can be a local path, a GCS
                          path (gs://...), or a HuggingFace Hub repo ID (hf://...).
@@ -30,7 +30,7 @@ Key Parameters (to be set in the config file or as command-line overrides):
              Defaults to False.
   --hf_model_path: (Optional) Specifies a local or remote directory containing the model weights.
       If unspecified, we use the default Hugging Face repository ID
-      (e.g., openai/gpt-oss-20b; see `HF_IDS[model_name]` in `utils/ckpt_conversion/utils`).
+      (e.g., openai/gpt-oss-20b; see `HF_IDS[model_name]` in `maxtext.utils.globals`).
       This is necessary for locally dequantized models like GPT-OSS or DeepSeek.
 
 Environment Variables:
@@ -74,11 +74,12 @@ from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from maxtext.checkpoint_conversion.utils.utils import HF_IDS, MemoryMonitorTqdm, apply_hook_fns, get_hf_model, print_peak_memory, print_ram_usage, validate_and_filter_param_map_keys
+from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, apply_hook_fns, get_hf_model, print_peak_memory, print_ram_usage, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging, max_utils, maxtext_utils
+from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
 from safetensors import safe_open
@@ -155,7 +156,12 @@ class LazyHFLoader:
     if self.is_local:
       index_path = os.path.join(self.model_id, index_file)
     else:
-      index_path = hf_hub_download(repo_id=self.model_id, filename=index_file, token=self.token, revision=self.revision)
+      index_path = hf_hub_download(
+          repo_id=self.model_id,
+          filename=index_file,
+          token=self.token,
+          revision=self.revision,
+      )
     with open(index_path, "r", encoding="utf-8") as f:
       index_data = json.load(f)
     self.shard_map = index_data["weight_map"]
@@ -185,7 +191,12 @@ class LazyHFLoader:
     else:
       # STEP 1: Download outside the lock.
       # multiple threads can download different shards at the same time.
-      local_path = hf_hub_download(repo_id=self.model_id, filename=shard_name, token=self.token, revision=self.revision)
+      local_path = hf_hub_download(
+          repo_id=self.model_id,
+          filename=shard_name,
+          token=self.token,
+          revision=self.revision,
+      )
 
     # STEP 2: Lock ONLY the reading into RAM.
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
@@ -200,7 +211,13 @@ class LazyTensor:
   and transformation until __array__ is called (e.g., by Orbax during save).
   """
 
-  def __init__(self, load_fn: Callable[[], np.ndarray], shape: tuple, dtype, name: str = "unknown"):
+  def __init__(
+      self,
+      load_fn: Callable[[], np.ndarray],
+      shape: tuple,
+      dtype,
+      name: str = "unknown",
+  ):
     self._load_fn = load_fn
     self.shape = shape
     self.dtype = np.dtype(dtype)
@@ -421,7 +438,13 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
     def _loader(getter, key, shape, hook):
       return apply_hook_fns(getter(key), shape, hook)
 
-    load_fn = partial(_loader, tensor_getter, hf_source_keys_or_key, mt_target_shape_or_shapes, hook_fn)
+    load_fn = partial(
+        _loader,
+        tensor_getter,
+        hf_source_keys_or_key,
+        mt_target_shape_or_shapes,
+        hook_fn,
+    )
   # Stacked mapping
   elif not isinstance(hf_source_keys_or_key[0], list):
     # Case 2 or 3: Single-Axis Stacked hf keys (un-nested list)
@@ -516,7 +539,12 @@ def _get_maxtext_weight(
     # to load the tensor later (the `load_fn`, shape, dtype).
     # The actual data will only be loaded when Orbax calls `__array__`
     # on this object during the saving process.
-    final_mt_tensor_numpy = LazyTensor(load_fn, mt_target_shape_or_shapes, config.weight_dtype, name=mt_param_key_or_keys)
+    final_mt_tensor_numpy = LazyTensor(
+        load_fn,
+        mt_target_shape_or_shapes,
+        config.weight_dtype,
+        name=mt_param_key_or_keys,
+    )
     if not is_composite_mt_key:
       # Case 2.1: Lazy mode, `atomic_mt_key`
       final_mt_weights[mt_target_idx_or_indices] = final_mt_tensor_numpy
@@ -562,7 +590,10 @@ def main(
 
   # check the supported model ids
   if model_name_original not in HF_IDS:
-    raise ValueError(f"Unsupported model name: {model_name_original}. Supported models are: {list(HF_IDS.keys())}")
+    raise ValueError(
+        f"Unsupported model name: {model_name_original}.\
+                      Supported models are: {list(HF_IDS.keys())}"
+    )
 
   model_id = hf_model_path or HF_IDS[model_name_original]
 
@@ -633,7 +664,11 @@ def main(
   filtered_map_keys = validate_and_filter_param_map_keys(param_map_mt_to_hf.keys(), maxtext_abstract_dict.keys())
 
   for mt_param_key_or_keys in MemoryMonitorTqdm(
-      filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
+      filtered_map_keys,
+      desc="Transforming weights",
+      unit="param",
+      leave=True,
+      dynamic_ncols=True,
   ):
     if not lazy_load_tensors:
       max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
@@ -651,7 +686,13 @@ def main(
 
     # Step 2: Determine the loading function for hf key
     # based on hf_key form (unscanned, scanned, unscanned with expert stacking, or scanned with expert stacking)
-    load_fn = _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape_or_shapes, config)
+    load_fn = _get_hf_loading_function(
+        hf_source_keys_or_key,
+        tensor_getter,
+        hook_fn,
+        mt_target_shape_or_shapes,
+        config,
+    )
 
     # Step 3: Load hf keys and convert to maxtext keys
     # based on tensor load mode (lazy, eager) and MaxText key form (`atomic_mt_key` or `composite_mt_key`)
@@ -710,9 +751,13 @@ if __name__ == "__main__":
       default=False,
       help="Whether to use lazy loading of HF tensors.",
   )
-  # If not specified, default to maxtext.checkpoint_conversion.utils.utils.HF_IDS[model_name]
+  # If not specified, default to maxtext.utils.globals.HF_IDS[model_name]
   parser.add_argument(
-      "--hf_model_path", type=str, required=False, default="", help="local path to hf model, or custom remote hf repo"
+      "--hf_model_path",
+      type=str,
+      required=False,
+      default="",
+      help="local path to hf model, or custom remote hf repo",
   )
   # Determines the logical sharding of the output checkpoint by partitioning
   # weights across virtual XLA devices.
@@ -730,7 +775,11 @@ if __name__ == "__main__":
   parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
 
   parser.add_argument(
-      "--revision", type=str, required=False, default=None, help="Specific Hugging Face revision (branch/tag/commit)"
+      "--revision",
+      type=str,
+      required=False,
+      default=None,
+      help="Specific Hugging Face revision (branch/tag/commit)",
   )
 
   # Parse local arguments
