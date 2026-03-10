@@ -14,12 +14,13 @@
 
 """Tests for pyconfig."""
 
-import unittest
 import os.path
+import tempfile
+import unittest
 
 from maxtext.configs import pyconfig
 from maxtext.configs.pyconfig import resolve_config_path
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
 
 
@@ -100,6 +101,19 @@ class PyconfigTest(unittest.TestCase):
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
     self.assertEqual(resolve_config_path(__file__), __file__)
+
+  def test_resolve_config_path_pip_install(self):
+    """Simulates pip-installed env where cwd has no src/ folder."""
+    orig = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmpdir:
+      try:
+        os.chdir(tmpdir)
+        result = resolve_config_path("src/maxtext/configs/base.yml")
+        self.assertEqual(result, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"))
+        result = resolve_config_path("src/maxtext/configs/post_train/rl.yml")
+        self.assertEqual(result, os.path.join(MAXTEXT_CONFIGS_DIR, "post_train/rl.yml"))
+      finally:
+        os.chdir(orig)
 
 
 if __name__ == "__main__":
