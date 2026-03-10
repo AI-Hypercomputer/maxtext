@@ -843,8 +843,8 @@ class TransformerEngineQuantization(Quantization):
 
   def einsum(self, *args, **kwargs):
     """Placeholder for einsum implementation in subclasses."""
-    import transformer_engine.jax.flax as te_flax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-    return te_flax.make_einsum_cls(quantization_recipe=self._recipe)
+    # quant.einsum is only required for MoE or for inference with KVCache.
+    raise ValueError("Einsum is not yet supported for TransformerEngine quantization.")
 
   def gmm(self, inputs, kernel, tiling, group_sizes, expert_assignments):
     """ Grouped GEMM """
