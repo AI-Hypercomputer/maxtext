@@ -96,20 +96,6 @@ jobs:
 
             papermill "$notebook" "$output_name" -k maxtext_venv
           done
-      - name: Record Commit IDs
-        shell: bash
-        run: |
-          echo "--- MaxText and Post-Training Repositories Commit IDs ---"
-          echo "maxtext: ${GITHUB_SHA:0:7}"
-
-          declare -a repos=("tunix" "vllm" "tpu-inference")
-          for repo_dir in "${repos[@]}"; do
-            if [ -d "$repo_dir" ]; then
-              echo "$repo_dir: $(git -C "$repo_dir" rev-parse --short HEAD)"
-            else
-              echo "Warning: $repo_dir directory not found."
-            fi
-          done
       - name: Upload Outputs
         if: always()
         uses: actions/upload-artifact@v4

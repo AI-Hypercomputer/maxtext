@@ -122,20 +122,24 @@ gcloud auth configure-docker
 docker run hello-world
 ```
 
-### Option 1: Install stable releases of post-training dependencies
+### Option 1: From PyPI releases (Recommended)
 
-> **Caution:** RL in MaxText is currently broken with stable releases of
-> post-training dependencies. We are working on fixing this and recommend
-> following
-> [Option 2: Install from Git repositories of post-training dependencies](#option-2-install-from-git-repositories-of-post-training-dependencies)
-> in the meantime.
+Get the latest stable release of MaxText from PyPI. This will automatically pull
+compatible versions of post-training dependencies, such as [Tunix](https://github.com/google/tunix),
+[vLLM](https://github.com/vllm-project/vllm), and
+[tpu-inference](https://github.com/vllm-project/tpu-inference).
+
+```bash
+git clone https://github.com/AI-Hypercomputer/maxtext.git
+cd maxtext
+
+# checkout the latest stable release here: https://pypi.org/project/maxtext/
+export MAXTEXT_VERSION=0.2.0
+git checkout maxtext-v${MAXTEXT_VERSION?}
+```
 
 Run the following script to create a Docker image with stable releases of
-MaxText, [Tunix](https://github.com/google/tunix),
-[vLLM](https://github.com/vllm-project/vllm), and
-[tpu-inference](https://github.com/vllm-project/tpu-inference) dependencies.
-This installs `vllm-tpu` which provides TPU inference for vLLM with unified JAX
-and PyTorch support. The build process takes approximately 10-15 minutes.
+MaxText, and its post-training dependencies. The build process takes approximately 10-15 minutes.
 
 ```bash
 bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
@@ -147,34 +151,15 @@ For experimental features (such as improved pathwaysutils resharding API), use:
 bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training-experimental
 ```
 
-### Option 2: Install from Git repositories of post-training dependencies
+### Option 2: From Github
 
-You can also locally clone the [tunix](https://github.com/google/tunix),
-[tpu-inference](https://github.com/vllm-project/tpu-inference), and
-[vllm](https://github.com/vllm-project/vllm.git) repositories and then build the
-docker image with these local sources. To get a set of compatible commit IDs for
-`maxtext`, `tunix`, `tpu-inference`, and `vllm`, follow these steps:
-
-1. Navigate to the
-   [MaxText Package Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/build_and_test_maxtext.yml?query=event%3Aschedule)
-   GitHub Actions workflow.
-
-2. Select the latest successful run.
-
-3. Within the workflow run, find and click on the `maxtext_jupyter_notebooks (py312)` job, then expand the `run` job.
-
-4. Locate the `Record Commit IDs` step. The commit SHAs for `maxtext`, `tunix`,
-   `tpu-inference`, and `vllm` that were used in that successful run are listed
-   in the logs of this step.
-
-5. Prior to installation, ensure that the `maxtext`, `tunix`, `vllm`, and `tpu-inference` repositories are synchronized to the specific commits recorded from the CI logs. For each repository, use the following command to switch to the correct commit: `git checkout <commit_id>`.
-
-**Note:** Clone these repositories as siblings of the `maxtext` directory (e.g.,
-in the same parent directory). After cloning, run the build from inside the
-`maxtext` repository so it picks up the local sources:
+For using a version newer than the latest PyPI release, you could also build the Docker image with the latest vetted versions of post-training dependencies and MaxText in the following way:
 
 ```bash
-bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training POST_TRAINING_SOURCE=local
+git clone https://github.com/AI-Hypercomputer/maxtext.git
+cd maxtext
+
+bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
 ```
 
 ### Upload the Docker Image
