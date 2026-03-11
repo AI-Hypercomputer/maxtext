@@ -1377,7 +1377,14 @@ class RoutedMoE(nnx.Module):
     def gmm(
         inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes
     ):
-      use_te_gmm = self.config.quantization and self.config.quantization.startswith("te_")
+      use_te_gmm = self.config.te_use_gmm
+      if use_te_gmm:
+            assert not self.config.megablox and not self.config.use_tokamax_gmm, "TE GMM is only supported when Megablox and Tokamax GMM are disabled."
+            assert self.config.quantization and self.config.quantization.startswith("te_"), "TE GMM currently requires TE quantization."
+            # TODO(jberchtold): Adjust this based on TE GMM requirements per recipe
+            TE_GMM_ALIGN_REQUIREMENT = 128
+            assert self.config.te_permutation_impl and self.config.te_permutation_align_size % TE_GMM_ALIGN_REQUIREMENT == 0 and self.config.te_permutation_align_size > 0, f"TE GMM currently requires TE permutation with alignment (te_permutation_align_size > 0 and multiple of {TE_GMM_ALIGN_REQUIREMENT})."
+
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -1397,7 +1404,6 @@ class RoutedMoE(nnx.Module):
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
-      assert not use_te_gmm or (not self.config.megablox and not self.config.use_tokamax_gmm), "TE GMM is only supported when Megablox and Tokamax GMM are disabled."
       if not self.config.megablox and not self.config.use_tokamax_gmm:
         tiling = (
             min(tiling[0], m),

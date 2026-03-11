@@ -191,6 +191,7 @@ use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backw
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
 te_permutation_impl: false # whether to use TransformerEngine permutation kernels for MoE token dispatch/combine
 te_permutation_align_size: 128 # alignment size for TE permutation padding, set to 0 to disable padding
+te_use_gmm: false # whether to use the TE GMM implementation for MoE matmuls
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
 # tokamax ragged dot - supports all 18 configs
