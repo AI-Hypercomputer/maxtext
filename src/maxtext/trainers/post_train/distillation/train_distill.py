@@ -204,6 +204,8 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     self.strategy = strategy
 
     # override optimizer to only use student_model.
+    if training_config.gradient_accumulation_steps is not None and training_config.gradient_accumulation_steps > 1:
+      optimizer = optax.MultiSteps(optimizer, training_config.gradient_accumulation_steps)
     wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(model.student_model, optimizer, wrt=wrt)
 
@@ -457,7 +459,8 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   )
 
   # 4. Optimizer & Config
-  optimizer = get_distillation_optimizer(student_config, student_config.steps)
+  total_updates = student_config.steps // student_config.gradient_accumulation_steps
+  optimizer = get_distillation_optimizer(student_config, total_updates)
 
   checkpointing_options = checkpoint.CheckpointManagerOptions(
       save_interval_steps=student_config.checkpoint_period,
@@ -486,6 +489,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
       profiler_options=profiler_options,
       checkpoint_root_directory=student_config.checkpoint_dir,
       checkpointing_options=checkpointing_options,
+      gradient_accumulation_steps=student_config.gradient_accumulation_steps,
   )
 
   # 5. Data Iterators (Init BEFORE Trainer)
