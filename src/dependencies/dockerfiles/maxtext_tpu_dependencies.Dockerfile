@@ -37,7 +37,7 @@ ENV ENV_DEVICE=$DEVICE
 
 ENV MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets
 ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/tests/assets
-ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
+ENV MAXTEXT_PKG_DIR=/deps/src/maxtext
 ENV MAXTEXT_REPO_ROOT=/deps
 
 # Set the working directory in the container
@@ -47,7 +47,7 @@ WORKDIR /deps
 COPY tools/setup tools/setup/
 COPY src/dependencies/requirements/ src/dependencies/requirements/
 COPY src/install_maxtext_extra_deps/ src/install_maxtext_extra_deps/
-COPY src/MaxText/integration/vllm/ src/MaxText/integration/vllm/
+COPY src/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 
 # Copy the custom libtpu.so file if it exists inside maxtext repository
 COPY libtpu.so* /root/custom_libtpu/
