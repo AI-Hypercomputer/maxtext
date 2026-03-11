@@ -20,8 +20,43 @@
 
 # For instructions on building the MaxText Docker image, please refer to the https://maxtext.readthedocs.io/en/latest/build_maxtext.html.
 
-PACKAGE_DIR="${PACKAGE_DIR:-src}"
-echo "PACKAGE_DIR: $PACKAGE_DIR"
+# Build docker image with stable dependencies
+## bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=stable
+
+# Build docker image with nightly dependencies
+## bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=nightly
+
+# Build docker image with stable dependencies and, a pinned JAX_VERSION for TPUs
+## bash src/dependencies/scripts/docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
+
+# Build docker image with a pinned JAX_VERSION and, a pinned LIBTPU_VERSION for TPUs
+## bash src/dependencies/scripts/docker_build_dependency_image.sh MODE={{stable|nightly}} JAX_VERSION=0.8.1 LIBTPU_VERSION=0.0.31.dev20251119+nightly
+
+# Build docker image with a custom libtpu.so for TPUs
+# Note: libtpu.so file must be present in the root directory of the MaxText repository
+## bash src/dependencies/scripts/docker_build_dependency_image.sh MODE={{stable|nightly}}
+
+# Build docker image with nightly dependencies and, a pinned JAX_VERSION for GPUs
+# Available versions listed at https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/jax
+## bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109
+
+# ==================================
+# POST-TRAINING BUILD EXAMPLES
+# ==================================
+
+# Build docker image with post-training dependencies
+## bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
+
+if [ "${BASH_SOURCE-}" ]; then
+  this_file="${BASH_SOURCE[0]}"
+elif [ "${ZSH_VERSION-}" ]; then
+  # shellcheck disable=SC2296
+  this_file="${(%):-%x}"
+else
+  this_file="${0}"
+fi
+
+MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(CDPATH='' cd -- "$(dirname -- "${this_file}")"'/../../..' && pwd)}"
 
 # Enable "exit immediately if any command fails" option
 set -e
@@ -104,7 +139,7 @@ build_tpu_image() {
   fi
 
   echo "Building docker image with arguments: ${docker_build_args[*]}"
-  run_docker_build "$PACKAGE_DIR/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile" "${docker_build_args[@]}"
+  run_docker_build "$MAXTEXT_REPO_ROOT/src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile" "${docker_build_args[@]}"
 }
 
 if [[ ${DEVICE} == "gpu" ]]; then
