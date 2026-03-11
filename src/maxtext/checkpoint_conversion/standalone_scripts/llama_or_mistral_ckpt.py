@@ -1801,7 +1801,12 @@ if __name__ == "__main__":
   parser.add_argument("--huggingface-checkpoint", type=str2bool, required=False, default=False)
   parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
+  parser.add_argument("--enable-single-controller", type=str2bool, required=False, default=False)
   args = parser.parse_args()
+
+  if args.enable_single_controller:
+    args.use_ocdbt = False
+    args.use_zarr3 = False
 
   if args.model_size not in MODEL_PARAMS_DICT:
     raise NotImplementedError

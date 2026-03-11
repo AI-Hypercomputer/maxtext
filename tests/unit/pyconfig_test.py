@@ -115,6 +115,34 @@ class PyconfigTest(unittest.TestCase):
       finally:
         os.chdir(orig)
 
+  def test_pathways_checkpoint_overrides(self):
+    """Verifies that OCDBT and ZARR3 are False for Pathways by default."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        enable_single_controller=True,
+        colocated_python_checkpointing=False,
+        checkpoint_storage_use_ocdbt=True,  # Try to set it to True
+        checkpoint_storage_use_zarr3=True,  # Try to set it to True
+    )
+
+    self.assertFalse(config.checkpoint_storage_use_ocdbt)
+    self.assertFalse(config.checkpoint_storage_use_zarr3)
+
+  def test_pathways_no_override_when_colocated(self):
+    """Verifies that no override occurs if colocated_python_checkpointing is True."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        enable_single_controller=True,
+        colocated_python_checkpointing=True,
+        checkpoint_storage_use_ocdbt=True,
+        checkpoint_storage_use_zarr3=True,
+    )
+
+    self.assertTrue(config.checkpoint_storage_use_ocdbt)
+    self.assertTrue(config.checkpoint_storage_use_zarr3)
+
 
 if __name__ == "__main__":
   unittest.main()

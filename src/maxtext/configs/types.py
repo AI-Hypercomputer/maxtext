@@ -2313,7 +2313,13 @@ class MaxTextConfig(
       ):
         self.logical_axis_rules.append(["aqt_amax_history", ("stage",)])
 
-    # H. RUN ALL CROSS-FIELD VALIDATIONS
+    # H. PATHWAYS/SINGLE-CONTROLLER OVERRIDES
+    # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
+    if self.enable_single_controller and not self.colocated_python_checkpointing:
+      self.checkpoint_storage_use_ocdbt = False
+      self.checkpoint_storage_use_zarr3 = False
+
+    # I. RUN ALL CROSS-FIELD VALIDATIONS
     if self.load_parameters_path and self.load_full_state_path:
       raise ValueError("At most one of `load_parameters_path` or `load_full_state_path` should be set.")
     if (self.load_parameters_path or self.load_full_state_path) and not self.enable_checkpointing:
@@ -2538,7 +2544,7 @@ class MaxTextConfig(
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
 
-    # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
+    # J. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
     if self.using_pipeline_parallelism and self.mesh_axes and self.mesh_axes[0] == "stage":
       self.ici_parallelism = [

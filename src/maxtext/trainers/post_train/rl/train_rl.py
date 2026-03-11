@@ -17,7 +17,7 @@ RL Trainer
 
 This module provides a unified `rl_train` function that consolidates the common
 RL training logic. It handles model loading, reward function setup, dataset
-processing, and training orchestration. By default, we run Group Relative Policy Optimization (GRPO) on 
+processing, and training orchestration. By default, we run Group Relative Policy Optimization (GRPO) on
 GSM8K math reasoning benchmark. The script is also flexible enough to run Group Sequence Policy Optimization (GSPO).
 
 Usage Examples:
@@ -84,14 +84,14 @@ def get_maxtext_model(config, devices=None):
   """
   Load MaxText model with Tunix adapter.
   # Note: pass the path to your scanned checkpoint for 'load_parameters_path'.
-  # To create a scanned checkpoint, you can use /maxtext/src/MaxText/checkpoint_conversion/to_maxtext.py and if
-  # using Pathways, please set `checkpoint_storage_use_ocdbt=False checkpoint_storage_use_zarr3=False`
-  # python src/MaxText/checkpoint_conversion/to_maxtext.py \
-  #  --model_name="gemma2-2b" \
-  #  --base_output_directory="/path/to/your/output/directory" \
-  #  --scan_layers=True \
-  # --checkpoint_storage_use_ocdbt=False\
-  # checkpoint_storage_use_zarr3=False
+  # To create a scanned checkpoint, you can use `src/maxtext/checkpoint_conversion/to_maxtext.py` and if
+  # using Pathways, please set `enable_single_controller=True`
+  # python src/maxtext/checkpoint_conversion/to_maxtext.py \
+  #   maxtext/configs/base.yml \
+  #   model_name="gemma2-2b" \
+  #   base_output_directory="/path/to/your/output/directory" \
+  #   scan_layers=True \
+  #   enable_single_controller=True
   # Please ensure that you pass the full path ending in `/0/items` for load_parameters_path to train_rl.py i.e.,
   # load_parameters_path=/path/to/your/output/directory/0/items
   """
