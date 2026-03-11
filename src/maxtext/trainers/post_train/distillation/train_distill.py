@@ -131,7 +131,8 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
   """
 
   def model_forward_fn(
-      model, input_tokens, positions, attention_mask, decoder_segment_ids=None, cache=None, **kwargs
+      model, input_tokens, positions, attention_mask, decoder_segment_ids=None, cache=None, 
+      **kwargs
   ) -> distillation_utils.DistillationForwardOutput:
     """Forward pass wrapper adapted for raw MaxText models."""
     del attention_mask  # Unused
@@ -141,8 +142,8 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         decoder_positions=positions,
         decoder_segment_ids=decoder_segment_ids,
         enable_dropout=config.enable_dropout,
-        decoder_target_tokens=kwargs.get("targets", None),
-        decoder_target_mask=kwargs.get("targets_segmentation", None),
+        decoder_target_tokens=kwargs.get("decoder_target_tokens", None),
+        decoder_target_mask=kwargs.get("decoder_target_mask", None),
     )
     out_projection_activations = None
     if config.distill_beta > 0.0:
@@ -214,7 +215,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     batch = self.gen_model_input_fn(inputs)
 
-    def loss_wrapper(student, teacher, batch):
+    def loss_wrapper(student, teacher, batch):      
       if "teacher_output" in batch:
         teacher_output = batch["teacher_output"]
       else:
@@ -224,6 +225,8 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
             positions=batch["positions"],
             attention_mask=batch.get("attention_mask"),
             decoder_segment_ids=batch.get("decoder_segment_ids"),
+            decoder_target_tokens=batch.get("targets", None),
+            decoder_target_mask=batch.get("targets_segmentation", None),
             cache=None,
         )
 
@@ -235,9 +238,12 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
           positions=batch["positions"],
           attention_mask=batch.get("attention_mask"),
           decoder_segment_ids=batch.get("decoder_segment_ids"),
+          decoder_target_tokens=batch.get("targets", None),
+          decoder_target_mask=batch.get("targets_segmentation", None),
           cache=None,
       )
-      labels = self.strategy.labels_fn(batch["targets"])
+      # we should apply a mask for labels to disable segment-separator tokens
+      labels = self.strategy.labels_fn(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
       return self.strategy.compute_loss(student_output, teacher_output, labels)
 
     # Because student is the 0th argument, argnums=0 guarantees
@@ -434,7 +440,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
 
   # 3. Define Distillation Strategy
   def labels_fn(targets, targets_segmentation=None, **kwargs):
-    """Converts integer targets to masked one-hot vectors for hard label loss."""
+    """Converts integer targets to masked one-hot vectors for hard label loss."""    
     del kwargs  # Unused
     one_hot = jax.nn.one_hot(targets, student_config.vocab_size)
     mask = jnp.not_equal(targets, pad_id).astype(one_hot.dtype)[..., None]
