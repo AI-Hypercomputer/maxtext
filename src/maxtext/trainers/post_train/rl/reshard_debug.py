@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-RL Trainer
+Resharding Benchmark for the RL Trainer
 
 This module provides a unified `rl_train` function that consolidates the common
 RL training logic. It handles model loading, reward function setup, dataset
@@ -22,24 +22,23 @@ GSM8K math reasoning benchmark. The script is also flexible enough to run Group 
 
 Usage Examples:
 
-# GRPO on Llama3.1-8B-Instruct
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
-  model_name=llama3.1-8b \
-  tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
-  load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN
-
-# GSPO on Llama3.1-70B-Instruct
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
-  model_name=llama3.1-70b \
-  tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
-  load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN \
-  loss_algo=gspo-token
+# GRPO on Qwen3-30B
+python3 -m src.maxtext.trainers.post_train.rl.reshard_debug src/maxtext/configs/post_train/rl.yml \
+  model_name=qwen3-30b-a3b \
+  tokenizer_path=Qwen/Qwen3-30B-A3B \
+  run_name=sanbao-rl-0310-1 \
+  base_output_directory=gs://sanbao-bucket/mlperf_rl/qwen3/sanbao-rl-0310-1 \
+  batch_size=16 \
+  rl.num_generations=8 \
+  num_batches=4 \
+  rollout_data_parallelism=4 \
+  rollout_tensor_parallelism=1 \
+  rollout_expert_parallelism=4 \
+  hbm_utilization_vllm=0.4 \
+  scan_layers=True \
+  allow_split_physical_axes=True \
+  vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+  vllm_additional_config='{maxtext_config: {model_name: qwen3-30b-a3b, allow_split_physical_axes: true, log_config: false, weight_dtype: bfloat16}}'
 
 """
 
@@ -49,6 +48,7 @@ from typing import Sequence
 import collections
 import jax
 import json
+import time
 import logging
 import os
 import pathwaysutils
@@ -120,8 +120,8 @@ def setup_configs_and_devices(argv: list[str]):
         max_logging.log(f"Using first {len(trainer_devices)} devices as Trainer devices")
       if config.sampler_devices_fraction != 1.0:
         max_logging.log(f"Using last {len(sampler_devices)} devices as Sampler devices")
-    trainer_config = config
-    sampler_config = config
+    trainer_config = config.model_copy()
+    sampler_config = config.model_copy()
   elif config.num_trainer_slices > 0 and config.num_samplers_slices > 0:
     max_logging.log("Running RL with Multislice")
     devices_by_slice = collections.defaultdict(list)
@@ -175,6 +175,8 @@ def setup_configs_and_devices(argv: list[str]):
   else:
     raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
 
+  sampler_config.subslice_shape = ""  # we are not using subslices in this script, set it to empty to avoid confusion
+  sampler_config.enable_single_controller = False  # we are not using single controller in this script, set it to False to avoid confusion
   return trainer_config, sampler_config, trainer_devices, sampler_devices
 
 
@@ -407,10 +409,12 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     nnx.update(actor_model, new_state)
 
     show_hbm_usage(f"HBM before step {step}:")
+    start_time = time.time()
     rl_cluster.sync_weights()
     jax.tree_util.tree_map(jax.block_until_ready, rl_cluster.rollout._sampler.transformer_state)
+    end_time = time.time()
     show_hbm_usage(f"HBM after step {step}:")
-    max_logging.log(f"Resharding via sync_weights() completed: step {step}")
+    max_logging.log(f"Resharding via sync_weights() completed: step {step}. Weight Syncing Time taken: {end_time - start_time:.4f}s")
 
 
 def main(argv: Sequence[str]) -> None:
