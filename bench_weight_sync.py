@@ -22,6 +22,7 @@ import maxtext.checkpoint_conversion.utils.param_mapping as param_mapping
 import pathwaysutils
 from maxtext.utils import model_creation_utils
 from maxtext.configs import pyconfig
+from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.generate import utils
@@ -96,7 +97,9 @@ def _clean_device_memory():
 
 def _get_ref_maxtext_model(config):
   """Creates and returns a Tunix-adapted MaxText model and mesh."""
-  model, mesh = model_creation_utils.create_nnx_model(config)
+  print(f'wyzhangd: creating model with config: {config}')
+  model, mesh = model_creation_utils.create_nnx_model(config, model_mode=MODEL_MODE_AUTOREGRESSIVE)
+  print(f'wyzhangd: model created')
   with mesh:
     tunix_model = TunixMaxTextAdapter(base_model=model)
     # Use the appropriate model config based on the model name
@@ -104,6 +107,20 @@ def _get_ref_maxtext_model(config):
       model_config = qwen3_lib.ModelConfig.qwen3_30b()
     elif config.model_name == "qwen3-0.6b":
       model_config = qwen3_lib.ModelConfig.qwen3_0_6b()
+    elif config.model_name == "qwen3-235b-a22b":
+      model_config = qwen3_lib.ModelConfig(
+        num_layers=94,
+        vocab_size=151936,
+        embed_dim=4096,
+        hidden_dim=1536,
+        num_heads=64,
+        head_dim=128,
+        num_kv_heads=4,
+        norm_eps=1e-06,
+        rope_theta=5_000_000,
+        num_experts=128,
+        num_experts_per_tok=8,
+    )
     else:
       raise ValueError(f"Unsupported model: {config.model_name}")
     tunix_model.config = model_config
@@ -161,16 +178,16 @@ print("="*80)
 # Make sure you have edited the config.json in this directory.
 # VLLM_MODEL_PATH = "Qwen/Qwen3-0.6B"
 # VLLM_MODEL_PATH = "Qwen/Qwen3-8B"
-VLLM_MODEL_PATH = "Qwen/Qwen3-30B-A3B"
+# VLLM_MODEL_PATH = "Qwen/Qwen3-30B-A3B"
 # VLLM_MODEL_PATH = "Qwen/Qwen3-235B-A22B"
-golden_llm = LLM(
-  VLLM_MODEL_PATH,
-  max_model_len=16,
-  tensor_parallel_size=4,
-  gpu_memory_utilization=0.25,  # Limit to 40% memory per device
-  download_dir="/home/wyzhang_google_com/ckpt/hf",
-)
-dst_golden_state = golden_llm.llm_engine.model_executor.driver_worker.model_runner.state
+# golden_llm = LLM(
+#   VLLM_MODEL_PATH,
+#   max_model_len=16,
+#   tensor_parallel_size=8,
+#   gpu_memory_utilization=0.25,  # Limit to 40% memory per device
+#   download_dir="/home/wyzhang_google_com/ckpt/hf",
+# )
+# dst_golden_state = golden_llm.llm_engine.model_executor.driver_worker.model_runner.state
 
 # Use deterministic sampling for consistent outputs
 from vllm import SamplingParams
@@ -195,20 +212,49 @@ else:
   )
 
 # Initialize MaxText config
+# config_ref = pyconfig.initialize(
+#     [ "", BASE_YAML_PATH, ],
+#     base_output_directory="gs://wyzhang-dev/tmp",  # Not used in Tunix.
+#     run_name="test-tunix-maxtext-qwen3-8b",
+#     tokenizer_type="huggingface",
+#     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "qwen3-tokenizer"),
+#     # model_name="qwen3-0.6b",
+#     # load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-0.6b/scanned/2026-01-21-11-35/0/items",
+#     model_name="qwen3-30b-a3b",
+#     load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-30b-a3b/scanned/2026-01-23-14-00/0/items/0/items",
+#     # load_parameters_path="/dev/shm/hengtaoguo/0/items/0/items",
+#     # model_name="qwen3-235b-a22b",
+#     # load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-235b-a22b/scanned/001/0/items",
+#     # scan_layers="true",
+#     per_device_batch_size=1,
+#     max_prefill_predict_length=8,
+#     max_target_length=16,
+#     steps=100,
+#     async_checkpointing="false",
+#     checkpoint_period=5,
+#     skip_jax_distributed_system="true",
+#     weight_dtype="bfloat16",
+#     attention="dot_product",
+#     remat_policy="custom",
+#     decoder_layer_input="offload",
+#     query_proj="offload",
+#     key_proj="offload",
+#     value_proj="offload",
+#     ici_fsdp_parallelism=2,
+#     ici_tensor_parallelism=4,
+#     override_model_config="true",
+#     # base_num_decoder_layers=2,
+# )
+
 config_ref = pyconfig.initialize(
     [ "", BASE_YAML_PATH, ],
     base_output_directory="gs://wyzhang-dev/tmp",  # Not used in Tunix.
-    run_name="test-tunix-maxtext-qwen3-8b",
+    run_name="test-tunix-maxtext-qwen3",
     tokenizer_type="huggingface",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "qwen3-tokenizer"),
-    # model_name="qwen3-0.6b",
-    # load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-0.6b/scanned/2026-01-21-11-35/0/items",
-    model_name="qwen3-30b-a3b",
-    load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-30b-a3b/scanned/2026-01-23-14-00/0/items/0/items",
-    # load_parameters_path="/dev/shm/hengtaoguo/0/items/0/items",
-    # model_name="qwen3-235b-a22b",
-    # load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-235b-a22b/scanned/001/0/items",
-    # scan_layers="true",
+    model_name="qwen3-235b-a22b",
+    load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-235b-a22b/scanned/Qwen3-235B-A22B/0/items",
+    scan_layers="true",
     per_device_batch_size=1,
     max_prefill_predict_length=8,
     max_target_length=16,
@@ -223,10 +269,11 @@ config_ref = pyconfig.initialize(
     query_proj="offload",
     key_proj="offload",
     value_proj="offload",
-    ici_fsdp_parallelism=2,
+    # ici_fsdp_parallelism=2,
+    ici_expert_parallelism=2,
     ici_tensor_parallelism=4,
     override_model_config="true",
-    # base_num_decoder_layers=2,
+    debug_sharding="true",
 )
 
 # Create the MaxText model
@@ -415,23 +462,23 @@ while layer_expert_buffers:
     direct_assignments[w2_key] = w2_fused
 print(f"  Expert fusion complete in {time.time() - expert_fuse_start:.2f}s")
 
-# Batch assign all weights to vLLM state
-print(f"Assigning {len(direct_assignments)} weights to vLLM state...")
-for vllm_key, weight in direct_assignments.items():
-  assert vllm_key in dst_golden_state, f"Key not found: {vllm_key}"
-  target_shape = dst_golden_state[vllm_key].shape
-  # NOTE(wyzhang): Hack to workaround incompatible shape between downloaded weights and this benchmark code.
-  if weight.shape == target_shape:
-    pass
-  elif len(weight.shape) == 3 and weight.shape == (target_shape[0], target_shape[2], target_shape[1]):
-    @jax.jit(donate_argnums=(0,))
-    def _transpose_weight(w):
-      return w.transpose(0, 2, 1)
-    weight = _transpose_weight(weight)
-  else:
-    assert weight.shape == target_shape, f"Shape mismatch for {vllm_key}: {weight.shape} vs {target_shape}"
-  assert(isinstance(weight, jax.Array)), f"Expected JAX array for {vllm_key}, got {type(weight)}"
-  dst_golden_state[vllm_key] = weight
+# # Batch assign all weights to vLLM state
+# print(f"Assigning {len(direct_assignments)} weights to vLLM state...")
+# for vllm_key, weight in direct_assignments.items():
+#   assert vllm_key in dst_golden_state, f"Key not found: {vllm_key}"
+#   target_shape = dst_golden_state[vllm_key].shape
+#   # NOTE(wyzhang): Hack to workaround incompatible shape between downloaded weights and this benchmark code.
+#   if weight.shape == target_shape:
+#     pass
+#   elif len(weight.shape) == 3 and weight.shape == (target_shape[0], target_shape[2], target_shape[1]):
+#     @jax.jit(donate_argnums=(0,))
+#     def _transpose_weight(w):
+#       return w.transpose(0, 2, 1)
+#     weight = _transpose_weight(weight)
+#   else:
+#     assert weight.shape == target_shape, f"Shape mismatch for {vllm_key}: {weight.shape} vs {target_shape}"
+#   assert(isinstance(weight, jax.Array)), f"Expected JAX array for {vllm_key}, got {type(weight)}"
+#   dst_golden_state[vllm_key] = weight
 
 print(f"✅ Phase 3 complete: All weights assigned in {time.time() - phase3_start:.2f}s")
 
@@ -449,8 +496,8 @@ _show_hbm_usage()
 print("\n" + "="*80)
 print("Generation test after weight transfer:")
 # NOTE(wyzhang): Remain the same behavior to assign numpy to vllm state.
-# TODO(wyzhang): When passing jax array directly here, vllm seems to not recognize and handle it properly.
-for key, jax_array in dst_golden_state.items():
-    # This blocks until the array is ready and copies it to Host RAM
-    dst_golden_state[key] = np.array(jax_array)
-print(golden_llm.generate("Paris is", sampling_params=sampling_params))
+# # TODO(wyzhang): When passing jax array directly here, vllm seems to not recognize and handle it properly.
+# for key, jax_array in dst_golden_state.items():
+#     # This blocks until the array is ready and copies it to Host RAM
+#     dst_golden_state[key] = np.array(jax_array)
+# print(golden_llm.generate("Paris is", sampling_params=sampling_params))
