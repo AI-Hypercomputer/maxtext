@@ -51,7 +51,6 @@ from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
 
-from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 from tunix.sft import metrics_logger, peft_trainer, profiler
 from tunix.sft import utils as tunix_sft_utils
 from tunix.rl import reshard
@@ -541,98 +540,34 @@ def maybe_apply_lora(model, mesh, mt_config):
   return lora_model
 
 
-def _resolve_lora_restore_checkpoint(lora_restore_path):
-  """Normalizes lora_restore_path into Tunix checkpoint manager inputs."""
-  normalized_path = os.path.normpath(lora_restore_path)
-  basename = os.path.basename(normalized_path)
-
-  if basename == "model_params":
-    step_dir = os.path.dirname(normalized_path)
-    root_directory = os.path.dirname(step_dir)
-    step_name = os.path.basename(step_dir)
-    try:
-      return root_directory, int(step_name)
-    except ValueError as exc:
-      raise ValueError(
-          "lora_restore_path ending in 'model_params' must live under a numeric step directory."
-      ) from exc
-
-  if basename.isdigit():
-    return os.path.dirname(normalized_path), int(basename)
-
-  return normalized_path, None
-
-
-def maybe_restore_lora_from_path(model, mt_config, mesh=None):
-  """Optionally restores LoRA params from a dedicated adapter checkpoint path.
-
-  If `lora_restore_path` is set and LoRA params have not yet been materialized on
-  the model, this function attempts to apply LoRA first (when enabled) before
-  restoring adapter weights.
-
-  Returns:
-    A tuple of `(model, resume_step)` where `resume_step` is the step returned
-    by Tunix checkpoint restore.
-  """
-  lora_restore_path = getattr(mt_config, "lora_restore_path", "")
+def _maybe_restore_lora_from_path(trainer, lora_restore_path):
+  """Optionally restores LoRA params from an external checkpoint item path."""
   if not lora_restore_path:
-    return model, None
-
-  if not tunix_sft_utils.is_lora_enabled(model):
-    if getattr(mt_config, "enable_lora", False):
-      max_logging.log("lora_restore_path is set but model has no LoRA params yet; " "applying LoRA before restore.")
-      model = maybe_apply_lora(model, mesh, mt_config)
-
-    if not tunix_sft_utils.is_lora_enabled(model):
-      raise ValueError(
-          "lora_restore_path is set but LoRA is not enabled on the model. "
-          "Set enable_lora=True and verify lora_module_path matches model modules."
-      )
-
-  if not os.path.exists(lora_restore_path):
-    raise ValueError(f"lora_restore_path does not exist: {lora_restore_path}")
-
-  restore_root_directory, restore_step = _resolve_lora_restore_checkpoint(lora_restore_path)
-  max_logging.log(
-      f"Restoring LoRA params from checkpoint root '{restore_root_directory}' "
-      f"at step {restore_step if restore_step is not None else 'latest'}."
-  )
-
-  checkpoint_manager = tunix_checkpoint_manager.CheckpointManager(
-      root_directory=restore_root_directory,
-  )
-  try:
-    restored_step, _ = checkpoint_manager.maybe_restore(
-        model,
-        step=restore_step,
-        restore_only_lora_params=True,
-    )
-  finally:
-    checkpoint_manager.close()
-
-  if restore_step is not None and restored_step != restore_step:
-    raise ValueError(
-        f"Expected LoRA restore from step {restore_step}, got step {restored_step}."
-    )
-
-  if restored_step == 0:
-    raise ValueError(f"No LoRA checkpoint found for lora_restore_path: {lora_restore_path}")
-
-  max_logging.log("LoRA restore complete.")
-  return model, restored_step
-
-
-def _maybe_resume_trainer_from_step(trainer, resume_step, tunix_config, source):
-  """Applies a recovered step to a freshly initialized trainer if needed."""
-  if not resume_step or getattr(trainer, "_train_steps", 0) != 0:
     return trainer
 
-  grad_accum = getattr(tunix_config, "gradient_accumulation_steps", None) or 1
-  trainer._train_steps = resume_step
-  trainer._iter_steps = resume_step * grad_accum
-  if hasattr(trainer, "_prof") and trainer._prof:
-    trainer._prof.initial_step = trainer._iter_steps
-  max_logging.log(f"Resuming trainer manually from step {resume_step} based on {source}.")
+  if getattr(trainer, "_train_steps", 0) > 0:
+    max_logging.log(
+        f"PeftTrainer restored current run at step {trainer._train_steps}; "
+        f"ignoring lora_restore_path '{lora_restore_path}'."
+    )
+    return trainer
+
+  if not tunix_sft_utils.is_lora_enabled(trainer.model):
+    raise ValueError(
+        "lora_restore_path is set but LoRA is not enabled on the model. "
+        "Set enable_lora=True and verify lora_module_path matches model modules."
+    )
+
+  abstract_lora_params = nnx.state(trainer.model, nnx.LoRAParam)
+  restored_lora_params = ocp.StandardCheckpointer().restore(
+      lora_restore_path,
+      target=abstract_lora_params,
+  )
+  nnx.update(trainer.model, restored_lora_params)
+  max_logging.log(
+      f"LoRA restore complete from '{lora_restore_path}'. "
+      "Trainer step remains at 0 for this run."
+  )
   return trainer
 
 def setup_trainer_state(mt_config, goodput_recorder=None):
@@ -642,7 +577,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.create_nnx_model(mt_config)
     model = maybe_apply_lora(model, mesh, mt_config)
-    model, lora_resume_step = maybe_restore_lora_from_path(model, mt_config, mesh)
+    lora_restore_path = getattr(mt_config, "lora_restore_path", "")
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     # pass in model for muon
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
@@ -658,12 +593,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
     trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
-    trainer = _maybe_resume_trainer_from_step(
-        trainer,
-        lora_resume_step,
-        tunix_config,
-        source="lora_restore_path",
-    )
+    trainer = _maybe_restore_lora_from_path(trainer, lora_restore_path)
 
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)

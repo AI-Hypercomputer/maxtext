@@ -1085,9 +1085,7 @@ class LoRA(BaseModel):
   lora_restore_path: PathStr = Field(
       "",
       description=(
-        "Optional Tunix NNX LoRA checkpoint path to restore adapter weights from."
-        " This may point to the checkpoint root, a numeric step directory,"
-        " or a direct `model_params` path."
+        "Optional path to LoRA weights to load before training. Ignored if the current run is resumed."
       ),
   )
 
