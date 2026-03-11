@@ -148,7 +148,7 @@ Hardware: GPU
 ```
 
 ```bash
-python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=gpu01 base_output_directory=/deps/output  \
+python3 -m maxtext.trainers.pre_train.train run_name=gpu01 base_output_directory=/deps/output  \
   dataset_type=synthetic enable_checkpointing=True steps=10 attention=cudnn_flash_te scan_layers=False \
   use_iota_embed=True hardware=gpu per_device_batch_size=12
 ```

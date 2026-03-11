@@ -70,7 +70,7 @@ Finally, run below command to complete the conversion
 # Optional: If run out of disk space when downloading HuggingFace safetensors,
 # customize your "HF_HOME" to redirect the cache to a larger or mounted disk (e.g., on a TPU VM).
 # export HF_HOME="/dev/shm/huggingface_tmp"
-python3 -m maxtext.checkpoint_conversion.to_maxtext maxtext/configs/base.yml \
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME?} \
     hf_access_token=${HF_TOKEN?} \
     base_output_directory=${MODEL_CHECKPOINT_DIRECTORY?} \
@@ -108,7 +108,7 @@ Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugg
 The following command converts a MaxText checkpoint and saves it locally, to GCS, or uploads it directly to the Hugging Face Hub.
 
 ```bash
-python3 -m maxtext.checkpoint_conversion.to_huggingface src/maxtext/configs/base.yml \
+python3 -m maxtext.checkpoint_conversion.to_huggingface \
     model_name=<MODEL_NAME> \
     load_parameters_path=<path-to-maxtext-checkpoint> \
     base_output_directory=<path-to-save-converted-checkpoint> \
