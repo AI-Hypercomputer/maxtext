@@ -60,6 +60,7 @@ Before starting, ensure you have:
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
 - XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md)).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
+- **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Setup Environment Variables
 
@@ -106,7 +107,9 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 
 ## Build and upload MaxText Docker image with post-training dependencies
 
-Before building the Docker image, authenticate to
+Before building the Docker image, follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
+
+Then, authenticate to
 [Google Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/docker/authentication#gcloud-helper)
 for permission to push your images and other access.
 
