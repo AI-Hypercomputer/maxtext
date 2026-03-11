@@ -83,6 +83,7 @@ export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${WORKLOAD?}/0/items
 export TPU_TYPE=<TPU Type> # e.g., 'v5p-128'
 export TPU_CLUSTER=<cluster name>
 export PROJECT_ID=<GCP project ID>
+export ZONE=<GCP zone>
 export CLOUD_IMAGE_NAME=<your artifact registry image> # Name for the Docker image to be built
 ```
 
@@ -195,6 +196,7 @@ xpk workload create-pathways --workload ${WORKLOAD?} \
 --docker-image gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} --cluster ${TPU_CLUSTER?} \
 --tpu-type=${TPU_TYPE?} --num-slices=1 \
 --project=${PROJECT_ID?} --priority=high \
+--zone=${ZONE?} \
 --command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
 python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL?} \
@@ -212,6 +214,7 @@ xpk workload create-pathways --workload ${WORKLOAD?} \
 --docker-image gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} --cluster ${TPU_CLUSTER?} \
 --tpu-type=${TPU_TYPE?} --num-slices=1 \
 --project=${PROJECT_ID?} --priority=high \
+--zone=${ZONE?} \
 --command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
 python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=${MODEL?} \
