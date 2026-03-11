@@ -37,10 +37,6 @@ on:
       image_date:
         required: true
         type: string
-      base_image:
-        required: false
-        type: string
-        default: ''
       workflow:
         required: false
         type: string
@@ -125,7 +121,6 @@ jobs:
             JAX_VERSION=NONE
             LIBTPU_VERSION=NONE
             INCLUDE_TEST_ASSETS=true
-            ${{ inputs.base_image != '' && format('BASEIMAGE={0}', inputs.base_image) || '' }}
 
       - name: Add tags to Docker image
         if: steps.check.outputs.should_run == 'true'

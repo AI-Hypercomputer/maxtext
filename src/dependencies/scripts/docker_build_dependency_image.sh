@@ -46,11 +46,8 @@
 # POST-TRAINING BUILD EXAMPLES
 # ==================================
 
-# Build docker image with stable pre-training dependencies and stable post-training dependencies
+# Build docker image with post-training dependencies
 ## bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
-
-# Build docker image with stable pre-training dependencies and post-training dependencies from GitHub head
-## bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training POST_TRAINING_SOURCE=local
 
 if [ "${BASH_SOURCE-}" ]; then
   this_file="${BASH_SOURCE[0]}"
@@ -118,24 +115,6 @@ run_docker_build() {
   docker build --network host $(printf -- '--build-arg %q ' "$@") -f "$dockerfile_path" -t "$LOCAL_IMAGE_NAME" .
 }
 
-# Function to build post-training dependencies from local Github head
-build_post_training_deps_from_local_github() {
-  # To install vllm, tunix, tpu-inference from a local path, we copy it into the build context, excluding __pycache__.
-  # This assumes vllm, tunix, tpu-inference is a sibling directory to the current one (maxtext).
-  rsync -a --exclude='__pycache__' ../tpu-inference .
-  rsync -a --exclude='__pycache__' ../vllm .
-  rsync -a --exclude='__pycache__' ../tunix .
-
-  # The cleanup is set to run even if the build fails to remove the copied directory.
-  trap "rm -rf ./tpu-inference ./vllm ./tunix" EXIT INT TERM
-
-  DOCKERFILE_NAME='maxtext_post_training_local_dependencies.Dockerfile'
-  echo "Building local post-training dependencies: $DOCKERFILE_NAME"
-
-  run_docker_build "$MAXTEXT_REPO_ROOT/src/dependencies/dockerfiles/$DOCKERFILE_NAME" \
-    "MODE=${WORKFLOW}" "BASEIMAGE=${LOCAL_IMAGE_NAME}"
-}
-
 # Function to build image for GPUs
 build_gpu_image() {
   if [[ ${MODE} == "pinned" ]]; then
@@ -162,13 +141,6 @@ build_tpu_image() {
 
   echo "Building docker image with arguments: ${docker_build_args[*]}"
   run_docker_build "$MAXTEXT_REPO_ROOT/src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile" "${docker_build_args[@]}"
-
-  # Handle post-training workflow if specified
-  if [[ ${WORKFLOW} == "post-training" || ${WORKFLOW} == "post-training-experimental" ]]; then
-    if [[ ${POST_TRAINING_SOURCE} == "local" ]]; then
-      build_post_training_deps_from_local_github
-    fi
-  fi
 }
 
 if [[ ${DEVICE} == "gpu" ]]; then
