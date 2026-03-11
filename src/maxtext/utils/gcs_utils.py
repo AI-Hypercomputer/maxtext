@@ -18,6 +18,8 @@ import json
 import os
 import socket
 from pathlib import Path
+from etils import epath
+import uuid
 
 import yaml
 
@@ -242,3 +244,47 @@ def write_dict_to_gcs_json(data_dict, file_path):
     blob.upload_from_string(json_string, content_type="application/json")
   except (ValueError, TypeError, RecursionError) as e:
     print(f"Failed to write json file at {file_path} with error: {str(e)}")
+
+
+def mkdir_and_check_permissions(p: str | epath.Path) -> epath.Path:
+  """Creates a directory if it doesn't exist and verifies write permissions.
+
+  This function prevents the program from hanging when an output directory is inaccessible. The standard
+  `epath.Path.mkdir` can hang or fail silently when pointed at a path in a non-existent or inaccessible GCS bucket.
+
+  For example, the following code can hang indefinitely:
+
+    from etils import epath
+    p = epath.Path("gs://no_such_bucket/path/to/output")
+    p.mkdir(exist_ok=True, parents=True)
+  """
+  if isinstance(p, str):
+    p = epath.Path(p)
+
+  if p.as_posix().startswith("gs://"):
+    if len(p.parts) < 3:
+      raise ValueError(f"Invalid GCS path (missing bucket name): '{p}'")
+    bucket_name = p.parts[2]
+    try:
+      storage_client = storage.Client()
+      storage_client.get_bucket(bucket_name)
+    except Exception as e:
+      raise FileNotFoundError(f"GCS bucket 'gs://{bucket_name}' not found or accessible.") from e
+  p.mkdir(exist_ok=True, parents=True)
+  if not p.exists():
+    raise PermissionError(f"Failed to create the directory '{p}'. Please check that you have write access.")
+
+  # Verify write permissions by creating and deleting a temporary file.
+  # This handles the case where the directory exists but is not writable.
+  temp_file_path = p / f".write_test_{uuid.uuid4()}"
+  try:
+    temp_file_path.write_text("test")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    raise PermissionError(f"Directory '{p}' exists, but is not writable. Please check permissions.") from e
+  finally:
+    try:
+      temp_file_path.unlink()  # Delete the temp file.
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass  # Suppress errors during cleanup to not hide the original error.
+
+  return p
