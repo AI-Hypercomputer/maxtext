@@ -112,7 +112,7 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   return model
 
 
-def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
+def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, use_rand_init=False):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
 
   def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
@@ -194,9 +194,17 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
               sharded_state,
               is_leaf=lambda n: hasattr(n, "value"),
           )
-
-          item_to_restore = {"params": {"params": target_for_restore}}
-          restore_args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(target_for_restore)}}
+          target_for_restore_struct = jax.tree.map(
+            lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding),
+            target_for_restore
+          )
+          if use_rand_init:
+            fake_restored = {"params": {"params": target_for_restore}}            
+          else:
+            jax.tree.map(lambda x: x.delete(), target_for_restore)
+            del target_for_restore
+            item_to_restore = {"params": {"params": target_for_restore_struct}}
+            restore_args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(target_for_restore_struct)}}
         else:
           # structure of nnx checkpoint: {'decoder': {'value': ...}}
           target_for_restore = jax.tree.map(
@@ -207,12 +215,16 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
           item_to_restore = target_for_restore
           restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
 
-        restored = ckptr.restore(
-            epath.Path(config.load_parameters_path),
-            item=item_to_restore,
-            transforms={},
-            restore_args=restore_args,
-        )
+        if use_rand_init:
+          print(f'WARNING: Randomly initializing weights instead of loading from checkpoint at {config.load_parameters_path}')
+          restored = fake_restored
+        else:
+          restored = ckptr.restore(
+              epath.Path(config.load_parameters_path),
+              item=item_to_restore,
+              transforms={},
+              restore_args=restore_args,
+          )
 
         if is_nnx_checkpoint:
           checkpoint = jax.tree.map(
