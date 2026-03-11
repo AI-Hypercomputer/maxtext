@@ -807,7 +807,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
 
     tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
         group_sizes,
-        representative_value=max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+        max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
     )
     if config.use_qwix_quantization:
       output = megablox.gmm(

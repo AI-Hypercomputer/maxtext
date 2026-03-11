@@ -898,7 +898,7 @@ class RoutedMoE(nnx.Module):
     ):
       tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
           group_sizes,
-          representative_value=max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+          max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
       )
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
