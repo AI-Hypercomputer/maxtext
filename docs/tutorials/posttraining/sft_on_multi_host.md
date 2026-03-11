@@ -37,7 +37,7 @@ cd maxtext
 
 ### 1.2. Build MaxText Docker image
 
-Before building the Docker image, authenticate to [Google Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/docker/authentication#gcloud-helper) for permission to push your images and other access.
+Before building the Docker image, follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/). Then, authenticate to [Google Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/docker/authentication#gcloud-helper) for permission to push your images and other access.
 
 ```bash
 # Authenticate your user account for gcloud CLI access

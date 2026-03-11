@@ -37,6 +37,8 @@ Before you can run a MaxText workload, you must complete the following setup ste
 
 3. **Build and upload a MaxText Docker image** to your project's Artifact Registry.
 
+   [Follow the steps to configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/) before running the commands below.
+
    Step 1: Build the Docker image for a TPU device. This image contains MaxText and its dependencies.
 
    ```shell
