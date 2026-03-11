@@ -26,6 +26,7 @@ import unittest
 from unittest import mock
 import jax
 import jax.numpy as jnp
+from flax import nnx
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -536,6 +537,74 @@ class TrainDistillTest(unittest.TestCase):
     # Verify value appended to list
     values_list = mock_buffer.additional_metrics["distill/kl_div"][0]
     self.assertEqual(values_list[0], 0.5)
+
+  def test_gradient_accumulation_requires_k_passes_for_update(self):
+    """Verifies that weights only update after k distinct forward passes."""
+
+    # 1. Setup a minimal NNX model
+    class DummyModel(nnx.Module):
+
+      def __init__(self):
+        self.linear = nnx.Linear(in_features=2, out_features=2, rngs=nnx.Rngs(0))
+
+      def __call__(self, x):
+        return self.linear(x)
+
+    student = DummyModel()
+    teacher = DummyModel()
+    model_bundle = train_distill.ModelBundle(teacher_model=teacher, student_model=student)
+
+    # Snapshot the initial weights
+    initial_weights = student.linear.kernel.value.copy()
+
+    # 2. Setup Optimizer with MultiSteps (Accumulate over 2 passes)
+    base_optimizer = optax.sgd(learning_rate=0.1)
+    accumulating_optimizer = optax.MultiSteps(base_optimizer, every_k_schedule=2)
+    nnx_opt = nnx.Optimizer(student, accumulating_optimizer, wrt=nnx.Param)
+
+    # 3. Initialize Trainer and Mocks
+    # pylint: disable=no-value-for-parameter
+    trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
+    trainer.strategy = mock.Mock()
+
+    dummy_batch = {
+        "input_tokens": jnp.ones((1, 2)),
+        "positions": None,
+        "targets": None,
+        "teacher_output": jnp.array([1.0, 1.0]),
+    }
+    trainer.gen_model_input_fn = mock.Mock(return_value=dummy_batch)
+    trainer.strategy.labels_fn.return_value = None
+
+    # 4. Mock the forward pass to COUNT how many times it executes
+    # We wrap the actual dummy model execution in a mock to track it.
+    mock_student_forward = mock.Mock(side_effect=lambda model, **kwargs: model(dummy_batch["input_tokens"]))
+    trainer.strategy.student_forward_fn = mock_student_forward
+
+    trainer.strategy.compute_loss.side_effect = lambda s_out, t_out, labels: (jnp.sum(s_out), {"aux": 1.0})
+
+    # --- EXECUTE PASS 1 ---
+    trainer._train_step(model_bundle, nnx_opt, dummy_batch)
+
+    # ASSERTIONS AFTER PASS 1:
+    # Verify exactly ONE forward pass happened
+    self.assertEqual(mock_student_forward.call_count, 1)
+
+    # Verify weights are completely UNCHANGED
+    np.testing.assert_allclose(
+        student.linear.kernel.value, initial_weights, err_msg="Weights should not update on the first pass."
+    )
+
+    # --- EXECUTE PASS 2 ---
+    trainer._train_step(model_bundle, nnx_opt, dummy_batch)
+
+    # ASSERTIONS AFTER PASS 2:
+    # Verify exactly TWO forward passes have now happened
+    self.assertEqual(mock_student_forward.call_count, 2)
+
+    # Verify weights HAVE changed
+    with self.assertRaises(AssertionError, msg="Weights should have updated on the second pass."):
+      np.testing.assert_allclose(student.linear.kernel.value, initial_weights)
 
 
 if __name__ == "__main__":
