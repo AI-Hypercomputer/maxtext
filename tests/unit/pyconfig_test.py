@@ -19,7 +19,7 @@ import tempfile
 import unittest
 
 from maxtext.configs import pyconfig
-from maxtext.configs.pyconfig import resolve_config_path
+from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
 
@@ -114,6 +114,21 @@ class PyconfigTest(unittest.TestCase):
         self.assertEqual(result, os.path.join(MAXTEXT_CONFIGS_DIR, "post_train/rl.yml"))
       finally:
         os.chdir(orig)
+
+  def test_config_file_mapping(self):
+    for module, relative_path in _CONFIG_FILE_MAPPING.items():
+      full_path = os.path.join(MAXTEXT_CONFIGS_DIR, relative_path)
+      self.assertTrue(os.path.isfile(full_path), f"Default config for '{module}' not found at {full_path}")
+
+  def test_module_from_path(self):
+    import maxtext.trainers.pre_train.train as train_module
+    module_file = train_module.__file__
+    result = _module_from_path(module_file)
+    self.assertEqual(result, "maxtext.trainers.pre_train.train")
+
+  def test_unknown_module_raises(self):
+    with self.assertRaises(ValueError):
+      pyconfig.initialize_pydantic(["/custom_rl/module.py", "run_name=test"])
 
 
 if __name__ == "__main__":
