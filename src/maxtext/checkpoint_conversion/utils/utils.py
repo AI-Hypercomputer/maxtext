@@ -14,6 +14,7 @@
 
 """ Checkpoint conversion utility functions. """
 
+import jax.sharding as jax_sharding
 import jax.numpy as jnp
 import contextlib
 import functools
@@ -184,22 +185,6 @@ def _transform_weight(weight, indices, axes, hook_fns, target_shape):
   return jnp.squeeze(weight)
 
 
-@functools.partial(jax.jit, donate_argnums=(0,), static_argnames=["target_shape", "num_experts", "num_layers"])
-def _transform_moe_block_tpu(maxtext_param_weight, target_shape, num_experts, num_layers):
-  # TODO(wyzhang): Fix hack. Directly use the code from follow reshape_kernel in the _transform_moe_block_tpu
-  # current hook fns is params-decoder-layers-moe_block-wi_0 (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
-  # current hook fns is params-decoder-layers-moe_block-wi_1 (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
-  # current hook fns is params-decoder-layers-moe_block-wo (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
-  def _apply_hooks(w):
-    return w.T.reshape(target_shape)
-
-  def process_expert(expert_weights):
-    return jax.lax.map(_apply_hooks, expert_weights)
-  transformed_weight = jax.lax.map(process_expert, maxtext_param_weight)
-  stacked = transformed_weight.reshape((num_experts * num_layers,) + transformed_weight.shape[2:])
-  # return [jax.lax.index_in_dim(stacked, i, keepdims=False) for i in range(num_experts * num_layers)]
-  return jnp.unstack(stacked, axis=0)
-
 def process_maxtext_param(
     maxtext_param_key: str | tuple[str, ...],
     maxtext_param_weight: jax.Array | list[jax.Array],
@@ -208,6 +193,7 @@ def process_maxtext_param(
     hf_shape_map: dict[str, Any],
     maxtext_config: Any,
     jax_to_numpy: bool = True,
+    mesh: jax.sharding.Mesh | None = None,
 ) -> list[tuple[str, Any]]:
   """Processes a single MaxText parameter (or a group of parameters) for conversion, used in to_huggingface.
 
@@ -317,12 +303,44 @@ def process_maxtext_param(
   num_experts = maxtext_param_weight.shape[0]
   num_layers = maxtext_param_weight.shape[1]
   target_shape = tuple(hf_shape_map[hf_target_paths[0][0]])
-  print(f'wyzhangd: current hook fns is {maxtext_param_key} {current_hook_fns}')
+  print(f'wyzhangd: current hook fns is {maxtext_param_key} {current_hook_fns} {maxtext_param_weight.shape}')
   # TODO(wyzhang): Fix hack. Not passing a function. Directly use the code from follow reshape_kernel in the _transform_moe_block_tpu
   # current hook fns is params-decoder-layers-moe_block-wi_0 (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
   # current hook fns is params-decoder-layers-moe_block-wi_1 (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
   # current hook fns is params-decoder-layers-moe_block-wo (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
-  all_slices = _transform_moe_block_tpu(maxtext_param_weight, target_shape, num_experts, num_layers)
+
+  # TODO(wyzhang): Hack
+  in_sharding =  maxtext_param_weight.sharding
+  element_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*in_sharding.spec[-2:]))
+  out_sharding = tuple([element_sharding] * (num_experts * num_layers))
+  print(f'wyzhangd: moe in_sharding {in_sharding}')
+  print(f'wyzhangd: moe out_sharding {out_sharding[0]}')
+     
+  @functools.partial(
+    jax.jit, 
+    donate_argnums=(0,), 
+    static_argnames=["target_shape", "num_experts", "num_layers"],
+    in_shardings=in_sharding,
+    out_shardings=out_sharding,
+  )
+  def _transform_moe_block_tpu(maxtext_param_weight, target_shape, num_experts, num_layers):
+    # TODO(wyzhang): Fix hack. Directly use the code from follow reshape_kernel in the _transform_moe_block_tpu
+    # current hook fns is params-decoder-layers-moe_block-wi_0 (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
+    # current hook fns is params-decoder-layers-moe_block-wi_1 (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
+    # current hook fns is params-decoder-layers-moe_block-wo (<function QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN.<locals>.reshape_kernel at 0x75d949ce5ee0>,)
+    def _apply_hooks(w):
+      return w.T.reshape(target_shape)
+
+    def process_expert(expert_weights):
+      return jax.lax.map(_apply_hooks, expert_weights)
+    transformed_weight = jax.lax.map(process_expert, maxtext_param_weight)
+    stacked = transformed_weight.reshape((num_experts * num_layers,) + transformed_weight.shape[2:])
+    return jnp.unstack(stacked, axis=0)
+  
+  with mesh:
+    all_slices = _transform_moe_block_tpu(maxtext_param_weight, target_shape, num_experts, num_layers)
+
+    
   with jax.named_scope("hf_path"):
     hf_paths = [path for expert_list in hf_target_paths for path in expert_list]
   with jax.named_scope("finalize_loop"):
