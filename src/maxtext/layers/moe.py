@@ -900,7 +900,7 @@ class RoutedMoE(nnx.Module):
     def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes):
       tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
           group_sizes,
-          representative_value=max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+          max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
       )
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
