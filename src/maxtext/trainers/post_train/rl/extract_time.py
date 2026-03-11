@@ -1,10 +1,11 @@
+import argparse
 import re
 import pandas as pd
 from google.cloud import logging
 from google.cloud.logging import DESCENDING
 from datetime import datetime, timedelta, timezone
 
-def get_reshard_data():
+def get_reshard_data(args):
     client = logging.Client(project="cloud-tpu-multipod-dev")
     
     # 1. Define a narrow time window (last 24 hours)
@@ -18,7 +19,7 @@ def get_reshard_data():
         f'resource.labels.location="us-central1" '
         f'resource.labels.cluster_name="zxhe-super-xpk-bid" '
         f'resource.labels.namespace_name="default" '
-        f'resource.labels.pod_name:"sanbao-rl-0307-2" '
+        f'resource.labels.pod_name:"{args.pod_name}" '
         f'severity>=DEFAULT '
         f'timestamp >= "{start_time}" '
         f'SEARCH("Reshard finished in")'
@@ -58,10 +59,26 @@ def get_reshard_data():
         return None
 
     df = pd.DataFrame(results).sort_values("timestamp")
-    df.to_csv("reshard_times.csv", index=False)
-    
-    print(f"Success! Found {len(df)} events.")
-    print(df.describe())
-    return df
 
-df = get_reshard_data()
+    # Only keep the third - tenth ones and compute the mean of them
+    # Note: iloc[2:min(df.shape[0], args.max_steps)] gets indices 2 through 9 (8 items), corresponding to 3rd through 10th
+    selected_df = df.iloc[2:min(df.shape[0], args.max_steps)]
+    mean_reshard_time = selected_df["reshard_sec"].mean()
+
+    result_df = pd.DataFrame([{"pod_name": args.pod_name, "mean_reshard_time": mean_reshard_time}])
+    # If the csv file already exists, append to it instead of overwriting
+    try:
+        existing_df = pd.read_csv("reshard_stats.csv")
+        result_df = pd.concat([existing_df, result_df], ignore_index=True)
+    except FileNotFoundError:
+        pass
+    result_df.to_csv("reshard_stats.csv", index=False)
+    print(result_df)
+    return result_df
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pod_name", type=str, required=True, help="Pod name")
+    parser.add_argument("--max_steps", type=int, default=10, help="Max steps")
+    args = parser.parse_args()
+    get_reshard_data(args)

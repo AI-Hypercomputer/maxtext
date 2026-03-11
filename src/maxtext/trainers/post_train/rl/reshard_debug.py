@@ -175,8 +175,8 @@ def setup_configs_and_devices(argv: list[str]):
   else:
     raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
 
-  sampler_config.subslice_shape = ""  # we are not using subslices in this script, set it to empty to avoid confusion
-  sampler_config.enable_single_controller = False  # we are not using single controller in this script, set it to False to avoid confusion
+  sampler_config.subslice_shape = config.rollout_subslice_shape
+  sampler_config.enable_single_controller = config.rollout_enable_single_controller
   return trainer_config, sampler_config, trainer_devices, sampler_devices
 
 
@@ -414,7 +414,8 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     jax.tree_util.tree_map(jax.block_until_ready, rl_cluster.rollout._sampler.transformer_state)
     end_time = time.time()
     show_hbm_usage(f"HBM after step {step}:")
-    max_logging.log(f"Resharding via sync_weights() completed: step {step}. Weight Syncing Time taken: {end_time - start_time:.4f}s")
+    max_logging.log(f"Weight Syncing Time taken: {end_time - start_time:.4f}s")
+    max_logging.log(f"Resharding via sync_weights() completed: step {step}")
 
 
 def main(argv: Sequence[str]) -> None:

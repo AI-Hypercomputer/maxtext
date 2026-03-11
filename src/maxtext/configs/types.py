@@ -1586,6 +1586,11 @@ class RLHardware(BaseModel):
       description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined.",
   )
   rollout_expert_parallelism: int = Field(1, description="Expert parallelism per replica for rollout")
+  rollout_subslice_shape: str = Field("", description="Subslice shape for rollout in the form of 'x,y,z' for Pathways.")
+  rollout_enable_single_controller: bool = Field(
+      False,
+      description="Whether to enable single-controller mode for rollout. If True, the trainer will also run the rollout and sampling computations instead of launching separate processes. This is only recommended for debugging or if the rollout computation is very small and can be efficiently handled by a single controller.",
+  )
 
 
 class VLLM(BaseModel):
