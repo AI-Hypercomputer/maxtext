@@ -168,6 +168,120 @@ def merge(x, split_factor=2):
   return jnp.reshape(x, (-1,) + x.shape[2:])
 
 
+def gather_weights(weights, mesh):
+  """all-gathers FSDP sharded weights."""
+
+  def fn(weights):
+    (
+        (pre_attn_norm, post_attn_norm),
+        (wq_a, wq_b, q_norm, wkv_a, wkv_b, kv_norm, out),
+    ), (
+        (gate, bias),
+        (routed_wi_0, routed_wi_1, routed_wo),
+        (shared_wi_0, shared_wi_1, shared_wo),
+    ) = weights
+    # All-gather across FSDP axis.
+    wq_a = jax.lax.all_gather(wq_a, axis_name="fsdp", tiled=True, to="reduced")
+    wq_b = jax.lax.all_gather(wq_b, axis_name="fsdp", tiled=True, to="reduced")
+    wkv_a = jax.lax.all_gather(wkv_a, axis_name="fsdp", tiled=True, to="reduced")
+    wkv_b = jax.lax.all_gather(wkv_b, axis_name="fsdp", tiled=True, to="reduced")
+    out = jax.lax.all_gather(out, axis_name="fsdp", tiled=True, axis=2, to="reduced")
+    gate = jax.lax.all_gather(gate, axis_name="fsdp", tiled=True, to="reduced")
+    print("before AG: ", jax.typeof(routed_wi_0))
+    routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name="fsdp", tiled=True, to="reduced")
+    print("after AG: ", jax.typeof(routed_wi_0))
+    routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name="fsdp", tiled=True, to="reduced")
+    routed_wo = jax.lax.all_gather(routed_wo, axis_name="fsdp", tiled=True, to="reduced")
+    shared_wi_0 = jax.lax.all_gather(shared_wi_0, axis_name="fsdp", tiled=True, to="reduced")
+    shared_wi_1 = jax.lax.all_gather(shared_wi_1, axis_name="fsdp", tiled=True, to="reduced")
+    shared_wo = jax.lax.all_gather(shared_wo, axis_name="fsdp", tiled=True, axis=1, to="reduced")
+    return (
+        (
+            (pre_attn_norm, post_attn_norm),
+            (wq_a, wq_b, q_norm, wkv_a, wkv_b, kv_norm, out),
+        ),
+        (
+            (gate, bias),
+            (routed_wi_0, routed_wi_1, routed_wo),
+            (shared_wi_0, shared_wi_1, shared_wo),
+        ),
+    )
+
+  return jax.shard_map(
+      fn,
+      mesh=mesh,
+      in_specs=(
+          (
+              (
+                  (
+                      jax.sharding.PartitionSpec(None),
+                      jax.sharding.PartitionSpec(None),
+                  ),
+                  (
+                      jax.sharding.PartitionSpec("fsdp", None),
+                      jax.sharding.PartitionSpec("fsdp", None, None),
+                      jax.sharding.PartitionSpec(None),
+                      jax.sharding.PartitionSpec("fsdp", None),
+                      jax.sharding.PartitionSpec("fsdp", None, None),
+                      jax.sharding.PartitionSpec(None),
+                      jax.sharding.PartitionSpec(None, None, "fsdp"),
+                  ),
+              ),
+              (
+                  (
+                      jax.sharding.PartitionSpec("fsdp", None),
+                      jax.sharding.PartitionSpec(None),
+                  ),
+                  (
+                      jax.sharding.PartitionSpec("fsdp", None, "expert"),
+                      jax.sharding.PartitionSpec("fsdp", None, "expert"),
+                      jax.sharding.PartitionSpec("fsdp", "expert", None),
+                  ),
+                  (
+                      jax.sharding.PartitionSpec("fsdp", None),
+                      jax.sharding.PartitionSpec("fsdp", None),
+                      jax.sharding.PartitionSpec(None, "fsdp"),
+                  ),
+              ),
+          ),
+      ),
+      out_specs=(
+          (
+              (
+                  jax.sharding.PartitionSpec(None),
+                  jax.sharding.PartitionSpec(None),
+              ),
+              (
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp"}),
+                  jax.sharding.PartitionSpec(None, None, None, reduced={"fsdp"}),
+                  jax.sharding.PartitionSpec(None),
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp"}),
+                  jax.sharding.PartitionSpec(None, None, None, reduced={"fsdp"}),
+                  jax.sharding.PartitionSpec(None),
+                  jax.sharding.PartitionSpec(None, None, None, reduced={"fsdp"}),
+              ),
+          ),
+          (
+              (
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp"}),
+                  jax.sharding.PartitionSpec(None),
+              ),
+              (
+                  jax.sharding.PartitionSpec(None, None, "expert", reduced={"fsdp"}),
+                  jax.sharding.PartitionSpec(None, None, "expert", reduced={"fsdp"}),
+                  jax.sharding.PartitionSpec(None, "expert", None, reduced={"fsdp"}),
+              ),
+              (
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp"}),
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp"}),
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp"}),
+              ),
+          ),
+      ),
+      check_vma=True,
+  )(weights)
+
+
 def scan_batch_split_layers(
     inputs,
     params,
@@ -182,8 +296,40 @@ def scan_batch_split_layers(
 ):
   """Scans the layers with batch-split schedule."""
 
-  def batch_split_scan_fn(inputs, weights, dpos, dseg):
-    xs = batch_split_schedule(
+  # @jax.custom_vjp
+  # def process_layer(inputs, weights, dpos, dseg):
+  #   xs, _ = process_layer_fwd(inputs, weights, dpos, dseg)
+  #   return xs
+
+  # def process_layer_fwd(inputs, weights, dpos, dseg):
+  #   weights = gather_weights(weights, mesh)
+  #   xs, batch_split_schedule_vjp = jax.vjp(
+  #       functools.partial(
+  #           batch_split_schedule,
+  #           model_mode=model_mode,
+  #           mesh=mesh,
+  #           quant=quant,
+  #           cfg=cfg,
+  #       ),
+  #       inputs,
+  #       weights,
+  #       dpos,
+  #       dseg,
+  #   )
+  #   return xs, batch_split_schedule_vjp
+
+  # def process_layer_bwd(res, grad):
+  #   batch_split_schedule_vjp = res
+  #   inputs_grad, ws_grad, _, _ = batch_split_schedule_vjp(grad)
+  #   return inputs_grad, ws_grad, None, None
+
+  # process_layer.defvjp(process_layer_fwd, process_layer_bwd)
+
+  def process_layer(inputs, weights, dpos, dseg):
+    print("before gather call: ", jax.typeof(weights[1][1][0]))
+    weights = gather_weights(weights, mesh)
+    print("after gather call: ", jax.typeof(weights[1][1][0]))
+    return batch_split_schedule(
         inputs,
         weights,
         dpos,
@@ -193,14 +339,18 @@ def scan_batch_split_layers(
         quant=quant,
         cfg=cfg,
     )
-    return xs, None
 
-  batch_split_scan_fn_checkpointed = jax.checkpoint(
-      batch_split_scan_fn,
-      # No need to prevent CSE inside scan.
-      prevent_cse=False,
-      policy=policy,
-  )
+  def batch_split_scan_fn(inputs, weights, dpos, dseg):
+    return (
+        jax.checkpoint(
+            process_layer,
+            # No need to prevent CSE inside scan.
+            prevent_cse=False,
+            policy=policy,
+        )(inputs, weights, dpos, dseg),
+        None,
+    )
+
   weights = fetch_weights(params, cfg.dtype)
   # `jax.lax.scan` expects the leading dimension of weights to be the scan
   # dimension, but the weights are initialized/loaded with the param scan
@@ -212,6 +362,7 @@ def scan_batch_split_layers(
       None,
       None,
   )
+  inputs = data_parallel_reshard(inputs, mesh)
   inputs = jax.shard_map(
       functools.partial(split, split_factor=cfg.batch_split_factor),
       mesh=mesh,
@@ -221,7 +372,7 @@ def scan_batch_split_layers(
   dpos = split(positions, split_factor=cfg.batch_split_factor)
   dseg = split(segment_ids, split_factor=cfg.batch_split_factor)
   outputs, _ = jax.lax.scan(
-      functools.partial(batch_split_scan_fn_checkpointed, dpos=dpos, dseg=dseg),
+      functools.partial(batch_split_scan_fn, dpos=dpos, dseg=dseg),
       inputs,
       weights,
   )
@@ -246,8 +397,8 @@ def batch_split_schedule(
     cfg,
 ):
   """Applies the DeepSeek MoE layer with batch-split schedule."""
-  xs = [with_data_parallel_constraint(x, mesh) for x in inputs]
-  xs = jax.ad_checkpoint.checkpoint_name(xs, "decoder_layer_input")
+  # xs = [with_data_parallel_constraint(x, mesh) for x in inputs]
+  xs = jax.ad_checkpoint.checkpoint_name(inputs, "decoder_layer_input")
 
   attn_op = attention_op.AttentionOp(
       config=cfg,
@@ -310,6 +461,15 @@ def staggered_call(fn, xs):
   return xs
 
 
+def data_parallel_reshard(x, mesh):
+  activation_pspec = jax.sharding.PartitionSpec(
+      ("data", "fsdp", "fsdp_transpose", "expert", "context"),
+      None,
+      None,
+  )
+  return jax.reshard(x, jax.sharding.NamedSharding(mesh, activation_pspec))
+
+
 def with_data_parallel_constraint(x, mesh):
   activation_pspec = jax.sharding.PartitionSpec(
       ("data", "fsdp", "fsdp_transpose", "expert", "context"),
@@ -357,30 +517,28 @@ def mla_with_norms(
         epsilon=normalization_layer_epsilon,
         dtype=dtype,
     )
-    out = x + with_data_parallel_constraint(
-        mla(
-            y,
-            dpos,
-            dseg,
-            attn_ws,
-            model_mode=model_mode,
-            epsilon=normalization_layer_epsilon,
-            kv_lora_rank=kv_lora_rank,
-            kv_norm_epsilon=normalization_layer_epsilon,
-            qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            rope_theta=rope_max_timescale,
-            num_query_heads=num_query_heads,
-            max_position_embeddings=max_position_embeddings,
-            original_max_position_embeddings=original_max_position_embeddings,
-            beta_fast=beta_fast,
-            beta_slow=beta_slow,
-            rope_factor=rope_factor,
-            dtype=dtype,
-            mscale=mscale,
-            attention_op_fn=attn_op,
-        ),
-        mesh,
+    out = x + mla(
+        y,
+        dpos,
+        dseg,
+        attn_ws,
+        model_mode=model_mode,
+        epsilon=normalization_layer_epsilon,
+        kv_lora_rank=kv_lora_rank,
+        kv_norm_epsilon=normalization_layer_epsilon,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        rope_theta=rope_max_timescale,
+        num_query_heads=num_query_heads,
+        max_position_embeddings=max_position_embeddings,
+        original_max_position_embeddings=original_max_position_embeddings,
+        beta_fast=beta_fast,
+        beta_slow=beta_slow,
+        rope_factor=rope_factor,
+        dtype=dtype,
+        mscale=mscale,
+        attention_op_fn=attn_op,
+        mesh=mesh,
     )
     return out, rms_norm(
         out,
@@ -414,6 +572,7 @@ def mla(
     mscale,
     attention_op_fn,
     dtype,
+    mesh,
 ):
   """Performs MLA."""
   (
@@ -473,6 +632,7 @@ def mla(
       model_mode,
       cached_values=[None, None],
   )
+  out = data_parallel_reshard(out, mesh)
   out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
   out = dot(out, out_weights, axes=2)
   out = jax.ad_checkpoint.checkpoint_name(out, "out_proj")
@@ -689,19 +849,16 @@ def moe(
 ):
   """Performs dropless MoE with tensor/expert parallelism."""
   xs, ys = list(zip(*inputs))
-  ys = with_data_parallel_constraint(
-      process_activations(
-          ys,
-          weights,
-          mesh=mesh,
-          num_experts=num_experts,
-          num_experts_per_tok=num_experts_per_tok,
-          routed_scaling_factor=routed_scaling_factor,
-          expert_axis_name=expert_axis_name,
-          use_gather_mosaic_kernel=use_gather_mosaic_kernel,
-          config=config,
-      ),
-      mesh,
+  ys = process_activations(
+      ys,
+      weights,
+      mesh=mesh,
+      num_experts=num_experts,
+      num_experts_per_tok=num_experts_per_tok,
+      routed_scaling_factor=routed_scaling_factor,
+      expert_axis_name=expert_axis_name,
+      use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+      config=config,
   )
   return [x + y for x, y in zip(xs, ys)]
 
@@ -1028,6 +1185,7 @@ def process_activations(
       None,
       None,
   )
+  print("before second shard map: ", print(jax.typeof(weights[1][0])))
   if config.use_qwix_quantization:
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
     gating_pspec = nn.logical_to_mesh_axes(gating_pspec)
@@ -1067,5 +1225,5 @@ def process_activations(
           ),
       ),
       out_specs=activation_pspec,
-      check_vma=False,
+      check_vma=True,
   )([x.astype(config.dtype) for x in xs], weights)
