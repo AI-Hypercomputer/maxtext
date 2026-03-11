@@ -20,6 +20,7 @@ import pickle
 import os
 
 from flax import linen as nn
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 
@@ -1030,7 +1031,7 @@ def init_initial_state(model, tx, config, is_training, key):
   return init_decode_state(model.apply, model_vars)
 
 
-def get_abstract_param(model, config):
+def get_abstract_param(model: nn.Module | nnx.Module, config):
   """Get abstract model structure (name, shape) without materializing the weights to save memory"""
   with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     key = jax.random.PRNGKey(0)
@@ -1039,14 +1040,17 @@ def get_abstract_param(model, config):
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
-  abstract_vars = jax.eval_shape(
-      model.init,
-      {"params": key, "dropout": key, "aqt": key},
-      jnp.ones(input_shape, dtype=jnp.int32),
-      jnp.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
-      encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
-  )
+  if isinstance(model, nn.Module):
+    abstract_vars = jax.eval_shape(
+        model.init,
+        {"params": key, "dropout": key, "aqt": key},
+        jnp.ones(input_shape, dtype=jnp.int32),
+        jnp.ones(input_shape, dtype=jnp.int32),
+        encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+        encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
+    )
+  else:  # nnx.Module
+    _, abstract_vars = nnx.split(nnx.eval_shape(lambda: model))
   return abstract_vars
 
 

@@ -464,8 +464,8 @@ def eval_step(
           "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
       },
   }
-  # if config.use_dpo:
-  #  metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux["reward_accuracy"]
+  if config.use_dpo:
+    metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux["reward_accuracy"]
 
   return metrics
 
@@ -497,7 +497,7 @@ def _create_and_shard_optimizer(model: nnx.Module, config, mesh: Mesh):
     learning_rate_schedule: Learning-rate schedule function.
   """
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-  tx = optimizers.get_optimizer(config, learning_rate_schedule)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
   # NNX 0.11+: wrt is mandatory; optimizer does not store a model reference.
   optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
