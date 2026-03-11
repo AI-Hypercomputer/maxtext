@@ -72,12 +72,15 @@ class MaxTextTrainingInput(peft_trainer.TrainingInput):
   top_k_logits: jax.Array = None
   top_k_indices: jax.Array = None
 
+
 # -----------------------------------------------------------------------------
 # Data Loading Adapter
 # -----------------------------------------------------------------------------
 
+
 class OfflineArrayRecordIterator:
   """Reads the pre-generated global top-k logits file."""
+
   def __init__(self, data_dir: str, epochs: int = 100):
     # Check if the user passed a directory or a direct file path
     if tf.io.gfile.isdir(data_dir):
@@ -100,18 +103,18 @@ class OfflineArrayRecordIterator:
   def __next__(self):
     if self.record_index < self.num_records:
       pass
-      
+
     self.current_epoch += 1
     if self.current_epoch >= self.epochs:
-        raise StopIteration
-    
+      raise StopIteration
+
     self.record_index = 0
     self.reader = array_record_module.ArrayRecordReader(self.filepath)
 
     record = self.reader.read()
     self.record_index += 1
     data = pickle.loads(record)
-    
+
     # Map the arrays to match MaxText's expected dictionary
     batch = {
         "inputs": data["tokens"],
@@ -121,8 +124,9 @@ class OfflineArrayRecordIterator:
     for key in ["inputs_position", "inputs_segmentation", "targets_segmentation", "targets"]:
       if key in data:
         batch[key] = data[key]
-        
+
     return batch
+
 
 class MaxTextToTunixIterator:
   """Adapts the raw dictionary output of MaxText's data loader to Tunix objects.

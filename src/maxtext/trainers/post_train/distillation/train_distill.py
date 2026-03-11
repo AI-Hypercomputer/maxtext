@@ -307,7 +307,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         targets_position=input_data.targets_position,
         targets_segmentation=input_data.targets_segmentation,
         top_k_logits=input_data.top_k_logits,
-        top_k_indices=input_data.top_k_indices
+        top_k_indices=input_data.top_k_indices,
     )
 
   def _post_process_train_step(self, aux: dict[str, jax.Array]) -> None:
@@ -406,7 +406,12 @@ def get_maxtext_model(config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh)
 # -----------------------------------------------------------------------------
 
 
-def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyconfig.HyperParameters, is_offline: bool = False, offline_data_dir: str | None = None) -> None:
+def train_distill(
+    student_config: pyconfig.HyperParameters,
+    teacher_config: pyconfig.HyperParameters,
+    is_offline: bool = False,
+    offline_data_dir: str | None = None,
+) -> None:
   """Main distillation training loop.
 
   Orchestrates the loading of both student and teacher models, configures the
@@ -550,7 +555,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
         "targets_segmentation": batch.targets_segmentation,
         "cache": None,
     }
-    
+
     # If we are in online mode then we exit
     if getattr(batch, "top_k_logits", None) is None:
       return inputs_dict
@@ -558,21 +563,15 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
     # Scatter the offline arrays into a dense tensor of -10000s
     dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
     dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
-    dense_logits = jnp.put_along_axis(
-        dense_logits, 
-        batch.top_k_indices, 
-        batch.top_k_logits, 
-        axis=-1, 
-        inplace=False
-    )
-    
+    dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
+
     # Inject it as teacher_output so the trainer skips the teacher forward pass
     inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
         logits=dense_logits, out_projection_activations=None
     )
-    
+
     return inputs_dict
-  
+
   trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
 
   # 9. Create Iterator Wrappers (Use Utils)
@@ -635,7 +634,7 @@ def main(argv: Sequence[str], local_args) -> None:
   student_config = pyconfig.initialize(argv, **student_overrides)
 
   # 3. Initialize TEACHER Config
-   # We isolate the Teacher from Student CLI arguments (like pruning params).
+  # We isolate the Teacher from Student CLI arguments (like pruning params).
   teacher_overrides = global_config.teacher_overrides
 
   # Ensure load_parameters_path is set in overrides
@@ -668,7 +667,7 @@ if __name__ == "__main__":
       default=None,
       help="GCS or local path to the pre-generated ArrayRecord teacher data.",
   )
-  
+
   # parse_known_args separates our custom flags from MaxText's standard args
   local_arg, remaining_args = parser.parse_known_args()
 
