@@ -282,37 +282,11 @@ def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
   return rollout_kwargs
 
 
-def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
-  """
-  Run RL training with the provided configuration.
-
-  Args:
-    trainer_config: MaxText configuration for the trainer.
-    sampler_config: MaxText configuration for the sampler.
-    trainer_devices: JAX devices for the trainer.
-    sampler_devices: JAX devices for the sampler.
-  """
-  if not trainer_config.debug.rl:
-    # Apply filter to suppress noisy logs
-    noise_filter = max_logging.NoisyLogFilter()
-    logging.getLogger().addFilter(noise_filter)
-    absl_logging.get_absl_logger().addFilter(noise_filter)
-
-  max_logging.log("Starting RL Training")
-  max_logging.log(f"Ensuring TensorBoard log directory exists: {trainer_config.tensorboard_dir}")
-  if not epath.Path(trainer_config.tensorboard_dir).exists():
-    epath.Path(trainer_config.tensorboard_dir).mkdir(parents=True, exist_ok=True)
-
-  if not epath.Path(trainer_config.checkpoint_dir).exists():
-    epath.Path(trainer_config.checkpoint_dir).mkdir(parents=True)
-
-  # Number of training steps.
-  max_train_steps = int(
-      trainer_config.num_batches
-      * trainer_config.rl.num_iterations
-      * trainer_config.train_fraction
-      * trainer_config.num_epoch
-  )
+def get_datasets(
+    model_tokenizer,
+    trainer_config,
+) -> tuple[grain.IterDataset, grain.IterDataset]:
+  """Handles loading, templating, filtering, and batching of train/test datasets."""
   # ====== Data ======
   # Setup data directories
   home = os.path.expanduser("~") + "/"
@@ -323,9 +297,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   if not os.path.exists(test_data_dir):
     os.makedirs(test_data_dir)
 
-  # Create model tokenizer
-  model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
-
   # Load datasets
   if trainer_config.dataset_name == "huggingface:nvidia/OpenMathInstruct-2":
     import datasets  # pylint: disable=import-outside-toplevel
@@ -334,7 +305,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
         split: str = "train_1M",
         seed: int = 42,
         test_size: float = 0.05,
-        output_key: str = "expected_answer",
     ):
       """Load and split the OpenMathInstruct-2 dataset into train and validation sets using HF's train_test_split."""
       max_logging.log(
@@ -422,16 +392,54 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   if trainer_config.debug.rl:
     # Let's see how one batch of the dataset looks like!
-    if trainer_config.debug.rl:
-      for i, ele in enumerate(train_dataset):
-        if i >= 5:
-          break
-        pprint(ele)
-    if trainer_config.debug.rl:
-      for i, ele in enumerate(test_dataset):
-        if i >= 5:
-          break
-        pprint(ele)
+    for i, ele in enumerate(train_dataset):
+      if i >= 5:
+        break
+      pprint(ele)
+    for i, ele in enumerate(test_dataset):
+      if i >= 5:
+        break
+      pprint(ele)
+
+  return train_dataset, test_dataset
+
+
+def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
+  """
+  Run RL training with the provided configuration.
+
+  Args:
+    trainer_config: MaxText configuration for the trainer.
+    sampler_config: MaxText configuration for the sampler.
+    trainer_devices: JAX devices for the trainer.
+    sampler_devices: JAX devices for the sampler.
+  """
+  if not trainer_config.debug.rl:
+    # Apply filter to suppress noisy logs
+    noise_filter = max_logging.NoisyLogFilter()
+    logging.getLogger().addFilter(noise_filter)
+    absl_logging.get_absl_logger().addFilter(noise_filter)
+
+  max_logging.log("Starting RL Training")
+  max_logging.log(f"Ensuring TensorBoard log directory exists: {trainer_config.tensorboard_dir}")
+  if not epath.Path(trainer_config.tensorboard_dir).exists():
+    epath.Path(trainer_config.tensorboard_dir).mkdir(parents=True, exist_ok=True)
+
+  if not epath.Path(trainer_config.checkpoint_dir).exists():
+    epath.Path(trainer_config.checkpoint_dir).mkdir(parents=True)
+
+  # Number of training steps.
+  max_train_steps = int(
+      trainer_config.num_batches
+      * trainer_config.rl.num_iterations
+      * trainer_config.train_fraction
+      * trainer_config.num_epoch
+  )
+  # ====== Data ======
+  # Create model tokenizer
+  model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
+
+  train_dataset, test_dataset = get_datasets(model_tokenizer, trainer_config)
 
   # Load reference model
   max_logging.log("Creating reference model and also meshes for reference and rollout")
