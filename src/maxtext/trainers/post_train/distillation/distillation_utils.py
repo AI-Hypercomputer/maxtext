@@ -101,15 +101,13 @@ class OfflineArrayRecordIterator:
     return self
 
   def __next__(self):
-    if self.record_index < self.num_records:
-      pass
+    if self.record_index >= self.num_records:
+      self.current_epoch += 1
+      if self.current_epoch >= self.epochs:
+        raise StopIteration
 
-    self.current_epoch += 1
-    if self.current_epoch >= self.epochs:
-      raise StopIteration
-
-    self.record_index = 0
-    self.reader = array_record_module.ArrayRecordReader(self.filepath)
+      self.record_index = 0
+      self.reader = array_record_module.ArrayRecordReader(self.filepath)
 
     record = self.reader.read()
     self.record_index += 1
