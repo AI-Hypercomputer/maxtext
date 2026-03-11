@@ -51,7 +51,7 @@ Third, setup following environment variables for conversion script
 
 ```bash
 # -- Model configuration --
-export HF_MODEL=<Hugging Face Model to be converted to MaxText> # e.g. 'llama3.1-8b-Instruct'
+export MODEL_NAME=<Hugging Face Model to be converted to MaxText> # e.g. 'llama3.1-8b-Instruct'
 export HF_TOKEN=<Hugging Face access token> # your token to access gated HF repos
 
 # -- MaxText configuration --
@@ -67,8 +67,11 @@ export LAZY_LOAD_TENSORS=<Flag to lazy load> # True to use lazy load, False to u
 Finally, run below command to complete the conversion
 
 ```bash
+# Optional: If run out of disk space when downloading HuggingFace safetensors,
+# customize your "HF_HOME" to redirect the cache to a larger or mounted disk (e.g., on a TPU VM).
+# export HF_HOME="/dev/shm/huggingface_tmp"
 python3 -m maxtext.checkpoint_conversion.to_maxtext maxtext/configs/base.yml \
-    model_name=${HF_MODEL?} \
+    model_name=${MODEL_NAME?} \
     hf_access_token=${HF_TOKEN?} \
     base_output_directory=${MODEL_CHECKPOINT_DIRECTORY?} \
     scan_layers=True \
