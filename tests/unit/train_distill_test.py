@@ -183,6 +183,8 @@ class TrainDistillTest(unittest.TestCase):
         positions=mock_batch["positions"],
         attention_mask=mock_batch["attention_mask"],
         decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch.get("targets", None),
+        decoder_target_mask=mock_batch.get("targets_segmentation", None),
         cache=None,
     )
 
@@ -228,7 +230,9 @@ class TrainDistillTest(unittest.TestCase):
         positions=mock_batch["positions"],
         attention_mask=mock_batch["attention_mask"],
         decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch.get("targets", None),
         cache=None,
+        decoder_target_mask=None,
     )
 
     trainer.strategy.student_forward_fn.assert_called_once_with(
@@ -237,11 +241,13 @@ class TrainDistillTest(unittest.TestCase):
         positions=mock_batch["positions"],
         attention_mask=mock_batch["attention_mask"],
         decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch.get("targets", None),
         cache=None,
+        decoder_target_mask=None,
     )
 
     # Verify loss computation and optimizer update
-    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"])
+    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
     trainer.strategy.compute_loss.assert_called_once()
     optimizer.update.assert_called_once_with(student_model, mock_grads)
 
