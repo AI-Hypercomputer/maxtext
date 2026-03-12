@@ -213,7 +213,7 @@ class PipelineBase(nn.Module):
       def get_partition_spec_leaf(leaf):
         return leaf.get_partition_spec()
 
-      return jax.tree.map(get_partition_spec_leaf, pytree, is_leaf=_is_leaf)
+      return jax.tree.map(get_partition_spec_leaf, pytree, is_leaf=lambda x: x is None or _is_leaf(x))
 
     partition_spec_with_extra_layer = get_partition_spec(weights)
     logical_partition_spec = {"params": partition_spec_with_extra_layer["params"]["layers"]}
@@ -222,12 +222,12 @@ class PipelineBase(nn.Module):
   def get_vmap_func_for_init(self):
     """This vmap func is used to initialize the weights only on init."""
 
-    def func_to_vmap(body_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+    def func_to_vmap(body_instance, deterministic, model_mode, stages_inputs, stages_segment_ids, stages_positions):
       return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
     vmap_func = nn.vmap(
         func_to_vmap,
-        in_axes=(0, 0, 0, None, None),
+        in_axes=(None, None, 0, 0, 0),
         spmd_axis_name=self.spmd_axis_name,
         variable_axes={"params": 0, "_overwrite_with_gradient": 0},
         split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
@@ -248,7 +248,7 @@ class PipelineBase(nn.Module):
     """
 
     def func_to_vmap(
-        body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
+        body_instance, deterministic, model_mode, weights, stages_inputs, stages_segment_ids, stages_positions
     ):
       weights = meta.remove_axis(
           weights,
@@ -264,7 +264,7 @@ class PipelineBase(nn.Module):
 
     vmap_func = nn.vmap(
         func_to_vmap,
-        in_axes=(0, 0, 0, 0, None, None),
+        in_axes=(None, None, 0, 0, 0, 0),
         spmd_axis_name=self.spmd_axis_name,
         variable_axes={"params": 0},
         split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
@@ -286,7 +286,7 @@ class PipelineBase(nn.Module):
     if self.config.num_pipeline_repeats > 1:
       vmap_func = nn.vmap(
           vmap_func,
-          in_axes=(0, segment_idx, position_idx, None, None),
+          in_axes=(None, None, 0, segment_idx, position_idx),
           variable_axes={"params": 0, "_overwrite_with_gradient": 0, "non_trainable": 0, "hyper_params": 0},
           split_rngs={"params": True, "dropout": self.config.enable_dropout},
           metadata_params={
@@ -311,7 +311,7 @@ class PipelineBase(nn.Module):
 
     example_inputs = self._maybe_shard_with_logical(example_inputs, (None, None, None, None))
     stage_outputs = vmap_func(
-        self.layers, example_inputs, example_segmentation, example_position, deterministic, model_mode
+        self.layers, deterministic, model_mode, example_inputs, example_segmentation, example_position
     )
     if self.config.scan_layers:
       stage_outputs = stage_outputs[0]
@@ -663,9 +663,14 @@ class Pipeline(PipelineBase):
       )
 
     if physical_partition_spec is None:
-      weights = jax.tree.map(gather_weights_for_stages_in, weights)
+      weights = jax.tree.map(gather_weights_for_stages_in, weights, is_leaf=lambda x: x is None)
     else:
-      weights = jax.tree.map(gather_weights_for_stages_in, weights, physical_partition_spec)
+      weights = jax.tree.map(
+          lambda w, s: gather_weights_for_stages_in(w, s) if w is not None else None,
+          weights,
+          physical_partition_spec,
+          is_leaf=lambda x: x is None,
+      )
     return weights
 
   def run_one_iteration(
@@ -969,8 +974,8 @@ class CircularPipeline(PipelineBase):
     def _init_empty_bsw_buffers(variables):
       # BSW requires two buffers (current and next) for the sliding window
       return (
-          jax.tree.map(lambda x: jnp.zeros_like(x[0]), variables),
-          jax.tree.map(lambda x: jnp.zeros_like(x[0]), variables),
+          jax.tree.map(lambda x: jnp.zeros_like(x[0]) if x is not None else None, variables, is_leaf=lambda x: x is None),
+          jax.tree.map(lambda x: jnp.zeros_like(x[0]) if x is not None else None, variables, is_leaf=lambda x: x is None),
       )
 
     if self.is_initializing():
