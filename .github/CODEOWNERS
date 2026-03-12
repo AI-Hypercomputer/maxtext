@@ -1,36 +1,34 @@
 * @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @gagika @shralex @SurbhiJainUSC @hengtaoguo @A9isha @aireenmei @NuojCheng @jiangjy1982 @suexu1025 @NicoGrande @jesselu-google @dipannita08 @igorts-git
 
 # Model bring-up
-src/MaxText/assets @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande
-src/MaxText/configs/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @suexu1025 @jesselu-google @NuojCheng
+src/maxtext/assets @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande
+src/maxtext/configs/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng
 src/maxtext/checkpoint_conversion @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @hengtaoguo @gagika @shralex @richjames0 @NicoGrande
-src/MaxText/layers @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @suexu1025 @jesselu-google @NuojCheng
+src/maxtext/layers @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng
+src/maxtext/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng
 
 # Features
 src/maxtext/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0 @shralex @NicoGrande
-src/MaxText/input_pipeline @aireenmei @SurbhiJainUSC @richjames0 @shralex @NicoGrande
-src/MaxText/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google
-src/MaxText/kernels/ragged_attention.py @patemotter @vipannalla @richjames0 @shralex
-src/MaxText/layers/pipeline.py @gobbleturk @richjames0 @shralex @NuojCheng
-src/MaxText/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google
-src/MaxText/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0 @shralex
-src/MaxText/elastic_train.py @lukebaumann @shauryagup @richjames0 @shralex
-src/MaxText/layers/quantizations.py @khatwanimohit @jshin1394 @liudangyi @richjames0 @shralex
+src/maxtext/input_pipeline @aireenmei @SurbhiJainUSC @richjames0 @shralex @NicoGrande
+src/maxtext/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google
+src/maxtext/kernels/ragged_attention.py @patemotter @vipannalla @richjames0 @shralex
+src/maxtext/layers/pipeline.py @gobbleturk @richjames0 @shralex @NuojCheng
+src/maxtext/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google
+src/maxtext/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0 @shralex
+src/maxtext/layers/quantizations.py @khatwanimohit @jshin1394 @liudangyi @richjames0 @shralex
 
 # Inference
-src/maxtext/tests/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
+tests/inference/ @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
 src/maxtext/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
-src/maxtext/inference_mlperf @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
 
 # Dockerfiles and dependencies
-*.Dockerfile @bvandermoon @parambole @richjames0 @shralex
-*.txt @bvandermoon @parambole @richjames0 @shralex
+src/dependencies/ @bvandermoon @parambole @richjames0 @shralex
 
 # Docs
-*.md @jacoguzo @bvandermoon @richjames0 @shralex @gobbleturk @RissyRan @gagika @A9isha @jiangjy1982 @vipannalla
+docs/ @jacoguzo @bvandermoon @richjames0 @shralex @gobbleturk @RissyRan @gagika @A9isha @jiangjy1982 @vipannalla
 
 # Workflow files
-.github/workflows @gobbleturk @khatwanimohit @shralex @parambole @bvandermoon @richjames0
+.github/workflows/ @gobbleturk @khatwanimohit @shralex @parambole @bvandermoon @richjames0
 
 # Benchmarking/Recipes
-benchmarks @SujeethJinesh @bvandermoon @richjames0 @shralex @vipannalla @mitalisi @RissyRan @shauryagup @NuojCheng @gobbleturk @khatwanimohit @Obliviour @notabee @suexu1025
+benchmarks/ @SujeethJinesh @bvandermoon @richjames0 @shralex @vipannalla @mitalisi @RissyRan @shauryagup @NuojCheng @gobbleturk @khatwanimohit @Obliviour @notabee @suexu1025
