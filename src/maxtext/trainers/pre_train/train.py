@@ -420,7 +420,7 @@ def eval_step(model, config, state, data, dropout_rng):
 def train_loop(config, recorder, state=None):
   """Main Training loop."""
   # Kills the workload if initialization takes longer than 20 minutes
-  with watchdog.watchdog(20 * 60, repeat=False):
+  with watchdog.watchdog(name="initialization", timeout=20 * 60, repeat=False):
     (
         init_rng,
         checkpoint_manager,
@@ -476,7 +476,10 @@ def train_loop(config, recorder, state=None):
     last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
       # Print the stacktrace every 60s and also exit the workload if longer than 600s
-      with watchdog.watchdog(60), watchdog.watchdog(10 * 60, repeat=False):
+      with (
+          watchdog.watchdog("step-stack-status", timeout=60),
+          watchdog.watchdog("step-timebomb" * 60, repeat=False),
+      ):
         prof.maybe_activate_profiler(step, state)
 
         with jax.profiler.StepTraceAnnotation("train", step_num=step):
