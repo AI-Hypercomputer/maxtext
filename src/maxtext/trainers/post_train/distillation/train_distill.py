@@ -619,7 +619,7 @@ def train_distill(
   max_logging.log("Distillation Complete.")
 
 
-def main(argv: Sequence[str], local_args) -> None:
+def main(argv: Sequence[str]) -> None:
   """Entry point for the script.
 
   Parses configuration, isolates Student and Teacher overrides, and triggers the
@@ -638,7 +638,7 @@ def main(argv: Sequence[str], local_args) -> None:
   teacher_overrides = global_config.teacher_overrides
 
   # Ensure load_parameters_path is set in overrides
-  if not local_args.offline_distillation and not teacher_overrides.get("load_parameters_path"):
+  if not global_config.offline_distillation and not teacher_overrides.get("load_parameters_path"):
     raise ValueError(
         "Teacher model path is missing! You must provide 'teacher_overrides.load_parameters_path' "
         "in your config or arguments."
@@ -650,26 +650,8 @@ def main(argv: Sequence[str], local_args) -> None:
   teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
 
   # 4. Run Training
-  train_distill(student_config, teacher_config, local_args.offline_distillation, local_args.offline_data_dir)
+  train_distill(student_config, teacher_config, global_config.offline_distillation, global_config.offline_data_dir)
 
 
 if __name__ == "__main__":
-  parser = argparse.ArgumentParser()
-  parser.add_argument(
-      "--offline_distillation",
-      action="store_true",
-      help="Pass this flag to enable offline distillation.",
-  )
-  parser.add_argument(
-      "--offline_data_dir",
-      type=str,
-      required=False,
-      default=None,
-      help="GCS or local path to the pre-generated ArrayRecord teacher data.",
-  )
-
-  # parse_known_args separates our custom flags from MaxText's standard args
-  local_arg, remaining_args = parser.parse_known_args()
-
-  main_wrapper = functools.partial(main, local_args=local_arg)
-  app.run(main_wrapper, argv=[sys.argv[0]] + remaining_args)
+  app.run(main)
