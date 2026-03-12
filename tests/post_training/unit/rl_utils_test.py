@@ -18,6 +18,8 @@ import unittest
 import pytest
 from types import SimpleNamespace
 
+pytestmark = [pytest.mark.post_training]
+
 evaluate_rl = pytest.importorskip(
     "maxtext.trainers.post_train.rl.evaluate_rl",
     reason="tunix (required by evaluate_rl) is not installed GPU",
