@@ -22,7 +22,7 @@ Runs GRPO trainer unit test correctness with golden logits generated
   from maxtext/tests/assets/logits_generation/generate_grpo_golden_logits.py
 
 Usage:
-  pytest tests/integration/grpo_trainer_correctness_test.py
+  pytest tests/post_training/integration/grpo_trainer_correctness_test.py
 """
 
 import os
@@ -52,7 +52,7 @@ import pytest
 import transformers
 
 # This test is for serving pathways via offline_engine and maxengine.
-pytestmark = [pytest.mark.external_training]
+pytestmark = [pytest.mark.external_training, pytest.mark.post_training]
 
 
 def get_golden_data(config):

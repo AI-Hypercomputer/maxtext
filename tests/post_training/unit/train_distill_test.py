@@ -18,7 +18,7 @@
 import pytest
 
 pytest.importorskip("tunix")
-pytestmark = [pytest.mark.tpu_only]
+pytestmark = [pytest.mark.tpu_only, pytest.mark.post_training]
 
 import shutil
 import tempfile

@@ -14,6 +14,10 @@
 
 """Data processing tests for distillation."""
 
+import pytest
+
+pytestmark = [pytest.mark.post_training, pytest.mark.cpu_only]
+
 import argparse
 import os
 import subprocess
