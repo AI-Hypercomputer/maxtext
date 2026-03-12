@@ -23,14 +23,44 @@ from etils import epath
 from flax import nnx
 import flax.linen as nn
 import jax
+import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers import quantizations
 from maxtext.models import models
+from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from orbax import checkpoint as ocp
+
+
+def _tile_checkpoint_to_model_shapes(ckpt_arr, model_arr):
+  """Tile ckpt_arr along any dimension where model_arr is larger.
+
+  Used to expand checkpoint KV-head (and similar) arrays that were saved with
+  fewer heads than the padded model shape requires (e.g. due to TP/EP padding
+  in adapter.py).  Each dimension must divide evenly into the corresponding
+  model dimension.
+  """
+  ckpt_shape = ckpt_arr.shape
+  model_shape = model_arr.shape
+  if ckpt_shape == model_shape:
+    return ckpt_arr
+  if len(ckpt_shape) != len(model_shape):
+    raise ValueError(
+        f"Checkpoint and model arrays have different ranks: {ckpt_shape} vs {model_shape}"
+    )
+  repeats = []
+  for ckpt_dim, model_dim in zip(ckpt_shape, model_shape):
+    if model_dim % ckpt_dim != 0:
+      raise ValueError(
+          f"Model dimension {model_dim} is not evenly divisible by checkpoint dimension {ckpt_dim}."
+          f" Full shapes — checkpoint: {ckpt_shape}, model: {model_shape}"
+      )
+    repeats.append(model_dim // ckpt_dim)
+  max_logging.log(f"Tiling checkpoint array from {ckpt_shape} to {model_shape} with repeats {repeats}")
+  return jnp.tile(ckpt_arr, repeats)
 
 
 @overload
@@ -154,6 +184,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
     with nn.logical_axis_rules(config.logical_axis_rules):
       sharded_state = create_sharded_state()
     model = nnx.merge(graphdef, sharded_state)
+
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
       max_utils.print_non_trivial_mesh_axis(model.mesh)
@@ -163,6 +194,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
           mesh=model.mesh,
           logical_annotations=specs,
       )
+
     if config.load_parameters_path:
       try:
         ckptr = ocp.Checkpointer(
@@ -224,6 +256,12 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
           checkpoint = restored["params"]["params"]
 
         if checkpoint:
+          model_arrays = jax.tree.map(
+              lambda v: v.value,
+              sharded_state,
+              is_leaf=lambda n: isinstance(n, nnx.Variable),
+          )
+          checkpoint = jax.tree.map(_tile_checkpoint_to_model_shapes, checkpoint, model_arrays)
           nnx.update(model, checkpoint)
 
       except Exception as e:
