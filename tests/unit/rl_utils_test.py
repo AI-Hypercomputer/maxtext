@@ -17,6 +17,7 @@
 import unittest
 import pytest
 from types import SimpleNamespace
+from unittest.mock import patch, MagicMock
 
 evaluate_rl = pytest.importorskip(
     "maxtext.trainers.post_train.rl.evaluate_rl",
@@ -26,6 +27,11 @@ evaluate_rl = pytest.importorskip(
 utils_rl = pytest.importorskip(
     "maxtext.trainers.post_train.rl.utils_rl",
     reason="tunix (required by utils_rl) is not installed GPU",
+)
+
+train_rl = pytest.importorskip(
+    "maxtext.trainers.post_train.rl.train_rl",
+    reason="tunix (required by train_rl) is not installed GPU",
 )
 
 
@@ -205,6 +211,221 @@ class TestExtractHashAnswer(unittest.TestCase):
     """Test extraction when #### is not present."""
     self.assertIsNone(utils_rl.extract_hash_answer("The answer is 42"))
     self.assertIsNone(utils_rl.extract_hash_answer(""))
+
+
+class TestGetDataset(unittest.TestCase):
+  """Tests for train_rl.get_dataset."""
+
+  def setUp(self):
+    self.config = SimpleNamespace(
+        data_shuffle_seed=42,
+        chat_template_path="dummy_path",
+        train_split="train",
+        debug=SimpleNamespace(rl=False),
+    )
+    self.data_dir = "/tmp/dummy_data_dir"
+    self.mock_tokenizer = MagicMock()
+
+    self.patcher_makedirs = patch("maxtext.trainers.post_train.rl.train_rl.os.makedirs", autospec=True)
+    self.patcher_exists = patch("maxtext.trainers.post_train.rl.train_rl.os.path.exists", return_value=True)
+    self.patcher_load_template = patch(
+        "maxtext.trainers.post_train.rl.train_rl.load_template_from_file",
+        autospec=True,
+    )
+    self.patcher_process_data = patch(
+        "maxtext.trainers.post_train.rl.train_rl.utils_rl.process_data",
+        autospec=True,
+    )
+    self.patcher_grain_source = patch(
+        "maxtext.trainers.post_train.rl.train_rl.grain.MapDataset.source",
+        autospec=True,
+    )
+    # Mock datasets module entirely to avoid ModuleNotFoundError if not installed
+    self.mock_datasets_module = MagicMock()
+    self.patcher_datasets = patch.dict("sys.modules", {"datasets": self.mock_datasets_module})
+    self.patcher_tfds = patch("maxtext.trainers.post_train.rl.train_rl.tfds.data_source")
+    self.patcher_auto_tokenizer = patch(
+        "maxtext.trainers.post_train.rl.train_rl.AutoTokenizer.from_pretrained",
+        autospec=True,
+    )
+
+    self.mock_makedirs = self.patcher_makedirs.start()
+    self.addCleanup(self.patcher_makedirs.stop)
+    self.mock_exists = self.patcher_exists.start()
+    self.addCleanup(self.patcher_exists.stop)
+    self.mock_load_template = self.patcher_load_template.start()
+    self.addCleanup(self.patcher_load_template.stop)
+    self.mock_process_data = self.patcher_process_data.start()
+    self.addCleanup(self.patcher_process_data.stop)
+    self.mock_grain_source = self.patcher_grain_source.start()
+    self.addCleanup(self.patcher_grain_source.stop)
+
+    self.patcher_datasets.start()
+    self.addCleanup(self.patcher_datasets.stop)
+    self.mock_datasets = self.mock_datasets_module.load_dataset
+
+    self.mock_tfds = self.patcher_tfds.start()
+    self.addCleanup(self.patcher_tfds.stop)
+    self.mock_auto_tokenizer = self.patcher_auto_tokenizer.start()
+    self.addCleanup(self.patcher_auto_tokenizer.stop)
+
+    # This dummy data will be "fed" into the lambda passed to map()
+    self.dummy_map_input = {"dummy_key": "dummy_value"}
+
+    self.mock_source_obj = MagicMock()
+    self.mock_grain_source.return_value = self.mock_source_obj
+    self.mock_shuffle_obj = MagicMock()
+    self.mock_map_obj = MagicMock()
+
+    def map_side_effect(func):
+      func(self.dummy_map_input)
+      return self.mock_map_obj
+
+    self.mock_shuffle_obj.map.side_effect = map_side_effect
+    self.mock_source_obj.shuffle.return_value = self.mock_shuffle_obj
+
+  @pytest.mark.cpu_only
+  def test_huggingface_dataset_without_data_files(self):
+    """Test correct loader is called when dataset_name starts with 'huggingface:'."""
+    dataset_name = "huggingface:my_dataset"
+    result = train_rl.get_dataset(
+        self.mock_tokenizer,
+        self.config,
+        self.data_dir,
+        split="train",
+        data_files=None,
+        dataset_name=dataset_name,
+    )
+    self.mock_datasets.assert_called_once_with("my_dataset", split="train", cache_dir=self.data_dir)
+    self.mock_tfds.assert_not_called()
+    self.mock_load_template.assert_called_once_with("dummy_path")
+    self.mock_grain_source.assert_called_once()
+    self.mock_grain_source.assert_called_once_with(self.mock_datasets.return_value)
+    self.mock_source_obj.shuffle.assert_called_once_with(seed=42)
+    self.mock_shuffle_obj.map.assert_called_once()
+    self.mock_process_data.assert_called_once_with(
+        dataset_name,
+        self.mock_tokenizer,
+        self.mock_load_template.return_value,
+        self.config,
+        self.dummy_map_input,
+    )
+    self.assertEqual(result, self.mock_map_obj)
+
+  @pytest.mark.cpu_only
+  def test_huggingface_dataset_with_data_files(self):
+    """Test correct loader is called when data_files are provided."""
+    dataset_name = "huggingface:my_dataset"
+    result = train_rl.get_dataset(
+        self.mock_tokenizer,
+        self.config,
+        self.data_dir,
+        split="train",
+        data_files=["file1.parquet"],
+        dataset_name=dataset_name,
+    )
+    self.mock_datasets.assert_called_once_with(
+        "parquet",
+        data_files={"train": ["file1.parquet"]},
+        split="train",
+        cache_dir=self.data_dir,
+    )
+    self.mock_tfds.assert_not_called()
+    self.mock_load_template.assert_called_once_with("dummy_path")
+    self.mock_grain_source.assert_called_once_with(self.mock_datasets.return_value)
+    self.mock_source_obj.shuffle.assert_called_once_with(seed=42)
+    self.mock_shuffle_obj.map.assert_called_once()
+    self.mock_process_data.assert_called_once_with(
+        dataset_name,
+        self.mock_tokenizer,
+        self.mock_load_template.return_value,
+        self.config,
+        self.dummy_map_input,
+    )
+    self.assertEqual(result, self.mock_map_obj)
+
+  @pytest.mark.cpu_only
+  def test_tfds_dataset(self):
+    """Test correct loader is called for a TFDS dataset_name like 'gsm8k'."""
+    dataset_name = "gsm8k"
+
+    result = train_rl.get_dataset(
+        self.mock_tokenizer,
+        self.config,
+        self.data_dir,
+        split="train",
+        data_files=None,
+        dataset_name=dataset_name,
+    )
+
+    self.mock_tfds.assert_called_once_with(
+        dataset_name,
+        split="train",
+        data_dir=self.data_dir,
+        builder_kwargs=self.mock_tfds.call_args.kwargs.get("builder_kwargs"),  # validates kwarg was passed
+        download=True,
+    )
+    self.mock_datasets.assert_not_called()
+    self.mock_load_template.assert_called_once_with("dummy_path")
+    self.mock_grain_source.assert_called_once_with(self.mock_tfds.return_value)
+    self.mock_source_obj.shuffle.assert_called_once_with(seed=42)
+    self.mock_shuffle_obj.map.assert_called_once()
+    self.mock_process_data.assert_called_once_with(
+        dataset_name,
+        self.mock_tokenizer,
+        self.mock_load_template.return_value,
+        self.config,
+        self.dummy_map_input,
+    )
+    self.assertEqual(result, self.mock_map_obj)
+
+  @pytest.mark.cpu_only
+  def test_directory_creation(self):
+    """Test that the data directory is created if it doesn't exist."""
+    self.mock_exists.stop()
+    with patch("maxtext.trainers.post_train.rl.train_rl.os.path.exists", return_value=False):
+      train_rl.get_dataset(
+          self.mock_tokenizer,
+          self.config,
+          self.data_dir,
+          split="train",
+          data_files=None,
+          dataset_name="gsm8k",
+      )
+    self.mock_makedirs.assert_called_once_with(self.data_dir)
+    self.mock_exists.start()
+
+  @pytest.mark.cpu_only
+  def test_missing_dataset_name_raises_error(self):
+    """Test that a ValueError is raised if dataset_name is not provided."""
+    with self.assertRaises(ValueError):
+      train_rl.get_dataset(
+          self.mock_tokenizer,
+          self.config,
+          self.data_dir,
+          split="train",
+          data_files=None,
+          dataset_name=None,
+      )
+
+  @pytest.mark.cpu_only
+  @patch("maxtext.trainers.post_train.rl.train_rl.max_logging.log")
+  def test_debug_logging_for_hf_dataset(self, mock_max_logging):
+    """Test that debug logging occurs for huggingface datasets when debug.rl is True."""
+    self.config.debug.rl = True
+    mock_hf_data = MagicMock()
+    mock_hf_data.__len__.return_value = 123
+    self.mock_datasets.return_value = mock_hf_data
+
+    train_rl.get_dataset(
+        self.mock_tokenizer,
+        self.config,
+        self.data_dir,
+        split="train",
+        data_files=None,
+        dataset_name="huggingface:my_dataset",
+    )
+    mock_max_logging.assert_called_with("Loaded Hugging Face dataset my_dataset with split train. Size: 123")
 
 
 if __name__ == "__main__":
