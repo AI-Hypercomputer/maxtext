@@ -24,7 +24,9 @@ import os.path
 from tempfile import gettempdir
 
 import pytest
+import transformers
 
+from maxtext.checkpoint_conversion.utils.hf_model_configs import DeepseekV32Config
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
 
@@ -893,6 +895,7 @@ class TrainCompile(unittest.TestCase):
   def test_engram_integration(self):
     """AOT test for Engram implementation"""
     compiled_trainstep_file = "/tmp/test_engram_integration"
+    transformers.AutoConfig.register("deepseek_v32", DeepseekV32Config)
     train_compile_main(
         (
             "",

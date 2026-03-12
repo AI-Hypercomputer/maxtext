@@ -33,8 +33,11 @@ def main():
   current_dir = os.path.dirname(os.path.abspath(__file__))
   repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
   github_deps_path = os.path.join(repo_root, "dependencies", "extra_deps", "post_train_github_deps.txt")
+  overrides_deps_path = os.path.join(repo_root, "dependencies", "extra_deps", "post_train_overrides.txt")
   if not os.path.exists(github_deps_path):
-    raise FileNotFoundError(f"GitHub dependencies file not found at {github_deps_path}")
+    raise FileNotFoundError(f"Github dependencies file not found at {github_deps_path}")
+  if not os.path.exists(overrides_deps_path):
+    raise FileNotFoundError(f"Overrides file not found at {overrides_deps_path}")
 
   # Check if 'uv' is available in the environment
   try:
@@ -44,6 +47,16 @@ def main():
     print(f"Error checking uv version: {e}")
     print(f"Stderr: {e.stderr.decode()}")
     sys.exit(1)
+
+  override_deps_command = [
+      sys.executable,  # Use the current Python executable's pip to ensure the correct environment
+      "-m",
+      "uv",
+      "pip",
+      "install",
+      "-r",
+      str(overrides_deps_path),
+  ]
 
   github_deps_command = [
       sys.executable,  # Use the current Python executable's pip to ensure the correct environment
@@ -67,10 +80,15 @@ def main():
   ]
 
   try:
+    # Run the command to install overrides first
+    print(f"Installing overrides: {' '.join(override_deps_command)}")
+    _ = subprocess.run(override_deps_command, check=True, capture_output=True, text=True)
+    print("Overrides installed successfully!")
+
     # Run the command to install Github dependencies
-    print(f"Installing github dependencies: {' '.join(github_deps_command)}")
+    print(f"Installing Github dependencies: {' '.join(github_deps_command)}")
     _ = subprocess.run(github_deps_command, check=True, capture_output=True, text=True)
-    print("GitHub dependencies installed successfully!")
+    print("Github dependencies installed successfully!")
 
     # Run the command to install the MaxText vLLM directory
     print(f"Installing MaxText vLLM dependency: {' '.join(local_vllm_install_command)}")

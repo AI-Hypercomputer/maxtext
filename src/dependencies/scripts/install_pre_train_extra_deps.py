@@ -32,7 +32,7 @@ def main():
   repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
   github_deps_path = os.path.join(repo_root, "dependencies", "extra_deps", "pre_train_github_deps.txt")
   if not os.path.exists(github_deps_path):
-    raise FileNotFoundError(f"GitHub dependencies file not found at {github_deps_path}")
+    raise FileNotFoundError(f"Github dependencies file not found at {github_deps_path}")
 
   # Check if 'uv' is available in the environment
   try:
@@ -55,9 +55,9 @@ def main():
   ]
 
   try:
-    print(f"Installing github dependencies: {' '.join(github_deps_command)}")
+    print(f"Installing Github dependencies: {' '.join(github_deps_command)}")
     _ = subprocess.run(github_deps_command, check=True, capture_output=True, text=True)
-    print("GitHub dependencies installed successfully!")
+    print("Github dependencies installed successfully!")
   except subprocess.CalledProcessError as e:
     print("Failed to install extra dependencies.")
     print(f"Command '{' '.join(e.cmd)}' returned non-zero exit status {e.returncode}.")

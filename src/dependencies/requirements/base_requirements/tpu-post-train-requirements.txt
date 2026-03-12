@@ -1,0 +1,7 @@
+-r requirements.txt
+google-metrax
+ipykernel
+jax[tpu]
+kagglehub
+papermill
+perfetto

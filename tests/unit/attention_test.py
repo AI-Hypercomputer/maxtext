@@ -266,6 +266,7 @@ class AttentionTest(parameterized.TestCase):
       "sa_block_kv_dkv_compute": 128,
       "sa_block_q_dq": 128,
       "sa_block_kv_dq": 128,
+      "log_config": False,
   }
 
   def setUp(self):

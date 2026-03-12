@@ -1,2 +1,3 @@
 -r requirements.txt
+jax[cuda12]
 transformer-engine[jax]
