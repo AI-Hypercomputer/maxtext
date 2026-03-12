@@ -75,6 +75,18 @@ from maxtext.inference.kvcache import KVQuant
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils.globals import EPS
 
+####
+import functools
+from typing import Optional, Tuple
+
+import jax
+import jax.numpy as jnp
+from jax.experimental import pallas as pl
+from jax.experimental.pallas import tpu as pltpu
+
+# Constants
+DEFAULT_MASK_VALUE = -1e9
+
 
 class Indexer(nnx.Module):
   """Indexer for DeepSeek Sparse Attention (DSA).
@@ -193,6 +205,229 @@ class Indexer(nnx.Module):
     x = jnp.concatenate([x_pe, x_nope], axis=-1)
     return x
 
+  def kernel(self, q_ref, k_ref, w_ref, mask_ref, o_score_ref, 
+            k_scratch_ref, mask_scratch_ref, score_scratch_ref, sem, *, 
+            has_mask, bS):
+      """Pallas kernel for Indexer score computation.
+      
+      Args:
+          q_ref: Query block. Shape: (bT, H, D). Memory: VMEM.
+          k_ref: Key tensor (full array). Shape: (B, S_padded, D). Memory: HBM (ANY).
+          w_ref: Weights block. Shape: (bT, H). Memory: VMEM.
+          mask_ref: Mask tensor (full array). Shape: (B, T_padded, S_padded). Memory: HBM (ANY).
+          o_score_ref: Output score tensor (full array). Shape: (B, T_padded, S_padded). Memory: HBM (ANY).
+          k_scratch_ref: Scratch buffer for K block. Shape: (bS, D). Memory: VMEM.
+          mask_scratch_ref: Scratch buffer for Mask block. Shape: (bT, bS). Memory: VMEM.
+          score_scratch_ref: Scratch buffer for Score block. Shape: (bT, bS). Memory: VMEM.
+          sem: DMA Semaphore.
+          has_mask: Boolean, whether mask is provided.
+          bS: Block size for S dimension loop.
+      """
+      # Grid indices
+      b_idx = pl.program_id(0)
+      t_idx = pl.program_id(1)
+      
+      bT, H, D = q_ref.shape
+      
+      t_start = t_idx * bT
+      
+      # S_padded is the second dim of k_ref
+      S_padded = k_ref.shape[1]
+      
+      # Load q from VMEM to registers
+      q_val = q_ref[...]
+      # Flatten q for matmul: (bT, H, D) -> (bT*H, D)
+      q_flat = q_val.reshape(bT * H, D)
+      
+      # Load w from VMEM to registers
+      w_val = w_ref[...]
+      
+      # Loop over S blocks
+      num_blocks = S_padded // bS
+      
+      def body(i, _):
+          s_start = i * bS
+          
+          # Load K block from HBM (ANY) to VMEM (scratch)
+          # k_ref is (B, S, D), we want (b_idx, s_start:s_start+bS, :)
+          dma_k = pltpu.make_async_copy(
+              k_ref.at[b_idx, pl.ds(s_start, bS), :],
+              k_scratch_ref,
+              sem
+          )
+          dma_k.start()
+          dma_k.wait()
+          
+          k_block = k_scratch_ref[...]  # Shape: (bS, D)
+          
+          # Compute Logits: (bT*H, D) @ (bS, D).T -> (bT*H, bS)
+          logits_flat = jnp.dot(q_flat, k_block.T)  # Shape: (bT*H, bS)
+          
+          # Reshape to (bT, H, bS)
+          logits = logits_flat.reshape(bT, H, bS)
+          
+          # ReLU activation
+          logits = jax.nn.relu(logits)
+          
+          # Weighted Sum: sum(logits * w) -> (bT, bS)
+          weighted = logits * w_val[..., None]
+          score_block = jnp.sum(weighted, axis=1)  # Shape: (bT, bS)
+          
+          # Apply Mask if present
+          if has_mask:
+              # mask_ref is (B, T, S), we want (b_idx, t_start:t_start+bT, s_start:s_start+bS)
+              dma_mask = pltpu.make_async_copy(
+                  mask_ref.at[b_idx, pl.ds(t_start, bT), pl.ds(s_start, bS)],
+                  mask_scratch_ref,
+                  sem
+              )
+              dma_mask.start()
+              dma_mask.wait()
+              
+              mask_block = mask_scratch_ref[...]
+              score_block = score_block + mask_block
+              
+          # Store Score Block to HBM (ANY)
+          # First store to VMEM scratch
+          score_scratch_ref[...] = score_block
+          
+          # Then copy to HBM
+          dma_score = pltpu.make_async_copy(
+              score_scratch_ref,
+              o_score_ref.at[b_idx, pl.ds(t_start, bT), pl.ds(s_start, bS)],
+              sem
+          )
+          dma_score.start()
+          dma_score.wait()
+          
+          return ()
+
+      jax.lax.fori_loop(0, num_blocks, body, ())
+
+  def computation(self, q: jnp.ndarray, k: jnp.ndarray, w: jnp.ndarray, mask: Optional[jnp.ndarray], top_k: int) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+      """Sets up and invokes the Pallas kernel.
+      
+      Args:
+          q: Query tensor (B, T, H, D)
+          k: Key tensor (B, S, D)
+          w: Weights tensor (B, T, H)
+          mask: Optional mask tensor (B, T, S)
+          top_k: Number of top elements
+          
+      Returns:
+          score: (B, T, S)
+          indices: (B, T, top_k)
+          index_mask: (B, T, top_k) - Mask values at the selected indices
+      """
+      B, T, H, D = q.shape
+      _, S, _ = k.shape
+      
+      # Block sizes
+      bT = 32
+      bS = 512
+      
+      # Pad D to multiple of 128 (TPU vector alignment)
+      # TPU vector registers are 8x128 (for f32). The last dimension should be 128-aligned.
+      pad_d = (128 - (D % 128)) % 128
+      
+      if pad_d > 0:
+          q = jnp.pad(q, ((0,0), (0,0), (0,0), (0, pad_d)))
+          k = jnp.pad(k, ((0,0), (0,0), (0, pad_d)))
+      
+      D_padded = D + pad_d
+      
+      # Pad S to multiple of bS
+      pad_s = (bS - (S % bS)) % bS
+      if pad_s > 0:
+          k = jnp.pad(k, ((0,0), (0, pad_s), (0,0)))
+          if mask is not None:
+              mask = jnp.pad(mask, ((0,0), (0,0), (0, pad_s)), constant_values=DEFAULT_MASK_VALUE)
+      
+      S_padded = S + pad_s
+      
+      # Pad T to multiple of bT
+      pad_t = (bT - (T % bT)) % bT
+      if pad_t > 0:
+          q = jnp.pad(q, ((0,0), (0, pad_t), (0,0), (0,0)))
+          w = jnp.pad(w, ((0,0), (0, pad_t), (0,0)))
+          if mask is not None:
+              mask = jnp.pad(mask, ((0,0), (0, pad_t), (0,0)), constant_values=DEFAULT_MASK_VALUE)
+      
+      T_padded = T + pad_t
+      
+      # Grid: (B, T_padded // bT)
+      grid = (B, T_padded // bT)
+      
+      # Block Specs
+      # q: (B, T, H, D_padded) -> (bT, H, D_padded) in kernel (squeeze B)
+      q_spec = pl.BlockSpec((None, bT, H, D_padded), lambda b, t: (b, t, 0, 0))
+      # w: (B, T, H) -> (bT, H) in kernel (squeeze B)
+      w_spec = pl.BlockSpec((None, bT, H), lambda b, t: (b, t, 0))
+      
+      # k: (B, S_padded, D_padded) -> Full array in HBM
+      # We use ANY memory space, so we must pass the full array and slice manually in the kernel
+      k_spec = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+      
+      # mask
+      has_mask = mask is not None
+      if has_mask:
+          # mask: (B, T, S) -> Full array in HBM
+          mask_spec = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+      else:
+          # Dummy mask to satisfy Pallas signature
+          # Create a small dummy mask
+          dummy_mask = jnp.zeros((1, 1), dtype=jnp.float32)
+          mask_spec = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+
+      # Outputs
+      # o_score: (B, T, S) -> Full array in HBM
+      o_score_spec = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+      
+      out_shape = jax.ShapeDtypeStruct((B, T_padded, S_padded), dtype=jnp.float32)
+      
+      # Scratch buffers for manual copy
+      # We need VMEM buffers to copy data from ANY memory space
+      scratch_shapes = [
+          pltpu.VMEM((bS, D_padded), k.dtype),       # k_scratch
+          pltpu.VMEM((bT, bS), jnp.float32),  # mask_scratch (assume float32)
+          pltpu.VMEM((bT, bS), jnp.float32),  # score_scratch
+          pltpu.SemaphoreType.DMA,            # sem
+      ]
+      
+      # Call Pallas
+      # Use functools.partial to bind static arguments to the kernel
+      kernel_fn = functools.partial(self.kernel, has_mask=has_mask, bS=bS)
+      
+      # If has_mask is False, we pass the dummy mask to the kernel
+      mask_arg = mask if has_mask else dummy_mask
+      
+      score = pl.pallas_call(
+          kernel_fn,
+          out_shape=out_shape,
+          grid=grid,
+          in_specs=[q_spec, k_spec, w_spec, mask_spec],
+          out_specs=o_score_spec,
+          scratch_shapes=scratch_shapes,
+          compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "parallel"))
+      )(q, k, w, mask_arg)
+      
+      # Slice back to original dimensions
+      score = score[:, :T, :S]
+      
+      # Perform TopK outside the kernel
+      # jax.lax.top_k is not supported inside Pallas TPU kernels (KernelType.TC)
+      vals, indices = jax.lax.top_k(score, top_k)
+      
+      # Extract mask values at the selected indices
+      if has_mask:
+          mask_sliced = mask[:, :T, :S]
+          index_mask = jnp.take_along_axis(mask_sliced, indices, axis=2)
+      else:
+          # If no mask was provided, return zeros (valid)
+          index_mask = jnp.zeros((B, T, top_k), dtype=jnp.float32)
+          
+      return score, indices, index_mask
+
   def generate_mask(self, topk_indices, s):
     """
     Creates a mask for top-k indices.
@@ -276,6 +511,12 @@ class Indexer(nnx.Module):
     k = k[:, :, None, :]  # [b, s, d] -> [b, s, 1, d]
     k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
     k = k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
+
+    if True:
+      # early return
+      weights = self.weights_proj(inputs_q)
+      weights = weights * (self.n_heads**-0.5) * self.softmax_scale
+      return self.computation(q, k, weights, attention_mask, self.config.index_topk)
 
     # Compute Index Scores
     # QK product: relu(q @ k.T), [b, t, s, h]
