@@ -2679,7 +2679,32 @@ class MaxTextConfig(
     self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 
     # Diloco params
+    # Resolve dcn_diloco_parallelism=-1 if left unspecified, using the same convention as dcn_data_parallelism.
+    # num_diloco_replicas must be computed after this resolution, so we resolve it here rather than
+    # relying on fill_unspecified_mesh_axes (which runs later during mesh creation).
+    if self.dcn_diloco_parallelism == -1:
+      other_dcn_product = prod(v for v in self.dcn_parallelism if v != -1)
+      assert other_dcn_product > 0 and self.num_slices % other_dcn_product == 0, (
+          f"Cannot resolve dcn_diloco_parallelism=-1: num_slices={self.num_slices} is not divisible "
+          f"by the product of other DCN parallelism values ({other_dcn_product})."
+      )
+      self.dcn_diloco_parallelism = self.num_slices // other_dcn_product
+      # Keep dcn_parallelism list consistent with the resolved value.
+      diloco_idx = self.dcn_parallelism.index(-1)
+      self.dcn_parallelism[diloco_idx] = self.dcn_diloco_parallelism
     self.num_diloco_replicas = int(self.ici_diloco_parallelism * self.dcn_diloco_parallelism)
+
+    # (b/496973624) use_tokamax_gmm is incompatible with enable_diloco: drjax.map_fn wraps
+    # the train step in jax.vmap over the diloco axis, which causes JAX to batch through
+    # lax.scan (layer scan).
+    # Tokamax's vmap_rule then tries to reconstruct GroupSizes with a batched 2-D value, but
+    # GroupSizes.__post_init__ requires exactly a 1-D shape.
+    if self.enable_diloco and self.use_tokamax_gmm:
+      raise ValueError(
+          "use_tokamax_gmm=True is not compatible with enable_diloco=True due to a known "
+          "incompatibility between tokamax's GroupSizes vmap_rule and JAX's scan batching. "
+          "Please set use_tokamax_gmm=False."
+      )
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):

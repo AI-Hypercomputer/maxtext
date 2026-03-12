@@ -507,19 +507,18 @@ def train_loop(config, recorder, state=None):
 
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
-  p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config,
-      model,
-      mesh,
-      state,
-      state_mesh_shardings,
-      train_step,
-      eval_step,
-      eval_data_iterator,
-      params_shardings,
-  )
-
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config,
+        model,
+        mesh,
+        state,
+        state_mesh_shardings,
+        train_step,
+        eval_step,
+        eval_data_iterator,
+        params_shardings,
+    )
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data:
       state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
