@@ -535,6 +535,8 @@ class AttentionIndexer(BaseModel):
   index_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
   index_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
   index_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
+  sparse_indexer_loss: bool = Field(False, description="Determines the token selection strategy for indexer loss.")
+  indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
 
 
 class Llama4Attention(BaseModel):
