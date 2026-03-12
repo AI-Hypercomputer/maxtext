@@ -17,7 +17,7 @@
 import functools
 import json
 import re
-from typing import Tuple, Sequence
+from typing import Tuple, Sequence, Dict, Union, Any
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -25,7 +25,6 @@ from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
-
 import qwix
 
 import jax
@@ -58,140 +57,227 @@ class Quantization:
   def einsum(self, dtype: DType = jnp.float32):
     """Placeholder for einsum implementation in subclasses."""
 
+# ORIGINAL AQT
 
-def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
-  """apply tiling function"""
-  del lhs, rhs
+# def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
+#   """apply tiling function"""
+#   del lhs, rhs
 
-  (lhs_ca, rhs_ca), _ = dimension_numbers
-  ret = tiled_dot_general.Cfg(
-      lhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
-      rhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
-  )
+#   (lhs_ca, rhs_ca), _ = dimension_numbers
+#   ret = tiled_dot_general.Cfg(
+#       lhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
+#       rhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
+#   )
 
-  for lhs_idx, rhs_idx in zip(lhs_ca, rhs_ca):
-    ret.lhs.contraction_axes.append(tiled_dot_general.AxisTiling(axis=lhs_idx, tile_size=tile_size, tile_count=None))
-    ret.rhs.contraction_axes.append(tiled_dot_general.AxisTiling(axis=rhs_idx, tile_size=tile_size, tile_count=None))
+#   for lhs_idx, rhs_idx in zip(lhs_ca, rhs_ca):
+#     ret.lhs.contraction_axes.append(tiled_dot_general.AxisTiling(axis=lhs_idx, tile_size=tile_size, tile_count=None))
+#     ret.rhs.contraction_axes.append(tiled_dot_general.AxisTiling(axis=rhs_idx, tile_size=tile_size, tile_count=None))
 
-  return ret
-
-
-def _rhs_axis_metadata_wrapper(
-    x: jnp.ndarray,
-    tile_map,
-    no_sharding_axis: Sequence[int],
-    mesh_axes: Tuple[str, ...],
-    is_tiled: bool,
-    replicate_scale: bool = False,
-):
-  """right-hand-side axis metadata wrapper"""
-  if replicate_scale:
-    # Temporarily using the shape to identify the scale.
-    # TODO: remove the replication once the 2d sharding quantization
-    # works as expected.
-    if len(x.shape) == 1:
-      return nn.with_logical_partitioning((lambda: x), tuple(None for _ in mesh_axes))()
-
-  mesh_axes = list(mesh_axes)
-  if is_tiled:
-    # tile_map is a mapping between original rank and a list of new, tiled rank.
-    if len(mesh_axes) < len(tile_map):
-      mesh_axes = [None] * (len(tile_map) - len(mesh_axes)) + mesh_axes
-    new_mesh_axes = [None] * len(x.shape)
-    for orig_rank, new_rank in tile_map.items():
-      assert new_rank
-      assert len(new_rank) <= 2
-      new_mesh_axes[new_rank[-1]] = mesh_axes[orig_rank]
-    mesh_axes = new_mesh_axes
-
-  if mesh_axes is not None and len(mesh_axes) > 0:
-    for no_shard_idx in no_sharding_axis:
-      if no_shard_idx < len(mesh_axes):
-        mesh_axes[no_shard_idx] = None
-
-  return nn.with_logical_partitioning((lambda: x), mesh_axes)()
+#   return ret
 
 
+# def _rhs_axis_metadata_wrapper(
+#     x: jnp.ndarray,
+#     tile_map,
+#     no_sharding_axis: Sequence[int],
+#     mesh_axes: Tuple[str, ...],
+#     is_tiled: bool,
+#     replicate_scale: bool = False,
+# ):
+#   """right-hand-side axis metadata wrapper"""
+#   if replicate_scale:
+#     # Temporarily using the shape to identify the scale.
+#     # TODO: remove the replication once the 2d sharding quantization
+#     # works as expected.
+#     if len(x.shape) == 1:
+#       return nn.with_logical_partitioning((lambda: x), tuple(None for _ in mesh_axes))()
+
+#   mesh_axes = list(mesh_axes)
+#   if is_tiled:
+#     # tile_map is a mapping between original rank and a list of new, tiled rank.
+#     if len(mesh_axes) < len(tile_map):
+#       mesh_axes = [None] * (len(tile_map) - len(mesh_axes)) + mesh_axes
+#     new_mesh_axes = [None] * len(x.shape)
+#     for orig_rank, new_rank in tile_map.items():
+#       assert new_rank
+#       assert len(new_rank) <= 2
+#       new_mesh_axes[new_rank[-1]] = mesh_axes[orig_rank]
+#     mesh_axes = new_mesh_axes
+
+#   if mesh_axes is not None and len(mesh_axes) > 0:
+#     for no_shard_idx in no_sharding_axis:
+#       if no_shard_idx < len(mesh_axes):
+#         mesh_axes[no_shard_idx] = None
+
+#   return nn.with_logical_partitioning((lambda: x), mesh_axes)()
+
+
+# @dataclass
+# class AqtQuantization:
+#   """Configures AQT quantization github.com/google/aqt."""
+
+#   quant_dg: aqt_config.DotGeneral
+#   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
+#   replicate_scale: bool = False
+
+#   def _get_mixed_precision_cfg(self):
+#     """get configuration for mixed precision"""
+#     quant_dg = None
+#     is_tiled = False
+#     tiling_fn = None
+#     # pylint: disable=protected-access
+#     module_path = "/".join(nn.module._context.module_stack[-1].path)
+#     tile_size = -1
+#     for layer_name_re, layer_quant_dg in self.quant_dg.items():
+#       if re.fullmatch(layer_name_re, module_path):
+#         quant_dg, tile_size = layer_quant_dg
+#     if quant_dg is None:
+#       quant_dg, tile_size = self.quant_dg[DEFAULT]
+#     if tile_size != -1:
+#       is_tiled = True
+#       tiling_fn = functools.partial(_tiling_fn, tile_size=tile_size)
+#     return quant_dg, is_tiled, tiling_fn
+
+#   def _get_rhs_axis_metadata_wrapper(
+#       self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
+#   ):
+#     if self.quant_mode == aqt_flax.QuantMode.CONVERT:
+#       return None
+#     return functools.partial(
+#         _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale
+#     )
+
+#   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+#     """Returns dot_general configured with aqt params."""
+#     if isinstance(self.quant_dg, dict):
+#       quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
+#     else:
+#       quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+#     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
+#         mesh_axes, is_tiled, replicate_scale=self.replicate_scale
+#     )
+#     # module_path = "/".join(nn.module._context.module_stack[-1].path)
+#     # print(f"quant_dg: {quant_dg}, is_tiled: {is_tiled}, module_path: {module_path}")
+#     aqt_dg_cls = functools.partial(
+#         aqt_flax.AqtDotGeneral,
+#         quant_dg,
+#         rhs_quant_mode=self.quant_mode,
+#         lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+#         rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+#         rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+#         use_legacy_freezer=False,
+#         tiling_fn=tiling_fn,
+#     )
+#     return aqt_dg_cls
+
+#   def einsum(self, mesh_axes: Tuple[str, ...] = ()):
+#     """Returns einsum configured with aqt params."""
+#     if isinstance(self.quant_dg, dict):
+#       quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
+#     else:
+#       quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+
+#     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
+#         mesh_axes, is_tiled, replicate_scale=self.replicate_scale
+#     )
+#     aqt_einsum = functools.partial(
+#         aqt_flax.AqtEinsum(
+#             cfg=quant_dg,
+#             rhs_quant_mode=self.quant_mode,
+#             lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+#             rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+#             rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+#             use_legacy_freezer=False,
+#             tiling_fn=tiling_fn,
+#         )
+#     )
+#     return aqt_einsum
+
+
+# # QWIX V1
+# @dataclass
+# class AqtQuantization(Quantization):
+#   """Configures Qwix quantization as a drop-in replacement for AQT."""
+
+#   # Replace with the specific Qwix configuration class when available
+#   qwix_cfg: Any
+#   # quant_mode: str = "TRAIN"
+
+#   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+#     """Returns dot_general configured with Qwix params."""
+
+#     # Initialize the Qwix provider with your configuration
+#     provider = qwix.QuantizationProvider(self.qwix_cfg)
+
+#     # If Qwix's dot_general requires instantiation per layer (like AQT),
+#     # you might need to use functools.partial.
+#     # If it's a ready-to-use function, you can just return it directly.
+#     # Example using partial:
+#     # return functools.partial(provider.dot_general, mesh_axes=mesh_axes)
+
+#     return provider.dot_general
+
+#   def einsum(self, mesh_axes: Tuple[str, ...] = ()):
+#     """Returns einsum configured with Qwix params."""
+
+#     provider = qwix.QuantizationProvider(self.qwix_cfg)
+
+#     # Return the Qwix einsum implementation
+#     return provider.einsum
+
+
+# QWIX V2
 @dataclass
-class AqtQuantization:
-  """Configures AQT quantization github.com/google/aqt."""
+class AqtQuantization(Quantization):
+  """Configures Qwix quantization for high-performance JAX/Flax."""
 
-  quant_dg: aqt_config.DotGeneral
-  quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
+  quant_cfg: Union[qwix.Config, Dict[str, Tuple[qwix.Config, int]]]
+  quant_mode: str = "inference"
   replicate_scale: bool = False
 
-  def _get_mixed_precision_cfg(self):
-    """get configuration for mixed precision"""
-    quant_dg = None
-    is_tiled = False
-    tiling_fn = None
-    # pylint: disable=protected-access
-    module_path = "/".join(nn.module._context.module_stack[-1].path)
+  def _get_mixed_precision_cfg(self) -> Tuple[qwix.Config, bool, int]:
+    """Determines config and tile size based on the Flax module path."""
+    cfg = None
     tile_size = -1
-    for layer_name_re, layer_quant_dg in self.quant_dg.items():
-      if re.fullmatch(layer_name_re, module_path):
-        quant_dg, tile_size = layer_quant_dg
-    if quant_dg is None:
-      quant_dg, tile_size = self.quant_dg[DEFAULT]
-    if tile_size != -1:
-      is_tiled = True
-      tiling_fn = functools.partial(_tiling_fn, tile_size=tile_size)
-    return quant_dg, is_tiled, tiling_fn
 
-  def _get_rhs_axis_metadata_wrapper(
-      self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
-  ):
-    if self.quant_mode == aqt_flax.QuantMode.CONVERT:
-      return None
-    return functools.partial(
-        _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale
-    )
+    # Standard Flax path lookup
+    try:
+      module_path = "/".join(nn.module._context.module_stack[-1].path)
+    except (AttributeError, IndexError):
+      module_path = "default"
+
+    if isinstance(self.quant_cfg, dict):
+      for pattern, layer_cfg_tuple in self.quant_cfg.items():
+        if re.fullmatch(pattern, module_path):
+          cfg, tile_size = layer_cfg_tuple
+          break
+      if cfg is None:
+        cfg, tile_size = self.quant_cfg.get("DEFAULT", (None, -1))
+    else:
+      cfg = self.quant_cfg
+
+    return cfg, (tile_size != -1), tile_size
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
-    """Returns dot_general configured with aqt params."""
-    if isinstance(self.quant_dg, dict):
-      quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
-    else:
-      quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
-    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
-        mesh_axes, is_tiled, replicate_scale=self.replicate_scale
+    """Returns a Qwix-configured dot_general."""
+    cfg, is_tiled, tile_size = self._get_mixed_precision_cfg()
+
+    # Qwix internalizes sharding/tiling logic
+    return functools.partial(
+        qwix.nn.dot_general,
+        cfg=cfg,
+        mode=self.quant_mode,
+        tile_size=tile_size if is_tiled else None,
+        # Sharding axes are passed directly without a custom wrapper function
+        sharding_axes=mesh_axes,
+        replicate_scale=self.replicate_scale,
     )
-    # module_path = "/".join(nn.module._context.module_stack[-1].path)
-    # print(f"quant_dg: {quant_dg}, is_tiled: {is_tiled}, module_path: {module_path}")
-    aqt_dg_cls = functools.partial(
-        aqt_flax.AqtDotGeneral,
-        quant_dg,
-        rhs_quant_mode=self.quant_mode,
-        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-        rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
-        rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
-        use_legacy_freezer=False,
-        tiling_fn=tiling_fn,
-    )
-    return aqt_dg_cls
 
   def einsum(self, mesh_axes: Tuple[str, ...] = ()):
-    """Returns einsum configured with aqt params."""
-    if isinstance(self.quant_dg, dict):
-      quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
-    else:
-      quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+    """Returns a Qwix-configured einsum."""
+    cfg, is_tiled, tile_size = self._get_mixed_precision_cfg()
 
-    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
-        mesh_axes, is_tiled, replicate_scale=self.replicate_scale
-    )
-    aqt_einsum = functools.partial(
-        aqt_flax.AqtEinsum(
-            cfg=quant_dg,
-            rhs_quant_mode=self.quant_mode,
-            lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-            rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
-            rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
-            use_legacy_freezer=False,
-            tiling_fn=tiling_fn,
-        )
-    )
-    return aqt_einsum
+    return functools.partial(qwix.nn.einsum, cfg=cfg, mode=self.quant_mode, sharding_axes=mesh_axes)
 
 
 @dataclass
