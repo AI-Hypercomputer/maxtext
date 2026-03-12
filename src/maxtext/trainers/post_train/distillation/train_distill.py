@@ -32,10 +32,6 @@ Architecture Overview:
 3. **Tunix Integration**: We wrap the MaxText models in `TunixMaxTextAdapter` to expose
    a standard interface (call signature) that the Tunix `DistillationTrainer` expects.
 """
-import argparse
-import functools
-import sys
-
 from typing import Sequence, Callable
 from absl import app
 from flax import nnx

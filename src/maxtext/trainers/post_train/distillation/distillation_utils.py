@@ -18,7 +18,6 @@ This module contains adapter classes that bridge MaxText's data loading and
 model structures with Tunix's training interfaces.
 """
 
-import os
 import pickle
 import tensorflow as tf
 from array_record.python import array_record_module
@@ -82,11 +81,7 @@ class OfflineArrayRecordIterator:
   """Reads the pre-generated global top-k logits file."""
 
   def __init__(self, data_dir: str, epochs: int = 100):
-    # Check if the user passed a directory or a direct file path
-    if tf.io.gfile.isdir(data_dir):
-      self.filepath = os.path.join(data_dir, "teacher_top_k_global.array_record")
-    else:
-      self.filepath = data_dir
+    self.filepath = data_dir
 
     if not tf.io.gfile.exists(self.filepath):
       raise FileNotFoundError(f"Offline distillation file not found: {self.filepath}")
