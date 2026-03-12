@@ -21,6 +21,8 @@ from types import SimpleNamespace
 import jax
 
 
+pytestmark = [pytest.mark.post_training]
+
 # Same as in rl_utils_test.py.
 train_rl = pytest.importorskip(
     "maxtext.trainers.post_train.rl.train_rl",

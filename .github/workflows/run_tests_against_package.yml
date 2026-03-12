@@ -61,6 +61,10 @@ on:
       maxtext_sha:
         required: true
         type: string
+      extra_pip_deps_file:
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -96,6 +100,12 @@ jobs:
           python3 --version
           python3 -m pip freeze
           uv pip install pytest-cov
+      - name: Install extra pip deps
+        if: inputs.extra_pip_deps_file != ''
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          uv pip install -r ${{ inputs.extra_pip_deps_file }}
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
