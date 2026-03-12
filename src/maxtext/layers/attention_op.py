@@ -1672,7 +1672,7 @@ class AttentionOp(nnx.Module):
           key,
           value,
           mask_type=MaskType.CAUSAL,
-          scale=1.0 / math.sqrt(head_dim),
+          scale=1.0,
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
           return_residual=True,
