@@ -864,6 +864,32 @@ class TrainCompile(unittest.TestCase):
     )
 
   @pytest.mark.cpu_only
+  def test_circular_pipeline_ag_per_repeat_ep_ds(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_circular_pipeline_ag_per_repeat_ep_ds.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "per_device_batch_size=2",
+            "ici_pipeline_parallelism=2",
+            "ici_expert_parallelism=2",
+            "pipeline_parallel_layers=4",
+            "num_pipeline_microbatches=4",
+            "model_name=deepseek3-test",
+            "override_model_config=true",
+            "base_num_decoder_layers=7",
+            "use_ring_of_experts=true",
+            "use_random_routing=true",
+            "max_target_length=128",
+            "pipeline_fsdp_ag_per_repeat=true",
+        )
+    )
+
+  @pytest.mark.cpu_only
   def test_qk_clip(self):
     """AOT test for qk-clip with DeepSeek3 Tiny model"""
     compiled_trainstep_file = "/tmp/test_qk_clip.pickle"
