@@ -30,6 +30,7 @@ from maxtext.utils import model_creation_utils
 
 try:
   from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+  from tpu_inference.layers.common.attention_interface import ShardingAxisName
 except ImportError:
   # Mock for documentation build or environments without tpu_inference
   class AttentionMetadata:
@@ -39,7 +40,7 @@ except ImportError:
 from vllm.config import VllmConfig
 
 
-def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters:
+def generate_maxtext_config(vllm_config: VllmConfig, mesh: Mesh) -> pyconfig.HyperParameters:
   """Generates a MaxText configuration from a vLLM configuration.
 
   This function takes a vLLM configuration object and translates relevant
@@ -50,6 +51,7 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   Args:
     vllm_config: The vLLM configuration object containing model and load
       parameters.
+    mesh: The JAX mesh device for model sharding.
 
   Returns:
     A `pyconfig.HyperParameters` object configured for MaxText.
@@ -72,6 +74,23 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   # Add base config path to positional args
   base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
   argv_list = ["", str(base_config_path)]
+
+  # Pad the number of KV heads if its less than the TP / EP size
+  if isinstance(ShardingAxisName.ATTN_HEAD, tuple):
+    tp_sizes = [mesh.shape[axis_name] for axis_name in ShardingAxisName.ATTN_HEAD]
+    max_tp_size = max(tp_sizes)
+  else:
+    max_tp_size = mesh.shape[ShardingAxisName.ATTN_HEAD]
+
+  num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+
+  if num_kv_heads < max_tp_size and max_tp_size % num_kv_heads == 0:
+    max_logging.log(
+        f"Padding num_kv_heads from {vllm_config.model_config.get_total_num_kv_heads()} to {max_tp_size} to match tp_size."
+    )
+    overrides["base_num_kv_heads"] = max_tp_size
+  else:
+    raise ValueError("Number of KV heads is less than the model parallel dimension and does not divide the model parallel dimension.")
 
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
   return maxtext_config
@@ -96,7 +115,7 @@ class MaxTextForCausalLM(nnx.Module):
     """
     self.vllm_config = vllm_config
     self.cfg = vllm_config.model_config
-    self.maxtext_config = generate_maxtext_config(vllm_config)
+    self.maxtext_config = generate_maxtext_config(vllm_config, mesh)
 
     # Model configuration
     self.mesh = mesh
