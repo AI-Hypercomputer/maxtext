@@ -21,7 +21,7 @@ may fail on different versions like v5p-8, v6e-8.
 
 Usage:
 
-  pytest tests/integration/sft_trainer_correctness_test.py
+  pytest tests/post_training/integration/sft_trainer_correctness_test.py
 """
 
 import os.path
@@ -45,6 +45,8 @@ from maxtext.utils import maxtext_utils
 import numpy as np
 import pytest
 from transformers import AutoTokenizer
+
+pytestmark = [pytest.mark.post_training]
 
 
 def get_golden_data(model_name):

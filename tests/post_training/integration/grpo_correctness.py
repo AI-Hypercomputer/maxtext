@@ -35,7 +35,7 @@ import transformers
 
 from trl import GRPOConfig, GRPOTrainer
 
-pytestmark = [pytest.mark.external_training]  # uses pre-generated checkpoint
+pytestmark = [pytest.mark.external_training, pytest.mark.post_training]  # uses pre-generated checkpoint
 
 
 class GRPOTest(unittest.TestCase):
