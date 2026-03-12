@@ -27,7 +27,7 @@ from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
-from tests.utils.sharding_dump import TEST_CASES, load_json, named_shardings_to_json, partition_specs_to_json
+from tests.utils.sharding_dump import TEST_CASES, load_json, input_sharding_to_json, named_shardings_to_json, partition_specs_to_json
 from tests.utils.test_helpers import get_test_config_path
 import pytest
 
@@ -131,12 +131,16 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
 
   named_json_path = os.path.join(base_path, "named_shardings.json")
   logical_json_path = os.path.join(base_path, "logical_shardings.json")
+  input_json_path = os.path.join(base_path, "input_shardings.json")
 
   if not os.path.exists(named_json_path):
     pytest.skip(f"Missing named_shardings.json for {model_name} {topology} slice {num_slice}")
     return
   if not os.path.exists(logical_json_path):
     pytest.skip(f"Missing logical_shardings.json for {model_name} {topology} slice {num_slice}")
+    return
+  if not os.path.exists(input_json_path):
+    pytest.skip(f"Missing input_shardings.json for {model_name} {topology} slice {num_slice}")
     return
 
   config = pyconfig.initialize(params)
@@ -172,6 +176,19 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
     print(f"\n[FAIL] Logical Sharding Mismatch: {model_name} {topology} slice {num_slice}", flush=True)
     compare_sharding_jsons(expected_logical, "Expected (Logical)", actual_logical, "Actual (Logical)")
     error_messages.append(f"Logical sharding mismatch for {model_name} on {topology} slice {num_slice}")
+
+  # 3. Compare Input Shardings
+  actual_input = input_sharding_to_json()
+  expected_input = load_json(input_json_path)
+  # calculate checksum
+  actual_input_sum = compute_checksum(actual_input)
+  expected_input_sum = compute_checksum(expected_input)
+  input_match = actual_input_sum == expected_input_sum
+
+  if not input_match:
+    print(f"\n[FAIL] Input Sharding Mismatch: {model_name} {topology} slice {num_slice}", flush=True)
+    # compare_sharding_jsons(expected_input, "Expected (Input)", actual_input, "Actual (Input)")
+    error_messages.append(f"Input sharding mismatch for {model_name} on {topology} slice {num_slice}")
 
   assert not error_messages, "\n".join(error_messages)
 
