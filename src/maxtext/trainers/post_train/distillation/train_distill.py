@@ -131,8 +131,7 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
   """
 
   def model_forward_fn(
-      model, input_tokens, positions, attention_mask, decoder_segment_ids=None, cache=None, 
-      **kwargs
+      model, input_tokens, positions, attention_mask, decoder_segment_ids=None, cache=None, **kwargs
   ) -> distillation_utils.DistillationForwardOutput:
     """Forward pass wrapper adapted for raw MaxText models."""
     del attention_mask  # Unused
@@ -215,7 +214,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     batch = self.gen_model_input_fn(inputs)
 
-    def loss_wrapper(student, teacher, batch):      
+    def loss_wrapper(student, teacher, batch):
       if "teacher_output" in batch:
         teacher_output = batch["teacher_output"]
       else:
@@ -440,7 +439,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
 
   # 3. Define Distillation Strategy
   def labels_fn(targets, targets_segmentation=None, **kwargs):
-    """Converts integer targets to masked one-hot vectors for hard label loss."""    
+    """Converts integer targets to masked one-hot vectors for hard label loss."""
     del kwargs  # Unused
     one_hot = jax.nn.one_hot(targets, student_config.vocab_size)
     mask = jnp.not_equal(targets, pad_id).astype(one_hot.dtype)[..., None]
