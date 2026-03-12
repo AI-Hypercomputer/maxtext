@@ -282,6 +282,41 @@ def _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qw
 
   lora_provider.dot_general = types.MethodType(_dot_general_with_3d, lora_provider)
 
+
+def _patch_qwix_update_boxed(qwix_flax_util):
+  """Patches Qwix flax_util.update_boxed to handle PartitionSpec."""
+  original_update_boxed = qwix_flax_util.update_boxed
+
+  def patched_update_boxed(
+      boxed,
+      *,
+      value=None,
+      split=None,
+      merge=None,
+      transpose=None,
+  ):
+    import jax
+    from flax import nnx
+
+    if isinstance(boxed, nnx.Variable):
+      if value is not None:
+        boxed = boxed.replace(value)
+      shape = boxed.value.shape
+      metadata = boxed.get_metadata()
+      sharding_key = "out_sharding" if "out_sharding" in metadata else "sharding_names"
+      axes = metadata.get(sharding_key, None)
+      if isinstance(axes, (list, tuple, jax.sharding.PartitionSpec)):
+        axes = qwix_flax_util.update_sharding(
+            axes, shape=shape, split=split, merge=merge, transpose=transpose
+        )
+        boxed.set_metadata(sharding_key, axes)
+      return boxed
+    return original_update_boxed(
+        boxed, value=value, split=split, merge=merge, transpose=transpose
+    )
+
+  qwix_flax_util.update_boxed = patched_update_boxed
+
 def _prepare_dummy_inputs(mt_config, mesh):
   """Builds dummy decoder inputs used to materialize LoRA parameters."""
   batch_size = getattr(mt_config, "per_device_batch_size", 1)
@@ -518,6 +553,7 @@ def maybe_apply_lora(model, mesh, mt_config):
   lora_provider = _build_lora_provider(mt_config, qwix)
 
   _patch_qwix_dot_general_with_3d(lora_provider, qwix_flax_util, qwix_lora, qwix_ptq, types)
+  _patch_qwix_update_boxed(qwix_flax_util)
 
   decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(mt_config, mesh)
   lora_model = qwix.apply_lora_to_model(
