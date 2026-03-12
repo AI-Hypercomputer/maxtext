@@ -42,6 +42,7 @@ from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models import (
     deepseek,
     deepseek_batchsplit,
+    deepseek_custom,
     gemma,
     gemma2,
     gemma3,
@@ -52,7 +53,6 @@ from maxtext.models import (
     mistral,
     mixtral,
     olmo3,
-    qwen2,
     qwen3,
     simple_layer,
 )
@@ -458,6 +458,14 @@ class Decoder(nn.Module):
             deepseek.DeepSeekDenseLayerToLinen,
             deepseek.DeepSeekMoELayerToLinen,
         ]
+      case DecoderBlockType.DEEPSEEK_CUSTOM:
+        deepseek_custom_moe_layer = deepseek_custom.DeepSeekMoELayerToLinen
+        if self.config.scan_layers and self.config.attention_layer_hybrid_ratio > 1:
+          deepseek_custom_moe_layer = deepseek_custom.DeepSeekMoEScannableBlockToLinen
+        return [
+            deepseek_custom.DeepSeekDenseLayerToLinen,
+            deepseek_custom_moe_layer,
+        ]
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
@@ -468,8 +476,6 @@ class Decoder(nn.Module):
         return [gpt3.Gpt3DecoderLayerToLinen]
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlockToLinen] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayerToLinen]
-      case DecoderBlockType.QWEN2:
-        return [qwen2.Qwen2DecoderLayerToLinen]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
@@ -525,10 +531,10 @@ class Decoder(nn.Module):
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.DEEPSEEK_CUSTOM,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
-        DecoderBlockType.QWEN2,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.GPT_OSS,
@@ -577,7 +583,7 @@ class Decoder(nn.Module):
     """get pipeline stage module"""
 
     def get_layer_to_pipeline(blocks, cfg):
-      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+      if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK_CUSTOM):
         return blocks[1]  # return the sparse block
       else:
         return blocks[0]
@@ -803,7 +809,7 @@ class Decoder(nn.Module):
           if cfg.pipeline_fsdp_ag_once or cfg.pipeline_fsdp_ag_per_repeat
           else None
       )
-      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+      if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK_CUSTOM):
         assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
         dense_layer = RemattedBlockLayers[0]
         moe_layer = RemattedBlockLayers[1]
@@ -849,7 +855,7 @@ class Decoder(nn.Module):
             )(y, *broadcast_args)
     else:
       if cfg.scan_layers:
-        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+        if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK_CUSTOM):
           assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
           layer_call_kwargs = {
               "page_state": page_state,
@@ -927,10 +933,31 @@ class Decoder(nn.Module):
                   policy=policy,
               )
             else:
+              scan_length = num_moe_layers
+              if cfg.decoder_block == DecoderBlockType.DEEPSEEK_CUSTOM and cfg.scan_layers:
+                if num_moe_layers % cfg.inhomogeneous_layer_cycle_interval != 0:
+                  raise ValueError(
+                      f"num_moe_layers ({num_moe_layers}) must be divisible by "
+                      f"inhomogeneous_layer_cycle_interval ({cfg.inhomogeneous_layer_cycle_interval}) "
+                      "when using DeepSeek Custom and scan_layers is True."
+                  )
+                if cfg.attention_layer_hybrid_ratio != cfg.inhomogeneous_layer_cycle_interval:
+                  raise ValueError(
+                      f"attention_layer_hybrid_ratio ({cfg.attention_layer_hybrid_ratio}) and "
+                      f"inhomogeneous_layer_cycle_interval ({cfg.inhomogeneous_layer_cycle_interval}) "
+                      "must be the same."
+                  )
+                scan_length = num_moe_layers // cfg.inhomogeneous_layer_cycle_interval
+                max_logging.log(
+                    f"scan_length: {scan_length}, "
+                    f"num_moe_layers // cfg.inhomogeneous_layer_cycle_interval: "
+                    f"{num_moe_layers // cfg.inhomogeneous_layer_cycle_interval}"
+                )
+
               y, _ = self.scan_decoder_layers(
                   cfg,
                   moe_layer,
-                  num_moe_layers,
+                  scan_length,
                   "moe_layers",
                   mesh,
                   in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
@@ -968,7 +995,7 @@ class Decoder(nn.Module):
               **layer_kwargs,
           )(y, *broadcast_args)
       else:
-        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+        if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK_CUSTOM):
           assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
@@ -1058,11 +1085,14 @@ class Decoder(nn.Module):
                 kv_caches["key_cache"][lyr] = returned_cache[0]
                 kv_caches["value_cache"][lyr] = returned_cache[1]
 
-            if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
-              visual_embeds = deepstack_visual_embeds[lyr]
+            if (
+                deepstack_visual_embeds is not None
+                and lyr < len(deepstack_visual_embeds)
+                and bidirectional_mask is not None
+                and deepstack_visual_embeds[lyr] is not None
+            ):
               # Use bidirectional_mask to identify visual token positions
-              if bidirectional_mask is not None and visual_embeds is not None:
-                y = deepstack_process(y, bidirectional_mask, visual_embeds)
+              y = deepstack_process(y, bidirectional_mask, deepstack_visual_embeds[lyr])
 
     assert isinstance(y, jax.Array)
 

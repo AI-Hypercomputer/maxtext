@@ -373,8 +373,15 @@ class RoutedMoE(nnx.Module):
     else:
       self._expert_parallelism_name = "expert"
 
+    # Some architectures may have a dedicated model dimension for the MoE layers,
+    # different from the primary embedding dimension.
+    self.in_features = self.config.moe_model_dim if self.config.moe_model_dim > 0 else self.config.emb_dim
+    max_logging.log(
+        f"    [RoutedMoE Block] In Features: {self.in_features}, Intermediate Dim: {intermediate_dim}, "
+        f"Total Experts: {num_experts}, Active Experts/Token: {num_experts_per_tok}"
+    )
     self.gate = GateLogit(
-        in_features_shape=self.config.emb_dim,
+        in_features_shape=self.in_features,
         out_features_shape=self.num_experts,
         mesh=self.mesh,
         model_name=self.config.model_name,
@@ -392,22 +399,20 @@ class RoutedMoE(nnx.Module):
 
     # pylint: disable=protected-access
     self.activation_fn = linears._convert_to_activation_function(self.config.mlp_activations[0])
-
-    kernel_in_axis = np.arange(1)
+    kernel_in_axis = np.arange(1)  # the first dimension is the number of experts
     kernel_out_axis = np.arange(1, 2)
 
     if quantizations.in_serve_mode(self.quant):
       # During aqt convert state we delete kernel weight from params to save
       # memory. Instead they are retrieved from the tensors stored in the 'aqt'
-      # collection.
-      self.wi_0 = jnp.zeros((num_experts, self.config.emb_dim, intermediate_dim))
-      self.wi_1 = jnp.zeros((num_experts, self.config.emb_dim, intermediate_dim))
-      self.wo = jnp.zeros((num_experts, intermediate_dim, self.config.emb_dim))
+      self.wi_0 = jnp.zeros((num_experts, self.in_features, intermediate_dim))
+      self.wi_1 = jnp.zeros((num_experts, self.in_features, intermediate_dim))
+      self.wo = jnp.zeros((num_experts, intermediate_dim, self.in_features))
     else:
       self.wi_0 = nnx.Param(
           self.kernel_init(
               self.rngs.params(),
-              (num_experts, self.config.emb_dim, intermediate_dim),
+              (num_experts, self.in_features, intermediate_dim),
               weight_dtype,
               kernel_in_axis,
               kernel_out_axis,
@@ -417,7 +422,7 @@ class RoutedMoE(nnx.Module):
       self.wi_1 = nnx.Param(
           self.kernel_init(
               self.rngs.params(),
-              (num_experts, self.config.emb_dim, intermediate_dim),
+              (num_experts, self.in_features, intermediate_dim),
               weight_dtype,
               kernel_in_axis,
               kernel_out_axis,
@@ -427,7 +432,7 @@ class RoutedMoE(nnx.Module):
       self.wo = nnx.Param(
           self.kernel_init(
               self.rngs.params(),
-              (self.num_experts, self.intermediate_dim, self.config.emb_dim),
+              (self.num_experts, self.intermediate_dim, self.in_features),
               self.weight_dtype,
               kernel_in_axis,
               kernel_out_axis,
@@ -439,7 +444,7 @@ class RoutedMoE(nnx.Module):
       wi_bias_axes = ("exp", "activation_mlp")
       wo_bias_axes = ("exp", "activation_embed")
       wi_bias_shape = (self.num_experts, self.intermediate_dim)
-      wo_bias_shape = (self.num_experts, self.config.emb_dim)
+      wo_bias_shape = (self.num_experts, self.in_features)
       self.wi_0_bias = nnx.Param(
           default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
           sharding=wi_bias_axes,
@@ -875,6 +880,14 @@ class RoutedMoE(nnx.Module):
     )
     return input_offsets, send_sizes, output_offsets, recv_sizes
 
+  def get_ragged_buffer_size(self, local_expert_size, local_batch):
+    if self.config.ragged_buffer_factor > 0.0:
+      balanced_size = local_batch
+      return int(balanced_size * self.config.ragged_buffer_factor)
+    else:
+      max_local_experts_per_tok = min(local_expert_size, self.config.num_experts_per_tok)
+      return int(local_batch * max_local_experts_per_tok)
+
   def transform_bias(self, experts_index, *biases):
     """Selects bias values for a variable number of bias tensors based on chosen experts."""
     return tuple(bias[experts_index] for bias in biases)
@@ -902,7 +915,7 @@ class RoutedMoE(nnx.Module):
       else:
         tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
             group_sizes,
-            max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+            max_utils.generate_representative_group_sizes(inputs.shape[0], group_sizes.shape[0]),
         )
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
@@ -1166,9 +1179,8 @@ class RoutedMoE(nnx.Module):
             # In the worst case, all of the global input data is assigned to each expert in the current shard.
             # This would result in num_expert_shards * input_size * experts_per_shard assignments. However, if
             # experts_per_shard > num_experts_per_tok we cannot assign more than num_experts_per_tok to all of the inputs.
-            max_local_experts_per_tok = min(local_expert_size, self.config.num_experts_per_tok)
-            buffer_size = int(num_expert_parallelism * batch_size * sequence_length * max_local_experts_per_tok)
-            output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
+            buffer_size = self.get_ragged_buffer_size(local_expert_size, jnp.shape(x)[0])
+            output_shape = jnp.zeros((buffer_size, self.in_features), dtype=x.dtype)
 
             x = jax.lax.ragged_all_to_all(
                 x,
@@ -1323,7 +1335,7 @@ class RoutedMoE(nnx.Module):
         )
 
         # Sum up the partial outputs across the expert shards.
-        output = jnp.reshape(output, (-1, sequence_length, self.config.emb_dim // self.get_tensor_parallelism_size()))
+        output = jnp.reshape(output, (-1, sequence_length, self.in_features // self.get_tensor_parallelism_size()))
         output = jax.lax.psum_scatter(output, self._expert_parallelism_name, scatter_dimension=0, tiled=True)
 
       else:
@@ -1334,7 +1346,7 @@ class RoutedMoE(nnx.Module):
           output_shape = jnp.zeros(
               (
                   original_inputs_first_dim,
-                  self.config.emb_dim // self.get_tensor_parallelism_size(),
+                  self.in_features // self.get_tensor_parallelism_size(),
               ),
               dtype=intermediate_output.dtype,
           )
@@ -2076,23 +2088,33 @@ class RoutedAndSharedMoE(nnx.Module):
     self.rngs = rngs
     # NOTE: the name MoeBlock_0 is to ensure reverse compatibility with
     # existing checkpoints for routed experts.
+    in_features = self.config.moe_model_dim if self.config.moe_model_dim > 0 else self.config.emb_dim
     self.MoeBlock_0 = RoutedMoE(
         config=self.config,
         num_experts=self.config.num_experts,
         num_experts_per_tok=self.config.num_experts_per_tok,
         mesh=self.mesh,
         kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
-        intermediate_dim=self.config.moe_mlp_dim,
+        kernel_axes=kernel_axes,
+        intermediate_dim=self.config.base_moe_mlp_dim,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
         quant=self.quant,
         rngs=self.rngs,
     )
+    # If shared_expert_mlp_dim is not set, use the base_moe_mlp_dim.
+    shared_expert_dim = self.config.shared_expert_mlp_dim if self.config.shared_expert_mlp_dim > 0 else self.config.base_moe_mlp_dim
+    max_logging.log(
+        "    [RoutedAndSharedMoE] Shared Experts: %s, "
+        "Shared Exp MLP Dim: %s" % (
+            self.config.shared_experts,
+            self.config.shared_experts * shared_expert_dim,
+        )
+    )
     self.shared_experts = linears.MlpBlock(
         mesh=self.mesh,
-        in_features=self.config.emb_dim,
-        intermediate_dim=self.config.shared_experts * self.config.moe_mlp_dim,
+        in_features=in_features,
+        intermediate_dim=self.config.shared_experts * shared_expert_dim,
         activations=self.config.mlp_activations,
         intermediate_dropout_rate=self.config.dropout_rate,
         dtype=self.config.dtype,

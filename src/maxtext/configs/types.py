@@ -224,6 +224,9 @@ ModelName = Literal[
     "deepseek3-tiny",
     "deepseek3.2-671b",
     "deepseek-custom",
+    "deepseek3-custom-small",
+    "deepseek3-custom",
+    "deepseek3-custom-large",
     "kimi-k2-1t",
     "gemma-7b",
     "gemma-2b",
@@ -437,6 +440,14 @@ class ModelArchitecture(BaseModel):
   base_mlp_dim: int = Field(7168, description="Base dimension of the MLP layer.")
   base_num_decoder_layers: int = Field(16, description="Base number of decoder layers.")
   head_dim: int = Field(128, description="Dimension of each attention head.")
+  attention_output_dim: int = Field(-1, description="Override output dimension for attention block")
+  local_num_query_heads: int = Field(-1, description="Number of query heads in local context layers.")
+  local_num_kv_heads: int = Field(-1, description="Number of KV heads in local context layers.")
+  global_num_query_heads: int = Field(-1, description="Number of query heads in global context layers.")
+  global_num_kv_heads: int = Field(-1, description="Number of KV heads in global context layers.")
+  attention_layer_hybrid_ratio: int = Field(
+      -1, description="Ratio of layer context styles (e.g. 5 means 4 local followed by 1 global)."
+  )
   mlp_activations: list[str] = Field(["silu", "linear"], description="Activation functions in the MLP layer.")
   mlp_activations_limit: float = Field(
       -1.0,
@@ -617,6 +628,7 @@ class MoEGeneral(BaseModel):
   num_experts: PositiveInt = Field(1, description="The total number of experts in each MoE layer.")
   num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
+  ragged_buffer_factor: float = Field(-1.0, description="Ragged buffer factor. If < 0, ragged buffer is worst case size.")
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
   use_custom_sort_vjp: bool = Field(
       True,
@@ -714,6 +726,8 @@ class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
 
   base_moe_mlp_dim: int = Field(7168, description="Intermediate dimension at MoE layer (DeepSeek style).")
+  moe_model_dim: int = Field(-1, description="Dimension of tokens entering the MoE layer.")
+  shared_expert_mlp_dim: int = Field(-1, description="Intermediate dimension for the shared expert.")
   first_num_dense_layers: NonNegativeInt = Field(0, description="Number of initial dense layers in the model.")
   shared_experts: PositiveInt = Field(1, description="Number of shared experts.")
   routed_scaling_factor: float = Field(1.0, description="Scaling factor for routing scores.")

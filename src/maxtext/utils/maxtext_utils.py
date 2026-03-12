@@ -214,19 +214,14 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
   Calculate training TFLOP for Gemma2 as in Gemma2 we combine [local_attention, global_attention] into one decoder
   layer and we use sliding window attention in local_attention
   """
-  noncausal_attention_flops = (
-      # global attention
-      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
-      +
-      # local attention
-      4
-      * config.per_device_batch_size
-      * config.max_target_length
-      * min(config.sliding_window_size, config.max_target_length)
-      * config.num_query_heads
-      * config.head_dim
-  )
-  causal_attention_flops = noncausal_attention_flops / 2
+  S = config.max_target_length
+  W = min(config.sliding_window_size, S)
+
+  global_attention_flops = 4 * config.per_device_batch_size * (S**2) * config.num_query_heads * config.head_dim / 2
+
+  local_attention_flops = 4 * config.per_device_batch_size * S * W * config.num_query_heads * config.head_dim
+
+  causal_attention_flops = global_attention_flops + local_attention_flops
   attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
 
   # multiply num_decoder_layers by 2 because we combine [local_attention, global_attention] into one decoder layer
@@ -253,7 +248,7 @@ def calculate_mixed_attention_model_tflops_training_per_device(
   # Formula: 4 * batch_size * seq_len^2 * num_heads * head_dim
   global_attention_flops_per_layer = (
       4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
-  )
+  ) / 2
 
   # FLOPs for a single local attention layer (sliding window)
   # Formula: 4 * batch_size * seq_len * window_size * num_heads * head_dim
@@ -266,11 +261,10 @@ def calculate_mixed_attention_model_tflops_training_per_device(
       * config.head_dim
   )
 
-  # Total attention FLOPs = (num_global_layers * FLOPs_per_global) + (num_local_layers * FLOPs_per_local)
-  noncausal_attention_flops = (
+  # Total causal attention FLOPs = (num_global_layers * FLOPs_per_global) + (num_local_layers * FLOPs_per_local)
+  causal_attention_flops = (
       num_global_layers * global_attention_flops_per_layer + num_local_layers * local_attention_flops_per_layer
   )
-  causal_attention_flops = noncausal_attention_flops / 2
 
   # Convert to TFLOPs and multiply by 3 for fwd/bwd pass
   attention_tflops = causal_attention_flops * 3 / 10**12
@@ -456,7 +450,7 @@ def calculate_mla_tflops_per_device(config):
   return qkv_flops, attention_flops, projection_flops
 
 
-def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim):
+def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim, in_features=None):
   """Helper function to calculate matmul TFLOP in ffn based on MLP dimension.
 
   Applies to:
@@ -464,21 +458,32 @@ def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim):
     - MoE FFN layers (mlp_dim = config.moe_mlp_dim),
       need to scale by shared_experts or num_experts_per_tok.
   """
+  if in_features is None:
+    in_features = config.emb_dim
   ffn1_flops = (
-      2 * config.per_device_batch_size * config.max_target_length * mlp_dim * config.emb_dim * len(config.mlp_activations)
+      2 * config.per_device_batch_size * config.max_target_length * mlp_dim * in_features * len(config.mlp_activations)
   )
-  ffn2_flops = 2 * config.per_device_batch_size * config.max_target_length * mlp_dim * config.emb_dim
+  ffn2_flops = 2 * config.per_device_batch_size * config.max_target_length * mlp_dim * in_features
   return ffn1_flops + ffn2_flops
 
 
 def calculate_routed_and_shared_ffn_tflops_per_device(config):
   """Helper function to calculate DeepSeek-style ffn TFLOP"""
-  gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
+  if config.decoder_block == DecoderBlockType.DEEPSEEK_CUSTOM:
+    in_features = config.moe_model_dim if config.moe_model_dim > 0 else config.emb_dim
+    dense_in_features = config.emb_dim
+    shared_expert_mlp_dim = config.shared_expert_mlp_dim if config.shared_expert_mlp_dim > 0 else config.moe_mlp_dim * config.shared_experts
+  else:
+    in_features = config.emb_dim
+    dense_in_features = config.emb_dim
+    shared_expert_mlp_dim = config.moe_mlp_dim * config.shared_experts
+
+  gate_flops = 2 * config.per_device_batch_size * config.max_target_length * in_features * config.num_experts
   # Due to the mixed decoder layers, the flops is multiplied by num of layers for both dense and moe
   num_dense_layers, num_moe_layers = get_dense_moe_layers(config)
-  dense_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * num_dense_layers
-  shared_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.shared_experts
-  routed_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
+  dense_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim, dense_in_features) * num_dense_layers
+  shared_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, shared_expert_mlp_dim, in_features)
+  routed_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim, in_features) * config.num_experts_per_tok
   moe_ffn_flops = (gate_flops + shared_experts_flops + routed_experts_flops) * num_moe_layers
   total_ffn_flops = dense_ffn_flops + moe_ffn_flops
   return total_ffn_flops
@@ -486,7 +491,7 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
 
 def get_dense_moe_layers(config):
   """Helper function to calculate number of dense and moe layers"""
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK_CUSTOM):
     num_dense_layers = config.first_num_dense_layers
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     return num_dense_layers, num_moe_layers
@@ -500,6 +505,66 @@ def get_dense_moe_layers(config):
     raise ValueError("Currently we only support DeepSeek, Llama4, and Qwen3-Next calculation.")
 
   return num_dense_layers, num_moe_layers
+
+
+def calculate_deepseek_custom_attention_and_proj_tflops(config):
+  """Calculates attention and projection FLOPs for DeepSeek Custom model layer by layer."""
+  total_qkv_proj_flops = 0
+  total_causal_attention_flops = 0
+
+  B = config.per_device_batch_size
+  S = config.max_target_length
+  E = config.emb_dim
+  D_head = config.head_dim
+
+  for layer_idx in range(config.num_decoder_layers):
+    is_dense_layer = layer_idx < config.first_num_dense_layers
+    is_global_attention = False
+
+    if not is_dense_layer and config.attention_layer_hybrid_ratio > 0:
+      is_global_attention = (layer_idx + 1) % config.attention_layer_hybrid_ratio == 0
+
+    if is_global_attention and config.global_num_query_heads > 0:
+      H_q = config.global_num_query_heads
+      H_kv = config.global_num_kv_heads
+      W = None
+    elif not is_global_attention and config.local_num_query_heads > 0:
+      H_q = config.local_num_query_heads
+      H_kv = config.local_num_kv_heads
+      W = config.sliding_window_size
+    else:
+      H_q = config.base_num_query_heads
+      H_kv = config.base_num_kv_heads
+      W = None
+
+    attention_output_dim = config.attention_output_dim if (not is_dense_layer and config.attention_output_dim > 0) else E
+
+    # QKV projection
+    # Q, K, V
+    qkv_flops = 2 * B * S * E * (H_q + 2 * H_kv) * D_head
+
+    # Attention
+    if W is not None:
+      # Local Sliding window attention
+      # Formula: 4 * B * S * W * H_q * D_head
+      causal_attention_flops = 4 * B * S * W * H_q * D_head
+    else:
+      # Global attention
+      noncausal_attention_flops = 4 * B * S * (S ** 2) * H_q * D_head / S
+      causal_attention_flops = noncausal_attention_flops / 2
+
+    # Out projection
+    projection_flops = 2 * B * S * H_q * D_head * attention_output_dim
+
+    # Up projection (if MoE layer)
+    up_projection_flops = 0
+    if not is_dense_layer and config.attention_output_dim > 0 and config.attention_output_dim != E:
+      up_projection_flops = 2 * B * S * config.attention_output_dim * E
+
+    total_qkv_proj_flops += (qkv_flops + projection_flops + up_projection_flops)
+    total_causal_attention_flops += causal_attention_flops
+
+  return total_qkv_proj_flops, total_causal_attention_flops
 
 
 def calculate_gated_delta_net_flops_per_device(config):
@@ -725,7 +790,7 @@ def calculate_tflops_training_per_device(config, log=True):
   # MLP flops
   if config.num_experts > 1:
     # calculation based on dropless implementation
-    if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4, DecoderBlockType.QWEN3_NEXT):
+    if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4, DecoderBlockType.QWEN3_NEXT, DecoderBlockType.DEEPSEEK_CUSTOM):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
@@ -793,6 +858,10 @@ def calculate_tflops_training_per_device(config, log=True):
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
+  elif config.decoder_block == DecoderBlockType.DEEPSEEK_CUSTOM:
+    total_qkv_proj_flops, total_causal_attention_flops = calculate_deepseek_custom_attention_and_proj_tflops(config)
+    learnable_weight_tflops = (total_ffn_flops + total_qkv_proj_flops + embedding_flops) * 3 / 10**12
+    attention_tflops = total_causal_attention_flops * 3 / 10**12
   elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
     gdn_weight_flops_per_layer, gdn_attn_flops_per_layer = calculate_gated_delta_net_flops_per_device(config)
     cycle_interval = config.inhomogeneous_layer_cycle_interval
