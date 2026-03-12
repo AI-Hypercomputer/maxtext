@@ -183,6 +183,8 @@ class TrainDistillTest(unittest.TestCase):
         positions=mock_batch["positions"],
         attention_mask=mock_batch["attention_mask"],
         decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch.get("targets", None),
+        decoder_target_mask=mock_batch.get("targets_segmentation", None),
         cache=None,
     )
 
@@ -228,7 +230,9 @@ class TrainDistillTest(unittest.TestCase):
         positions=mock_batch["positions"],
         attention_mask=mock_batch["attention_mask"],
         decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch.get("targets", None),
         cache=None,
+        decoder_target_mask=None,
     )
 
     trainer.strategy.student_forward_fn.assert_called_once_with(
@@ -237,17 +241,79 @@ class TrainDistillTest(unittest.TestCase):
         positions=mock_batch["positions"],
         attention_mask=mock_batch["attention_mask"],
         decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch.get("targets", None),
         cache=None,
+        decoder_target_mask=None,
     )
 
     # Verify loss computation and optimizer update
-    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"])
+    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
     trainer.strategy.compute_loss.assert_called_once()
     optimizer.update.assert_called_once_with(student_model, mock_grads)
 
     # Verify the final returns match what grad_fn produced
     self.assertEqual(loss, mock_loss)
     self.assertEqual(aux, mock_aux)
+
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.tree.map")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.value_and_grad")
+  def test_train_step_passes_targets_segmentation(self, mock_value_and_grad, mock_tree_map):
+    """Verifies strategy callbacks receive decoder_target_tokens and decoder_target_mask."""
+    # 1. Initialize Trainer
+    # pylint: disable=no-value-for-parameter
+    trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
+    trainer.strategy = mock.Mock()
+
+    # 2. Setup Batch WITH targets_segmentation
+    mock_targets_segmentation = jnp.array([[1, 1, 0]])
+    mock_batch = {
+        "input_tokens": mock.Mock(),
+        "positions": mock.Mock(),
+        "attention_mask": mock.Mock(),
+        "decoder_segment_ids": mock.Mock(),
+        "targets": mock.Mock(),
+        "targets_segmentation": mock_targets_segmentation,
+    }
+    trainer.gen_model_input_fn = mock.Mock(return_value=mock_batch)
+
+    # 3. Setup Models & Inputs
+    teacher_model, student_model = mock.Mock(), mock.Mock()
+    model_bundle = train_distill.ModelBundle(teacher_model=teacher_model, student_model=student_model)
+    optimizer, inputs = mock.Mock(), mock.Mock()
+
+    # 4. Configure mocked nnx.value_and_grad
+    mock_grad_fn = mock.Mock(return_value=((mock.Mock(), mock.Mock()), mock.Mock()))
+    mock_value_and_grad.return_value = mock_grad_fn
+
+    # 5. Execute outer function & trigger inner loss_wrapper
+    trainer._train_step(model_bundle, optimizer, inputs)
+    loss_wrapper = mock_value_and_grad.call_args[0][0]
+    loss_wrapper(student_model, teacher_model, mock_batch)
+
+    # 6. Assertions
+    trainer.strategy.labels_fn.assert_called_once_with(
+        mock_batch["targets"], targets_segmentation=mock_targets_segmentation
+    )
+    trainer.strategy.student_forward_fn.assert_called_once_with(
+        model=student_model,
+        input_tokens=mock_batch["input_tokens"],
+        positions=mock_batch["positions"],
+        attention_mask=mock_batch["attention_mask"],
+        decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch["targets"],
+        decoder_target_mask=mock_targets_segmentation,
+        cache=None,
+    )
+    trainer.strategy.teacher_forward_fn.assert_called_once_with(
+        model=teacher_model,
+        input_tokens=mock_batch["input_tokens"],
+        positions=mock_batch["positions"],
+        attention_mask=mock_batch["attention_mask"],
+        decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch["targets"],
+        decoder_target_mask=mock_targets_segmentation,
+        cache=None,
+    )
 
   def test_optimizer_factory(self):
     """Verifies the optimizer factory injects hyperparams and handles configs."""

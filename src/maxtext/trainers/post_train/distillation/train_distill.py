@@ -141,8 +141,8 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         decoder_positions=positions,
         decoder_segment_ids=decoder_segment_ids,
         enable_dropout=config.enable_dropout,
-        decoder_target_tokens=kwargs.get("targets", None),
-        decoder_target_mask=kwargs.get("targets_segmentation", None),
+        decoder_target_tokens=kwargs.get("decoder_target_tokens", None),
+        decoder_target_mask=kwargs.get("decoder_target_mask", None),
     )
     out_projection_activations = None
     if config.distill_beta > 0.0:
@@ -224,6 +224,8 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
             positions=batch["positions"],
             attention_mask=batch.get("attention_mask"),
             decoder_segment_ids=batch.get("decoder_segment_ids"),
+            decoder_target_tokens=batch.get("targets", None),
+            decoder_target_mask=batch.get("targets_segmentation", None),
             cache=None,
         )
 
@@ -235,9 +237,12 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
           positions=batch["positions"],
           attention_mask=batch.get("attention_mask"),
           decoder_segment_ids=batch.get("decoder_segment_ids"),
+          decoder_target_tokens=batch.get("targets", None),
+          decoder_target_mask=batch.get("targets_segmentation", None),
           cache=None,
       )
-      labels = self.strategy.labels_fn(batch["targets"])
+      # we should apply a mask for labels to disable segment-separator tokens
+      labels = self.strategy.labels_fn(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
       return self.strategy.compute_loss(student_output, teacher_output, labels)
 
     # Because student is the 0th argument, argnums=0 guarantees
