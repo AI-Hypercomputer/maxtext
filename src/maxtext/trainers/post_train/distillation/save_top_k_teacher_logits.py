@@ -43,6 +43,7 @@ def generate_and_save_data(config, local_args):
   k_val = local_args.top_k
   optional_keys = local_args.optional_keys
   gcs_upload_path = local_args.gcs_upload_path
+  local_tmp_dir = local_args.local_tmp_dir
 
   devices = jax.devices()
   devices_array = maxtext_utils.create_device_mesh(config, devices)
@@ -54,7 +55,6 @@ def generate_and_save_data(config, local_args):
   train_iter, _ = input_pipeline_interface.create_data_iterator(config, mesh)
 
   # Setup local tmp directory for Host 0
-  local_tmp_dir = "/mnt/ajkv/disks/teacher_logits_output"
   filename = "teacher_top_k_global.array_record"
   local_output_path = os.path.join(local_tmp_dir, filename)
 
@@ -160,6 +160,13 @@ if __name__ == "__main__":
       required=False,
       default=None,
       help="Optional GCS directory (e.g., gs://my-bucket/logits/) to upload the locally saved ArrayRecord file.",
+  )
+  parser.add_argument(
+      "--local_tmp_dir",
+      type=str,
+      required=False,
+      default="/tmp",
+      help="Local temporary directory to write the ArrayRecord file before optional GCS upload.",
   )
   local_arg, remaining_args = parser.parse_known_args()
 
