@@ -794,6 +794,7 @@ class MLA(Attention):
     else:
       # LoRA path
       low_rank_q = self.wq_a(inputs_q, out_sharding=wqa_out_sharding)  # [B, L, q_lora_rank]
+      low_rank_q = checkpoint_name(low_rank_q, "query_wa_proj")
       low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
       low_rank_q = checkpoint_name(low_rank_q, "mla_q")
       q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads, qk_head_dim]
@@ -933,6 +934,7 @@ class MLA(Attention):
       wka_logical_name = (KV_BATCH, LENGTH_NO_EXP, KV_LORA_UP_PROJ)
     wkva_out_sharding = create_sharding(self.mesh, wka_logical_name)
     low_rank = self.wkv_a(inputs, out_sharding=wkva_out_sharding)
+    low_rank = checkpoint_name(low_rank, "kv_wa_proj")
     low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
     low_rank_main = self.kv_norm(low_rank_main)
     low_rank_main = checkpoint_name(low_rank_main, "mla_kv")
