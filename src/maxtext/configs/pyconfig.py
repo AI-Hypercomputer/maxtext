@@ -29,12 +29,13 @@ import jax.numpy as jnp
 import omegaconf
 
 from maxtext.configs import pyconfig_deprecated
-from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT, HF_IDS, MAXTEXT_PKG_DIR
 from maxtext.common.common_types import DecoderBlockType, ShardMode
 from maxtext.configs import types
 from maxtext.configs.types import MaxTextConfig
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_utils
+from maxtext.utils import max_logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.environ.get("LOGLEVEL", "INFO"))
@@ -105,7 +106,7 @@ def resolve_config_path(param: str) -> str:
   # For pip-installed packages, strip the src prefix and resolve against
   # the installed configs directory (MAXTEXT_CONFIGS_DIR).
   if param.startswith("src/maxtext/configs/"):
-    candidate = os.path.join(MAXTEXT_CONFIGS_DIR, param[len("src/maxtext/configs/"):])
+    candidate = os.path.join(MAXTEXT_CONFIGS_DIR, param[len("src/maxtext/configs/") :])
     if os.path.isfile(candidate):
       return candidate
   return os.path.join("src", param)
@@ -169,7 +170,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   for key, value in raw_keys.items():
     if key not in valid_fields:
       logger.warning("Ignoring invalid/unsupported field from YAML/CLI: %s", repr(key))
-      raise ValueError(f"{key!r} not in {", ".join(map(repr, valid_fields))}.")
+      raise ValueError(f"{key!r} not in {', '.join(map(repr, valid_fields))}.")
 
     new_value = value
     if isinstance(new_value, str) and new_value.lower() == "none":
@@ -185,13 +186,33 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
 
     # An empty value provided in the configuration is treated as None
     if (
-        key in ("hf_train_files", "hf_eval_files", "hf_access_token", "hf_name", "hf_data_dir", "hf_eval_split")
+        key
+        in (
+            "hf_train_files",
+            "hf_eval_files",
+            "hf_access_token",
+            "hf_name",
+            "hf_data_dir",
+            "hf_eval_split",
+            "tokenizer_path",
+        )
         and new_value == ""
     ):
       new_value = None
 
     if key == "run_name" and new_value is None:
       new_value = ""
+
+    if key == "tokenizer_path" and new_value is None:
+      try:
+        new_value = HF_IDS[raw_keys["model_name"]]
+      except KeyError:
+        new_value = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2")
+        max_logging.warning(
+            "tokenizer_path not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
+          Using the default src/maxtext/assets/tokenizers/tokenizer.llama2 instead. \
+          Please pass tokenizer_path in your command if this is not intended."
+        )
 
     # Preprocess muon_consistent_rms to be None or float
     if key == "muon_consistent_rms":
@@ -281,16 +302,23 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   # 3. Handle model-specific config
   temp_cfg = omegaconf.OmegaConf.merge(base_yml_config, overrides_cfg)
   model_name = temp_cfg.get("model_name", "default")
+  # The architecture for -Instruct v/s base models are the same, so for identifying the
+  # architecture we replace "-Instruct" from the model_name and get the base model name
+  model_name = model_name.replace("-Instruct", "") if "-Instruct" in model_name else model_name
   model_cfg = {}
   if model_name != "default":
     # First try relative to base config path
     model_config_path = os.path.join(os.path.dirname(config_path), "models", f"{model_name}.yml")
     # Try looking for "models" under "src/maxtext/configs/"
     if not os.path.isfile(model_config_path):
-      model_config_path = os.path.join(os.path.dirname(os.path.dirname(config_path)), "models", f"{model_name}.yml")
+      model_config_path = os.path.join(
+          os.path.dirname(os.path.dirname(config_path)),
+          "models",
+          f"{model_name}.yml",
+      )
 
     if not os.path.isfile(model_config_path):
-      # Fallback to default location within package
+      # Fallback to the default location within package
       dir_path = os.path.dirname(os.path.realpath(__file__))
       model_config_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
 
@@ -304,7 +332,7 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
     else:
       logger.warning("Model config for '%s' not found at %s", model_name, model_config_path)
 
-      # 4. Final merge (base, model, then overrides)
+      # Finally merge (base, model, then overrides)
   model_cfg_oc = omegaconf.OmegaConf.create(model_cfg)
 
   # 4. Manually merge logical_axis_rules to avoid OmegaConf's list replacement behavior.
