@@ -25,6 +25,7 @@ from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
+
 import qwix
 from qwix._src.core import dot_general_qt
 
@@ -112,9 +113,10 @@ def _rhs_axis_metadata_wrapper(
   return nn.with_logical_partitioning((lambda: x), mesh_axes)()
 
 
-class QwixDotGeneral:
+class QwixDotGeneral(nn.Module):
   """A callable class for Qwix dot_general."""
 
+  @nn.compact
   def __call__(
       self,
       lhs: jax.Array,
@@ -128,15 +130,17 @@ class QwixDotGeneral:
     config = dot_general_qt.DotGeneralQtConfig(
         lhs_qtype=jnp.float8_e4m3fn,
         rhs_qtype=jnp.float8_e4m3fn,
-        bwd_qtype=jnp.float8_e5m2,
+        dlhs_grad_qtype=jnp.float8_e5m2, 
+        drhs_grad_qtype=jnp.float8_e5m2,
         tile_size=None,
     )
     return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
 
 
-class QwixEinsum:
+class QwixEinsum(nn.Module):
   """A callable class for Qwix einsum."""
 
+  @nn.compact
   def __call__(
       self,
       einsum_str: str,
@@ -149,7 +153,8 @@ class QwixEinsum:
     config = dot_general_qt.DotGeneralQtConfig(
         lhs_qtype=jnp.float8_e4m3fn,
         rhs_qtype=jnp.float8_e4m3fn,
-        bwd_qtype=jnp.float8_e5m2,
+        dlhs_grad_qtype=jnp.float8_e5m2, 
+        drhs_grad_qtype=jnp.float8_e5m2,
         tile_size=None,
     )
     custom_dot_general = lambda *args, **kwargs: dot_general_qt.dot_general_qt(*args[:3], config)
@@ -168,9 +173,9 @@ class QwixEinsum:
 class AqtQuantization:
   """Configures AQT quantization github.com/google/aqt."""
 
-  quant_dg: aqt_config.DotGeneral
+  # quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
-  replicate_scale: bool = False
+  # replicate_scale: bool = False
 
   # def _get_mixed_precision_cfg(self):
   #   """get configuration for mixed precision"""

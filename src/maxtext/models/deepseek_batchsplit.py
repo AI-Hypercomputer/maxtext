@@ -463,6 +463,7 @@ def mla(
       dtype=dtype,
       qk_nope_head_dim=qk_nope_head_dim,
       mscale=mscale,
+      quant=quant,
   )
   query = jax.ad_checkpoint.checkpoint_name(query, "query_proj")
   key, value = kv_projection(
@@ -483,6 +484,7 @@ def mla(
       dtype=dtype,
       qk_nope_head_dim=qk_nope_head_dim,
       num_query_heads=num_query_heads,
+      quant=quant,
   )
   key = jax.ad_checkpoint.checkpoint_name(key, "key_proj")
   value = jax.ad_checkpoint.checkpoint_name(value, "value_proj")
@@ -821,6 +823,7 @@ def unroute(
 def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
   """Processes routed tokens through the MLP."""
 
+
   def gmm(
       inputs,
       kernel,
@@ -831,16 +834,16 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       input_buffer_count,
       combine_scopes,
   ):
-
-    tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
-        group_sizes,
-        max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
-    )
     if config.use_qwix_quantization:
+
+      # print("\n>>> INSIDE COMPUTE: CHECKING SHAPES <<<")
+      # print(f"w0 shape before: {w0.shape}")
+      # print(f"group_sizes shape: {group_sizes.shape}\n")
+
       output = megablox.gmm(
           lhs=inputs,
           rhs=kernel,
-          group_sizes=tokamax_group_sizes,
+          group_sizes=group_sizes,
           preferred_element_type=preferred_element_type,
           tiling=tiling,
           use_qwix_quantization=config.use_qwix_quantization,
@@ -851,6 +854,10 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
           qwix_rule=quantizations.get_fp8_full_qwix_rule(config),
       )
     else:
+      tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
+          group_sizes,
+          max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+      )
       output = tokamax.ragged_dot(
           lhs=inputs,
           rhs=kernel,
