@@ -14,7 +14,8 @@ def generate_rl_config(
     sampler_devices_fraction, 
     base_output_directory, 
     run_name,
-    hf_token
+    hf_token,
+    extra_config
 ):
     yaml_template = """apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
@@ -78,7 +79,7 @@ spec:
                 trainer_devices_fraction={{ trainer_devices_fraction }} \\
                 subslice_shape='{{ subslice_shape }}' \\
                 enable_single_controller={{ enable_single_controller }} \\
-                sampler_devices_fraction={{ sampler_devices_fraction }}) & PID=$!;
+                sampler_devices_fraction={{ sampler_devices_fraction }} {{extra_config}}) & PID=$!;
 
                 while kill -0 $PID 2>/dev/null;
                     do sleep 5;
@@ -297,7 +298,8 @@ spec:
         sampler_devices_fraction=sampler_devices_fraction,
         base_output_directory=base_output_directory,
         run_name=run_name,
-        hf_token=hf_token
+        hf_token=hf_token,
+        extra_config=extra_config
     )
     
     return rendered_yaml
@@ -324,25 +326,35 @@ if __name__ == "__main__":
     parser.add_argument("--base_output_directory", type=str, required=True)
     parser.add_argument("--hf_token", type=str, required=True)
     parser.add_argument("--store_directory", type=str, required=True)
-    parser.add_argument("--enable_tp", type=bool, default=True)
+    parser.add_argument("--enable_tp", action="store_true", default=False, help="Enable tensor parallelism")
+    parser.add_argument("--enable_ep", action="store_true", default=False, help="Enable expert parallelism")
     args = parser.parse_args()
+    print(vars(args))
+
 
     # for v7x-128
+    extra_config = ""
     number_of_chips = 64
     batch_size = args.trainer_chips * 2
     trainer_devices_fraction = args.trainer_chips / number_of_chips
     rollout_data_parallelism = args.sampler_replicas
     sampler_chips = args.number_of_sampler_chips_per_replica * args.sampler_replicas
     assert sampler_chips + args.trainer_chips <= number_of_chips, "Total number of chips used by trainer and sampler must be less than or equal to available chips"
-    if args.enable_tp:
+    if args.enable_tp and args.enable_ep:
         rollout_tensor_parallelism = args.number_of_sampler_chips_per_replica * 2
         rollout_expert_parallelism = rollout_tensor_parallelism // 4 if rollout_tensor_parallelism >= 4 else 1
         assert rollout_tensor_parallelism % rollout_expert_parallelism == 0, "rollout_tensor_parallelism must be divisible by rollout_expert_parallelism"
         rollout_tensor_parallelism = 4 if rollout_tensor_parallelism >= 4 else rollout_tensor_parallelism
-    else:
+    elif args.enable_ep:
         rollout_tensor_parallelism = 1
         rollout_expert_parallelism = args.number_of_sampler_chips_per_replica * 2
-      
+    elif args.enable_tp:
+        rollout_tensor_parallelism = args.number_of_sampler_chips_per_replica * 2
+        rollout_expert_parallelism = 1
+        extra_config += " enable_dp_attention=True" if rollout_tensor_parallelism >= 4 else ""
+    else:
+        assert False, "At least one of tensor parallelism or expert parallelism must be enabled"
+
     sampler_devices_fraction = sampler_chips / number_of_chips
     if args.trainer_chips == 4:
       enable_single_controller = "true"
@@ -374,7 +386,8 @@ if __name__ == "__main__":
         sampler_devices_fraction=sampler_devices_fraction,
         base_output_directory=output_directory,
         run_name=args.metadata_name,
-        hf_token=args.hf_token
+        hf_token=args.hf_token,
+        extra_config=extra_config
     )
     # if the yaml directory does not exist, create it
     if not os.path.exists(args.store_directory):
