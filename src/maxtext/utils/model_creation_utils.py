@@ -230,6 +230,8 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kw
   """
   if argv is None:
     argv = [""]
+  else:
+    argv = list(argv)
   for k, v in kwargs.items():
     argv.append(f"{k}={v}")
 
@@ -295,7 +297,6 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kw
         [
             "use_multimodal=false",
             "scan_layers=true",
-            "skip_jax_distributed_system=True",
         ]
     )
 
@@ -319,8 +320,9 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kw
     jax.config.update("jax_platforms", "cpu")
     os.environ["JAX_PLATFORMS"] = "cpu"  # Ensure child scripts use cpu
 
+    to_maxtext_argv = argv + ["skip_jax_distributed_system=True"]
     to_maxtext.main(
-        argv,
+        to_maxtext_argv,
         hf_model_path=hf_model_path,
         revision=revision,
         lazy_load_tensors=lazy_load_tensors,
