@@ -14,10 +14,15 @@
 
 """Tests for the common MaxText utilities"""
 
+import functools
+import pytest
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Sequence
 import unittest
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
+from dataclasses import dataclass, field
+import numpy as np
+import optax
 
 from flax import linen as nn
 from flax import nnx
@@ -26,9 +31,10 @@ from flax.training import train_state
 import jax
 from jax import random, vmap
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
+from jax.experimental import mesh_utils
 from maxtext.configs import pyconfig
-from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode, DecoderBlockType
 from maxtext.inference import inference_utils
 from maxtext.layers import quantizations
 from maxtext.models import models
@@ -37,10 +43,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
-import numpy as np
-import optax
-
-Transformer = models.transformer_as_linen
+from maxtext.utils import maxtext_utils_nnx
 
 
 class TestGradientClipping(unittest.TestCase):
@@ -177,11 +180,7 @@ class UpdateStateParamTest(unittest.TestCase):
         "decoder": {"gate": {"bias": jnp.array([0.5, 0.5])}},
     }
     self.state = train_state.TrainState(
-        step=0,
-        apply_fn=self.model.apply,
-        params=self.initial_params,
-        tx=None,
-        opt_state={},
+        step=0, apply_fn=self.model.apply, params=self.initial_params, tx=None, opt_state={}
     )
 
   def test_update_mode_add(self):
@@ -341,28 +340,44 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
     self._test_init_initial_state_driver(False)
 
 
+@pytest.mark.linen_only
 class MaxUtilsInitTransformerState(unittest.TestCase):
   """Tests initialization of transformer states in max_utils.py"""
 
   def setUp(self):
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
     extra_args = get_decoupled_parallelism_overrides()
-    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
+    self.config = pyconfig.initialize(
+        [None, get_test_config_path()], enable_checkpointing=False, pure_nnx=False, **extra_args
+    )
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    if self.config.pure_nnx:
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      self.model = models.transformer_as_linen(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)
-    state, _ = maxtext_utils.setup_decode_state(self.model, self.config, rng, self.mesh, None)
+    if self.config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng)
+    state, _ = maxtext_utils.setup_decode_state(self.config, self.mesh, None, init_state_fn)
     self.assertEqual(state.tx, None)
     self.assertEqual(state.opt_state, {})
 
   def test_setup_initial_state(self):
     rng = random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
-    state, _, _, _ = maxtext_utils.setup_initial_state(self.model, None, tx, self.config, rng, self.mesh, None)
+    if self.config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
+    state, _, _, _ = maxtext_utils.setup_initial_state(None, self.config, self.mesh, None, init_state_fn)
     self.assertEqual(state.tx, tx)
     self.assertNotEqual(state.opt_state, {})
 
@@ -908,38 +923,996 @@ class TestLearningRateSchedules(unittest.TestCase):
     self.assertIn("wsd_decay_steps_fraction", str(cm.exception))
 
 
-class TestGetAbstractState(unittest.TestCase):
-  """Test class for get_abstract_state."""
+class TestMeshUtils(unittest.TestCase):
+  """Test suite for the mesh creation utility function."""
+
+  @dataclass
+  class MockConfig:
+    """Minimal mock for pyconfig.HyperParameters."""
+
+    init_weights_seed: int = 42
+    shard_mode: str = ShardMode.EXPLICIT
+    mesh_axes: Sequence[str] = field(default_factory=lambda: ["data", "model"])
 
   def setUp(self):
-    extra_args = get_decoupled_parallelism_overrides()
-    self.config = pyconfig.initialize(
-        [None, get_test_config_path()],
-        **extra_args,
-        enable_checkpointing=False,
-        model_name="llama3.1-8b",
-        per_device_batch_size=1,
-        max_target_length=16,
+    # Setup a dummy device array for the mock to return
+    self.devices_array = np.array(jax.devices())
+
+  @patch("MaxText.maxtext_utils.create_device_mesh")
+  def test_get_mesh_explicit_mode(self, mock_create_device_mesh):
+    """Tests that ShardMode.EXPLICIT sets axis_types to MANUAL."""
+    # 1. Setup Mock
+    mock_create_device_mesh.return_value = self.devices_array[:1].reshape((1,))
+    config = self.MockConfig(shard_mode=ShardMode.EXPLICIT, mesh_axes=["data"])
+
+    # 2. Run function
+    mesh = maxtext_utils.get_mesh_from_config(config)
+
+    # 3. Assertions
+    # Check that the internal utility was called correctly
+    mock_create_device_mesh.assert_called_once_with(config, None)
+
+    # Verify Mesh properties
+    self.assertEqual(mesh.axis_names, ("data",))
+    # In JAX, AxisType.MANUAL is the equivalent for explicit control
+    self.assertEqual(mesh.axis_types, (AxisType.Explicit,))
+
+  @patch("MaxText.maxtext_utils.create_device_mesh")
+  def test_get_mesh_auto_mode(self, mock_create_device_mesh):
+    """Tests that ShardMode.AUTO sets axis_types to AUTO."""
+    # 1. Setup Mock
+    mock_create_device_mesh.return_value = self.devices_array[:2].reshape((2, 1))
+    config = self.MockConfig(shard_mode=ShardMode.AUTO, mesh_axes=["data", "model"])
+
+    # 2. Run function
+    mesh = maxtext_utils.get_mesh_from_config(config)
+
+    # 3. Assertions
+    self.assertEqual(len(mesh.axis_types), 2)
+    self.assertTrue(all(t == AxisType.Auto for t in mesh.axis_types))
+
+  @patch("MaxText.maxtext_utils.create_device_mesh")
+  def test_get_mesh_with_provided_devices(self, mock_create_device_mesh):
+    """Tests that provided devices are passed through to the mesh creator."""
+    config = self.MockConfig()
+    specific_devices = self.devices_array[:2].reshape((1, 2))
+    mock_create_device_mesh.return_value = specific_devices
+
+    _ = maxtext_utils.get_mesh_from_config(config, devices=specific_devices)
+
+    # Verify the second argument to create_device_mesh was our device list
+    mock_create_device_mesh.assert_called_once_with(config, specific_devices)
+
+
+class TestNNXAbstractState(unittest.TestCase):
+  """Test the get_abstract_state_nnx func."""
+
+  @dataclass
+  class MockConfig:
+    init_weights_seed: int = 42
+    shard_optimizer_over_data: bool = False
+    optimizer_memory_host_offload: bool = False
+    parameter_memory_host_offload: bool = False
+    param_scan_axis: int = 0
+    logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]]])
+
+  class MockTrainState(nnx.Module):
+    """Simulates a TrainState with params and optimizer state."""
+
+    def __init__(self, rngs: nnx.Rngs):
+      # Model parameters
+      device_num = len(jax.local_devices())
+      self.params = nnx.Linear(
+          2, 4, kernel_init=nnx.with_partitioning(nnx.initializers.ones, sharding=("model",)), rngs=rngs
+      )
+      # Simulated optimizer state
+      self.optimizer = nnx.Variable(jnp.zeros((device_num,)), sharding=("model",))
+
+  def setUp(self):
+    # Create a real 1D mesh on local devices
+    devices = jax.local_devices()
+    self.mesh = Mesh(mesh_utils.create_device_mesh((len(devices), 1)), axis_names=("model", "data"))
+    self.config = self.MockConfig()
+
+  def nnx_init_trainstate_wrapper(self):
+    """Wrapper to initialize the mock NNX model."""
+    rngs = maxtext_utils_nnx.create_nnx_rngs(self.config)
+    return self.MockTrainState(rngs)
+
+  def test_basic_abstraction(self):
+    """Verifies the basic return structure and partition spec extraction."""
+    abstract_state, annotations, shardings = maxtext_utils.get_abstract_state_nnx(
+        self.config, self.mesh, self.nnx_init_trainstate_wrapper
     )
-    devices_array = maxtext_utils.create_device_mesh(self.config)
-    self.mesh = Mesh(devices_array, self.config.mesh_axes)
-    quant = quantizations.configure_quantization(self.config)
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-    self.rng = jax.random.PRNGKey(0)
-    self.tx = optax.adam(learning_rate=0.001)
 
-  def test_get_abstract_state(self):
-    """Tests that get_abstract_state returns abstract arrays."""
-    # get_abstract_state returns a tuple, the first element is the abstract state.
-    abstract_state, _, _ = maxtext_utils.get_abstract_state(self.model, self.tx, self.config, self.rng, self.mesh, None)
+    # Check return types
+    self.assertIsInstance(abstract_state, nnx.State)
+    self.assertIsInstance(annotations, nnx.State)
+    self.assertIsInstance(shardings, nnx.State)
 
-    # Check that params are abstract
-    param_leaves = jax.tree_util.tree_leaves(abstract_state.params)
-    self.assertTrue(all(isinstance(leaf, jax.ShapeDtypeStruct) for leaf in param_leaves))
+    # Verify PartitionSpec was extracted correctly from the mock model's annotations
+    # Path: params -> kernel -> spec
+    self.assertEqual(
+        annotations.params.kernel.get_value(),
+        PartitionSpec(
+            "model",
+        ),
+    )
 
-    # Check that opt_state is abstract
-    opt_state_leaves = jax.tree_util.tree_leaves(abstract_state.opt_state)
-    self.assertTrue(all(isinstance(leaf, jax.ShapeDtypeStruct) for leaf in opt_state_leaves))
+  def test_shard_optimizer_over_data(self):
+    """Verifies that 'data' is added to optimizer sharding using the real utility."""
+    self.config.shard_optimizer_over_data = True
+
+    _, annotations, _ = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Original Pspec for optimizer was PartitionSpec(None).
+    # add_data_to_sharding should find that dim 0 is compatible with mesh 'data'
+    # and update it to PartitionSpec(('data',)).
+    opt_spec = annotations.optimizer.get_value()
+
+    # Verify 'data' is now in the spec
+    self.assertEqual(opt_spec, PartitionSpec(("data", "model")))
+
+  def test_optimizer_host_offload(self):
+    """Verifies that optimizer memory is moved to host when configured."""
+    self.config.optimizer_memory_host_offload = True
+
+    _, _, shardings = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Optimizer state should be pinned to host
+    opt_sharding = shardings.optimizer.get_value()
+    self.assertEqual(opt_sharding.memory_kind, "pinned_host")
+
+    # Params should still be on default memory (usually device)
+    param_sharding = shardings.params.kernel.get_value()
+    self.assertNotEqual(param_sharding.memory_kind, "pinned_host")
+
+  def test_parameter_host_offload(self):
+    """Verifies that parameter memory is moved to host when configured."""
+    self.config.parameter_memory_host_offload = True
+    self.config.param_scan_axis = 0
+
+    _, _, shardings = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Parameters should be pinned to host
+    param_sharding = shardings.params.kernel.get_value()
+    self.assertEqual(param_sharding.memory_kind, "pinned_host")
+
+  def test_invalid_init_fn(self):
+    """Ensures function raises error if no init function is provided."""
+    with self.assertRaises(AssertionError):
+      maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, None)
+
+
+class TestDeprecatedWrappers(unittest.TestCase):
+  """Tests for deprecated wrapper functions that delegate to sharding module."""
+
+  @patch("maxtext.utils.maxtext_utils.sharding")
+  def test_get_input_data_sharding(self, mock_sharding):
+    mock_sharding.get_input_data_sharding.return_value = "dummy_sharding"
+    result = maxtext_utils.get_input_data_sharding(MagicMock(), MagicMock())
+    mock_sharding.get_input_data_sharding.assert_called_once()
+    self.assertEqual(result, "dummy_sharding")
+
+  @patch("maxtext.utils.maxtext_utils.sharding")
+  def test_assert_params_sufficiently_sharded_deprecated(self, mock_sharding):
+    # 'assert_params_sufficiently_sharded' starts with 'assert' so MagicMock blocks direct attr access;
+    # use configure_mock to set it explicitly.
+    mock_fn = MagicMock(return_value=None)
+    mock_sharding.configure_mock(**{"assert_params_sufficiently_sharded": mock_fn})
+    maxtext_utils.assert_params_sufficiently_sharded({}, MagicMock(), 0.1)
+    mock_fn.assert_called_once()
+
+  @patch("maxtext.utils.maxtext_utils.sharding")
+  def test_add_data_to_sharding(self, mock_sharding):
+    mock_sharding.add_data_to_sharding.return_value = "result"
+    result = maxtext_utils.add_data_to_sharding(MagicMock(), "path", "aval", {})
+    mock_sharding.add_data_to_sharding.assert_called_once()
+    self.assertEqual(result, "result")
+
+  @patch("maxtext.utils.maxtext_utils.sharding")
+  def test_maybe_update_params_sharding_with_opt(self, mock_sharding):
+    mock_sharding.maybe_update_params_sharding_with_opt.return_value = "shardings"
+    result = maxtext_utils.maybe_update_params_sharding_with_opt(MagicMock(), MagicMock())
+    mock_sharding.maybe_update_params_sharding_with_opt.assert_called_once()
+    self.assertEqual(result, "shardings")
+
+  @patch("maxtext.utils.maxtext_utils.sharding")
+  def test_all_gather_over_fsdp(self, mock_sharding):
+    mock_sharding.all_gather_over_fsdp.return_value = "gathered"
+    result = maxtext_utils.all_gather_over_fsdp({}, {}, MagicMock(), [], ShardMode.AUTO)
+    mock_sharding.all_gather_over_fsdp.assert_called_once()
+    self.assertEqual(result, "gathered")
+
+
+class TestFunctionalSignatures(unittest.TestCase):
+  """Tests for get_functional_train/eval_with_signature pure_nnx branches."""
+
+  def _cfg(self, pure_nnx):
+    cfg = MagicMock()
+    cfg.pure_nnx = pure_nnx
+    return cfg
+
+  def test_get_functional_train_pure_nnx_true(self):
+    _, in_shardings, _, _, donate_argnums = maxtext_utils.get_functional_train_with_signature(
+        MagicMock(), MagicMock(), MagicMock(), MagicMock(), self._cfg(True)
+    )
+    self.assertEqual(len(in_shardings), 2)  # (state, batch)
+    self.assertEqual(donate_argnums, 0)
+
+  def test_get_functional_train_pure_nnx_false(self):
+    _, in_shardings, _, _, _ = maxtext_utils.get_functional_train_with_signature(
+        MagicMock(), MagicMock(), MagicMock(), MagicMock(), self._cfg(False)
+    )
+    self.assertEqual(len(in_shardings), 3)  # (state, batch, rng)
+
+  def test_get_functional_eval_pure_nnx_true(self):
+    _, in_shardings, _, _, donate_argnums = maxtext_utils.get_functional_eval_with_signature(
+        MagicMock(), MagicMock(), MagicMock(), MagicMock(), self._cfg(True)
+    )
+    self.assertEqual(len(in_shardings), 2)  # (state, batch)
+    self.assertEqual(donate_argnums, ())
+
+  def test_get_functional_eval_pure_nnx_false(self):
+    _, in_shardings, _, _, _ = maxtext_utils.get_functional_eval_with_signature(
+        MagicMock(), MagicMock(), MagicMock(), MagicMock(), self._cfg(False)
+    )
+    self.assertEqual(len(in_shardings), 3)  # (state, batch, rng)
+
+
+class TestShouldPreventCse(unittest.TestCase):
+  """Tests for should_prevent_cse_in_remat branches."""
+
+  def _cfg(self, scan_layers, gradient_accumulation_steps, hardware):
+    cfg = MagicMock()
+    cfg.scan_layers = scan_layers
+    cfg.gradient_accumulation_steps = gradient_accumulation_steps
+    cfg.hardware = hardware
+    return cfg
+
+  def test_scan_layers_returns_false(self):
+    self.assertFalse(maxtext_utils.should_prevent_cse_in_remat(self._cfg(True, 1, "tpu")))
+
+  def test_gradient_accum_gpu_returns_false(self):
+    self.assertFalse(maxtext_utils.should_prevent_cse_in_remat(self._cfg(False, 2, "gpu")))
+
+  def test_gradient_accum_gpu_multiprocess_returns_false(self):
+    self.assertFalse(maxtext_utils.should_prevent_cse_in_remat(self._cfg(False, 4, "gpu_multiprocess")))
+
+  def test_no_scan_no_gpu_accum_returns_true(self):
+    self.assertTrue(maxtext_utils.should_prevent_cse_in_remat(self._cfg(False, 1, "tpu")))
+
+  def test_gradient_accum_tpu_returns_true(self):
+    self.assertTrue(maxtext_utils.should_prevent_cse_in_remat(self._cfg(False, 2, "tpu")))
+
+
+class TestGetShapedBatchExtended(unittest.TestCase):
+  """Tests for get_shaped_batch branches not covered elsewhere."""
+
+  def test_standard_batch_shape(self):
+    cfg = MagicMock()
+    cfg.enable_diloco = False
+    cfg.global_batch_size_to_load = 4
+    cfg.max_target_length = 8
+    cfg.use_multimodal = False
+    cfg.use_audio = False
+    result = maxtext_utils.get_shaped_batch(cfg)
+    self.assertIn("inputs", result)
+    self.assertEqual(result["inputs"].shape, (4, 8))
+
+  def test_diloco_batch_shape(self):
+    cfg = MagicMock()
+    cfg.enable_diloco = True
+    cfg.num_diloco_replicas = 2
+    cfg.global_batch_size_to_load = 8
+    cfg.max_target_length = 4
+    cfg.use_multimodal = False
+    cfg.use_audio = False
+    result = maxtext_utils.get_shaped_batch(cfg)
+    # shape = (num_diloco_replicas, global_batch // num_diloco_replicas, seq_len)
+    self.assertEqual(result["inputs"].shape, (2, 4, 4))
+
+
+class TestGetIntermediateValueClear(unittest.TestCase):
+  """Tests the clear=True branch of get_intermediate_value (line 967)."""
+
+  def setUp(self):
+    self.mock_model = MagicMock(name="Transformer")
+    self.mock_decoder = MagicMock(name="Decoder")
+    self.mock_model.decoder = self.mock_decoder
+    self.mock_layers = {}
+    self.mock_model.decoder.layers = self.mock_layers
+    self.self_attention = {}
+    self.mock_layers["self_attention"] = self.self_attention
+
+  def test_clear_removes_key(self):
+    expected_data = [0.1, 0.5]
+    mock_var = Mock()
+    mock_var.get_value.return_value = (expected_data,)
+    self.mock_layers["self_attention"]["out_projection_activations"] = mock_var
+
+    result = maxtext_utils.get_intermediate_value(self.mock_model, "out_projection_activations", clear=True)
+    self.assertEqual(result, expected_data)
+    self.assertNotIn("out_projection_activations", self.mock_layers["self_attention"])
+
+
+class TestCalculateTokensTraining(unittest.TestCase):
+
+  def test_basic(self):
+    cfg = MagicMock()
+    cfg.max_target_length = 16
+    cfg.per_device_batch_size = 4
+    cfg.gradient_accumulation_steps = 2
+    self.assertEqual(maxtext_utils.calculate_tokens_training_per_device(cfg), 16 * 4 * 2)
+
+
+class TestCalculateGemma2Tflops(unittest.TestCase):
+  """Tests for calculate_gemma2_tflops_training_per_device."""
+
+  def _cfg(self, sliding_window_size=8):
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 2
+    cfg.max_target_length = 16
+    cfg.num_query_heads = 4
+    cfg.head_dim = 8
+    cfg.sliding_window_size = sliding_window_size
+    cfg.num_decoder_layers = 2
+    return cfg
+
+  def test_basic(self):
+    attn, weights = maxtext_utils.calculate_gemma2_tflops_training_per_device(
+        self._cfg(), total_ffn_flops=1000, qkv_flops=500, projection_flops=200, embedding_flops=100
+    )
+    self.assertGreater(attn, 0)
+    self.assertGreater(weights, 0)
+
+  def test_sliding_window_larger_than_seq_len(self):
+    # sliding_window_size > max_target_length: clamped to max_target_length
+    attn, _ = maxtext_utils.calculate_gemma2_tflops_training_per_device(
+        self._cfg(sliding_window_size=100), 100, 50, 10, 5
+    )
+    self.assertGreater(attn, 0)
+
+
+class TestCalculateMixedAttentionModelTflops(unittest.TestCase):
+  """Tests for calculate_mixed_attention_model_tflops_training_per_device."""
+
+  def _cfg(self, num_decoder_layers=6):
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 2
+    cfg.max_target_length = 16
+    cfg.num_query_heads = 4
+    cfg.head_dim = 8
+    cfg.sliding_window_size = 4
+    cfg.num_decoder_layers = num_decoder_layers
+    return cfg
+
+  def test_gemma3_style(self):
+    attn, weights = maxtext_utils.calculate_mixed_attention_model_tflops_training_per_device(
+        self._cfg(6), 1000, 500, 200, 100, attention_pattern_length=6
+    )
+    self.assertGreater(attn, 0)
+    self.assertGreater(weights, 0)
+
+  def test_gpt_oss_style(self):
+    attn, _ = maxtext_utils.calculate_mixed_attention_model_tflops_training_per_device(
+        self._cfg(4), 500, 200, 100, 50, attention_pattern_length=2
+    )
+    self.assertGreater(attn, 0)
+
+
+class TestCalculateChunkedAttentionFlops(unittest.TestCase):
+  """Tests for _calculate_chunked_attention_flops_per_layer."""
+
+  def _cfg(self):
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 2
+    cfg.num_query_heads = 4
+    cfg.head_dim = 8
+    return cfg
+
+  def test_evenly_divisible(self):
+    result = maxtext_utils._calculate_chunked_attention_flops_per_layer(  # pylint: disable=protected-access
+        self._cfg(), seq_len=16, chunk_size=4
+    )
+    self.assertGreater(result, 0)
+
+  def test_with_remainder(self):
+    # seq_len=10, chunk_size=3 -> 3 full chunks + remainder of 1
+    result = maxtext_utils._calculate_chunked_attention_flops_per_layer(  # pylint: disable=protected-access
+        self._cfg(), seq_len=10, chunk_size=3
+    )
+    self.assertGreater(result, 0)
+
+
+class TestCalculateLlama4AttentionTflops(unittest.TestCase):
+  """Tests for calculate_llama4_attention_tflops."""
+
+  def test_basic(self):
+    cfg = MagicMock()
+    cfg.num_decoder_layers = 8
+    cfg.max_target_length = 16
+    cfg.chunk_attn_window_size = 4
+    cfg.nope_layer_interval = 4
+    cfg.per_device_batch_size = 2
+    cfg.num_query_heads = 4
+    cfg.head_dim = 8
+    result = maxtext_utils.calculate_llama4_attention_tflops(cfg)
+    self.assertGreater(result, 0)
+
+
+class TestCalculateIndexerMaskRatio(unittest.TestCase):
+  """Tests for calculate_indexer_mask_ratio."""
+
+  def test_k_equals_t(self):
+    # K == T -> ratio=1, result = 1 - 0.5 = 0.5
+    result = maxtext_utils.calculate_indexer_mask_ratio(8, 8)
+    self.assertAlmostEqual(result, 0.5)
+
+  def test_k_half_t(self):
+    ratio = 4.0 / 8.0
+    expected = ratio - 0.5 * ratio**2
+    self.assertAlmostEqual(maxtext_utils.calculate_indexer_mask_ratio(4, 8), expected)
+
+  def test_k_zero(self):
+    self.assertAlmostEqual(maxtext_utils.calculate_indexer_mask_ratio(0, 8), 0.0)
+
+
+class TestCalculateIndexerTflops(unittest.TestCase):
+  """Tests for calculate_indexer_tflops_per_device."""
+
+  def test_basic(self):
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 2
+    cfg.max_target_length = 16
+    cfg.q_lora_rank = 8
+    cfg.index_n_heads = 4
+    cfg.index_head_dim = 4
+    cfg.emb_dim = 32
+    proj_flops, scoring_flops = maxtext_utils.calculate_indexer_tflops_per_device(cfg)
+    self.assertGreater(proj_flops, 0)
+    self.assertGreater(scoring_flops, 0)
+
+
+class TestCalculateMlaTflops(unittest.TestCase):
+  """Tests for calculate_mla_tflops_per_device."""
+
+  def _cfg(self, q_lora_rank=0, use_sparse_indexer=False, index_topk=0):
+    """Build a mock MLA config."""
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 2
+    cfg.max_target_length = 16
+    cfg.q_lora_rank = q_lora_rank
+    cfg.emb_dim = 32
+    cfg.num_query_heads = 4
+    cfg.qk_nope_head_dim = 4
+    cfg.qk_rope_head_dim = 2
+    cfg.kv_lora_rank = 8
+    cfg.v_head_dim = 4
+    cfg.use_sparse_indexer = use_sparse_indexer
+    cfg.index_topk = index_topk
+    cfg.index_n_heads = 4
+    cfg.index_head_dim = 4
+    return cfg
+
+  def test_no_lora(self):
+    qkv, attn, _ = maxtext_utils.calculate_mla_tflops_per_device(self._cfg(q_lora_rank=0))
+    self.assertGreater(qkv, 0)
+    self.assertGreater(attn, 0)
+
+  def test_with_q_lora(self):
+    qkv, _, _ = maxtext_utils.calculate_mla_tflops_per_device(self._cfg(q_lora_rank=8))
+    self.assertGreater(qkv, 0)
+
+  def test_sparse_indexer_active(self):
+    # use_sparse_indexer=True and max_target_length(16) > index_topk(4)
+    qkv, attn, _ = maxtext_utils.calculate_mla_tflops_per_device(self._cfg(use_sparse_indexer=True, index_topk=4))
+    self.assertGreater(qkv, 0)
+    self.assertGreater(attn, 0)
+
+  def test_sparse_indexer_bypassed(self):
+    # use_sparse_indexer=True but index_topk >= max_target_length -> bypass indexer
+    qkv, _, _ = maxtext_utils.calculate_mla_tflops_per_device(self._cfg(use_sparse_indexer=True, index_topk=100))
+    self.assertGreater(qkv, 0)
+
+
+class TestCalculateFfnMatmulTflops(unittest.TestCase):
+
+  def test_basic(self):
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 2
+    cfg.max_target_length = 8
+    cfg.emb_dim = 32
+    cfg.mlp_activations = ("silu", "linear")
+    result = maxtext_utils.calculate_ffn_mamtul_tflops_per_device(cfg, mlp_dim=64)
+    self.assertGreater(result, 0)
+
+
+class TestGetDenseMoeLayers(unittest.TestCase):
+  """Tests for get_dense_moe_layers."""
+
+  def test_deepseek(self):
+    cfg = MagicMock()
+    cfg.decoder_block = DecoderBlockType.DEEPSEEK
+    cfg.first_num_dense_layers = 3
+    cfg.num_decoder_layers = 10
+    dense, moe = maxtext_utils.get_dense_moe_layers(cfg)
+    self.assertEqual(dense, 3)
+    self.assertEqual(moe, 7)
+
+  def test_llama4(self):
+    cfg = MagicMock()
+    cfg.decoder_block = DecoderBlockType.LLAMA4
+    cfg.num_decoder_layers = 8
+    cfg.interleave_moe_layer_step = 2
+    dense, moe = maxtext_utils.get_dense_moe_layers(cfg)
+    self.assertEqual(moe, 4)
+    self.assertEqual(dense, 4)
+
+  def test_qwen3_next(self):
+    cfg = MagicMock()
+    cfg.decoder_block = DecoderBlockType.QWEN3_NEXT
+    cfg.num_decoder_layers = 6
+    dense, moe = maxtext_utils.get_dense_moe_layers(cfg)
+    self.assertEqual(dense, 0)
+    self.assertEqual(moe, 6)
+
+  def test_invalid_raises_value_error(self):
+    cfg = MagicMock()
+    cfg.decoder_block = DecoderBlockType.DEFAULT
+    with self.assertRaises(ValueError):
+      maxtext_utils.get_dense_moe_layers(cfg)
+
+
+class TestCalculateRoutedAndSharedFfnTflops(unittest.TestCase):
+  """Tests for calculate_routed_and_shared_ffn_tflops_per_device."""
+
+  def test_deepseek(self):
+    cfg = MagicMock()
+    cfg.decoder_block = DecoderBlockType.DEEPSEEK
+    cfg.first_num_dense_layers = 1
+    cfg.num_decoder_layers = 4
+    cfg.per_device_batch_size = 2
+    cfg.max_target_length = 8
+    cfg.emb_dim = 32
+    cfg.mlp_dim = 64
+    cfg.moe_mlp_dim = 32
+    cfg.mlp_activations = ("relu",)
+    cfg.num_experts = 8
+    cfg.shared_experts = 1
+    cfg.num_experts_per_tok = 2
+    result = maxtext_utils.calculate_routed_and_shared_ffn_tflops_per_device(cfg)
+    self.assertGreater(result, 0)
+
+
+class TestCalculateGatedDeltaNetFlops(unittest.TestCase):
+  """Tests for calculate_gated_delta_net_flops_per_device."""
+
+  def test_basic(self):
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 2
+    cfg.max_target_length = 8
+    cfg.emb_dim = 32
+    cfg.gdn_num_key_heads = 4
+    cfg.gdn_num_value_heads = 4
+    cfg.gdn_key_head_dim = 8
+    cfg.gdn_value_head_dim = 8
+    cfg.gdn_conv_kernel_dim = 4
+    weight_flops, attn_flops = maxtext_utils.calculate_gated_delta_net_flops_per_device(cfg)
+    self.assertGreater(weight_flops, 0)
+    self.assertGreater(attn_flops, 0)
+
+
+class TestCalculateGemma3VisionLayersTflops(unittest.TestCase):
+  """Tests for calculate_gemma3_vision_layers_tflops_per_device."""
+
+  def _cfg(self, freeze=False):
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 1
+    cfg.num_channels_for_vit = 3
+    cfg.image_size_for_vit = 896
+    cfg.emb_dim = 64
+    cfg.freeze_vision_encoder_params = freeze
+    return cfg
+
+  def test_not_frozen(self):
+    total, _, _ = maxtext_utils.calculate_gemma3_vision_layers_tflops_per_device(self._cfg(freeze=False))
+    self.assertGreater(total, 0)
+
+  def test_frozen(self):
+    total, _, _ = maxtext_utils.calculate_gemma3_vision_layers_tflops_per_device(self._cfg(freeze=True))
+    self.assertGreater(total, 0)
+
+
+class TestCalculateLlama4VisionLayersTflops(unittest.TestCase):
+  """Tests for calculate_llama4_vision_layers_tflops_per_device."""
+
+  def _cfg(self, freeze=False):
+    """Build a mock Llama4 vision config."""
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 1
+    cfg.num_channels_for_vit = 3
+    cfg.tile_size_for_vit = 336
+    cfg.patch_size_for_vit = 14
+    cfg.hidden_size_for_vit = 1408
+    cfg.intermediate_size_for_vit = 5632
+    cfg.num_hidden_layers_for_vit = 32
+    cfg.projector_input_dim_for_vit = 4096
+    cfg.projector_output_dim_for_vit = 4096
+    cfg.base_emb_dim = 128
+    cfg.pixel_shuffle_ratio_for_vit = 0.5
+    cfg.freeze_vision_encoder_params = freeze
+    return cfg
+
+  def test_not_frozen(self):
+    total, _, _ = maxtext_utils.calculate_llama4_vision_layers_tflops_per_device(self._cfg(freeze=False))
+    self.assertGreater(total, 0)
+
+  def test_frozen(self):
+    total, _, _ = maxtext_utils.calculate_llama4_vision_layers_tflops_per_device(self._cfg(freeze=True))
+    self.assertGreater(total, 0)
+
+
+class TestCalculateEngramTflops(unittest.TestCase):
+  """Tests for calculate_engram_tflops."""
+
+  def test_basic(self):
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 2
+    cfg.max_target_length = 8
+    cfg.mhc_expansion_rate = 2
+    cfg.emb_dim = 32
+    cfg.engram_kernel_size = 4
+    cfg.engram_max_ngram_size = 3
+    cfg.engram_num_heads = 4
+    cfg.engram_head_dim = 8
+    cfg.engram_layers = [0, 1]
+    weight_tflops, attn_tflops = maxtext_utils.calculate_engram_tflops(cfg)
+    self.assertGreater(weight_tflops, 0)
+    self.assertGreater(attn_tflops, 0)
+
+
+class TestCalculateVisionEncoderTflops(unittest.TestCase):
+  """Tests for calculate_vision_encoder_tflops."""
+
+  def test_gemma3_model(self):
+    cfg = MagicMock()
+    cfg.model_name = "gemma3_4b"
+    cfg.per_device_batch_size = 1
+    cfg.num_channels_for_vit = 3
+    cfg.image_size_for_vit = 896
+    cfg.emb_dim = 64
+    cfg.freeze_vision_encoder_params = False
+    total, _, _ = maxtext_utils.calculate_vision_encoder_tflops(cfg)
+    self.assertGreater(total, 0)
+
+  def test_llama4_model(self):
+    cfg = MagicMock()
+    cfg.model_name = "llama4_scout"
+    cfg.per_device_batch_size = 1
+    cfg.num_channels_for_vit = 3
+    cfg.tile_size_for_vit = 336
+    cfg.patch_size_for_vit = 14
+    cfg.hidden_size_for_vit = 1408
+    cfg.intermediate_size_for_vit = 5632
+    cfg.num_hidden_layers_for_vit = 32
+    cfg.projector_input_dim_for_vit = 4096
+    cfg.projector_output_dim_for_vit = 4096
+    cfg.base_emb_dim = 128
+    cfg.pixel_shuffle_ratio_for_vit = 0.5
+    cfg.freeze_vision_encoder_params = False
+    total, _, _ = maxtext_utils.calculate_vision_encoder_tflops(cfg)
+    self.assertGreater(total, 0)
+
+  def test_unknown_model_returns_zeros(self):
+    cfg = MagicMock()
+    cfg.model_name = "unknown_model"
+    total, weight, attn = maxtext_utils.calculate_vision_encoder_tflops(cfg)
+    self.assertEqual(total, 0)
+    self.assertEqual(weight, 0)
+    self.assertEqual(attn, 0)
+
+
+class TestCalculateTflopsTrainingPerDevice(unittest.TestCase):
+  """Tests for calculate_tflops_training_per_device covering all decoder_block branches."""
+
+  def _base_cfg(self, decoder_block=None, attention_type="default", num_experts=1):
+    """Build a base mock config for TFLOP training calculations."""
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 2
+    cfg.max_target_length = 16
+    cfg.emb_dim = 32
+    cfg.num_query_heads = 4
+    cfg.num_kv_heads = 4
+    cfg.head_dim = 8
+    cfg.num_decoder_layers = 4
+    cfg.vocab_size = 100
+    cfg.mlp_dim = 64
+    cfg.mlp_activations = ("relu",)
+    cfg.gradient_accumulation_steps = 1
+    cfg.sliding_window_size = 8
+    cfg.use_dpo = False
+    cfg.engram_layers = []
+    cfg.use_multimodal = False
+    cfg.num_experts = num_experts
+    cfg.num_experts_per_tok = 2
+    cfg.attention_type = attention_type
+    cfg.decoder_block = decoder_block or DecoderBlockType.DEFAULT
+    return cfg
+
+  def test_default_decoder_block(self):
+    cfg = self._base_cfg(decoder_block=DecoderBlockType.DEFAULT)
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_gemma2_decoder_block(self):
+    cfg = self._base_cfg(decoder_block=DecoderBlockType.GEMMA2)
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_gemma3_decoder_block(self):
+    cfg = self._base_cfg(decoder_block=DecoderBlockType.GEMMA3)
+    cfg.num_decoder_layers = 6
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_gpt_oss_decoder_block(self):
+    cfg = self._base_cfg(decoder_block=DecoderBlockType.GPT_OSS)
+    cfg.num_decoder_layers = 4
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_llama4_decoder_block(self):
+    cfg = self._base_cfg(decoder_block=DecoderBlockType.LLAMA4, num_experts=8)
+    cfg.first_num_dense_layers = 1
+    cfg.moe_mlp_dim = 32
+    cfg.shared_experts = 1
+    cfg.interleave_moe_layer_step = 2
+    cfg.nope_layer_interval = 2
+    cfg.chunk_attn_window_size = 4
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_deepseek_decoder_block(self):
+    cfg = self._base_cfg(decoder_block=DecoderBlockType.DEEPSEEK, attention_type="mla", num_experts=8)
+    cfg.first_num_dense_layers = 1
+    cfg.moe_mlp_dim = 32
+    cfg.shared_experts = 1
+    cfg.q_lora_rank = 0
+    cfg.qk_nope_head_dim = 4
+    cfg.qk_rope_head_dim = 2
+    cfg.kv_lora_rank = 8
+    cfg.v_head_dim = 4
+    cfg.use_sparse_indexer = False
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_qwen3_next_decoder_block(self):
+    cfg = self._base_cfg(decoder_block=DecoderBlockType.QWEN3_NEXT, num_experts=8)
+    cfg.moe_mlp_dim = 32
+    cfg.shared_experts = 1
+    cfg.gdn_num_key_heads = 4
+    cfg.gdn_num_value_heads = 4
+    cfg.gdn_key_head_dim = 8
+    cfg.gdn_value_head_dim = 8
+    cfg.gdn_conv_kernel_dim = 4
+    cfg.inhomogeneous_layer_cycle_interval = 2
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_generic_moe_branch(self):
+    # num_experts > 1 with a decoder_block not in [DEEPSEEK, LLAMA4, QWEN3_NEXT]
+    cfg = self._base_cfg(decoder_block=DecoderBlockType.MIXTRAL, num_experts=8)
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_with_dpo(self):
+    cfg = self._base_cfg()
+    cfg.use_dpo = True
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_with_gradient_accumulation(self):
+    cfg = self._base_cfg()
+    cfg.gradient_accumulation_steps = 4
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_with_engram_layers(self):
+    cfg = self._base_cfg()
+    cfg.engram_layers = [0, 1]
+    cfg.mhc_expansion_rate = 2
+    cfg.engram_kernel_size = 4
+    cfg.engram_max_ngram_size = 3
+    cfg.engram_num_heads = 4
+    cfg.engram_head_dim = 8
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_with_multimodal_unknown_model(self):
+    cfg = self._base_cfg()
+    cfg.use_multimodal = True
+    cfg.model_name = "some_model"  # unknown -> vision TFLOPs = 0
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    self.assertGreater(total, 0)
+
+  def test_log_true_does_not_raise(self):
+    cfg = self._base_cfg()
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=True)
+    self.assertGreater(total, 0)
+
+
+class TestCalculatePrefillTflops(unittest.TestCase):
+  """Tests for calculate_prefill_tflops_per_device."""
+
+  def test_basic(self):
+    cfg = MagicMock()
+    cfg.num_query_heads = 4
+    cfg.num_decoder_layers = 4
+    cfg.head_dim = 8
+    total, weight, attn = maxtext_utils.calculate_prefill_tflops_per_device(
+        num_model_parameters=1e9, prefill_length=512, config=cfg, log=False
+    )
+    self.assertGreater(total, 0)
+    self.assertGreater(weight, 0)
+    self.assertGreater(attn, 0)
+
+  def test_log_true_does_not_raise(self):
+    cfg = MagicMock()
+    cfg.num_query_heads = 4
+    cfg.num_decoder_layers = 2
+    cfg.head_dim = 4
+    total, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(
+        num_model_parameters=1e8, prefill_length=64, config=cfg, log=True
+    )
+    self.assertGreater(total, 0)
+
+
+class TestGetReorderCallable(unittest.TestCase):
+  """Tests for get_reorder_callable and shard_reorder_causal_load_balanced."""
+
+  def test_returns_callable(self):
+    fn = maxtext_utils.get_reorder_callable(cp_size=2, shard_mode=ShardMode.AUTO)
+    self.assertTrue(callable(fn))
+
+  @patch("maxtext.utils.maxtext_utils.sharding")
+  @patch("maxtext.utils.maxtext_utils.max_utils")
+  def test_shard_reorder_with_jax_array(self, mock_max_utils, mock_sharding):
+    # batch with a jax.Array value -> isinstance check is True -> shard call made
+    batch_array = jnp.ones((4, 8))
+    reordered_dict = {"tokens": batch_array}
+    mock_max_utils.reorder_causal_load_balanced.return_value = reordered_dict
+    mock_sharding.maybe_shard_with_name.return_value = reordered_dict
+    batch = {"tokens": batch_array}
+    result = maxtext_utils.shard_reorder_causal_load_balanced(batch, cp_size=2, shard_mode=ShardMode.AUTO)
+    mock_max_utils.reorder_causal_load_balanced.assert_called_once_with(batch, 2)
+    self.assertEqual(result, reordered_dict)
+
+  @patch("maxtext.utils.maxtext_utils.sharding")
+  @patch("maxtext.utils.maxtext_utils.max_utils")
+  def test_shard_reorder_with_non_array_values(self, mock_max_utils, mock_sharding):
+    # batch with non-jax.Array values -> isinstance check is False -> no shard call
+    reordered_dict = {"tokens": jnp.ones((4, 8))}
+    mock_max_utils.reorder_causal_load_balanced.return_value = reordered_dict
+    batch = {"tokens": "not_an_array"}
+    maxtext_utils.shard_reorder_causal_load_balanced(batch, cp_size=2, shard_mode=ShardMode.AUTO)
+    mock_sharding.maybe_shard_with_name.assert_not_called()
+
+
+class TestSaveQuantizedCheckpoint(unittest.TestCase):
+  """Tests for save_quantized_checkpoint_if_configured."""
+
+  @patch("maxtext.utils.maxtext_utils.checkpointing")
+  def test_save_path_configured(self, mock_checkpointing):
+    cfg = MagicMock()
+    cfg.quantization = "int8"
+    cfg.save_quantized_params_path = "/some/path"
+    maxtext_utils.save_quantized_checkpoint_if_configured(cfg, {"param": jnp.ones(1)})
+    mock_checkpointing.save_params_to_path.assert_called_once()
+
+  @patch("maxtext.utils.maxtext_utils.checkpointing")
+  def test_no_save_path_logs(self, mock_checkpointing):
+    cfg = MagicMock()
+    cfg.quantization = "int8"
+    cfg.save_quantized_params_path = ""  # falsy
+    maxtext_utils.save_quantized_checkpoint_if_configured(cfg, {})
+    mock_checkpointing.save_params_to_path.assert_not_called()
+
+  def test_no_quantization_raises(self):
+    cfg = MagicMock()
+    cfg.quantization = ""  # falsy
+    with self.assertRaises(AssertionError):
+      maxtext_utils.save_quantized_checkpoint_if_configured(cfg, {})
+
+
+class TestAddConfigToSummaryWriter(unittest.TestCase):
+
+  @patch("maxtext.utils.maxtext_utils.max_utils")
+  def test_writes_on_process_zero(self, mock_max_utils):
+    cfg = MagicMock()
+    cfg.get_keys.return_value = {"lr": 0.001, "steps": 100}
+    summary_writer = MagicMock()
+    maxtext_utils.add_config_to_summary_writer(cfg, summary_writer)
+    # jax.process_index() == 0 in tests, so add_text_to_summary_writer should be called
+    self.assertEqual(mock_max_utils.add_text_to_summary_writer.call_count, 2)
+
+
+class TestGetShapedBatchMultimodal(unittest.TestCase):
+  """Tests get_shaped_batch multimodal and audio branches."""
+
+  @patch("maxtext.utils.maxtext_utils.mm_processor")
+  def test_multimodal_adds_image_keys(self, mock_mm):
+    mock_mm.get_dummy_image_shape_for_init.return_value = (2, 4, 3)
+    cfg = MagicMock()
+    cfg.enable_diloco = False
+    cfg.global_batch_size_to_load = 2
+    cfg.max_target_length = 4
+    cfg.use_multimodal = True
+    cfg.use_audio = False
+    result = maxtext_utils.get_shaped_batch(cfg)
+    self.assertIn("images", result)
+    self.assertIn("image_masks", result)
+    self.assertEqual(result["images"].shape, (2, 4, 3))
+    self.assertEqual(result["image_masks"].shape, (2, 4))  # image_shape[:2]
+
+  @patch("maxtext.utils.maxtext_utils.mm_processor")
+  def test_audio_adds_audios_key(self, mock_mm):
+    mock_mm.get_dummy_audio_shape_for_init.return_value = (2, 16000)
+    cfg = MagicMock()
+    cfg.enable_diloco = False
+    cfg.global_batch_size_to_load = 2
+    cfg.max_target_length = 4
+    cfg.use_multimodal = False
+    cfg.use_audio = True
+    result = maxtext_utils.get_shaped_batch(cfg)
+    self.assertIn("audios", result)
+    self.assertEqual(result["audios"].shape, (2, 16000))
+    self.assertEqual(result["audios"].dtype, jnp.float32)
+
+
+class TestSetupTrainingState(unittest.TestCase):
+  """Tests setup_training_state delegates to setup_initial_state with is_training=True."""
+
+  @patch("maxtext.utils.maxtext_utils.setup_initial_state")
+  def test_delegates_with_is_training_true(self, mock_setup):
+    mock_setup.return_value = ("state", "annotations", "shardings", "it")
+    data_iter = MagicMock()
+    config = MagicMock()
+    mesh = MagicMock()
+    ckpt_mgr = MagicMock()
+    init_fn = MagicMock()
+    result = maxtext_utils.setup_training_state(data_iter, config, mesh, ckpt_mgr, init_fn)
+    mock_setup.assert_called_once_with(data_iter, config, mesh, ckpt_mgr, init_fn, True)
+    self.assertEqual(result, ("state", "annotations", "shardings", "it"))
+
+
+class TestCalculateTflopsWithMultimodalLog(unittest.TestCase):
+  """Tests the multimodal log=True branch (line 841)."""
+
+  @patch("maxtext.utils.maxtext_utils.calculate_vision_encoder_tflops")
+  def test_multimodal_with_log(self, mock_vision):
+    mock_vision.return_value = (1.5, 1.0, 0.5)  # non-zero to avoid div-by-zero in print
+    cfg = MagicMock()
+    cfg.per_device_batch_size = 2
+    cfg.max_target_length = 16
+    cfg.emb_dim = 32
+    cfg.num_query_heads = 4
+    cfg.num_kv_heads = 4
+    cfg.head_dim = 8
+    cfg.num_decoder_layers = 4
+    cfg.vocab_size = 100
+    cfg.mlp_dim = 64
+    cfg.mlp_activations = ("relu",)
+    cfg.gradient_accumulation_steps = 1
+    cfg.use_dpo = False
+    cfg.engram_layers = []
+    cfg.use_multimodal = True
+    cfg.num_experts = 1
+    cfg.attention_type = "default"
+    cfg.decoder_block = DecoderBlockType.DEFAULT
+    total, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=True)
+    self.assertGreater(total, 0)
+    mock_vision.assert_called_once()
 
 
 if __name__ == "__main__":
