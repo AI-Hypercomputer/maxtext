@@ -321,25 +321,22 @@ def with_data_parallel_constraint(x, mesh):
   return jax.lax.with_sharding_constraint(x, jax.NamedSharding(mesh, activation_pspec))
 
 
-# def dot(x, y, axes=1):
-#   return jnp.tensordot(x, y, axes=axes)
-
 def dot(x, y, quant=None, axes=1):
   if quant is not None:
-    # Convert 'axes' shorthand to jax.lax.dot_general dimension_numbers
+    # Convert axes to jax.lax.dot_general dimension_numbers
     if isinstance(axes, int):
       x_contract = tuple(range(x.ndim - axes, x.ndim))
       y_contract = tuple(range(axes))
     else:
       x_contract, y_contract = axes
     dimension_numbers = ((x_contract, y_contract), ((), ()))
-    
     # Instantiate and call the QwixDotGeneral (via Quant wrapper)
     custom_dot = quant.dot_general_cls()()
     return custom_dot(lhs=x, rhs=y, dimension_numbers=dimension_numbers)
-    
-  # Unquantized fallback
+
+  # Unquantized
   return jnp.tensordot(x, y, axes=axes)
+
 
 def mla_with_norms(
     inputs,
@@ -823,7 +820,6 @@ def unroute(
 def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
   """Processes routed tokens through the MLP."""
 
-
   def gmm(
       inputs,
       kernel,
@@ -835,11 +831,6 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       combine_scopes,
   ):
     if config.use_qwix_quantization:
-
-      # print("\n>>> INSIDE COMPUTE: CHECKING SHAPES <<<")
-      # print(f"w0 shape before: {w0.shape}")
-      # print(f"group_sizes shape: {group_sizes.shape}\n")
-
       output = megablox.gmm(
           lhs=inputs,
           rhs=kernel,

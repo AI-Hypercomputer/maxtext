@@ -17,7 +17,7 @@
 import functools
 import json
 import re
-from typing import Tuple, Sequence, Dict, Union, Any, Callable
+from typing import Tuple, Sequence, Callable
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -113,6 +113,120 @@ def _rhs_axis_metadata_wrapper(
   return nn.with_logical_partitioning((lambda: x), mesh_axes)()
 
 
+@dataclass
+class AqtQuantization(Quantization):
+  """Configures AQT quantization github.com/google/aqt."""
+
+  quant_dg: aqt_config.DotGeneral
+  quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
+  replicate_scale: bool = False
+
+  def _get_mixed_precision_cfg(self):
+    """get configuration for mixed precision"""
+    quant_dg = None
+    is_tiled = False
+    tiling_fn = None
+    # pylint: disable=protected-access
+    module_path = "/".join(nn.module._context.module_stack[-1].path)
+    tile_size = -1
+    for layer_name_re, layer_quant_dg in self.quant_dg.items():
+      if re.fullmatch(layer_name_re, module_path):
+        quant_dg, tile_size = layer_quant_dg
+    if quant_dg is None:
+      quant_dg, tile_size = self.quant_dg[DEFAULT]
+    if tile_size != -1:
+      is_tiled = True
+      tiling_fn = functools.partial(_tiling_fn, tile_size=tile_size)
+    return quant_dg, is_tiled, tiling_fn
+
+  def _get_rhs_axis_metadata_wrapper(
+      self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
+  ):
+    if self.quant_mode == aqt_flax.QuantMode.CONVERT:
+      return None
+    return functools.partial(
+        _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale
+    )
+
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+    """Returns dot_general configured with aqt params."""
+    if isinstance(self.quant_dg, dict):
+      quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
+    else:
+      quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
+        mesh_axes, is_tiled, replicate_scale=self.replicate_scale
+    )
+    # module_path = "/".join(nn.module._context.module_stack[-1].path)
+    # print(f"quant_dg: {quant_dg}, is_tiled: {is_tiled}, module_path: {module_path}")
+    aqt_dg_cls = functools.partial(
+        aqt_flax.AqtDotGeneral,
+        quant_dg,
+        rhs_quant_mode=self.quant_mode,
+        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+        rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+        use_legacy_freezer=False,
+        tiling_fn=tiling_fn,
+    )
+    return aqt_dg_cls
+
+  def einsum(self, mesh_axes: Tuple[str, ...] = ()):
+    """Returns einsum configured with aqt params."""
+    if isinstance(self.quant_dg, dict):
+      quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
+    else:
+      quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+
+    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
+        mesh_axes, is_tiled, replicate_scale=self.replicate_scale
+    )
+    aqt_einsum = functools.partial(
+        aqt_flax.AqtEinsum(
+            cfg=quant_dg,
+            rhs_quant_mode=self.quant_mode,
+            lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+            rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+            rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+            use_legacy_freezer=False,
+            tiling_fn=tiling_fn,
+        )
+    )
+    return aqt_einsum
+
+
+@dataclass
+class QwixQuantization(Quantization):
+  """Configures Qwix quantization github.com/google/qwix, for training only."""
+
+  quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN  # needed by external call
+  act_calibration_method: str = "absmax"
+  weight_calibration_method: str = "absmax"
+  bwd_calibration_method: str = "absmax"
+
+  def _get_fp8_full_qwix_config(self) -> dot_general_qt.DotGeneralQtConfig:
+    """Centralized factory for the Qwix dot_general config."""
+    return dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype=jnp.float8_e4m3fn,  # activation
+        rhs_qtype=jnp.float8_e4m3fn,  # weight
+        dlhs_grad_qtype=jnp.float8_e5m2,  # activation gradient
+        drhs_grad_qtype=jnp.float8_e5m2,  # weight gradient
+        lhs_calibration_method=self.act_calibration_method,
+        rhs_calibration_method=self.weight_calibration_method,
+        dlhs_grad_calibration_method=self.bwd_calibration_method,
+        drhs_grad_calibration_method=self.bwd_calibration_method,
+        tile_size=None,
+    )
+
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+    """Returns qwix dot_general."""
+    return functools.partial(QwixDotGeneral, config=self._get_fp8_full_qwix_config())
+
+  def einsum(self, mesh_axes: Tuple[str, ...] = ()):
+    """Returns qwix eqinsum."""
+    return QwixEinsum(config=self._get_fp8_full_qwix_config())
+
+
 class QwixDotGeneral(nn.Module):
   """A callable class for Qwix dot_general."""
   config: dot_general_qt.DotGeneralQtConfig
@@ -156,40 +270,6 @@ class QwixEinsum(nn.Module):
           _dot_general=custom_dot_general,
           out_sharding=out_sharding,
       )
-
-
-@dataclass
-class AqtQuantization:
-  """Configures AQT quantization github.com/google/aqt."""
-
-  # quant_dg: aqt_config.DotGeneral
-  quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
-  # replicate_scale: bool = False
-  act_calibration_method: str = "absmax"
-  weight_calibration_method: str = "absmax"
-  bwd_calibration_method: str = "absmax"
-
-  def _get_fp8_full_qwix_config(self) -> dot_general_qt.DotGeneralQtConfig:
-    """Centralized factory for the Qwix dot_general config."""
-    return dot_general_qt.DotGeneralQtConfig(
-        lhs_qtype=jnp.float8_e4m3fn,  # activation
-        rhs_qtype=jnp.float8_e4m3fn,  # weight
-        dlhs_grad_qtype=jnp.float8_e5m2,  # activation gradient
-        drhs_grad_qtype=jnp.float8_e5m2,  # weight gradient
-        lhs_calibration_method=self.act_calibration_method,
-        rhs_calibration_method=self.weight_calibration_method,
-        dlhs_grad_calibration_method=self.bwd_calibration_method,
-        drhs_grad_calibration_method=self.bwd_calibration_method,
-        tile_size=None,
-    )
-
-  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
-    """Returns qwix dot_general."""
-    return functools.partial(QwixDotGeneral, config=self._get_fp8_full_qwix_config())
-
-  def einsum(self, mesh_axes: Tuple[str, ...] = ()):
-    """Returns qwix eqinsum."""
-    return QwixEinsum(config=self._get_fp8_full_qwix_config())
 
 
 @dataclass
@@ -544,28 +624,28 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
-  # if config.use_qwix_quantization:
-  #  return None
-  # quant_cfg = _get_quant_config(config)
-  # print(f"quant_cfg {quant_cfg}")
-  quant_cfg = config.quantization
-  if quant_cfg and not config.use_qwix_quantization:
-    raise NotImplementedError("AQT is not supported")
-  if quant_cfg:
-    return AqtQuantization(
+  if config.use_batch_split_schedule and config.quantization:
+    if not (config.use_qwix_quantization and config.quantization == "fp8_full"):
+      raise ValueError("Batch split quantization only supports `use_qwix_quantization=True` and `quantization=fp8_full`")
+    return QwixQuantization(
         weight_calibration_method=config.weight_quantization_calibration_method,
         act_calibration_method=config.act_quantization_calibration_method,
         bwd_calibration_method=config.bwd_quantization_calibration_method,
     )
-    # if quant_cfg == "fp8":
-    #   return Fp8Quantization()
-    # elif quant_cfg == "nanoo_fp8":
-    #   return NANOOFp8Quantization()
-    # elif isinstance(quant_cfg, str) and quant_cfg.startswith("te_"):
-    #   return TransformerEngineQuantization(config)
-    # quant_mode = get_quant_mode(quant_mode_str)
-    # replicate_scale = config.replicate_quant_scale if config.replicate_quant_scale else False
-    # return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode, replicate_scale=replicate_scale)
+
+  if config.use_qwix_quantization:
+    return None
+  quant_cfg = _get_quant_config(config)
+  if quant_cfg:
+    if quant_cfg == "fp8":
+      return Fp8Quantization()
+    elif quant_cfg == "nanoo_fp8":
+      return NANOOFp8Quantization()
+    elif isinstance(quant_cfg, str) and quant_cfg.startswith("te_"):
+      return TransformerEngineQuantization(config)
+    quant_mode = get_quant_mode(quant_mode_str)
+    replicate_scale = config.replicate_quant_scale if config.replicate_quant_scale else False
+    return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode, replicate_scale=replicate_scale)
   return None
 
 
@@ -733,7 +813,8 @@ def get_qt_provider(config):
 
 def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
-  if config.use_qwix_quantization:
+  # Batch split is not using Qwix's interception feature but manual plumbing
+  if config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
       model = qwix.quantize_model(model, quantization_provider)

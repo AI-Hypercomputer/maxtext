@@ -2530,7 +2530,9 @@ class MaxTextConfig(
       if not (self.decoder_block == DecoderBlockType.DEEPSEEK and self.sparse_matmul and self.use_tokamax_gmm):
         raise ValueError("Batch split only supports deepseek, with `sparse_matmul=True` and `use_tokamax_gmm=True`")
       if self.quantization and not (self.use_qwix_quantization and self.quantization=="fp8_full"):
-        raise ValueError("Batch split quantization only supports `use_qwix_quantization=True` and `self.quantization=fp8_full`")
+        raise ValueError(
+            "Batch split quantization only supports `use_qwix_quantization=True` and `quantization=fp8_full`"
+        )
 
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
