@@ -13,13 +13,25 @@
 # limitations under the License.
 
 """ Train tokenizer
-Example usage: python3 -m MaxText.train_tokenizer --dataset_path=gs://maxtext-dataset --dataset_name=c4/en:3.0.1
+Example usage (parquet):
+  python3 -m MaxText.train_tokenizer \
+    --grain_train_files=gs://my-bucket/data/*.parquet \
+    --grain_file_type=parquet
+
+Example usage (arrayrecord):
+  python3 -m MaxText.train_tokenizer \
+    --grain_train_files=gs://my-bucket/data/*.arrayrecord \
+    --grain_file_type=arrayrecord \
+    --data_column=text
 """
 
+import glob
 import os
-import sys
+import shutil
 import tempfile
 import time
+from collections.abc import Iterator
+from pathlib import Path
 
 from absl import app
 from absl import flags
@@ -28,44 +40,102 @@ from absl import logging
 from sentencepiece import SentencePieceTrainer
 
 import jax
-
-import tensorflow as tf
-import tensorflow_datasets as tfds
+import grain.python as grain
+import grain.experimental
 
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils import gcs_utils
 
-_DATASET_PATH = flags.DEFINE_string("dataset_path", None, "Path to the dataset", required=True)
-_DATASET_NAME = flags.DEFINE_string("dataset_name", None, "Name to the dataset", required=True)
+
+_GRAIN_TRAIN_FILES = flags.DEFINE_string(
+    "grain_train_files", None, "File pattern for training data (local or gs://)", required=True
+)
+_GRAIN_FILE_TYPE = flags.DEFINE_string(
+    "grain_file_type", "parquet", "Type of data files. Supported: 'parquet', 'arrayrecord'."
+)
+_DATA_COLUMN = flags.DEFINE_string("data_column", "text", "Column name to extract text from (used for arrayrecord).")
 _VOCAB_SIZE = flags.DEFINE_integer("vocab_size", 32_768, "Vocab size")
 _MAX_CORPUS_CHARS = flags.DEFINE_integer("max_corpus_chars", 10_000_000, "Max corpus chars")
-_ASSETS_PATH = flags.DEFINE_string("assets_path", MAXTEXT_ASSETS_ROOT, "Name to the dataset")
-_VOCAB_MODEL_NAME = flags.DEFINE_string("vocab_model_name", "tokenizer", "Name to the dataset")
+_ASSETS_PATH = flags.DEFINE_string("assets_path", MAXTEXT_ASSETS_ROOT, "Path to assets directory")
+_VOCAB_MODEL_NAME = flags.DEFINE_string("vocab_model_name", "tokenizer", "Output tokenizer model name")
 
 
-def _dump_chars_to_textfile(dataset: tf.data.Dataset, maxchars: int = int(1e7), data_keys=("text",)) -> tuple[str, int]:
-  """Write part of a TFDS sentence dataset to lines in a text file.
+def build_grain_iterator(data_file_pattern: str, data_file_type: str, data_keys: tuple[str, ...] = ("text",)) -> Iterator:
+  """Build a grain iterator from a file pattern for tokenizer training.
+
   Args:
-    dataset: tf.dataset containing string-data.
-    maxchars: int: approximate number of characters to save from dataset.
-    data_keys: tuple[str]: what keys in dataset to dump from.
+    data_file_pattern: Glob pattern for data files (local path or gs://).
+    data_file_type: One of 'arrayrecord' or 'parquet'.
+    data_keys: Column names to extract from each example (used for arrayrecord).
+
   Returns:
-    name of temp file with dataset bytes, exact number of characters dumped.
+    A Python iterator yielding examples as dicts.
+  """
+  if data_file_pattern.startswith("gs://"):
+    data_files = gcs_utils.gcs_glob_pattern(data_file_pattern)
+  else:
+    data_files = glob.glob(str(Path(data_file_pattern).expanduser().resolve()))
+  if not data_files:
+    raise FileNotFoundError(f"No files found matching pattern: {data_file_pattern}")
+  logging.info("Found %d files for tokenizer training.", len(data_files))
+
+  if data_file_type == "parquet":
+    dataset = grain.MapDataset.source(data_files)
+    dataset = dataset.map(grain.experimental.ParquetIterDataset)
+    dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=len(data_files))
+    return iter(dataset)
+  elif data_file_type == "arrayrecord":
+    from maxtext.input_pipeline.protos import example_pb2  # pylint: disable=import-outside-toplevel
+
+    source = grain.ArrayRecordDataSource(data_files)
+    dataset = grain.MapDataset.source(source)
+
+    def _parse_example(raw_bytes):
+      example = example_pb2.Example()
+      example.ParseFromString(raw_bytes)
+      features = example.features.feature
+      parsed = {}
+      for col in data_keys:
+        if col in features:
+          parsed[col] = features[col].bytes_list.value[0]
+      return parsed
+
+    dataset = dataset.map(_parse_example)
+    return iter(dataset)
+  else:
+    raise ValueError(f"Unsupported grain_file_type: {data_file_type!r}. Use 'parquet' or 'arrayrecord'.")
+
+
+def _dump_chars_to_textfile(dataset_iter: Iterator, maxchars: int = int(1e7), data_keys=("text",)) -> tuple[str, int]:
+  """Write part of a grain dataset to lines in a text file.
+
+  Args:
+    dataset_iter: Iterator yielding examples as dicts.
+    maxchars: Approximate number of characters to save from dataset.
+    data_keys: Keys in each example to dump.
+
+  Returns:
+    Name of temp file with dataset bytes, exact number of characters dumped.
   """
   char_count = 0
-  ds_iter = dataset.as_numpy_iterator()
   temp_dir = tempfile.gettempdir()
-  with tempfile.NamedTemporaryFile(delete=False, prefix=os.path.join(temp_dir, "ds_chars")) as outfp:
+  with tempfile.NamedTemporaryFile(
+      delete=False, prefix=os.path.join(temp_dir, "ds_chars"), mode="w", encoding="utf-8"
+  ) as outfp:
     while char_count < maxchars:
-      example = next(ds_iter)
+      example = next(dataset_iter)
       for k in data_keys:
-        line = example[k] + b"\n"
+        val = example[k]
+        if isinstance(val, bytes):
+          val = val.decode("utf-8")
+        line = val + "\n"
         char_count += len(line)
         outfp.write(line)
   return outfp.name, char_count
 
 
 def _train_sentencepiece(
-    dataset: tf.data.Dataset,
+    dataset_iter: Iterator,
     *,
     vocab_size: int,
     maxchars: int = int(1e7),
@@ -74,25 +144,25 @@ def _train_sentencepiece(
     character_coverage: float = 1.0,
     data_keys=("text",),
 ):
-  """Train SentencePiece tokenizer from subset of tf dataset.
+  """Train SentencePiece tokenizer from subset of a grain dataset.
+
   Args:
-    dataset: tf.dataset
-    vocab_size: int: size of vocab tokens to train.
-    maxchars: int: number of characters to use for sentencepiece training.
-    model_path: str: path of model file to save vocab model to.
-    model_type: str: type of sentencepiece vocab to train.
-    character_coverage: amount of characters covered by the model, good defaults
-      are 0.9995 for languages with rich character set like Japanese or Chinese
-      and 1.0 for other languages with small character set.
-    data_keys: tuple[str]: keys of dataset to use for training.
+    dataset_iter: Iterator yielding examples as dicts.
+    vocab_size: Size of vocab tokens to train.
+    maxchars: Number of characters to use for sentencepiece training.
+    model_path: Path to save vocab model to (local or gs://).
+    model_type: Type of sentencepiece vocab to train.
+    character_coverage: Amount of characters covered by the model.
+    data_keys: Keys of dataset to use for training.
+
   Returns:
-    path to the trained sentencepiece vocabulary model.
+    Path to the trained sentencepiece vocabulary model.
   """
   if model_path.startswith("gs://"):
     abs_model_path = model_path
   else:
     abs_model_path = os.path.abspath(os.path.expanduser(model_path))
-  fname, _ = _dump_chars_to_textfile(dataset, maxchars=maxchars, data_keys=data_keys)
+  fname, _ = _dump_chars_to_textfile(dataset_iter, maxchars=maxchars, data_keys=data_keys)
   temp_dir = tempfile.gettempdir()
   with tempfile.NamedTemporaryFile(delete=False, prefix=os.path.join(temp_dir, "sp_tmp")) as model_fp:
     pass  # we just want a prefix'd tmp-filename
@@ -107,32 +177,38 @@ def _train_sentencepiece(
   )
   SentencePieceTrainer.Train(argstr)
   if jax.process_index() == 0:
-    # Use an intermediate filename that is renamed to the target name to address
-    # create and fill delays.
-    copy_rename_path = abs_model_path + ".rntmp"
-    tf.io.gfile.makedirs(os.path.dirname(abs_model_path))
-    tf.io.gfile.copy(model_fp.name + ".model", copy_rename_path, overwrite=True)
-    tf.io.gfile.rename(copy_rename_path, abs_model_path, overwrite=True)
-    logging.info("copied %s to %s", model_fp.name + ".model", abs_model_path)
+    if abs_model_path.startswith("gs://"):
+      gcs_utils.upload_blob(abs_model_path, model_fp.name + ".model")
+      logging.info("Uploaded %s to %s", model_fp.name + ".model", abs_model_path)
+    else:
+      parent = os.path.dirname(abs_model_path)
+      if parent:
+        os.makedirs(parent, exist_ok=True)
+      shutil.copy(model_fp.name + ".model", abs_model_path)
+      logging.info("Copied %s to %s", model_fp.name + ".model", abs_model_path)
   else:
-    while not tf.io.gfile.exists(abs_model_path):
-      time.sleep(1)
+    if abs_model_path.startswith("gs://"):
+      while not gcs_utils.gcs_path_exists(abs_model_path):
+        time.sleep(1)
+    else:
+      while not os.path.exists(abs_model_path):
+        time.sleep(1)
     time.sleep(1)
   return abs_model_path
 
 
 def train_tokenizer(
-    dataset: tf.data.Dataset,
+    dataset_iter: Iterator,
     *,
     vocab_path: str,
     vocab_size: int,
     max_corpus_chars: int,
     data_keys: tuple[str] = ("text",),
 ):
-  """tokenizer training function"""
+  """Tokenizer training function."""
   logging.info("SentencePiece vocab not found, building one from data.")
   vocab_path = _train_sentencepiece(
-      dataset,
+      dataset_iter,
       vocab_size=vocab_size,
       maxchars=max_corpus_chars,
       model_path=vocab_path,
@@ -143,19 +219,14 @@ def train_tokenizer(
 
 def main(argv):
   del argv
-  flags.FLAGS(sys.argv)
-  os.environ["TFDS_DATA_DIR"] = _DATASET_PATH.value
-
-  read_config = tfds.ReadConfig(
-      shuffle_seed=0,
-  )
-  train_ds_builder = tfds.builder(_DATASET_NAME.value)
-  train_ds = train_ds_builder.as_dataset(split="train", read_config=read_config, shuffle_files=True)
+  data_keys = (_DATA_COLUMN.value,)
+  dataset_iter = build_grain_iterator(_GRAIN_TRAIN_FILES.value, _GRAIN_FILE_TYPE.value, data_keys=data_keys)
   train_tokenizer(
-      train_ds,
+      dataset_iter,
       vocab_path=os.path.join(_ASSETS_PATH.value, _VOCAB_MODEL_NAME.value),
       vocab_size=_VOCAB_SIZE.value,
       max_corpus_chars=_MAX_CORPUS_CHARS.value,
+      data_keys=data_keys,
   )
 
 
