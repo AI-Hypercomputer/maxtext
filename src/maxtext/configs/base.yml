@@ -426,7 +426,6 @@ internal_compile_num_devices: -1 # You must specify the number of devices when u
 
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
-custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying yml name under config/mesh_and_rule/.
 mesh_axes:
   [
     "diloco",
@@ -446,9 +445,7 @@ mesh_axes:
 logical_axis_rules:
   [
     ["activation_batch", ["data", "fsdp", "fsdp_transpose", "expert"]],
-    ["activation_batch_moe", ["data", "fsdp", "fsdp_transpose", "expert"]],
     ["activation_batch_no_exp", ["data", "fsdp", "fsdp_transpose"]],
-    ["activation_batch_no_exp_moe", ["data", "fsdp", "fsdp_transpose"]],
     [
       "activation_embed_and_logits_batch",
       ["data", "stage", "fsdp", "fsdp_transpose", "expert"],
@@ -487,10 +484,7 @@ logical_axis_rules:
     ["activation_attn_length_no_exp", ["context"]],
     ["activation_length_no_exp", ["sequence", "context"]],
     ["activation_length_no_exp", ["context"]],
-    ["activation_length_no_exp_moe", ["sequence", "context"]],
-    ["activation_length_no_exp_moe", ["context"]],
     ["activation_norm_length", ["tensor_sequence", "context", "sequence"]],
-    ["activation_norm_length_moe", ["tensor_sequence", "context", "sequence"]],
     ["activation_q_length", ["context", "expert"]],
     ["activation_q_length_no_exp", ["context"]],
     ["prefill_activation_length", ["sequence", "context"]],
@@ -501,7 +495,6 @@ logical_axis_rules:
     ["activation_kv_length", []],
     ["activation_attn_embed", ["tensor", "tensor_transpose"]],
     ["activation_embed", ["tensor", "tensor_transpose"]],
-    ["activation_embed_moe", ["tensor", "tensor_transpose"]],
     ["activation_mlp", ["tensor", "tensor_transpose", "tensor_sequence"]],
     ["activation_kv", ["tensor", "tensor_transpose", "tensor_sequence"]],
     [
@@ -561,30 +554,6 @@ logical_axis_rules:
     ["embed_no_exp", ["fsdp", "sequence", "tensor_transpose", "context"]],
     ["embed_no_exp", ["fsdp", "fsdp_transpose", "sequence", "context"]],
     ["embed_no_exp", ["fsdp", "sequence", "context"]],
-    [
-      "embed_moe",
-      [
-        "fsdp",
-        "fsdp_transpose",
-        "sequence",
-        "tensor_transpose",
-        "context",
-        "expert",
-      ],
-    ],
-    [
-      "embed_moe",
-      ["fsdp", "sequence", "tensor_transpose", "context", "expert"],
-    ],
-    ["embed_moe", ["fsdp", "fsdp_transpose", "sequence", "context", "expert"]],
-    ["embed_moe", ["fsdp", "sequence", "context", "expert"]],
-    [
-      "embed_no_exp_moe",
-      ["fsdp", "fsdp_transpose", "sequence", "tensor_transpose", "context"],
-    ],
-    ["embed_no_exp_moe", ["fsdp", "sequence", "tensor_transpose", "context"]],
-    ["embed_no_exp_moe", ["fsdp", "fsdp_transpose", "sequence", "context"]],
-    ["embed_no_exp_moe", ["fsdp", "sequence", "context"]],
     ["embed_tensor_transpose", ["tensor_transpose"]],
     [
       "q_lora",
