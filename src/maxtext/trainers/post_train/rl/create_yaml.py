@@ -65,12 +65,12 @@ spec:
                 base_output_directory={{ base_output_directory }} \\
                 hf_access_token={{ hf_token }} \\
                 batch_size={{ batch_size }} \\
-                rl.num_generations={{ batch_size }} \\
-                num_batches=4 \\
+                rl.num_generations=8 \\
+                num_batches=10 \\
                 rollout_data_parallelism={{ rollout_data_parallelism }} \\
                 rollout_tensor_parallelism={{ rollout_tensor_parallelism }} \\
                 rollout_expert_parallelism={{ rollout_expert_parallelism }} \\
-                hbm_utilization_vllm=0.4 \\
+                hbm_utilization_vllm=0.6 \\
                 scan_layers=True \\
                 allow_split_physical_axes=True \\
                 vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \\
@@ -296,23 +296,22 @@ spec:
         enable_single_controller=enable_single_controller,
         sampler_devices_fraction=sampler_devices_fraction,
         base_output_directory=base_output_directory,
-        run_name=run_name
+        run_name=run_name,
+        hf_token=hf_token
     )
     
     return rendered_yaml
 
 # Example Usage:
 if __name__ == "__main__":
-    # add args for metadat_name, trainer_chips, sampler_chips, rollout_data_parallelism, rollout_tensor_parallelism, rollout_expert_parallelism
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--metadata_name", type=str, required=True)
     parser.add_argument("--trainer_chips", type=int, required=True)
     parser.add_argument("--number_of_sampler_chips_per_replica", type=int, required=True)
-    parser.add_argument("--sampler_sharding_per_replica", type=int, required=True)
     parser.add_argument("--sampler_replicas", type=int, required=True)
     parser.add_argument("--base_output_directory", type=str, required=True)
     parser.add_argument("--hf_token", type=str, required=True)
+    parser.add_argument("--store_directory", type=str, required=True)
     args = parser.parse_args()
 
     # for v7x-128
@@ -320,23 +319,40 @@ if __name__ == "__main__":
     batch_size = args.trainer_chips * 2
     trainer_devices_fraction = args.trainer_chips / number_of_chips
     rollout_data_parallelism = args.sampler_replicas
-    sampler_chips = args.number_of_sampler_chips_per_replica * args.sampler_sharding_per_replica
-    rollout_tensor_parallelism = sampler_chips // batch_size
+    sampler_chips = args.number_of_sampler_chips_per_replica * args.sampler_replicas
+    assert sampler_chips + args.trainer_chips <= number_of_chips, "Total number of chips used by trainer and sampler must be less than or equal to available chips"
+    rollout_tensor_parallelism = args.number_of_sampler_chips_per_replica * 2
+    rollout_expert_parallelism = rollout_tensor_parallelism // 4 if rollout_tensor_parallelism >= 4 else 1
+    assert rollout_tensor_parallelism % rollout_expert_parallelism == 0, "rollout_tensor_parallelism must be divisible by rollout_expert_parallelism"
+    rollout_tensor_parallelism = 4 if rollout_tensor_parallelism >= 4 else rollout_tensor_parallelism
+    sampler_devices_fraction = sampler_chips / number_of_chips
+    if args.trainer_chips == 4:
+        subslice_shape = "2,2,1"
+        enable_single_controller = "true"
+    else:
+        subslice_shape = ""
+        enable_single_controller = "false"
+    
+    output_directory = os.path.join(args.base_output_directory, args.metadata_name)
 
     result = generate_rl_config(
         metadata_name=args.metadata_name,
         batch_size=batch_size,
-        rollout_data_parallelism=args.rollout_data_parallelism,
-        rollout_tensor_parallelism=args.rollout_tensor_parallelism,
-        rollout_expert_parallelism=args.rollout_expert_parallelism,
-        trainer_devices_fraction=0.0625,
-        subslice_shape="2,2,1",
-        enable_single_controller="true",
-        sampler_devices_fraction=0.0625,
-        base_output_directory=args.base_output_directory,
-        run_name=args.metadata_name
+        rollout_data_parallelism=rollout_data_parallelism,
+        rollout_tensor_parallelism=rollout_tensor_parallelism,
+        rollout_expert_parallelism=rollout_expert_parallelism,
+        trainer_devices_fraction=trainer_devices_fraction,
+        subslice_shape=subslice_shape,
+        enable_single_controller=enable_single_controller,
+        sampler_devices_fraction=sampler_devices_fraction,
+        base_output_directory=output_directory,
+        run_name=args.metadata_name,
         hf_token=args.hf_token
     )
+    # if the yaml directory does not exist, create it
+    if not os.path.exists(args.store_directory):
+        os.makedirs(args.store_directory)
+    output_yaml_path = os.path.join(args.store_directory, f"{args.metadata_name}.yaml")
     
-    with open("qwen3-30b-v7x-temp.yaml", "w") as f:
+    with open(output_yaml_path, "w") as f:
         f.write(result)
