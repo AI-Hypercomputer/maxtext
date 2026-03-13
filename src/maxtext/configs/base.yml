@@ -42,7 +42,7 @@ normalization_layer_epsilon: 1.e-05 # epsilon value for rmsnorm, layernorm.
 load_parameters_path: ""
 
 # LoRA adapter support configs
-lora_input_adapters_path: ""    # Input GCS path for a parent directory which has all the LoRA adapters (lora_id as subdir)
+lora_input_adapters_path: "" # Input GCS path for a parent directory which has all the LoRA adapters (lora_id as subdir)
 
 # Loads a full checkpoint including optimizer state and step count from a specific directory
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
@@ -81,13 +81,11 @@ checkpoint_conversion_fn: none
 # optional checkpoint context to use for loading. options: "orbax", "safetensors"
 source_checkpoint_layout: "orbax"
 
-# Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing 
+# Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing
 colocated_python_checkpointing: False
 ############################### end checkpointing ##################################
 
-
 reuse_example_batch: 0 # for testing tpu performance, this options repeated uses the same batch.
-
 
 metrics_file: "" # for testing, local file that stores scalar metrics. if empty, no metrics are written.
 # if true save metrics such as loss and tflops to gcs in {base_output_directory}/{run_name}/metrics/
@@ -159,8 +157,8 @@ mlp_activations: ["silu", "linear"]
 mlp_activations_limit: -1.0
 dropout_rate: 0.0
 logits_via_embedding: false
-normalize_embedding_logits: true  # whether to normalize pre-softmax logits if logits_via_embedding is true
-logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
+normalize_embedding_logits: true # whether to normalize pre-softmax logits if logits_via_embedding is true
+logits_dot_in_fp32: false # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
@@ -275,7 +273,6 @@ pipeline_parallel_layers: -1 # Pipeline only this number of layers - for the rem
 # PP degree divides the number of layers.
 # By default (when set to -1) we pipeline all of the decoder layers.
 
-
 # num_pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
@@ -303,28 +300,27 @@ scan_layers_per_stage: False
 set_remat_policy_on_pipeline_iterations: True
 set_remat_policy_on_layers_per_stage: False
 
-
 # Choose 'remat_policy' between 'minimal_with_context', 'minimal', 'save_dot_with_context_except_mlp', 'save_dot_except_mlpwi', 'save_dot_except_mlp',
 # 'save_qkv_proj', 'qkv_proj_offloaded', 'custom', 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
-remat_policy: 'full'
+remat_policy: "full"
 # If "custom" remat_policy is chosen, you can select tensors from the following list to offload on host memory, rematerialize or save on device memory.
 # Pick one of these options for following tensors: ['remat','device','offload']
-decoder_layer_input: 'device' # this tensor cannot be rematerialized - it serves as periodic checkpoints that act as the remat start points
-context: 'remat' # From https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py#L581-L583
-mlpwi: 'remat'
-mlpwi_0: 'remat'
-mlpwi_1: 'remat'
-mlpwo: 'remat'
-query_proj: 'remat'
-key_proj: 'remat'
-value_proj: 'remat'
-qkv_proj: 'remat'
-out_proj: 'remat'
-mla_q: 'remat'
-mla_kv: 'remat'
-attention_out: 'remat'
-engram: 'remat'
+decoder_layer_input: "device" # this tensor cannot be rematerialized - it serves as periodic checkpoints that act as the remat start points
+context: "remat" # From https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py#L581-L583
+mlpwi: "remat"
+mlpwi_0: "remat"
+mlpwi_1: "remat"
+mlpwo: "remat"
+query_proj: "remat"
+key_proj: "remat"
+value_proj: "remat"
+qkv_proj: "remat"
+out_proj: "remat"
+mla_q: "remat"
+mla_kv: "remat"
+attention_out: "remat"
+engram: "remat"
 
 optimizer_memory_host_offload: False
 parameter_memory_host_offload: False
@@ -333,8 +329,8 @@ param_scan_axis: 1
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
-attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
-attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
+attention: "autoselected" # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
+attention_type: "global" # Supported attention_type: global, local_sliding, chunk, mla
 share_kv_projections: False # Note: Not compatible with attention_type='mla'
 attention_bias: False # If True, adds a learnable bias to the query, key, and value projections
 attention_sink: False
@@ -346,7 +342,6 @@ z_loss_multiplier: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
 mla_naive_kvcache: True
-
 
 # Adding Mixture of Block Attention Support (MoBA): https://github.com/MoonshotAI/MoBA/blob/master/MoBA_Tech_Report.pdf
 moba: False
@@ -368,8 +363,8 @@ qk_rope_head_dim: 64
 v_head_dim: 128
 
 # QK-Clip (Muon Clip) Configuration
-use_qk_clip: False  # Enable QK-Clip (supported in MLA with DotProduct or Tokamax Splash)
-qk_clip_threshold: 100.0  # Threshold for clipping (tau in the paper)
+use_qk_clip: False # Enable QK-Clip (supported in MLA with DotProduct or Tokamax Splash)
+qk_clip_threshold: 100.0 # Threshold for clipping (tau in the paper)
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False
@@ -398,7 +393,6 @@ multi_tier_checkpointing_backup_interval_minutes: 0
 # It should be a positive number when enabling multi-tier checkpointing. If set to 0, it will be set to num of slices.
 mtc_data_parallelism: 0
 
-
 # Whether to enable emergency checkpoint. If True, `local_checkpoint_directory` and a non-zero `local_checkpoint_period` must also be specified.
 # Emergency checkpoint is an experimental Orbax feature that: periodically saves to persistent storage and, with a larger invertal, saves to a local directory.
 # During restore, if a local copy is available in any slice, it will be broadcast to other slices without having to fetch from persistent storage.
@@ -415,7 +409,7 @@ local_checkpoint_period: 0
 jax_cache_dir: "~/jax_cache"
 
 # Hardware
-hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
+hardware: "tpu" # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # internal_compile allows bypassing open-source topology name mappings when using internal topologies directly via get_topology_desc.
 internal_compile: False
@@ -423,96 +417,212 @@ internal_compile_num_devices: -1 # You must specify the number of devices when u
 
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
-mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
-logical_axis_rules: [
-                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
-                      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
-                      ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
-                      ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
-                      ['activation_length', ['sequence', 'context', 'expert']],
-                      ['activation_length', ['context', 'expert']],
-                      ['activation_attn_length', ['sequence', 'context', 'expert']],
-                      ['activation_attn_length', ['context', 'expert']],
-                      ['activation_attn_length_no_exp', ['sequence', 'context']],
-                      ['activation_attn_length_no_exp', ['context']],
-                      ['activation_length_no_exp', ['sequence', 'context']],
-                      ['activation_length_no_exp', ['context']],
-                      ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
-                      ['activation_q_length', ['context', 'expert']],
-                      ['activation_q_length_no_exp', ['context']],
-                      ['prefill_activation_length', ['sequence', 'context']],
-                      ['prefill_activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
-                      ['activation_kv_length', []],
-                      ['activation_attn_embed', ['tensor', 'tensor_transpose']],
-                      ['activation_embed', ['tensor', 'tensor_transpose']],
-                      ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_kv_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
-                      ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['activation_vocab', ['tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['activation_vocab', ['tensor', 'tensor_transpose']],
-                      ['activation_vocab', 'tensor_sequence'],
-                      ['activation_vocab', ['sequence','context']],
-                      ['activation_stage', 'stage'],
-                      ['activation_exp', ['expert']],
-                      ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['decode_length', ['sequence']],
-                      ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
-                      ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']],
-                      ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
-                      ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
-                      ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
-                      ['kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
-                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context', 'expert']],
-                      ['embed', ['fsdp', 'sequence', 'tensor_transpose', 'context' , 'expert']],
-                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
-                      ['embed', ['fsdp', 'sequence', 'context', 'expert']],
-                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context']],
-                      ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
-                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
-                      ['embed_no_exp', ['fsdp', 'sequence', 'context']],
-                      ['embed_tensor_transpose', ['tensor_transpose']],
-                      ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
-                      ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
-                      ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
-                      ['q_lora', ['fsdp', 'sequence', 'context', 'expert']],
-                      ["q_lora_up_proj",[]],
-                      ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
-                      ['kv_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
-                      ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
-                      ['kv_lora', ['fsdp', 'sequence', 'context', 'expert']],
-                      ["kv_lora_up_proj",[]],
-                      ['norm', ['tensor', 'tensor_transpose']],
-                      ['layers', 'stage'],
-                      ['qkv', []],
-                      ['kv', []],
-                      ['kv_head_dim', []],
-                      ['cache_batch_prefill', []],
-                      ['cache_batch', []],
-                      ['cache_heads_none', []],
-                      ['cache_heads', ['autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
-                      ['cache_kv', []],
-                      ['cache_sequence', []],
-                      ['exp', 'expert'],
-                      ['exp_with_fsdp', 'fsdp'],
-                      ['paged_kv_heads', ['tensor']],
-                      ['num_pages', []],
-                      ['tokens_per_page', []],
-                      ['paged_kv_head_dim_size', []],
-                      ['dense_layers', []],
-                      ['moe_layers', []],
-                      ['engram_dim', ['tensor']],
-                      ['mhc', []],
-                      ['diloco', 'diloco'],
-                    ]
+mesh_axes:
+  [
+    "diloco",
+    "data",
+    "stage",
+    "fsdp",
+    "fsdp_transpose",
+    "sequence",
+    "context",
+    "context_autoregressive",
+    "tensor",
+    "tensor_transpose",
+    "tensor_sequence",
+    "expert",
+    "autoregressive",
+  ]
+logical_axis_rules:
+  [
+    ["activation_batch", ["data", "fsdp", "fsdp_transpose", "expert"]],
+    ["activation_batch_no_exp", ["data", "fsdp", "fsdp_transpose"]],
+    [
+      "activation_embed_and_logits_batch",
+      ["data", "stage", "fsdp", "fsdp_transpose", "expert"],
+    ],
+    [
+      "activation_embed_and_logits_batch_sequence",
+      [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "expert",
+      ],
+    ],
+    [
+      "activation_heads",
+      [
+        "tensor",
+        "tensor_transpose",
+        "sequence",
+        "tensor_sequence",
+        "autoregressive",
+      ],
+    ],
+    [
+      "activation_kv_heads",
+      ["tensor", "tensor_transpose", "sequence", "tensor_sequence"],
+    ],
+    ["activation_length", ["sequence", "context", "expert"]],
+    ["activation_length", ["context", "expert"]],
+    ["activation_attn_length", ["sequence", "context", "expert"]],
+    ["activation_attn_length", ["context", "expert"]],
+    ["activation_attn_length_no_exp", ["sequence", "context"]],
+    ["activation_attn_length_no_exp", ["context"]],
+    ["activation_length_no_exp", ["sequence", "context"]],
+    ["activation_length_no_exp", ["context"]],
+    ["activation_norm_length", ["tensor_sequence", "context", "sequence"]],
+    ["activation_q_length", ["context", "expert"]],
+    ["activation_q_length_no_exp", ["context"]],
+    ["prefill_activation_length", ["sequence", "context"]],
+    [
+      "prefill_activation_norm_length",
+      ["tensor_sequence", "context", "sequence"],
+    ],
+    ["activation_kv_length", []],
+    ["activation_attn_embed", ["tensor", "tensor_transpose"]],
+    ["activation_embed", ["tensor", "tensor_transpose"]],
+    ["activation_mlp", ["tensor", "tensor_transpose", "tensor_sequence"]],
+    ["activation_kv", ["tensor", "tensor_transpose", "tensor_sequence"]],
+    [
+      "activation_prefill_kv_batch",
+      ["data", "fsdp", "fsdp_transpose", "expert"],
+    ],
+    ["activation_kv_batch", ["data", "fsdp", "fsdp_transpose", "expert"]],
+    ["activation_kv_batch_no_exp", ["data", "fsdp", "fsdp_transpose"]],
+    [
+      "activation_kv_head_dim",
+      ["tensor", "tensor_transpose", "tensor_sequence"],
+    ],
+    ["activation_vocab", ["tensor", "tensor_transpose", "tensor_sequence"]],
+    ["activation_vocab", ["tensor", "tensor_transpose"]],
+    ["activation_vocab", "tensor_sequence"],
+    ["activation_vocab", ["sequence", "context"]],
+    ["activation_stage", "stage"],
+    ["activation_exp", ["expert"]],
+    ["decode_batch", ["data", "fsdp", "fsdp_transpose", "expert"]],
+    ["decode_length", ["sequence"]],
+    ["mlp", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
+    ["mlp_no_fsdp", ["tensor", "tensor_sequence", "autoregressive"]],
+    [
+      "vocab",
+      ["tensor", "tensor_transpose", "tensor_sequence", "autoregressive"],
+    ],
+    [
+      "heads",
+      ["tensor", "tensor_transpose", "tensor_sequence", "autoregressive"],
+    ],
+    [
+      "q_heads",
+      ["tensor", "tensor_transpose", "tensor_sequence", "autoregressive"],
+    ],
+    [
+      "kv_heads",
+      ["tensor", "tensor_transpose", "tensor_sequence", "autoregressive"],
+    ],
+    [
+      "embed",
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "tensor_transpose",
+        "context",
+        "expert",
+      ],
+    ],
+    ["embed", ["fsdp", "sequence", "tensor_transpose", "context", "expert"]],
+    ["embed", ["fsdp", "fsdp_transpose", "sequence", "context", "expert"]],
+    ["embed", ["fsdp", "sequence", "context", "expert"]],
+    [
+      "embed_no_exp",
+      ["fsdp", "fsdp_transpose", "sequence", "tensor_transpose", "context"],
+    ],
+    ["embed_no_exp", ["fsdp", "sequence", "tensor_transpose", "context"]],
+    ["embed_no_exp", ["fsdp", "fsdp_transpose", "sequence", "context"]],
+    ["embed_no_exp", ["fsdp", "sequence", "context"]],
+    ["embed_tensor_transpose", ["tensor_transpose"]],
+    [
+      "q_lora",
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "tensor_transpose",
+        "expert",
+      ],
+    ],
+    ["q_lora", ["fsdp", "sequence", "context", "tensor_transpose", "expert"]],
+    ["q_lora", ["fsdp", "fsdp_transpose", "sequence", "context", "expert"]],
+    ["q_lora", ["fsdp", "sequence", "context", "expert"]],
+    ["q_lora_up_proj", []],
+    [
+      "kv_lora",
+      [
+        "fsdp",
+        "fsdp_transpose",
+        "sequence",
+        "context",
+        "tensor_transpose",
+        "expert",
+      ],
+    ],
+    ["kv_lora", ["fsdp", "sequence", "context", "tensor_transpose", "expert"]],
+    ["kv_lora", ["fsdp", "fsdp_transpose", "sequence", "context", "expert"]],
+    ["kv_lora", ["fsdp", "sequence", "context", "expert"]],
+    ["kv_lora_up_proj", []],
+    ["norm", ["tensor", "tensor_transpose"]],
+    ["layers", "stage"],
+    ["qkv", []],
+    ["kv", []],
+    ["kv_head_dim", []],
+    ["cache_batch_prefill", []],
+    ["cache_batch", []],
+    ["cache_heads_none", []],
+    [
+      "cache_heads",
+      ["autoregressive", "tensor", "tensor_transpose", "tensor_sequence"],
+    ],
+    ["cache_heads", ["autoregressive", "tensor", "tensor_sequence"]],
+    ["cache_kv", []],
+    ["cache_sequence", []],
+    ["exp", "expert"],
+    ["exp_with_fsdp", "fsdp"],
+    ["paged_kv_heads", ["tensor"]],
+    ["num_pages", []],
+    ["tokens_per_page", []],
+    ["paged_kv_head_dim_size", []],
+    ["dense_layers", []],
+    ["moe_layers", []],
+    ["engram_dim", ["tensor"]],
+    ["mhc", []],
+    ["diloco", "diloco"],
+  ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
-data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
-input_data_sharding_logical_axes: ['activation_embed_and_logits_batch', 'activation_norm_length']
+data_sharding:
+  [
+    [
+      "data",
+      "stage",
+      "fsdp",
+      "fsdp_transpose",
+      "sequence",
+      "context",
+      "context_autoregressive",
+      "tensor",
+      "tensor_transpose",
+      "tensor_sequence",
+      "expert",
+      "autoregressive",
+    ],
+  ]
+input_data_sharding_logical_axes:
+  ["activation_embed_and_logits_batch", "activation_norm_length"]
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02
@@ -522,10 +632,10 @@ sharding_tolerance: 0.02
 # By default, product of the DCN axes should equal number of slices
 # and product of the ICI axes should equal number of devices per slice.
 dcn_diloco_parallelism: 1
-dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
+dcn_data_parallelism: -1 # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
 dcn_fsdp_transpose_parallelism: 1
-dcn_sequence_parallelism: 1  # never recommended
+dcn_sequence_parallelism: 1 # never recommended
 dcn_context_parallelism: 1
 dcn_context_autoregressive_parallelism: 1
 dcn_tensor_parallelism: 1 # never recommended
@@ -572,8 +682,8 @@ tokenizer_path: "src/maxtext/assets/tokenizers/tokenizer.llama2"
 tokenizer_type: "sentencepiece" # Currently supporting: "tiktoken", "sentencepiece", "huggingface"
 use_chat_template: False
 chat_template_path: "" # path to chat template json file
-tokenize_train_data: True  # False if the dataset is pre-tokenized
-tokenize_eval_data: True  # False if the dataset is pre-tokenized
+tokenize_train_data: True # False if the dataset is pre-tokenized
+tokenize_eval_data: True # False if the dataset is pre-tokenized
 add_bos: True
 add_eos: True
 # If False, use chunking for long sequences instead of truncation.
@@ -591,10 +701,10 @@ per_device_batch_size: 12.0
 expansion_factor_real_data: -1.0
 eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
-train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
-train_image_column: 'image'
-eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
-eval_image_column: 'image'
+train_data_columns: ["text"] # for DPO dataset containing "chosen" and "rejected"
+train_image_column: "image"
+eval_data_columns: ["text"] # for DPO dataset containing "chosen" and "rejected"
+eval_image_column: "image"
 packing: True
 num_epoch: 1
 generate_padding_batch_train: False
@@ -633,30 +743,30 @@ sft_train_on_completion_only: False
 dataset_type: tfds
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_name: 'c4/en:3.0.1'
-eval_dataset_name: 'c4/en:3.0.1'
-train_split: 'train'
-eval_split: 'validation'
+dataset_name: "c4/en:3.0.1"
+eval_dataset_name: "c4/en:3.0.1"
+train_split: "train"
+eval_split: "validation"
 # for HuggingFace input pipeline (dataset_type=hf)
 # Check definition at https://github.com/huggingface/datasets/blob/0feb65dd8733191dd2d1e74215b422fc5939a56a/src/datasets/load.py#L1338-L1408
-hf_path: ''
-hf_name: ''
-hf_data_dir: ''
-hf_train_files: ''
-hf_eval_split: ''
-hf_eval_files: ''
-hf_access_token: ''
+hf_path: ""
+hf_name: ""
+hf_data_dir: ""
+hf_train_files: ""
+hf_eval_split: ""
+hf_eval_files: ""
+hf_access_token: ""
 # for Grain input pipeline (dataset_type=grain)
 # Path to grain data files. Can be a single pattern or multiple patterns with weights.
 # For multiple patterns, use semicolon (;) to separate and comma (,) to specify weights.
 # Example: "path/to/data1.array_record*,0.3;path/to/data2.array_record*,0.7"
 # Note: When using multiple files (separated by ';'), only ArrayRecord format is supported.
 # For more details, see https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/data_input_grain.md
-grain_train_files: ''
-grain_eval_files: ''
-grain_train_mixture_config_path: '' # Path to a JSON file specifying the mixture weights for Grain training data.
-grain_file_type: 'arrayrecord' # arrayrecord or parquet
-grain_packing_type: 'first_fit' # 'first_fit', 'best_fit' or 'concat_then_split'. See details of the corresponding module in https://google-grain.readthedocs.io/en/latest/grain.experimental.html
+grain_train_files: ""
+grain_eval_files: ""
+grain_train_mixture_config_path: "" # Path to a JSON file specifying the mixture weights for Grain training data.
+grain_file_type: "arrayrecord" # arrayrecord or parquet
+grain_packing_type: "first_fit" # 'first_fit', 'best_fit' or 'concat_then_split'. See details of the corresponding module in https://google-grain.readthedocs.io/en/latest/grain.experimental.html
 grain_worker_count: 1 # Set to -1 to enable auto-tuning: automatically determines optimal worker count. See https://google-grain.readthedocs.io/en/latest/_autosummary/grain.experimental.pick_performance_config.html
 grain_per_worker_buffer_size: 1
 # num_threads and prefetch_buffer_size are per-worker per-dataset.
@@ -670,9 +780,9 @@ grain_per_worker_buffer_size_eval: 1
 grain_ram_budget_mb: 1024 # RAM budget (MB) for auto-tuning worker count. Only used when grain_worker_count is -1.
 grain_num_threads_eval: 16
 grain_prefetch_buffer_size_eval: 500
-grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
+grain_data_source_max_workers: 16 # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
 # for using pathways
-colocated_python_data_input: False  # experimental feature, under testing
+colocated_python_data_input: False # experimental feature, under testing
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
@@ -704,11 +814,11 @@ skip_jax_distributed_system: False # If True we will not initialize the jax dist
 #
 # The zero learning rate section can be used to more accurately measure the fully trained model's performance.
 learning_rate: 3.e-5
-lr_schedule_type: 'cosine'  # Options: 'cosine' or 'wsd'
-learning_rate_final_fraction: 0.1  # Final LR as fraction of peak LR (applies to both cosine and WSD schedules)
-wsd_decay_steps_fraction: 0.1  # Fraction of learning_rate_schedule_steps used for decay phase in WSD (e.g., 0.1 = 10%)
-wsd_decay_style: 'linear'  # Decay style for WSD schedule: 'linear' or 'cosine'
-warmup_steps_fraction: 0.1  # Fraction of learning_rate_schedule_steps used for warmup phase (applies to both schedules)
+lr_schedule_type: "cosine" # Options: 'cosine' or 'wsd'
+learning_rate_final_fraction: 0.1 # Final LR as fraction of peak LR (applies to both cosine and WSD schedules)
+wsd_decay_steps_fraction: 0.1 # Fraction of learning_rate_schedule_steps used for decay phase in WSD (e.g., 0.1 = 10%)
+wsd_decay_style: "linear" # Decay style for WSD schedule: 'linear' or 'cosine'
+warmup_steps_fraction: 0.1 # Fraction of learning_rate_schedule_steps used for warmup phase (applies to both schedules)
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.
 # However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
@@ -740,7 +850,7 @@ profile_periodically_period: -1 # If set to a positive integer, profile every pr
 # - upload xplane profiling, if it is enabled.
 # - upload training metrics, at the defined log_period interval.
 managed_mldiagnostics: False # Whether to enable the managed diagnostics
-managed_mldiagnostics_run_group: ""  # Optional. Used to group multiple runs.
+managed_mldiagnostics_run_group: "" # Optional. Used to group multiple runs.
 
 # Dump HLO and jaxpr options
 dump_hlo: False
@@ -779,7 +889,7 @@ gradient_clipping_threshold: 1.0
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
 
-opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
+opt_type: "adamw" # one of "adamw", "adam_pax", "sgd", or "muon"
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
@@ -803,14 +913,14 @@ muon_consistent_rms: None # If None, apply width scaling to updates. If float, a
 
 # Stack trace parameters
 collect_stack_trace: False
-stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
-stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
+stack_trace_to_cloud: False # Uploads to cloud logging if True, else to the console if False.
+stack_trace_interval_seconds: 600 # Stack trace collection frequency in seconds.
 
 # Use iota operator in Embed
 use_iota_embed: False
 # use positional embedding
 use_untrainable_positional_embedding: False
-trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
+trainable_position_size: -1 # enable gpt3 position embedding with a positive trainable_position_size
 # RoPE parameters
 rope_type: "default" # one of "default", "llama3.1" or "yarn"
 rope_linear_scaling_factor: 1.0 # linear scaling factor for "default" RoPE (see class `RotaryEmbedding` for more)
@@ -833,7 +943,7 @@ rope_attention_scaling: False # Scale the rotary embedding output
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
-compile_topology: '' # Target hardware version, e.g. 'v5e-256'
+compile_topology: "" # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
 
 decode_sampling_strategy: "greedy" # decode_sampling_strategy should be one of greedy, weighted, nucleus, topk, or composite(top_k -> top_p -> weighted temperature)
@@ -841,9 +951,9 @@ decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
 decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
 
-eval_interval: -1  # the specific number of train step between eval_step
-eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
-target_eval_loss: 0.  # early stop once reaching target eval_loss
+eval_interval: -1 # the specific number of train step between eval_step
+eval_steps: -1 # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
+target_eval_loss: 0. # early stop once reaching target eval_loss
 
 # Goodput parameters
 enable_goodput_recording: False
@@ -882,12 +992,12 @@ inference_microbenchmark_loop_iters: 10
 inference_microbenchmark_log_file_path: ""
 inference_microbenchmark_num_samples: [1, 2, 3, 4, 5]
 inference_metadata_file: "" # path to a json file
-inference_server: "MaxtextInterleavedServer"  # inference server to start
+inference_server: "MaxtextInterleavedServer" # inference server to start
 prefill_slice: "v5e-16" # slice to use for prefill in disaggregation mode
 generate_slice: "v5e-16" # slice to use for generatation in disaggregation mode
 inference_benchmark_test: False
 enable_model_warmup: False
-enable_llm_inference_pool: False          # Bool to launch inference server for llm_inference_gateway with their specified APIs
+enable_llm_inference_pool: False # Bool to launch inference server for llm_inference_gateway with their specified APIs
 multi_sampling: False
 return_log_prob: False
 
@@ -970,14 +1080,13 @@ context_parallel_strategy: "all_gather" # "all_gather" or "ring"
 # These settings take effect only when `attention=paged`.
 # They should be adjusted based on the available HBM and model config.
 # Note: one page group corresponds to one request/slot
-pagedattn_num_pages: 64  # total number of pages to allocate
-pagedattn_tokens_per_page: 32  # number of tokens each page can hold
-pagedattn_pages_per_compute_block: 4  # number of pages processed together in pallas kernels
-pagedattn_max_pages_per_group: -1  # defaults to number of pages needed to reach max_target_length
+pagedattn_num_pages: 64 # total number of pages to allocate
+pagedattn_tokens_per_page: 32 # number of tokens each page can hold
+pagedattn_pages_per_compute_block: 4 # number of pages processed together in pallas kernels
+pagedattn_max_pages_per_group: -1 # defaults to number of pages needed to reach max_target_length
 # Alignment of head_dim to the nearest multiple of this value, set to 0 to disable alignment. On
 # TPUs, the head_dim is padded to the nearest multiple of 128.
 pagedattn_head_dim_alignment: 128
-
 
 # Chunked Prefill Parameters
 prefill_chunk_size: 256
@@ -1010,8 +1119,8 @@ use_multimodal: False
 use_audio: False
 freeze_vision_encoder_params: True
 freeze_audio_encoder_params: True
-dtype_mm: "float32"  # Data type for multimodal model's vision encoder
-remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
+dtype_mm: "float32" # Data type for multimodal model's vision encoder
+remat_policy_for_vit: "minimal" # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding, can be multiple paths separated by comma, exp "/path/image1.jpg,/path/image2.jpg"
 video_path: "" # Local video path used for decoding, can be multiple paths separated by comma, exp "/path/video1.mp4,/path/video2.mp4"
@@ -1108,7 +1217,7 @@ use_jax_splash: false
 # Path to the HuggingFace-style config directory for the adapter (e.g. src/MaxText/integration/vllm/maxtext_vllm_adapter)
 vllm_hf_config_path: ""
 # A JSON string of overrides to apply to the HuggingFace-style config for the vLLM adapter.
-# This can be used to override specific settings without modifying the original config file. 
+# This can be used to override specific settings without modifying the original config file.
 vllm_hf_overrides: {}
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
@@ -1123,7 +1232,7 @@ sinkhorn_iterations: 20
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
-# Example: [1, 4] attaches to the 2nd and 5th layer. 
+# Example: [1, 4] attaches to the 2nd and 5th layer.
 engram_layers: []
 # The max 'n' in N-gram. Example: n=3 means it covers both 2-grams and 3-grams.
 engram_max_ngram_size: 3
