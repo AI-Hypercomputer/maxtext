@@ -314,7 +314,11 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kw
     os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
 
     prev_jax_platforms = jax.config.jax_platforms
+    prev_env_jax_platforms = os.environ.get("JAX_PLATFORMS")  # Capture env var
+
     jax.config.update("jax_platforms", "cpu")
+    os.environ["JAX_PLATFORMS"] = "cpu"  # Ensure child scripts use cpu
+
     to_maxtext.main(
         argv,
         hf_model_path=hf_model_path,
@@ -322,7 +326,12 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kw
         lazy_load_tensors=lazy_load_tensors,
         simulated_cpu_devices_count=simulated_cpu_devices_count,
     )
+    # Restore both the JAX config and the environment variable
     jax.config.update("jax_platforms", prev_jax_platforms)
+    if prev_env_jax_platforms is not None:
+        os.environ["JAX_PLATFORMS"] = prev_env_jax_platforms
+    else:
+        os.environ.pop("JAX_PLATFORMS", None)
 
     if prev_xla_flags is None:
       os.environ.pop("XLA_FLAGS", None)
