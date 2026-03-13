@@ -428,7 +428,7 @@ def build_user_command(
   if wl_config.hlo_dump:
     hlo_dump = "XLA_FLAGS='--xla_dump_large_constants --xla_dump_to=/tmp/xla_dump'"
     upload_hlo_dump = (
-        f" && gsutil -m cp -r /tmp/xla_dump  {wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump"
+        f" && gcloud storage cp --recursive /tmp/xla_dump  {wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump"
     )
   # Construct the command string with proper formatting and line continuations
   command = " ".join(
