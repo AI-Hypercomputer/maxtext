@@ -437,40 +437,32 @@ class NNXDecoder(nnx.Module):
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
     graphdef, params, state = nnx.split(
         layers, nnx.Param, ...
-    )  # state: the mutable state we carry (KV cache, RNGs, etc.)
+    )
 
     scan_axis = self.config.param_scan_axis
     if scan_axis != 0:
-      # Move scan_axis to 0 so scan can iterate over it
       params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
 
     layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
 
-    layer_cls = layers.__class__  # Access the underlying class
+    layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)
-    # Filter kwargs to only include keys that exist in the layer's signature
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
 
     def layer_fn(carry, scanned_vars):
-      # Unpack the sliced variables for THIS layer
       current_params, current_state = scanned_vars
 
       if self.config.parameter_memory_host_offload:
         current_params = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), current_params)
 
-      # Merge using the SLICED state
       layer = nnx.merge(graphdef, current_params, current_state)
 
-      # Run the layer (Filter kwargs if using the solution from previous turn)
       layer_out = layer(carry, *args, **valid_kwargs)
 
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
-      # Extract the updated state to return it
-      # _, new_current_state = nnx.split(layer, nnx.Param, ...)
-      new_current_state = nnx.state(layer)
       return new_carry, new_current_state
 
     layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
