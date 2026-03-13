@@ -891,21 +891,11 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
-    vma_axes = tuple(axis for axis in self.config.mesh_axes if self.mesh.shape[axis] > 1)
-    use_vma = not self.config.use_tokamax_gmm
-
-    vma_axes = tuple(axis for axis in self.config.mesh_axes if self.mesh.shape[axis] > 1)
-    use_vma = not self.config.use_tokamax_gmm
-
     def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes):
-      # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
-      if self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat:
-        tokamax_group_sizes = group_sizes
-      else:
-        tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
-            group_sizes,
-            max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
-        )
+      tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
+          group_sizes,
+          representative_value=max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+      )
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -1035,9 +1025,7 @@ class RoutedMoE(nnx.Module):
       batch_logical_axis = "activation_batch_no_exp_moe"
 
     if self.get_tensor_transpose_parallelism_size() > 1:
-      input_partition_pspec = self._logical_to_mesh_axes(
-          (batch_logical_axis, "activation_norm_length_moe", "activation_embed_moe")
-      )
+      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))
       w0_bias_pspec = self._logical_to_mesh_axes(("exp", None))
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", None))
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
@@ -1438,10 +1426,8 @@ class RoutedMoE(nnx.Module):
     # output of updated weights: (batch_size, seq_len, num_experts)
     update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
     index_update = (
-        self._maybe_shard_with_logical(
-            jnp.arange(weights.shape[0])[:, None, None], ("activation_batch_no_exp_moe", None, None)
-        ),
-        self._maybe_shard_with_logical(jnp.arange(weights.shape[1])[:, None], ("activation_length_no_exp_moe", None)),
+        self._maybe_shard_with_logical(jnp.arange(weights.shape[0])[:, None, None], ("activation_batch_no_exp", None, None)),
+        self._maybe_shard_with_logical(jnp.arange(weights.shape[1])[:, None], ("activation_length_no_exp", None)),
         indices,
     )
     weight_sharding = (
@@ -1695,9 +1681,7 @@ class RoutedMoE(nnx.Module):
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_no_exp_moe", None))
     if self.config.model_name.startswith("deepseek3"):
       # pre_bias_logits is None for non-DeepSeek v3 models
-      pre_bias_logits = self._maybe_shard_with_logical(
-          pre_bias_logits, ("activation_batch_moe", "activation_length_no_exp_moe", None)
-      )
+      pre_bias_logits = self._maybe_shard_with_logical(pre_bias_logits, ("activation_batch", "activation_norm_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs)
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
