@@ -356,15 +356,15 @@ moba_topk: 8
 
 # DeepSeek Sparse Attention (DSA)
 # deepseek3.2 introduces indexer in MLA
-use_sparse_indexer: False
-index_head_dim: 128
-index_n_heads: 64
-index_topk: 2048
-# Determines the token selection strategy for indexer loss: 
-# - False: Uses all tokens (Dense Warm-up).
-# - True: Uses only top-k tokens (Sparse Training).
+use_indexer: False
+indexer_head_dim: 128
+indexer_n_heads: 64
+indexer_topk: 2048
+# Determines the training strategy for the indexer:
+# - False (Dense Warm-up): Computes indexer loss over all tokens. Used with `trainable_parameters_mask` to freeze other model parameters.
+# - True (Sparse Training): Computes indexer loss over top-k tokens only and detaches the indexer input for independent optimization.
 # Note: This is only active when `indexer_loss_scaling_factor` > 0.
-sparse_indexer_loss: False
+indexer_sparse_training: False
 # Multiplier for the indexer KL divergence loss
 indexer_loss_scaling_factor: 0.0
 
@@ -788,6 +788,10 @@ gradient_clipping_threshold: 1.0
 gradient_accumulation_steps: 1
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
+# List of parameter names/patterns to train.
+# If non-empty, all other parameters will be frozen. Example: ['.*indexer.*'].
+# If empty (default), all parameters are trained.
+trainable_parameters_mask: []
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
