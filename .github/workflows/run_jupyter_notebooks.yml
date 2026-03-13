@@ -64,8 +64,6 @@ jobs:
 
           # 2. Install MaxText package and all the post training dependencies
           uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
-          #TODO: @mazumdera:  replace this with the following after release
-          # uv pip install maxtext[tpu-post-train] --resolution=lowest
           install_maxtext_tpu_post_train_extra_deps
           .venv/bin/python3 -m ipykernel install --user --name maxtext_venv
           
