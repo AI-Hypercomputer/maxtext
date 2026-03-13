@@ -891,6 +891,12 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
+    vma_axes = tuple(axis for axis in self.config.mesh_axes if self.mesh.shape[axis] > 1)
+    use_vma = not self.config.use_tokamax_gmm
+
+    vma_axes = tuple(axis for axis in self.config.mesh_axes if self.mesh.shape[axis] > 1)
+    use_vma = not self.config.use_tokamax_gmm
+
     def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes):
       # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
       if self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat:
@@ -1034,7 +1040,8 @@ class RoutedMoE(nnx.Module):
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", None))
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
     else:
-      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_moe", None))
+      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      # expert weights are sharded by exp
       w0_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
