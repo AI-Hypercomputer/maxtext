@@ -1071,10 +1071,7 @@ class Distillation(BaseModel):
       description="Overrides specific to the Teacher model (e.g., {'num_query_heads': 64}).",
   )
 
-  # --- Offline Distillation Fields ---
-  offline_distillation: bool = Field(
-      False, description="If True, enables offline distillation using pre-generated teacher data."
-  )
+  # --- Offline Distillation Field ---
   offline_data_dir: Optional[str] = Field(
       None, description="GCS or local path to the pre-generated ArrayRecord teacher data."
   )
