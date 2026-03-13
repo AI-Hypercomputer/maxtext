@@ -101,7 +101,6 @@ Below is a sample training script.
 
 ```sh
 python3 -m maxtext.trainers.pre_train.train \
-  src/maxtext/configs/base.yml \
   run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   load_parameters_path=${MODEL_CKPT_PATH?} \
