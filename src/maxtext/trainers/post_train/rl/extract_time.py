@@ -7,9 +7,6 @@ from google.cloud.logging import DESCENDING
 from datetime import datetime, timedelta, timezone
 import os
 
-# Example usage:
-# python ./maxtext/src/maxtext/trainers/post_train/rl/extract_time.py --pod_name sanbao-rl-0312-2
-
 def get_reshard_data(args):
     client = logging.Client(project="cloud-tpu-multipod-dev")
     
@@ -81,7 +78,6 @@ def get_reshard_data(args):
         print("Still no logs found. Try this final check:")
         print(f"1. Run: gcloud logging read '{log_filter}' --limit=1")
         print("2. If that returns nothing, your local gcloud credentials don't have permission for this project.")
-        return None
 
     mean_reshard_time = float('nan')
     if reshard_results:
@@ -125,10 +121,7 @@ def get_reshard_data(args):
         "log_link": log_link
     }])
 
-    # if args.store_directory is not exist, create it
-    if not os.path.exists(args.store_directory):
-        os.makedirs(args.store_directory)
-    output_csv_path = os.path.join(args.store_directory, "reshard_stats.csv")
+    output_csv_path = args.store_cvs_file
 
     # If the csv file already exists, append to it instead of overwriting
     try:
@@ -142,11 +135,16 @@ def get_reshard_data(args):
     print(result_df)
     return result_df
 
+# Example usage:
+"""
+python ./maxtext/src/maxtext/trainers/post_train/rl/extract_time.py --pod_name sanbao-rl-0312-2
+"""
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--pod_name", type=str, required=True, help="Pod name")
     parser.add_argument("--max_steps", type=int, default=10, help="Max steps")
-    parser.add_argument("--store_directory", type=str, required=True)
+    parser.add_argument("--store_cvs_file", type=str, required=True)
     args = parser.parse_args()
     get_reshard_data(args)
 

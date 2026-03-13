@@ -303,6 +303,18 @@ spec:
     return rendered_yaml
 
 # Example Usage:
+"""
+python ./maxtext/src/maxtext/trainers/post_train/rl/create_yaml.py \
+      --metadata_name "${workload_name}" \
+      --trainer_chips "${trainer_chips}" \
+      --number_of_sampler_chips_per_replica "${sampler_chips}" \
+      --sampler_replicas 1 \
+      --base_output_directory "${base_output_directory}" \
+      --hf_token "${hf_token}" \
+      --store_directory "${store_path}" \
+      --enable_tp "${enable_tp}"
+"""
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--metadata_name", type=str, required=True)
@@ -312,6 +324,7 @@ if __name__ == "__main__":
     parser.add_argument("--base_output_directory", type=str, required=True)
     parser.add_argument("--hf_token", type=str, required=True)
     parser.add_argument("--store_directory", type=str, required=True)
+    parser.add_argument("--enable_tp", type=bool, default=True)
     args = parser.parse_args()
 
     # for v7x-128
@@ -321,17 +334,26 @@ if __name__ == "__main__":
     rollout_data_parallelism = args.sampler_replicas
     sampler_chips = args.number_of_sampler_chips_per_replica * args.sampler_replicas
     assert sampler_chips + args.trainer_chips <= number_of_chips, "Total number of chips used by trainer and sampler must be less than or equal to available chips"
-    rollout_tensor_parallelism = args.number_of_sampler_chips_per_replica * 2
-    rollout_expert_parallelism = rollout_tensor_parallelism // 4 if rollout_tensor_parallelism >= 4 else 1
-    assert rollout_tensor_parallelism % rollout_expert_parallelism == 0, "rollout_tensor_parallelism must be divisible by rollout_expert_parallelism"
-    rollout_tensor_parallelism = 4 if rollout_tensor_parallelism >= 4 else rollout_tensor_parallelism
-    sampler_devices_fraction = sampler_chips / number_of_chips
-    if args.trainer_chips == 4:
-        subslice_shape = "2,2,1"
-        enable_single_controller = "true"
+    if args.enable_tp:
+        rollout_tensor_parallelism = args.number_of_sampler_chips_per_replica * 2
+        rollout_expert_parallelism = rollout_tensor_parallelism // 4 if rollout_tensor_parallelism >= 4 else 1
+        assert rollout_tensor_parallelism % rollout_expert_parallelism == 0, "rollout_tensor_parallelism must be divisible by rollout_expert_parallelism"
+        rollout_tensor_parallelism = 4 if rollout_tensor_parallelism >= 4 else rollout_tensor_parallelism
     else:
-        subslice_shape = ""
-        enable_single_controller = "false"
+        rollout_tensor_parallelism = 1
+        rollout_expert_parallelism = args.number_of_sampler_chips_per_replica * 2
+      
+    sampler_devices_fraction = sampler_chips / number_of_chips
+    enable_single_controller = "true"
+
+    subslice_shape_status = {
+        4: "2,2,1",
+        8: "2,2,2",
+        16: "2,2,4",
+        32: "2,4,4",
+        64: "4,4,4",
+        128: "4,4,8"}
+    subslice_shape = subslice_shape_status.get(args.trainer_chips, "")
     
     output_directory = os.path.join(args.base_output_directory, args.metadata_name)
 
