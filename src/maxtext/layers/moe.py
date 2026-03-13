@@ -891,6 +891,12 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
+    vma_axes = tuple(axis for axis in self.config.mesh_axes if self.mesh.shape[axis] > 1)
+    use_vma = not self.config.use_tokamax_gmm
+
+    vma_axes = tuple(axis for axis in self.config.mesh_axes if self.mesh.shape[axis] > 1)
+    use_vma = not self.config.use_tokamax_gmm
+
     def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes):
       tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
           group_sizes,
@@ -1030,7 +1036,8 @@ class RoutedMoE(nnx.Module):
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", None))
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
     else:
-      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_moe", None))
+      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      # expert weights are sharded by exp
       w0_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
@@ -1093,7 +1100,7 @@ class RoutedMoE(nnx.Module):
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
         ),
-        check_vma=False,
+        check_vma=use_vma,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
@@ -1251,6 +1258,7 @@ class RoutedMoE(nnx.Module):
 
       wi_combine_scopes = self.config.wi_combine_scopes
       wo_combine_scopes = self.config.wo_combine_scopes
+      # x * W_gate
       layer_w0 = gmm_fn(
           x,
           w0,
@@ -1263,8 +1271,8 @@ class RoutedMoE(nnx.Module):
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
-      layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
-
+      layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
+      # x * W_up
       layer_w1 = gmm_fn(
           x,
           w1,
@@ -1277,9 +1285,10 @@ class RoutedMoE(nnx.Module):
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w1 = layer_w1 + w1_bias
-      layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
+      layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
+      # multiplied result from W_gate and W_up before downward projection
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
-
+      # output of FFN
       intermediate_output = gmm_fn(
           intermediate_layer,
           wo,
