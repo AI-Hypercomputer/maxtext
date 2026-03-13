@@ -180,26 +180,18 @@ def gather_weights(weights, mesh):
         (routed_wi_0, routed_wi_1, routed_wo),
         (shared_wi_0, shared_wi_1, shared_wo),
     ) = weights
-    # All-gather across FSDP axis. Expert axis is used for FSDP in attention.
-    wq_a = jax.lax.all_gather(wq_a, axis_name="expert", tiled=True, axis=1)
+    # All-gather across FSDP axis.
     wq_a = jax.lax.all_gather(wq_a, axis_name="fsdp", tiled=True)
-    wq_b = jax.lax.all_gather(wq_b, axis_name="expert", tiled=True, axis=1)
     wq_b = jax.lax.all_gather(wq_b, axis_name="fsdp", tiled=True)
-    wkv_a = jax.lax.all_gather(wkv_a, axis_name="expert", tiled=True, axis=1)
     wkv_a = jax.lax.all_gather(wkv_a, axis_name="fsdp", tiled=True)
-    wkv_b = jax.lax.all_gather(wkv_b, axis_name="expert", tiled=True, axis=1)
     wkv_b = jax.lax.all_gather(wkv_b, axis_name="fsdp", tiled=True)
-    out = jax.lax.all_gather(out, axis_name="expert", tiled=True)
     out = jax.lax.all_gather(out, axis_name="fsdp", tiled=True, axis=2)
     gate = jax.lax.all_gather(gate, axis_name="fsdp", tiled=True)
     routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name="fsdp", tiled=True)
     routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name="fsdp", tiled=True)
     routed_wo = jax.lax.all_gather(routed_wo, axis_name="fsdp", tiled=True)
-    shared_wi_0 = jax.lax.all_gather(shared_wi_0, axis_name="expert", tiled=True, axis=1)
     shared_wi_0 = jax.lax.all_gather(shared_wi_0, axis_name="fsdp", tiled=True)
-    shared_wi_1 = jax.lax.all_gather(shared_wi_1, axis_name="expert", tiled=True, axis=1)
     shared_wi_1 = jax.lax.all_gather(shared_wi_1, axis_name="fsdp", tiled=True)
-    shared_wo = jax.lax.all_gather(shared_wo, axis_name="expert", tiled=True)
     shared_wo = jax.lax.all_gather(shared_wo, axis_name="fsdp", tiled=True, axis=1)
     return (
         (
@@ -224,13 +216,13 @@ def gather_weights(weights, mesh):
                       jax.sharding.PartitionSpec(None),
                   ),
                   (
-                      jax.sharding.PartitionSpec("fsdp", "expert"),
-                      jax.sharding.PartitionSpec("fsdp", "expert", None),
+                      jax.sharding.PartitionSpec("fsdp", None),
+                      jax.sharding.PartitionSpec("fsdp", None, None),
                       jax.sharding.PartitionSpec(None),
-                      jax.sharding.PartitionSpec("fsdp", "expert"),
-                      jax.sharding.PartitionSpec("fsdp", "expert", None),
+                      jax.sharding.PartitionSpec("fsdp", None),
+                      jax.sharding.PartitionSpec("fsdp", None, None),
                       jax.sharding.PartitionSpec(None),
-                      jax.sharding.PartitionSpec("expert", None, "fsdp"),
+                      jax.sharding.PartitionSpec(None, None, "fsdp"),
                   ),
               ),
               (
@@ -244,9 +236,9 @@ def gather_weights(weights, mesh):
                       jax.sharding.PartitionSpec("fsdp", "expert", None),
                   ),
                   (
-                      jax.sharding.PartitionSpec("fsdp", "expert"),
-                      jax.sharding.PartitionSpec("fsdp", "expert"),
-                      jax.sharding.PartitionSpec("expert", "fsdp"),
+                      jax.sharding.PartitionSpec("fsdp", None),
+                      jax.sharding.PartitionSpec("fsdp", None),
+                      jax.sharding.PartitionSpec(None, "fsdp"),
                   ),
               ),
           ),
