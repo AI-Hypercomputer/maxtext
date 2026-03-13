@@ -88,6 +88,343 @@ from jax.experimental.pallas import tpu as pltpu
 DEFAULT_MASK_VALUE = -1e9
 
 
+
+def backward_qw_kernel(q_ref, w_ref, k_ref, d_score_ref, d_q_ref, d_w_ref,
+                       k_scratch_ref, d_score_scratch_ref, sem, *,
+                       bS):
+    """Pallas kernel for d_q and d_w computation.
+    
+    Args:
+        q_ref: Query block. Shape: (bT, H, D_padded). Memory: VMEM.
+        w_ref: Weights block. Shape: (bT, H_padded). Memory: VMEM.
+        k_ref: Key tensor (full array). Shape: (B, S_padded, D_padded). Memory: HBM (ANY).
+        d_score_ref: Gradient of score (full array). Shape: (B, T_padded, S_padded). Memory: HBM (ANY).
+        d_q_ref: Gradient of query (accumulator). Shape: (bT, H, D_padded). Memory: VMEM.
+        d_w_ref: Gradient of weights (accumulator). Shape: (bT, H_padded). Memory: VMEM.
+        k_scratch_ref: Scratch buffer for K block. Shape: (bS, D_padded). Memory: VMEM.
+        d_score_scratch_ref: Scratch buffer for d_score block. Shape: (bT, bS). Memory: VMEM.
+        sem: DMA Semaphore.
+        bS: Block size for S dimension loop.
+    """
+    # Grid indices
+    b_idx = pl.program_id(0)
+    t_idx = pl.program_id(1)
+    
+    bT, H, D_padded = q_ref.shape
+    
+    H_padded = w_ref.shape[1]
+    
+    t_start = t_idx * bT
+    
+    # Initialize accumulators
+    d_q_ref[...] = jnp.zeros_like(d_q_ref)
+    d_w_ref[...] = jnp.zeros_like(d_w_ref)
+    
+    # Load q and w from VMEM to registers
+    q_val = q_ref[...] # (bT, H, D_padded)
+    w_val_padded = w_ref[...] # (bT, H_padded)
+    w_val = w_val_padded[:, :H] # (bT, H)
+    
+    # Flatten q for matmul: (bT, H, D) -> (bT*H, D)
+    q_flat = q_val.reshape(bT * H, D_padded)
+    
+    # S_padded is the second dim of k_ref
+    S_padded = k_ref.shape[1]
+    num_blocks = S_padded // bS
+    
+    def body(i, _):
+        s_start = i * bS
+        
+        # Load K block: (B, S, D) -> (bS, D)
+        dma_k = pltpu.make_async_copy(
+            k_ref.at[b_idx, pl.ds(s_start, bS), :],
+            k_scratch_ref,
+            sem
+        )
+        # Load d_score block: (B, T, S) -> (bT, bS)
+        dma_ds = pltpu.make_async_copy(
+            d_score_ref.at[b_idx, pl.ds(t_start, bT), pl.ds(s_start, bS)],
+            d_score_scratch_ref,
+            sem
+        )
+        
+        dma_k.start()
+        dma_ds.start()
+        dma_k.wait()
+        dma_ds.wait()
+        
+        k_block = k_scratch_ref[...] # (bS, D_padded)
+        d_score_block = d_score_scratch_ref[...] # (bT, bS)
+        
+        # Recompute Logits: (bT*H, D) @ (bS, D).T -> (bT*H, bS)
+        logits_flat = jnp.dot(q_flat, k_block.T)
+        logits = logits_flat.reshape(bT, H, bS) # (bT, H, bS)
+        
+        # ReLU mask
+        relu_mask = logits > 0
+        relu_logits = jnp.where(relu_mask, logits, 0.0)
+        
+        # Compute d_w contribution
+        # d_w_acc += sum(d_score * relu_logits, axis=1)
+        # d_score: (bT, bS) -> (bT, 1, bS)
+        # relu_logits: (bT, H, bS)
+        weighted_ds = d_score_block[:, None, :] * relu_logits # (bT, H, bS)
+        d_w_partial = jnp.sum(weighted_ds, axis=2) # Sum over S -> (bT, H)
+        
+        # Accumulate d_w
+        d_w_ref[:, :H] += d_w_partial
+        
+        # Compute d_logits for d_q
+        # d_logits = d_score * w * (logits > 0)
+        # w: (bT, H) -> (bT, H, 1)
+        d_logits = d_score_block[:, None, :] * w_val[:, :, None] * relu_mask.astype(jnp.float32) # (bT, H, bS)
+        
+        # Compute d_q contribution
+        # d_q_acc += d_logits @ k
+        # d_logits -> (bT*H, bS)
+        d_logits_flat = d_logits.reshape(bT * H, bS)
+        d_q_partial = jnp.dot(d_logits_flat, k_block) # (bT*H, D_padded)
+        d_q_partial_reshaped = d_q_partial.reshape(bT, H, D_padded)
+        
+        d_q_ref[...] += d_q_partial_reshaped
+        
+        return ()
+
+    jax.lax.fori_loop(0, num_blocks, body, ())
+
+
+def backward_k_kernel(k_ref, q_ref, w_ref, d_score_ref, d_k_ref,
+                      q_scratch_ref, w_scratch_ref, d_score_scratch_ref, sem, *,
+                      bT):
+    """Pallas kernel for d_k computation.
+    
+    Args:
+        k_ref: Key block. Shape: (bS, D_padded). Memory: VMEM.
+        q_ref: Query tensor (full). Shape: (B, T_padded, H, D_padded). Memory: HBM (ANY).
+        w_ref: Weights tensor (full). Shape: (B, T_padded, H_padded). Memory: HBM (ANY).
+        d_score_ref: Gradient of score (full). Shape: (B, T_padded, S_padded). Memory: HBM (ANY).
+        d_k_ref: Gradient of key (accumulator). Shape: (bS, D_padded). Memory: VMEM.
+        q_scratch_ref: Scratch buffer for Q block. Shape: (bT, H, D_padded). Memory: VMEM.
+        w_scratch_ref: Scratch buffer for W block. Shape: (bT, H_padded). Memory: VMEM.
+        d_score_scratch_ref: Scratch buffer for d_score block. Shape: (bT, bS). Memory: VMEM.
+        sem: DMA Semaphore.
+        bT: Block size for T dimension loop.
+    """
+    # Grid indices
+    b_idx = pl.program_id(0)
+    s_idx = pl.program_id(1)
+    
+    bS, D_padded = k_ref.shape
+    s_start = s_idx * bS
+    
+    # Initialize accumulator
+    d_k_ref[...] = jnp.zeros_like(d_k_ref)
+    
+    # Load k from VMEM
+    k_val = k_ref[...] # (bS, D_padded)
+    
+    # T_padded is the second dim of q_ref
+    T_padded = q_ref.shape[1]
+    H = q_ref.shape[2] # Real H
+    num_blocks = T_padded // bT
+    
+    def body(i, _):
+        t_start = i * bT
+        
+        # Load Q block: (B, T, H, D) -> (bT, H, D)
+        dma_q = pltpu.make_async_copy(
+            q_ref.at[b_idx, pl.ds(t_start, bT), :, :],
+            q_scratch_ref,
+            sem
+        )
+        # Load W block: (B, T, H_padded) -> (bT, H_padded)
+        dma_w = pltpu.make_async_copy(
+            w_ref.at[b_idx, pl.ds(t_start, bT), :],
+            w_scratch_ref,
+            sem
+        )
+        # Load d_score block: (B, T, S) -> (bT, bS)
+        dma_ds = pltpu.make_async_copy(
+            d_score_ref.at[b_idx, pl.ds(t_start, bT), pl.ds(s_start, bS)],
+            d_score_scratch_ref,
+            sem
+        )
+        
+        dma_q.start()
+        dma_w.start()
+        dma_ds.start()
+        dma_q.wait()
+        dma_w.wait()
+        dma_ds.wait()
+        
+        q_block = q_scratch_ref[...] # (bT, H, D_padded)
+        w_block_padded = w_scratch_ref[...] # (bT, H_padded)
+        w_block = w_block_padded[:, :H] # (bT, H)
+        d_score_block = d_score_scratch_ref[...] # (bT, bS)
+        
+        # Recompute Logits: (bT, H, D) @ (bS, D).T -> (bT, H, bS)
+        q_flat = q_block.reshape(bT * H, D_padded)
+        logits_flat = jnp.dot(q_flat, k_val.T)
+        logits = logits_flat.reshape(bT, H, bS)
+        
+        # ReLU mask
+        relu_mask = logits > 0
+        
+        # Compute d_logits for d_k
+        # d_logits = d_score * w * (logits > 0)
+        d_logits = d_score_block[:, None, :] * w_block[:, :, None] * relu_mask.astype(jnp.float32) # (bT, H, bS)
+        
+        # Compute d_k contribution
+        # d_k_acc += d_logits.T @ q
+        # d_logits -> (bT*H, bS) -> (bS, bT*H)
+        d_logits_flat = d_logits.reshape(bT * H, bS)
+        # q_flat: (bT*H, D_padded)
+        d_k_partial = jnp.dot(d_logits_flat.T, q_flat) # (bS, D_padded)
+        d_k_ref[...] += d_k_partial
+        
+        return ()
+
+    jax.lax.fori_loop(0, num_blocks, body, ())
+
+
+def backward_computation(q: jnp.ndarray, k: jnp.ndarray, w: jnp.ndarray, d_score: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Sets up and invokes the Pallas backward kernels.
+    
+    Args:
+        q: Query tensor (B, T, H, D)
+        k: Key tensor (B, S, D)
+        w: Weights tensor (B, T, H)
+        d_score: Gradient of score (B, T, S)
+        
+    Returns:
+        d_q: (B, T, H, D)
+        d_k: (B, S, D)
+        d_w: (B, T, H)
+    """
+    B, T, H, D = q.shape
+    _, S, _ = k.shape
+    
+    # Block sizes
+    bT = 32
+    bS = 512
+    
+    # Padding
+    pad_d = (128 - (D % 128)) % 128
+    D_padded = D + pad_d
+    
+    pad_s = (bS - (S % bS)) % bS
+    S_padded = S + pad_s
+    
+    pad_t = (bT - (T % bT)) % bT
+    T_padded = T + pad_t
+    
+    # Pad H in w to 128 for DMA alignment
+    pad_h_w = (128 - (H % 128)) % 128
+    H_padded_w = H + pad_h_w
+    
+    # Apply padding
+    if pad_d > 0:
+        q = jnp.pad(q, ((0,0), (0,0), (0,0), (0, pad_d)))
+        k = jnp.pad(k, ((0,0), (0,0), (0, pad_d)))
+    
+    if pad_s > 0:
+        k = jnp.pad(k, ((0,0), (0, pad_s), (0,0)))
+        d_score = jnp.pad(d_score, ((0,0), (0,0), (0, pad_s)))
+    
+    if pad_t > 0:
+        q = jnp.pad(q, ((0,0), (0, pad_t), (0,0), (0,0)))
+        w = jnp.pad(w, ((0,0), (0, pad_t), (0,0)))
+        d_score = jnp.pad(d_score, ((0,0), (0, pad_t), (0,0)))
+
+    if pad_h_w > 0:
+        # Pad w along H dimension (last dimension)
+        w = jnp.pad(w, ((0,0), (0,0), (0, pad_h_w)))
+        
+    # --- Kernel 1: d_q and d_w ---
+    grid_qw = (B, T_padded // bT)
+    
+    q_spec = pl.BlockSpec((None, bT, H, D_padded), lambda b, t: (b, t, 0, 0))
+    w_spec = pl.BlockSpec((None, bT, H_padded_w), lambda b, t: (b, t, 0))
+    k_spec_any = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+    d_score_spec_any = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+    
+    d_q_spec = pl.BlockSpec((None, bT, H, D_padded), lambda b, t: (b, t, 0, 0))
+    d_w_spec = pl.BlockSpec((None, bT, H_padded_w), lambda b, t: (b, t, 0))
+    
+    scratch_shapes_qw = [
+        pltpu.VMEM((bS, D_padded), k.dtype),       # k_scratch
+        pltpu.VMEM((bT, bS), d_score.dtype),       # d_score_scratch
+        pltpu.SemaphoreType.DMA,                   # sem
+    ]
+    
+    kernel_qw_fn = functools.partial(backward_qw_kernel, bS=bS)
+    
+    d_q, d_w = pl.pallas_call(
+        kernel_qw_fn,
+        out_shape=[
+            jax.ShapeDtypeStruct((B, T_padded, H, D_padded), q.dtype),
+            jax.ShapeDtypeStruct((B, T_padded, H_padded_w), w.dtype)
+        ],
+        grid=grid_qw,
+        in_specs=[q_spec, w_spec, k_spec_any, d_score_spec_any],
+        out_specs=[d_q_spec, d_w_spec],
+        scratch_shapes=scratch_shapes_qw,
+        compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "parallel"))
+    )(q, w, k, d_score)
+    
+    # --- Kernel 2: d_k ---
+    grid_k = (B, S_padded // bS)
+    
+    k_spec = pl.BlockSpec((None, bS, D_padded), lambda b, s: (b, s, 0))
+    q_spec_any = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+    w_spec_any = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+    # d_score_spec_any reused
+    
+    d_k_spec = pl.BlockSpec((None, bS, D_padded), lambda b, s: (b, s, 0))
+    
+    scratch_shapes_k = [
+        pltpu.VMEM((bT, H, D_padded), q.dtype),    # q_scratch
+        pltpu.VMEM((bT, H_padded_w), w.dtype),     # w_scratch (padded)
+        pltpu.VMEM((bT, bS), d_score.dtype),       # d_score_scratch
+        pltpu.SemaphoreType.DMA,                   # sem
+    ]
+    
+    kernel_k_fn = functools.partial(backward_k_kernel, bT=bT)
+    
+    d_k = pl.pallas_call(
+        kernel_k_fn,
+        out_shape=jax.ShapeDtypeStruct((B, S_padded, D_padded), k.dtype),
+        grid=grid_k,
+        in_specs=[k_spec, q_spec_any, w_spec_any, d_score_spec_any],
+        out_specs=d_k_spec,
+        scratch_shapes=scratch_shapes_k,
+        compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "parallel"))
+    )(k, q, w, d_score)
+    
+    # Slice back
+    d_q = d_q[:, :T, :, :D]
+    d_k = d_k[:, :S, :D]
+    d_w = d_w[:, :T, :H] # Slice H back
+    
+    return d_q, d_k, d_w
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0, 5))
+def indexer_computation_vjp(comp_fn, q: jnp.ndarray, k: jnp.ndarray, w: jnp.ndarray, mask: Optional[jnp.ndarray], top_k: int):
+    return comp_fn(q, k, w, mask, top_k)
+
+def _indexer_computation_fwd(comp_fn, q: jnp.ndarray, k: jnp.ndarray, w: jnp.ndarray, mask: Optional[jnp.ndarray], top_k: int):
+    score, indices, index_mask = comp_fn(q, k, w, mask, top_k)
+    return (score, indices, index_mask), (q, k, w)
+
+def _indexer_computation_bwd(comp_fn, top_k: int, res, g):
+    q, k, w = res
+    g_score, g_indices, g_index_mask = g
+    d_q, d_k, d_w = backward_computation(q, k, w, g_score)
+    return d_q, d_k, d_w, None
+
+indexer_computation_vjp.defvjp(_indexer_computation_fwd, _indexer_computation_bwd)
+
 class Indexer(nnx.Module):
   """Indexer for DeepSeek Sparse Attention (DSA).
 
@@ -304,7 +641,7 @@ class Indexer(nnx.Module):
 
       jax.lax.fori_loop(0, num_blocks, body, ())
 
-  def computation(self, q: jnp.ndarray, k: jnp.ndarray, w: jnp.ndarray, mask: Optional[jnp.ndarray], top_k: int) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+  def _computation_impl(self, q: jnp.ndarray, k: jnp.ndarray, w: jnp.ndarray, mask: Optional[jnp.ndarray], top_k: int) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
       """Sets up and invokes the Pallas kernel.
       
       Args:
@@ -427,6 +764,9 @@ class Indexer(nnx.Module):
           index_mask = jnp.zeros((B, T, top_k), dtype=jnp.float32)
           
       return score, indices, index_mask
+
+  def computation(self, q: jnp.ndarray, k: jnp.ndarray, w: jnp.ndarray, mask: Optional[jnp.ndarray], top_k: int) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+      return indexer_computation_vjp(self._computation_impl, q, k, w, mask, top_k)
 
   def generate_mask(self, topk_indices, s):
     """
