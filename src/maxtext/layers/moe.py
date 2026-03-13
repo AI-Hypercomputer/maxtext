@@ -1104,7 +1104,7 @@ class RoutedMoE(nnx.Module):
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
         ),
-        check_vma=False,
+        check_vma=use_vma,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
@@ -1262,6 +1262,7 @@ class RoutedMoE(nnx.Module):
 
       wi_combine_scopes = self.config.wi_combine_scopes
       wo_combine_scopes = self.config.wo_combine_scopes
+      # x * W_gate
       layer_w0 = gmm_fn(
           x,
           w0,
@@ -1274,8 +1275,8 @@ class RoutedMoE(nnx.Module):
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
-      layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
-
+      layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
+      # x * W_up
       layer_w1 = gmm_fn(
           x,
           w1,
@@ -1288,9 +1289,10 @@ class RoutedMoE(nnx.Module):
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w1 = layer_w1 + w1_bias
-      layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
+      layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
+      # multiplied result from W_gate and W_up before downward projection
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
-
+      # output of FFN
       intermediate_output = gmm_fn(
           intermediate_layer,
           wo,
