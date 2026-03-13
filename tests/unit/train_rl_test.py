@@ -28,10 +28,14 @@ train_rl = pytest.importorskip(
 )
 
 
-def _get_mock_devices(num_devices):
-  mock_devices = [mock.MagicMock() for _ in range(num_devices)]
-  for i, d in enumerate(mock_devices):
-    d.id = i
+def _get_mock_devices(devices_per_slice, num_slices=1):
+  mock_devices = []
+  for slice_idx in range(num_slices):
+    for _ in range(devices_per_slice):
+      d = mock.MagicMock()
+      d.id = len(mock_devices)
+      d.slice_index = slice_idx
+      mock_devices.append(d)
   return mock_devices
 
 
@@ -92,6 +96,195 @@ class TrainRLTest(unittest.TestCase):
       self.assertEqual(len(sampler_devices), 6)
       self.assertEqual(trainer_devices, mock_devices[:2])
       self.assertEqual(sampler_devices, mock_devices[2:])
+
+  @pytest.mark.cpu_only
+  def test_setup_configs_and_devices_multislice_not_enough_slices(self):
+    """Test setup_configs_and_devices raises ValueError when not enough slices."""
+    mock_devices = _get_mock_devices(num_slices=2, devices_per_slice=4)
+    mock_config = SimpleNamespace(
+        num_trainer_slices=2,
+        num_samplers_slices=1,
+    )
+
+    def side_effect(argv, **kwargs):
+      res = SimpleNamespace(**vars(mock_config))
+      for k, v in kwargs.items():
+        setattr(res, k, v)
+      return res
+
+    with (
+        mock.patch.object(jax, "devices", return_value=mock_devices),
+        mock.patch(
+            "maxtext.trainers.post_train.rl.train_rl.pyconfig.initialize_pydantic",
+            side_effect=side_effect,
+        ),
+    ):
+      with self.assertRaisesRegex(ValueError, "Not enough slices for trainer and samplers"):
+        train_rl.setup_configs_and_devices(["dummy", "dummy"])
+
+  @pytest.mark.cpu_only
+  def test_setup_configs_and_devices_multislice_invalid_tp(self):
+    """Test setup_configs_and_devices raises ValueError for invalid TP."""
+    mock_devices = _get_mock_devices(num_slices=4, devices_per_slice=8)
+    mock_config = SimpleNamespace(
+        num_trainer_slices=2,
+        num_samplers_slices=2,
+        ici_tensor_parallelism=3,  # 8 is not divisible by 3
+        ici_fsdp_parallelism=-1,
+    )
+
+    def side_effect(argv, **kwargs):
+      res = SimpleNamespace(**vars(mock_config))
+      for k, v in kwargs.items():
+        setattr(res, k, v)
+      return res
+
+    with (
+        mock.patch.object(jax, "devices", return_value=mock_devices),
+        mock.patch(
+            "maxtext.trainers.post_train.rl.train_rl.pyconfig.initialize_pydantic",
+            side_effect=side_effect,
+        ),
+    ):
+      with self.assertRaisesRegex(ValueError, "must be divisible by tensor parallelism"):
+        train_rl.setup_configs_and_devices(["dummy", "dummy"])
+
+  @pytest.mark.cpu_only
+  def test_setup_configs_and_devices_multislice_invalid_tp_fsdp(self):
+    """Test setup_configs_and_devices raises ValueError for inconsistent TP and FSDP."""
+    mock_devices = _get_mock_devices(num_slices=4, devices_per_slice=8)
+    mock_config = SimpleNamespace(
+        num_trainer_slices=2,
+        num_samplers_slices=2,
+        ici_tensor_parallelism=4,
+        ici_fsdp_parallelism=3,  # 4 * 3 != 8
+    )
+
+    def side_effect(argv, **kwargs):
+      res = SimpleNamespace(**vars(mock_config))
+      for k, v in kwargs.items():
+        setattr(res, k, v)
+      return res
+
+    with (
+        mock.patch.object(jax, "devices", return_value=mock_devices),
+        mock.patch(
+            "maxtext.trainers.post_train.rl.train_rl.pyconfig.initialize_pydantic",
+            side_effect=side_effect,
+        ),
+    ):
+      with self.assertRaisesRegex(ValueError, "must equal devices_per_slice"):
+        train_rl.setup_configs_and_devices(["dummy", "dummy"])
+
+  @pytest.mark.cpu_only
+  def test_get_rollout_kwargs_no_dp(self):
+    """Test case 1: sampler_config.rollout_data_parallelism=-1 -> verify result is calculated."""
+    # num_sampler_devices=16, tp=2, ep=4 -> dp should be 16 // (2 * 4) = 2
+    sampler_config = SimpleNamespace(
+        rollout_data_parallelism=-1,
+        rollout_tensor_parallelism=2,
+        rollout_expert_parallelism=4,
+    )
+    expected_result = {
+        "data_parallel_size": 2,
+        "tensor_parallel_size": 2,
+        "expert_parallel_size": 4,
+    }
+    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 16), expected_result)
+
+  @pytest.mark.cpu_only
+  def test_get_rollout_kwargs_auto_tp(self):
+    """Test case 2: dp=2, tp=-1, num_sampler_devices=4."""
+    sampler_config = SimpleNamespace(
+        rollout_data_parallelism=2,
+        rollout_tensor_parallelism=-1,
+        rollout_expert_parallelism=1,
+    )
+    expected_result = {
+        "data_parallel_size": 2,
+        "tensor_parallel_size": 2,
+        "expert_parallel_size": 1,
+    }
+    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4), expected_result)
+
+  @pytest.mark.cpu_only
+  def test_get_rollout_kwargs_fixed_tp_dp(self):
+    """Test case 3: dp=2, tp=2, num_sampler_devices=4."""
+    sampler_config = SimpleNamespace(
+        rollout_data_parallelism=2,
+        rollout_tensor_parallelism=2,
+        rollout_expert_parallelism=1,
+    )
+    expected_result = {
+        "data_parallel_size": 2,
+        "tensor_parallel_size": 2,
+        "expert_parallel_size": 1,
+    }
+    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4), expected_result)
+
+  @pytest.mark.cpu_only
+  def test_get_rollout_kwargs_auto_ep(self):
+    """Test case 4: ep=-1 -> verify result is calculated."""
+    # num_sampler_devices=8, tp=2, dp=2 -> ep should be 8 // (2 * 2) = 2
+    sampler_config = SimpleNamespace(
+        rollout_data_parallelism=2,
+        rollout_tensor_parallelism=2,
+        rollout_expert_parallelism=-1,
+    )
+    expected_result = {
+        "data_parallel_size": 2,
+        "tensor_parallel_size": 2,
+        "expert_parallel_size": 2,
+    }
+    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8), expected_result)
+
+  @pytest.mark.cpu_only
+  def test_get_rollout_kwargs_errors(self):
+    """Test various error cases for get_rollout_kwargs_for_parallelism."""
+    # More than one -1
+    sampler_config = SimpleNamespace(
+        rollout_data_parallelism=-1,
+        rollout_tensor_parallelism=-1,
+        rollout_expert_parallelism=1,
+    )
+    with self.assertRaisesRegex(ValueError, "At most one of .* can be -1"):
+      train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4)
+
+    # num_devices % (tp * ep) != 0 when dp == -1
+    sampler_config = SimpleNamespace(
+        rollout_data_parallelism=-1,
+        rollout_tensor_parallelism=3,
+        rollout_expert_parallelism=1,
+    )
+    with self.assertRaisesRegex(ValueError, "must be divisible by"):
+      train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4)
+
+    # num_devices % (tp * dp) != 0 when ep == -1
+    sampler_config = SimpleNamespace(
+        rollout_data_parallelism=2,
+        rollout_tensor_parallelism=3,
+        rollout_expert_parallelism=-1,
+    )
+    with self.assertRaisesRegex(ValueError, "must be divisible by"):
+      train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8)
+
+    # num_devices % (dp * ep) != 0 when tp == -1
+    sampler_config = SimpleNamespace(
+        rollout_data_parallelism=3,
+        rollout_tensor_parallelism=-1,
+        rollout_expert_parallelism=2,
+    )
+    with self.assertRaisesRegex(ValueError, "must be divisible by"):
+      train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8)
+
+    # tp * dp * ep != num_sampler_devices when all are positive
+    sampler_config = SimpleNamespace(
+        rollout_data_parallelism=2,
+        rollout_tensor_parallelism=2,
+        rollout_expert_parallelism=1,
+    )
+    with self.assertRaisesRegex(ValueError, r"!= len\(sampler_devices\)"):
+      train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8)
 
 
 if __name__ == "__main__":

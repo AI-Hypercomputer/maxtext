@@ -133,7 +133,7 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 Run the following command for GRPO:
 
 ```
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
   tokenizer_path=${TOKENIZER?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
@@ -157,7 +157,7 @@ The overview of what this run will do is as follows:
 Run the following command for GSPO:
 
 ```
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
   tokenizer_path=${TOKENIZER?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \

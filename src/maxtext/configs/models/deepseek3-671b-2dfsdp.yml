@@ -56,19 +56,21 @@ rope_truncate: True
 rope_attention_scaling: False
 
 override_logical_axis_rules: True
-mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']
-data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']]
+mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']
+data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']]
 logical_axis_rules: [
     ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
-    ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
+    ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
     ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
     ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
     ['activation_norm_length', ['context']],
     ['activation_heads', []],
+    ['activation_stage', 'stage'],
     ['embed', ['fsdp']],
     ['embed_no_exp', ['fsdp']],
     ['q_lora', ['fsdp']],
     ['kv_lora', ['fsdp']],
+    ['layers', 'stage'],
     ['q_lora_up_proj', ['fsdp_transpose', 'expert']],
     ['kv_lora_up_proj', ['fsdp_transpose', 'expert']],
     ['q_heads', ['fsdp_transpose', 'expert']],

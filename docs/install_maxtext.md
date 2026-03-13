@@ -127,7 +127,7 @@ Run the following command, replacing `<jax-build-commit-hash>` with the hash you
 
 ```bash
 seed-env \
-  --local-requirements=dependencies/requirements/base_requirements/tpu-base-requirements.txt \
+  --local-requirements=src/dependencies/requirements/base_requirements/tpu-base-requirements.txt \
   --host-name=MaxText \
   --seed-commit=<jax-build-commit-hash> \
   --python-version=3.12 \
@@ -141,7 +141,7 @@ Similarly, run the command for the GPU requirements.
 
 ```bash
 seed-env \
-  --local-requirements=dependencies/requirements/base_requirements/cuda12-base-requirements.txt \
+  --local-requirements=src/dependencies/requirements/base_requirements/cuda12-base-requirements.txt \
   --host-name=MaxText \
   --seed-commit=<jax-build-commit-hash> \
   --python-version=3.12 \

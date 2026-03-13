@@ -60,6 +60,7 @@ Before starting, ensure you have:
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
 - XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md)).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
+- **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Setup Environment Variables
 
@@ -82,6 +83,7 @@ export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${WORKLOAD?}/0/items
 export TPU_TYPE=<TPU Type> # e.g., 'v5p-128'
 export TPU_CLUSTER=<cluster name>
 export PROJECT_ID=<GCP project ID>
+export ZONE=<GCP zone>
 export CLOUD_IMAGE_NAME=<your artifact registry image> # Name for the Docker image to be built
 ```
 
@@ -106,7 +108,9 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 
 ## Build and upload MaxText Docker image with post-training dependencies
 
-Before building the Docker image, authenticate to
+Before building the Docker image, follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
+
+Then, authenticate to
 [Google Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/docker/authentication#gcloud-helper)
 for permission to push your images and other access.
 
@@ -142,13 +146,13 @@ Run the following script to create a Docker image with stable releases of
 MaxText, and its post-training dependencies. The build process takes approximately 10-15 minutes.
 
 ```bash
-bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
+bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
 ```
 
 For experimental features (such as improved pathwaysutils resharding API), use:
 
 ```bash
-bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training-experimental
+bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training-experimental
 ```
 
 ### Option 2: From Github
@@ -159,7 +163,7 @@ For using a version newer than the latest PyPI release, you could also build the
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
 
-bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
+bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
 ```
 
 ### Upload the Docker Image
@@ -170,7 +174,7 @@ bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-trainin
 > project administrator if you don't have this permission.
 
 ```bash
-bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
+bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
 ```
 
 ## Submit your RL workload via Pathways
@@ -192,8 +196,9 @@ xpk workload create-pathways --workload ${WORKLOAD?} \
 --docker-image gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} --cluster ${TPU_CLUSTER?} \
 --tpu-type=${TPU_TYPE?} --num-slices=1 \
 --project=${PROJECT_ID?} --priority=high \
+--zone=${ZONE?} \
 --command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
   tokenizer_path=${TOKENIZER?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
@@ -209,8 +214,9 @@ xpk workload create-pathways --workload ${WORKLOAD?} \
 --docker-image gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} --cluster ${TPU_CLUSTER?} \
 --tpu-type=${TPU_TYPE?} --num-slices=1 \
 --project=${PROJECT_ID?} --priority=high \
+--zone=${ZONE?} \
 --command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
   tokenizer_path=${TOKENIZER?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \

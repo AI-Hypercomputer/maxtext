@@ -140,8 +140,8 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         decoder_positions=positions,
         decoder_segment_ids=decoder_segment_ids,
         enable_dropout=config.enable_dropout,
-        decoder_target_tokens=kwargs.get("targets", None),
-        decoder_target_mask=kwargs.get("targets_segmentation", None),
+        decoder_target_tokens=kwargs.get("decoder_target_tokens", None),
+        decoder_target_mask=kwargs.get("decoder_target_mask", None),
     )
     out_projection_activations = None
     if config.distill_beta > 0.0:
@@ -203,6 +203,8 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     self.strategy = strategy
 
     # override optimizer to only use student_model.
+    if training_config.gradient_accumulation_steps is not None and training_config.gradient_accumulation_steps > 1:
+      optimizer = optax.MultiSteps(optimizer, training_config.gradient_accumulation_steps)
     wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(model.student_model, optimizer, wrt=wrt)
 
@@ -221,6 +223,8 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
             positions=batch["positions"],
             attention_mask=batch.get("attention_mask"),
             decoder_segment_ids=batch.get("decoder_segment_ids"),
+            decoder_target_tokens=batch.get("targets", None),
+            decoder_target_mask=batch.get("targets_segmentation", None),
             cache=None,
         )
 
@@ -232,9 +236,12 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
           positions=batch["positions"],
           attention_mask=batch.get("attention_mask"),
           decoder_segment_ids=batch.get("decoder_segment_ids"),
+          decoder_target_tokens=batch.get("targets", None),
+          decoder_target_mask=batch.get("targets_segmentation", None),
           cache=None,
       )
-      labels = self.strategy.labels_fn(batch["targets"])
+      # we should apply a mask for labels to disable segment-separator tokens
+      labels = self.strategy.labels_fn(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
       return self.strategy.compute_loss(student_output, teacher_output, labels)
 
     # Because student is the 0th argument, argnums=0 guarantees
@@ -469,7 +476,8 @@ def train_distill(
   )
 
   # 4. Optimizer & Config
-  optimizer = get_distillation_optimizer(student_config, student_config.steps)
+  total_updates = student_config.steps // student_config.gradient_accumulation_steps
+  optimizer = get_distillation_optimizer(student_config, total_updates)
 
   checkpointing_options = checkpoint.CheckpointManagerOptions(
       save_interval_steps=student_config.checkpoint_period,
@@ -498,6 +506,7 @@ def train_distill(
       profiler_options=profiler_options,
       checkpoint_root_directory=student_config.checkpoint_dir,
       checkpointing_options=checkpointing_options,
+      gradient_accumulation_steps=student_config.gradient_accumulation_steps,
   )
 
   # 5. Data Iterators (Init BEFORE Trainer)

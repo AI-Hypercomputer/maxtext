@@ -26,6 +26,7 @@ import unittest
 from unittest import mock
 import jax
 import jax.numpy as jnp
+from flax import nnx
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -182,6 +183,8 @@ class TrainDistillTest(unittest.TestCase):
         positions=mock_batch["positions"],
         attention_mask=mock_batch["attention_mask"],
         decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch.get("targets", None),
+        decoder_target_mask=mock_batch.get("targets_segmentation", None),
         cache=None,
     )
 
@@ -227,7 +230,9 @@ class TrainDistillTest(unittest.TestCase):
         positions=mock_batch["positions"],
         attention_mask=mock_batch["attention_mask"],
         decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch.get("targets", None),
         cache=None,
+        decoder_target_mask=None,
     )
 
     trainer.strategy.student_forward_fn.assert_called_once_with(
@@ -236,17 +241,79 @@ class TrainDistillTest(unittest.TestCase):
         positions=mock_batch["positions"],
         attention_mask=mock_batch["attention_mask"],
         decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch.get("targets", None),
         cache=None,
+        decoder_target_mask=None,
     )
 
     # Verify loss computation and optimizer update
-    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"])
+    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
     trainer.strategy.compute_loss.assert_called_once()
     optimizer.update.assert_called_once_with(student_model, mock_grads)
 
     # Verify the final returns match what grad_fn produced
     self.assertEqual(loss, mock_loss)
     self.assertEqual(aux, mock_aux)
+
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.tree.map")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.value_and_grad")
+  def test_train_step_passes_targets_segmentation(self, mock_value_and_grad, mock_tree_map):
+    """Verifies strategy callbacks receive decoder_target_tokens and decoder_target_mask."""
+    # 1. Initialize Trainer
+    # pylint: disable=no-value-for-parameter
+    trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
+    trainer.strategy = mock.Mock()
+
+    # 2. Setup Batch WITH targets_segmentation
+    mock_targets_segmentation = jnp.array([[1, 1, 0]])
+    mock_batch = {
+        "input_tokens": mock.Mock(),
+        "positions": mock.Mock(),
+        "attention_mask": mock.Mock(),
+        "decoder_segment_ids": mock.Mock(),
+        "targets": mock.Mock(),
+        "targets_segmentation": mock_targets_segmentation,
+    }
+    trainer.gen_model_input_fn = mock.Mock(return_value=mock_batch)
+
+    # 3. Setup Models & Inputs
+    teacher_model, student_model = mock.Mock(), mock.Mock()
+    model_bundle = train_distill.ModelBundle(teacher_model=teacher_model, student_model=student_model)
+    optimizer, inputs = mock.Mock(), mock.Mock()
+
+    # 4. Configure mocked nnx.value_and_grad
+    mock_grad_fn = mock.Mock(return_value=((mock.Mock(), mock.Mock()), mock.Mock()))
+    mock_value_and_grad.return_value = mock_grad_fn
+
+    # 5. Execute outer function & trigger inner loss_wrapper
+    trainer._train_step(model_bundle, optimizer, inputs)
+    loss_wrapper = mock_value_and_grad.call_args[0][0]
+    loss_wrapper(student_model, teacher_model, mock_batch)
+
+    # 6. Assertions
+    trainer.strategy.labels_fn.assert_called_once_with(
+        mock_batch["targets"], targets_segmentation=mock_targets_segmentation
+    )
+    trainer.strategy.student_forward_fn.assert_called_once_with(
+        model=student_model,
+        input_tokens=mock_batch["input_tokens"],
+        positions=mock_batch["positions"],
+        attention_mask=mock_batch["attention_mask"],
+        decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch["targets"],
+        decoder_target_mask=mock_targets_segmentation,
+        cache=None,
+    )
+    trainer.strategy.teacher_forward_fn.assert_called_once_with(
+        model=teacher_model,
+        input_tokens=mock_batch["input_tokens"],
+        positions=mock_batch["positions"],
+        attention_mask=mock_batch["attention_mask"],
+        decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch["targets"],
+        decoder_target_mask=mock_targets_segmentation,
+        cache=None,
+    )
 
   def test_optimizer_factory(self):
     """Verifies the optimizer factory injects hyperparams and handles configs."""
@@ -693,6 +760,73 @@ class TrainDistillTest(unittest.TestCase):
     # check that both student and teacher models are set since online mode should load both
     self.assertIs(model_bundle.student_model, mock_student_model)
     self.assertIs(model_bundle.teacher_model, mock_teacher_model)
+  def test_gradient_accumulation_requires_k_passes_for_update(self):
+    """Verifies that weights only update after k distinct forward passes."""
+
+    # 1. Setup a minimal NNX model
+    class DummyModel(nnx.Module):
+
+      def __init__(self):
+        self.linear = nnx.Linear(in_features=2, out_features=2, rngs=nnx.Rngs(0))
+
+      def __call__(self, x):
+        return self.linear(x)
+
+    student = DummyModel()
+    teacher = DummyModel()
+    model_bundle = train_distill.ModelBundle(teacher_model=teacher, student_model=student)
+
+    # Snapshot the initial weights
+    initial_weights = student.linear.kernel.value.copy()
+
+    # 2. Setup Optimizer with MultiSteps (Accumulate over 2 passes)
+    base_optimizer = optax.sgd(learning_rate=0.1)
+    accumulating_optimizer = optax.MultiSteps(base_optimizer, every_k_schedule=2)
+    nnx_opt = nnx.Optimizer(student, accumulating_optimizer, wrt=nnx.Param)
+
+    # 3. Initialize Trainer and Mocks
+    # pylint: disable=no-value-for-parameter
+    trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
+    trainer.strategy = mock.Mock()
+
+    dummy_batch = {
+        "input_tokens": jnp.ones((1, 2)),
+        "positions": None,
+        "targets": None,
+        "teacher_output": jnp.array([1.0, 1.0]),
+    }
+    trainer.gen_model_input_fn = mock.Mock(return_value=dummy_batch)
+    trainer.strategy.labels_fn.return_value = None
+
+    # 4. Mock the forward pass to COUNT how many times it executes
+    # We wrap the actual dummy model execution in a mock to track it.
+    mock_student_forward = mock.Mock(side_effect=lambda model, **kwargs: model(dummy_batch["input_tokens"]))
+    trainer.strategy.student_forward_fn = mock_student_forward
+
+    trainer.strategy.compute_loss.side_effect = lambda s_out, t_out, labels: (jnp.sum(s_out), {"aux": 1.0})
+
+    # --- EXECUTE PASS 1 ---
+    trainer._train_step(model_bundle, nnx_opt, dummy_batch)
+
+    # ASSERTIONS AFTER PASS 1:
+    # Verify exactly ONE forward pass happened
+    self.assertEqual(mock_student_forward.call_count, 1)
+
+    # Verify weights are completely UNCHANGED
+    np.testing.assert_allclose(
+        student.linear.kernel.value, initial_weights, err_msg="Weights should not update on the first pass."
+    )
+
+    # --- EXECUTE PASS 2 ---
+    trainer._train_step(model_bundle, nnx_opt, dummy_batch)
+
+    # ASSERTIONS AFTER PASS 2:
+    # Verify exactly TWO forward passes have now happened
+    self.assertEqual(mock_student_forward.call_count, 2)
+
+    # Verify weights HAVE changed
+    with self.assertRaises(AssertionError, msg="Weights should have updated on the second pass."):
+      np.testing.assert_allclose(student.linear.kernel.value, initial_weights)
 
 
 if __name__ == "__main__":

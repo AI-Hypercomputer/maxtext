@@ -275,7 +275,6 @@ pipeline_parallel_layers: -1 # Pipeline only this number of layers - for the rem
 # PP degree divides the number of layers.
 # By default (when set to -1) we pipeline all of the decoder layers.
 
-
 # num_pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
@@ -288,8 +287,9 @@ pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights
 # to only one stage's worth, however we only execute one all-gather and reduce across per repeat, as opposed
 # to every microbatch. This is similar to zero-1 sharding, since we also don't need to all gather the FSDP weights in the backward pass.
 # An alternative to setting this to true may be to replace any FSDP with DP and use optimizer offloading if necessary.
-# A more optimal behavior is to all-gather at the start of each repeat, which would ideally get the best of both worlds -
-# a small amount of memory and time, however this has proven hard to implement in SPMD, see b/364386697 for more.
+pipeline_fsdp_ag_per_repeat: False
+# Pipeline weight prefetching per repeat is an advanced SPMD pipeline parallelism improvement technique
+# When enabled, it prefetches necessary weight gathering ahead of microbatched computation, therefore reducing collectives
 
 # There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)
@@ -299,6 +299,7 @@ pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights
 # It may be useful to do the reverse when the layers_per_stage is very large.
 # The below settings only have effect when using pipeline parallelism.
 scan_pipeline_iterations: True
+scan_pipeline_repeats: True
 scan_layers_per_stage: False
 set_remat_policy_on_pipeline_iterations: True
 set_remat_policy_on_layers_per_stage: False
@@ -359,6 +360,13 @@ use_sparse_indexer: False
 index_head_dim: 128
 index_n_heads: 64
 index_topk: 2048
+# Determines the token selection strategy for indexer loss: 
+# - False: Uses all tokens (Dense Warm-up).
+# - True: Uses only top-k tokens (Sparse Training).
+# Note: This is only active when `indexer_loss_scaling_factor` > 0.
+sparse_indexer_loss: False
+# Multiplier for the indexer KL divergence loss
+indexer_loss_scaling_factor: 0.0
 
 # MLA parameters
 q_lora_rank: 0

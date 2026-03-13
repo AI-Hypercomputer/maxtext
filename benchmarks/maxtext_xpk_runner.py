@@ -746,6 +746,7 @@ def xpk_benchmark_runner(
     command, name = generate_xpk_workload_cmd(
         cluster_config=cluster_config,
         wl_config=wl_config,
+        workload_name=wl_config.run_name,
         user=user,
         exp_name=exp_name,
     )

@@ -67,7 +67,7 @@ export NEEDRESTART_MODE=l
 
 # Directory Validation Check
 echo "Checking current directory..."
-if [[ ! -d "dependencies" || ! -d "src" ]]; then
+if [[ ! -d "src" || ! -d "src/dependencies" ]]; then
     echo -e "\n\e[31mERROR: Critical directories not found!\e[0m"
     echo "Please run this script from the root of the MaxText repository."
     echo "Expected to find './dependencies' and './src' folders."
@@ -210,9 +210,9 @@ install_maxtext_with_deps() {
     fi
     echo "Setting up MaxText in $MODE mode for $DEVICE device"
     if [ "$DEVICE" = "gpu" ]; then
-        dep_name='dependencies/requirements/generated_requirements/cuda12-requirements.txt'
+        dep_name='src/dependencies/requirements/generated_requirements/cuda12-requirements.txt'
     else
-        dep_name='dependencies/requirements/generated_requirements/tpu-requirements.txt'
+        dep_name='src/dependencies/requirements/generated_requirements/tpu-requirements.txt'
     fi
     echo "Installing requirements from $dep_name"
     python3 -m uv pip install --resolution=lowest -r "$dep_name" \
@@ -227,7 +227,7 @@ install_post_training_deps() {
       exit 1
     fi
     echo "Setting up MaxText post-training workflow for $DEVICE device"
-    dep_name='dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt'
+    dep_name='src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt'
     echo "Installing requirements from $dep_name"
     python3 -m uv pip install --resolution=lowest -r "$dep_name"
     python3 -m src.install_maxtext_extra_deps.install_post_train_extra_deps

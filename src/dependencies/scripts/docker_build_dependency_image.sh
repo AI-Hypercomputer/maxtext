@@ -23,34 +23,31 @@
 # ==================================
 
 # Build docker image with stable dependencies
-## bash dependencies/scripts/docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=stable
+## bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=stable
 
 # Build docker image with nightly dependencies
-## bash dependencies/scripts/docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=nightly
+## bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=nightly
 
 # Build docker image with stable dependencies and, a pinned JAX_VERSION for TPUs
-## bash dependencies/scripts/docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
+## bash src/dependencies/scripts/docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
 
 # Build docker image with a pinned JAX_VERSION and, a pinned LIBTPU_VERSION for TPUs
-## bash dependencies/scripts/docker_build_dependency_image.sh MODE={{stable|nightly}} JAX_VERSION=0.8.1 LIBTPU_VERSION=0.0.31.dev20251119+nightly
+## bash src/dependencies/scripts/docker_build_dependency_image.sh MODE={{stable|nightly}} JAX_VERSION=0.8.1 LIBTPU_VERSION=0.0.31.dev20251119+nightly
 
 # Build docker image with a custom libtpu.so for TPUs
 # Note: libtpu.so file must be present in the root directory of the MaxText repository
-## bash dependencies/scripts/docker_build_dependency_image.sh MODE={{stable|nightly}}
+## bash src/dependencies/scripts/docker_build_dependency_image.sh MODE={{stable|nightly}}
 
 # Build docker image with nightly dependencies and, a pinned JAX_VERSION for GPUs
 # Available versions listed at https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/jax
-## bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109
+## bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109
 
 # ==================================
 # POST-TRAINING BUILD EXAMPLES
 # ==================================
 
-# Build docker image with stable pre-training dependencies and stable post-training dependencies
-## bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
-
-# Build docker image with stable pre-training dependencies and post-training dependencies from GitHub head
-## bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training POST_TRAINING_SOURCE=local
+# Build docker image with post-training dependencies
+## bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
 
 if [ "${BASH_SOURCE-}" ]; then
   this_file="${BASH_SOURCE[0]}"
@@ -61,7 +58,7 @@ else
   this_file="${0}"
 fi
 
-MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(CDPATH='' cd -- "$(dirname -- "${this_file}")"'/../..' && pwd)}"
+MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(CDPATH='' cd -- "$(dirname -- "${this_file}")"'/../../..' && pwd)}"
 
 # Enable "exit immediately if any command fails" option
 set -e
@@ -118,24 +115,6 @@ run_docker_build() {
   docker build --network host $(printf -- '--build-arg %q ' "$@") -f "$dockerfile_path" -t "$LOCAL_IMAGE_NAME" .
 }
 
-# Function to build post-training dependencies from local Github head
-build_post_training_deps_from_local_github() {
-  # To install vllm, tunix, tpu-inference from a local path, we copy it into the build context, excluding __pycache__.
-  # This assumes vllm, tunix, tpu-inference is a sibling directory to the current one (maxtext).
-  rsync -a --exclude='__pycache__' ../tpu-inference .
-  rsync -a --exclude='__pycache__' ../vllm .
-  rsync -a --exclude='__pycache__' ../tunix .
-
-  # The cleanup is set to run even if the build fails to remove the copied directory.
-  trap "rm -rf ./tpu-inference ./vllm ./tunix" EXIT INT TERM
-
-  DOCKERFILE_NAME='maxtext_post_training_local_dependencies.Dockerfile'
-  echo "Building local post-training dependencies: $DOCKERFILE_NAME"
-
-  run_docker_build "$MAXTEXT_REPO_ROOT/dependencies/dockerfiles/$DOCKERFILE_NAME" \
-    "MODE=${WORKFLOW}" "BASEIMAGE=${LOCAL_IMAGE_NAME}"
-}
-
 # Function to build image for GPUs
 build_gpu_image() {
   if [[ ${MODE} == "pinned" ]]; then
@@ -144,7 +123,7 @@ build_gpu_image() {
   fi
 
   echo "Building docker image with arguments: ${docker_build_args[*]}"
-  run_docker_build "$MAXTEXT_REPO_ROOT/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile" "${docker_build_args[@]}"
+  run_docker_build "$MAXTEXT_REPO_ROOT/src/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile" "${docker_build_args[@]}"
 }
 
 # Function to build image for TPUs
@@ -161,14 +140,7 @@ build_tpu_image() {
   fi
 
   echo "Building docker image with arguments: ${docker_build_args[*]}"
-  run_docker_build "$MAXTEXT_REPO_ROOT/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile" "${docker_build_args[@]}"
-
-  # Handle post-training workflow if specified
-  if [[ ${WORKFLOW} == "post-training" || ${WORKFLOW} == "post-training-experimental" ]]; then
-    if [[ ${POST_TRAINING_SOURCE} == "local" ]]; then
-      build_post_training_deps_from_local_github
-    fi
-  fi
+  run_docker_build "$MAXTEXT_REPO_ROOT/src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile" "${docker_build_args[@]}"
 }
 
 if [[ ${DEVICE} == "gpu" ]]; then
