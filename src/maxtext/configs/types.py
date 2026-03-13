@@ -28,7 +28,7 @@ from tempfile import gettempdir
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ShardMode
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
@@ -775,6 +775,10 @@ class HardwareAndMesh(BaseModel):
   context_parallel_strategy: str = Field(
       "all_gather",
       description="Strategy for context parallelism ('all_gather' or 'ring').",
+  )
+  context_parallel_reorder_strategy: ReorderStrategy = Field(
+      "auto",
+      description="Reorder strategy for load-balanced context parallelism.",
   )
   custom_mesh: str = Field("", description="Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']")
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")

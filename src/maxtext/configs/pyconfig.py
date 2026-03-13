@@ -30,7 +30,7 @@ import omegaconf
 
 from maxtext.configs import pyconfig_deprecated
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-from maxtext.common.common_types import DecoderBlockType, ShardMode
+from maxtext.common.common_types import DecoderBlockType, ReorderStrategy, ShardMode
 from maxtext.configs import types
 from maxtext.configs.types import MaxTextConfig
 from maxtext.inference.inference_utils import str2bool
@@ -187,6 +187,7 @@ class HyperParameters:
 
     final_dict["decoder_block"] = DecoderBlockType(final_dict["decoder_block"])
     final_dict["shard_mode"] = ShardMode(final_dict["shard_mode"])
+    final_dict["context_parallel_reorder_strategy"] = ReorderStrategy(final_dict["context_parallel_reorder_strategy"])
 
     object.__setattr__(self, "_flat_config", final_dict)
 
