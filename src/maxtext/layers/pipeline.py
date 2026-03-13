@@ -1239,7 +1239,7 @@ class CircularPipeline(PipelineBase):
       return _from_repeat_weights_to_bsw_shardmap(repeat_weights, physical_partition_spec, axes_to_gather=axes_to_gather)
     return _from_repeat_weights_to_bsw_hint(repeat_weights)
 
-  def weight_prefetching(self, weights, physical_partition_spec, loop_iteration):
+  def both_weight_prefetching(self, weights, physical_partition_spec, loop_iteration):
     """Triggers asynchronous FSDP-like all-gathers for the current and next pipeline steps.
 
     By gathering weights for `loop_iteration + 1` right now, the network communication
@@ -1250,7 +1250,16 @@ class CircularPipeline(PipelineBase):
     nxt_repeat_weights = self.from_all_variables_to_repeat_weights(weights, loop_iteration + 1)
     bsw_0 = self.from_repeat_weights_to_bsw(cur_repeat_weights, physical_partition_spec)
     bsw_1 = self.from_repeat_weights_to_bsw(nxt_repeat_weights, physical_partition_spec)
-    return jax.ad_checkpoint.checkpoint_name((bsw_0, bsw_1), "bsw")
+    return bsw_0, bsw_1
+
+  def one_weight_prefetching(self, weights, physical_partition_spec, loop_iteration):
+    """Triggers asynchronous FSDP-like all-gathers for the next pipeline steps.
+
+    By gathering weights for `loop_iteration + 1` right now, the network communication
+    can overlap with the compute happening in `loop_iteration`.
+    """
+    repeat_weights = self.from_all_variables_to_repeat_weights(weights, loop_iteration + 1)
+    return self.from_repeat_weights_to_bsw(repeat_weights, physical_partition_spec)
 
   def run_one_iteration(self, loop_state, bsw, positions, segment_ids, deterministic, model_mode, logical_partition_spec):
     """Executes the forward/backward logic for a single microbatch inside the pipeline.
@@ -1389,18 +1398,12 @@ class CircularPipeline(PipelineBase):
     run_one_repeat_scannable = base_scannable(length=self.config.num_pipeline_microbatches)
     run_bubbles_scannable = base_scannable(length=bubble_iterations)
 
-    if self.config.scan_pipeline_repeats:
-      run_repeats_scanned = pipeline_utils.create_flax_pipeline_scan(
-          pipeline_stage_fn=run_one_repeat_scannable, length=self.config.num_pipeline_repeats
-      )
-      run_bubbles_scanned = pipeline_utils.create_flax_pipeline_scan(pipeline_stage_fn=run_bubbles_scannable, length=1)
-      (loop_state, bsw), _ = run_repeats_scanned(self, (loop_state, bsw))
-      (loop_state, bsw), _ = run_bubbles_scanned(self, (loop_state, bsw))
-    else:
-      for _ in range(self.config.num_pipeline_repeats):
-        (loop_state, bsw), _ = run_one_repeat_scannable(self, (loop_state, bsw))
-      for _ in range(bubble_iterations):
-        (loop_state, bsw), _ = run_iteration_scannable(self, loop_state, bsw)
+    run_repeats_scanned = pipeline_utils.create_flax_pipeline_scan(
+        pipeline_stage_fn=run_one_repeat_scannable, length=self.config.num_pipeline_repeats
+    )
+    run_bubbles_scanned = pipeline_utils.create_flax_pipeline_scan(pipeline_stage_fn=run_bubbles_scannable, length=1)
+    (loop_state, w_curr), _ = run_repeats_scanned(self, (loop_state, bsw[0]))
+    (loop_state, _), _ = run_bubbles_scanned(self, (loop_state, w_curr))
 
     final_output = self.realign_output_microbatches(loop_state["state_io"])
     final_output = jnp.reshape(
