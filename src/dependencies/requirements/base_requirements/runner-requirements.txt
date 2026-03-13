@@ -1,0 +1,4 @@
+google-cloud-filestore
+kubernetes
+omegaconf
+xpk
