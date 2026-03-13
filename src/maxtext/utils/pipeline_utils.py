@@ -286,23 +286,30 @@ def create_rematerialized_pipeline_stage(
   """
 
   def execute_pipeline_stage(model, loop_state_and_bsw):
-    loop_state, bsw = loop_state_and_bsw
-    # Retrieve the specific weights needed for this pipeline chunk
-    bsw = model.weight_prefetching(pipeline_weights, physical_partition_spec, loop_state["loop_iteration"])
-
-    if model.config.scan_pipeline_iterations:
-      scan_microbatches_fn = create_gradient_accumulation_scan(
-          model=model,
-          length=length,
-          deterministic=deterministic,
-          model_mode=model_mode,
-          logical_partition_spec=logical_partition_spec,
-      )
-      loop_state, bsw = scan_microbatches_fn(loop_state, bsw, positions, segment_ids)
-    else:
-      for _ in range(length):
-        (loop_state, bsw), _ = run_iteration_scannable(model, loop_state, bsw)
-    return (loop_state, bsw), None
+    loop_state, w_curr = loop_state_and_bsw
+    # # Retrieve the specific weights needed for this pipeline chunk
+    # bsw = model.both_weight_prefetching(pipeline_weights, physical_partition_spec, loop_state["loop_iteration"])
+    w_next = jax.remat(
+        model.one_weight_prefetching,
+        static_argnums=(1,),
+        policy=jax.checkpoint_policies.nothing_saveable,
+    )(
+        pipeline_weights,
+        physical_partition_spec,
+        loop_state["loop_iteration"],
+    )
+    bsw = (w_curr, w_next)
+    scan_microbatches_fn = create_gradient_accumulation_scan(
+        model=model,
+        length=length,
+        deterministic=deterministic,
+        model_mode=model_mode,
+        logical_partition_spec=logical_partition_spec,
+    )
+    loop_state, bsw = scan_microbatches_fn(loop_state, bsw, positions, segment_ids)
+    w_curr, w_next = bsw
+    del w_curr
+    return (loop_state, w_next), None
 
   return nn.remat(
       execute_pipeline_stage,
