@@ -344,12 +344,14 @@ if __name__ == "__main__":
         rollout_expert_parallelism = args.number_of_sampler_chips_per_replica * 2
       
     sampler_devices_fraction = sampler_chips / number_of_chips
-    if args.trainer_chips <= 4:
+    if args.trainer_chips == 4:
       enable_single_controller = "true"
     else:
         enable_single_controller = "false"
 
     subslice_shape_status = {
+        1: "1,1,1",
+        2: "2,1,1",
         4: "2,2,1",
         8: "2,2,2",
         16: "2,2,4",
