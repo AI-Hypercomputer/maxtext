@@ -80,29 +80,6 @@ from maxtext.input_pipeline.instruction_data_processing import load_template_fro
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 
 
-def get_maxtext_model(config, devices=None):
-  """
-  Load MaxText model with Tunix adapter.
-  # Note: pass the path to your scanned checkpoint for 'load_parameters_path'.
-  # To create a scanned checkpoint, you can use /maxtext/src/MaxText/checkpoint_conversion/to_maxtext.py and if
-  # using Pathways, please set `checkpoint_storage_use_ocdbt=False checkpoint_storage_use_zarr3=False`
-  # python src/MaxText/checkpoint_conversion/to_maxtext.py \
-  #  --model_name="gemma2-2b" \
-  #  --base_output_directory="/path/to/your/output/directory" \
-  #  --scan_layers=True \
-  # --checkpoint_storage_use_ocdbt=False\
-  # checkpoint_storage_use_zarr3=False
-  # Please ensure that you pass the full path ending in `/0/items` for load_parameters_path to train_rl.py i.e.,
-  # load_parameters_path=/path/to/your/output/directory/0/items
-  """
-  model, mesh = model_creation_utils.create_nnx_model(config, devices=devices)
-  with mesh:
-    use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
-    tunix_model = TunixMaxTextAdapter(base_model=model, use_no_op_mappings=use_no_op_mappings)
-    tunix_model.config = None
-  return tunix_model, mesh
-
-
 def get_dataset(
     model_tokenizer, tmvp_config, data_dir, split="train", data_files=None, dataset_name=None
 ) -> grain.MapDataset:
@@ -146,86 +123,6 @@ def get_dataset(
       .map(lambda x: utils_rl.process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x))
   )
   return loaded_dataset
-
-
-def setup_configs_and_devices(argv: list[str]):
-  """Setup device allocation and configs for training and inference."""
-  config = pyconfig.initialize_pydantic(argv)
-  devices = jax.devices()
-  if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
-    max_logging.log("Running RL on a single slice")
-    num_vms = len(devices) // config.chips_per_vm
-    trainer_devices = devices
-    sampler_devices = devices
-    if num_vms >= 2 and config.use_pathways:
-      # Multiple hosts with Pathways - potentially split devices for trainer and sampler
-      # based on trainer_devices_fraction and sampler_devices_fraction
-      max_logging.log(f"{num_vms} VMs detected, allocating trainer and sampler devices, and using Pathways.")
-      num_devices = len(devices)
-      num_trainer_devices = int(num_devices * config.trainer_devices_fraction)
-      num_sampler_devices = int(num_devices * config.sampler_devices_fraction)
-      trainer_devices = devices[:num_trainer_devices]
-      sampler_devices = devices[num_devices - num_sampler_devices :]
-      if config.trainer_devices_fraction != 1.0:
-        max_logging.log(f"Using first {len(trainer_devices)} devices as Trainer devices")
-      if config.sampler_devices_fraction != 1.0:
-        max_logging.log(f"Using last {len(sampler_devices)} devices as Sampler devices")
-    trainer_config = config
-    sampler_config = config
-  elif config.num_trainer_slices > 0 and config.num_samplers_slices > 0:
-    max_logging.log("Running RL with Multislice")
-    devices_by_slice = collections.defaultdict(list)
-    for d in devices:
-      devices_by_slice[d.slice_index].append(d)
-    slice_indices = sorted(devices_by_slice.keys())
-
-    if len(slice_indices) < config.num_trainer_slices + config.num_samplers_slices:
-      raise ValueError("Not enough slices for trainer and samplers")
-
-    trainer_devices = []
-    for i in range(config.num_trainer_slices):
-      trainer_devices.extend(devices_by_slice[slice_indices[i]])
-
-    sampler_devices = []
-    for i in range(config.num_trainer_slices, config.num_trainer_slices + config.num_samplers_slices):
-      sampler_devices.extend(devices_by_slice[slice_indices[i]])
-
-    trainer_devices_per_slice = len(trainer_devices) // config.num_trainer_slices
-    trainer_fsdp = trainer_devices_per_slice
-    tp = config.ici_tensor_parallelism
-    if tp > 1:
-      if trainer_devices_per_slice % tp != 0:
-        raise ValueError(
-            f"trainer_devices_per_slice ({trainer_devices_per_slice}) must be divisible by tensor parallelism ({tp})"
-        )
-      if config.ici_fsdp_parallelism != -1 and config.ici_fsdp_parallelism * tp != trainer_devices_per_slice:
-        raise ValueError(
-            f"ici_fsdp_parallelism ({config.ici_fsdp_parallelism}) * ici_tensor_parallelism ({tp}) must equal "
-            f"devices_per_slice ({trainer_devices_per_slice})"
-        )
-      trainer_fsdp = trainer_devices_per_slice // tp
-
-    trainer_update = {
-        "num_slices": config.num_trainer_slices,
-        "ici_fsdp_parallelism": trainer_fsdp,
-        "ici_tensor_parallelism": tp,
-        "dcn_data_parallelism": config.num_trainer_slices,
-    }
-
-    sampler_update = {
-        "num_slices": config.num_samplers_slices,
-        "ici_fsdp_parallelism": len(sampler_devices) // config.num_samplers_slices,
-        "ici_tensor_parallelism": -1,
-        "dcn_data_parallelism": config.num_samplers_slices,
-    }
-
-    trainer_config = pyconfig.initialize_pydantic(argv, **trainer_update)
-    sampler_config = pyconfig.initialize_pydantic(argv, **sampler_update)
-
-  else:
-    raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
-
-  return trainer_config, sampler_config, trainer_devices, sampler_devices
 
 
 def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
@@ -282,7 +179,7 @@ def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
   return rollout_kwargs
 
 
-def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
+def rl_train(argv: Sequence[str], **kwargs):
   """
   Run RL training with the provided configuration.
 
@@ -292,13 +189,15 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
+  reference_model, actor_model, trainer_config, sampler_config, reference_mesh, actor_mesh, rollout_mesh, trainer_devices, sampler_devices = model_creation_utils.from_pretrained(argv)
+
   if not trainer_config.debug.rl:
     # Apply filter to suppress noisy logs
     noise_filter = max_logging.NoisyLogFilter()
     logging.getLogger().addFilter(noise_filter)
     absl_logging.get_absl_logger().addFilter(noise_filter)
+    os.environ["VLLM_LOGGING_LEVEL"] = "ERROR"
 
-  max_logging.log("Starting RL Training")
   max_logging.log(f"Ensuring TensorBoard log directory exists: {trainer_config.tensorboard_dir}")
   if not epath.Path(trainer_config.tensorboard_dir).exists():
     epath.Path(trainer_config.tensorboard_dir).mkdir(parents=True, exist_ok=True)
@@ -432,44 +331,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
         if i >= 5:
           break
         pprint(ele)
-
-  # Load reference model
-  max_logging.log("Creating reference model and also meshes for reference and rollout")
-  reference_model, reference_mesh = get_maxtext_model(trainer_config, trainer_devices)
-  devices_array = maxtext_utils.create_device_mesh(sampler_config, sampler_devices)
-  # if trainer_devices=sampler_devices, then rollout_mesh=reference_mesh
-  # else rollout_mesh uses sampler_devices
-  rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
-  if trainer_config.debug.rl:
-    max_logging.log("Reference Model initialized successfully")
-    nnx.display(reference_model)
-    max_logging.log(f"Reference mesh shape: {reference_mesh.shape}")
-
-    # Sanity check that weights are loaded correctly.
-    _maxtext_state_flatten = nnx.state(reference_model).flat_state()
-    maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
-    max_logging.log(
-        f"maxtext_state_flatten[base.token_embedder.embedding].value=\
-          {maxtext_state_flatten['base.token_embedder.embedding'][...]}"
-    )
-
-  # TODO: @mazumdera: change this to use lora
-  if trainer_config.load_checkpoint_only_once:
-    max_logging.log("Creating policy model by copying reference model instead of restoring from checkpoint again.")
-    with reference_mesh:
-      actor_base_model = nnx.clone(reference_model.base)
-      use_no_op_mappings = "maxtext_config" in trainer_config.vllm_additional_config
-      actor_model = TunixMaxTextAdapter(base_model=actor_base_model, use_no_op_mappings=use_no_op_mappings)
-      actor_model.config = None
-    actor_mesh = reference_mesh
-  else:
-    max_logging.log("Creating policy model with same config as reference model on trainer mesh")
-    actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
-
-  if trainer_config.debug.rl:
-    max_logging.log("Policy Model initialized successfully")
-    nnx.display(actor_model)
-    max_logging.log(f"Policy mesh shape: {actor_mesh.shape}")
 
   # Setup optimizer
   optimizer = utils_rl.get_optimizer(trainer_config, max_train_steps)
@@ -682,8 +543,7 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
   max_utils.print_system_information()
-  trainer_config, sampler_config, trainer_devices, sampler_devices = setup_configs_and_devices(argv)
-  rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices)
+  rl_train(argv)
 
 
 if __name__ == "__main__":
