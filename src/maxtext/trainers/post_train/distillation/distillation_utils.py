@@ -18,6 +18,10 @@ This module contains adapter classes that bridge MaxText's data loading and
 model structures with Tunix's training interfaces.
 """
 
+import pickle
+import tensorflow as tf
+from array_record.python import array_record_module
+
 from typing import Any, Iterator, Optional, List, Callable
 
 import flax
@@ -63,11 +67,58 @@ class MaxTextTrainingInput(peft_trainer.TrainingInput):
   targets_position: jax.Array = None
   #: Segment IDs for packed target tokens.
   targets_segmentation: jax.Array = None
+  #: Top-K logits from the teacher model.
+  top_k_logits: jax.Array = None
+  top_k_indices: jax.Array = None
 
 
 # -----------------------------------------------------------------------------
 # Data Loading Adapter
 # -----------------------------------------------------------------------------
+
+
+class OfflineArrayRecordIterator:
+  """Reads the pre-generated global top-k logits file."""
+
+  def __init__(self, data_dir: str, epochs: int = 100):
+    self.filepath = data_dir
+
+    if not tf.io.gfile.exists(self.filepath):
+      raise FileNotFoundError(f"Offline distillation file not found: {self.filepath}")
+
+    self.reader = array_record_module.ArrayRecordReader(self.filepath)
+    self.num_records = self.reader.num_records()
+    self.epochs = epochs
+    self.current_epoch = 0
+    self.record_index = 0
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    if self.record_index >= self.num_records:
+      self.current_epoch += 1
+      if self.current_epoch >= self.epochs:
+        raise StopIteration
+
+      self.record_index = 0
+      self.reader = array_record_module.ArrayRecordReader(self.filepath)
+
+    record = self.reader.read()
+    self.record_index += 1
+    data = pickle.loads(record)
+
+    # Map the arrays to match MaxText's expected dictionary
+    batch = {
+        "inputs": data["tokens"],
+        "top_k_logits": data["top_k_logits"],
+        "top_k_indices": data["top_k_indices"],
+    }
+    for key in ["inputs_position", "inputs_segmentation", "targets_segmentation", "targets"]:
+      if key in data:
+        batch[key] = data[key]
+
+    return batch
 
 
 class MaxTextToTunixIterator:
@@ -123,6 +174,8 @@ class MaxTextToTunixIterator:
         targets=batch["targets"],
         targets_position=targets_position,
         targets_segmentation=targets_segmentation,
+        top_k_logits=batch.get("top_k_logits"),
+        top_k_indices=batch.get("top_k_indices"),
     )
 
 
