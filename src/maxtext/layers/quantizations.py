@@ -17,7 +17,7 @@
 import functools
 import json
 import re
-from typing import Tuple, Sequence
+from typing import Tuple, Sequence, Callable
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -27,6 +27,7 @@ from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 
 import qwix
+from qwix._src.core import dot_general_qt
 
 import jax
 import jax.numpy as jnp
@@ -192,6 +193,88 @@ class AqtQuantization:
         )
     )
     return aqt_einsum
+
+
+@dataclass
+class QwixQuantization:
+  """Configures Qwix quantization github.com/google/qwix, for training only."""
+
+  quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN  # needed by external call
+  act_calibration_method: str = "absmax"
+  weight_calibration_method: str = "absmax"
+  bwd_calibration_method: str = "absmax"
+
+  def _get_fp8_full_qwix_config(self) -> dot_general_qt.DotGeneralQtConfig:
+    """Returns Qwix dot_general config for fp8_full quantization."""
+    return dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype=jnp.float8_e4m3fn,  # activation
+        rhs_qtype=jnp.float8_e4m3fn,  # weight
+        dlhs_grad_qtype=jnp.float8_e5m2,  # activation gradient
+        drhs_grad_qtype=jnp.float8_e5m2,  # weight gradient
+        lhs_calibration_method=self.act_calibration_method,
+        rhs_calibration_method=self.weight_calibration_method,
+        dlhs_grad_calibration_method=self.bwd_calibration_method,
+        drhs_grad_calibration_method=self.bwd_calibration_method,
+        tile_size=None,
+    )
+
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+    """Returns Qwix dot_general."""
+    return functools.partial(QwixDotGeneral, config=self._get_fp8_full_qwix_config())
+
+  def einsum(self, mesh_axes: Tuple[str, ...] = ()):
+    """Returns Qwix einsum."""
+    return QwixEinsum(config=self._get_fp8_full_qwix_config())
+
+
+class QwixDotGeneral(nn.Module):
+  """A callable class for Qwix dot_general."""
+
+  config: dot_general_qt.DotGeneralQtConfig
+
+  @nn.compact
+  def __call__(
+      self,
+      lhs: jax.Array,
+      rhs: jax.Array,
+      dimension_numbers: jax.lax.DotDimensionNumbers,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+      *,
+      out_sharding=None,
+  ) -> jax.Array:
+
+    return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, self.config)
+
+
+class QwixEinsum(nn.Module):
+  """A callable class for Qwix einsum."""
+
+  config: dot_general_qt.DotGeneralQtConfig
+
+  @nn.compact
+  def __call__(
+      self,
+      einsum_str: str,
+      *operands: jax.Array,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+      _dot_general: Callable[..., jax.Array] | None = None,
+      out_sharding=None,
+  ) -> jax.Array:
+
+    def custom_dot_general(*args, **kwargs):
+      return dot_general_qt.dot_general_qt(*args[:3], self.config)
+
+    with jax.disable_jit():
+      return jnp.einsum(
+          einsum_str,
+          *operands,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          _dot_general=custom_dot_general,
+          out_sharding=out_sharding,
+      )
 
 
 @dataclass
@@ -546,6 +629,15 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
+  if config.use_batch_split_schedule and config.quantization:
+    if not (config.use_qwix_quantization and config.quantization == "fp8_full"):
+      raise ValueError("Batch split quantization only supports `use_qwix_quantization=True` and `quantization=fp8_full`")
+    return QwixQuantization(
+        weight_calibration_method=config.weight_quantization_calibration_method,
+        act_calibration_method=config.act_quantization_calibration_method,
+        bwd_calibration_method=config.bwd_quantization_calibration_method,
+    )
+
   if config.use_qwix_quantization:
     return None
   quant_cfg = _get_quant_config(config)
@@ -726,7 +818,8 @@ def get_qt_provider(config):
 
 def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
-  if config.use_qwix_quantization:
+  # Batch split is not using Qwix's interception feature but manual plumbing
+  if config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
       model = qwix.quantize_model(model, quantization_provider)
