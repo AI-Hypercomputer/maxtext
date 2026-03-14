@@ -163,6 +163,7 @@ max_num_checkpoints_to_keep: 10
 
 # ====== Reward ======
 
+reward_exact_answer: 5.0
 reward_exact_format_match: 3.0
 reward_white_space_format_match: 1.5
 reward_partial_format_match: 0.5
