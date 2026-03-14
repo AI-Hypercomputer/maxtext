@@ -33,8 +33,6 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import max_logging
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
-from maxtext.checkpoint_conversion import to_maxtext
-from maxtext.checkpoint_conversion.utils.utils import HF_IDS
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from orbax import checkpoint as ocp
 
@@ -220,7 +218,7 @@ def setup_configs_and_devices(argv: list[str]):
   return trainer_config, sampler_config, trainer_devices, sampler_devices
 
 
-def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kwargs):
+def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=True, **kwargs):
   """
   Obtain a MaxText model by providing minimal configs
   It at least needs the following argument
@@ -269,8 +267,8 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kw
         " then please provide the intended .yml file as an argument. e.g., "
         "src/maxtext/configs/post_train/rl.yml for post-training"
     )
-    yaml_file = True
-    argv.insert(1, f"{MAXTEXT_PKG_DIR}/configs/base.yml")
+    yaml_file = f"{MAXTEXT_PKG_DIR}/configs/base.yml"
+    argv.insert(1, yaml_file)
   else:
     # verify that the .yml is in index 1 in the list
     if ".yml" not in argv[1]:
@@ -289,6 +287,20 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kw
     if hf_access_token:
       argv.append(f"hf_access_token={hf_access_token}")
 
+  if not tokenizer_path_seen and model_name:
+    from maxtext.checkpoint_conversion.utils.utils import HF_IDS
+
+    tokenizer_path = HF_IDS.get(model_name)
+    if not tokenizer_path:
+      model_name_original = model_name.replace("-Instruct", "") if "-Instruct" in model_name else model_name
+      base_tokenizer_path = HF_IDS.get(model_name_original)
+      if base_tokenizer_path and "-Instruct" in model_name:
+        tokenizer_path = f"{base_tokenizer_path}-Instruct"
+      else:
+        tokenizer_path = base_tokenizer_path
+    if tokenizer_path:
+      argv.append(f"tokenizer_path={tokenizer_path}")
+
   if not load_parameters_path_seen:
     if not hf_access_token_seen:
       raise ValueError("hf_access_token must be provided when not providing a pre-existing checkpoint")
@@ -300,48 +312,32 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kw
         ]
     )
 
-    hf_model_path = None
-    revision = None
     simulated_cpu_devices_count = 16
 
-    if not tokenizer_path_seen and model_name:
+    import subprocess
+    import sys
+    
+    # Run the conversion in a completely isolated subprocess so its CPU 
+    # JAX/XLA requirements do not interfere with the parent's Pathways TPU mesh.
+    conversion_env = os.environ.copy()
+    conversion_env["JAX_PLATFORMS"] = "cpu"
+    conversion_env["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
 
-      model_name_original = model_name.replace("-Instruct", "") if "-Instruct" in model_name else model_name
-      tokenizer_path = hf_model_path or HF_IDS.get(model_name_original)
-      if tokenizer_path:
-        argv.append(f"tokenizer_path={tokenizer_path}")
+    to_maxtext_cmd = [
+        sys.executable,
+        "-m", "maxtext.checkpoint_conversion.to_maxtext",
+    ] + argv[1:] + [
+        "skip_jax_distributed_system=True",
+        f"--lazy_load_tensors={lazy_load_tensors}",
+    ]
 
-    prev_xla_flags = os.environ.get("XLA_FLAGS")
-    os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
+    try:
+        subprocess.run(to_maxtext_cmd, env=conversion_env, check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Checkpoint conversion failed with exit code {e.returncode}") from e
 
-    prev_jax_platforms = jax.config.jax_platforms
-    prev_env_jax_platforms = os.environ.get("JAX_PLATFORMS")  # Capture env var
-
-    jax.config.update("jax_platforms", "cpu")
-    os.environ["JAX_PLATFORMS"] = "cpu"  # Ensure child scripts use cpu
-
-    to_maxtext_argv = argv + ["skip_jax_distributed_system=True"]
-    to_maxtext.main(
-        to_maxtext_argv,
-        hf_model_path=hf_model_path,
-        revision=revision,
-        lazy_load_tensors=lazy_load_tensors,
-        simulated_cpu_devices_count=simulated_cpu_devices_count,
-    )
-    # Restore both the JAX config and the environment variable
-    jax.config.update("jax_platforms", prev_jax_platforms)
-    if prev_env_jax_platforms is not None:
-        os.environ["JAX_PLATFORMS"] = prev_env_jax_platforms
-    else:
-        os.environ.pop("JAX_PLATFORMS", None)
-
-    if prev_xla_flags is None:
-      os.environ.pop("XLA_FLAGS", None)
-    else:
-      os.environ["XLA_FLAGS"] = prev_xla_flags
-
-      load_parameters_path = os.path.join(base_output_directory, "0", "items")
-      argv.append(f"load_parameters_path={load_parameters_path}")
+    load_parameters_path = os.path.join(base_output_directory, "0", "items")
+    argv.append(f"load_parameters_path={load_parameters_path}")
 
   # if the yaml file contains rl.yml then we call the setup_configs_and_devices from train_rl.py
   if "rl.yml" in yaml_file:
