@@ -194,56 +194,54 @@ def create_gradient_accumulation_scan(
   """
 
   @functools.partial(jax.custom_vjp)
-  def run_single_microbatch_custom(lightweight_state, bsw, weights, pos_arg, seg_arg):
-    return run_single_microbatch_custom_fwd(lightweight_state, bsw, weights, pos_arg, seg_arg)[0]
+  def run_single_microbatch_custom(lightweight_state, bsw, pos_arg, seg_arg):
+    return run_single_microbatch_custom_fwd(lightweight_state, bsw, pos_arg, seg_arg)[0]
 
-  def run_single_microbatch_custom_fwd(lightweight_state, bsw, weights, pos_arg, seg_arg):
-    def _run(l, b, w):
+  def run_single_microbatch_custom_fwd(lightweight_state, bsw, pos_arg, seg_arg):
+    def _run(l, b):
       out = model.run_one_iteration(
-          l, b, w, pos_arg, seg_arg, deterministic, model_mode, logical_partition_spec=logical_partition_spec
+          l, b, pos_arg, seg_arg, deterministic, model_mode, logical_partition_spec=logical_partition_spec
       )
-      return out, b, w
+      return out, b
 
     # Rematerialize the inner step to save activation memory
     _run_remat = jax.remat(_run, prevent_cse=False, policy=model.get_pipeline_remat_policy())
-    out, vjp_fun = jax.vjp(_run_remat, lightweight_state, bsw, weights)
+    out, vjp_fun = jax.vjp(_run_remat, lightweight_state, bsw)
     return out, vjp_fun
 
   def run_single_microbatch_custom_bwd(res, g_out):
     vjp_fun = res
-    d_l, d_b, d_w = vjp_fun(g_out)
-    return d_l, d_b, d_w, None, None
+    d_l, d_b = vjp_fun(g_out)
+    return d_l, d_b, None, None
 
   run_single_microbatch_custom.defvjp(run_single_microbatch_custom_fwd, run_single_microbatch_custom_bwd)
 
   @functools.partial(jax.custom_vjp)
-  def run_pipeline_microbatches_custom(loop_state, bsw, weights, positions, segment_ids):
-    return run_pipeline_microbatches_custom_fwd(loop_state, bsw, weights, positions, segment_ids)[0]
+  def run_pipeline_microbatches_custom(loop_state, bsw, positions, segment_ids):
+    return run_pipeline_microbatches_custom_fwd(loop_state, bsw, positions, segment_ids)[0]
 
-  def run_pipeline_microbatches_custom_fwd(loop_state, bsw, weights, positions, segment_ids):
+  def run_pipeline_microbatches_custom_fwd(loop_state, bsw, positions, segment_ids):
     final_lightweight, scan_vjp_fun = jax.vjp(
-        lambda l, b, w: jax.lax.scan(
-            lambda carry, _: (run_single_microbatch_custom(carry, b, w, positions, segment_ids)[0], None),
+        lambda l, b: jax.lax.scan(
+            lambda carry, _: (run_single_microbatch_custom(carry, b, positions, segment_ids)[0], None),
             l,
             None,
             length=length,
         )[0],
         loop_state,
         bsw,
-        weights,
     )
 
-    return (final_lightweight, bsw, weights), scan_vjp_fun
+    return (final_lightweight, bsw), scan_vjp_fun
 
   def run_pipeline_microbatches_custom_bwd(residuals, g_final_state):
     scan_vjp_fun = residuals
-    g_lightweight, g_bsw, g_weights = g_final_state
-    d_init_lightweight, d_init_bsw, d_init_weights = scan_vjp_fun(g_lightweight)
+    g_lightweight, g_bsw = g_final_state
+    d_init_lightweight, d_init_bsw = scan_vjp_fun(g_lightweight)
 
     d_init_bsw = jax.tree.map(lambda d, g: d + g if hasattr(d, "shape") else d, d_init_bsw, g_bsw)
-    d_init_weights = jax.tree.map(lambda d, g: d + g if hasattr(d, "shape") else d, d_init_weights, g_weights)
 
-    return (d_init_lightweight, d_init_bsw, d_init_weights, None, None)
+    return (d_init_lightweight, d_init_bsw, None, None)
 
   run_pipeline_microbatches_custom.defvjp(run_pipeline_microbatches_custom_fwd, run_pipeline_microbatches_custom_bwd)
   return run_pipeline_microbatches_custom
@@ -259,6 +257,7 @@ def create_rematerialized_pipeline_stage(
     physical_partition_spec,
     positions,
     segment_ids,
+    pipeline_weights,
 ):
   """Builds a memory-checkpointed execution block for a single pipeline stage.
 
@@ -279,30 +278,38 @@ def create_rematerialized_pipeline_stage(
     physical_partition_spec: Rules for physical device mesh mappings (used in prefetching).
     positions: Position IDs for the sequence.
     segment_ids: Segment/Attention routing IDs for the sequence.
+    pipeline_weights: The fully gathered pipeline weights explicitly passed via closure.
 
   Returns:
     A function decorated with `nn.remat` that takes `(model, loop_state)` and returns
     the updated `loop_state`.
   """
 
-  def execute_pipeline_stage(model, loop_state_and_bsw_and_weights):
-    loop_state, bsw, weights = loop_state_and_bsw_and_weights
-    # Retrieve the specific weights needed for this pipeline chunk
-    bsw = model.weight_prefetching(weights, physical_partition_spec, loop_state["loop_iteration"])
-
-    if model.config.scan_pipeline_iterations:
-      scan_microbatches_fn = create_gradient_accumulation_scan(
-          model=model,
-          length=length,
-          deterministic=deterministic,
-          model_mode=model_mode,
-          logical_partition_spec=logical_partition_spec,
-      )
-      loop_state, bsw, weights = scan_microbatches_fn(loop_state, bsw, weights, positions, segment_ids)
-    else:
-      for _ in range(length):
-        (loop_state, bsw, weights), _ = run_iteration_scannable(model, loop_state, bsw, weights)
-    return (loop_state, bsw, weights), None
+  def execute_pipeline_stage(model, loop_state_and_bsw):
+    loop_state, w_curr = loop_state_and_bsw
+    # # Retrieve the specific weights needed for this pipeline chunk
+    # bsw = model.both_weight_prefetching(pipeline_weights, physical_partition_spec, loop_state["loop_iteration"])
+    w_next = jax.remat(
+        model.one_weight_prefetching,
+        static_argnums=(1,),
+        policy=jax.checkpoint_policies.nothing_saveable,
+    )(
+        pipeline_weights,
+        physical_partition_spec,
+        loop_state["loop_iteration"],
+    )
+    bsw = (w_curr, w_next)
+    scan_microbatches_fn = create_gradient_accumulation_scan(
+        model=model,
+        length=length,
+        deterministic=deterministic,
+        model_mode=model_mode,
+        logical_partition_spec=logical_partition_spec,
+    )
+    loop_state, bsw = scan_microbatches_fn(loop_state, bsw, positions, segment_ids)
+    w_curr, w_next = bsw
+    del w_curr
+    return (loop_state, w_next), None
 
   return nn.remat(
       execute_pipeline_stage,
