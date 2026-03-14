@@ -17,7 +17,7 @@
 # pylint: disable=no-name-in-module
 
 import functools
-from typing import Optional
+from typing import Optional, Any
 
 from flax import nnx
 import jax
@@ -208,9 +208,11 @@ class DeepSeekGenericLayer(nnx.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
     """Executes the attention layer."""
-    attention_result, _ = self.self_attention(
+    attention_result, kv_cache = self.self_attention(
         x,
         x,
         decoder_positions,
@@ -221,8 +223,10 @@ class DeepSeekGenericLayer(nnx.Module):
         previous_chunk=previous_chunk,
         page_state=page_state,
         slot=slot,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
-    return self.with_logical_constraint(attention_result)
+    return self.with_logical_constraint(attention_result), kv_cache
 
   @property
   def logical_axis_names(self):
@@ -269,6 +273,8 @@ class DeepSeekGenericLayer(nnx.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
     """self-attention with normalization"""
     if self.is_mhc_enabled:
@@ -288,7 +294,7 @@ class DeepSeekGenericLayer(nnx.Module):
       )
     else:
       lnx = self.pre_attention_norm_op(inputs)
-      attention_lnx = self.attention_op(
+      attention_lnx, kv_cache = self.attention_op(
           lnx,
           decoder_segment_ids,
           decoder_positions,
@@ -296,11 +302,13 @@ class DeepSeekGenericLayer(nnx.Module):
           previous_chunk,
           page_state,
           slot,
+          kv_cache,
+          attention_metadata,
       )
       intermediate_inputs = inputs + attention_lnx
     # Normalization
     hidden_states = self.post_attention_norm_op(intermediate_inputs)
-    return hidden_states, intermediate_inputs
+    return hidden_states, intermediate_inputs, kv_cache
 
   def engram_op(self, x, decoder_input_tokens):
     normed_x = self.engram_layer_norm(x)
@@ -363,7 +371,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       engram_output = self.engram_op(x, decoder_input_tokens)
       x = x + engram_output
 
-    hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
+    hidden_states, intermediate_inputs, kv_cache = self.self_attention_with_norm_op(
         x,
         decoder_segment_ids,
         decoder_positions,
@@ -371,6 +379,8 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         previous_chunk,
         page_state,
         slot,
+        kv_cache,
+        attention_metadata,
     )
 
     if self.is_mhc_enabled:
@@ -492,7 +502,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       engram_output = self.engram_op(x, decoder_input_tokens)
       x = x + engram_output
 
-    hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
+    hidden_states, intermediate_inputs, kv_cache = self.self_attention_with_norm_op(
         x,
         decoder_segment_ids,
         decoder_positions,
@@ -500,6 +510,8 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         previous_chunk,
         page_state,
         slot,
+        kv_cache,
+        attention_metadata,
     )
 
     if self.is_mhc_enabled:
