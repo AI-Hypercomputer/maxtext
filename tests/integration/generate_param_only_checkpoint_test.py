@@ -126,7 +126,7 @@ def test_param_ckpt_generation_with_dot_product(quantization, capsys):
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
-@pytest.mark.scheduled_only
+# @pytest.mark.scheduled_only
 @pytest.mark.external_serving  # Requires pre-generated checkpoint (Gemma-2b)
 def test_param_ckpt_generation_with_pre_generated_ckpt(capsys):
   """Tests the parameter-only checkpoint generation and decode flow with a pre-generated Gemma-2b model checkpoint."""
