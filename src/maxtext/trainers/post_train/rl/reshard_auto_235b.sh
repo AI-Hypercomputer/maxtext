@@ -2,20 +2,12 @@
 
 # Define your configurations: "trainer_chips:number_of_sampler_chips_per_replica"
 configs=(
-    "1:1"
-    "4:1"
-    "4:2"
     "4:4"
-    "8:1"
-    "8:2"
     "8:4"
     "8:8"
-    "16:1"
-    "16:2"
     "16:4"
     "16:8"
     "16:16"
-    "32:2"
     "32:4"
     "32:8"
     "32:16"
@@ -28,7 +20,7 @@ store_path="./reshard"
 project="cloud-tpu-multipod-dev"
 zone="us-central1"
 cluster="zxhe-super-xpk-bid"
-timestamp="d3"
+timestamp="d5"
 
 mkdir -p ${store_path}
 
@@ -39,9 +31,9 @@ handle_error() {
     # Continue to next iteration rather than exiting the whole script
 }
 
-store_cvs_file="${store_path}/reshard_stats_tp_ep.csv"
+store_cvs_file="${store_path}/reshard_stats_235b_tp_ep.csv"
 
-## For EP + TP
+# For EP + TP
 for config in "${configs[@]}"; do
     # Split the config string into variables
     IFS=":" read -r trainer_chips sampler_chips <<< "$config"
@@ -58,7 +50,7 @@ for config in "${configs[@]}"; do
     trap 'handle_error' ERR
 
     # 1. Create the YAML
-    python ./maxtext/src/maxtext/trainers/post_train/rl/create_yaml.py \
+    python ./maxtext/src/maxtext/trainers/post_train/rl/create_yaml_235b.py \
         --metadata_name "${workload_name}" \
         --trainer_chips "${trainer_chips}" \
         --number_of_sampler_chips_per_replica "${sampler_chips}" \
@@ -86,7 +78,7 @@ for config in "${configs[@]}"; do
     echo "Finished: ${workload_name}. Data in ${store_cvs_file}"
     
     # Small buffer before starting the next config
-    sleep 120
+    sleep 30
 
     # 4. Cleanup Workload
     echo "Deleting workload..."
@@ -102,7 +94,7 @@ echo "All configurations completed."
 
 
 ## For EP only
-store_cvs_file="${store_path}/reshard_stats_ep.csv"
+store_cvs_file="${store_path}/reshard_stats_235b_ep.csv"
 
 for config in "${configs[@]}"; do
     # Split the config string into variables
@@ -120,7 +112,7 @@ for config in "${configs[@]}"; do
     trap 'handle_error' ERR
 
     # 1. Create the YAML
-    python ./maxtext/src/maxtext/trainers/post_train/rl/create_yaml.py \
+    python ./maxtext/src/maxtext/trainers/post_train/rl/create_yaml_235b.py \
         --metadata_name "${workload_name}" \
         --trainer_chips "${trainer_chips}" \
         --number_of_sampler_chips_per_replica "${sampler_chips}" \
@@ -147,7 +139,7 @@ for config in "${configs[@]}"; do
     echo "Finished: ${workload_name}. Data in ${store_cvs_file}"
     
     # Small buffer before starting the next config
-    sleep 120
+    sleep 30
 
     # 4. Cleanup Workload
     echo "Deleting workload..."
@@ -162,7 +154,7 @@ gcloud storage cp ${store_cvs_file} gs://sanbao-bucket/mlperf_rl/results/
 echo "All configurations completed."
 
 ## For TP only
-store_cvs_file="${store_path}/reshard_stats_tp.csv"
+store_cvs_file="${store_path}/reshard_stats_235b_tp.csv"
 for config in "${configs[@]}"; do
     # Split the config string into variables
     IFS=":" read -r trainer_chips sampler_chips <<< "$config"
@@ -179,7 +171,7 @@ for config in "${configs[@]}"; do
     trap 'handle_error' ERR
 
     # 1. Create the YAML
-    python ./maxtext/src/maxtext/trainers/post_train/rl/create_yaml.py \
+    python ./maxtext/src/maxtext/trainers/post_train/rl/create_yaml_235b.py \
         --metadata_name "${workload_name}" \
         --trainer_chips "${trainer_chips}" \
         --number_of_sampler_chips_per_replica "${sampler_chips}" \
@@ -206,7 +198,7 @@ for config in "${configs[@]}"; do
     echo "Finished: ${workload_name}. Data in ${store_cvs_file}"
     
     # Small buffer before starting the next config
-    sleep 120
+    sleep 30
 
     # 4. Cleanup Workload
     echo "Deleting workload..."
