@@ -28,6 +28,8 @@ num_samplers_slices: -1
 rollout_data_parallelism: -1
 rollout_tensor_parallelism: -1
 rollout_expert_parallelism: 1
+rollout_subslice_shape: "" # e.g. '2,2,1' for 4 chips with DP=2, TP=2, EP=1
+rollout_enable_single_controller: False # If True, use a single controller for rollout. This can help with stability when using more than 1 model replica in rollout.
 
 # ====== Reproducibility ======
 data_shuffle_seed: 42
