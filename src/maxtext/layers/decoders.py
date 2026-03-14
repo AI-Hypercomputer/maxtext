@@ -792,7 +792,13 @@ class Decoder(nn.Module):
         decoder_positions,
         deterministic,
         model_mode,
+        previous_chunk,
+        page_state,
+        slot,
     )
+    in_axes_tuple = (nn.broadcast,) * len(broadcast_args)
+    # Pipeline module only accepts (segment_ids, positions, deterministic, model_mode)
+    pipeline_broadcast_args = broadcast_args[:4]
     if cfg.using_pipeline_parallelism:
       logical_partition_spec = (
           self.pipeline_module.get_weight_sharding(y, decoder_segment_ids, decoder_positions, deterministic, model_mode)
@@ -827,9 +833,9 @@ class Decoder(nn.Module):
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
                 model_mode=model_mode,
             )(y, *broadcast_args)
-        y = self.pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
+        y = self.pipeline_module(y, *pipeline_broadcast_args, logical_partition_spec=logical_partition_spec)
       else:  # Not DeepSeek
-        y = self.pipeline_module(y, *broadcast_args, logical_partition_spec=logical_partition_spec)
+        y = self.pipeline_module(y, *pipeline_broadcast_args, logical_partition_spec=logical_partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
@@ -846,26 +852,12 @@ class Decoder(nn.Module):
     else:
       if cfg.scan_layers:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
-          layer_call_kwargs = {
-              "page_state": page_state,
-              "previous_chunk": previous_chunk,
-              "slot": slot,
-          }
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
           if cfg.engram_layers:
-            original_dense_call = dense_layer.__call__
-            original_moe_call = moe_layer.__call__
-            dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
-            moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
-
             common_kwargs = {
                 "dense_layer": dense_layer,
                 "moe_layer": moe_layer,
-                "original_dense_call": original_dense_call,
-                "original_moe_call": original_moe_call,
-                "layer_call_kwargs": layer_call_kwargs,
                 "decoder_segment_ids": decoder_segment_ids,
                 "decoder_positions": decoder_positions,
                 "deterministic": deterministic,
@@ -894,7 +886,6 @@ class Decoder(nn.Module):
                 **common_kwargs,
             )
           else:
-            dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
             y, _ = self.scan_decoder_layers(
                 cfg,
                 dense_layer,
@@ -904,7 +895,6 @@ class Decoder(nn.Module):
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
                 model_mode=model_mode,
             )(y, *broadcast_args)
-            moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
             num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
             # If batch-split schedule is used and initialization is complete,
@@ -953,16 +943,38 @@ class Decoder(nn.Module):
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
-          y, _ = self.scan_decoder_layers(
+
+          # Update broadcast_args and in_axes_tuple for vLLM RPA
+          current_broadcast_args = list(broadcast_args)
+          current_in_axes_tuple = list(in_axes_tuple)
+
+          if kv_caches is not None:
+            # Stack kv_caches for scan: [num_layers, ...]
+            stacked_kv_cache = jnp.stack(kv_caches, axis=0)
+            current_broadcast_args.append(stacked_kv_cache)
+            current_in_axes_tuple.append(0)  # Scan over the layer dimension
+          else:
+            current_broadcast_args.append(None)
+            current_in_axes_tuple.append(nn.broadcast)
+
+          current_broadcast_args.append(attention_metadata)
+          current_in_axes_tuple.append(nn.broadcast)
+
+          y, returned_kv_cache = self.scan_decoder_layers(
               cfg,
               RemattedBlockLayer,
               scan_length,
               "layers",
               mesh,
-              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              in_axes_tuple=tuple(current_in_axes_tuple),
               model_mode=model_mode,
               **layer_kwargs,
-          )(y, *broadcast_args)
+          )(y, *current_broadcast_args)
+
+          if kv_caches is not None and returned_kv_cache is not None:
+            # Update the list of KV caches from the scanned results
+            for i, cache in enumerate(returned_kv_cache):
+              kv_caches[i] = cache
       else:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
           assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
@@ -1172,10 +1184,8 @@ class Decoder(nn.Module):
     """Applies a single, unscanned Engram layer."""
     layer = kwargs["dense_layer"] if layer_type == "dense" else kwargs["moe_layer"]
     layer_prefix = "dense_layers" if layer_type == "dense" else "moe_layers"
-    original_call = kwargs["original_dense_call"] if layer_type == "dense" else kwargs["original_moe_call"]
-    layer_call_kwargs = kwargs["layer_call_kwargs"]
+    broadcast_args = kwargs["broadcast_args"]
 
-    layer.__call__ = original_call
     y, _ = layer(
         config=self.config,
         mesh=self.mesh,
@@ -1185,14 +1195,9 @@ class Decoder(nn.Module):
         layer_idx=current_idx,
     )(
         y,
-        kwargs["decoder_segment_ids"],
-        kwargs["decoder_positions"],
-        kwargs["deterministic"],
-        kwargs["model_mode"],
+        *broadcast_args,
         decoder_input_tokens=kwargs["decoder_input_tokens"],
-        **layer_call_kwargs,
     )
-    layer.__call__ = functools.partial(original_call, **layer_call_kwargs)
     return y
 
   def _apply_scanned_chunk(self, y, current_idx, next_boundary, layer_type, **kwargs):

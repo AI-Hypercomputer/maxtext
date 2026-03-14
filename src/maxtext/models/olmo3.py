@@ -267,6 +267,11 @@ class Olmo3ScannableBlock(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
+      page_state=None,
+      slot=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     cfg = self.config
 
@@ -282,6 +287,11 @@ class Olmo3ScannableBlock(nnx.Module):
           decoder_positions,
           deterministic,
           model_mode,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
       )
       if cfg.scan_layers:
         y = y[0]

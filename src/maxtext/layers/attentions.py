@@ -956,12 +956,13 @@ class Attention(nnx.Module):
           "vLLM RPA attention ops require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
       ) from e
 
-    if rpa_kv_cache is None or rpa_metadata is None:
-      raise ValueError("kv_cache and attention_metadata must be provided when using vLLM.")
-
     query = query.reshape(-1, query.shape[2], query.shape[3])
     key = key.reshape(-1, key.shape[2], key.shape[3])
     value = value.reshape(-1, value.shape[2], value.shape[3])
+
+    if rpa_kv_cache is None or rpa_metadata is None:
+      # Return dummy values for dry runs (e.g. during model initialization or JIT tracing)
+      return [], query
 
     if self.config.sliding_window_size > 0:
       attention_chunk_size = self.config.sliding_window_size

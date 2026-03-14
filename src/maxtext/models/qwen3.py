@@ -896,6 +896,8 @@ class Qwen3NextScannableBlock(nnx.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache=None,
+      attention_metadata=None,
   ) -> tuple[Array, None]:
     """Applies the block of decoder layers to the input carry.
 
@@ -924,6 +926,8 @@ class Qwen3NextScannableBlock(nnx.Module):
           previous_chunk,
           page_state,
           slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
       )
 
     # The output of the block is the carry for the next scan iteration.
@@ -1235,10 +1239,7 @@ class Qwen3DecoderLayer(AttentionWithNorm):
     layer_output = intermediate_inputs + mlp_lnx
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
-    if self.config.scan_layers:
-      return layer_output, None
-    else:
-      return layer_output, kv_cache
+    return layer_output, kv_cache
 
 
 # -----------------------------------------
@@ -1304,10 +1305,7 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
     layer_output = intermediate_inputs + mlp_lnx
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
-    if self.config.scan_layers:
-      return layer_output, None
-    else:
-      return layer_output, kv_cache
+    return layer_output, kv_cache
 
 
 class Qwen3OmniMoeVisionPatchMerger(nnx.Module):

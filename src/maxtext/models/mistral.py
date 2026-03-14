@@ -22,6 +22,7 @@ from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config
+from maxtext.inference import page_manager
 from maxtext.layers import initializers, nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
@@ -126,9 +127,9 @@ class MistralDecoderLayer(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      page_state: None | int = None,
-      slot: None | int = None,
       previous_chunk=None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
       kv_cache=None,
       attention_metadata=None,
   ):
