@@ -56,6 +56,47 @@ SAFE_TENSORS_INDEX_FILE = "model.safetensors.index.json"
 DEFAULT_MAX_SHARD_SIZE = 1024 * 1024 * 1024 * 3  # 3GB default
 
 
+# Mapping from MaxText model key to Hugging Face tokenizer identifiers
+HF_IDS = {
+    "gemma2-2b": "google/gemma-2-2b",
+    "gemma2-9b": "google/gemma-2-9b",
+    "gemma2-27b": "google/gemma-2-27b",
+    "gemma3-4b": "google/gemma-3-4b-it",  # hf multi-modal should also support the pure-text
+    "gemma3-12b": "google/gemma-3-12b-it",
+    "gemma3-27b": "google/gemma-3-27b-it",
+    "qwen3-0.6b": "Qwen/Qwen3-0.6B",
+    "qwen3-1.7b": "Qwen/Qwen3-1.7B",
+    "qwen3-4b": "Qwen/Qwen3-4B",
+    "qwen3-4b-thinking-2507": "Qwen/Qwen3-4B-Thinking-2507",
+    "qwen3-8b": "Qwen/Qwen3-8B",
+    "qwen3-14b": "Qwen/Qwen3-14B",
+    "qwen3-32b": "Qwen/Qwen3-32B",
+    "qwen3-1.7b-base": "Qwen/Qwen3-1.7B-base",
+    "qwen3-4b-base": "Qwen/Qwen3-4B-base",
+    "qwen3-8b-base": "Qwen/Qwen3-8B-base",
+    "qwen3-14b-base": "Qwen/Qwen3-14B-base",
+    "qwen3-30b-a3b-base": "Qwen/Qwen3-30B-A3B-base",
+    "llama3.1-8b": "meta-llama/Llama-3.1-8B",
+    "llama3.1-8b-Instruct": "meta-llama/Llama-3.1-8B-Instruct",
+    "llama3.1-70b-Instruct": "meta-llama/Llama-3.1-70B-Instruct",
+    "llama3.1-70b": "meta-llama/Llama-3.1-70B",
+    "llama3.1-405b": "meta-llama/Llama-3.1-405B",
+    "qwen3-30b-a3b": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+    "qwen3-235b-a22b": "Qwen/Qwen3-235B-A22B-Thinking-2507",
+    "qwen3-480b-a35b": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    "deepseek3-671b": "deepseek-ai/DeepSeek-V3",
+    "gpt-oss-20b": "openai/gpt-oss-20b",
+    "gpt-oss-120b": "openai/gpt-oss-120b",
+    "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+    "qwen3-next-80b-a3b": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "mixtral-8x7b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "mixtral-8x22b": "mistralai/Mixtral-8x22B-Instruct-v0.1",
+    "olmo3-7b": "allenai/Olmo-3-7B-Instruct",
+    "olmo3-7b-pt": "allenai/Olmo-3-1025-7B",
+    "olmo3-32b": "allenai/Olmo-3-32B-Think",
+}
+
+
 def _get_local_directory(output_dir: str) -> str:
   """Determines the local directory for saving files."""
   if output_dir.startswith("gs://") or output_dir.startswith("hf://"):

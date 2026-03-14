@@ -233,13 +233,19 @@ ModelName = Literal[
     "gemma3-12b",
     "gemma3-27b",
     "qwen3-0.6b",
+    "qwen3-1.7b",
+    "qwen3-1.7b-base",
     "qwen3-4b",
+    "qwen3-4b-base",
     "qwen3-4b-thinking-2507",
     "qwen3-8b",
+    "qwen3-8b-base",
     "qwen3-14b",
+    "qwen3-14b-base",
     "qwen3-32b",
     "qwen3-235b-a22b",
     "qwen3-30b-a3b",
+    "qwen3-30b-a3b-base",
     "qwen3-480b-a35b",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
@@ -1662,6 +1668,7 @@ class RLEvaluation(BaseModel):
 class Reward(BaseModel):
   """Configuration for the reward/penalty model in RL."""
 
+  reward_exact_answer: float = Field(5.0, description="Reward for an exact answer match.")
   reward_exact_format_match: float = Field(3.0, description="Reward for an exact format match.")
   reward_white_space_format_match: float = Field(1.5, description="Reward for a format match ignoring whitespace.")
   reward_partial_format_match: float = Field(0.5, description="Reward for a partial format match.")
