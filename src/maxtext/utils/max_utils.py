@@ -198,6 +198,16 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     return
   if raw_keys["enable_single_controller"]:
     max_logging.log("Skipping jax distributed system since its not needed for single controller.")
+    if raw_keys["enable_multi_tier_checkpointing"]:
+      max_logging.log("Initializing multi-tier checkpointing for single controller...")
+      initialize_multi_tier_checkpointing(
+        local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
+        backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
+        run_name=raw_keys["run_name"],
+        jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
+        data_parallelism=raw_keys["mtc_data_parallelism"],
+        use_colocated_python=True
+      )
     return
   if jax.distributed.is_initialized():
     max_logging.log("Jax distributed system is already initialized.")
