@@ -38,7 +38,7 @@ Then use this command to convert an unscanned checkpoint from HuggingFace to Max
 ```shell
 export HF_ACCESS_TOKEN=hf_...
 export MAXTEXT_CKPT_GCS_PATH=gs://...
-python -m maxtext.checkpoint_conversion.to_maxtext maxtext/configs/base.yml \
+python -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=gemma3-4b \
     hf_access_token=${HF_ACCESS_TOKEN?} \
     base_output_directory=${MAXTEXT_CKPT_GCS_PATH?} \

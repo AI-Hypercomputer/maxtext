@@ -30,7 +30,7 @@ source ${VENV_NAME?}/bin/activate
 
 # Run the following commands to get all the necessary installations.
 
-uv pip install maxtext[tpu-post-train] --resolution=lowest
+uv pip install "maxtext[tpu-post-train]>=0.2.0" --resolution=lowest
 install_maxtext_tpu_post_train_extra_deps
 
 
