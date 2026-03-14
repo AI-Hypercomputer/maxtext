@@ -33,8 +33,6 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import max_logging
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
-from maxtext.checkpoint_conversion import to_maxtext
-from maxtext.checkpoint_conversion.utils.utils import HF_IDS
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from orbax import checkpoint as ocp
 
@@ -269,8 +267,8 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kw
         " then please provide the intended .yml file as an argument. e.g., "
         "src/maxtext/configs/post_train/rl.yml for post-training"
     )
-    yaml_file = True
-    argv.insert(1, f"{MAXTEXT_PKG_DIR}/configs/base.yml")
+    yaml_file = f"{MAXTEXT_PKG_DIR}/configs/base.yml"
+    argv.insert(1, yaml_file)
   else:
     # verify that the .yml is in index 1 in the list
     if ".yml" not in argv[1]:
@@ -303,6 +301,9 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kw
     hf_model_path = None
     revision = None
     simulated_cpu_devices_count = 16
+
+    from maxtext.checkpoint_conversion import to_maxtext
+    from maxtext.checkpoint_conversion.utils.utils import HF_IDS
 
     if not tokenizer_path_seen and model_name:
 
@@ -340,8 +341,8 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=False, **kw
     else:
       os.environ["XLA_FLAGS"] = prev_xla_flags
 
-      load_parameters_path = os.path.join(base_output_directory, "0", "items")
-      argv.append(f"load_parameters_path={load_parameters_path}")
+    load_parameters_path = os.path.join(base_output_directory, "0", "items")
+    argv.append(f"load_parameters_path={load_parameters_path}")
 
   # if the yaml file contains rl.yml then we call the setup_configs_and_devices from train_rl.py
   if "rl.yml" in yaml_file:
