@@ -205,7 +205,9 @@ ModelName = Literal[
     "llama2-13b",
     "llama2-70b",
     "llama3-8b",
+    "llama3.1-8b-Instruct",
     "llama3-70b",
+    "llama3.1-70b-Instruct",
     "llama3.1-8b",
     "llama3.1-70b",
     "llama3.1-405b",
@@ -932,8 +934,8 @@ class Tokenizer(BaseModel):
   """Configuration for the tokenizer."""
 
   vocab_size: int = Field(32_000, description="The size of the vocabulary.")
-  tokenizer_path: PathStr = Field(
-      os.path.join("assets", "tokenizers", "tokenizer.llama2"),
+  tokenizer_path: None | PathStr = Field(
+      None,
       description="Path to the tokenizer model file.",
   )
   tokenizer_type: TokenizerType = Field(TokenizerType.SENTENCEPIECE, description="The type of tokenizer.")

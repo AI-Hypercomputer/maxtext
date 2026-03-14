@@ -70,7 +70,7 @@ Finally, run below command to complete the conversion
 # Optional: If run out of disk space when downloading HuggingFace safetensors,
 # customize your "HF_HOME" to redirect the cache to a larger or mounted disk (e.g., on a TPU VM).
 # export HF_HOME="/dev/shm/huggingface_tmp"
-python3 -m maxtext.checkpoint_conversion.to_maxtext maxtext/configs/base.yml \
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME?} \
     hf_access_token=${HF_TOKEN?} \
     base_output_directory=${MODEL_CHECKPOINT_DIRECTORY?} \
@@ -108,7 +108,7 @@ Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugg
 The following command converts a MaxText checkpoint and saves it locally, to GCS, or uploads it directly to the Hugging Face Hub.
 
 ```bash
-python3 -m maxtext.checkpoint_conversion.to_huggingface src/maxtext/configs/base.yml \
+python3 -m maxtext.checkpoint_conversion.to_huggingface \
     model_name=<MODEL_NAME> \
     load_parameters_path=<path-to-maxtext-checkpoint> \
     base_output_directory=<path-to-save-converted-checkpoint> \
@@ -221,7 +221,7 @@ To extend conversion support to a new model architecture, you must define its sp
 - In [`utils/param_mapping.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/utils/param_mapping.py), add the `hook_fn` logic (`def {MODEL}_MAXTEXT_TO_HF_PARAM_HOOK_FN`). This is the transformation needed per layer.
 
 2. **Add Hugging Face weights Shape**: In [`utils/hf_shape.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/utils/hf_shape.py), define the tensor shape of Hugging Face format (`def {MODEL}_HF_WEIGHTS_TO_SHAPE`). This is used to ensure the tensor shape is matched after to_huggingface conversion.
-3. **Register model key**: In [`utils/utils.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/utils/utils.py), add the new model key in `HF_IDS`.
+3. **Register model key**: In [`utils/utils.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py), add the new model key in `HF_IDS`.
 4. **Add transformer config**: In [`utils/hf_model_configs.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/utils/hf_model_configs.py), add the `transformers.Config` object, describing the Hugging Face model configuration (defined in [`src/maxtext/configs/models`](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/configs/models)). **Note**: This configuration must precisely match the MaxText model's architecture.
 
 Here is an example [PR to add support for gemma3 multi-modal model](https://github.com/AI-Hypercomputer/maxtext/pull/1983)

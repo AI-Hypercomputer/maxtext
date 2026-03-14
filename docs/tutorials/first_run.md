@@ -49,7 +49,7 @@ pre-commit install
 4. After installation completes, run training on synthetic data with the following command:
 
 ```sh
-python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train \
   run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -61,7 +61,7 @@ Optional: If you want to try training on a Hugging Face dataset, see [Data Input
 5. To demonstrate model output, run the following command:
 
 ```sh
-python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
+python3 -m maxtext.inference.decode \
   run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
@@ -83,7 +83,7 @@ You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/bl
 2. After installation is complete, run training with the following command on synthetic data:
 
 ```sh
-python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train \
   run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -93,7 +93,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 3. To demonstrate model output, run the following command:
 
 ```sh
-python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
+python3 -m maxtext.inference.decode \
   run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1

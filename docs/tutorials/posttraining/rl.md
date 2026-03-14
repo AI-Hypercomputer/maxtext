@@ -57,7 +57,7 @@ source ${VENV_NAME?}/bin/activate
 Run the following commands to get all the necessary installations.
 
 ```bash
-uv pip install maxtext[tpu-post-train] --resolution=lowest
+uv pip install "maxtext[tpu-post-train]>=0.2.0" --resolution=lowest
 install_maxtext_tpu_post_train_extra_deps
 ```
 
@@ -86,14 +86,17 @@ install_maxtext_tpu_post_train_extra_deps
 
 ## Setup environment variables
 
+Follow the instructions [here](https://huggingface.co/docs/huggingface_hub/v0.21.2/guides/cli) to login to Hugging Face using your access token using
+
+```bash
+huggingface-cli login
+```
+
 Setup following environment variables before running GRPO/GSPO:
 
 ```bash
 # -- Model configuration --
-export HF_MODEL=<Hugging Face Model> # e.g. 'llama3.1-8b-Instruct'
-export MODEL=<MaxText Model> # e.g. 'llama3.1-8b'
-export TOKENIZER=<Tokenizer> # e.g. 'meta-llama/Llama-3.1-8B-Instruct'
-export HF_TOKEN=<Hugging Face access token>
+export MODEL=<MaxText Model> # e.g. 'llama3.1-8b-Instruct'
 
 # -- MaxText configuration --
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
@@ -133,13 +136,11 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 Run the following command for GRPO:
 
 ```
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
-  tokenizer_path=${TOKENIZER?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-  hf_access_token=${HF_TOKEN?} \
   chips_per_vm=${CHIPS_PER_VM?}
 ```
 
@@ -157,13 +158,11 @@ The overview of what this run will do is as follows:
 Run the following command for GSPO:
 
 ```
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
-  tokenizer_path=${TOKENIZER?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-  hf_access_token=${HF_TOKEN?} \
   loss_algo=gspo-token \
   chips_per_vm=${CHIPS_PER_VM?}
 ```
