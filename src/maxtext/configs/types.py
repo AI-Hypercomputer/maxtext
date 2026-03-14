@@ -291,6 +291,13 @@ class Checkpointing(BaseModel):
 
   load_parameters_path: PathStr = Field("", description="Loads only model parameters from a specific checkpoint path.")
   lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
+  hf_lora_adapter_path: PathStr = Field(
+      "",
+      description=(
+          "HuggingFace LoRA adapter repo ID (e.g., 'username/adapter-repo') or local "
+          "path to directory containing adapter_model.safetensors."
+      ),
+  )
   load_full_state_path: PathStr = Field("", description="Loads the complete training state from a checkpoint path.")
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
@@ -783,6 +790,7 @@ class HardwareAndMesh(BaseModel):
   enable_nnx: bool = Field(False, description="Whether to use NNX for model definition.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
+  pure_nnx_decoder: bool = Field(False, description="Whether to enable pure NNX decoder.")
 
 
 class LayoutAndSharding(BaseModel):
@@ -801,7 +809,10 @@ class LayoutAndSharding(BaseModel):
       description="Allowed percentage of non-sharded parameters.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
-  internal_compile: bool = Field(False, description="Use internal_compile to bypass open-source topology mappings.")
+  internal_compile: bool = Field(
+      False,
+      description="Use internal_compile to bypass open-source topology mappings.",
+  )
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
 
 
@@ -1062,6 +1073,34 @@ class FineTuning(BaseModel):
       False, description="If True, trains only on the completion part of the text."
   )
   use_grpo: None | bool = Field(None, description="If True, enables Group Relative Policy Optimization.")
+
+
+class LoRA(BaseModel):
+  """Configuration for LoRA / QLoRA adapters."""
+
+  enable_lora: bool = Field(False, description="If True, enables LoRA/QLoRA during fine-tuning.")
+  lora_rank: NonNegativeInt = Field(0, description="LoRA rank. Set >0 when LoRA is enabled.")
+  lora_alpha: NonNegativeFloat = Field(0.0, description="LoRA alpha scaling factor.")
+  lora_module_path: str = Field(
+      "",
+      description=(
+          "Regex identifying target modules for LoRA, e.g." " '.*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj'."
+      ),
+  )
+  lora_weight_qtype: str | None = Field(
+      None,
+      description=("Optional quantization type for QLoRA (e.g., 'nf4'). If set, QLoRA is applied."),
+  )
+  lora_tile_size: NonNegativeInt | None = Field(
+      None,
+      description="Optional tile size for QLoRA (e.g., 128 or 256).",
+  )
+  lora_restore_path: PathStr = Field(
+      "",
+      description=(
+        "Optional path to LoRA weights to load before training. Ignored if the current run is resumed."
+      ),
+  )
 
 
 class Distillation(BaseModel):
@@ -1885,6 +1924,7 @@ class MaxTextConfig(
     AdamW,
     Muon,
     FineTuning,
+    LoRA,
     Distillation,
     # Reinforcement Learning
     RLHardware,
