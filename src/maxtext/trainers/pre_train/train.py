@@ -220,7 +220,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
 
   # get indexer loss
   indexer_loss = 0.0
-  if config.use_sparse_indexer and config.indexer_loss_scaling_factor > 0.0:
+  if config.use_indexer and config.indexer_loss_scaling_factor > 0.0:
     indexer_losses = []
     # Extract 'indexer_loss' from model intermediates.
     # We check for paths ending in ('self_attention', 'indexer_loss').

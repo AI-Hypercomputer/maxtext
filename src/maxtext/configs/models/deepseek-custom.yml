@@ -56,10 +56,10 @@ rope_interleave: True
 rope_truncate: True
 rope_attention_scaling: False
 # Indexer for DeepSeek Sparse Attention
-use_sparse_indexer: True
-index_n_heads: 16              # Reduced from 64
-index_head_dim: 64             # Reduced from 128
-index_topk: 256                # Reduced from 2048
+use_indexer: True
+indexer_n_heads: 16              # Reduced from 64
+indexer_head_dim: 64             # Reduced from 128
+indexer_topk: 256                # Reduced from 2048
 # Hyper-connections: mHC enabled
 mhc_expansion_rate: 4
 sinkhorn_iterations: 20

@@ -533,11 +533,14 @@ class MlaAttention(BaseModel):
 class AttentionIndexer(BaseModel):
   """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
 
-  use_sparse_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
-  index_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
-  index_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
-  index_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
-  sparse_indexer_loss: bool = Field(False, description="Determines the token selection strategy for indexer loss.")
+  use_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
+  indexer_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
+  indexer_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
+  indexer_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
+  indexer_sparse_training: bool = Field(
+      False,
+      description="Determines the training strategy for the indexer: Dense Warm-up or Sparse Training stage.",
+  )
   indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
 
 
@@ -1168,6 +1171,13 @@ class Optimizer(BaseModel):
       -1,
       ge=-1,
       description="Total steps for the LR schedule. -1 defaults to `steps`.",
+  )
+  trainable_parameters_mask: list[str] = Field(
+      default_factory=list,
+      description=(
+          "List of parameter names/patterns to train. If non-empty, all other parameters will be frozen, "
+          "example: ['.*indexer.*']. If empty (default), all parameters are trained."
+      ),
   )
 
 
@@ -2353,7 +2363,7 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
-    if self.use_sparse_indexer:
+    if self.use_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
       supports_dot_product = self.attention == "dot_product"

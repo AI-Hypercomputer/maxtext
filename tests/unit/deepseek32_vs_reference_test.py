@@ -96,9 +96,9 @@ class Config:
   rope_truncate: bool = True
   rope_attention_scaling: bool = False
   # indexer
-  use_sparse_indexer: bool = True
-  index_n_heads: int = 64
-  index_head_dim: int = 128  # > qk_rope_head_dim
+  use_indexer: bool = True
+  indexer_n_heads: int = 64
+  indexer_head_dim: int = 128  # > qk_rope_head_dim
 
 
 class ModelArgs:
@@ -107,7 +107,7 @@ class ModelArgs:
   Maps MaxText Config keys to the specific variable names expected by the reference implementation.
   """
 
-  def __init__(self, config: Config, max_batch_size: int = 8, index_topk: int = 4):
+  def __init__(self, config: Config, max_batch_size: int = 8, indexer_topk: int = 4):
     self.max_batch_size = max_batch_size
     self.scale_fmt = None
     self.max_seq_len = config.max_position_embeddings
@@ -128,9 +128,9 @@ class ModelArgs:
     self.beta_slow = config.beta_slow
     self.mscale = config.mscale
     # indexer
-    self.index_n_heads = config.index_n_heads
-    self.index_head_dim = config.index_head_dim
-    self.index_topk = index_topk
+    self.indexer_n_heads = config.indexer_n_heads
+    self.indexer_head_dim = config.indexer_head_dim
+    self.indexer_topk = indexer_topk
 
 
 # -----------------------------------------------------------------------------
@@ -458,14 +458,14 @@ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
 
 class Indexer(torch.nn.Module):  # pylint: disable=missing-class-docstring
 
-  def __init__(self, args: ModelArgs, index_topk: int = 4):
+  def __init__(self, args: ModelArgs, indexer_topk: int = 4):
     super().__init__()
     self.dim: int = args.dim
-    self.n_heads: int = args.index_n_heads
-    self.n_local_heads = args.index_n_heads // world_size
-    self.head_dim: int = args.index_head_dim
+    self.n_heads: int = args.indexer_n_heads
+    self.n_local_heads = args.indexer_n_heads // world_size
+    self.head_dim: int = args.indexer_head_dim
     self.rope_head_dim: int = args.qk_rope_head_dim
-    self.index_topk: int = index_topk
+    self.index_topk: int = indexer_topk
     self.q_lora_rank: int = args.q_lora_rank
     self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim)
     self.wk = Linear(self.dim, self.head_dim)
@@ -581,7 +581,7 @@ class MLA(nn.Module):
       softmax_scale (float): Scaling factor for softmax in attention computation.
   """
 
-  def __init__(self, args: ModelArgs, index_topk: int):
+  def __init__(self, args: ModelArgs, indexer_topk: int):
     super().__init__()
     self.dim = args.dim
     self.n_heads = args.n_heads
@@ -606,7 +606,7 @@ class MLA(nn.Module):
       mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
-    self.indexer = Indexer(args, index_topk)
+    self.indexer = Indexer(args, indexer_topk)
 
     self.register_buffer(
         "kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False
@@ -751,7 +751,7 @@ def get_jax_mla_weights(pt_mla, cfg):
   }
 
 
-def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len, attention, index_topk):
+def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len, attention, indexer_topk):
   """Returns MaxText configuration and mesh."""
   cfg = pyconfig.initialize(
       [None, get_test_config_path()],
@@ -768,7 +768,7 @@ def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len, attention, in
       max_target_length=seq_len,
       max_prefill_predict_length=seq_len,
       attention=attention,
-      index_topk=index_topk,
+      indexer_topk=indexer_topk,
       **asdict(config),
   )
   devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -831,7 +831,7 @@ class DeepseekTestBase(parameterized.TestCase):
 class DeepseekV32IndexerTest(DeepseekTestBase):
   """Tests for the Sparse Indexer (Top-K Selection)."""
 
-  # index_topk=4
+  # indexer_topk=4
   def test_indexer_match(self, seq_len=8):
     """Verifies Indexer output matches PyTorch output."""
     torch_inputs, jax_inputs = self.get_data(seq_len)
@@ -864,7 +864,7 @@ class DeepseekV32IndexerTest(DeepseekTestBase):
         batch_size=self.batch_size,
         seq_len=self.seq_len,
         attention="dot_product",
-        index_topk=4,
+        indexer_topk=4,
     )
 
     # Indexer specific RoPE (interleave=False)
@@ -914,49 +914,49 @@ class DeepseekV32MLATest(DeepseekTestBase):
           "testcase_name": "dot_product_s2_k4",
           "attention": "dot_product",
           "seq_len": 2,
-          "index_topk": 4,
+          "indexer_topk": 4,
       },
       {
           "testcase_name": "dot_product_s8_k4",
           "attention": "dot_product",
           "seq_len": 8,
-          "index_topk": 4,
+          "indexer_topk": 4,
       },
       {
           "testcase_name": "dot_product_s128_k4",
           "attention": "dot_product",
           "seq_len": 128,
-          "index_topk": 4,
+          "indexer_topk": 4,
           "check_norm": True,
       },
       {
           "testcase_name": "dot_product_s128_k128",
           "attention": "dot_product",
           "seq_len": 128,
-          "index_topk": 128,
+          "indexer_topk": 128,
           "check_norm": True,
       },
       {
           "testcase_name": "flash_s128_k4",
           "attention": "flash",
           "seq_len": 128,
-          "index_topk": 4,
+          "indexer_topk": 4,
           "check_norm": True,
       },
       {
           "testcase_name": "flash_s128_k128",
           "attention": "flash",
           "seq_len": 128,
-          "index_topk": 128,
+          "indexer_topk": 128,
           "check_norm": True,
       },
   )
-  def test_mla_parity(self, attention, seq_len, index_topk, check_norm=False):
+  def test_mla_parity(self, attention, seq_len, indexer_topk, check_norm=False):
     """Verifies JAX MLA output against the PyTorch reference implementation."""
     torch_inputs, jax_inputs = self.get_data(seq_len)
 
     # 1. PyTorch Run
-    pt_mla = MLA(self.pt_args, index_topk)
+    pt_mla = MLA(self.pt_args, indexer_topk)
     init_torch_weights(pt_mla)
     pt_mla.eval()
 
@@ -977,7 +977,7 @@ class DeepseekV32MLATest(DeepseekTestBase):
         batch_size=self.batch_size,
         seq_len=self.seq_len,
         attention=attention,
-        index_topk=index_topk,
+        indexer_topk=indexer_topk,
     )
 
     jax_mla = attention_mla.MLA(
