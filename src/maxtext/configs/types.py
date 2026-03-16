@@ -613,15 +613,11 @@ class MoEGeneral(BaseModel):
   )
   te_permutation_impl: bool = Field(
       False,
-      description="Whether to use TransformerEngine permutation kernels for MoE token dispatch/combine.",
+      description="Whether to use TransformerEngine fused router and permutation kernels for MoE routing and token dispatch/combine.",
   )
   te_permutation_align_size: int = Field(
       128,
       description="Alignment size for TE permutation padding. Set to 0 to disable padding.",
-  )
-  te_router_impl: bool = Field(
-      False,
-      description="Whether to use TransformerEngine fused router kernels for MoE routing. Requires te_permutation_impl=True.",
   )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
@@ -2386,14 +2382,8 @@ class MaxTextConfig(
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
       if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
-      if self.te_router_impl:
-        if not self.te_permutation_impl:
-          raise ValueError(
-              "te_router_impl=True requires te_permutation_impl=True. "
-              "The TE fused router outputs (sparse_probs, routing_map) are only compatible with TE permutation."
-          )
-        if not self.sparse_matmul:
-          raise ValueError("te_router_impl=True requires sparse_matmul=True.")
+      if self.te_permutation_impl and not self.sparse_matmul:
+        raise ValueError("te_permutation_impl=True requires sparse_matmul=True.")
     if self.use_multimodal:
       valid_mm_models = (
           "gemma3-4b",
