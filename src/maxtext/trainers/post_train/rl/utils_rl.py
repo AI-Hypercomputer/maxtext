@@ -468,8 +468,7 @@ def check_answer_simple_math(prompts, completions, answer, tmvp_config, **kargs)
       flags=re.MULTILINE | re.DOTALL,
   )
   extracted_responses = [
-      guess.group(1) if (guess := match_numbers.search(response)) is not None else None
-      for response in completions
+      guess.group(1) if (guess := match_numbers.search(response)) is not None else None for response in completions
   ]
 
   scores = []
@@ -526,9 +525,7 @@ def get_optimizer(tmvp_config, max_train_steps):
   def make_optimizer(learning_rate):
     transforms = []
     if tmvp_config.gradient_clipping_threshold > 0:
-      transforms.append(
-          optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold)
-      )
+      transforms.append(optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold))
     transforms.append(
         optax.adamw(
             learning_rate=learning_rate,
@@ -589,17 +586,15 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
       "prompts": model_tokenizer.apply_chat_template(
           [
               {
-                "role": "system", 
-                "content": template_config["SYSTEM_PROMPT"].format(
-                  reasoning_start_token=tmvp_config.reasoning_start_token,
-                  reasoning_end_token=tmvp_config.reasoning_end_token,
-                  solution_start_token=tmvp_config.solution_start_token,
-                  solution_end_token=tmvp_config.solution_end_token,
-              )},
-              { 
-                "role": "user",
-                "content": question
-              }
+                  "role": "system",
+                  "content": template_config["SYSTEM_PROMPT"].format(
+                      reasoning_start_token=tmvp_config.reasoning_start_token,
+                      reasoning_end_token=tmvp_config.reasoning_end_token,
+                      solution_start_token=tmvp_config.solution_start_token,
+                      solution_end_token=tmvp_config.solution_end_token,
+                  ),
+              },
+              {"role": "user", "content": question},
           ],
           tokenize=False,
           add_generation_prompt=True,

@@ -479,9 +479,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     )
     model_input = actor_model.get_model_input()
     with actor_mesh:
-      actor_model = qwix.apply_lora_to_model(
-          actor_model, lora_provider, rngs=nnx.Rngs(0), **model_input
-      )
+      actor_model = qwix.apply_lora_to_model(actor_model, lora_provider, rngs=nnx.Rngs(0), **model_input)
     max_logging.log("LoRA applied to actor model successfully.")
 
   if trainer_config.debug.rl:
@@ -646,12 +644,13 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     @wraps(reward_fn)
     def _reward_fn(**kwargs):
       return reward_fn(tmvp_config=trainer_config, **kwargs)
+
     return _reward_fn
 
   reward_fns = [
       _make_reward_fn(utils_rl.match_format_exactly),
       _make_reward_fn(utils_rl.match_format_approximately),
-      #_make_reward_fn(utils_rl.check_answer), # atwigg: commenting out since it overlaps with check_numbers
+      # _make_reward_fn(utils_rl.check_answer), # atwigg: commenting out since it overlaps with check_numbers
       _make_reward_fn(utils_rl.check_numbers),
   ]
 

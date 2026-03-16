@@ -97,6 +97,7 @@ class TunixMaxTextAdapter(nnx.Module):
   def get_model_input(self):
     """Returns dummy inputs matching __call__ for qwix.apply_lora_to_model tracing."""
     import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
+
     dummy_batch_size = 1
     dummy_seq_len = 128
     return {

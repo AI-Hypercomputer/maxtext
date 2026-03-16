@@ -255,7 +255,9 @@ class ToNNX(Module):
       nnx_attrs = {
           k: v
           for k, v in vars(self).items()
-          if not k.startswith("to_nnx__") and not k.startswith("_pytree__") and not k.startswith("_object__")
+          if not k.startswith("to_nnx__")
+          and not k.startswith("_pytree__")
+          and not k.startswith("_object__")
           and isinstance(v, dict)  # linen variable collections are always dicts; skip plain attrs (e.g. qwix metadata)
       }
       variables = nnx_attrs_to_linen_vars(nnx_attrs)
