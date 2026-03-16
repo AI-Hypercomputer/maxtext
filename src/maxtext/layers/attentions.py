@@ -1046,6 +1046,9 @@ class Attention(nnx.Module):
     else:
       input_axis_names = self.decode_input_axis_names
 
+    # this_module = "vision" if self.is_vision else "decoder"
+    # jax.debug.print("*{this_module} Attention input_q shape: {shape}, mean: {mean}", this_module=this_module, shape=str(inputs_q.shape), mean=jnp.mean(inputs_q))
+    # jax.debug.print("*{this_module} Attention input_kv shape: {shape}, mean: {mean}", this_module=this_module, shape=str(inputs_kv.shape), mean=jnp.mean(inputs_kv))
     inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
     inputs_kv = self._maybe_shard_with_logical(inputs_kv, input_axis_names)
     qkv_sharding = create_sharding(self.mesh, input_axis_names)
@@ -1069,8 +1072,13 @@ class Attention(nnx.Module):
     # NOTE: llama 4 does L2 normalization after RoPE
     # Apply Qwen3Next specific RMS Norm
     if (self.use_qk_norm and not is_llama4_decoder_block) or self.is_qwen3_next:
+      # jax.debug.print("*{this_module} before norm query shape: {shape}, mean: {mean}", this_module=this_module, shape=str(query.shape), mean=jnp.mean(query))
+      # jax.debug.print("*{this_module} before norm key shape: {shape}, mean: {mean}", this_module=this_module, shape=str(key.shape), mean=jnp.mean(key))
       query = self.query_norm(query)
       key = self.key_norm(key)
+      # jax.debug.print("*{this_module} after norm query shape: {shape}, mean: {mean}", this_module=this_module, shape=str(query.shape), mean=jnp.mean(query))
+      # jax.debug.print("*{this_module} after norm key shape: {shape}, mean: {mean}", this_module=this_module, shape=str(key.shape), mean=jnp.mean(key))
+  
 
     # NOTE: is_nope_layer should be used in attention mask and also used in attention tuning
     use_rope = not self.is_nope_layer
@@ -1079,6 +1087,10 @@ class Attention(nnx.Module):
     if use_rope:
       query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
       key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
+      # jax.debug.print("*{this_module} inputs_positions {inputs_positions}", this_module=this_module, inputs_positions=inputs_positions)
+      # jax.debug.print("*{this_module} after rotary embedding query shape: {shape}, mean: {mean}", this_module=this_module, shape=str(query.shape), mean=jnp.mean(query))
+      # jax.debug.print("*{this_module} after rotary embedding key shape: {shape}, mean: {mean}", this_module=this_module, shape=str(key.shape), mean=jnp.mean(key))
+
 
     if use_qk_norm and is_llama4_decoder_block:
       l2_norm = L2Norm(eps=self.config.normalization_layer_epsilon)

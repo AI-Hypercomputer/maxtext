@@ -121,7 +121,7 @@ class AudioEncoder(nnx.Module):
     # audio projector layer
     projector = getattr(self, self.projector_name)
     embeddings = projector(embeddings)
-    jax.debug.print("*Audio encoder output embeddings shape: {shape}, mean: {mean}", shape=embeddings.shape, mean=jnp.mean(embeddings))
+    # jax.debug.print("*Audio encoder output embeddings shape: {shape}, mean: {mean}", shape=embeddings.shape, mean=jnp.mean(embeddings))
 
     return embeddings
 

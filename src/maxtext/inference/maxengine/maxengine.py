@@ -482,13 +482,17 @@ class MaxEngine(_BaseEngine):
 
     full_true_length = start_position + true_length
 
-    input_tokens = jnp.expand_dims(padded_tokens, 0)
+    if padded_tokens.ndim == 1:
+      input_tokens = jnp.expand_dims(padded_tokens, 0)
+    else:
+      input_tokens = padded_tokens  # already has batch dimension (e.g. from multimodal preprocessing)
 
     if positions is not None:
       if positions.ndim == 2:
         positions = jnp.expand_dims(positions, 1)
     else:
       positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
+    # positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
     if self.config.use_multimodal and images is not None:
       if images.ndim == 3:
@@ -575,6 +579,7 @@ class MaxEngine(_BaseEngine):
       next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32) + mrope_deltas
     else:
       next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
+    # next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
 
     return {
         "logits": selected_logits,
@@ -1302,7 +1307,12 @@ class MaxEngine(_BaseEngine):
       )
 
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
-    inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
+    inserted_next_pos = jax.lax.dynamic_update_index_in_dim(
+        decode_state["next_pos"],
+        jnp.asarray(unboxed_prefix["next_pos"], dtype=decode_state["next_pos"].dtype),
+        slot,
+        0,
+    )
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
         decode_state["generated_tokens"],
         unboxed_prefix["generated_tokens"],

@@ -100,7 +100,7 @@ def main(argv: Sequence[str]) -> None:
   prof = profiler.Profiler(config)
 
   text = config.prompt
-  text = r"<|im_start|>user\n" + text + r"<|im_end|>\n<|im_start|>assistant\n"
+  # text = r"<|im_start|>user\n" + text + r"<|im_end|>\n<|im_start|>assistant\n"
   prefill_length = config.max_prefill_predict_length
   processor_outputs = mm_utils.PreprocessorOutput()
   if config.use_multimodal:
@@ -108,15 +108,15 @@ def main(argv: Sequence[str]) -> None:
     image_offsets = mm_processor.get_image_offsets(config=config, processor_output=processor_outputs)
 
     prefill_length -= image_offsets
-    # text = mm_processor.reformat_prompt(
-    #     prompt=config.prompt,
-    #     image_placeholder=config.image_placeholder,
-    #     video_placeholder=config.video_placeholder,
-    #     model_name=config.model_name,
-    #     num_images=processor_outputs.num_images,
-    #     num_videos=getattr(processor_outputs, 'num_videos', 0),
-    # )
-    text = r"<|im_start|>user\n<|vision_start|><|video_pad|><|vision_end|>What can you see? Answer in one short sentence.<|im_end|>\n<|im_start|>assistant\n"
+    text = mm_processor.reformat_prompt(
+        prompt=config.prompt,
+        image_placeholder=config.image_placeholder,
+        video_placeholder=config.video_placeholder,
+        model_name=config.model_name,
+        num_images=processor_outputs.num_images,
+        num_videos=getattr(processor_outputs, 'num_videos', 0),
+    )
+    # text = r"<|im_start|>user\n<|vision_start|><|video_pad|><|vision_end|>What can you see? Answer in one short sentence.<|im_end|>\n<|im_start|>assistant\n"
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
@@ -145,20 +145,20 @@ def main(argv: Sequence[str]) -> None:
     true_length = 1071
     max_utils.max_logging.log(f"After preparing text for image fusion, tokens: {tokens.shape}, true_length: {true_length}")
 
-    # if config.use_mrope:
-    #   from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
+    if config.use_mrope:
+      from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
 
-    #   position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
-    #       input_ids=tokens,
-    #       image_grid_thw=processor_outputs.pixel_grid_thw,  # pytype: disable=attribute-error
-    #       video_grid_thw=processor_outputs.video_grid_thw,  # pytype: disable=attribute-error
-    #       attention_mask=np.ones_like(tokens),
-    #       use_audio_in_video=config.use_audio and getattr(processor_outputs, 'num_videos', 0) > 0,
-    #       audio_lengths=processor_outputs.audio_lengths,  # pytype: disable=attribute-error
-    #       second_per_grids=processor_outputs.video_second_per_grid,  # pytype: disable=attribute-error
-    #       spatial_merge_size=config.spatial_merge_size_for_vit,  # pytype: disable=attribute-error
-    #       position_id_per_seconds=config.position_id_per_seconds,
-    #   )
+      position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
+          input_ids=tokens,
+          image_grid_thw=processor_outputs.pixel_grid_thw,  # pytype: disable=attribute-error
+          video_grid_thw=processor_outputs.video_grid_thw,  # pytype: disable=attribute-error
+          attention_mask=np.ones_like(tokens),
+          use_audio_in_video=config.use_audio and getattr(processor_outputs, 'num_videos', 0) > 0,
+          audio_lengths=processor_outputs.audio_lengths,  # pytype: disable=attribute-error
+          second_per_grids=processor_outputs.video_second_per_grid,  # pytype: disable=attribute-error
+          spatial_merge_size=config.spatial_merge_size_for_vit,  # pytype: disable=attribute-error
+          position_id_per_seconds=config.position_id_per_seconds,
+      )
 
   assert (
       true_length <= config.max_prefill_predict_length
@@ -199,11 +199,29 @@ def main(argv: Sequence[str]) -> None:
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)
 
+  # # Debug: print mrope_position_deltas and prefill next_pos
+  # if mrope_position_deltas is not None:
+  #   max_utils.max_logging.log(f"mrope_position_deltas: {mrope_position_deltas}, shape: {np.array(mrope_position_deltas).shape}")
+  #   max_utils.max_logging.log(f"prefill next_pos (before cast): {true_length} + {float(mrope_position_deltas.flat[0]):.2f} = {true_length + float(mrope_position_deltas.flat[0]):.2f}")
+
   # Insert
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
   for i in range(_NUM_STREAMS):
     decode_state = engine.insert(prefill_result_list[i], decode_state, slot=i)
+
+  # # Debug: verify prefill KV cache is populated after insert
+  # max_utils.max_logging.log(f"decode_state next_pos after insert: {jnp.array(decode_state['next_pos'])}")
+  # try:
+  #   first_layer = list(decode_state["cache"]["decoder"].values())[0]
+  #   first_kv_module = list(first_layer.values())[0]
+  #   prefill_key = first_kv_module.get("cached_prefill_key", None)
+  #   if prefill_key is not None:
+  #     max_utils.max_logging.log(f"prefill KV cache[layer0] mean abs: {jnp.mean(jnp.abs(prefill_key)):.6f} (should be non-zero)")
+  #   else:
+  #     max_utils.max_logging.log("WARNING: cached_prefill_key not found in cache structure")
+  # except Exception as e:  # pylint: disable=broad-except
+  #   max_utils.max_logging.log(f"Cache debug failed: {e}")
 
   # Generate
   prof_deactivated = False

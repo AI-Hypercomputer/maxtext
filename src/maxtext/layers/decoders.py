@@ -640,14 +640,14 @@ class Decoder(nn.Module):
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
       ]:
-        jax.debug.print("==== Before merging image embeddings, y shape: {shape}, mean: {mean}", shape=str(y.shape), mean=jnp.mean(y))
-        jax.debug.print("==== Before merging image embeddings, image_embeddings shape: {shape}, mean: {mean}", shape=str(image_embeddings.shape), mean=jnp.mean(image_embeddings))
+        # jax.debug.print("==== Before merging image embeddings, y shape: {shape}, mean: {mean}", shape=str(y.shape), mean=jnp.mean(y))
+        # jax.debug.print("==== Before merging image embeddings, image_embeddings shape: {shape}, mean: {mean}", shape=str(image_embeddings.shape), mean=jnp.mean(image_embeddings))
         # Tile stub embeddings from (1, T, D) to (B, T, D) using true batch size from text embeddings
         if image_embeddings.shape[0] != y.shape[0]:
           image_embeddings = jnp.tile(image_embeddings, (y.shape[0], 1, 1))
-          jax.debug.print("==== Tiled image_embeddings to batch: {shape}", shape=str(image_embeddings.shape))
-        jax.debug.print("==== bidirectional_mask shape {shape}, sum: {sum}", shape=str(bidirectional_mask.shape), sum=jnp.sum(bidirectional_mask))
-        jax.debug.print("==== image_masks: {image_masks}", image_masks=image_masks)
+        #   jax.debug.print("==== Tiled image_embeddings to batch: {shape}", shape=str(image_embeddings.shape))
+        # jax.debug.print("==== bidirectional_mask shape {shape}, sum: {sum}", shape=str(bidirectional_mask.shape), sum=jnp.sum(bidirectional_mask))
+        # jax.debug.print("==== image_masks: {image_masks}", image_masks=image_masks)
         # image_embeddings = jnp.load("/home/hengtaoguo_google_com/projects/video_embeds.npy")
         # image_embeddings = image_embeddings[jnp.newaxis, :, :]  # Add batch dimension
         # jax.debug.print("==== Loaded image_embeddings shape: {shape}, mean: {mean}", shape=str(image_embeddings.shape), mean=jnp.mean(image_embeddings))
@@ -662,8 +662,8 @@ class Decoder(nn.Module):
         )
         jax.debug.print("==== After merging image embeddings, y shape: {shape}, mean: {mean}", shape=str(y.shape), mean=jnp.mean(y))
         # if str(y.shape) == "(1, 1071, 2048)":
-        # y = jnp.load("/home/hengtaoguo_google_com/projects/merged.npy")
-        # jax.debug.print("==== Loaded merged embeddings from file, y shape: {shape}, mean: {mean}", shape=str(y.shape), mean=jnp.mean(y))
+        #   y = jnp.load("/home/hengtaoguo_google_com/projects/merged.npy")
+        #   jax.debug.print("==== Loaded merged embeddings from file, y shape: {shape}, mean: {mean}", shape=str(y.shape), mean=jnp.mean(y))
 
 
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
@@ -994,7 +994,8 @@ class Decoder(nn.Module):
                 kv_caches[index] = kv_cache
             global_layer_idx_offset += num_layers
         else:
-          jax.debug.print("====!!!! Decoder start y {shape} {mean}", shape=str(y.shape), mean=jnp.mean(y))
+          # jax.debug.print("====!!!! Decoder start y {shape} {mean} ====", shape=str(y.shape), mean=jnp.mean(y))
+          # jax.debug.print("====!!!! decoder_positions {shape} {mean}", shape=str(decoder_positions.shape), mean=jnp.mean(decoder_positions))
           # if y.shape[1] == 1071:
           #   y = jnp.load("/home/hengtaoguo_google_com/projects/decoder_array/decoder_hidden_states_a.npy")
           #   jax.debug.print("====!!!! Loaded hidden states from disk for decoder start, new shape: {shape}, new mean: {mean}", shape=str(y.shape), mean=jnp.mean(y))
@@ -1022,6 +1023,7 @@ class Decoder(nn.Module):
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
             kv_cache = kv_caches[lyr] if kv_caches is not None else None
+            # jax.debug.print("====!!!! Decoder start layer {layer} {mean} ====", layer=lyr, mean=jnp.mean(y))
             y, kv_cache = layer(
                 y,
                 decoder_segment_ids,

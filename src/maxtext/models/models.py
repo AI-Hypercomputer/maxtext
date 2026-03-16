@@ -170,6 +170,7 @@ class TransformerLinenPure(nn.Module):
 
     # jax.debug.print("*Decoder input tokens shape: {shape}", shape=str(decoder_input_tokens.shape))
     # jax.debug.print("*Decoder input tokens content: {content}", content=decoder_input_tokens)
+    # jax.debug.print("*decoder_positions: {content}", content=decoder_positions)
     # jax.debug.print("*self.config.use_multimodal: {use_multimodal}", use_multimodal=self.config.use_multimodal)
     # jax.debug.print("*encoder_images is None: {is_none}", is_none=encoder_images is None)
     logits, hidden_state, kv_caches = self.decoder(
@@ -472,7 +473,7 @@ class Transformer(nnx.Module):
           input_images=encoder_images, deterministic=not enable_dropout
       )
       bidirectional_mask = mm_processor.get_bidirectional_mask_vision(self.config, decoder_input_tokens)
-      jax.debug.print("*bidirectional_mask shape: {shape}, sum: {sum}", shape=bidirectional_mask.shape, sum=jnp.sum(bidirectional_mask))
+      # jax.debug.print("*bidirectional_mask shape: {shape}, sum: {sum}", shape=bidirectional_mask.shape, sum=jnp.sum(bidirectional_mask))
 
     audio_embeddings = None
     if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
@@ -489,9 +490,9 @@ class Transformer(nnx.Module):
     if self.config.distill_beta > 0.0 and "intermediates" not in mutable_collections:
       mutable_collections.append("intermediates")
 
-    jax.debug.print("*Decoder input tokens shape: {shape}", shape=decoder_input_tokens.shape)
-    jax.debug.print("*self.config.use_multimodal: {use_multimodal}", use_multimodal=self.config.use_multimodal)
-    jax.debug.print("*encoder_images is None: {is_none}", is_none=encoder_images is None)
+    # jax.debug.print("*Decoder input tokens shape: {shape}", shape=decoder_input_tokens.shape)
+    # jax.debug.print("*self.config.use_multimodal: {use_multimodal}", use_multimodal=self.config.use_multimodal)
+    # jax.debug.print("*encoder_images is None: {is_none}", is_none=encoder_images is None)
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,

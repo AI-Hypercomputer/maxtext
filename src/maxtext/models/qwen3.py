@@ -1712,8 +1712,8 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
         - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
     """
-    jax.debug.print("*Input hidden_states shape: {shape}", shape=str(hidden_states.shape))
-    jax.debug.print("*Input hidden_states mean: {mean}", mean=jnp.mean(hidden_states))
+    # jax.debug.print("*Input hidden_states shape: {shape}", shape=str(hidden_states.shape))
+    # jax.debug.print("*Input hidden_states mean: {mean}", mean=jnp.mean(hidden_states))
     ve_pass = False
     if hidden_states.ndim != 5:
         # hidden_states = 0.5 * jnp.ones_like(hidden_states)
@@ -1731,20 +1731,20 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
     # if ve_pass:
     #     jax.debug.print("*Patch embedded hidden_states mean: {mean}", mean=jnp.mean(x))
     #     x = jnp.load("/home/hengtaoguo_google_com/projects/patch_embed.npy")
-    jax.debug.print("*Patch embedded hidden_states loaded mean: {mean}", mean=jnp.mean(x))
+    # jax.debug.print("*Patch embedded hidden_states loaded mean: {mean}", mean=jnp.mean(x))
     pos = self.pos_embed_interpolate(num_frames, height, width)
-    jax.debug.print("*Positional embedding mean: {mean}", mean=jnp.mean(pos))
+    # jax.debug.print("*Positional embedding mean: {mean}", mean=jnp.mean(pos))
 
     pos = pos[jnp.newaxis, :, :]
     x = x + pos
-    jax.debug.print("*x+pos mean: {mean}", mean=jnp.mean(x))
+    # jax.debug.print("*x+pos mean: {mean}", mean=jnp.mean(x))
 
     h_traj = []
     for i in range(self.depth):
       block_name = f"blocks_{i}"
       blk = getattr(self, block_name)
       x = blk(x, num_frames=num_frames, height=height, width=width)
-      jax.debug.print("*x mean after block {i}: {mean}", i=i, mean=jnp.mean(x))
+    #   jax.debug.print("*x mean after block {i}: {mean}", i=i, mean=jnp.mean(x))
       h_traj.append(x)
 
     deep_feats = []
@@ -1755,11 +1755,11 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
       deep_feat = merger(h)
       deep_feats.append(deep_feat)
 
-    jax.debug.print("*Output hidden_states shape: {shape}", shape=str(x.shape))
-    jax.debug.print("*Output hidden_states mean: {mean}", mean=jnp.mean(x))
-    jax.debug.print("*self.deep_idx: {deep_idx}", deep_idx=self.deep_idx)
-    for i, deep_feat in enumerate(deep_feats):
-      jax.debug.print("*Deep feature {i} shape: {shape}, mean: {mean}", i=i, shape=str(deep_feat.shape), mean=jnp.mean(deep_feat))
+    # jax.debug.print("*Output hidden_states shape: {shape}", shape=str(x.shape))
+    # jax.debug.print("*Output hidden_states mean: {mean}", mean=jnp.mean(x))
+    # jax.debug.print("*self.deep_idx: {deep_idx}", deep_idx=self.deep_idx)
+    # for i, deep_feat in enumerate(deep_feats):
+    #   jax.debug.print("*Deep feature {i} shape: {shape}, mean: {mean}", i=i, shape=str(deep_feat.shape), mean=jnp.mean(deep_feat))
     return x, deep_feats
 
 
