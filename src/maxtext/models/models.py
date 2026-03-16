@@ -335,8 +335,8 @@ class Transformer(nnx.Module):
     if cfg.pure_nnx_decoder:
       self.decoder = NNXDecoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
     else:
-      decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
-      self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
+      self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
+      self.decoder = nnx_wrappers.ToNNX(self.decoder, rngs=rngs)
     self.hidden_states = None
 
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=cfg, model_mode=model_mode)
