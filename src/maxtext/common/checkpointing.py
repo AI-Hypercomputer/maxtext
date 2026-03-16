@@ -739,8 +739,8 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
         max_logging.log("Started a checkpoint and a new slice is available. Waiting for current checkpoint to finish before interrupting.")
         checkpoint_manager.wait_until_finished()
         max_logging.log("Checkpoint save completed. Interrupting")
-        raise manager.NewSliceAvailableError()
-  except (manager.NewSliceAvailableError, jax.errors.JaxRuntimeError):
+        raise manager.ScaleUpSignalError()
+  except (manager.ScaleUpSignalError, jax.errors.JaxRuntimeError):
     raise
   except Exception as e:
     raise exceptions.StopTraining(f"Checkpointing failed. {str(e)}") from e
