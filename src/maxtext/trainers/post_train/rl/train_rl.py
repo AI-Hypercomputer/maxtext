@@ -392,7 +392,9 @@ def prepare_datasets(trainer_config, model_tokenizer):
   train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size)
 
   test_dataset = test_dataset.filter(_filter_long_prompts)
-  test_dataset = test_dataset[: trainer_config.num_test_batches * trainer_config.batch_size]
+  test_dataset = test_dataset[
+      trainer_config.test_batch_start_index : trainer_config.num_test_batches * trainer_config.batch_size
+  ]
 
   test_dataset = test_dataset.to_iter_dataset().batch(trainer_config.batch_size)
   return train_dataset, test_dataset

@@ -100,6 +100,7 @@ micro_batch_size: -1
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200
+test_batch_start_index: 0
 train_fraction: 1.0
 
 eval_interval: 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
