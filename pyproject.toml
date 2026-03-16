@@ -21,7 +21,7 @@ name = "MaxText"
 version = "0.1.0"
 description = "MaxText is a high performance, highly scalable, open-source LLM written in pure Python/Jax and targeting Google Cloud TPUs and GPUs for training and inference"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {file = "LICENSE"}
 dynamic = ["dependencies"]
 
