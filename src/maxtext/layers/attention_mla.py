@@ -345,8 +345,8 @@ def backward_computation(q: jnp.ndarray, k: jnp.ndarray, w: jnp.ndarray, d_score
     
     q_spec = pl.BlockSpec((None, bT, H, D_padded), lambda b, t: (b, t, 0, 0))
     w_spec = pl.BlockSpec((None, bT, H_padded_w), lambda b, t: (b, t, 0))
-    k_spec_any = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
-    d_score_spec_any = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+    k_spec_any = pl.BlockSpec(memory_space=None)
+    d_score_spec_any = pl.BlockSpec(memory_space=None)
     
     d_q_spec = pl.BlockSpec((None, bT, H, D_padded), lambda b, t: (b, t, 0, 0))
     d_w_spec = pl.BlockSpec((None, bT, H_padded_w), lambda b, t: (b, t, 0))
@@ -376,8 +376,8 @@ def backward_computation(q: jnp.ndarray, k: jnp.ndarray, w: jnp.ndarray, d_score
     grid_k = (B, S_padded // bS)
     
     k_spec = pl.BlockSpec((None, bS, D_padded), lambda b, s: (b, s, 0))
-    q_spec_any = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
-    w_spec_any = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+    q_spec_any = pl.BlockSpec(memory_space=None)
+    w_spec_any = pl.BlockSpec(memory_space=None)
     # d_score_spec_any reused
     
     d_k_spec = pl.BlockSpec((None, bS, D_padded), lambda b, s: (b, s, 0))
@@ -703,22 +703,22 @@ class Indexer(nnx.Module):
       
       # k: (B, S_padded, D_padded) -> Full array in HBM
       # We use ANY memory space, so we must pass the full array and slice manually in the kernel
-      k_spec = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+      k_spec = pl.BlockSpec(memory_space=None)
       
       # mask
       has_mask = mask is not None
       if has_mask:
           # mask: (B, T, S) -> Full array in HBM
-          mask_spec = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+          mask_spec = pl.BlockSpec(memory_space=None)
       else:
           # Dummy mask to satisfy Pallas signature
           # Create a small dummy mask
           dummy_mask = jnp.zeros((1, 1), dtype=jnp.float32)
-          mask_spec = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+          mask_spec = pl.BlockSpec(memory_space=None)
 
       # Outputs
       # o_score: (B, T, S) -> Full array in HBM
-      o_score_spec = pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY)
+      o_score_spec = pl.BlockSpec(memory_space=None)
       
       out_shape = jax.ShapeDtypeStruct((B, T_padded, S_padded), dtype=jnp.float32)
       
@@ -854,10 +854,12 @@ class Indexer(nnx.Module):
 
     if True:
       # early return
+      print("use kernel implementation")
       weights = self.weights_proj(inputs_q)
       weights = weights * (self.n_heads**-0.5) * self.softmax_scale
       return self.computation(q, k, weights, attention_mask, self.config.index_topk)
 
+    print("use JAX implementation")
     # Compute Index Scores
     # QK product: relu(q @ k.T), [b, t, s, h]
     # Similar to MQA, each key is shared by h query head
