@@ -63,6 +63,7 @@ from jax.sharding import Mesh
 from orbax import checkpoint as ocp
 from pprint import pprint
 from transformers import AutoTokenizer
+import qwix
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
@@ -453,7 +454,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           {maxtext_state_flatten['base.token_embedder.embedding'][...]}"
     )
 
-  # TODO: @mazumdera: change this to use lora
   if trainer_config.load_checkpoint_only_once:
     max_logging.log("Creating policy model by copying reference model instead of restoring from checkpoint again.")
     with reference_mesh:
@@ -465,6 +465,23 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   else:
     max_logging.log("Creating policy model with same config as reference model on trainer mesh")
     actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
+
+  if trainer_config.lora.enabled:
+    max_logging.log(
+        f"Applying LoRA to actor model: rank={trainer_config.lora.rank}, "
+        f"alpha={trainer_config.lora.alpha}, module_path='{trainer_config.lora.module_path}'"
+    )
+    lora_provider = qwix.LoraProvider(
+        module_path=trainer_config.lora.module_path,
+        rank=trainer_config.lora.rank,
+        alpha=trainer_config.lora.alpha,
+    )
+    model_input = actor_model.get_model_input()
+    with actor_mesh:
+      actor_model = qwix.apply_lora_to_model(
+          actor_model, lora_provider, rngs=nnx.Rngs(0), **model_input
+      )
+    max_logging.log("LoRA applied to actor model successfully.")
 
   if trainer_config.debug.rl:
     max_logging.log("Policy Model initialized successfully")
@@ -514,7 +531,13 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   # We need to parse vLLM config to get the logical axis rules for the sampler config.
   vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
-  argv_list = ["", str(vllm_config_path), "log_config=False"]
+  argv_list = [
+      "",
+      str(vllm_config_path),
+      "log_config=False",
+      f"model_name={trainer_config.model_name}",
+      f"tokenizer_path={trainer_config.tokenizer_path}",
+  ]
   vllm_config = pyconfig.initialize(argv_list)
 
   # RL Cluster config
@@ -616,13 +639,20 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   # Create RL trainer
   max_logging.log("Setting up RL trainer...")
+
+  def match_format_exactly_reward(**kwargs):
+    return utils_rl.match_format_exactly(tmvp_config=trainer_config, **kwargs)
+
+  def check_numbers_reward(**kwargs):
+    return utils_rl.check_numbers(tmvp_config=trainer_config, **kwargs)
+
   rl_trainer = GrpoLearner(
       rl_cluster=rl_cluster,
       reward_fns=[  # type: ignore
-          lambda **kwargs: utils_rl.match_format_exactly(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.match_format_approximately(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.check_answer(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.check_numbers(tmvp_config=trainer_config, **kwargs),
+          match_format_exactly_reward,
+          # match_format_approximately_reward,
+          # check_answer_reward,
+          check_numbers_reward,
       ],
       algo_config=grpo_config,
   )

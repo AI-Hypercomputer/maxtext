@@ -404,6 +404,8 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
   Reward the model if the answer is correct using math_verify for robust comparison.
   Handles both numeric values and mathematical expressions with LaTeX.
   """
+  #return check_answer_simple_math(prompts, completions, answer, tmvp_config, **kargs)
+
   question = kargs["question"]
 
   # Extract full answer content from solution tags (not just first number)
@@ -447,6 +449,55 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
         scores.append(tmvp_config.reward_exact_answer if guess_val == true_val else 0.0)
       except:
         scores.append(0)
+
+  return scores
+
+
+def check_answer_simple_math(prompts, completions, answer, tmvp_config, **kargs):
+  """Binary numeric reward matching tunix/cli/reward_fn/simple_math.py::check_answer.
+
+  This intentionally mirrors tunix behavior:
+  - extract first numeric token after <answer>
+  - compare with strict float equality
+  - return reward_exact_answer on exact match else 0
+  """
+  match_numbers = re.compile(
+      rf"{re.escape(tmvp_config.solution_start_token)}.*?([\d\.]{{1,}})",
+      flags=re.MULTILINE | re.DOTALL,
+  )
+  answer_tag_pattern = re.compile(
+      rf"{re.escape(tmvp_config.solution_start_token)}.*?{re.escape(tmvp_config.solution_end_token)}",
+      flags=re.MULTILINE | re.DOTALL,
+  )
+  extracted_responses = [
+      guess.group(1) if (guess := match_numbers.search(response)) is not None else None
+      for response in completions
+  ]
+
+  scores = []
+  for guess, true_answer in zip(extracted_responses, answer):
+    if guess is None:
+      scores.append(0)
+      continue
+    try:
+      guess_val = float(guess.strip())
+      true_val = float(str(true_answer).strip())
+      scores.append(tmvp_config.reward_exact_answer if guess_val == true_val else 0.0)
+    except ValueError:
+      scores.append(0)
+
+  if tmvp_config.debug.rl:
+    total = max(1, len(completions))
+    tag_hits = sum(1 for response in completions if answer_tag_pattern.search(response) is not None)
+    numeric_hits = sum(1 for guess in extracted_responses if guess is not None)
+    nonzero_rewards = sum(1 for score in scores if score > 0)
+    max_logging.log(
+        "[reward_debug/simple_math] "
+        f"tag_hit_rate={tag_hits / total:.3f} "
+        f"numeric_extract_rate={numeric_hits / total:.3f} "
+        f"nonzero_reward_rate={nonzero_rewards / total:.3f} "
+        f"batch_size={len(completions)}"
+    )
 
   return scores
 
@@ -540,17 +591,17 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
       "prompts": model_tokenizer.apply_chat_template(
           [
               {
-                  "role": "user",
-                  "content": template_config["TEMPLATE"].format(
-                      system_prompt=template_config["SYSTEM_PROMPT"].format(
-                          reasoning_start_token=tmvp_config.reasoning_start_token,
-                          reasoning_end_token=tmvp_config.reasoning_end_token,
-                          solution_start_token=tmvp_config.solution_start_token,
-                          solution_end_token=tmvp_config.solution_end_token,
-                      ),
-                      question=question,
-                  ),
-              },
+                "role": "system", 
+                "content": template_config["SYSTEM_PROMPT"].format(
+                  reasoning_start_token=tmvp_config.reasoning_start_token,
+                  reasoning_end_token=tmvp_config.reasoning_end_token,
+                  solution_start_token=tmvp_config.solution_start_token,
+                  solution_end_token=tmvp_config.solution_end_token,
+              )},
+              { 
+                "role": "user",
+                "content": question
+              }
           ],
           tokenize=False,
           add_generation_prompt=True,
