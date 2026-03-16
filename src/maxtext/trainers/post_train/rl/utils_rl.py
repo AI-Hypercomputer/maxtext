@@ -404,8 +404,6 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
   Reward the model if the answer is correct using math_verify for robust comparison.
   Handles both numeric values and mathematical expressions with LaTeX.
   """
-  #return check_answer_simple_math(prompts, completions, answer, tmvp_config, **kargs)
-
   question = kargs["question"]
 
   # Extract full answer content from solution tags (not just first number)

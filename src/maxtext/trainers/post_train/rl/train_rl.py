@@ -45,6 +45,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 
 from __future__ import annotations
 from typing import Sequence
+from functools import wraps
 
 import collections
 import grain
@@ -640,20 +641,23 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   # Create RL trainer
   max_logging.log("Setting up RL trainer...")
 
-  def match_format_exactly_reward(**kwargs):
-    return utils_rl.match_format_exactly(tmvp_config=trainer_config, **kwargs)
+  # wrap the reward_fn so that tunix can see __name__
+  def _make_reward_fn(reward_fn):
+    @wraps(reward_fn)
+    def _reward_fn(**kwargs):
+      return reward_fn(tmvp_config=trainer_config, **kwargs)
+    return _reward_fn
 
-  def check_numbers_reward(**kwargs):
-    return utils_rl.check_numbers(tmvp_config=trainer_config, **kwargs)
+  reward_fns = [
+      _make_reward_fn(utils_rl.match_format_exactly),
+      _make_reward_fn(utils_rl.match_format_approximately),
+      #_make_reward_fn(utils_rl.check_answer), # atwigg: commenting out since it overlaps with check_numbers
+      _make_reward_fn(utils_rl.check_numbers),
+  ]
 
   rl_trainer = GrpoLearner(
       rl_cluster=rl_cluster,
-      reward_fns=[  # type: ignore
-          match_format_exactly_reward,
-          # match_format_approximately_reward,
-          # check_answer_reward,
-          check_numbers_reward,
-      ],
+      reward_fns=reward_fns,  # type: ignore
       algo_config=grpo_config,
   )
 
