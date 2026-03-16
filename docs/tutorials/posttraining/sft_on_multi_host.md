@@ -116,8 +116,11 @@ export MODEL_CHECKPOINT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-b
 
 **Note:** Make sure that `MODEL_CHECKPOINT_PATH` has the checkpoints created using the correct storage flags:
 
-- **For SFT with McJAX:** `checkpoint_storage_use_zarr3=True` and `checkpoint_storage_use_ocdbt=True`.
-- **For SFT with Pathways:** `checkpoint_storage_use_zarr3=False` and `checkpoint_storage_use_ocdbt=False`.
+```
+export USE_PATHWAYS=0  # Set to 1 for Pathways, 0 for McJAX.
+checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS))
+checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS))
+```
 
 ### Option 2: Converting a Hugging Face checkpoint
 
@@ -150,6 +153,8 @@ Once the fine-tuning is completed, you can access your model checkpoints at `$OU
 ### 6.2. SFT with Pathways
 
 ```bash
+export USE_PATHWAYS=1
+
 xpk workload create-pathways \
 --cluster=${CLUSTER_NAME?} \
 --project=${PROJECT?} \
@@ -158,7 +163,7 @@ xpk workload create-pathways \
 --workload=${WORKLOAD_NAME?} \
 --tpu-type=${TPU_TYPE?} \
 --num-slices=${TPU_SLICE?} \
---command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=${MODEL_NAME?} load_parameters_path=${MODEL_CHECKPOINT_PATH?} hf_access_token=${HF_TOKEN?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False enable_single_controller=True"
+--command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=${MODEL_NAME?} load_parameters_path=${MODEL_CHECKPOINT_PATH?} hf_access_token=${HF_TOKEN?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS)) checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) enable_single_controller=True"
 ```
 
 Once the fine-tuning is completed, you can access your model checkpoints at `$OUTPUT_PATH/$WORKLOAD_NAME/checkpoints`.
