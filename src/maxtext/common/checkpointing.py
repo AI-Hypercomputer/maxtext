@@ -16,6 +16,7 @@
 
 import time
 from typing import Any, Optional
+from packaging import version
 
 from absl import flags
 import datetime
@@ -774,7 +775,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       ocdbt_target_data_file_size=chunk_byte_size,
   )
   save_args_composite = {"items": checkpoint_args}
-
+  print(version.__package__)
   if (
       config
       and config.dataset_type == "grain"
