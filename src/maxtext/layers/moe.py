@@ -900,10 +900,7 @@ class RoutedMoE(nnx.Module):
       if self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat:
         tokamax_group_sizes = group_sizes
       else:
-        tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
-            group_sizes,
-            max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
-        )
+        tokamax_group_sizes = tokamax.RaggedDotGroupSizes(group_sizes, self.config.wi_tile_fwd_batch_seq)
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
