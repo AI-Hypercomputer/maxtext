@@ -2531,6 +2531,15 @@ class MaxTextConfig(
       self.use_grpo = True
     else:
       self.use_grpo = False
+
+    if self.use_batch_split_schedule:
+      if not (self.decoder_block == DecoderBlockType.DEEPSEEK and self.sparse_matmul and self.use_tokamax_gmm):
+        raise ValueError("Batch split only supports deepseek, with `sparse_matmul=True` and `use_tokamax_gmm=True`")
+      if self.quantization and not (self.use_qwix_quantization and self.quantization == "fp8_full"):
+        raise ValueError(
+            "Batch split quantization only supports `use_qwix_quantization=True` and `quantization=fp8_full`"
+        )
+
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.QWEN3,
@@ -2539,7 +2548,7 @@ class MaxTextConfig(
     ]:
       raise ValueError(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "
-          f"`python3 -m MaxText.muon_utils {self.model_name} True`"
+          f"`python3 -m maxtext.utils.muon_utils {self.model_name} True`"
       )
     if self.force_q_layout and not self.use_jax_splash:
       raise ValueError("`force_q_layout` can only be true if `use_jax_splash` is also true.")
