@@ -8,13 +8,15 @@ from contextlib import contextmanager
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from absl import flags
 from flax import nnx
 from jax import config as jax_config
 from jax.sharding import PartitionSpec as P
 from jaxtyping import PyTree
+import torch
 from tunix.models.qwen3 import model as qwen3_lib
-from vllm import LLM
+from vllm import LLM, SamplingParams
 
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
@@ -73,7 +75,8 @@ def _get_maxtext_model(config):
   """Creates and returns a Tunix-adapted MaxText model and mesh."""
   logging.info(f'Creating model with config: {config}')
   model, mesh = model_creation_utils.create_nnx_model(
-    config, model_mode=MODEL_MODE_AUTOREGRESSIVE, use_rand_init=_RAND_INIT.value)
+    # config, model_mode=MODEL_MODE_AUTOREGRESSIVE)
+    config, model_mode=MODEL_MODE_AUTOREGRESSIVE, use_rand_init=_RAND_INIT.value)    
   with mesh:
     tunix_model = TunixMaxTextAdapter(base_model=model)
     # Use the appropriate model config based on the model name
@@ -141,8 +144,10 @@ def _load_maxtext_model(base_yaml_path):
       run_name="test-tunix-maxtext-qwen3",
       tokenizer_type="huggingface",
       tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "qwen3-tokenizer"),
-      model_name="qwen3-235b-a22b",
-      load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-235b-a22b/scanned/Qwen3-235B-A22B/0/items",
+      # model_name="qwen3-235b-a22b",
+      # load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-235b-a22b/scanned/Qwen3-235B-A22B/0/items",
+      model_name="qwen3-30b-a3b",
+      load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-30b-a3b/scanned/2026-01-23-14-00/0/items/0/items",
       scan_layers="true",
       per_device_batch_size=1,
       max_prefill_predict_length=8,
@@ -158,7 +163,7 @@ def _load_maxtext_model(base_yaml_path):
       query_proj="offload",
       key_proj="offload",
       value_proj="offload",
-      ici_expert_parallelism=8,
+      ici_expert_parallelism=4,
       # ici_fsdp_parallelism=,
       # ici_tensor_parallelism=,
       override_model_config="true",
@@ -249,16 +254,16 @@ class MaxTextToVLLMConverter:
       gc.collect()
       
     def _to_final_norm(self, params):
-      self.vllm_state["model.norm.weight"] = params['base']['decoder']['decoder_norm']['scale']
+      self.vllm_state["vllm_model.model.norm.weight"] = params['base']['decoder']['decoder_norm']['scale']
 
     def _to_embed_tokens(self, params):
-      self.vllm_state["model.embed_tokens.weight"] = params['base']['token_embedder']['embedding']
+      self.vllm_state["vllm_model.model.embed_tokens.weight"] = params['base']['token_embedder']['embedding']
 
     def _to_lm_head(self, params):
       @jax.jit(donate_argnums=(0,))
       def _transpose(x):
         return jnp.transpose(x, (1, 0))
-      self.vllm_state["lm_head.weight"] = _transpose(
+      self.vllm_state["vllm_model.lm_head.weight"] = _transpose(
           params['base']['decoder']['logits_dense']['kernel']
       )
       
@@ -269,13 +274,22 @@ class MaxTextToVLLMConverter:
       q = jnp.transpose(attn['query']['kernel'], (1, 0, 2, 3))
       k = jnp.transpose(attn['key']['kernel'], (1, 0, 2, 3))
       v = jnp.transpose(attn['value']['kernel'], (1, 0, 2, 3))
-      def _prep_qkv(x):
-        # (l, d_model, h, d) -> (l, d_model, h * d)
-        x_flat = x.reshape(x.shape[0], x.shape[1], -1)
-        # (l, d_model, h * d) -> (l, h * d, d_model)
-        return jnp.transpose(x_flat, (0, 2, 1))
-      # (l, 3 * h * d, d_model)
-      qkv_proj = jnp.concatenate([_prep_qkv(q), _prep_qkv(k), _prep_qkv(v)], axis=1)
+      # GQA interleaving: [Q_group0, K0, V0, Q_group1, K1, V1, ...]
+      # q: (l, d_model, num_q_heads, head_dim)
+      # k: (l, d_model, num_kv_heads, head_dim)
+      num_q_heads = q.shape[2]
+      num_kv_heads = k.shape[2]
+      heads_per_group = num_q_heads // num_kv_heads
+      l, d_model, _, head_dim = q.shape
+      # Group q: (l, d_model, num_kv_heads, heads_per_group, head_dim)
+      q_grouped = q.reshape(l, d_model, num_kv_heads, heads_per_group, head_dim)
+      # Group k, v: (l, d_model, num_kv_heads, 1, head_dim)
+      k_grouped = k.reshape(l, d_model, num_kv_heads, 1, head_dim)
+      v_grouped = v.reshape(l, d_model, num_kv_heads, 1, head_dim)
+      # Concat within each group: (l, d_model, num_kv_heads, heads_per_group+2, head_dim)
+      group = jnp.concatenate([q_grouped, k_grouped, v_grouped], axis=3)
+      # Flatten and transpose: (l, num_kv_heads*(heads_per_group+2)*head_dim, d_model)
+      qkv_proj = jnp.transpose(group.reshape(l, d_model, -1), (0, 2, 1))
       
       # (h, l, d, d_model) -> (l, d_model, Heads, d)
       o = jnp.transpose(attn['out']['kernel'], (1, 3, 0, 2))
@@ -357,14 +371,19 @@ class MaxTextToVLLMConverter:
             out_specs=P('expert', None, None), 
         )
         def _fuse(wi_0, wi_1):
-          # [e, d_model, d_inner] -> [e, d_inner, d_model]
-          wi_0 = jnp.transpose(wi_0, (0, 2, 1))
-          wi_1 = jnp.transpose(wi_1, (0, 2, 1))
-          # Interleave instead of simple concat
-          # [e, d_inner, d_model] -> [e, d_inner, 2, d_model]
-          combined = jnp.stack([wi_0, wi_1], axis=2) 
-          # [e, d_inner, 2, d_model] -> [e, 2 * d_inner, d_model]
-          return combined.reshape(wi_0.shape[0], -1, wi_0.shape[2])
+          # [e_shard, d_model, d_inner] -> [e_shard, d_inner, d_model]
+          wi_0 = jnp.transpose(wi_0, (0, 2, 1))  # gate
+          wi_1 = jnp.transpose(wi_1, (0, 2, 1))  # up
+          e, d_inner, d_model = wi_0.shape
+          # Chunk-level interleave to match vLLM TP sharding:
+          # layout: [gate_chunk0, up_chunk0, gate_chunk1, up_chunk1, ...]
+          num_chunks = 4  # tensor_parallel_size for vLLM
+          chunk_size = d_inner // num_chunks
+          gate_chunks = wi_0.reshape(e, num_chunks, chunk_size, d_model)
+          up_chunks = wi_1.reshape(e, num_chunks, chunk_size, d_model)
+          # [e, num_chunks, 2, chunk_size, d_model] -> [e, 2*d_inner, d_model]
+          combined = jnp.stack([gate_chunks, up_chunks], axis=2)
+          return combined.reshape(e, 2 * d_inner, d_model)
 
         layer_i = _fuse(wi_0_layer_i, wi_1_layer_i)
         self.vllm_state.update({f"{layer_key_prefix}.{i}.{layer_key_suffix}": layer_i})
@@ -382,6 +401,13 @@ class MaxTextToVLLMConverter:
     def _unstack_layer(param):
         return jnp.unstack(param, axis=0)
 
+
+def save_dict_to_file(dict, filename):
+    with open(filename, 'w') as f:
+        for key in sorted(dict.keys()):
+            f.write(f"{key}: {dict[key].shape}\n")
+
+
 def main():
   print(f"JAX devices: {jax.devices()}")  
   _setup_jax_compilation_cache()
@@ -394,7 +420,8 @@ def main():
   print("="*80)
   print("Loading MaxText model...")
   print("="*80)
-  path1 = "/home/wyzhang_google_com/mnt/rl/maxtext/src/maxtext/configs/base.yml"
+  # path1 = "/home/wyzhang_google_com/mnt/rl/maxtext/src/maxtext/configs/base.yml"
+  path1 = "/home/hengtaoguo_google_com/projects/maxtext/src/maxtext/configs/base.yml"
   path2 = os.path.join(os.path.expanduser("~"), "mnt/rl/maxtext/src/maxtext/configs/base.yml")
   if os.path.exists(path1):
     base_yaml_path = path1
@@ -425,6 +452,32 @@ def main():
     vllm_state = converter.convert(model_state)
   del model_state
   gc.collect()
+  save_dict_to_file(vllm_state, "vllm_state_shapes.txt")
+
+  # Load vLLM model and run generation test
+  print("="*80)
+  print("Loading vLLM model for generation test...")
+  print("="*80)
+  llm = LLM(
+    "Qwen/Qwen3-30B-A3B",
+    max_model_len=16,
+    tensor_parallel_size=4,
+    gpu_memory_utilization=0.5,
+  )
+  llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
+  # save_dict_to_file(llm_state, "llm_state_shapes.txt")
+
+  with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
+    for key, weight in vllm_state.items():
+      target_sharding = llm_state[key].sharding
+      llm_state[key] = jax.device_put(np.asarray(weight), target_sharding)
+
+  sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
+  print("\n" + "="*80)
+  print("Generation test after weight transfer:")
+  with timer("Generation"):
+    print(llm.generate("Paris is", sampling_params=sampling_params))
+
 
 if __name__ == "__main__":
   main()
