@@ -1,0 +1,1 @@
+{% for message in messages %}{{ '<|start_of_turn|><|' + message['role'] + '|>\n' + message['content'] + '<|end_of_turn|>\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|start_of_turn|><|assistant|>\n' }}{% endif %}
