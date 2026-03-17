@@ -103,7 +103,7 @@ To install, click the `Extensions` icon on the left sidebar (or press `Ctrl+Shif
 
 ### Step 4: Install MaxText and Dependencies
 
-To execute post-training notebooks on your TPU-VM, follow the official [MaxText installation guides](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl.html#create-virtual-environment-and-install-maxtext-dependencies) to install MaxText and its dependencies inside a dedicated virtual environment.
+To execute post-training notebooks on your TPU-VM, follow the official [MaxText installation guides](https://maxtext.readthedocs.io/en/latest/install_maxtext.html#from-source) and specifically follow `Option 3: Installing [tpu-post-train]`. This will ensure all post-training dependencies are installed inside your virtual environment.
 
 ### Step 5: Install the necessary library for Jupyter
 
@@ -162,7 +162,7 @@ pip3 install jupyterlab
 
 ### Step 4: Install MaxText and Dependencies
 
-To execute post-training notebooks on your TPU-VM, follow the official [MaxText installation guides](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl.html#create-virtual-environment-and-install-maxtext-dependencies) to install MaxText and its dependencies inside a dedicated virtual environment.
+To execute post-training notebooks on your TPU-VM, follow the official [MaxText installation guides](https://maxtext.readthedocs.io/en/latest/install_maxtext.html#from-source) and specifically follow `Option 3: Installing [tpu-post-train]`. This will ensure all post-training dependencies are installed inside your virtual environment.
 
 ### Step 5: Register virtual environment as a Jupyter Kernel
 

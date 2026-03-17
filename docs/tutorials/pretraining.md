@@ -18,7 +18,7 @@
 
 # Pre-training
 
-In this tutorial, we introduce how to run pretraining with real datasets. While synthetic data is commonly used for benchmarking, we rely on real datasets to obtain meaningful weights. Currently, MaxText supports three dataset input pipelines: HuggingFace, Grain, and TensorFlow Datasets (TFDS). We will walk you through: setting up dataset, modifying the [dataset configs](https://github.com/AI-Hypercomputer/maxtext/blob/08d9f20329ab55b9b928543fedd28ad173e1cd97/src/maxtext/configs/base.yml#L486-L514) and [tokenizer configs](https://github.com/AI-Hypercomputer/maxtext/blob/08d9f20329ab55b9b928543fedd28ad173e1cd97/src/maxtext/configs/base.yml#L452-L455) for training, and optionally enabling evaluation.
+In this tutorial, we introduce how to run pretraining with real datasets. While synthetic data is commonly used for benchmarking, we rely on real datasets to obtain meaningful weights. Currently, MaxText supports three dataset input pipelines: HuggingFace, Grain, and TensorFlow Datasets (TFDS). We will walk you through: setting up dataset, modifying the [dataset configs](https://github.com/AI-Hypercomputer/maxtext/blob/f11f5507c987fdb57272c090ebd2cbdbbadbd36c/src/maxtext/configs/base.yml#L631-L675) and [tokenizer configs](https://github.com/AI-Hypercomputer/maxtext/blob/f11f5507c987fdb57272c090ebd2cbdbbadbd36c/src/maxtext/configs/base.yml#L566) for training, and optionally enabling evaluation.
 
 To start with, we focus on HuggingFace datasets for convenience.
 
@@ -35,7 +35,7 @@ We can use this **command** for pretraining:
 
 ```bash
 # replace base_output_directory with your bucket
-python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train \
 base_output_directory=gs://runner-maxtext-logs run_name=demo \
 model_name=deepseek2-16b per_device_batch_size=1 steps=10 max_target_length=2048 enable_checkpointing=false \
 dataset_type=hf hf_path=allenai/c4 hf_data_dir=en train_split=train \
@@ -57,7 +57,7 @@ completed step: 1, seconds: 0.287, TFLOP/s/device: 110.951, Tokens/s/device: 713
 completed step: 9, seconds: 1.010, TFLOP/s/device: 31.541, Tokens/s/device: 2027.424, total_weights: 7979, loss: 9.436
 ```
 
-The total weights is the number of real tokens processed in each step. More explanation can be found in [Understand Logs and Metrics](understand-logs-and-metrics) page.
+The total weights is the number of real tokens processed in each step. More explanation can be found in [Understand Logs and Metrics](../guides/monitoring_and_debugging/understand_logs_and_metrics.md#understand-logs-and-metrics) page.
 
 **Evaluation config (optional)**:
 
@@ -87,7 +87,7 @@ eval metrics after step: 9, loss=9.420, total_weights=75264.0
 
 Grain is a library for reading data for training and evaluating JAX models. It is the recommended input pipeline for determinism and resilience! It supports data formats like ArrayRecord and Parquet. You can check [Grain pipeline](../guides/data_input_pipeline/data_input_grain.md) for more details.
 
-**Data preparation**: You need to download data to a Cloud Storage bucket, and read data via Cloud Storage Fuse with [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/0baff00ac27bb7996c62057f235cc1d2f43d734e/setup_gcsfuse.sh#L18).
+**Data preparation**: You need to download data to a Cloud Storage bucket, and read data via Cloud Storage Fuse with [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/tools/setup/setup_gcsfuse.sh).
 
 - For example, we can mount the bucket `gs://maxtext-dataset` on the local path `/tmp/gcsfuse` before training
   ```bash
@@ -102,7 +102,7 @@ This **command** shows pretraining with Grain pipeline, along with evaluation:
 
 ```bash
 # replace DATASET_GCS_BUCKET and base_output_directory with your buckets
-python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train \
 base_output_directory=gs://runner-maxtext-logs run_name=demo \
 model_name=deepseek2-16b per_device_batch_size=1 steps=10 max_target_length=2048 enable_checkpointing=false \
 dataset_type=grain grain_file_type=arrayrecord grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record* grain_worker_count=2 \
@@ -133,13 +133,13 @@ The TensorFlow Datasets (TFDS) pipeline uses dataset in the TFRecord format. You
 
 **Data preparation**: You need to download data to a [Cloud Storage bucket](https://cloud.google.com/storage/docs/creating-buckets), and the pipeline streams data from the bucket.
 
-- To download the AllenAI C4 dataset to your bucket, you can use [download_dataset.sh](https://github.com/AI-Hypercomputer/maxtext/blob/08d9f20329ab55b9b928543fedd28ad173e1cd97/download_dataset.sh#L19): `bash download_dataset.sh <GCS_PROJECT> <GCS_BUCKET_FOR_DATASET>`
+- To download the AllenAI C4 dataset to your bucket, you can use [download_dataset.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/tools/data_generation/download_dataset.sh): `bash download_dataset.sh <GCS_PROJECT> <GCS_BUCKET_FOR_DATASET>`
 
 This **command** shows pretraining with TFDS pipeline, along with evaluation:
 
 ```bash
 # replace base_output_directory and dataset_path with your buckets
-python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train \
 base_output_directory=gs://runner-maxtext-logs run_name=demo \
 model_name=deepseek2-16b per_device_batch_size=1 steps=10 max_target_length=2048 enable_checkpointing=false \
 dataset_type=tfds dataset_path=gs://maxtext-dataset dataset_name='c4/en:3.0.1' train_split=train \

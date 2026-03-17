@@ -37,10 +37,12 @@ Before you can run a MaxText workload, you must complete the following setup ste
 
 3. **Build and upload a MaxText Docker image** to your project's Artifact Registry.
 
+   [Follow the steps to configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/) before running the commands below.
+
    Step 1: Build the Docker image for a TPU device. This image contains MaxText and its dependencies.
 
    ```shell
-   bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
+   bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
    ```
 
    Step 2: Configure Docker to authenticate with Google Cloud
@@ -52,7 +54,7 @@ Before you can run a MaxText workload, you must complete the following setup ste
    Step 3: Upload the image to your project's registry. Replace `$USER_runner` with your desired image name.
 
    ```shell
-   bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$USER_runner
+   bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$USER_runner
    ```
 
 ## 2. Environment configuration
@@ -94,7 +96,7 @@ xpk workload create-pathways \
   --project=${PROJECT?} \
   --zone=${ZONE?} \
   --docker-image=${DOCKER_IMAGE?} \
-  --command="python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+  --command="python3 -m maxtext.trainers.pre_train.train \
     base_output_directory=gs://${BUCKET_NAME?} \
     per_device_batch_size=1 \
     enable_checkpointing=false \
@@ -152,7 +154,7 @@ export JAX_PLATFORMS=proxy
 export JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 
 # Run the training script
-python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train \
   base_output_directory=gs://${BUCKET_NAME?} \
   per_device_batch_size=1 \
   enable_checkpointing=false \

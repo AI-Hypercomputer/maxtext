@@ -42,6 +42,7 @@ def _create_workload_config(
       "base_docker_image": (user_config.runner if Framework(framework) == Framework.MCJAX else None),
       "pathways_config": (user_config.pathways_config if Framework(framework) == Framework.PATHWAYS else None),
       "xpk_path": user_config.xpk_path,
+      "run_name": user_config.workload_id,
       "num_steps": num_steps,
       "priority": priority,
       "generate_metrics_and_upload_to_big_query": user_config.bq_enable,

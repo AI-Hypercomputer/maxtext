@@ -19,7 +19,7 @@ file and can override parameters on the command line.
 
 Key Parameters (to be set in the config file or as command-line overrides):
   model_name: (Required) The name of the model to convert (e.g., "gemma2-2b").
-              Must be a key in `maxtext.checkpoint_conversion.utils.utils.HF_IDS`.
+              Must be a key in `maxtext.utils.globals.HF_IDS`.
   load_parameters_path: (Required) Path to the MaxText checkpoint directory
                         containing the parameter-only checkpoint.
   base_output_directory: (Optional) The directory where the converted HuggingFace
@@ -79,12 +79,13 @@ from maxtext.checkpoint_conversion.utils.utils import (
     save_model_files,
     load_orbax_checkpoint,
     detect_and_extract_checkpoint,
-    HF_IDS,
     MemoryMonitorTqdm,
     print_peak_memory,
 )
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils.globals import HF_IDS
+
 
 flags.DEFINE_bool(
     "override_model_architecture",

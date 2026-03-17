@@ -17,7 +17,7 @@
 import os
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
-TPU_REQUIREMENTS_PATH = "dependencies/requirements/generated_requirements/tpu-requirements.txt"
+TPU_REQUIREMENTS_PATH = "src/dependencies/requirements/generated_requirements/tpu-requirements.txt"
 
 
 def get_tpu_dependencies():

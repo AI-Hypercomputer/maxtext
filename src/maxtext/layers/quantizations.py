@@ -655,6 +655,15 @@ def get_fp8_full_qwix_rule(config: Config):
 
 def get_quantization_rule(config: Config):
   match config.quantization:
+    case "int4":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype=jnp.int4,
+          act_qtype=jnp.int4,
+          bwd_qtype=jnp.int4,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+          op_names=("dot_general",),
+      )
     case "int8":
       return qwix.QtRule(
           module_path="decoder/.*layers.*",
@@ -701,6 +710,8 @@ def get_qt_provider(config):
   """Get quantization rules based on the config."""
   match config.quantization:
     case "int8":
+      return qwix.QtProvider([get_quantization_rule(config)])
+    case "int4":
       return qwix.QtProvider([get_quantization_rule(config)])
     case "fp8":
       return qwix.QtProvider([get_quantization_rule(config)])
