@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,26 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# model config for qwen3-4b-base
+# Qwen 2.5 14B Instruct Configuration
+# https://huggingface.co/Qwen/Qwen2.5-14B-Instruct
 
-base_emb_dim: 2560
-base_num_query_heads: 32
+base_emb_dim: 5120
+base_num_query_heads: 40
 base_num_kv_heads: 8
-base_mlp_dim: 9728
-base_num_decoder_layers: 36
+base_mlp_dim: 13824
+base_num_decoder_layers: 48
 head_dim: 128
-mlp_activations: ["silu", "linear"] # "hidden_act": "silu" implies SwiGLU
-vocab_size: 151936
-
-decoder_block: "qwen3"
-
+mlp_activations: ["silu", "linear"]
+vocab_size: 152064
+decoder_block: "qwen2"
 normalization_layer_epsilon: 1.0e-6
-rope_max_timescale: 1000000
-
-use_qk_norm: True
-
-logits_via_embedding: True # from "tie_word_embeddings": true
+rope_max_timescale: 1000000.0
+use_qk_norm: False
+# Bias for q, k, v proj.
+attention_bias: True
+logits_via_embedding: False
 normalize_embedding_logits: False
-enable_dropout: False # deterministic for testing
-
 tokenizer_type: "huggingface"
