@@ -468,11 +468,11 @@ class NNXDecoder(nnx.Module):
       layer = nnx.merge(graphdef, current_params, current_state)
       layer_out = layer(carry, *args, **valid_kwargs)
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
-      
-      new_full_state = nnx.state(layer)
-      new_current_state = _extract_matching_state(current_state, new_full_state)
-      
-      # ONLY return non-param state to prevent memory duplication of weights
+      # Exclude Intermediate variables (e.g., sowed max_logits for QK-Clip).
+      # They are transient forward-pass artifacts absent from graphdef, so
+      # including them would cause a leaf-count mismatch in nnx.merge below.
+      new_current_state = nnx.state(layer, nnx.Not(nnx.Intermediate))
+
       return new_carry, new_current_state
 
     layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
@@ -481,8 +481,14 @@ class NNXDecoder(nnx.Module):
 
     if scan_axis != 0:
       params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), params)
-      
-    scanned_state = nnx.State.merge(params, scanned_other)
+
+    # Params are read-only during the forward pass, so the scan output's copy of
+    # params is at axis=0 (lax.scan default) rather than scan_axis. Discard the
+    # scan-output params and keep the original params (correctly positioned at
+    # scan_axis) to avoid a shape mismatch when _apply_scanned_chunk tries to
+    # write them back via dynamic_update_slice_in_dim.
+    _, non_param_scanned_state = scanned_state.split(nnx.Param, ...)
+    scanned_state = nnx.State.merge(params, non_param_scanned_state)
     return final_carry, nnx.merge(graphdef, scanned_state)
 
   def get_decoder_layers(self):
