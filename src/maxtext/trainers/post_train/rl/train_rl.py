@@ -189,7 +189,7 @@ def rl_train(argv: Sequence[str], **kwargs):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
-  reference_model, actor_model, trainer_config, sampler_config, reference_mesh, actor_mesh, rollout_mesh, trainer_devices, sampler_devices = model_creation_utils.from_pretrained(argv)
+  reference_model, actor_model, trainer_config, sampler_config, reference_mesh, actor_mesh, rollout_mesh, trainer_devices, sampler_devices = model_creation_utils.populate_configs(argv)
 
   if not trainer_config.debug.rl:
     # Apply filter to suppress noisy logs

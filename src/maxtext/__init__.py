@@ -40,7 +40,7 @@ from maxtext.models import models
 from maxtext.trainers.post_train.dpo import dpo_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
-from maxtext.utils.model_creation_utils import from_pretrained
+from maxtext.utils.model_creation_utils import populate_configs
 
 
 Transformer = models.Transformer

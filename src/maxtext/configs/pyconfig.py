@@ -268,16 +268,19 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
     """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
     Returns pydantic MaxTextConfig class whereas `initialize` returns the og `HyperParameters`
     """
-    # 1. Load base and inherited configs from file(s)
+    # 1. Generate/infer missing configs
+    argv = populate_configs(argv)
+
+    # 2. Load base and inherited configs from file(s)
     config_path = resolve_config_path(argv[1])
     base_yml_config = _load_config(config_path)
 
-    # 2. Get overrides from CLI and kwargs
+    # 3. Get overrides from CLI and kwargs
     cli_cfg = omegaconf.OmegaConf.from_cli(argv[2:])
     kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
     overrides_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
 
-    # 3. Handle model-specific config
+    # 4. Handle model-specific config
     temp_cfg = omegaconf.OmegaConf.merge(base_yml_config, overrides_cfg)
     model_name = temp_cfg.get("model_name", "default")
     model_name = (
@@ -319,10 +322,10 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
                 "Model config for '%s' not found at %s", model_name, model_config_path
             )
 
-            # 4. Final merge (base, model, then overrides)
+    # 5. Final merge (base, model, then overrides)
     model_cfg_oc = omegaconf.OmegaConf.create(model_cfg)
 
-    # 4. Manually merge logical_axis_rules to avoid OmegaConf's list replacement behavior.
+    # 6. Manually merge logical_axis_rules to avoid OmegaConf's list replacement behavior.
     base_rules_oc = base_yml_config.get("logical_axis_rules", [])
     model_rules_oc = model_cfg_oc.get("logical_axis_rules", [])
     overrides_rules_oc = overrides_cfg.get("logical_axis_rules", [])
@@ -354,7 +357,7 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
     if "logical_axis_rules" in overrides_cfg:
         del overrides_cfg["logical_axis_rules"]
 
-    # 5. Final merge for all other keys
+    # 7. Final merge for all other keys
     final_config = omegaconf.OmegaConf.merge(
         base_yml_config, model_cfg_oc, overrides_cfg
     )
@@ -362,7 +365,7 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
 
     raw_keys_dict = omegaconf.OmegaConf.to_container(final_config, resolve=True)
 
-    # 6. Handle environment variable overrides
+    # 8. Handle environment variable overrides
     cli_keys = frozenset(omegaconf.OmegaConf.to_container(cli_cfg, resolve=True).keys())
     kwargs_keys = frozenset(kwargs.keys())
     for k in tuple(raw_keys_dict.keys()):

@@ -218,7 +218,7 @@ def setup_configs_and_devices(argv: list[str]):
   return trainer_config, sampler_config, trainer_devices, sampler_devices
 
 
-def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=True, **kwargs):
+def populate_configs(argv: list[str] | None = None, lazy_load_tensors=True, **kwargs):
   """
   Obtain a MaxText model by providing minimal configs
   It at least needs the following argument
@@ -389,9 +389,10 @@ def from_pretrained(argv: list[str] | None = None, lazy_load_tensors=True, **kwa
     return model, mesh, config
 
 
-def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
+def create_nnx_model(config, original_mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
 
+  mesh = original_mesh
   def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
     if rng_key is None:
       rng_key = jax.random.PRNGKey(config.init_weights_seed)
@@ -506,4 +507,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
       except Exception as e:
         raise ValueError(f"Checkpoint loading failed: {e}") from e
 
-    return model, mesh
+    if original_mesh:
+      return model
+    else:
+      return model, mesh
