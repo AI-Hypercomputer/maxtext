@@ -146,7 +146,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
   tunix_config = get_tunix_config(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
-    model, mesh = model_creation_utils.create_nnx_model(mt_config)
+    model, mesh = model_creation_utils.from_pretrained(mt_config)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     # pass in model for muon
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)

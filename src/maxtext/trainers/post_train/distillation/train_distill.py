@@ -393,7 +393,7 @@ def get_maxtext_model(config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh)
     The loaded MaxText model.
   """
   max_logging.log(f"Initializing model: {config.model_name}...")
-  model, _ = model_creation_utils.create_nnx_model(config, mesh=mesh)
+  model, _ = model_creation_utils.from_pretrained(config, mesh=mesh)
   return model
 
 

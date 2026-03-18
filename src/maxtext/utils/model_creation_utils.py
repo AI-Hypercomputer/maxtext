@@ -112,9 +112,9 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   return model
 
 
-def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
+def from_pretrained(config, original_mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
-
+  mesh = original_mesh
   def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
     if rng_key is None:
       rng_key = jax.random.PRNGKey(config.init_weights_seed)
@@ -229,4 +229,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
       except Exception as e:
         raise ValueError(f"Checkpoint loading failed: {e}") from e
 
-    return model, mesh
+    if original_mesh:
+      return model
+    else:
+      return model, mesh

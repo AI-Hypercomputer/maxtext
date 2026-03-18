@@ -77,8 +77,8 @@ from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_template_from_file
-from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
-
+from maxtext.utils import max_logging, max_utils, maxtext_utils
+import maxtext as mt
 
 def get_maxtext_model(config, devices=None):
   """
@@ -96,7 +96,7 @@ def get_maxtext_model(config, devices=None):
   # Please ensure that you pass the full path ending in `/0/items` for load_parameters_path to train_rl.py i.e.,
   # load_parameters_path=/path/to/your/output/directory/0/items
   """
-  model, mesh = model_creation_utils.create_nnx_model(config, devices=devices)
+  model, mesh = mt.from_pretrained(config, devices=devices)
   with mesh:
     use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
     tunix_model = TunixMaxTextAdapter(base_model=model, use_no_op_mappings=use_no_op_mappings)
@@ -149,9 +149,9 @@ def get_dataset(
   return loaded_dataset
 
 
-def setup_configs_and_devices(argv: list[str]):
+def setup_configs_and_devices(argv: list[str], **kwargs):
   """Setup device allocation and configs for training and inference."""
-  config = pyconfig.initialize_pydantic(argv)
+  config = pyconfig.initialize_pydantic(argv, kwargs)
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
     max_logging.log("Running RL on a single slice")
@@ -580,7 +580,7 @@ def create_rl_components(
   return rl_cluster, rl_trainer, optimizer
 
 
-def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
+def rl_train(argv: Sequence[str], **kwargs):
   """
   Run RL training with the provided configuration.
 
@@ -590,13 +590,19 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
+  trainer_config, sampler_config, trainer_devices, sampler_devices = setup_configs_and_devices(argv, kwargs)
+
+  reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh = create_models_and_meshes(
+      trainer_config, sampler_config, trainer_devices, sampler_devices
+  )
+
   if not trainer_config.debug.rl:
     # Apply filter to suppress noisy logs
     noise_filter = max_logging.NoisyLogFilter()
     logging.getLogger().addFilter(noise_filter)
     absl_logging.get_absl_logger().addFilter(noise_filter)
+    os.environ["VLLM_LOGGING_LEVEL"] = "ERROR"
 
-  max_logging.log("Starting RL Training")
   if not epath.Path(trainer_config.tensorboard_dir).exists():
     epath.Path(trainer_config.tensorboard_dir).mkdir(parents=True, exist_ok=True)
 
@@ -619,10 +625,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       if i >= 5:
         break
       pprint(ele)
-
-  reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh = create_models_and_meshes(
-      trainer_config, sampler_config, trainer_devices, sampler_devices
-  )
 
   if trainer_config.debug.rl:
     max_logging.log("Reference Model initialized successfully")
@@ -697,8 +699,7 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
   max_utils.print_system_information()
-  trainer_config, sampler_config, trainer_devices, sampler_devices = setup_configs_and_devices(argv)
-  rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices)
+  rl_train(argv)
 
 
 if __name__ == "__main__":
