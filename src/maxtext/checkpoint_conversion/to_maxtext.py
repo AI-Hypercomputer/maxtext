@@ -88,7 +88,6 @@ from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
 from safetensors import safe_open
-from transformers import AutoConfig
 
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
@@ -101,21 +100,15 @@ def get_hf_dict_from_safetensor(local_path, framework="pt"):
   For example, if maxtext has deepseek3 with mtp=false,
   then safetensor weight with prefix `model.layers.61` will be the extra keys.
   """
-
   ckpt_paths = sorted(pathlib.Path(local_path).glob("[!.]*.safetensors"))
   hf_state_dict = {}
   max_logging.log(f"Loading {len(ckpt_paths)} checkpoints")
-  for i, ckpt_path in tqdm(enumerate(ckpt_paths), total=len(ckpt_paths)):
-    # max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+  for ckpt_path in tqdm(ckpt_paths, total=len(ckpt_paths)):
     with safe_open(ckpt_path, framework=framework, device="cpu") as f:
       for key in f.keys():
         if key.endswith("_scale_inv"):
           raise ValueError("fp8 checkpoint is not supported.")
-        # skip mtp layer for deepseek3, deepseek3.2
-        # if key.startswith("model.layers.61"):
-        #   continue
         hf_state_dict[key] = f.get_tensor(key)
-
   return hf_state_dict
 
 
@@ -528,7 +521,7 @@ def _get_maxtext_weight(
     mt_target_shape_or_shapes,
     mt_param_key_or_keys,
     final_mt_weights,
-    config,
+    save_dtype,
     use_lazy_load,
 ):
   """Loads Hugging Face parameters and converts them to MaxText parameters.
@@ -572,7 +565,7 @@ def _get_maxtext_weight(
     final_mt_tensor_numpy = LazyTensor(
         load_fn,
         mt_target_shape_or_shapes,
-        config.weight_dtype,
+        save_dtype,
         name=mt_param_key_or_keys,
     )
     if not is_composite_mt_key:
@@ -594,7 +587,7 @@ def _get_maxtext_weight(
         final_mt_weights[mt_target_idx] = LazyTensor(
             slicing_load_fn,
             mt_target_shape_or_shapes[i],
-            config.weight_dtype,
+            save_dtype,
             name=mt_param_key_or_keys[i],
         )
 
@@ -645,12 +638,6 @@ def main(
   hf_state_dict_numpy = None
   hf_loader = None
 
-  # if test_args.use_from_pretrained_api:
-  #   hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
-  #   hf_config_dict = hf_config_obj.to_dict()
-  # else:
-  #   raise NotImplementedError
-
   # Define the appropriate tensor getter based on mode
   if lazy_load_tensors:
     max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
@@ -663,76 +650,43 @@ def main(
   else:
     max_logging.log(f"Lazy loading DISABLED. Loading full HuggingFace model: {model_id}...")
 
-    # BEFORE
-    # hf_model = get_hf_model(model_id, token=hf_token)
-    # hf_state_dict_numpy = hf_model.state_dict()
-    # # Convert all to numpy immediately in eager mode
-    # for k, v in hf_state_dict_numpy.items():
-    #   hf_state_dict_numpy[k] = v.numpy()
-    # del hf_model
-    # max_logging.log("HuggingFace model loaded and converted to NumPy.")
-    # print_ram_usage("After full HF model load")
-
-    # def _eager_getter(key):
-    #   if key not in hf_state_dict_numpy:
-    #     raise ValueError(f"HuggingFace key {key} not found in state_dict.")
-    #   return hf_state_dict_numpy[key]
-
-    #   tensor_getter = _eager_getter
-
     if test_args.use_from_pretrained_api:
-      max_logging.log(f"Loading with `from_pretrained`")
-      # AFTER
-      if test_args.mode == "default":
-        # model.from_pretrained: dtype default to float32
-        hf_state_dict_numpy = get_hf_dict_from_pretrained(model_id, token=hf_token)
-      else:
-        hf_state_dict_numpy = get_hf_dict_from_pretrained(model_id, token=hf_token, dtype=torch.bfloat16)
-    elif test_args.mode == "default-2":
-      max_logging.log(f"Loading with `safe_open`, framework=np")
-      hf_state_dict_numpy = get_hf_dict_from_safetensor(model_id, framework="np")
+      max_logging.log(f"Loading with `from_pretrained` with auto dtype")
+      # auto uses the `dtype` specifed in config.json (or `torch_dtype` for older version)
+      hf_state_dict_numpy = get_hf_dict_from_pretrained(model_id, token=hf_token, dtype="auto")
     else:
       max_logging.log(f"Loading with `safe_open`, framework=pt")
       hf_state_dict_numpy = get_hf_dict_from_safetensor(model_id, framework="pt")
-      # print(hf_state_dict_numpy)
 
     unique_dtypes = {tensor.dtype for tensor in hf_state_dict_numpy.values()}
-    max_logging.log(f"load dtypes: {unique_dtypes}")
+    max_logging.log(f"HuggingFace model loaded. dtypes: {unique_dtypes}")
+    print_ram_usage("After full HF model load")
 
     max_logging.log("Starting weight transformation...")
     start = time.time()
 
-    if test_args.mode == "default":
-      # Convert all to numpy immediately in eager mode
-      for k, v in hf_state_dict_numpy.items():
-        hf_state_dict_numpy[k] = v.numpy()
-      max_logging.log("HuggingFace model loaded and converted to NumPy.")
-      print_ram_usage("After full HF model load")
-
     def _eager_getter(key):
       if key not in hf_state_dict_numpy:
         raise ValueError(f"HuggingFace key {key} not found in state_dict.")
-      if test_args.mode == "default":
-        return hf_state_dict_numpy[key]
-      elif test_args.mode == "default-2":
-        return hf_state_dict_numpy[key]
-      elif test_args.mode == "float16":
-        # torch.bfloat16 -> torch.float16 -> np.float16
-        return hf_state_dict_numpy[key].to(torch.float16).numpy()
-      elif test_args.mode == "bfloat16-1":
-        # View as int16 (same bit-width) to trick NumPy, then view as bfloat16
-        # This is zero-copy on CPU
-        tensor = hf_state_dict_numpy[key]
-        assert tensor.dtype == torch.bfloat16
-        return tensor.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
-      elif test_args.mode == "bfloat16-2":
+      v = hf_state_dict_numpy[key]
+      # target dtype is float32
+      if test_args.save_dtype == "float32":
+        return v.to(torch.float32).numpy()
+      # target dtype is bfloat16
+      elif test_args.save_dtype == "bfloat16":
         # torch.bfloat16 -> torch.float32 -> np.float32 -> ml_dtypes.bfloat16
-        return hf_state_dict_numpy[key].to(torch.float32).numpy().astype(ml_dtypes.bfloat16)
+        # torch.float16 -> np.float16 -> ml_dtypes.bfloat16
+        # torch.float32 -> np.float32 -> ml_dtypes.bfloat16
+        if v.dtype == torch.bfloat16:
+          v = v.to(torch.float32)
+        return v.numpy().astype(ml_dtypes.bfloat16)
+      raise NotImplementedError
 
     tensor_getter = _eager_getter
 
   # Get parameter mappings and hooks
   model_key = config.model_name
+  # load config
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
   hf_config_dict = hf_config_obj.to_dict()
   # example of param mapping (gemma2, maxtext:huggingface):
@@ -793,7 +747,7 @@ def main(
         mt_target_shape_or_shapes,
         mt_param_key_or_keys,
         final_mt_weights,
-        config,
+        test_args.save_dtype,
         lazy_load_tensors,
     )
 
@@ -850,13 +804,6 @@ if __name__ == "__main__":
       default="",
       help="local path to hf model, or custom remote hf repo",
   )
-  parser.add_argument(
-      "--use_from_pretrained_api",
-      type=str2bool,
-      required=False,
-      default=True,
-      help="load HF weights via from_pretrained or safe_open",
-  )
   # Determines the logical sharding of the output checkpoint by partitioning
   # weights across virtual XLA devices.
   # - Even on a single CPU host, JAX can simulate multiple devices (e.g., 16)
@@ -871,7 +818,13 @@ if __name__ == "__main__":
   #   sharding: None
   #   storage:  chunk_shape=(151936, 1024) <-- Full layer in one chunk
   parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
-
+  parser.add_argument(
+      "--use_from_pretrained_api",
+      type=str2bool,
+      required=False,
+      default=True,
+      help="load HF weights via `from_pretrained` or `safe_open`",
+  )
   parser.add_argument(
       "--revision",
       type=str,
@@ -880,12 +833,12 @@ if __name__ == "__main__":
       help="Specific Hugging Face revision (branch/tag/commit)",
   )
   parser.add_argument(
-      "--mode",
+      "--save_dtype",
       type=str,
       required=False,
-      default="default",
-      choices=["default", "default-2", "float16", "bfloat16-1", "bfloat16-2"],
-      help="",
+      default="bfloat16",
+      choices=["float32", "bfloat16"],
+      help="save maxtext weight in specified dtype",
   )
 
   # Parse local arguments
@@ -893,13 +846,6 @@ if __name__ == "__main__":
   local_args, remaining_args = parser.parse_known_args()
   # Reconstruct model_args (script name + the args MaxText needs)
   model_args = [sys.argv[0]] + remaining_args
-
-  if not local_args.use_from_pretrained_api:
-    assert local_args.hf_model_path != ""
-    assert local_args.mode != "default"
-
-  if local_args.use_from_pretrained_api:
-    assert local_args.mode != "default-2"
 
   # Set jax environment
   jax.config.update("jax_platforms", "cpu")
