@@ -43,7 +43,7 @@ if [ "$DATASET_TYPE" == "hf" ]
 then
     # We use a local copy of tokenizer from https://huggingface.co/meta-llama/Llama-2-7b-hf
     # Alternatively, you can set tokenizer_path="meta-llama/Llama-2-7b-hf" and hf_access_token="<your-token>" after gaining access through HF website.
-    gsutil cp -r gs://maxtext-dataset/hf/llama2-tokenizer "${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"
+    gcloud storage cp --recursive gs://maxtext-dataset/hf/llama2-tokenizer "${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"
     CMD_DATA=" hf_path=parquet hf_data_files=gs://maxtext-dataset/hf/c4/c4-train-*.parquet dataset_type=hf tokenizer_path=${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}/llama2-tokenizer"
 fi
 
