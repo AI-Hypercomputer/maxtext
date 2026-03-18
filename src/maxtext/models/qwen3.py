@@ -48,7 +48,7 @@ from jax.experimental.shard_map import shard_map
 from maxtext.utils import max_utils
 from maxtext.inference import page_manager, kvcache
 
-from maxtext.scratch_code import gdn_pallas
+from maxtext.scratch_code import gdn_pallas, gdn_pallas2
 
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
@@ -282,6 +282,7 @@ def pallas_chunk_gated_delta_rule(
   else:
       h_init = initial_state.astype(compute_dtype)
 
+  kernel_to_use = gdn_pallas.gdn_pallas_layer
   # Invoke Kernel
   if mesh is not None:
       # Mesh Partitioning
@@ -298,17 +299,17 @@ def pallas_chunk_gated_delta_rule(
       state_spec = P(batch_spec, head_spec, None, None)
 
       sharded_gdn = shard_map(
-          gdn_pallas.gdn_pallas_layer,
+          kernel_to_use,
           mesh=mesh,
           in_specs=(in_specs, in_specs, in_specs, in_specs, in_specs, scalar_specs, scalar_specs, state_spec),
-          out_specs=(in_specs, state_spec), # Returns (out, final_state)
+          out_specs=(in_specs, state_spec),
           check_rep=False 
       )
       
       o_pallas, h_final = sharded_gdn(w_p, u_p, q_p, k_p, v_p, g_p, beta_p, h_init)
   else:
       # Single Device
-      o_pallas, h_final = gdn_pallas.gdn_pallas_layer(w_p, u_p, q_p, k_p, v_p, g_p, beta_p, h_init)
+      o_pallas, h_final = kernel_to_use(w_p, u_p, q_p, k_p, v_p, g_p, beta_p, h_init)
 
   o_chunks = o_pallas.transpose(0, 2, 1, 3, 4)
 
