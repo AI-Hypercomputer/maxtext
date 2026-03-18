@@ -77,18 +77,22 @@ def _module_from_path(path: str) -> str | None:
   return None
 
 
-def _resolve_or_infer_config(argv: list[str], **kwargs) -> tuple[str, list[str]]:
+def _resolve_or_infer_config(argv: list[str] | None = None, **kwargs) -> tuple[str, list[str]]:
   """Resolves or infers config file path from module."""
+  if argv is None:
+    argv = [""]
   if len(argv) >= 2 and argv[1].endswith(".yml"):
     return resolve_config_path(argv[1]), argv[2:]
-  module = _module_from_path(argv[0])
+  module = _module_from_path(argv[0]) if len(argv) > 0 else None
   if module not in _CONFIG_FILE_MAPPING:
-    raise ValueError(
-        f"No config file provided and no default config found for module '{module}'"
+    config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+    logger.warning(
+        "No config file provided and no default config found for module '%s', using base.yml", module
     )
-  config_path = os.path.join(MAXTEXT_CONFIGS_DIR, _CONFIG_FILE_MAPPING[module])
-  logger.warning("No config file provided, using default config mapping: %s", config_path)
-  remaining_argv = argv[1:]
+  else:
+    config_path = os.path.join(MAXTEXT_CONFIGS_DIR, _CONFIG_FILE_MAPPING[module])
+    logger.warning("No config file provided, using default config mapping: %s", config_path)
+  remaining_argv = argv[1:] if len(argv) > 1 else []
 
   return config_path, remaining_argv
 
@@ -299,14 +303,14 @@ class HyperParameters:
     return self._flat_config
 
 
-def initialize(argv: list[str], **kwargs) -> HyperParameters:
+def initialize(argv: list[str] | None = None, **kwargs) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
   pydantic_config = initialize_pydantic(argv, **kwargs)
   config = HyperParameters(pydantic_config)
   return config
 
 
-def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
+def initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfig:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
   Returns pydantic MaxTextConfig class whereas `initialize` returns the og `HyperParameters`
   """
@@ -446,3 +450,10 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
 # Shim for backward compatibility with pyconfig_deprecated_test.py
 validate_and_update_keys = pyconfig_deprecated.validate_and_update_keys
 __all__ = ["initialize", "initialize_pydantic"]
+
+class _CallablePyconfigModule(sys.modules[__name__].__class__):
+  """Allows calling the module directly as mt.pyconfig()."""
+  def __call__(self, argv: list[str] | None = None, **kwargs) -> HyperParameters:
+    return initialize(argv, **kwargs)
+
+sys.modules[__name__].__class__ = _CallablePyconfigModule

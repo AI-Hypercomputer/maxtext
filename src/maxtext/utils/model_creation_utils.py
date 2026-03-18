@@ -115,9 +115,14 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   return model
 
 
-def setup_configs_and_devices(argv: list[str], kwargs):
+def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None = None, **extra_kwargs):
   """Setup device allocation and configs for training and inference."""
-  config = pyconfig.initialize_pydantic(argv, **kwargs)
+  if argv is None:
+    argv = [""]
+  
+  combined_kwargs = dict(kwargs) if kwargs else {}
+  combined_kwargs.update(extra_kwargs)
+  config = pyconfig.initialize_pydantic(argv, **combined_kwargs)
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
     max_logging.log("Running on a single slice")
@@ -172,22 +177,24 @@ def setup_configs_and_devices(argv: list[str], kwargs):
         )
       trainer_fsdp = trainer_devices_per_slice // tp
 
-    trainer_update = {
+    trainer_kwargs = dict(combined_kwargs)
+    trainer_kwargs.update({
         "num_slices": config.num_trainer_slices,
         "ici_fsdp_parallelism": trainer_fsdp,
         "ici_tensor_parallelism": tp,
         "dcn_data_parallelism": config.num_trainer_slices,
-    }
+    })
 
-    sampler_update = {
+    sampler_kwargs = dict(combined_kwargs)
+    sampler_kwargs.update({
         "num_slices": config.num_samplers_slices,
         "ici_fsdp_parallelism": len(sampler_devices) // config.num_samplers_slices,
         "ici_tensor_parallelism": -1,
         "dcn_data_parallelism": config.num_samplers_slices,
-    }
+    })
 
-    trainer_config = pyconfig.initialize_pydantic(argv, **trainer_update)
-    sampler_config = pyconfig.initialize_pydantic(argv, **sampler_update)
+    trainer_config = pyconfig.initialize_pydantic(argv, **trainer_kwargs)
+    sampler_config = pyconfig.initialize_pydantic(argv, **sampler_kwargs)
 
   else:
     raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
