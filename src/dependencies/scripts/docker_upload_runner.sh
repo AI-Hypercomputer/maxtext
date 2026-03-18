@@ -21,18 +21,10 @@
 # (minutes). However, if you are simply changing local code and not updating dependencies, uploading just takes a few seconds.
 
 # Example command:
-# bash docker_upload_runner.sh CLOUD_IMAGE_NAME=${USER}_runner
+# bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${USER}_runner
 
-if [ "${BASH_SOURCE-}" ]; then
-  this_file="${BASH_SOURCE[0]}"
-elif [ "${ZSH_VERSION-}" ]; then
-  # shellcheck disable=SC2296
-  this_file="${(%):-%x}"
-else
-  this_file="${0}"
-fi
-
-MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(CDPATH='' cd -- "$(dirname -- "${this_file}")"'/../../..' && pwd)}"
+PACKAGE_DIR="${PACKAGE_DIR:-src}"
+echo "PACKAGE_DIR: $PACKAGE_DIR"
 
 set -e
 
@@ -85,6 +77,7 @@ if [ -n "$DANGLING_LINKS" ]; then
   echo "$DANGLING_LINKS"
   echo "These can cause 'failed to compute cache key' errors during 'docker build'."
   echo "Please remove or fix them before building the Docker image."
+  echo "Alternatively, run the command again from a clean, empty directory to bypass your local file state entirely."
   exit 1
 fi
 
@@ -95,23 +88,20 @@ if [ -n "$ABSOLUTE_LINKS" ]; then
   echo "$ABSOLUTE_LINKS"
   echo "Docker cannot follow absolute paths outside of the build context, which can cause 'failed to compute cache key' errors."
   echo "Please remove these links or convert them to relative paths before building the Docker image."
+  echo "Alternatively, run the command again from a clean, empty directory to bypass your local file state entirely."
   exit 1
 fi
-
-# Download other test assets from GCS into ${MAXTEXT_TEST_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}}/tests/assets/golden_logits
-# if ! gcloud storage cp gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/tests/assets/golden_logits}"; then
-#   echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."
-# fi
 
 # Check if the base image exists locally
 if ! docker image inspect "${LOCAL_IMAGE_NAME}" &> /dev/null; then
   echo "ERROR: Base image '${LOCAL_IMAGE_NAME}' not found locally."
-  echo "Please build it first by running 'bash docker_build_dependency_image.sh'."
+  echo "Please build it first by running 'build_maxtext_docker_image'."
   exit 1
 fi
 
 docker build --no-cache --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
-             -f "$MAXTEXT_REPO_ROOT"'/src/dependencies/dockerfiles/maxtext_runner.Dockerfile' \
+             --build-arg PACKAGE_DIR=${PACKAGE_DIR} \
+             -f "$PACKAGE_DIR"'/dependencies/dockerfiles/maxtext_runner.Dockerfile' \
              -t ${LOCAL_IMAGE_NAME_RUNNER} .
 
 docker tag ${LOCAL_IMAGE_NAME_RUNNER} gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
