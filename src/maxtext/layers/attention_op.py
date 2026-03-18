@@ -1184,7 +1184,7 @@ class AttentionOp(nnx.Module):
     global_k_layout = self.config.sa_k_layout
     global_v_layout = self.config.sa_v_layout
 
-    devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
+    devices_in_data_fsdp = self.mesh.shape.get("data", 1) * self.mesh.shape.get("fsdp", 1)
     assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
         "Batch dimension should be shardable among the devices in data and fsdp"
         " axis"
@@ -1284,10 +1284,9 @@ class AttentionOp(nnx.Module):
           jax.jit,
           static_argnames=[
               "single_head_mask",
-              "shard_head_size",
           ],
       )
-      def wrap_splash_kernel(single_head_mask, shard_head_size=1):
+      def wrap_splash_kernel(single_head_mask):
         splash_kernel = tokamax_splash_kernel.make_splash_mha(
             mask=single_head_mask,
             config=sa_config,
@@ -1295,11 +1294,7 @@ class AttentionOp(nnx.Module):
         )
         return splash_kernel
 
-      logical_axis_rules_head = np.array(
-          [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
-      )
-      shard_head_size = np.prod(logical_axis_rules_head)
-      splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
+      splash_kernel = wrap_splash_kernel(single_head_mask)
       if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
         segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
       else:
@@ -1331,11 +1326,10 @@ class AttentionOp(nnx.Module):
         )
         return splash_kernel
 
-      logical_axis_rules_head = np.array(
-          [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
-      )
-      shard_head_size = np.prod(logical_axis_rules_head)
-      splash_kernel = wrap_splash_kernel(multi_head_mask, int(shard_head_size))
+      head_physical_axes = logical_to_mesh_axes((HEAD,), self.mesh)[0]
+      head_physical_axes = (head_physical_axes,) if isinstance(head_physical_axes, str) else (head_physical_axes or ())
+      shard_head_size = math.prod(self.mesh.shape.get(ax, 1) for ax in head_physical_axes)
+      splash_kernel = wrap_splash_kernel(multi_head_mask, shard_head_size)
       named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
       segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
 
