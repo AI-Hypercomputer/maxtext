@@ -22,6 +22,7 @@ MaxText offers three installation modes:
 1. maxtext[tpu]. Used for pre-training and decode on TPUs.
 2. maxtext[cuda12]. Used for pre-training and decode on GPUs.
 3. maxtext[tpu-post-train]. Used for post-training on TPUs. Currently, this option should also be used for running vllm_decode on TPUs.
+4. maxtext[runner]. Used for building MaxText's Docker images and scheduling workloads through XPK.
 
 ## From PyPI (Recommended)
 
@@ -49,6 +50,9 @@ install_maxtext_cuda12_github_dep
 # Option 3: Installing maxtext[tpu-post-train]
 uv pip install "maxtext[tpu-post-train]>=0.2.0" --resolution=lowest
 install_maxtext_tpu_post_train_extra_deps
+
+# Option 4: Installing maxtext[runner]
+uv pip install maxtext[runner] --resolution=lowest
 ```
 
 > **Note:** The `install_maxtext_tpu_github_deps`, `install_maxtext_cuda12_github_dep`, and
@@ -85,6 +89,9 @@ install_maxtext_cuda12_github_dep
 # Option 3: Installing .[tpu-post-train]
 uv pip install -e .[tpu-post-train] --resolution=lowest
 install_maxtext_tpu_post_train_extra_deps
+
+# Option 4: Installing maxtext[runner]
+uv pip install .[runner] --resolution=lowest
 ```
 
 After installation, you can verify the package is available with `python3 -c "import maxtext"` and run training jobs with `python3 -m maxtext.trainers.pre_train.train ...`.
