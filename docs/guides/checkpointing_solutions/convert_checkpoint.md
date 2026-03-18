@@ -81,18 +81,20 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
     skip_jax_distributed_system=true \
     checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS)) \
     checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) \
-    --lazy_load_tensors=${LAZY_LOAD_TENSORS?}
+    --lazy_load_tensors=${LAZY_LOAD_TENSORS?} \
+    --save_dtype=bfloat16
 ```
 
 - `model_name`: The model identifier, which should be defined in `src/maxtext/configs/types.py`.
 - `scan_layers`: Indicates if the output checkpoint is [scanned](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/reference/core_concepts/checkpoints.md) (scan_layers=true) or unscanned (scan_layers=false).
 - `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
 - `hf_access_token`: Your Hugging Face token.
-- `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Googld Cloud Storage (GCS) or local. If not set, the default output directory is `Maxtext/tmp`.
+- `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Googld Cloud Storage (GCS) or local. If not set, the default output directory is `maxtext/tmp`.
 - `hardware=cpu`: run the conversion script on a CPU machine.
 - `checkpoint_storage_use_zarr3` and `checkpoint_storage_use_ocdbt`: Set to True for McJAX (default, `USE_PATHWAYS=0`); set to False for Pathways (`USE_PATHWAYS=1`). Both are controlled by the `$((1 - USE_PATHWAYS))` calculation in the example above.
-- `--lazy_load_tensors` (optional): If `true`, loads Hugging Face weights on-demand to minimize RAM usage. When memory is constrained, it is recommended to use the `--lazy_load_tensors=true` flag to reduce memory usage during conversion. For example, converting a Llama3.1-70B model with `--lazy_load_tensors=true` uses around 200GB of RAM and completes in ~10 minutes.
-- `--hf_model_path` (optional): Specifies a local or remote directory containing the model weights. If unspecified, we use the [default Hugging Face repository ID](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py) (e.g., openai/gpt-oss-20b). This is necessary for locally dequantized models like GPT-OSS or DeepSeek.
+- `--lazy_load_tensors` (optional): If `true`, loads Hugging Face weights on-demand to minimize RAM usage. When memory is constrained, it is recommended to use the `--lazy_load_tensors=true` flag to reduce memory usage during conversion. For example, converting a Llama3.1-70B model with lazy loading uses around 200GB of RAM and completes in ~10 minutes.
+- `--hf_model_path` (optional): Specifies a customized remote directory or local directory containing the model weights. If unspecified, we use the [default Hugging Face repository ID](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py) (e.g., openai/gpt-oss-20b). This is necessary for locally dequantized models like GPT-OSS or DeepSeek.
+- `--save_dtype` (optional): Specifies the dtype of saved model weights. Default to `bfloat16` to save memory.
 
 Above command will download the Hugging Face model to local machine if `hf_model_path` is unspecified, or reuse the checkpoint in `hf_model_path`. It will convert the checkpoint to the MaxText format and save it to `${MODEL_CHECKPOINT_DIRECTORY}/0/items`.
 

@@ -655,8 +655,6 @@ def main(
 
     print_ram_usage("After LazyLoader init")
     tensor_getter = hf_loader.get_tensor
-    max_logging.log("Starting weight transformation...")
-    start = time.time()
   else:
     max_logging.log(f"Lazy loading DISABLED. Loading full HuggingFace model: {model_id}...")
 
@@ -673,9 +671,6 @@ def main(
     unique_dtypes = {tensor.dtype for tensor in hf_state_dict_numpy.values()}
     max_logging.log(f"HuggingFace model loaded. dtypes: {unique_dtypes}")
     print_ram_usage("After full HF model load")
-
-    max_logging.log("Starting weight transformation...")
-    start = time.time()
 
     def _eager_getter(key):
       if key not in hf_state_dict_numpy:
@@ -713,6 +708,8 @@ def main(
   maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(config)
 
   # Weight transformation
+  max_logging.log("Starting weight transformation...")
+  start = time.time()
   # Stores MaxText weights: numpy.ndarray
   final_mt_weights = [None] * len(maxtext_abstract_dict)
 
@@ -806,7 +803,7 @@ if __name__ == "__main__":
       type=str2bool,
       required=False,
       default=False,
-      help="Whether to use lazy loading of HF tensors.",
+      help="Whether to use lazy loading of HF tensors",
   )
   # Eager load method (lazy load uses `safetensors.safe_open` with np)
   parser.add_argument(
@@ -823,7 +820,7 @@ if __name__ == "__main__":
       type=str,
       required=False,
       default=None,
-      help="customized remote hf repo, or local path to hf model",
+      help="Customized remote HF repo, or local path to HF model",
   )
   # If hf_model_path is set to a local path, this is ignored.
   parser.add_argument(
@@ -839,7 +836,7 @@ if __name__ == "__main__":
       required=False,
       default="bfloat16",
       choices=["float32", "bfloat16"],
-      help="save maxtext weight in specified dtype",
+      help="Save MaxText weights in specified dtype",
   )
   # Determines the logical sharding of the output checkpoint by partitioning
   # weights across virtual XLA devices.
@@ -854,8 +851,9 @@ if __name__ == "__main__":
   # Case 2: simulated_cpu_devices_count=1 (Monolith)
   #   sharding: None
   #   storage:  chunk_shape=(151936, 1024) <-- Full layer in one chunk
-  parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
-
+  parser.add_argument(
+      "--simulated_cpu_devices_count", type=int, required=False, default=16, help="Sharding of checkpoint"
+  )
   # Parse local arguments
   # Parse known args returns the namespace AND the list of remaining arguments
   local_args, remaining_args = parser.parse_known_args()
