@@ -390,46 +390,48 @@ class GrainTFRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
     )
     self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
+
 class GrainSFTPipelineTest(unittest.TestCase):
   """Tests the full SFT preprocessing pipeline end-to-end using dummy data."""
 
   def setUp(self):
     super().setUp()
     # Create a minimal config to satisfy the pipeline's requirements
-    self.config = ml_collections.ConfigDict({
-        "grain_file_type": "in_memory",  # Skips arrayrecord parsing
-        "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
-        "tokenizer_type": "sentencepiece", 
-        "add_bos": True,
-        "add_eos": True,
-        "hf_access_token": "",
-        "use_truncation": False,
-        "max_target_length": 16, 
-        "sft_train_on_completion_only": True,
-        "packing": False,
-        "global_batch_size_to_load": 2, # Using 2 examples
-        "expansion_factor_real_data": 1.0,
-        "grain_ram_budget_mb": 512,
-        # A very basic chat template for testing purposes
-        "chat_template": "{% for message in messages %}{{ message['role'] + ': ' + message['content'] + ' ' }}{% endfor %}",
-    })
-    
-  @mock.patch('maxtext.input_pipeline.input_pipeline_utils.apply_chat_template')
+    self.config = ml_collections.ConfigDict(
+        {
+            "grain_file_type": "in_memory",  # Skips arrayrecord parsing
+            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
+            "tokenizer_type": "sentencepiece",
+            "add_bos": True,
+            "add_eos": True,
+            "hf_access_token": "",
+            "use_truncation": False,
+            "max_target_length": 16,
+            "sft_train_on_completion_only": True,
+            "packing": False,
+            "global_batch_size_to_load": 2,  # Using 2 examples
+            "expansion_factor_real_data": 1.0,
+            "grain_ram_budget_mb": 512,
+            # A very basic chat template for testing purposes
+            "chat_template": (
+                "{% for message in messages %}" "{{ message['role'] + ': ' + message['content'] + ' ' }}" "{% endfor %}"
+            ),
+        }
+    )
+
+  @mock.patch("maxtext.input_pipeline.input_pipeline_utils.apply_chat_template")
   def test_sft_preprocessing_pipeline(self, mock_apply_chat_template):
     # Fake the exact chunked structure and is_prompt array that MaxText expects
     def fake_apply_chat(element, tokenizer_model, data_column_name):
-        # Return hardcoded strings instead of referencing the overwritten dictionary
-        element[data_column_name] = ["What is 2+2? ", "It is 4."]
-        element['is_prompt'] = [True, False]
-        return element
-        
+      # Return hardcoded strings instead of referencing the overwritten dictionary
+      element[data_column_name] = ["What is 2+2? ", "It is 4."]
+      element["is_prompt"] = [True, False]
+      return element
+
     mock_apply_chat_template.side_effect = fake_apply_chat
 
     # Create a dummy in-memory dataset
-    dummy_data = [
-        {"prompt": "What is 2+2?", "completion": "It is 4."},
-        {"prompt": "Say hello.", "completion": "Hello!"}
-    ]
+    dummy_data = [{"prompt": "What is 2+2?", "completion": "It is 4."}, {"prompt": "Say hello.", "completion": "Hello!"}]
     dataset = grain.MapDataset.source(dummy_data)
     dataset = dataset.to_iter_dataset()
     data_columns = ["prompt", "completion"]
@@ -451,9 +453,9 @@ class GrainSFTPipelineTest(unittest.TestCase):
     # Assert the pipeline output is correct
     self.assertIn("inputs", batch)
     self.assertIn("targets", batch)
-    
+
     expected_shape = (2, self.config.max_target_length)
-    
+
     # Check shapes
     self.assertEqual(batch["inputs"].shape, expected_shape)
     self.assertEqual(batch["targets"].shape, expected_shape)
@@ -461,6 +463,7 @@ class GrainSFTPipelineTest(unittest.TestCase):
     # Check for masked tokens
     has_masked_tokens = np.any((batch["targets"] == 0) | (batch["targets"] == -1))
     self.assertTrue(has_masked_tokens, "Targets array should contain masked (ignore) IDs for the prompt sections.")
-    
+
+
 if __name__ == "__main__":
   unittest.main()
