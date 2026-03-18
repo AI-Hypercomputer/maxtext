@@ -27,7 +27,7 @@ from maxtext.kernels import megablox, sort_activations
 from maxtext.layers import attention_op
 from maxtext.layers import moe as moe_lib
 from maxtext.layers import quantizations
-from maxtext.utils import max_utils
+from maxtext.utils import max_utils, sharding
 import qwix.pallas as qpl
 import tokamax
 
@@ -168,6 +168,177 @@ def merge(x, split_factor=2):
   return jnp.reshape(x, (-1,) + x.shape[2:])
 
 
+def gather_weights(weights, mesh):
+  """all-gathers FSDP sharded weights."""
+
+  def fn(weights):
+    (
+        (pre_attn_norm, post_attn_norm),
+        (wq_a, wq_b, q_norm, wkv_a, wkv_b, kv_norm, out),
+    ), (
+        (gate, bias),
+        (routed_wi_0, routed_wi_1, routed_wo),
+        (shared_wi_0, shared_wi_1, shared_wo),
+    ) = weights
+    # Cast to reduced across expert axis for all weights that are replicated
+    # across the expert axis. This results in an all-reduce across the expert
+    # axis in the backward pass.
+    
+    wq_a = jax.lax.pcast(wq_a, axis_name="expert", to="reduced")
+    wq_b = jax.lax.pcast(wq_b, axis_name="expert", to="reduced")
+    wkv_a = jax.lax.pcast(wkv_a, axis_name="expert", to="reduced")
+    wkv_b = jax.lax.pcast(wkv_b, axis_name="expert", to="reduced")
+    out = jax.lax.pcast(out, axis_name="expert", to="reduced")
+    gate = jax.lax.pcast(gate, axis_name="expert", to="reduced")
+    shared_wi_0 = jax.lax.pcast(shared_wi_0, axis_name="expert", to="reduced")
+    shared_wi_1 = jax.lax.pcast(shared_wi_1, axis_name="expert", to="reduced")
+    shared_wo = jax.lax.pcast(shared_wo, axis_name="expert", to="reduced")
+    # All-gather across FSDP axis.
+    wq_a = jax.lax.all_gather(wq_a, axis_name="fsdp", tiled=True, to="reduced")
+    wq_a = jax.lax.all_gather(wq_a, axis_name="fsdp_transpose", tiled=True, axis=1,to="reduced")
+    
+    #print(f"wq_a sharding: {wq_a.sharding}")
+    print(f"wq_a shape: {wq_a.shape}")
+    
+    wq_b = jax.lax.all_gather(wq_b, axis_name="fsdp", tiled=True, to="reduced")
+    wq_b = jax.lax.all_gather(wq_b, axis_name="fsdp_transpose", tiled=True, axis=1,to="reduced")
+    
+    wkv_a = jax.lax.all_gather(wkv_a, axis_name="fsdp", tiled=True, to="reduced")
+    wkv_a = jax.lax.all_gather(wkv_a, axis_name="fsdp_transpose", tiled=True, axis=1,to="reduced")
+    
+    wkv_b = jax.lax.all_gather(wkv_b, axis_name="fsdp", tiled=True, to="reduced")
+    wkv_b = jax.lax.all_gather(wkv_b, axis_name="fsdp_transpose", tiled=True, axis=1,to="reduced")
+    
+    
+    out = jax.lax.all_gather(out, axis_name="fsdp", tiled=True, axis=2, to="reduced")
+    out = jax.lax.all_gather(out, axis_name="fsdp_transpose", tiled=True, axis=0, to="reduced")
+    
+    gate = jax.lax.all_gather(gate, axis_name="fsdp", tiled=True, to="reduced")
+    gate = jax.lax.all_gather(gate, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
+    
+    rounted_wi_0_shape = routed_wi_0.shape
+    routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name=("fsdp", "fsdp_transpose"), tiled=False, to="reduced")
+    routed_wi_0 = jnp.reshape(routed_wi_0, (256, -1, rounted_wi_0_shape[2]))
+    #routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
+    
+    routed_wi_1_shape = routed_wi_1.shape
+    routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name=("fsdp", "fsdp_transpose"), tiled=False, to="reduced")
+    routed_wi_1 = jnp.reshape(routed_wi_1,(256, -1, routed_wi_1_shape[2]))
+    #routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
+    
+    routed_wo_shape = routed_wo.shape
+    routed_wo = jax.lax.all_gather(routed_wo, axis_name=("fsdp", "fsdp_transpose"), tiled=False, to="reduced")
+    routed_wo = jnp.reshape(routed_wo,(256, -1, routed_wo_shape[2]))
+    #routed_wo = jax.lax.all_gather(routed_wo, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
+    
+    shared_wi_0 = jax.lax.all_gather(shared_wi_0, axis_name="fsdp", tiled=True, to="reduced")
+    shared_wi_0 = jax.lax.all_gather(shared_wi_0, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
+    
+    shared_wi_1 = jax.lax.all_gather(shared_wi_1, axis_name="fsdp", tiled=True, to="reduced")
+    shared_wi_1 = jax.lax.all_gather(shared_wi_1, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
+    
+    shared_wo = jax.lax.all_gather(shared_wo, axis_name="fsdp", tiled=True, axis=1, to="reduced")
+    shared_wo = jax.lax.all_gather(shared_wo, axis_name="fsdp_transpose", tiled=True, axis=0, to="reduced")
+    
+    print(f"wq_a shape: {wq_a.shape}")
+    print(f"wq_b shape: {wq_b.shape}")
+    print(f"wkv_a shape: {wkv_a.shape}")
+    print(f"wkv_b shape: {wkv_b.shape}")
+    print(f"out shape: {out.shape}")
+    print(f"gate shape: {gate.shape}")
+    print(f"routed_wi_0 shape: {routed_wi_0.shape}")
+    print(f"routed_wi_1 shape: {routed_wi_1.shape}")
+    print(f"routed_wo shape: {routed_wo.shape}")
+    print(f"shared_wi_0 shape: {shared_wi_0.shape}")
+    print(f"shared_wi_1 shape: {shared_wi_1.shape}")
+    print(f"shared_wo shape: {shared_wo.shape}")
+    return (
+        (
+            (pre_attn_norm, post_attn_norm),
+            (wq_a, wq_b, q_norm, wkv_a, wkv_b, kv_norm, out),
+        ),
+        (
+            (gate, bias),
+            (routed_wi_0, routed_wi_1, routed_wo),
+            (shared_wi_0, shared_wi_1, shared_wo),
+        ),
+    )
+
+  return jax.shard_map(
+      fn,
+      mesh=mesh,
+      in_specs=(
+          (
+              (
+                  (
+                      jax.sharding.PartitionSpec(None),
+                      jax.sharding.PartitionSpec(None),
+                  ),
+                  (
+                      jax.sharding.PartitionSpec("fsdp", "fsdp_transpose"),
+                      jax.sharding.PartitionSpec("fsdp", "fsdp_transpose", None),
+                      jax.sharding.PartitionSpec(None),
+                      jax.sharding.PartitionSpec("fsdp", "fsdp_transpose"),
+                      jax.sharding.PartitionSpec("fsdp", "fsdp_transpose", None),
+                      jax.sharding.PartitionSpec(None),
+                      jax.sharding.PartitionSpec("fsdp_transpose", None, "fsdp"),
+                  ),
+              ),
+              (
+                  (
+                      jax.sharding.PartitionSpec("fsdp", "fsdp_transpose"),
+                      jax.sharding.PartitionSpec(None),
+                  ),
+                  (
+                      jax.sharding.PartitionSpec("fsdp", "fsdp_transpose","expert"),
+                      jax.sharding.PartitionSpec("fsdp", "fsdp_transpose","expert"),
+                      jax.sharding.PartitionSpec("fsdp", ("fsdp_transpose", "expert"), None),
+                  ),
+                  (
+                      jax.sharding.PartitionSpec("fsdp", "fsdp_transpose"),
+                      jax.sharding.PartitionSpec("fsdp", "fsdp_transpose"),
+                      jax.sharding.PartitionSpec("fsdp_transpose", "fsdp"),
+                  ),
+              ),
+          ),
+      ),
+      out_specs=(
+          (
+              (
+                  jax.sharding.PartitionSpec(None),
+                  jax.sharding.PartitionSpec(None),
+              ),
+              (
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp", "fsdp_transpose","expert"}),
+                  jax.sharding.PartitionSpec(None, None, None, reduced={"fsdp", "fsdp_transpose","expert"}),
+                  jax.sharding.PartitionSpec(None),
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp", "fsdp_transpose","expert"}),
+                  jax.sharding.PartitionSpec(None, None, None, reduced={"fsdp", "fsdp_transpose","expert"}),
+                  jax.sharding.PartitionSpec(None),
+                  jax.sharding.PartitionSpec(None, None, None, reduced={"fsdp", "fsdp_transpose", "expert"}),
+              ),
+          ),
+          (
+              (
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp", "fsdp_transpose", "expert"}),
+                  jax.sharding.PartitionSpec(None),
+              ),
+              (
+                  jax.sharding.PartitionSpec(None, None, "expert", reduced={"fsdp", "fsdp_transpose"}),
+                  jax.sharding.PartitionSpec(None, None, "expert", reduced={"fsdp", "fsdp_transpose"}),
+                  jax.sharding.PartitionSpec(None, "expert", None, reduced={"fsdp", "fsdp_transpose"}),
+              ),
+              (
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp", "fsdp_transpose", "expert"}),
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp", "fsdp_transpose", "expert"}),
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp", "fsdp_transpose", "expert"}),
+              ),
+          ),
+      ),
+      check_vma=True,
+  )(weights)
+
+
 def scan_batch_split_layers(
     inputs,
     params,
@@ -182,8 +353,9 @@ def scan_batch_split_layers(
 ):
   """Scans the layers with batch-split schedule."""
 
-  def batch_split_scan_fn(inputs, weights, dpos, dseg):
-    xs = batch_split_schedule(
+  def process_layer(inputs, weights, dpos, dseg):
+    weights = gather_weights(weights, mesh)
+    return batch_split_schedule(
         inputs,
         weights,
         dpos,
@@ -192,26 +364,31 @@ def scan_batch_split_layers(
         mesh=mesh,
         quant=quant,
         cfg=cfg,
+        activation_pspec=activation_pspec,
     )
-    return xs, None
 
-  batch_split_scan_fn_checkpointed = jax.checkpoint(
-      batch_split_scan_fn,
-      # No need to prevent CSE inside scan.
-      prevent_cse=False,
-      policy=policy,
-  )
+  def batch_split_scan_fn(inputs, weights, dpos, dseg):
+    return (
+        jax.checkpoint(
+            process_layer,
+            # No need to prevent CSE inside scan.
+            prevent_cse=False,
+            policy=policy,
+        )(inputs, weights, dpos, dseg),
+        None,
+    )
+
   weights = fetch_weights(params, cfg.dtype)
   # `jax.lax.scan` expects the leading dimension of weights to be the scan
   # dimension, but the weights are initialized/loaded with the param scan
   # axis as the scan dimension, so swap the axes.
   weights = jax.tree.map(lambda x: jnp.swapaxes(x, 0, cfg.param_scan_axis), weights)
 
-  activation_pspec = jax.sharding.PartitionSpec(
+  activation_pspec = sharding.remove_size_one_mesh_axis(jax.sharding.PartitionSpec(
       ("data", "fsdp", "fsdp_transpose", "expert", "context"),
       None,
       None,
-  )
+  ), mesh)
   inputs = jax.shard_map(
       functools.partial(split, split_factor=cfg.batch_split_factor),
       mesh=mesh,
@@ -221,7 +398,7 @@ def scan_batch_split_layers(
   dpos = split(positions, split_factor=cfg.batch_split_factor)
   dseg = split(segment_ids, split_factor=cfg.batch_split_factor)
   outputs, _ = jax.lax.scan(
-      functools.partial(batch_split_scan_fn_checkpointed, dpos=dpos, dseg=dseg),
+      functools.partial(batch_split_scan_fn, dpos=dpos, dseg=dseg),
       inputs,
       weights,
   )
@@ -244,10 +421,10 @@ def batch_split_schedule(
     mesh,
     quant,
     cfg,
+    activation_pspec,
 ):
   """Applies the DeepSeek MoE layer with batch-split schedule."""
-  xs = [with_data_parallel_constraint(x, mesh) for x in inputs]
-  xs = jax.ad_checkpoint.checkpoint_name(xs, "decoder_layer_input")
+  xs = jax.ad_checkpoint.checkpoint_name(inputs, "decoder_layer_input")
 
   attn_op = attention_op.AttentionOp(
       config=cfg,
@@ -285,6 +462,7 @@ def batch_split_schedule(
       rope_factor=cfg.rope_factor,
       mscale=cfg.mscale,
       dtype=cfg.dtype,
+      activation_pspec=activation_pspec,
   )
 
   xs = moe(
@@ -297,6 +475,7 @@ def batch_split_schedule(
       expert_axis_name="expert",
       use_gather_mosaic_kernel=False,
       config=cfg,
+      activation_pspec=activation_pspec,
   )
   return xs
 
@@ -308,15 +487,6 @@ def staggered_call(fn, xs):
     else:
       xs[i], xs[i + 1] = jax.lax.optimization_barrier((fn(x), xs[i + 1]))
   return xs
-
-
-def with_data_parallel_constraint(x, mesh):
-  activation_pspec = jax.sharding.PartitionSpec(
-      ("data", "fsdp", "fsdp_transpose", "expert", "context"),
-      None,
-      None,
-  )
-  return jax.lax.with_sharding_constraint(x, jax.NamedSharding(mesh, activation_pspec))
 
 
 def dot(x, y, axes=1):
@@ -345,6 +515,7 @@ def mla_with_norms(
     rope_factor,
     mscale,
     dtype,
+    activation_pspec,
 ):
   """Performs MLA with pre- and post-normalization."""
   (pre_attn_scale, post_attn_scale), attn_ws = weights
@@ -356,37 +527,38 @@ def mla_with_norms(
         pre_attn_scale,
         epsilon=normalization_layer_epsilon,
         dtype=dtype,
+        out_sharding=jax.sharding.NamedSharding(mesh, activation_pspec),
     )
-    out = x + with_data_parallel_constraint(
-        mla(
-            y,
-            dpos,
-            dseg,
-            attn_ws,
-            model_mode=model_mode,
-            epsilon=normalization_layer_epsilon,
-            kv_lora_rank=kv_lora_rank,
-            kv_norm_epsilon=normalization_layer_epsilon,
-            qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            rope_theta=rope_max_timescale,
-            num_query_heads=num_query_heads,
-            max_position_embeddings=max_position_embeddings,
-            original_max_position_embeddings=original_max_position_embeddings,
-            beta_fast=beta_fast,
-            beta_slow=beta_slow,
-            rope_factor=rope_factor,
-            dtype=dtype,
-            mscale=mscale,
-            attention_op_fn=attn_op,
-        ),
-        mesh,
+    out = x + mla(
+        y,
+        dpos,
+        dseg,
+        attn_ws,
+        model_mode=model_mode,
+        epsilon=normalization_layer_epsilon,
+        kv_lora_rank=kv_lora_rank,
+        kv_norm_epsilon=normalization_layer_epsilon,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        rope_theta=rope_max_timescale,
+        num_query_heads=num_query_heads,
+        max_position_embeddings=max_position_embeddings,
+        original_max_position_embeddings=original_max_position_embeddings,
+        beta_fast=beta_fast,
+        beta_slow=beta_slow,
+        rope_factor=rope_factor,
+        dtype=dtype,
+        mscale=mscale,
+        attention_op_fn=attn_op,
+        mesh=mesh,
+        activation_pspec=activation_pspec,
     )
     return out, rms_norm(
         out,
         post_attn_scale,
         epsilon=normalization_layer_epsilon,
         dtype=dtype,
+        out_sharding=jax.sharding.NamedSharding(mesh, activation_pspec),
     )
 
   return staggered_call(fn, list(zip(inputs, decoder_segment_ids, decoder_positions)))
@@ -414,6 +586,8 @@ def mla(
     mscale,
     attention_op_fn,
     dtype,
+    mesh,
+    activation_pspec,
 ):
   """Performs MLA."""
   (
@@ -442,6 +616,8 @@ def mla(
       dtype=dtype,
       qk_nope_head_dim=qk_nope_head_dim,
       mscale=mscale,
+      mesh=mesh,
+      activation_pspec=activation_pspec,
   )
   query = jax.ad_checkpoint.checkpoint_name(query, "query_proj")
   key, value = kv_projection(
@@ -462,6 +638,8 @@ def mla(
       dtype=dtype,
       qk_nope_head_dim=qk_nope_head_dim,
       num_query_heads=num_query_heads,
+      mesh=mesh,
+      activation_pspec=activation_pspec,
   )
   key = jax.ad_checkpoint.checkpoint_name(key, "key_proj")
   value = jax.ad_checkpoint.checkpoint_name(value, "value_proj")
@@ -497,6 +675,8 @@ def query_projection(
     rope_factor,
     dtype,
     mscale,
+    mesh,
+    activation_pspec,
 ):
   """Performs query projection."""
   # Set softmax scaling.
@@ -513,6 +693,7 @@ def query_projection(
       q_norm_scale_weights,
       epsilon=epsilon,
       dtype=dtype,
+      out_sharding=jax.sharding.NamedSharding(mesh, activation_pspec),
   )
   low_rank_q = jax.ad_checkpoint.checkpoint_name(low_rank_q, "mla_q")
   q = dot(low_rank_q, wq_b_weights)
@@ -530,6 +711,8 @@ def query_projection(
       beta_slow=beta_slow,
       rope_factor=rope_factor,
       fprop_dtype=dtype,
+      mesh=mesh,
+      activation_pspec=activation_pspec,
   )
   query = jnp.concatenate([q_nope, q_pe], axis=-1) * softmax_scale
   return query
@@ -554,6 +737,8 @@ def kv_projection(
     dtype,
     qk_nope_head_dim,
     num_query_heads,
+    mesh,
+    activation_pspec,
 ):
   """Performs KV projection."""
   low_rank = dot(inputs, wkv_a_weights)
@@ -563,6 +748,7 @@ def kv_projection(
       kv_norm_scale_weights,
       epsilon=kv_norm_epsilon,
       dtype=dtype,
+      out_sharding=jax.sharding.NamedSharding(mesh, activation_pspec),
   )
   low_rank_main = jax.ad_checkpoint.checkpoint_name(low_rank_main, "mla_kv")
   key_rope = jnp.expand_dims(low_rank_rope, axis=2)
@@ -577,6 +763,8 @@ def kv_projection(
       beta_slow=beta_slow,
       rope_factor=rope_factor,
       fprop_dtype=dtype,
+      mesh=mesh,
+      activation_pspec=activation_pspec,
   )
 
   return get_key_value(
@@ -609,12 +797,12 @@ def get_key_value(low_rank_main, key_rope, wkv_b_weights, *, qk_nope_head_dim, n
   return key, value
 
 
-def rms_norm(x, scale, *, epsilon, dtype):
+def rms_norm(x, scale, *, epsilon, dtype, out_sharding=None):
   """RMS normalization."""
   x = jnp.asarray(x, jnp.float32)
   mean2 = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
   y = jnp.asarray(x * jax.lax.rsqrt(mean2 + epsilon), dtype)
-  return jnp.einsum("i...k,...k->i...k", y, scale)
+  return jnp.einsum("i...k,...k->i...k", y, scale, out_sharding=out_sharding)
 
 
 def yarn(
@@ -629,6 +817,8 @@ def yarn(
     beta_slow,
     rope_factor,
     fprop_dtype,
+    mesh,
+    activation_pspec,
 ):
   """Performs YaRN rotary embedding."""
   # Initialize the swap and negate mask.
@@ -667,7 +857,7 @@ def yarn(
   # Lookup the precomputed frequencies using the position indices.
   # self.freqs has shape [max_position_embeddings, half_dim] so we use jnp.take along axis 0.
   # After indexing, shape becomes [B, S, half_dim]; we then add an axis for the heads.
-  freqs = jnp.take(freqs, positions, axis=0)  # shape: [B, S, half_dim]
+  freqs = freqs.at[positions].get(out_sharding=jax.sharding.NamedSharding(mesh, activation_pspec))
   freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
   freqs = jnp.repeat(freqs, 2, axis=-1)  # shape: [B, S, 1, embedding_dims]
   # inputs @ mask: [B, S, N, embedding_dims] @ [embedding_dims, embedding_dims] -> [B, S, N, embedding_dims]
@@ -686,22 +876,21 @@ def moe(
     expert_axis_name,
     use_gather_mosaic_kernel,
     config,
+    activation_pspec,
 ):
   """Performs dropless MoE with tensor/expert parallelism."""
   xs, ys = list(zip(*inputs))
-  ys = with_data_parallel_constraint(
-      process_activations(
-          ys,
-          weights,
-          mesh=mesh,
-          num_experts=num_experts,
-          num_experts_per_tok=num_experts_per_tok,
-          routed_scaling_factor=routed_scaling_factor,
-          expert_axis_name=expert_axis_name,
-          use_gather_mosaic_kernel=use_gather_mosaic_kernel,
-          config=config,
-      ),
-      mesh,
+  ys = process_activations(
+      ys,
+      weights,
+      mesh=mesh,
+      num_experts=num_experts,
+      num_experts_per_tok=num_experts_per_tok,
+      routed_scaling_factor=routed_scaling_factor,
+      expert_axis_name=expert_axis_name,
+      use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+      config=config,
+      activation_pspec=activation_pspec,
   )
   return [x + y for x, y in zip(xs, ys)]
 
@@ -804,16 +993,11 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       input_buffer_count,
       combine_scopes,
   ):
-
-    tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
-        group_sizes,
-        max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
-    )
     if config.use_qwix_quantization:
       output = megablox.gmm(
           lhs=inputs,
           rhs=kernel,
-          group_sizes=tokamax_group_sizes,
+          group_sizes=group_sizes,
           preferred_element_type=preferred_element_type,
           tiling=tiling,
           use_qwix_quantization=config.use_qwix_quantization,
@@ -827,7 +1011,10 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       output = tokamax.ragged_dot(
           lhs=inputs,
           rhs=kernel,
-          group_sizes=tokamax_group_sizes,
+          group_sizes=tokamax.RaggedDotGroupSizes(
+              group_sizes,
+              max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+          ),
           precision=jax.lax.Precision.DEFAULT,
           preferred_element_type=preferred_element_type,
           implementation="mosaic",
@@ -1021,20 +1208,16 @@ def process_activations(
     expert_axis_name,
     use_gather_mosaic_kernel,
     config,
+    activation_pspec,
 ):
   """Processes activations, which are fully sharded on the batch axis, with tensor/expert sharded weights."""
-  activation_pspec = jax.sharding.PartitionSpec(
-      ("data", "fsdp", "fsdp_transpose", "expert", "context"),
-      None,
-      None,
-  )
   if config.use_qwix_quantization:
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
     gating_pspec = nn.logical_to_mesh_axes(gating_pspec)
     linear_pspec = nn.logical_to_mesh_axes(linear_pspec)
   else:
-    gating_pspec = jax.sharding.PartitionSpec(None, None, expert_axis_name)
-    linear_pspec = jax.sharding.PartitionSpec(None, expert_axis_name, None)
+    gating_pspec = jax.sharding.PartitionSpec(None, None, expert_axis_name, reduced={"fsdp", "fsdp_transpose"})
+    linear_pspec = jax.sharding.PartitionSpec(None, expert_axis_name, None, reduced={"fsdp", "fsdp_transpose"})
   return jax.shard_map(
       functools.partial(
           route_compute_unroute,
@@ -1051,7 +1234,7 @@ def process_activations(
           [activation_pspec] * len(xs),
           (
               (
-                  jax.sharding.PartitionSpec(None, None),
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp", "fsdp_transpose", "expert"}),
                   jax.sharding.PartitionSpec(None),
               ),
               (
@@ -1060,12 +1243,12 @@ def process_activations(
                   linear_pspec,
               ),
               (
-                  jax.sharding.PartitionSpec(None, None),
-                  jax.sharding.PartitionSpec(None, None),
-                  jax.sharding.PartitionSpec(None, None),
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp", "fsdp_transpose", "expert"}),
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp", "fsdp_transpose", "expert"}),
+                  jax.sharding.PartitionSpec(None, None, reduced={"fsdp", "fsdp_transpose", "expert"}),
               ),
           ),
       ),
       out_specs=activation_pspec,
-      check_vma=False,
+      check_vma=True,
   )([x.astype(config.dtype) for x in xs], weights)

@@ -242,7 +242,7 @@ class GateLogit(nnx.Module):
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
       self.bias = nnx.Param(
           default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
-          sharding=bias_axes,
+          sharding=(None,),
       )
     else:
       self.bias = None
@@ -902,7 +902,7 @@ class RoutedMoE(nnx.Module):
       else:
         tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
             group_sizes,
-            max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+            int(inputs.shape[0])
         )
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
@@ -2082,7 +2082,7 @@ class RoutedAndSharedMoE(nnx.Module):
         num_experts_per_tok=self.config.num_experts_per_tok,
         mesh=self.mesh,
         kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
+        kernel_axes=("embed", "mlp"),
         intermediate_dim=self.config.moe_mlp_dim,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,

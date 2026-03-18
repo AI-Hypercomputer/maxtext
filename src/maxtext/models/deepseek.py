@@ -41,7 +41,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import deepseek_batchsplit
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding
-from maxtext.utils.sharding import maybe_shard_with_logical
+from maxtext.utils.sharding import maybe_shard_with_logical, remove_size_one_mesh_axis
 
 import transformers
 
@@ -78,8 +78,8 @@ class DeepSeekGenericLayer(nnx.Module):
     batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, self.model_mode)
     self.dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
 
-    self.out_sharding = create_sharding(self.mesh, self.logical_axis_names)
-    self.mlp_intermediate_sharding = create_sharding(self.mesh, self.mlp_logical_axis_names)
+    self.out_sharding = create_sharding(self.mesh, self.logical_axis_names, rules=self.config.logical_axis_rules)
+    self.mlp_intermediate_sharding = create_sharding(self.mesh, self.mlp_logical_axis_names, rules=self.config.logical_axis_rules)
 
     self.pre_self_attention_layer_norm = RMSNorm(
         num_features=self.dummy_inputs_shape[-1],
@@ -185,6 +185,7 @@ class DeepSeekGenericLayer(nnx.Module):
         shard_mode=self.config.shard_mode,
         debug_sharding=self.config.debug_sharding,
         extra_stack_level=1,
+        rules=self.config.logical_axis_rules,
     )
 
   def dropout_op(self, x, deterministic):
@@ -447,11 +448,11 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # That is also why we can split/merge activations here as well as
     # in `Decoder`, since they will never be executed together.
     if self.config.use_batch_split_schedule:
-      activation_pspec = jax.sharding.PartitionSpec(
+      activation_pspec = remove_size_one_mesh_axis(jax.sharding.PartitionSpec(
           ("data", "fsdp", "fsdp_transpose", "expert", "context"),
           None,
           None,
-      )
+      ), self.mesh)
       inputs = jax.shard_map(
           functools.partial(
               deepseek_batchsplit.split,
@@ -463,7 +464,12 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       )(inputs)
       dpos = deepseek_batchsplit.split(decoder_positions, self.config.batch_split_factor)
       dseg = deepseek_batchsplit.split(decoder_segment_ids, self.config.batch_split_factor)
-      weights = deepseek_batchsplit.fetch_weights(nnx.to_pure_dict(nnx.state(self, nnx.Param)), self.config.dtype)
+      fn = lambda x: (
+        maybe_shard_with_logical(x.value, x.sharding_names, self.mesh, shard_mode=self.config.shard_mode, rules=self.config.logical_axis_rules)
+        if isinstance(x, nnx.variablelib.Variable) else x
+      )
+      weights = deepseek_batchsplit.fetch_weights(nnx.to_pure_dict(nnx.state(self, nnx.Param), fn), self.config.dtype)
+      weights = deepseek_batchsplit.gather_weights(weights, self.mesh)
       outputs = deepseek_batchsplit.batch_split_schedule(
           inputs,
           weights,
@@ -473,6 +479,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           mesh=self.mesh,
           quant=self.quant,
           cfg=self.config,
+          activation_pspec=activation_pspec,
       )
       outputs = jax.shard_map(
           functools.partial(
