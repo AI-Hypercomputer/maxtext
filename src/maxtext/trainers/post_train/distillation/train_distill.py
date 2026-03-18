@@ -464,8 +464,7 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   )
 
   # 4. Optimizer & Config
-  total_updates = student_config.steps // student_config.gradient_accumulation_steps
-  optimizer = get_distillation_optimizer(student_config, total_updates)
+  optimizer = get_distillation_optimizer(student_config, student_config.steps)
 
   checkpointing_options = checkpoint.CheckpointManagerOptions(
       save_interval_steps=student_config.checkpoint_period,
