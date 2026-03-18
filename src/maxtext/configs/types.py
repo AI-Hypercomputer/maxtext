@@ -1030,17 +1030,13 @@ class GrainDataset(BaseModel):
       "",
       description="Path to a JSON file specifying the mixture weights for Grain training data.",
   )
-  grain_file_type: str = Field("arrayrecord", description="File type for Grain data.")
+  grain_file_type: str = Field(
+      "arrayrecord", description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet."
+  )
   grain_worker_count: int = Field(1, description="Number of workers for Grain data loading.")
-  grain_per_worker_buffer_size: int = Field(
-      1,
-      description="Buffer size for each worker for Grain data loading during training.",
-  )
+  grain_per_worker_buffer_size: int = Field(1, description="Per-worker buffer size for Grain train data loading.")
   grain_worker_count_eval: int = Field(1, description="Number of workers for Grain eval data loading.")
-  grain_per_worker_buffer_size_eval: int = Field(
-      1,
-      description="Buffer size for each worker for Grain data loading during evaluation.",
-  )
+  grain_per_worker_buffer_size_eval: int = Field(1, description="Per-worker buffer size for Grain eval data loading.")
   grain_ram_budget_mb: int = Field(1024, description="RAM budget (MB) for auto-tuning worker count.")
   grain_num_threads: int = Field(16, description="Number of threads for Grain ReadOptions during training.")
   grain_prefetch_buffer_size: int = Field(500, description="Prefetch buffer size for Grain ReadOptions during training.")
@@ -1052,6 +1048,7 @@ class GrainDataset(BaseModel):
       16,
       description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.",
   )
+  grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
 
 
 class FineTuning(BaseModel):
