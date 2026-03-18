@@ -151,7 +151,7 @@ def get_dataset(
 
 def setup_configs_and_devices(argv: list[str], **kwargs):
   """Setup device allocation and configs for training and inference."""
-  config = pyconfig.initialize_pydantic(argv, kwargs)
+  config = pyconfig.initialize_pydantic(argv, **kwargs)
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
     max_logging.log("Running RL on a single slice")
@@ -590,7 +590,7 @@ def rl_train(argv: Sequence[str], **kwargs):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
-  trainer_config, sampler_config, trainer_devices, sampler_devices = setup_configs_and_devices(argv, kwargs)
+  trainer_config, sampler_config, trainer_devices, sampler_devices = setup_configs_and_devices(argv, **kwargs)
 
   reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh = create_models_and_meshes(
       trainer_config, sampler_config, trainer_devices, sampler_devices
@@ -689,7 +689,7 @@ def rl_train(argv: Sequence[str], **kwargs):
   max_logging.warning(f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
 
-def main(argv: Sequence[str]) -> None:
+def main(argv: Sequence[str], **kwargs) -> None:
   """Main function to run RL training.
 
   Args:
@@ -699,7 +699,7 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
   max_utils.print_system_information()
-  rl_train(argv)
+  rl_train(argv, **kwargs)
 
 
 if __name__ == "__main__":
