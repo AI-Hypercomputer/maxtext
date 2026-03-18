@@ -63,6 +63,7 @@ from jax.sharding import Mesh
 from orbax import checkpoint as ocp
 from pprint import pprint
 from transformers import AutoTokenizer
+import qwix
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
@@ -78,7 +79,6 @@ from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_template_from_file
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
-
 
 def get_maxtext_model(config, devices=None):
   """
@@ -418,6 +418,22 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
   else:
     max_logging.log("Creating policy model with same config as reference model on trainer mesh")
     actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
+
+  # add lora adapter to actor model
+  if trainer_config.lora.enabled:
+    max_logging.log(
+      f"Applying LoRA to actor model: rank={trainer_config.lora.rank}, "
+      f"alpha={trainer_config.lora.alpha}, module_path='{trainer_config.lora.module_path}'"
+    )
+    lora_provider = qwix.LoraProvider(
+      module_path=trainer_config.lora.module_path,
+      rank=trainer_config.lora.rank,
+      alpha=trainer_config.lora.alpha,
+    )
+    model_input = actor_model.get_model_input()
+    with actor_mesh:  
+      actor_model = qwix.apply_lora_to_model(actor_model, lora_provider, rngs=nnx.Rngs(0), **model_input)
+    max_logging.log("LoRA applied to actor model successfully.")
 
   return reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh
 
