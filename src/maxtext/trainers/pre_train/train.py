@@ -673,6 +673,9 @@ def main(argv: Sequence[str]) -> None:
 
   config, recorder, diagnostic_config = initialize(argv)
   record_goodput(recorder, RECORD_JOB_START_TIME)
+
+  clean_up_checkpoints = functools.partial(max_utils.clean_up_checkpoints, checkpoint_dir=config.checkpoint_dir)
+
   def train():
     config, recorder, diagnostic_config = initialize(argv)
     run(config, recorder, diagnostic_config)
@@ -709,6 +712,7 @@ def main(argv: Sequence[str]) -> None:
             max_resizes=10,  # Handle up to 10 slice up or slice down transitions
             poll_interval=10,  # Monitor thread checks inactive slice health every 10 seconds
             pre_callback=pre_callback,
+            on_elastic_event_callback=clean_up_checkpoints,
         )(train)
 
       elif elastic_mode == "pause-resume":
@@ -716,6 +720,7 @@ def main(argv: Sequence[str]) -> None:
             max_retries=10,  # Handle up to 10 disruptions before restarting
             poll_interval=10,  # While paused, checks every 10 seconds for health
             timeout=300,  # Waits for slices to rejoin for 5 minutes
+            on_elastic_event_callback=clean_up_checkpoints,
         )(train)
 
       else:

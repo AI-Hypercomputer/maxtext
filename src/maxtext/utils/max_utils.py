@@ -24,6 +24,8 @@ import socket
 import subprocess
 import time
 from typing import Any
+import subprocess
+import re
 
 from etils import epath
 import flax
@@ -1108,3 +1110,40 @@ def live_devices():
 
 def live_slice_indices() -> set[int]:
   return {d.slice_index for d in live_devices()}
+
+
+def clean_up_checkpoints(checkpoint_dir: str):
+
+  max_logging.log(f"Checking for incomplete checkpoint after an elastic event...")
+  checkpoint_dir = f"{checkpoint_dir}"
+
+  # 1. List the directory
+  result = subprocess.run(['gsutil', 'ls', checkpoint_dir], capture_output=True, text=True)
+
+  if result.returncode != 0:
+    max_logging.log("Failed to inspect checkpoint dir. Continuing")
+    return
+
+  # 2. Filter for directories ending in numbers/ (equivalent to your grep and sort)
+  checkpoints = [line for line in result.stdout.splitlines() if re.search(r'/\d+/$', line)]
+
+  if not checkpoints:
+    max_logging.log("Found no existing checkpoints. Continuing")
+    return
+
+  # Sort naturally (Version sort) and get the last one
+  checkpoints.sort(key=lambda x: [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', x)])
+  latest_checkpoint = checkpoints[-1]
+
+  max_logging.log(f"Checking latest checkpoint: {latest_checkpoint}")
+
+  # 3. Check for commit_success file
+  # gsutil -q stat returns 0 if found, non-zero if not
+  stat_check = subprocess.run(['gsutil', '-q', 'stat', f"{latest_checkpoint}commit_success*"])
+
+  if stat_check.returncode != 0:
+    max_logging.log(f"No commit_success file found. Deleting {latest_checkpoint}...")
+    subprocess.run(['gsutil', '-m', 'rm', '-rf', latest_checkpoint])
+  else:
+    max_logging.log(f"Found commit_success file. Keeping {latest_checkpoint}.")
+
