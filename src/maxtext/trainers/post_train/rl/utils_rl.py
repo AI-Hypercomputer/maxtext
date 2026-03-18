@@ -527,28 +527,28 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
     answer = extract_hash_answer(answer)
 
   return {
-    # passed to model forward pass
-    "prompts": model_tokenizer.apply_chat_template(
-      [
-        {
-          "role": "system",
-          "content": template_config["SYSTEM_PROMPT"].format(
-            reasoning_start_token=tmvp_config.reasoning_start_token,
-            reasoning_end_token=tmvp_config.reasoning_end_token,
-            solution_start_token=tmvp_config.solution_start_token,
-            solution_end_token=tmvp_config.solution_end_token,
-          ),
-        },
-        {
-          "role": "user",
-          "content": question,
-        }
-      ],
-      tokenize=False,
-      add_generation_prompt=True,
-    ),
-    # passed to reward functions
-    "question": question,
-    # passed to reward functions
-    "answer": answer,
+      # passed to model forward pass
+      "prompts": model_tokenizer.apply_chat_template(
+          [
+              {
+                  "role": "system",
+                  "content": template_config["SYSTEM_PROMPT"].format(
+                      reasoning_start_token=tmvp_config.reasoning_start_token,
+                      reasoning_end_token=tmvp_config.reasoning_end_token,
+                      solution_start_token=tmvp_config.solution_start_token,
+                      solution_end_token=tmvp_config.solution_end_token,
+                  ),
+              },
+              {
+                  "role": "user",
+                  "content": question,
+              },
+          ],
+          tokenize=False,
+          add_generation_prompt=True,
+      ),
+      # passed to reward functions
+      "question": question,
+      # passed to reward functions
+      "answer": answer,
   }
