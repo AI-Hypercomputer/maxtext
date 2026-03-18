@@ -887,6 +887,14 @@ class RoutedMoE(nnx.Module):
     )
     return input_offsets, send_sizes, output_offsets, recv_sizes
 
+  def get_ragged_buffer_size(self, local_expert_size, local_batch):
+    if self.config.ragged_buffer_factor > 0.0:
+      balanced_size = local_batch
+      return int(balanced_size * self.config.ragged_buffer_factor)
+    else:
+      max_local_experts_per_tok = min(local_expert_size, self.config.num_experts_per_tok)
+      return int(local_batch * max_local_experts_per_tok)
+
   def transform_bias(self, experts_index, *biases):
     """Selects bias values for a variable number of bias tensors based on chosen experts."""
     return tuple(bias[experts_index] for bias in biases)
@@ -1181,7 +1189,7 @@ class RoutedMoE(nnx.Module):
             # This would result in num_expert_shards * input_size * experts_per_shard assignments. However, if
             # experts_per_shard > num_experts_per_tok we cannot assign more than num_experts_per_tok to all of the inputs.
             max_local_experts_per_tok = min(local_expert_size, self.config.num_experts_per_tok)
-            buffer_size = int(num_expert_parallelism * batch_size * sequence_length * max_local_experts_per_tok)
+            buffer_size = self.get_ragged_buffer_size(local_expert_size, jnp.shape(x)[0])
             output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
 
             x = jax.lax.ragged_all_to_all(
