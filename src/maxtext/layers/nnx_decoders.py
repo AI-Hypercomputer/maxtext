@@ -447,11 +447,11 @@ class NNXDecoder(nnx.Module):
     layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
-
-    layer_cls = layers.__class__  # Access the underlying class
-    sig = inspect.signature(layer_cls.__call__)
-    # Filter kwargs to only include keys that exist in the layer's signature
-    valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
+    # During Qwix init (disable_quant_stats_update=True), params may be lazily
+    # created and the layer graphdef can grow. Allow graphdef refresh in that
+    # phase only. Keep scanned training path static for remat purity.
+    dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
+    updated_graphdef = [graphdef]
 
     def layer_fn(carry, scanned_vars):
       # Unpack the sliced variables for THIS layer
@@ -468,21 +468,66 @@ class NNXDecoder(nnx.Module):
 
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
-      # Extract the updated state to return it
-      # _, new_current_state = nnx.split(layer, nnx.Param, ...)
-      new_current_state = nnx.state(layer)
-      return new_carry, new_current_state
+      # Qwix init: return updated params so graphdef can grow. In normal training, keep params unchanged to avoid extra memory use.
+      new_graphdef, updated_params, updated_state = nnx.split(layer, nnx.Param, ...)
+      if dynamic_graph_init:
+        updated_graphdef[0] = new_graphdef
+        returned_params = updated_params
+      else:
+        returned_params = current_params
+      return new_carry, (returned_params, updated_state)
 
-    layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
+    # Downcast gradient to activation dtype to save TPU memory.
+    @jax.custom_vjp
+    def layer_fn_wrapper(carry, params_state):
+      return layer_fn(carry, params_state)
 
-    final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state))
+    def layer_fn_wrapper_fwd(carry, params_state):
+      out = layer_fn(carry, params_state)
+      return out, ()
+
+    def layer_fn_wrapper_bwd(_unused_res, g):
+      # g is the cotangent tuple (g_carry, g_params_state)
+      g_carry, g_params_state = g
+      g_carry = jnp.asarray(g_carry, dtype=x_in.dtype)
+      return (g_carry, g_params_state)
+
+    layer_fn_wrapper.defvjp(layer_fn_wrapper_fwd, layer_fn_wrapper_bwd)
+
+    layer_fn_wrapped = jax.checkpoint(layer_fn_wrapper, policy=policy, prevent_cse=prevent_cse)
+
+    def _ensure_scan_leading_axis(x):
+      # Promote scalars for scan axis compatibility.
+      if not hasattr(x, "shape"):
+        return x
+      if len(x.shape) == 0:
+        return jnp.broadcast_to(x, (length,))
+      return x
+
+    params = jax.tree.map(_ensure_scan_leading_axis, params)
+    state = jax.tree.map(_ensure_scan_leading_axis, state)
+
+    if not isinstance(x_in, jax.core.Tracer):
+      # Eager: unroll to save memory.
+      final_carry = x_in
+      scanned_params_list = []
+      scanned_other_list = []
+      for i in range(length):
+        current_params = jax.tree.map(lambda x: x[i], params)
+        current_state = jax.tree.map(lambda x: x[i], state)
+        final_carry, (updated_params, updated_state) = layer_fn_wrapped(final_carry, (current_params, current_state))
+        scanned_params_list.append(updated_params)
+        scanned_other_list.append(updated_state)
+      scanned_params = jax.tree.map(lambda *args: jnp.stack(args), *scanned_params_list)
+      scanned_other = jax.tree.map(lambda *args: jnp.stack(args), *scanned_other_list)
+    else:
+      final_carry, (scanned_params, scanned_other) = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
 
     if scan_axis != 0:
-      scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
       scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
-      scanned_state = nnx.State.merge(scanned_params, scanned_other)
 
-    return final_carry, nnx.merge(graphdef, scanned_state)
+    graphdef_to_merge = updated_graphdef[0] if dynamic_graph_init else graphdef
+    return final_carry, nnx.merge(graphdef_to_merge, scanned_params, scanned_other)
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
