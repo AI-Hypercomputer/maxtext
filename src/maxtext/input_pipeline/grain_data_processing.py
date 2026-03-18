@@ -402,6 +402,8 @@ def sft_preprocessing_pipeline(
   else:
     pad_id = -1
 
+  tokenizer_model = tokenizer_model.tokenizer
+
   if getattr(config, "chat_template", None) and hasattr(tokenizer_model, "chat_template"):
     tokenizer_model.chat_template = config.chat_template
 
