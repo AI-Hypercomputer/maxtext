@@ -19,8 +19,8 @@ Test cmd for gpt3-52k:
 python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt3_ckpt_from_paxml \
   --paxml-ckpt-path=gs://maxtext-gpt3/ckpt_test/paxml/checkpoints/checkpoint_00000000/state \
   --maxtext-model-name=gpt3-52k \
-  --run-name=$RUN_NAME \
-  --base-output-directory=$BASE_OUTPUT_DIR
+  --run-name=${RUN_NAME?} \
+  --base-output-directory=${BASE_OUTPUT_DIR?}
 
 True cmd for gpt3-175b:
 
@@ -30,8 +30,8 @@ The script is memory demanding, requires at least 250 GiB in cpu and cumulative 
 python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt3_ckpt_from_paxml \
   --paxml-ckpt-path=gs://mlperf-llm-public2/gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000 \
   --maxtext-model-name=gpt3-175b \
-  --run-name=$RUN_NAME \
-  --base-output-directory=$BASE_OUTPUT_DIR
+  --run-name=${RUN_NAME?} \
+  --base-output-directory=${BASE_OUTPUT_DIR?}
 """
 
 import argparse
@@ -42,7 +42,7 @@ import sys
 import jax
 from jax import random
 from jax.sharding import Mesh
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_TRAIN

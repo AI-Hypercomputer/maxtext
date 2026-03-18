@@ -210,6 +210,41 @@ gemma2_27b_config = transformers.Gemma2Config(
     query_pre_attn_scalar=144,
 )
 
+qwen25_7b_config = transformers.Qwen2Config(
+    vocab_size=152064,
+    hidden_size=3584,
+    intermediate_size=18944,
+    num_hidden_layers=28,
+    num_attention_heads=28,
+    num_key_value_heads=4,
+    hidden_act="silu",
+    max_position_embeddings=32768,
+    initializer_range=0.02,
+    rms_norm_eps=1e-06,
+    use_cache=True,
+    rope_theta=1000000.0,
+    tie_word_embeddings=False,
+    torch_dtype="bfloat16",
+    attention_bias=True,
+)
+
+qwen25_14b_config = transformers.Qwen2Config(
+    vocab_size=152064,
+    hidden_size=5120,
+    intermediate_size=13824,
+    num_hidden_layers=48,
+    num_attention_heads=40,
+    num_key_value_heads=8,
+    hidden_act="silu",
+    max_position_embeddings=32768,
+    rms_norm_eps=1e-06,
+    rope_theta=1000000.0,
+    tie_word_embeddings=False,
+    torch_dtype="bfloat16",
+    attention_bias=True,
+)
+
+
 qwen3_0_6b_config = transformers.Qwen3Config(
     vocab_size=151936,
     hidden_size=1024,
@@ -815,6 +850,8 @@ HF_MODEL_CONFIGS = {
     "gemma3-4b": gemma3_4b_config,
     "gemma3-12b": gemma3_12b_config,
     "gemma3-27b": gemma3_27b_config,
+    "qwen2.5-7b": qwen25_7b_config,
+    "qwen2.5-14b": qwen25_14b_config,
     "qwen3-0.6b": qwen3_0_6b_config,
     "qwen3-4b": qwen3_4b_config,
     "qwen3-4b-thinking-2507": qwen3_4b_config,

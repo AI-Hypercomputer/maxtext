@@ -22,7 +22,7 @@ import jax.numpy as jnp
 
 from absl import app
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common import profiler
 from maxtext.common.gcloud_stub import jetstream, is_decoupled
 from maxtext.inference.maxengine import maxengine

@@ -20,7 +20,7 @@ from maxtext.common.gcloud_stub import mldiagnostics_modules
 
 mldiag, _ = mldiagnostics_modules()
 
-from MaxText.pyconfig import KEYS_NO_LOGGING
+from maxtext.configs.pyconfig import KEYS_NO_LOGGING
 
 
 class ManagedMLDiagnostics:

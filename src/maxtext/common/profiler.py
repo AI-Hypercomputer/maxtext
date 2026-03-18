@@ -51,7 +51,7 @@ class Profiler:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
 
     self.profiling_options = jax.profiler.ProfileOptions()
-    if self.mode == "xplane" and not self.managed_mldiagnostics:
+    if self.mode == "xplane" and not self.managed_mldiagnostics and config.profile_power_events:
       self.profiling_options.advanced_configuration = {
           "tpu_power_trace_level": config.xprof_tpu_power_trace_level,
           "e2e_enable_fw_throttle_event": config.xprof_e2e_enable_fw_throttle_event,

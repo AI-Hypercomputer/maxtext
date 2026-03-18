@@ -23,22 +23,22 @@ GSM8K math reasoning benchmark. The script is also flexible enough to run Group 
 Usage Examples:
 
 # GRPO on Llama3.1-8B-Instruct
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=llama3.1-8b \
   tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
   load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN
+  run_name=${WORKLOAD?} \
+  base_output_directory=${OUTPUT_PATH?} \
+  hf_access_token=${HF_TOKEN?}
 
 # GSPO on Llama3.1-70B-Instruct
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
   model_name=llama3.1-70b \
   tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
   load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN \
+  run_name=${WORKLOAD?} \
+  base_output_directory=${OUTPUT_PATH?} \
+  hf_access_token=${HF_TOKEN?} \
   loss_algo=gspo-token
 
 """
@@ -71,7 +71,7 @@ from tunix.sft import metrics_logger, profiler
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
@@ -85,13 +85,14 @@ def get_maxtext_model(config, devices=None):
   Load MaxText model with Tunix adapter.
   # Note: pass the path to your scanned checkpoint for 'load_parameters_path'.
   # To create a scanned checkpoint, you can use /maxtext/src/MaxText/checkpoint_conversion/to_maxtext.py and if
-  # using Pathways, please set `checkpoint_storage_use_ocdbt=False checkpoint_storage_use_zarr3=False`
+  # using Pathways, please set `USE_PATHWAYS=1` and use `$((1 - USE_PATHWAYS))` for storage flags:
+  # export USE_PATHWAYS=1
   # python src/MaxText/checkpoint_conversion/to_maxtext.py \
   #  --model_name="gemma2-2b" \
   #  --base_output_directory="/path/to/your/output/directory" \
   #  --scan_layers=True \
-  # --checkpoint_storage_use_ocdbt=False\
-  # checkpoint_storage_use_zarr3=False
+  #  --checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) \
+  #  --checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS))
   # Please ensure that you pass the full path ending in `/0/items` for load_parameters_path to train_rl.py i.e.,
   # load_parameters_path=/path/to/your/output/directory/0/items
   """
@@ -228,69 +229,72 @@ def setup_configs_and_devices(argv: list[str]):
   return trainer_config, sampler_config, trainer_devices, sampler_devices
 
 
-def get_rollout_kwargs_for_data_parallelism(sampler_config, num_sampler_devices):
+def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
   """Get rollout kwargs for vLLM rollout when using data parallelism."""
   dp = sampler_config.rollout_data_parallelism
-  if dp == -1:
-    return {}
-
-  rollout_kwargs = {}
   tp = sampler_config.rollout_tensor_parallelism
+  ep = sampler_config.rollout_expert_parallelism
 
-  if tp == -1:
-    if num_sampler_devices % dp != 0:
+  # -1 means "auto-derive from the other two". At most one can be -1.
+  num_auto = sum(1 for x in [tp, dp, ep] if x == -1)
+  if num_auto > 1:
+    raise ValueError(
+        "At most one of rollout_tensor_parallelism, rollout_data_parallelism, "
+        "rollout_expert_parallelism can be -1 (auto-derived)."
+    )
+
+  if dp == -1:
+    if num_sampler_devices % (tp * ep) != 0:
       raise ValueError(
           f"num_sampler_devices({num_sampler_devices}) must be divisible by "
-          f"rollout_data_parallelism({dp}) "
+          f"rollout_tensor_parallelism({tp}) * rollout_expert_parallelism({ep}) "
+          f"when rollout_data_parallelism is -1."
+      )
+    dp = num_sampler_devices // tp // ep
+  elif tp == -1:
+    if num_sampler_devices % (dp * ep) != 0:
+      raise ValueError(
+          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
+          f"rollout_data_parallelism({dp}) * rollout_expert_parallelism({ep}) "
           f"when rollout_tensor_parallelism is -1."
       )
-    tp = num_sampler_devices // dp
-  elif tp * dp != num_sampler_devices:
+    tp = num_sampler_devices // dp // ep
+  elif ep == -1:
+    if num_sampler_devices % (tp * dp) != 0:
+      raise ValueError(
+          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
+          f"rollout_tensor_parallelism({tp}) * rollout_data_parallelism({dp}) "
+          f"when rollout_expert_parallelism is -1."
+      )
+    ep = num_sampler_devices // tp // dp
+  elif tp * dp * ep != num_sampler_devices:
     raise ValueError(
         f"rollout_tensor_parallelism({tp}) * "
-        f"rollout_data_parallelism({dp}) "
+        f"rollout_data_parallelism({dp}) * "
+        f"rollout_expert_parallelism({ep}) "
         f"!= len(sampler_devices)({num_sampler_devices})"
     )
+
+  rollout_kwargs = {}
   rollout_kwargs["tensor_parallel_size"] = tp
   rollout_kwargs["data_parallel_size"] = dp
-  rollout_kwargs["rollout_vllm_async_scheduling"] = True
+  rollout_kwargs["expert_parallel_size"] = ep
 
   return rollout_kwargs
 
 
-def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
-  """
-  Run RL training with the provided configuration.
-
-  Args:
-    trainer_config: MaxText configuration for the trainer.
-    sampler_config: MaxText configuration for the sampler.
-    trainer_devices: JAX devices for the trainer.
-    sampler_devices: JAX devices for the sampler.
-  """
-  if not trainer_config.debug.rl:
-    # Apply filter to suppress noisy logs
-    noise_filter = max_logging.NoisyLogFilter()
-    logging.getLogger().addFilter(noise_filter)
-    absl_logging.get_absl_logger().addFilter(noise_filter)
-
-  max_logging.log("Starting RL Training")
-  max_logging.log(f"Ensuring TensorBoard log directory exists: {trainer_config.tensorboard_dir}")
-  if not epath.Path(trainer_config.tensorboard_dir).exists():
-    epath.Path(trainer_config.tensorboard_dir).mkdir(parents=True, exist_ok=True)
-
-  if not epath.Path(trainer_config.checkpoint_dir).exists():
-    epath.Path(trainer_config.checkpoint_dir).mkdir(parents=True)
-
-  # Number of training steps.
-  max_train_steps = int(
+def get_max_train_steps(trainer_config):
+  """Calculate the total number of training steps."""
+  return int(
       trainer_config.num_batches
       * trainer_config.rl.num_iterations
       * trainer_config.train_fraction
       * trainer_config.num_epoch
   )
-  # ====== Data ======
-  # Setup data directories
+
+
+def prepare_datasets(trainer_config, model_tokenizer):
+  """Setup and return train and test datasets."""
   home = os.path.expanduser("~") + "/"
   train_data_dir = f"{home}/data/train"
   test_data_dir = f"{home}/data/test"
@@ -298,9 +302,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     os.makedirs(train_data_dir)
   if not os.path.exists(test_data_dir):
     os.makedirs(test_data_dir)
-
-  # Create model tokenizer
-  model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
 
   # Load datasets
   if trainer_config.dataset_name == "huggingface:nvidia/OpenMathInstruct-2":
@@ -310,7 +311,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
         split: str = "train_1M",
         seed: int = 42,
         test_size: float = 0.05,
-        output_key: str = "expected_answer",
     ):
       """Load and split the OpenMathInstruct-2 dataset into train and validation sets using HF's train_test_split."""
       max_logging.log(
@@ -392,44 +392,21 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size)
 
   test_dataset = test_dataset.filter(_filter_long_prompts)
-  test_dataset = test_dataset[: trainer_config.num_test_batches * trainer_config.batch_size]
+  test_dataset = test_dataset[
+      trainer_config.test_batch_start_index : trainer_config.num_test_batches * trainer_config.batch_size
+  ]
 
   test_dataset = test_dataset.to_iter_dataset().batch(trainer_config.batch_size)
+  return train_dataset, test_dataset
 
-  if trainer_config.debug.rl:
-    # Let's see how one batch of the dataset looks like!
-    if trainer_config.debug.rl:
-      for i, ele in enumerate(train_dataset):
-        if i >= 5:
-          break
-        pprint(ele)
-    if trainer_config.debug.rl:
-      for i, ele in enumerate(test_dataset):
-        if i >= 5:
-          break
-        pprint(ele)
 
-  # Load reference model
+def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sampler_devices):
+  """Create reference and actor models and their respective meshes."""
   max_logging.log("Creating reference model and also meshes for reference and rollout")
   reference_model, reference_mesh = get_maxtext_model(trainer_config, trainer_devices)
   devices_array = maxtext_utils.create_device_mesh(sampler_config, sampler_devices)
-  # if trainer_devices=sampler_devices, then rollout_mesh=reference_mesh
-  # else rollout_mesh uses sampler_devices
   rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
-  if trainer_config.debug.rl:
-    max_logging.log("Reference Model initialized successfully")
-    nnx.display(reference_model)
-    max_logging.log(f"Reference mesh shape: {reference_mesh.shape}")
 
-    # Sanity check that weights are loaded correctly.
-    _maxtext_state_flatten = nnx.state(reference_model).flat_state()
-    maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
-    max_logging.log(
-        f"maxtext_state_flatten[base.token_embedder.embedding].value=\
-          {maxtext_state_flatten['base.token_embedder.embedding'][...]}"
-    )
-
-  # TODO: @mazumdera: change this to use lora
   if trainer_config.load_checkpoint_only_once:
     max_logging.log("Creating policy model by copying reference model instead of restoring from checkpoint again.")
     with reference_mesh:
@@ -442,11 +419,22 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     max_logging.log("Creating policy model with same config as reference model on trainer mesh")
     actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
 
-  if trainer_config.debug.rl:
-    max_logging.log("Policy Model initialized successfully")
-    nnx.display(actor_model)
-    max_logging.log(f"Policy mesh shape: {actor_mesh.shape}")
+  return reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh
 
+
+def create_rl_components(
+    trainer_config,
+    sampler_config,
+    sampler_devices,
+    actor_model,
+    actor_mesh,
+    reference_model,
+    reference_mesh,
+    rollout_mesh,
+    model_tokenizer,
+    max_train_steps,
+):
+  """Setup RL cluster, trainer, and optimizer."""
   # Setup optimizer
   optimizer = utils_rl.get_optimizer(trainer_config, max_train_steps)
 
@@ -459,7 +447,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   micro_batch_size = None if trainer_config.micro_batch_size == -1 else trainer_config.micro_batch_size
 
   # Setup metrics logging
-  max_logging.log(f"Tensorboard logs directory: {trainer_config.tensorboard_dir}")
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
       log_dir=trainer_config.tensorboard_dir, flush_every_n_steps=trainer_config.log_period
   )
@@ -477,25 +464,18 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   rollout_additional_config = None
   if trainer_config.vllm_additional_config:
     if isinstance(trainer_config.vllm_additional_config, dict):
-      # It's already parsed into a dict
       rollout_additional_config = trainer_config.vllm_additional_config
     elif isinstance(trainer_config.vllm_additional_config, str):
-      # It's a string, so we need to parse it
       try:
         rollout_additional_config = json.loads(trainer_config.vllm_additional_config)
       except json.JSONDecodeError as e:
         raise ValueError(f"Failed to parse additional_config JSON: {e}") from e
-
-    max_logging.log(f"Parsed additional config: {rollout_additional_config}")
 
   # We need to parse vLLM config to get the logical axis rules for the sampler config.
   vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
-  # RL Cluster config
-  # Note that we use vLLM as the rollout engine.
-  # and we are using Tensor Parallelism for rollout
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
           rl_cluster_lib.Role.ACTOR: actor_mesh,
@@ -513,15 +493,11 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           actor_optimizer=optimizer,
           eval_every_n_steps=trainer_config.eval_interval,
           max_steps=max_train_steps,
-          # Micro batching
           mini_batch_size=trainer_config.batch_size,
           train_micro_batch_size=micro_batch_size,
           rollout_micro_batch_size=micro_batch_size,
-          # Metrics logging
           metrics_logging_options=metrics_logging_options,
-          # Profiling
           profiler_options=profiler_options,
-          # Checkpoint saving
           checkpoint_root_directory=trainer_config.checkpoint_dir,
           checkpointing_options=checkpointing_options,
       ),
@@ -542,12 +518,20 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
           rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
           rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
+          rollout_vllm_async_scheduling=trainer_config.async_scheduling,
           rollout_vllm_kwargs={
               "hf_overrides": trainer_config.vllm_hf_overrides,
+              "enable_expert_parallel": sampler_config.rollout_expert_parallelism > 1,
           },
-          **get_rollout_kwargs_for_data_parallelism(sampler_config, len(sampler_devices)),
+          rollout_vllm_sampling_kwargs={
+              "stop": trainer_config.stop_strings,
+              "detokenize": trainer_config.stop_strings is not None,
+              "include_stop_str_in_output": trainer_config.stop_strings is not None,
+          },
+          **get_rollout_kwargs_for_parallelism(sampler_config, len(sampler_devices)),
       ),
   )
+
   grpo_config = GrpoConfig(
       num_generations=trainer_config.rl.num_generations,
       num_iterations=trainer_config.rl.num_iterations,
@@ -564,9 +548,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       from tunix.perf import export as perf_export  # pylint: disable=import-outside-toplevel
       from tunix.perf import metrics as perf_metrics  # pylint: disable=import-outside-toplevel
 
-      max_logging.log(
-          "enable_tunix_perf_metrics is True and tunix.perf modules are available, enabling Tunix-managed metrics."
-      )
       perf_config = perf_metrics.PerfMetricsConfig()
       perf_config.custom_export_fn = perf_export.PerfMetricsExport.create_metrics_export_fn(cluster_config)
       rl_cluster_kwargs["perf_config"] = perf_config
@@ -596,9 +577,76 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       algo_config=grpo_config,
   )
 
+  return rl_cluster, rl_trainer, optimizer
+
+
+def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
+  """
+  Run RL training with the provided configuration.
+
+  Args:
+    trainer_config: MaxText configuration for the trainer.
+    sampler_config: MaxText configuration for the sampler.
+    trainer_devices: JAX devices for the trainer.
+    sampler_devices: JAX devices for the sampler.
+  """
+  if not trainer_config.debug.rl:
+    # Apply filter to suppress noisy logs
+    noise_filter = max_logging.NoisyLogFilter()
+    logging.getLogger().addFilter(noise_filter)
+    absl_logging.get_absl_logger().addFilter(noise_filter)
+
+  max_logging.log("Starting RL Training")
+  if not epath.Path(trainer_config.tensorboard_dir).exists():
+    epath.Path(trainer_config.tensorboard_dir).mkdir(parents=True, exist_ok=True)
+
+  if not epath.Path(trainer_config.checkpoint_dir).exists():
+    epath.Path(trainer_config.checkpoint_dir).mkdir(parents=True)
+
+  max_train_steps = get_max_train_steps(trainer_config)
+
+  # Create model tokenizer
+  model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
+
+  train_dataset, test_dataset = prepare_datasets(trainer_config, model_tokenizer)
+
+  if trainer_config.debug.rl:
+    for i, ele in enumerate(train_dataset):
+      if i >= 5:
+        break
+      pprint(ele)
+    for i, ele in enumerate(test_dataset):
+      if i >= 5:
+        break
+      pprint(ele)
+
+  reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh = create_models_and_meshes(
+      trainer_config, sampler_config, trainer_devices, sampler_devices
+  )
+
+  if trainer_config.debug.rl:
+    max_logging.log("Reference Model initialized successfully")
+    nnx.display(reference_model)
+    max_logging.log(f"Reference mesh shape: {reference_mesh.shape}")
+    max_logging.log("Policy Model initialized successfully")
+    nnx.display(actor_model)
+    max_logging.log(f"Policy mesh shape: {actor_mesh.shape}")
+
+  rl_cluster, rl_trainer, _ = create_rl_components(
+      trainer_config,
+      sampler_config,
+      sampler_devices,
+      actor_model,
+      actor_mesh,
+      reference_model,
+      reference_mesh,
+      rollout_mesh,
+      model_tokenizer,
+      max_train_steps,
+  )
+
   # Before we train the model, let's evaluate the model on the test set so we can
   # see the improvement post training.
-  #
   (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
       trainer_config,
       test_dataset,
@@ -607,11 +655,9 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       corr_lst=trainer_config.eval_corr_lst,
       make_lst=trainer_config.eval_make_lst,
   )
-  # TODO: @mazumdera: Change this to max_logging.log once b/473703277 is resolved
   max_logging.warning(f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
   # Start training
-
   if trainer_config.load_checkpoint_only_once:
     max_logging.log("Capturing reference model state before training.")
     ref_state_before = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))

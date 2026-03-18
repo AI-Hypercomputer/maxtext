@@ -44,7 +44,7 @@ import absl
 from google.cloud import storage
 import jax
 import jax.numpy as jnp
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT
 from maxtext.checkpoint_conversion.utils.hf_utils import convert_jax_weight_to_torch
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN

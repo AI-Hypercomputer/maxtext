@@ -38,9 +38,9 @@ Grain ensures determinism in data input pipelines by saving the pipeline's state
 
 ```sh
 bash tools/setup/setup_gcsfuse.sh \
-DATASET_GCS_BUCKET=$BUCKET_NAME \
-MOUNT_PATH=$MOUNT_PATH \
-[FILE_PATH=$MOUNT_PATH/my_dataset]
+DATASET_GCS_BUCKET=${BUCKET_NAME?} \
+MOUNT_PATH=${MOUNT_PATH?} \
+[FILE_PATH=${MOUNT_PATH?}/my_dataset]
 ```
 
 Note that `FILE_PATH` is optional; when provided, the script runs `ls -R` for pre-filling the metadata cache (see ["Performance tuning best practices" on the Google Cloud documentation](https://cloud.google.com/storage/docs/cloud-storage-fuse/performance#improve-first-time-reads)).

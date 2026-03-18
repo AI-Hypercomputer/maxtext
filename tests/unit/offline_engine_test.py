@@ -21,7 +21,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common.gcloud_stub import is_decoupled
 
 pytestmark = [pytest.mark.external_serving]

@@ -61,6 +61,10 @@ on:
       maxtext_sha:
         required: true
         type: string
+      extra_pip_deps_file:
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -96,6 +100,12 @@ jobs:
           python3 --version
           python3 -m pip freeze
           uv pip install pytest-cov
+      - name: Install extra pip deps
+        if: inputs.extra_pip_deps_file != ''
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          uv pip install -r ${{ inputs.extra_pip_deps_file }}
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
@@ -121,12 +131,10 @@ jobs:
           else
             SPLIT_ARGS=""
           fi
-          # TODO: Fix the skipped tests and remove the deselect flags
           .venv/bin/python3 -m pytest ${INPUTS_PYTEST_ADDOPTS} \
             -v \
             -m "${FINAL_PYTEST_MARKER}" \
             --durations=0 \
-            --deselect "tests/unit/tokenizer_test.py::TokenizerTest::test_detokenize" \
             --cov=MaxText \
             --cov=maxtext \
             --cov-report=xml \

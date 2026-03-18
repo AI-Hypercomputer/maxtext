@@ -27,8 +27,7 @@ import jax
 from jax import random, vmap
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from MaxText import pyconfig
-from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.inference import inference_utils
 from maxtext.layers import quantizations
@@ -37,7 +36,7 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 import numpy as np
 import optax
 
@@ -347,7 +346,7 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
 
   def setUp(self):
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
@@ -816,6 +815,11 @@ class TestLearningRateSchedules(unittest.TestCase):
     # Warmup phase: 0 -> peak
     self.assertAlmostEqual(float(schedule_fn(0)), 0.0, places=6)
     self.assertAlmostEqual(float(schedule_fn(warmup_steps)), learning_rate, places=6)
+    # Ensure delta is constant
+    expected_slope = learning_rate / warmup_steps
+    for i in range(1, warmup_steps + 1):
+      current_lr = float(schedule_fn(i))
+      self.assertAlmostEqual(current_lr - float(schedule_fn(i - 1)), expected_slope, places=6)
 
     # Cosine decay phase
     lr_end = schedule_fn(learning_rate_schedule_steps - 1)
@@ -859,6 +863,11 @@ class TestLearningRateSchedules(unittest.TestCase):
       # Warmup phase: 0 -> peak
       self.assertAlmostEqual(float(schedule_fn(0)), 0.0, places=6)
       self.assertAlmostEqual(float(schedule_fn(warmup_steps)), learning_rate, places=6)
+      # Ensure delta is constant
+      expected_slope = learning_rate / warmup_steps
+      for i in range(1, warmup_steps + 1):
+        current_lr = float(schedule_fn(i))
+        self.assertAlmostEqual(current_lr - float(schedule_fn(i - 1)), expected_slope, places=6)
 
       # Stable phase: constant at peak
       self.assertAlmostEqual(float(schedule_fn(warmup_steps + 10)), learning_rate, places=6)
@@ -903,8 +912,10 @@ class TestGetAbstractState(unittest.TestCase):
   """Test class for get_abstract_state."""
 
   def setUp(self):
+    extra_args = get_decoupled_parallelism_overrides()
     self.config = pyconfig.initialize(
         [None, get_test_config_path()],
+        **extra_args,
         enable_checkpointing=False,
         model_name="llama3.1-8b",
         per_device_batch_size=1,

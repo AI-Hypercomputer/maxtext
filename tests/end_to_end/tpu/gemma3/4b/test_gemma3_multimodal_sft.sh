@@ -44,7 +44,7 @@ python3 -m maxtext.inference.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:
 
 # 3. SFT the MaxText converted checkpoint on ChartQA dataset
 export BASE_OUTPUT_DIRECTORY=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/sft
-python -m MaxText.sft_trainer "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//sft-vision-chartqa.yml \
+python -m maxtext.trainers.post_train.sft.train_sft_deprecated "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//sft-vision-chartqa.yml \
     run_name=$idx \
     model_name=$MODEL_NAME tokenizer_path="google/gemma-3-4b-pt" \
     per_device_batch_size=1 \

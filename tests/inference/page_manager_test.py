@@ -20,7 +20,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.inference.page_manager import PageManager, PageState
 from tests.utils.test_helpers import get_test_config_path
 

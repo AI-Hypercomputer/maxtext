@@ -20,7 +20,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.layers import quantizations
 from maxtext.models import models

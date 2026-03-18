@@ -113,16 +113,10 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
   ]
 
   # Vision layers mapping
-  if scan_layers:
-    for i in range(Nvis):
-      for mx, hf in vision_params:
-        key = f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock-{mx}"
-        mapping[key] = f"model.vision_tower.vision_model.encoder.layers.{i}.{hf}"
-  else:
-    for i in range(Nvis):
-      for mx, hf in vision_params:
-        key = f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-{mx}"
-        mapping[key] = f"model.vision_tower.vision_model.encoder.layers.{i}.{hf}"
+  for i in range(Nvis):
+    for mx, hf in vision_params:
+      key = f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-{mx}"
+      mapping[key] = f"model.vision_tower.vision_model.encoder.layers.{i}.{hf}"
 
   # Text decoder mapping
   text_params = [
@@ -142,9 +136,26 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
   ]
 
   if scan_layers:
-    for mx, hf in text_params:
-      key = f"params-decoder-layers-{mx}"
-      mapping[key] = [f"model.language_model.layers.{i}.{hf}" for i in range(Ndec)]
+    # Gemma3 repeats a 6-layer attention pattern (5 local + 1 global),
+    # scanned as layers_0..layers_5 with leftovers in layers_remainder.
+    attention_pattern_length = 6
+    num_remaining = Ndec % attention_pattern_length
+    num_scanned = Ndec - num_remaining
+
+    # Main scanned blocks: params-decoder-layers-layers_{block_idx}-{param}
+    for block_idx in range(attention_pattern_length):
+      hf_indices = list(range(block_idx, num_scanned, attention_pattern_length))
+      for mx, hf in text_params:
+        key = f"params-decoder-layers-layers_{block_idx}-{mx}"
+        mapping[key] = [f"model.language_model.layers.{i}.{hf}" for i in hf_indices]
+
+    # Remainder layers (unscanned): params-decoder-layers_remainder-layers_{rem_idx}-{param}
+    if num_remaining > 0:
+      for rem_idx in range(num_remaining):
+        hf_layer_idx = num_scanned + rem_idx
+        for mx, hf in text_params:
+          key = f"params-decoder-layers_remainder-layers_{rem_idx}-{mx}"
+          mapping[key] = f"model.language_model.layers.{hf_layer_idx}.{hf}"
   else:
     for i in range(Ndec):
       for mx, hf in text_params:
@@ -262,9 +273,17 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
   # Text layers
   tc = config.get("text_config", {})
   nlayers = tc.get("num_hidden_layers", 0)
-  layer_ids = [None] if scan_layers else list(range(nlayers))
-  for i in layer_ids:
-    pref = f"params-decoder-layers_{i}-" if i is not None else "params-decoder-layers-"
+  if scan_layers:
+    attention_pattern_length = 6
+    num_remaining = nlayers % attention_pattern_length
+    # Scanned sub-layer prefixes
+    prefixes = [f"params-decoder-layers-layers_{block_idx}-" for block_idx in range(attention_pattern_length)]
+    # Remainder sub-layer prefixes
+    if num_remaining > 0:
+      prefixes += [f"params-decoder-layers_remainder-layers_{rem_idx}-" for rem_idx in range(num_remaining)]
+  else:
+    prefixes = [f"params-decoder-layers_{i}-" for i in range(nlayers)]
+  for pref in prefixes:
     # Attention Q/K/V/O
     hooks[pref + "self_attention-query-kernel"] = reshape_kernel
     hooks[pref + "self_attention-key-kernel"] = reshape_kernel
@@ -288,13 +307,8 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
   # Vision layers
   vc = config.get("vision_config", {})
   nvis = vc.get("num_hidden_layers", 0)
-  vision_layer_ids = [None] if scan_layers else list(range(nvis))
-  for i in vision_layer_ids:
-    base = (
-        f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-"
-        if i is not None
-        else "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock-"
-    )
+  for i in range(nvis):
+    base = f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-"
     # Attention kernels & biases
     for qkv in ["query", "key", "value"]:
       hooks[base + f"MultiHeadDotProductAttention_0-{qkv}-kernel"] = reshape_kernel
@@ -573,11 +587,11 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
   return mapping
 
 
-def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
-  """Returns mapping from MaxText to HuggingFace Qwen3 weight paths.
+def QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Returns mapping from MaxText to HuggingFace Qwen weight paths.
 
   This function generates a dictionary that maps parameter names from a MaxText
-  Qwen3 checkpoint to their corresponding names in the Hugging Face format.
+  Qwen checkpoint to their corresponding names in the Hugging Face format.
   It handles both dense and Mixture-of-Experts (MoE) model variants.
 
   Args:
@@ -616,6 +630,15 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
             ],
             "params-decoder-layers-self_attention-value-kernel": [
                 f"model.layers.{i}.self_attn.v_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-query-bias": [
+                f"model.layers.{i}.self_attn.q_proj.bias" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-key-bias": [
+                f"model.layers.{i}.self_attn.k_proj.bias" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-value-bias": [
+                f"model.layers.{i}.self_attn.v_proj.bias" for i in range(n_layers)
             ],
             "params-decoder-layers-self_attention-out-kernel": [
                 f"model.layers.{i}.self_attn.o_proj.weight" for i in range(n_layers)
@@ -674,6 +697,9 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
               f"params-decoder-layers_{i}-self_attention-key-kernel": f"model.layers.{i}.self_attn.k_proj.weight",
               f"params-decoder-layers_{i}-self_attention-value-kernel": f"model.layers.{i}.self_attn.v_proj.weight",
               f"params-decoder-layers_{i}-self_attention-out-kernel": f"model.layers.{i}.self_attn.o_proj.weight",
+              f"params-decoder-layers_{i}-self_attention-query-bias": f"model.layers.{i}.self_attn.q_proj.bias",
+              f"params-decoder-layers_{i}-self_attention-key-bias": f"model.layers.{i}.self_attn.k_proj.bias",
+              f"params-decoder-layers_{i}-self_attention-value-bias": f"model.layers.{i}.self_attn.v_proj.bias",
               f"params-decoder-layers_{i}-self_attention-query_norm-scale": f"model.layers.{i}.self_attn.q_norm.weight",
               f"params-decoder-layers_{i}-self_attention-key_norm-scale": f"model.layers.{i}.self_attn.k_norm.weight",
               f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
@@ -707,8 +733,8 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
   return mapping
 
 
-def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
-  """Creates parameter transformation functions for Qwen3.
+def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Qwen.
 
   This function provides a dictionary of transformation functions (hooks) for
   converting Qwen3 model parameters between MaxText and Hugging Face formats.
@@ -752,6 +778,15 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False,
     else:
       return input_tensor.T.reshape(target_shape)
 
+  def reshape_bias(input_tensor, target_shape=None):
+    """Reshapes biases between MaxText 2D (heads, dim) and HF 1D (hidden)."""
+    if saving_to_hf:
+      # MaxText [heads, head_dim] -> HF [hidden_dim] (flatten)
+      return input_tensor.reshape(target_shape)
+    else:
+      # HF [hidden_dim] -> MaxText [heads, head_dim]
+      return input_tensor.reshape(target_shape)
+
   mapping = {
       "params-token_embedder-embedding": pad_embedding_layer,
       "params-decoder-logits_dense-kernel": reshape_kernel,
@@ -766,6 +801,11 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False,
       "mlp-wi_1-kernel",
       "mlp-wo-kernel",
   ]
+  bias_hooks = [
+      "self_attention-query-bias",
+      "self_attention-key-bias",
+      "self_attention-value-bias",
+  ]
   moe_kernel_hooks = [
       "moe_block-gate-kernel",
       "moe_block-wi_0-kernel",
@@ -779,6 +819,8 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False,
   if scan_layers:
     for key in kernel_hooks:
       mapping[f"params-decoder-layers-{key}"] = reshape_kernel
+    for key in bias_hooks:
+      mapping[f"params-decoder-layers-{key}"] = reshape_bias
     if num_experts > 1:
       for key in moe_kernel_hooks:
         mapping[f"params-decoder-layers-{key}"] = reshape_kernel
@@ -786,6 +828,8 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False,
     for i in range(n_layers):
       for key in kernel_hooks:
         mapping[f"params-decoder-layers_{i}-{key}"] = reshape_kernel
+      for key in bias_hooks:
+        mapping[f"params-decoder-layers_{i}-{key}"] = reshape_bias
       if num_experts > 1:
         for key in moe_kernel_hooks:
           mapping[f"params-decoder-layers_{i}-{key}"] = reshape_kernel
@@ -1362,7 +1406,7 @@ def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_laye
   # Text mapping with "thinker." prefix, reusing QWEN3-MOE mapping function
   num_experts_text = config["thinker_config"]["text_config"].get("num_experts", 0)
   n_layers_text = config["thinker_config"]["text_config"]["num_hidden_layers"]
-  text_mapping = QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(
+  text_mapping = QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(
       config={"num_hidden_layers": n_layers_text, "num_experts": num_experts_text},
       maxtext_config=maxtext_config,
       scan_layers=scan_layers,
@@ -1530,7 +1574,7 @@ def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_laye
   # Text hooks, reusing QWEN3-MOE hook function
   num_experts_text = config["thinker_config"]["text_config"].get("num_experts", 0)
   n_layers_text = config["thinker_config"]["text_config"]["num_hidden_layers"]
-  text_hooks = QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+  text_hooks = QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(
       config={"num_hidden_layers": n_layers_text, "num_experts": num_experts_text},
       maxtext_config=maxtext_config,
       scan_layers=scan_layers,
@@ -2318,18 +2362,23 @@ PARAM_MAPPING = {
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-0.6b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-4b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-4b-thinking-2507": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-8b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-14b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-32b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-0.5b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-1.5b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-3b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-7b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen2.5-14b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-0.6b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-4b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-4b-thinking-2507": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-8b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-14b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-30b-a3b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-235b-a22b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-coder-480b-a35b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -2350,18 +2399,23 @@ HOOK_FNS = {
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-0.6b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-4b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-4b-thinking-2507": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-8b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-14b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-32b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-0.5b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-1.5b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-3b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-7b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen2.5-14b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-0.6b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-4b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-4b-thinking-2507": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-8b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-14b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-30b-a3b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-235b-a22b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-coder-480b-a35b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,

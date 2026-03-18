@@ -19,7 +19,7 @@ import pytest
 import unittest
 from absl.testing import absltest
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 

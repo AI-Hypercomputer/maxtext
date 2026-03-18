@@ -29,8 +29,8 @@ from maxtext.layers import attention_mla
 from maxtext.utils import maxtext_utils
 from maxtext.utils.qk_clip_utils import apply_qk_clip, calculate_max_logit_metric
 
-from MaxText import pyconfig
-from tests.utils.test_helpers import get_test_config_path
+from maxtext.configs import pyconfig
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 
 
 class QKClipTest(unittest.TestCase):
@@ -264,7 +264,8 @@ class QKClipMLATest(unittest.TestCase):
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
 
     args = [sys.argv[0], get_test_config_path()]
-    self.cfg = pyconfig.initialize(args, **self.config_arguments)
+    extra_args = get_decoupled_parallelism_overrides()
+    self.cfg = pyconfig.initialize(args, **self.config_arguments, **extra_args)
 
   def _run_mla_pass(self, config_overrides=None):
     """Initializes MLA, runs forward pass, and returns variables & intermediates."""
@@ -276,7 +277,8 @@ class QKClipMLATest(unittest.TestCase):
     run_config_args["emb_dim"] = 128
 
     args = [sys.argv[0], get_test_config_path()]
-    config = pyconfig.initialize(args, **run_config_args)
+    extra_args = get_decoupled_parallelism_overrides()
+    config = pyconfig.initialize(args, **run_config_args, **extra_args)
 
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
@@ -378,7 +380,8 @@ class QKClipMLATest(unittest.TestCase):
     run_config_args["emb_dim"] = 128
 
     args = [sys.argv[0], get_test_config_path()]
-    config = pyconfig.initialize(args, **run_config_args)
+    extra_args = get_decoupled_parallelism_overrides()
+    config = pyconfig.initialize(args, **run_config_args, **extra_args)
 
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)

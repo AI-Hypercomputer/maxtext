@@ -26,10 +26,11 @@ classifiers = [
 dependencies = []
 
 [tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
-tpu = ["dependencies/requirements/generated_requirements/tpu-requirements.txt"]
-tpu-post-train = ["dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt"]
-cuda12 = ["dependencies/requirements/generated_requirements/cuda12-requirements.txt"]
-docs = ["dependencies/requirements/requirements_docs.txt"]
+tpu = ["src/dependencies/requirements/generated_requirements/tpu-requirements.txt"]
+tpu-post-train = ["src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt"]
+cuda12 = ["src/dependencies/requirements/generated_requirements/cuda12-requirements.txt"]
+runner = ["src/dependencies/requirements/generated_requirements/runner-requirements.txt"]
+docs = ["src/dependencies/requirements/requirements_docs.txt"]
 
 [project.urls]
 Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
@@ -39,10 +40,15 @@ Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/MaxText", "src/maxtext", "src/install_maxtext_extra_deps"]
+packages = ["src/MaxText", "src/maxtext", "src/install_maxtext_extra_deps", "src/dependencies"]
 
-[tool.hatch.build.targets.wheel.hooks.custom]
-path = "build_hooks.py"
+# TODO: Add this hook back when it handles device-type parsing
+# [tool.hatch.build.targets.wheel.hooks.custom]
+# path = "build_hooks.py"
 
 [project.scripts]
-install_maxtext_github_deps = "install_maxtext_extra_deps.install_github_deps:main"
+install_maxtext_tpu_github_deps = "install_maxtext_extra_deps.install_github_deps:main"
+install_maxtext_cuda12_github_deps = "install_maxtext_extra_deps.install_github_deps:main"
+install_maxtext_tpu_post_train_extra_deps = "install_maxtext_extra_deps.install_post_train_extra_deps:main"
+docker_build_dependency_image = "dependencies.scripts.docker_build_dependency_image:main"
+docker_upload_runner = "dependencies.scripts.docker_upload_runner:main"

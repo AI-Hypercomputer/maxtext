@@ -57,33 +57,16 @@ jobs:
       - name: Install MaxText and Dependencies
         shell: bash
         run: |
+          # 1. Create virtual environment
           python3 -m uv venv --seed
           source .venv/bin/activate
-
-          # Install MaxText package
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
-          uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
-          uv pip install -r src/install_maxtext_extra_deps/extra_deps_from_github.txt
 
-          # Install dependencies for running notebooks
-          uv pip install papermill ipykernel ipywidgets
+          # 2. Install MaxText package and all the post training dependencies
+          uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
+          install_maxtext_tpu_post_train_extra_deps
           .venv/bin/python3 -m ipykernel install --user --name maxtext_venv
-
-          # Install Tunix for post-training notebooks
-          git clone https://github.com/google/tunix
-          uv pip install ./tunix
           
-          # Install vllm for post-training notebooks
-          git clone https://github.com/vllm-project/vllm.git
-          VLLM_TARGET_DEVICE="tpu" uv pip install ./vllm
-
-          # Install tpu-inference for post-training notebooks
-          git clone https://github.com/vllm-project/tpu-inference.git
-          uv pip install ./tpu-inference
-
-          uv pip install --no-deps qwix==0.1.4
-          uv pip install --no-deps protobuf==5.29.5
-          uv pip install math-verify==0.9.0
           python3 -m pip freeze
       - name: Run Post-Training Notebooks
         shell: bash
@@ -99,7 +82,7 @@ jobs:
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
             filename=$(basename "$notebook")
-            if [[ "$filename" == "sft_qwen3_demo.ipynb" ]]; then
+            if [[ "$filename" == "sft_qwen3_demo.ipynb" || "$filename" == "sft_llama3_demo_gpu.ipynb" ]]; then
               echo "Skipping $filename"
               continue
             fi
@@ -110,20 +93,6 @@ jobs:
             echo "------------------------------------------------------"
 
             papermill "$notebook" "$output_name" -k maxtext_venv
-          done
-      - name: Record Commit IDs
-        shell: bash
-        run: |
-          echo "--- MaxText and Post-Training Repositories Commit IDs ---"
-          echo "maxtext: ${GITHUB_SHA:0:7}"
-
-          declare -a repos=("tunix" "vllm" "tpu-inference")
-          for repo_dir in "${repos[@]}"; do
-            if [ -d "$repo_dir" ]; then
-              echo "$repo_dir: $(git -C "$repo_dir" rev-parse --short HEAD)"
-            else
-              echo "Warning: $repo_dir directory not found."
-            fi
           done
       - name: Upload Outputs
         if: always()

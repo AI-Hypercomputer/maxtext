@@ -20,17 +20,17 @@ are defined inside `src/maxtext/configs/post_train/sft.yml`.
 Example command:
 Training & Evaluation:
   python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml \
-    run_name=$RUN_NAME base_output_directory=$BASE_OUTPUT_DIRECTORY \
-    model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \
-    hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH \
+    run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    model_name=${MODEL_NAME?} load_parameters_path=${CHECKPOINT_PATH?} \
+    hf_access_token=${HF_ACCESS_TOKEN?} tokenizer_path=${TOKENIZER_PATH?} \
     per_device_batch_size=1 max_target_length=1024 \
     eval_interval=2 eval_steps=2 steps=10 profiler=xplane weight_dtype=bfloat16
 
 Training:
   python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml \
-    run_name=$RUN_NAME base_output_directory=$BASE_OUTPUT_DIRECTORY \
-    model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \
-    hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH \
+    run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    model_name=${MODEL_NAME?} load_parameters_path=${CHECKPOINT_PATH?} \
+    hf_access_token=${HF_ACCESS_TOKEN?} tokenizer_path=${TOKENIZER_PATH?} \
     per_device_batch_size=1 max_target_length=1024 \
     eval_interval=-1 steps=10 profiler=xplane weight_dtype=bfloat16
 """
@@ -49,13 +49,16 @@ from orbax import checkpoint as ocp
 
 from tunix.sft import metrics_logger, peft_trainer, profiler
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train import loss_fn
 from maxtext.common.goodput import (
     GoodputEvent,
+    RECORD_JOB_END_TIME,
+    RECORD_JOB_START_TIME,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
+    record_goodput,
 )
 from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.sft import hooks
@@ -181,7 +184,13 @@ def train(mt_config, goodput_recorder=None):
     goodput_recorder: An optional GoodputRecorder to record performance metrics.
   """
   trainer, mesh = setup_trainer_state(mt_config, goodput_recorder)
-  trainer = train_model(mt_config, trainer, mesh)
+  _job_completed_gracefully = False
+  try:
+    trainer = train_model(mt_config, trainer, mesh)
+    _job_completed_gracefully = True
+  finally:
+    if _job_completed_gracefully:
+      record_goodput(goodput_recorder, RECORD_JOB_END_TIME)
   return trainer, mesh
 
 
@@ -198,8 +207,8 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
 
   goodput_recorder = create_goodput_recorder(mt_config)
-
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB), maybe_monitor_goodput(mt_config):
+  record_goodput(goodput_recorder, RECORD_JOB_START_TIME)
+  with maybe_monitor_goodput(mt_config):
     train(mt_config, goodput_recorder)
 
 

@@ -35,8 +35,8 @@ Please try running `conda install -c conda-forge gcc_linux-64 gxx_linux-64 libst
 
 ```sh
 export DATA_DISK_DIR=~/loadgen_run_data
-mkdir -p ${DATA_DISK_DIR}
-cd ${DATA_DISK_DIR}
+mkdir -p ${DATA_DISK_DIR?}
+cd ${DATA_DISK_DIR?}
 ```
 
 #### LLama2-70b:
@@ -100,7 +100,7 @@ export SAVE_QUANT_PARAMS_PATH=gs://${USER}-bkt/quantized/llama2-70b-chat
 # other tokenizers under src/maxtext/assets/ directory.
 export TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets}}"'/tokenizer.llama2'
 cd maxtext && \
-python3 -m maxtext.inference.decode src/maxtext/configs/base.yml tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${LOAD_PARAMS_PATH} max_prefill_predict_length=1024 max_target_length=2048 model_name=llama2-70b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=11 attention=dot_product quantization=int8 save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH}
+python3 -m maxtext.inference.decode tokenizer_path=${TOKENIZER_PATH?} load_parameters_path=${LOAD_PARAMS_PATH?} max_prefill_predict_length=1024 max_target_length=2048 model_name=llama2-70b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=11 attention=dot_product quantization=int8 save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH?}
 ```
 
 Your checkpoint is generated at `$SAVE_QUANT_PARAMS_PATH`. This is used to set `load_parameters_path` param below in `MAXENGINE_ARGS` env variable.
@@ -125,7 +125,7 @@ export MODEL_SIZE=llama3.1-405b
 export QUANTIZE_TYPE=int8
 
 cd maxtext && \
-python3 -m maxtext.checkpoint_conversion.load_and_quantize_checkpoint src/maxtext/configs/base.yml tokenizer_path=${TOKENIZER} load_parameters_path=${LOAD_PARAMS_PATH} max_prefill_predict_length=1024 max_target_length=2048 model_name=${MODEL_SIZE} ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 attention=dot_product quantization=${QUANTIZE_TYPE} save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH} async_checkpointing=false
+python3 -m maxtext.checkpoint_conversion.load_and_quantize_checkpoint src/maxtext/configs/base.yml tokenizer_path=${TOKENIZER?} load_parameters_path=${LOAD_PARAMS_PATH?} max_prefill_predict_length=1024 max_target_length=2048 model_name=${MODEL_SIZE?} ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 attention=dot_product quantization=${QUANTIZE_TYPE?} save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH?} async_checkpointing=false
 ```
 
 The quantized checkpoint is saved at `${SAVE_QUANT_PARAMS_PATH}`
@@ -133,7 +133,7 @@ The quantized checkpoint is saved at `${SAVE_QUANT_PARAMS_PATH}`
 ### HuggingFace login
 ```
 export HUGGING_FACE_TOKEN=<your_hugging_face_token>
-huggingface-cli login --token $HUGGING_FACE_TOKEN
+huggingface-cli login --token ${HUGGING_FACE_TOKEN?}
 ```
 
 ### Run Offline Benchmarks
@@ -172,7 +172,7 @@ bash benchmarks_llama2-70b-trillium_2x4.sh -b=all
 #### Mixtral-8x7b:
 ```
 export PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="256,144|512,72|2048,18"
-export MAXENGINE_ARGS="model_name=mixtral-8x7b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True megablox=False sparse_matmul=False capacity_factor=1 model_call_mode=inference compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
+export MAXENGINE_ARGS="model_name=mixtral-8x7b tokenizer_path=${TOKENIZER_PATH?}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH?} checkpoint_is_quantized=True megablox=False sparse_matmul=False capacity_factor=1 model_call_mode=inference compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
 ```
 
 ##### Test Run

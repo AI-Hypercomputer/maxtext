@@ -52,6 +52,7 @@ from maxtext.models import (
     mistral,
     mixtral,
     olmo3,
+    qwen2,
     qwen3,
     simple_layer,
 )
@@ -154,6 +155,7 @@ class DecoderLayer(nn.Module):
         reshape_q=cfg.reshape_q,
         use_mrope=cfg.use_mrope,
         mrope_section=cfg.mrope_section,
+        share_kv_projections=cfg.share_kv_projections,
         model_mode=model_mode,
     )
 
@@ -306,7 +308,7 @@ class Decoder(nn.Module):
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
-      self.pipeline_module = pipeline.Pipeline(
+      self.pipeline_module = pipeline.create_pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
       )
 
@@ -466,6 +468,8 @@ class Decoder(nn.Module):
         return [gpt3.Gpt3DecoderLayerToLinen]
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlockToLinen] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayerToLinen]
+      case DecoderBlockType.QWEN2:
+        return [qwen2.Qwen2DecoderLayerToLinen]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
@@ -524,6 +528,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
+        DecoderBlockType.QWEN2,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.GPT_OSS,
@@ -793,12 +798,11 @@ class Decoder(nn.Module):
         model_mode,
     )
     if cfg.using_pipeline_parallelism:
-      if cfg.pipeline_fsdp_ag_once:
-        logical_partition_spec = self.pipeline_module.get_weight_sharding(
-            y, decoder_segment_ids, decoder_positions, deterministic, model_mode
-        )
-      else:
-        logical_partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
+      logical_partition_spec = (
+          self.pipeline_module.get_weight_sharding(y, decoder_segment_ids, decoder_positions, deterministic, model_mode)
+          if cfg.pipeline_fsdp_ag_once or cfg.pipeline_fsdp_ag_per_repeat
+          else None
+      )
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
         assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
         dense_layer = RemattedBlockLayers[0]
@@ -853,45 +857,85 @@ class Decoder(nn.Module):
               "slot": slot,
           }
           dense_layer = RemattedBlockLayers[0]
-          dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
-          y, _ = self.scan_decoder_layers(
-              cfg,
-              dense_layer,
-              cfg.first_num_dense_layers,
-              "dense_layers",
-              mesh,
-              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
-          )(y, *broadcast_args)
           moe_layer = RemattedBlockLayers[1]
-          moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+          if cfg.engram_layers:
+            original_dense_call = dense_layer.__call__
+            original_moe_call = moe_layer.__call__
+            dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
+            moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
 
-          # If batch-split schedule is used and initialization is complete,
-          # as detected by immutable params, use deepseek_batchsplit custom
-          # scan with initialized parameters.
-          if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
-            y = deepseek_batchsplit.scan_batch_split_layers(
+            common_kwargs = {
+                "dense_layer": dense_layer,
+                "moe_layer": moe_layer,
+                "original_dense_call": original_dense_call,
+                "original_moe_call": original_moe_call,
+                "layer_call_kwargs": layer_call_kwargs,
+                "decoder_segment_ids": decoder_segment_ids,
+                "decoder_positions": decoder_positions,
+                "deterministic": deterministic,
+                "model_mode": model_mode,
+                "decoder_input_tokens": decoder_input_tokens,
+                "broadcast_args": broadcast_args,
+            }
+
+            # Apply Dense Layers
+            y = self._apply_interleaved_scanned_layers(
                 y,
-                self.variables["params"]["moe_layers"],
-                decoder_positions,
-                decoder_segment_ids,
-                model_mode=model_mode,
-                mesh=mesh,
-                quant=self.quant,
-                cfg=cfg,
-                policy=policy,
+                layer_type="dense",
+                start_idx=0,
+                end_idx=cfg.first_num_dense_layers,
+                engram_indices=cfg.engram_layers,
+                **common_kwargs,
+            )
+
+            # Apply MoE Layers
+            y = self._apply_interleaved_scanned_layers(
+                y,
+                layer_type="moe",
+                start_idx=cfg.first_num_dense_layers,
+                end_idx=cfg.num_decoder_layers,
+                engram_indices=cfg.engram_layers,
+                **common_kwargs,
             )
           else:
+            dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
             y, _ = self.scan_decoder_layers(
                 cfg,
-                moe_layer,
-                num_moe_layers,
-                "moe_layers",
+                dense_layer,
+                cfg.first_num_dense_layers,
+                "dense_layers",
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
                 model_mode=model_mode,
             )(y, *broadcast_args)
+            moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
+            num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+
+            # If batch-split schedule is used and initialization is complete,
+            # as detected by immutable params, use deepseek_batchsplit custom
+            # scan with initialized parameters.
+            if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
+              y = deepseek_batchsplit.scan_batch_split_layers(
+                  y,
+                  self.variables["params"]["moe_layers"],
+                  decoder_positions,
+                  decoder_segment_ids,
+                  model_mode=model_mode,
+                  mesh=mesh,
+                  quant=self.quant,
+                  cfg=cfg,
+                  policy=policy,
+              )
+            else:
+              y, _ = self.scan_decoder_layers(
+                  cfg,
+                  moe_layer,
+                  num_moe_layers,
+                  "moe_layers",
+                  mesh,
+                  in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                  model_mode=model_mode,
+              )(y, *broadcast_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           y = self._apply_gemma3_scanned_blocks(
               y,
@@ -979,6 +1023,14 @@ class Decoder(nn.Module):
               }
             if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
               layer_kwargs = {"layer_idx": lyr}
+            kv_cache = None
+            if kv_caches is not None and cfg.decoder_block != DecoderBlockType.QWEN3_NEXT:
+              kv_cache = kv_caches[lyr]
+            elif kv_caches is not None and cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+              # For Qwen3Next, kv_caches is a dictionary of lists of caches.
+              if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
+                kv_cache = (kv_caches["key_cache"][lyr], kv_caches["value_cache"][lyr])
+
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             if cfg.decoder_block == DecoderBlockType.OLMO3:
@@ -986,8 +1038,7 @@ class Decoder(nn.Module):
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
-            kv_cache = kv_caches[lyr] if kv_caches is not None else None
-            y, kv_cache = layer(
+            y, returned_cache = layer(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
@@ -1000,8 +1051,12 @@ class Decoder(nn.Module):
                 attention_metadata=attention_metadata,
                 **layer_call_kwargs,
             )
-            if kv_caches is not None and kv_cache is not None:
-              kv_caches[lyr] = kv_cache
+            if kv_caches is not None and returned_cache is not None:
+              if cfg.decoder_block != DecoderBlockType.QWEN3_NEXT:
+                kv_caches[lyr] = returned_cache
+              elif (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
+                kv_caches["key_cache"][lyr] = returned_cache[0]
+                kv_caches["value_cache"][lyr] = returned_cache[1]
 
             if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
               visual_embeds = deepstack_visual_embeds[lyr]
@@ -1105,4 +1160,75 @@ class Decoder(nn.Module):
           slot=slot,
           **layer_call_kwargs,
       )
+    return y
+
+  # TODO(b/490118813): Relocate the following functions to their designated directories
+  # once the plug-in strategy is implemented: _find_next_boundary(), _apply_single_engram_layer()
+  # _apply_scanned_chunk() and _apply_interleaved_scanned_layers().
+  def _find_next_boundary(self, current_idx, end_idx, engram_indices):
+    """Finds the next index boundary, either the next Engram layer index or the overall end index."""
+    next_engrams = [l for l in engram_indices if l > current_idx]
+    if next_engrams:
+      return min(end_idx, *next_engrams)
+    return end_idx
+
+  def _apply_single_engram_layer(self, y, current_idx, layer_type, **kwargs):
+    """Applies a single, unscanned Engram layer."""
+    layer = kwargs["dense_layer"] if layer_type == "dense" else kwargs["moe_layer"]
+    layer_prefix = "dense_layers" if layer_type == "dense" else "moe_layers"
+    original_call = kwargs["original_dense_call"] if layer_type == "dense" else kwargs["original_moe_call"]
+    layer_call_kwargs = kwargs["layer_call_kwargs"]
+
+    layer.__call__ = original_call
+    y, _ = layer(
+        config=self.config,
+        mesh=self.mesh,
+        name=f"{layer_prefix}_engram_{current_idx}",
+        quant=self.quant,
+        model_mode=self.model_mode,
+        layer_idx=current_idx,
+    )(
+        y,
+        kwargs["decoder_segment_ids"],
+        kwargs["decoder_positions"],
+        kwargs["deterministic"],
+        kwargs["model_mode"],
+        decoder_input_tokens=kwargs["decoder_input_tokens"],
+        **layer_call_kwargs,
+    )
+    layer.__call__ = functools.partial(original_call, **layer_call_kwargs)
+    return y
+
+  def _apply_scanned_chunk(self, y, current_idx, next_boundary, layer_type, **kwargs):
+    """Applies a contiguous chunk of layers using the scan operation."""
+    layer = kwargs["dense_layer"] if layer_type == "dense" else kwargs["moe_layer"]
+    layer_prefix = "dense_layers" if layer_type == "dense" else "moe_layers"
+    broadcast_args = kwargs["broadcast_args"]
+    scan_length = next_boundary - current_idx
+
+    if scan_length > 0:
+      y, _ = self.scan_decoder_layers(
+          self.config,
+          layer,
+          scan_length,
+          f"{layer_prefix}_{current_idx}_{next_boundary - 1}",
+          self.mesh,
+          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+          model_mode=kwargs["model_mode"],
+      )(y, *broadcast_args)
+    return y
+
+  def _apply_interleaved_scanned_layers(self, y, layer_type, start_idx, end_idx, engram_indices, **kwargs):
+    """Applies a mix of scanned standard layers and unscanned Engram layers."""
+    current_idx = start_idx
+    while current_idx < end_idx:
+      if current_idx in engram_indices:
+        # Handle individual unscanned Engram layer
+        y = self._apply_single_engram_layer(y, current_idx, layer_type, **kwargs)
+        current_idx += 1
+      else:
+        # Find next boundary and scan the chunk
+        next_boundary = self._find_next_boundary(current_idx, end_idx, engram_indices)
+        y = self._apply_scanned_chunk(y, current_idx, next_boundary, layer_type, **kwargs)
+        current_idx = next_boundary
     return y

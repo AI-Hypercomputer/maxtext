@@ -24,7 +24,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 from maxtext.input_pipeline import multihost_dataloading
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 
 
 class SyntheticDataIterator:

@@ -47,7 +47,7 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 os.environ["NEW_MODEL_DESIGN"] = "1"
@@ -75,6 +75,7 @@ def decode_with_vllm(config: Config) -> None:
       "hf_config_path": config.vllm_hf_config_path,
       "hf_overrides": config.vllm_hf_overrides,
       "gpu_memory_utilization": config.hbm_utilization_vllm,
+      "async_scheduling": config.async_scheduling,
       "additional_config": {
           "maxtext_config": {
               "model_name": config.model_name,

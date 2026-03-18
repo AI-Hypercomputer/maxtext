@@ -55,7 +55,7 @@ fi
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true TPU_MEGACORE=MEGACORE_DENSE"
-python3 -m MaxText.$EXECUTABLE "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml\
+python3 -m maxtext.trainers.pre_train.$EXECUTABLE "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml\
     profiler=xplane enable_checkpointing=false steps=10\
     ici_fsdp_parallelism=192 ici_tensor_parallelism=1 per_device_batch_size=7 remat_policy=full\
     base_num_decoder_layers=32 base_emb_dim=12288 base_mlp_dim=49152 base_num_query_heads=32 base_num_kv_heads=32 learning_rate=1e-8\

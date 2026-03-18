@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ while staying simple and "optimization-free" thanks to the power of Jax and the 
 """
 
 __author__ = "Google LLC"
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 __description__ = (
     "MaxText is a high performance, highly scalable, open-source LLM written in pure Python/Jax and "
     "targeting Google Cloud TPUs and GPUs for training and **inference."
@@ -35,7 +35,7 @@ del os
 
 from jax.sharding import Mesh
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.models import models
 from maxtext.trainers.post_train.dpo import dpo_utils
 from maxtext.utils import maxtext_utils
