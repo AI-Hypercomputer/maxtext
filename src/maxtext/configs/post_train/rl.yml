@@ -81,6 +81,7 @@ checkpoint_storage_use_ocdbt: False # For Pathways
 checkpoint_storage_use_zarr3: False # For Pathways
 use_pathways: True
 log_period: 20
+convert_checkpoint_if_possible: True
 
 # ====== Debugging ======
 debug:

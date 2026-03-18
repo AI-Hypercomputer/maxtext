@@ -46,7 +46,6 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 from __future__ import annotations
 from typing import Sequence
 
-import collections
 import grain
 import jax
 import json
@@ -77,31 +76,8 @@ from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_template_from_file
-from maxtext.utils import max_logging, max_utils, maxtext_utils
+from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 import maxtext as mt
-
-def get_maxtext_model(config, devices=None):
-  """
-  Load MaxText model with Tunix adapter.
-  # Note: pass the path to your scanned checkpoint for 'load_parameters_path'.
-  # To create a scanned checkpoint, you can use /maxtext/src/MaxText/checkpoint_conversion/to_maxtext.py and if
-  # using Pathways, please set `USE_PATHWAYS=1` and use `$((1 - USE_PATHWAYS))` for storage flags:
-  # export USE_PATHWAYS=1
-  # python src/MaxText/checkpoint_conversion/to_maxtext.py \
-  #  --model_name="gemma2-2b" \
-  #  --base_output_directory="/path/to/your/output/directory" \
-  #  --scan_layers=True \
-  #  --checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) \
-  #  --checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS))
-  # Please ensure that you pass the full path ending in `/0/items` for load_parameters_path to train_rl.py i.e.,
-  # load_parameters_path=/path/to/your/output/directory/0/items
-  """
-  model, mesh = mt.from_pretrained(config, devices=devices)
-  with mesh:
-    use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
-    tunix_model = TunixMaxTextAdapter(base_model=model, use_no_op_mappings=use_no_op_mappings)
-    tunix_model.config = None
-  return tunix_model, mesh
 
 
 def get_dataset(
@@ -148,85 +124,6 @@ def get_dataset(
   )
   return loaded_dataset
 
-
-def setup_configs_and_devices(argv: list[str], kwargs):
-  """Setup device allocation and configs for training and inference."""
-  config = pyconfig.initialize_pydantic(argv, **kwargs)
-  devices = jax.devices()
-  if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
-    max_logging.log("Running RL on a single slice")
-    num_vms = len(devices) // config.chips_per_vm
-    trainer_devices = devices
-    sampler_devices = devices
-    if num_vms >= 2 and config.use_pathways:
-      # Multiple hosts with Pathways - potentially split devices for trainer and sampler
-      # based on trainer_devices_fraction and sampler_devices_fraction
-      max_logging.log(f"{num_vms} VMs detected, allocating trainer and sampler devices, and using Pathways.")
-      num_devices = len(devices)
-      num_trainer_devices = int(num_devices * config.trainer_devices_fraction)
-      num_sampler_devices = int(num_devices * config.sampler_devices_fraction)
-      trainer_devices = devices[:num_trainer_devices]
-      sampler_devices = devices[num_devices - num_sampler_devices :]
-      if config.trainer_devices_fraction != 1.0:
-        max_logging.log(f"Using first {len(trainer_devices)} devices as Trainer devices")
-      if config.sampler_devices_fraction != 1.0:
-        max_logging.log(f"Using last {len(sampler_devices)} devices as Sampler devices")
-    trainer_config = config
-    sampler_config = config
-  elif config.num_trainer_slices > 0 and config.num_samplers_slices > 0:
-    max_logging.log("Running RL with Multislice")
-    devices_by_slice = collections.defaultdict(list)
-    for d in devices:
-      devices_by_slice[d.slice_index].append(d)
-    slice_indices = sorted(devices_by_slice.keys())
-
-    if len(slice_indices) < config.num_trainer_slices + config.num_samplers_slices:
-      raise ValueError("Not enough slices for trainer and samplers")
-
-    trainer_devices = []
-    for i in range(config.num_trainer_slices):
-      trainer_devices.extend(devices_by_slice[slice_indices[i]])
-
-    sampler_devices = []
-    for i in range(config.num_trainer_slices, config.num_trainer_slices + config.num_samplers_slices):
-      sampler_devices.extend(devices_by_slice[slice_indices[i]])
-
-    trainer_devices_per_slice = len(trainer_devices) // config.num_trainer_slices
-    trainer_fsdp = trainer_devices_per_slice
-    tp = config.ici_tensor_parallelism
-    if tp > 1:
-      if trainer_devices_per_slice % tp != 0:
-        raise ValueError(
-            f"trainer_devices_per_slice ({trainer_devices_per_slice}) must be divisible by tensor parallelism ({tp})"
-        )
-      if config.ici_fsdp_parallelism != -1 and config.ici_fsdp_parallelism * tp != trainer_devices_per_slice:
-        raise ValueError(
-            f"ici_fsdp_parallelism ({config.ici_fsdp_parallelism}) * ici_tensor_parallelism ({tp}) must equal "
-            f"devices_per_slice ({trainer_devices_per_slice})"
-        )
-      trainer_fsdp = trainer_devices_per_slice // tp
-
-    trainer_update = {
-        "num_slices": config.num_trainer_slices,
-        "ici_fsdp_parallelism": trainer_fsdp,
-        "ici_tensor_parallelism": tp,
-        "dcn_data_parallelism": config.num_trainer_slices,
-    }
-
-    sampler_update = {
-        "num_slices": config.num_samplers_slices,
-        "ici_fsdp_parallelism": len(sampler_devices) // config.num_samplers_slices,
-        "ici_tensor_parallelism": -1,
-        "dcn_data_parallelism": config.num_samplers_slices,
-    }
-
-    trainer_config = pyconfig.initialize_pydantic(argv, **trainer_update)
-    sampler_config = pyconfig.initialize_pydantic(argv, **sampler_update)
-
-  else:
-    raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
-
-  return trainer_config, sampler_config, trainer_devices, sampler_devices
 
 
 def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
@@ -400,27 +297,6 @@ def prepare_datasets(trainer_config, model_tokenizer):
   return train_dataset, test_dataset
 
 
-def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sampler_devices):
-  """Create reference and actor models and their respective meshes."""
-  max_logging.log("Creating reference model and also meshes for reference and rollout")
-  reference_model, reference_mesh = get_maxtext_model(trainer_config, trainer_devices)
-  devices_array = maxtext_utils.create_device_mesh(sampler_config, sampler_devices)
-  rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
-
-  if trainer_config.load_checkpoint_only_once:
-    max_logging.log("Creating policy model by copying reference model instead of restoring from checkpoint again.")
-    with reference_mesh:
-      actor_base_model = nnx.clone(reference_model.base)
-      use_no_op_mappings = "maxtext_config" in trainer_config.vllm_additional_config
-      actor_model = TunixMaxTextAdapter(base_model=actor_base_model, use_no_op_mappings=use_no_op_mappings)
-      actor_model.config = None
-    actor_mesh = reference_mesh
-  else:
-    max_logging.log("Creating policy model with same config as reference model on trainer mesh")
-    actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
-
-  return reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh
-
 
 def create_rl_components(
     trainer_config,
@@ -590,9 +466,9 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
-  trainer_config, sampler_config, trainer_devices, sampler_devices = setup_configs_and_devices(argv, kwargs)
+  trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(argv, kwargs)
 
-  reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh = create_models_and_meshes(
+  reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh = model_creation_utils.create_models_and_meshes(
       trainer_config, sampler_config, trainer_devices, sampler_devices
   )
 

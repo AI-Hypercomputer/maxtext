@@ -15,8 +15,10 @@
 # pylint: disable=bare-except, consider-using-generator
 """ Utils that are only interesting for creating a model in MaxText. """
 
+import collections
 from collections.abc import Sequence
 from functools import partial
+import os
 from typing import overload
 
 from etils import epath
@@ -28,8 +30,9 @@ from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers import quantizations
 from maxtext.models import models
-from maxtext.utils import max_utils
+from maxtext.utils import max_utils, max_logging
 from maxtext.utils import maxtext_utils
+from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from orbax import checkpoint as ocp
 
 
@@ -112,9 +115,181 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   return model
 
 
-def from_pretrained(config, original_mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, convert_checkpoint_if_possible=False):
+def setup_configs_and_devices(argv: list[str], kwargs):
+  """Setup device allocation and configs for training and inference."""
+  config = pyconfig.initialize_pydantic(argv, **kwargs)
+  devices = jax.devices()
+  if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
+    max_logging.log("Running on a single slice")
+    num_vms = len(devices) // config.chips_per_vm
+    trainer_devices = devices
+    sampler_devices = devices
+    if num_vms >= 2 and config.use_pathways:
+      # Multiple hosts with Pathways - potentially split devices for trainer and sampler
+      # based on trainer_devices_fraction and sampler_devices_fraction
+      max_logging.log(f"{num_vms} VMs detected, allocating trainer and sampler devices, and using Pathways.")
+      num_devices = len(devices)
+      num_trainer_devices = int(num_devices * config.trainer_devices_fraction)
+      num_sampler_devices = int(num_devices * config.sampler_devices_fraction)
+      trainer_devices = devices[:num_trainer_devices]
+      sampler_devices = devices[num_devices - num_sampler_devices :]
+      if config.trainer_devices_fraction != 1.0:
+        max_logging.log(f"Using first {len(trainer_devices)} devices as Trainer devices")
+      if config.sampler_devices_fraction != 1.0:
+        max_logging.log(f"Using last {len(sampler_devices)} devices as Sampler devices")
+    trainer_config = config
+    sampler_config = config
+  elif config.num_trainer_slices > 0 and config.num_samplers_slices > 0:
+    max_logging.log("Running with Multislice")
+    devices_by_slice = collections.defaultdict(list)
+    for d in devices:
+      devices_by_slice[d.slice_index].append(d)
+    slice_indices = sorted(devices_by_slice.keys())
+
+    if len(slice_indices) < config.num_trainer_slices + config.num_samplers_slices:
+      raise ValueError("Not enough slices for trainer and samplers")
+
+    trainer_devices = []
+    for i in range(config.num_trainer_slices):
+      trainer_devices.extend(devices_by_slice[slice_indices[i]])
+
+    sampler_devices = []
+    for i in range(config.num_trainer_slices, config.num_trainer_slices + config.num_samplers_slices):
+      sampler_devices.extend(devices_by_slice[slice_indices[i]])
+
+    trainer_devices_per_slice = len(trainer_devices) // config.num_trainer_slices
+    trainer_fsdp = trainer_devices_per_slice
+    tp = config.ici_tensor_parallelism
+    if tp > 1:
+      if trainer_devices_per_slice % tp != 0:
+        raise ValueError(
+            f"trainer_devices_per_slice ({trainer_devices_per_slice}) must be divisible by tensor parallelism ({tp})"
+        )
+      if config.ici_fsdp_parallelism != -1 and config.ici_fsdp_parallelism * tp != trainer_devices_per_slice:
+        raise ValueError(
+            f"ici_fsdp_parallelism ({config.ici_fsdp_parallelism}) * ici_tensor_parallelism ({tp}) must equal "
+            f"devices_per_slice ({trainer_devices_per_slice})"
+        )
+      trainer_fsdp = trainer_devices_per_slice // tp
+
+    trainer_update = {
+        "num_slices": config.num_trainer_slices,
+        "ici_fsdp_parallelism": trainer_fsdp,
+        "ici_tensor_parallelism": tp,
+        "dcn_data_parallelism": config.num_trainer_slices,
+    }
+
+    sampler_update = {
+        "num_slices": config.num_samplers_slices,
+        "ici_fsdp_parallelism": len(sampler_devices) // config.num_samplers_slices,
+        "ici_tensor_parallelism": -1,
+        "dcn_data_parallelism": config.num_samplers_slices,
+    }
+
+    trainer_config = pyconfig.initialize_pydantic(argv, **trainer_update)
+    sampler_config = pyconfig.initialize_pydantic(argv, **sampler_update)
+
+  else:
+    raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
+
+  return trainer_config, sampler_config, trainer_devices, sampler_devices
+
+
+
+def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sampler_devices):
+  """Create reference and actor models and their respective meshes."""
+  max_logging.log("Creating reference model and also meshes for reference and rollout")
+  reference_model, reference_mesh = get_maxtext_model(trainer_config, trainer_devices)
+  devices_array = maxtext_utils.create_device_mesh(sampler_config, sampler_devices)
+  rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
+
+  if trainer_config.load_checkpoint_only_once:
+    max_logging.log("Creating policy model by copying reference model instead of restoring from checkpoint again.")
+    with reference_mesh:
+      actor_base_model = nnx.clone(reference_model.base)
+      use_no_op_mappings = "maxtext_config" in trainer_config.vllm_additional_config
+      actor_model = TunixMaxTextAdapter(base_model=actor_base_model, use_no_op_mappings=use_no_op_mappings)
+      actor_model.config = None
+    actor_mesh = reference_mesh
+  else:
+    max_logging.log("Creating policy model with same config as reference model on trainer mesh")
+    actor_model, actor_mesh = get_maxtext_model(trainer_config, trainer_devices)
+
+  return reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh
+
+def get_maxtext_model(config, devices=None):
+  """
+  Load MaxText model with Tunix adapter.
+  # Note: pass the path to your scanned checkpoint for 'load_parameters_path'.
+  # To create a scanned checkpoint, you can use /maxtext/src/MaxText/checkpoint_conversion/to_maxtext.py and if
+  # using Pathways, please set `USE_PATHWAYS=1` and use `$((1 - USE_PATHWAYS))` for storage flags:
+  # export USE_PATHWAYS=1
+  # python src/MaxText/checkpoint_conversion/to_maxtext.py \
+  #  --model_name="gemma2-2b" \
+  #  --base_output_directory="/path/to/your/output/directory" \
+  #  --scan_layers=True \
+  #  --checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) \
+  #  --checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS))
+  # Please ensure that you pass the full path ending in `/0/items` for load_parameters_path to train_rl.py i.e.,
+  # load_parameters_path=/path/to/your/output/directory/0/items
+  """
+  model, mesh = from_pretrained(config, devices=devices)
+  with mesh:
+    use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
+    tunix_model = TunixMaxTextAdapter(base_model=model, use_no_op_mappings=use_no_op_mappings)
+    tunix_model.config = None
+  return tunix_model, mesh
+
+
+def from_pretrained(config, original_mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
   mesh = original_mesh
+  if config.convert_checkpoint_if_possible:
+    if not not (epath.Path(config.base_output_directory) / "0" / "items").exists():
+      # Try to convert checkpoint on the fly
+      if not config.hf_access_token:
+        raise ValueError("hf_access_token must be provided when not providing a pre-existing checkpoint")
+
+      max_logging.warning("Checkpoint path is not provided, converting checkpoint to orbax format for MaxText")
+
+      simulated_cpu_devices_count = 16
+
+      import subprocess
+      import sys
+      
+      # Run the conversion in a completely isolated subprocess so its CPU 
+      # JAX/XLA requirements do not interfere with the parent's Pathways TPU mesh.
+      conversion_env = os.environ.copy()
+      conversion_env["JAX_PLATFORMS"] = "cpu"
+      # conversion_env["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
+
+      to_maxtext_cmd = [
+          sys.executable,
+          "-m", "maxtext.checkpoint_conversion.to_maxtext",
+      ] + [
+          f"model_name={config.model_name}",
+          f"base_output_directory={config.base_output_directory}",
+          f"scan_layers={config.scan_layers}",
+          f"hf_access_token={config.hf_access_token}",
+          "use_multimodal=false",
+          "skip_jax_distributed_system=True",
+          f"--lazy_load_tensors=True",
+          f"--simulated_cpu_devices_count={simulated_cpu_devices_count}",
+      ]
+
+      try:
+          subprocess.run(to_maxtext_cmd, env=conversion_env, check=True)
+      except subprocess.CalledProcessError as e:
+          raise RuntimeError(f"Checkpoint conversion failed with exit code {e.returncode}") from e
+    load_parameters_path = epath.Path(config.base_output_directory) / "0" / "items"
+    # Create a copied Pydantic model with the updated values
+    pydantic_config = config._pydantic_config if hasattr(config, "_pydantic_config") else config
+    new_config = pydantic_config.model_copy(update={
+        "load_parameters_path": load_parameters_path,
+    })
+    config = pyconfig.HyperParameters(new_config)
+
+
   def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
     if rng_key is None:
       rng_key = jax.random.PRNGKey(config.init_weights_seed)
