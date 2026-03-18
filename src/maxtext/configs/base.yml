@@ -352,13 +352,13 @@ moba_topk: 8
 
 # DeepSeek Sparse Attention (DSA)
 # deepseek3.2 introduces indexer in MLA
-use_indexer: False
-indexer_head_dim: 128
-indexer_n_heads: 64
-indexer_topk: 2048
-# Determines the training strategy for the indexer:
-# - False (Dense Warm-up): Computes indexer loss over all tokens. Used with `trainable_parameters_mask` to freeze other model parameters.
-# - True (Sparse Training): Computes indexer loss over top-k tokens only and detaches the indexer input for independent optimization.
+use_sparse_indexer: False
+index_head_dim: 128
+index_n_heads: 64
+index_topk: 2048
+# Determines the token selection strategy for indexer loss:
+# - False: Uses all tokens (Dense Warm-up).
+# - True: Uses only top-k tokens (Sparse Training).
 # Note: This is only active when `indexer_loss_scaling_factor` > 0.
 indexer_sparse_training: False
 # Multiplier for the indexer KL divergence loss
@@ -426,6 +426,7 @@ internal_compile_num_devices: -1 # You must specify the number of devices when u
 
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
+custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying yml name under config/mesh_and_rule/.
 mesh_axes:
   [
     "diloco",
