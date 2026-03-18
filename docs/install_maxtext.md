@@ -111,7 +111,7 @@ To update dependencies, you will follow these general steps:
 1. **Modify Base Requirements**: Update the desired dependencies in `base_requirements/requirements.txt` or the hardware-specific files (`base_requirements/tpu-base-requirements.txt`, `base_requirements/gpu-base-requirements.txt`).
 2. **Generate New Files**: Run the `seed-env` CLI tool to generate new, fully-pinned requirements files based on your changes.
 3. **Update Project Files**: Copy the newly generated files into the `generated_requirements/` directory.
-4. **Handle GitHub Dependencies**: Move any dependencies that are installed directly from GitHub from the generated files to `src/install_maxtext_extra_deps/extra_deps_from_github.txt`.
+4. **Handle GitHub Dependencies**: Move any dependencies that are installed directly from GitHub from the generated files to `src/dependencies/github_deps/pre_train_deps.txt`.
 5. **Verify**: Test the new dependencies to ensure the project installs and runs correctly.
 
 The following sections provide detailed instructions for each step.
@@ -169,7 +169,7 @@ After generating the new requirements, you need to update the files in the MaxTe
    - Move `generated_tpu_artifacts/tpu-requirements.txt` to `generated_requirements/tpu-requirements.txt`.
    - Move `generated_gpu_artifacts/cuda12-requirements.txt` to `generated_requirements/cuda12-requirements.txt`.
 
-2. **Update `extra_deps_from_github.txt` (if necessary):**
+2. **Update `pre_train_deps.txt` (if necessary):**
    Currently, MaxText uses a few dependencies, such as `mlperf-logging` and `google-jetstream`, that are installed directly from GitHub source. These are defined in `base_requirements/requirements.txt`, and the `seed-env` tool will carry them over to the generated requirements files.
 
 ## Step 5: Verify the New Dependencies
