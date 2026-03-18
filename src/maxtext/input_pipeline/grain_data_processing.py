@@ -390,6 +390,13 @@ def _format_chat_template_grain(element, data_columns, tokenizer_model):
   )
 
 
+def _tokenize_sft_chunks(element, text_column_name, tokenizer_model):
+  """Tokenize each chunk individually without truncating."""
+  text_chunks = element[text_column_name]
+  element[text_column_name] = [tokenizer_model.encode(chunk) for chunk in text_chunks]
+  return element
+
+
 def sft_preprocessing_pipeline(
     dataset,
     config,
@@ -434,15 +441,13 @@ def sft_preprocessing_pipeline(
   )
 
   if tokenize:
-    text_column_name = data_columns[0]
-
-    def tokenize_sft_chunks(element, col=text_column_name):
-      # Tokenize each chunk individually without truncating
-      text_chunks = element[col]
-      element[col] = [tokenizer_model.encode(chunk) for chunk in text_chunks]
-      return element
-
-    dataset = dataset.map(tokenize_sft_chunks)
+    dataset = dataset.map(
+        functools.partial(
+            _tokenize_sft_chunks,
+            text_column_name=data_columns[0],
+            tokenizer_model=tokenizer_model,
+        )
+    )
 
   dataset = dataset.map(
       input_pipeline_utils.SFTPromptMasking(
