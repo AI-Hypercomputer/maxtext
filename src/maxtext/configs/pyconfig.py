@@ -95,18 +95,19 @@ def _resolve_or_infer_config(argv: list[str], **kwargs) -> tuple[str, list[str]]
 def _resolve_or_infer_addl_config(**kwargs):
   """Resolves or infers more configs from module."""
   inferred_kwargs = {}
-  
   # if base_output_directory key is not seen
-  if "base_output_directory" not in kwargs:
+  if not kwargs.get("base_output_directory"):
     max_logging.warning("base_output_directory is not provided; Using local directory called maxtext_output")
     base_output_directory = os.path.abspath("maxtext_output")
     inferred_kwargs["base_output_directory"] = base_output_directory
 
   # if hf_access_token key is not seen
-  if "hf_access_token" not in kwargs:
+  if not kwargs.get("hf_access_token"):
     hf_access_token = os.environ.get("HF_TOKEN")
     if hf_access_token:
       inferred_kwargs["hf_access_token"] = hf_access_token
+  breakpoint()  
+  
 
   return inferred_kwargs
 
@@ -311,7 +312,7 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   Returns pydantic MaxTextConfig class whereas `initialize` returns the og `HyperParameters`
   """
   # 1. Load base and inherited configs from file(s)
-  config_path, cli_args = _resolve_or_infer_config(argv, kwargs)
+  config_path, cli_args = _resolve_or_infer_config(argv, **kwargs)
   base_yml_config = _load_config(config_path)
 
   # 2. Get overrides from CLI and kwargs
