@@ -1110,6 +1110,8 @@ class TrainingLoop(BaseModel):
       0.0,
       description="If set, training will stop early when this evaluation loss is reached.",
   )
+  abort_on_nan_loss: bool = Field(True, description="Check for NaN values and abort training.")
+  abort_on_inf_loss: bool = Field(True, description="Check for Inf values and abort training.")
   enable_dropout: bool = Field(True, description="Enables dropout in the model.")
   dropout_rate: float = Field(0.0, ge=0.0, le=1.0, description="The dropout rate.")
   enable_data_shuffling: bool = Field(True, description="Enables shuffling of the training data.")

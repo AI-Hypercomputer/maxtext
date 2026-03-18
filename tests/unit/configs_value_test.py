@@ -126,6 +126,26 @@ class ConfigTest(unittest.TestCase):
     config = pyconfig.initialize(argv)
     self.assertEqual(config.tokenizer_type, "tiktoken")
 
+  def test_abort_on_nan_loss_defaults_and_cli_override(self):
+    """Tests abort_on_nan_loss default from base.yml and CLI override parsing."""
+    default_cfg = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test_default_abort_nan"])
+    self.assertEqual(default_cfg.abort_on_nan_loss, True)
+
+    cli_cfg = pyconfig.initialize(
+        ["", _BASE_CONFIG_PATH, "run_name=test_cli_abort_nan", "abort_on_nan_loss=False"]
+    )
+    self.assertEqual(cli_cfg.abort_on_nan_loss, False)
+
+  def test_abort_on_inf_loss_defaults_and_cli_override(self):
+    """Tests abort_on_inf_loss default from base.yml and CLI override parsing."""
+    default_cfg = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test_default_abort_inf"])
+    self.assertEqual(default_cfg.abort_on_inf_loss, True)
+
+    cli_cfg = pyconfig.initialize(
+        ["", _BASE_CONFIG_PATH, "run_name=test_cli_abort_inf", "abort_on_inf_loss=False"]
+    )
+    self.assertEqual(cli_cfg.abort_on_inf_loss, False)
+
   def test_initialize_pydantic_bad_keys(self):
     """Test that `pydantic.ValidationError` is raised on keys not in MaxTextConfig"""
     with self.assertRaises(ValueError):

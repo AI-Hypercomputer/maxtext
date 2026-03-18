@@ -852,6 +852,8 @@ decode_sampling_temperature: 1.
 eval_interval: -1  # the specific number of train step between eval_step
 eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
 target_eval_loss: 0.  # early stop once reaching target eval_loss
+abort_on_nan_loss: True # Check for NaN and abort if found in training loss
+abort_on_inf_loss: True # Check for Inf and abort if found in training loss
 
 # Goodput parameters
 enable_goodput_recording: False
