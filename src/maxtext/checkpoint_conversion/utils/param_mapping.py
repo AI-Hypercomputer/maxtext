@@ -1081,10 +1081,6 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
       scanned (list of strings), unscanned with expert stacking (list of strings),
       or scanned with expert stacking (nested list of strings).
   """
-  # # TODO(shuningjin): add unscan support, b/457820735
-  # if not scan_layers:
-  #   raise NotImplementedError("This conversion only supports scanned MaxText models.")
-
   # Extract hf configuration parameters, without mtp
   num_main_layers = config["num_hidden_layers"]
   first_num_dense_layers = config["first_k_dense_replace"]
@@ -1177,12 +1173,6 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
 
 def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for Deepseek."""
-  # # TODO(shuningjin): support hf->orbax(scan), b/457820372
-  # if not saving_to_hf:
-  #   raise NotImplementedError("This conversion only supports saving_to_hf")
-  # # TODO(shuningjin): add unscan support, b/457820735
-  # if not scan_layers:
-  #   raise NotImplementedError("This conversion only supports scanned MaxText models.")
 
   def reshape_kernel(input_tensor, target_shape):
     """Reshapes and transposes kernel weights between MaxText and HF."""
@@ -1796,9 +1786,9 @@ def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_laye
 
   def reshape_audio_attn_out(input_tensor, target_shape):
     """Reshape audio attention output projection.
-    F
-        HF: (hidden_size, hidden_size)
-        MaxText: (num_heads, head_dim, hidden_size)
+
+    HF: (hidden_size, hidden_size)
+    MaxText: (num_heads, head_dim, hidden_size)
     """
     if saving_to_hf:
       # MaxText -> HF: (num_heads, head_dim, hidden_size) -> (hidden_size, hidden_size)
