@@ -16,7 +16,9 @@ The following models are supported:
 | **Qwen3 MoE**           | 30B, 235B, 480B        |           √            |            √             |           √            |            √             |
 | **Mixtral**             | 8x7B, 8x22B            |           √            |            √             |           √            |            √             |
 | **GPT-OSS**             | 20B, 120B              |           √            |            √             |           √            |            √             |
-| **DeepSeek3**           | 671B                   |           -            |            -             |           √            |            -             |
+| **DeepSeek2**           | 16B                    |           √            |            √             |           √            |            √             |
+| **DeepSeek3**           | 671B                   |           √            |            √             |           √            |            √             |
+| **DeepSeek3.2**         | 671B                   |           √            |            √             |           -            |            -             |
 | **Qwen3 Next**          | 80B                    |           √            |            √             |           √            |            √             |
 
 ## Prerequisites
@@ -73,7 +75,7 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME?} \
     hf_access_token=${HF_TOKEN?} \
     base_output_directory=${MODEL_CHECKPOINT_DIRECTORY?} \
-    scan_layers=True \
+    scan_layers=true \
     use_multimodal=false \
     hardware=cpu \
     skip_jax_distributed_system=true \
@@ -90,7 +92,7 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
 - `hardware=cpu`: run the conversion script on a CPU machine.
 - `checkpoint_storage_use_zarr3` and `checkpoint_storage_use_ocdbt`: Set to True for McJAX (default, `USE_PATHWAYS=0`); set to False for Pathways (`USE_PATHWAYS=1`). Both are controlled by the `$((1 - USE_PATHWAYS))` calculation in the example above.
 - `--lazy_load_tensors` (optional): If `true`, loads Hugging Face weights on-demand to minimize RAM usage. When memory is constrained, it is recommended to use the `--lazy_load_tensors=true` flag to reduce memory usage during conversion. For example, converting a Llama3.1-70B model with `--lazy_load_tensors=true` uses around 200GB of RAM and completes in ~10 minutes.
-- `--hf_model_path` (optional): Specifies a local or remote directory containing the model weights. If unspecified, we use the [default Hugging Face repository ID](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/utils/utils.py#L59-L91) (e.g., openai/gpt-oss-20b). This is necessary for locally dequantized models like GPT-OSS or DeepSeek.
+- `--hf_model_path` (optional): Specifies a local or remote directory containing the model weights. If unspecified, we use the [default Hugging Face repository ID](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py) (e.g., openai/gpt-oss-20b). This is necessary for locally dequantized models like GPT-OSS or DeepSeek.
 
 Above command will download the Hugging Face model to local machine if `hf_model_path` is unspecified, or reuse the checkpoint in `hf_model_path`. It will convert the checkpoint to the MaxText format and save it to `${MODEL_CHECKPOINT_DIRECTORY}/0/items`.
 
@@ -217,7 +219,7 @@ To extend conversion support to a new model architecture, you must define its sp
 - In [`utils/param_mapping.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/utils/param_mapping.py), add the `hook_fn` logic (`def {MODEL}_MAXTEXT_TO_HF_PARAM_HOOK_FN`). This is the transformation needed per layer.
 
 2. **Add Hugging Face weights Shape**: In [`utils/hf_shape.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/utils/hf_shape.py), define the tensor shape of Hugging Face format (`def {MODEL}_HF_WEIGHTS_TO_SHAPE`). This is used to ensure the tensor shape is matched after to_huggingface conversion.
-3. **Register model key**: In [`utils/utils.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py), add the new model key in `HF_IDS`.
+3. **Register model key**: In [`utils/globals.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py), add the new model key in `HF_IDS`.
 4. **Add transformer config**: In [`utils/hf_model_configs.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/utils/hf_model_configs.py), add the `transformers.Config` object, describing the Hugging Face model configuration (defined in [`src/maxtext/configs/models`](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/configs/models)). **Note**: This configuration must precisely match the MaxText model's architecture.
 
 Here is an example [PR to add support for gemma3 multi-modal model](https://github.com/AI-Hypercomputer/maxtext/pull/1983)

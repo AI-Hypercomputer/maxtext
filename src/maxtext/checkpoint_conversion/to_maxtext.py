@@ -25,7 +25,7 @@ Key Parameters (to be set in the config file or as command-line overrides):
                          Defaults to "./mt_output/".
   scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
                This must match the training configuration of the checkpoint.
-  lazy_load: (bool) If True, uses an on-demand loading strategy to minimize RAM
+  --lazy_load: (bool) If True, uses an on-demand loading strategy to minimize RAM
              usage during conversion. Recommended if, 2 * model_size (GB) >= system RAM
              Defaults to False.
   --hf_model_path: (Optional) Specifies a local or remote directory containing the model weights.
@@ -40,7 +40,7 @@ Environment Variables:
 Example Usage:
   To convert a gemma2-2b model and save it to a specific directory:
 
-    /usr/bin/time -v python src/MaxText/checkpoint_conversion/to_maxtext.py \
+   python -m maxtext.checkpoint_conversion.to_maxtext \
     maxtext/configs/base.yml model_name="gemma2-2b" \
     base_output_directory="/path/to/your/output/directory" \
     hf_access_token=${HF_TOKEN?} hardware=cpu skip_jax_distributed_system=True \
@@ -51,7 +51,7 @@ Example Usage:
 
   To convert a 70B model with minimal RAM usage:
 
-   /usr/bin/time -v python src/MaxText/checkpoint_conversion/to_maxtext.py \
+   python -m maxtext.checkpoint_conversion.to_maxtext \
     maxtext/configs/base.yml model_name="llama3.1-70b" \
     base_output_directory="gs://my-bucket/maxtext-checkpoints" \
     hf_access_token=${HF_TOKEN?} hardware=cpu skip_jax_distributed_system=True \
@@ -601,6 +601,7 @@ def _get_maxtext_weight(
 
 def main(
     args: Sequence[str],
+    test_args,
     hf_model_path: str | None = None,
     revision: str | None = None,
     lazy_load_tensors: bool = False,
@@ -905,6 +906,7 @@ if __name__ == "__main__":
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={local_args.simulated_cpu_devices_count}"
   main(
       args=model_args,
+      test_args=local_args,
       hf_model_path=local_args.hf_model_path,
       revision=local_args.revision,
       lazy_load_tensors=local_args.lazy_load_tensors,
