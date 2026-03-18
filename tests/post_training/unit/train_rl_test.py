@@ -331,6 +331,7 @@ class TrainRLTest(unittest.TestCase):
         train_fraction=1.0,
         num_epoch=1,
         num_test_batches=1,
+        test_batch_start_index=0,
     )
 
     # Patch everything!
