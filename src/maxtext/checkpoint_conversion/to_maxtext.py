@@ -72,7 +72,7 @@ from tqdm import tqdm
 import pathlib
 import torch
 import flax.linen as nn
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import hf_hub_download, list_repo_files, snapshot_download
 import jax
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN
@@ -93,13 +93,24 @@ from safetensors import safe_open
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
-def load_hf_dict_from_safetensors(local_path, framework="pt"):
+def load_hf_dict_from_safetensors(model_id_or_path, token, revision, framework="pt"):
   """
   If the safetensor contains more HF keys than MaxText model,
   these HF keys will be loaded but ignored during conversion.
   For example, if maxtext has deepseek3 with mtp=false,
   then safetensor weight with prefix `model.layers.61` will be the extra keys.
   """
+  # Determine if the path is local or remote
+  if os.path.isdir(model_id_or_path):
+    local_path = model_id_or_path
+  else:
+    # Download only the safetensors files to the local HF cache
+    local_path = snapshot_download(
+        repo_id=model_id_or_path,
+        token=token,
+        revision=revision,
+    )
+  # load safetensors
   ckpt_paths = sorted(pathlib.Path(local_path).glob("[!.]*.safetensors"))
   hf_state_dict = {}
   max_logging.log(f"Loading {len(ckpt_paths)} checkpoints")
@@ -592,11 +603,11 @@ def _get_maxtext_weight(
 
 def main(
     args: Sequence[str],
-    save_dtype,
-    eager_load_method,
+    lazy_load_tensors: bool = False,
+    eager_load_method: str = "transformers",
     hf_model_path: str | None = None,
     revision: str | None = None,
-    lazy_load_tensors: bool = False,
+    save_dtype: str = "bfloat16",
     simulated_cpu_devices_count: int = 16,
 ) -> None:
   overall_start = time.time()
@@ -652,10 +663,10 @@ def main(
     if eager_load_method == "transformers":
       max_logging.log("Eager load with Transformers backend, from_pretrained with auto dtype")
       # auto uses the `dtype` specified in config.json (or `torch_dtype` for older version)
-      hf_state_dict_numpy = load_hf_dict_from_transformers(model_id, token=hf_token, dtype="auto")
+      hf_state_dict_numpy = load_hf_dict_from_transformers(model_id, token=hf_token, revision=revision, dtype="auto")
     elif eager_load_method == "safetensors":
       max_logging.log("Eager load with Safetensors backend, safe_open with pt framework")
-      hf_state_dict_numpy = load_hf_dict_from_safetensors(model_id, framework="pt")
+      hf_state_dict_numpy = load_hf_dict_from_safetensors(model_id, token=hf_token, revision=revision, framework="pt")
     else:
       raise NotImplementedError
 
@@ -797,7 +808,7 @@ if __name__ == "__main__":
       default=False,
       help="Whether to use lazy loading of HF tensors.",
   )
-  # eager load method (lazy load uses `safetensors.safe_open` with np)
+  # Eager load method (lazy load uses `safetensors.safe_open` with np)
   parser.add_argument(
       "--eager_load_method",
       type=str,
@@ -806,20 +817,21 @@ if __name__ == "__main__":
       choices=["transformers", "safetensors"],
       help="Backend to use for eager loading: `transformers_class.from_pretrained` or `safetensors.safe_open` with pt",
   )
+  # If not specified, default to maxtext.utils.globals.HF_IDS[model_name]
+  parser.add_argument(
+      "--hf_model_path",
+      type=str,
+      required=False,
+      default=None,
+      help="customized remote hf repo, or local path to hf model",
+  )
+  # If hf_model_path is set to a local path, this is ignored.
   parser.add_argument(
       "--revision",
       type=str,
       required=False,
       default=None,
       help="Specific Hugging Face revision (branch/tag/commit)",
-  )
-  # If not specified, default to maxtext.utils.globals.HF_IDS[model_name]
-  parser.add_argument(
-      "--hf_model_path",
-      type=str,
-      required=False,
-      default="",
-      help="local path to hf model, or custom remote hf repo",
   )
   parser.add_argument(
       "--save_dtype",
@@ -855,9 +867,10 @@ if __name__ == "__main__":
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={local_args.simulated_cpu_devices_count}"
   main(
       args=model_args,
-      test_args=local_args,
+      lazy_load_tensors=local_args.lazy_load_tensors,
+      eager_load_method=local_args.eager_load_method,
       hf_model_path=local_args.hf_model_path,
       revision=local_args.revision,
-      lazy_load_tensors=local_args.lazy_load_tensors,
+      save_dtype=local_args.save_dtype,
       simulated_cpu_devices_count=local_args.simulated_cpu_devices_count,
   )
