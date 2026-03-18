@@ -49,16 +49,8 @@
 # Build docker image with post-training dependencies
 ## bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
 
-if [ "${BASH_SOURCE-}" ]; then
-  this_file="${BASH_SOURCE[0]}"
-elif [ "${ZSH_VERSION-}" ]; then
-  # shellcheck disable=SC2296
-  this_file="${(%):-%x}"
-else
-  this_file="${0}"
-fi
-
-MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(CDPATH='' cd -- "$(dirname -- "${this_file}")"'/../../..' && pwd)}"
+PACKAGE_DIR="${PACKAGE_DIR:-src}"
+echo "PACKAGE_DIR: $PACKAGE_DIR"
 
 # Enable "exit immediately if any command fails" option
 set -e
@@ -107,6 +99,7 @@ docker_build_args=(
   "WORKFLOW=${WORKFLOW}"
   "MODE=${MODE}"
   "JAX_VERSION=${JAX_VERSION}"
+  "PACKAGE_DIR=${PACKAGE_DIR}"
 )
 
 run_docker_build() {
@@ -123,7 +116,7 @@ build_gpu_image() {
   fi
 
   echo "Building docker image with arguments: ${docker_build_args[*]}"
-  run_docker_build "$MAXTEXT_REPO_ROOT/src/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile" "${docker_build_args[@]}"
+  run_docker_build "$PACKAGE_DIR/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile" "${docker_build_args[@]}"
 }
 
 # Function to build image for TPUs
@@ -140,7 +133,7 @@ build_tpu_image() {
   fi
 
   echo "Building docker image with arguments: ${docker_build_args[*]}"
-  run_docker_build "$MAXTEXT_REPO_ROOT/src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile" "${docker_build_args[@]}"
+  run_docker_build "$PACKAGE_DIR/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile" "${docker_build_args[@]}"
 }
 
 if [[ ${DEVICE} == "gpu" ]]; then

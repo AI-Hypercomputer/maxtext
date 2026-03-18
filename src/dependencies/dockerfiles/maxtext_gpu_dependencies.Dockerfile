@@ -38,6 +38,9 @@ ENV ENV_JAX_VERSION=$JAX_VERSION
 ARG DEVICE
 ENV ENV_DEVICE=$DEVICE
 
+ARG PACKAGE_DIR
+ENV PACKAGE_DIR=$PACKAGE_DIR
+
 ENV MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets
 ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/tests/assets
 ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
@@ -47,16 +50,19 @@ ENV MAXTEXT_REPO_ROOT=/deps
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
-COPY tools/setup tools/setup/
-COPY src/dependencies/requirements/ src/dependencies/requirements/
-COPY src/install_maxtext_extra_deps/extra_deps_from_github.txt src/install_maxtext_extra_deps/
+COPY ${PACKAGE_DIR}/dependencies/requirements/ src/dependencies/requirements/
+COPY ${PACKAGE_DIR}/dependencies/scripts/ src/dependencies/scripts/
+COPY ${PACKAGE_DIR}/install_maxtext_extra_deps/ src/install_maxtext_extra_deps/
+COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
-RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv bash /deps/tools/setup/setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export UV_LINK_MODE=copy && \
+    bash /deps/src/dependencies/scripts/setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
 
 # Now copy the remaining code (source files that may change frequently)
-COPY . .
+COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/
 
 # Download test assets from GCS if building image with test assets
 ARG INCLUDE_TEST_ASSETS=false
@@ -67,5 +73,4 @@ RUN if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
         fi; \
     fi
 
-# Install (editable) MaxText
-RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .
+ENV PYTHONPATH="/deps/src:${PYTHONPATH}"
