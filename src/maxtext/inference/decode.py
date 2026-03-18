@@ -177,6 +177,8 @@ def main(argv: Sequence[str]) -> None:
 
   prof.activate(optional_postfix="trace")
   params = engine.load_params(rng_load_params)
+  # weight = params["params"]["decoder"]["vision_encoder"]["Qwen3OmniMoeVisionEncoder_0"]["patch_embed"]["proj"]["kernel"]
+  # jax.debug.print("Vision encoder patch_embed kernel shape: {shape}, {mean}", shape=str(weight.shape), mean=jnp.mean(weight))
 
   # Prefill
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill

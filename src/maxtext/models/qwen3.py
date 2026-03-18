@@ -25,6 +25,7 @@ from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
+import numpy as np
 
 from flax import linen as nn
 from flax import nnx
@@ -48,6 +49,9 @@ from maxtext.utils import max_utils
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
 # -----------------------------------------
+
+def save_as_text(arr, filename):
+  np.save(filename, arr)
 
 
 def naive_jax_chunk_gated_delta_rule(
@@ -1500,6 +1504,7 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
     batch_size = hidden_states.shape[0]
     seq_len = hidden_states.shape[1] * hidden_states.shape[2] * hidden_states.shape[3]
     hidden_states = hidden_states.reshape(batch_size, seq_len, self.embed_dim)
+    jax.debug.print("reshape back: {mean} {shape}", mean=jnp.mean(hidden_states), shape=str(hidden_states.shape))
     return hidden_states
 
 
@@ -1712,22 +1717,48 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
         - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
     """
-    # jax.debug.print("*Input hidden_states shape: {shape}", shape=str(hidden_states.shape))
-    # jax.debug.print("*Input hidden_states mean: {mean}", mean=jnp.mean(hidden_states))
+    jax.debug.print("* vision encoder input hidden states: {shape}, {mean}", shape=str(hidden_states.shape), mean=jnp.mean(hidden_states))
+    jax.debug.print("* before patch_embed First 5 {arr}", arr=hidden_states[0, :5])
+    jax.debug.print("* before patch_embed Last 5 {arr}", arr=hidden_states[-1, :5])
+    temporal_patch_size = 5
+    h = 30
+    w = 28
+    in_channels = 3
+
     ve_pass = False
     if hidden_states.ndim != 5:
         # hidden_states = 0.5 * jnp.ones_like(hidden_states)
+        # jax.debug.callback(save_as_text, hidden_states, "maxtext_inputs.npy")
         # hidden_states = jnp.load("/home/hengtaoguo_google_com/projects/vision_encoder_input_hidden_states.npy")
-        # hidden_states = hidden_states.reshape(4200, 2, 16, 16, 3)
-        hidden_states = hidden_states.reshape(1, 3, 5*2, 30*16, 28*16)
+        hidden_states = hidden_states.reshape(4200, 3, 2, 16, 16)
+        # hidden_states = hidden_states.reshape(1, 3, 10, 30 * 16, 28 * 16)
+        # hidden_states = hidden_states.reshape(
+        #     1,
+        #     self.config.num_channels_for_vit,
+        #     temporal_patch_size * self.config.temporal_patch_size_for_vit,
+        #     h * self.config.patch_size_for_vit,
+        #     w * self.config.patch_size_for_vit,
+        # )
         ve_pass = True
-    jax.debug.print("*Input hidden_states shape after reshape: {shape}", shape=str(hidden_states.shape))
-    _, _, num_frames, height, width = hidden_states.shape
-    num_frames = num_frames // self.config.temporal_patch_size_for_vit
-    height = height // self.config.patch_size_for_vit
-    width = width // self.config.patch_size_for_vit
 
+    # jax.debug.print("* vision encoder input hidden_states shape after reshape: {shape}", shape=str(hidden_states.shape))
+    _, _, num_frames, height, width = hidden_states.shape
+    num_frames = num_frames // self.config.temporal_patch_size_for_vit if not ve_pass else 5
+    height = height // self.config.patch_size_for_vit if not ve_pass else 30
+    width = width // self.config.patch_size_for_vit if not ve_pass else 28
+
+    jax.debug.print("* num_frames {num_frames}, height {height}, width {width}", num_frames=num_frames, height=height, width=width)
+    jax.debug.print("* before patch_embed {shape}, {mean}", shape=str(hidden_states.shape), mean=jnp.mean(hidden_states))
+    # jax.debug.print("* before patch_embed First 5 {arr}", arr=hidden_states[0, 0, :5])
+    # jax.debug.print("* before patch_embed Last 5 {arr}", arr=hidden_states[0, -1, :5])
     x = self.patch_embed(hidden_states)
+    # x = 0.5 * jnp.ones((1, 4200, 1152)) if ve_pass else x
+    x = x.reshape(1, 4200, 1152) if ve_pass else x
+
+    jax.debug.print("* after patch_embed {shape}, {mean}", shape=str(x.shape), mean=jnp.mean(x))
+    jax.debug.print("* after patch_embed First 5 {arr}", arr=x[0, 0, :5])
+    jax.debug.print("* after patch_embed Last 5 {arr}", arr=x[0, -1, -5:])
+
     # if ve_pass:
     #     jax.debug.print("*Patch embedded hidden_states mean: {mean}", mean=jnp.mean(x))
     #     x = jnp.load("/home/hengtaoguo_google_com/projects/patch_embed.npy")
@@ -1737,23 +1768,25 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
 
     pos = pos[jnp.newaxis, :, :]
     x = x + pos
-    # jax.debug.print("*x+pos mean: {mean}", mean=jnp.mean(x))
 
     h_traj = []
     for i in range(self.depth):
       block_name = f"blocks_{i}"
       blk = getattr(self, block_name)
+      jax.debug.print("* vision encoder before block {i}: {shape} {mean}", i=i, shape=str(x.shape), mean=jnp.mean(x))
       x = blk(x, num_frames=num_frames, height=height, width=width)
-    #   jax.debug.print("*x mean after block {i}: {mean}", i=i, mean=jnp.mean(x))
+      jax.debug.print("* vision encoder after block {i}: {shape} {mean}", i=i, shape=str(x.shape), mean=jnp.mean(x))
+      jax.debug.print("* First 5 hidden states {arr}", arr=x[0, 0, :5])
+      jax.debug.print("* Last 5 hidden states {arr}", arr=x[0, -1, :5])
       h_traj.append(x)
 
     deep_feats = []
-    for i, idx in enumerate(self.deep_idx):
-      h = h_traj[idx]
-      merger_name = f"merger_{i}"
-      merger = getattr(self, merger_name)
-      deep_feat = merger(h)
-      deep_feats.append(deep_feat)
+    # for i, idx in enumerate(self.deep_idx):
+    #   h = h_traj[idx]
+    #   merger_name = f"merger_{i}"
+    #   merger = getattr(self, merger_name)
+    #   deep_feat = merger(h)
+    #   deep_feats.append(deep_feat)
 
     # jax.debug.print("*Output hidden_states shape: {shape}", shape=str(x.shape))
     # jax.debug.print("*Output hidden_states mean: {mean}", mean=jnp.mean(x))

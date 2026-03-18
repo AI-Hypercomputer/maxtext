@@ -82,9 +82,9 @@ class VisionEncoder(nnx.Module):
     projector = getattr(self, self.projector_name)
     embeddings = projector(embeddings)
     jax.debug.print("*Vision encoder output embeddings shape: {shape}, mean: {mean}", shape=str(embeddings.shape), mean=jnp.mean(embeddings))
-    _stub = jnp.load("/home/hengtaoguo_google_com/projects/video_embeds.npy")
-    embeddings = _stub[jnp.newaxis, :, :]  # shape: (1, 1050, 2048); tiled to true batch size in decoder
-    jax.debug.print("*Loaded vision encoder output embeddings shape: {shape}, mean: {mean}", shape=str(embeddings.shape), mean=jnp.mean(embeddings))
+    # _stub = jnp.load("/home/hengtaoguo_google_com/projects/video_embeds.npy")
+    # embeddings = _stub[jnp.newaxis, :, :]  # shape: (1, 1050, 2048); tiled to true batch size in decoder
+    # jax.debug.print("*Loaded vision encoder output embeddings shape: {shape}, mean: {mean}", shape=str(embeddings.shape), mean=jnp.mean(embeddings))
     return embeddings, deep_feats
 
 

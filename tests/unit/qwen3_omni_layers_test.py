@@ -359,14 +359,29 @@ class TestQwen3OmniMoeVisionPatchEmbed(BaseVisionTestCase):
         self.config.patch_size_for_vit,
         self.config.patch_size_for_vit,
     )
+    print("\n")
+    loaded_array = np.load("/home/hengtaoguo_google_com/projects/maxtext/huggingface_inputs.npy") # (4200, 1536)
+    torch_hidden_states = torch.from_numpy(loaded_array) 
+    jax_hidden_states = loaded_array.reshape(4200, 3, 2, 16, 16)
+  
+
+    print(f"torch input shape {torch_hidden_states.shape}")
+    print(f"jax input shape {jax_hidden_states.shape}")
 
     torch_output = self.torch_model(torch_hidden_states)
     jax_output = self.jax_model(jax_hidden_states)
 
+    print(f"torch output shape {torch_output.shape}")
+    print(f"jax output shape {jax_output.shape}")
+
     torch_output_squeezed = torch_output.squeeze(1)
     jax_output_squeezed = jax_output.squeeze(1)
 
+    print(f"torch torch_output_squeezed shape {torch_output_squeezed.shape}")
+    print(f"jax_output_squeezed shape {jax_output_squeezed.shape}")
+
     assert_all_close_jax_torch(jax_output_squeezed, torch_output_squeezed, rtol=1e-3, atol=5e-3)
+    print("finish")
 
   def test_patch_embed_is_jittable(self):
     """Test that patch embed is JIT-compilable."""
