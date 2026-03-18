@@ -16,8 +16,8 @@
 
 base_num_decoder_layers: 36
 base_emb_dim: 2560
-base_num_query_heads: 10 
-base_num_kv_heads: 5
+base_num_query_heads: 8
+base_num_kv_heads: 4
 base_mlp_dim: 10240
 head_dim: 256
 mlp_activations: ["silu","linear"]

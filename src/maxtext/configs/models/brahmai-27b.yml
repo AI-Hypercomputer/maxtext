@@ -1,0 +1,18 @@
+base_num_decoder_layers: 64 
+base_emb_dim: 5120
+base_num_query_heads: 40 
+base_num_kv_heads: 20
+base_mlp_dim: 20480
+head_dim: 128
+mlp_activations: ["silu","linear"]
+vocab_size: 262_144
+decoder_block: "gemma3"
+normalization_layer_epsilon: 1e-6
+logits_via_embedding: True
+sliding_window_size: 1024
+use_post_attn_norm: true
+use_post_ffw_norm: true
+local_rope_max_timescale: 10_000
+rope_max_timescale: 1_000_000
+rope_linear_scaling_factor: 8.0
+

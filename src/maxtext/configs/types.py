@@ -202,6 +202,8 @@ class ProfilerType(str, Enum):
 ModelName = Literal[
     "default",
     "brahmai-4b",
+    "brahmai-9b",
+    "brahmai-27b",
     "llama2-7b",
     "llama2-13b",
     "llama2-70b",
