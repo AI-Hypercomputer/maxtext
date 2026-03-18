@@ -14,18 +14,13 @@
 
 """Provides op for tokenizing a dataset."""
 
-from typing import Iterable, Literal, Sequence, Collection
+from typing import Literal, Sequence, Collection
 from pathlib import Path
-import tensorflow as tf
-import tensorflow_text as tftxt
 from maxtext.utils import max_logging
 import transformers
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 from sentencepiece import SentencePieceProcessor
-
-
-Features = dict[str, tf.Tensor]
 
 
 class TikTokenTokenizer:
@@ -184,33 +179,23 @@ class TikTokenTokenizer:
 
 class SentencePieceTokenizer:
   """
-  Tokenizing and encoding/decoding text using the Sentencepiece tokenizer loaded with tensorflow_text
-  """
-
-  def __init__(self, model_path: str, add_bos: bool, add_eos: bool):
-    max_logging.log(f"Tokenizer path: {model_path}")
-    with tf.io.gfile.GFile(model_path, "rb") as model_fp:
-      sp_model = model_fp.read()
-    self.sp_tokenizer = tftxt.SentencepieceTokenizer(model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False)
-    self.pad_id = self.sp_tokenizer.string_to_id("<pad>")
-    self.unk_id = self.sp_tokenizer.string_to_id("<unk>")
-
-  def encode(self, s: str) -> list[int]:
-    return self.sp_tokenizer.tokenize(s)
-
-  def decode(self, t: Sequence[int]) -> str:
-    return self.sp_tokenizer.detokenize(t)
-
-
-class SentencePieceTokenizerGrain:
-  """
-  Tokenizing and encoding/decoding text using the Sentencepiece tokenizer loaded with sentencepiece
+  Tokenizing and encoding/decoding text using the native sentencepiece library.
+  Supports both local and GCS (gs://) model paths.
   """
 
   def __init__(self, model_path: str, add_bos: bool, add_eos: bool):
     max_logging.log(f"Loading sentencepiece tokenizer: {model_path}")
     self._tokenizer_model = SentencePieceProcessor()
-    self._tokenizer_model.Load(model_path)
+    try:
+      if model_path.startswith("gs://"):
+        from maxtext.utils.gcs_utils import read_bytes_from_gcs  # pylint: disable=import-outside-toplevel
+
+        model_proto = read_bytes_from_gcs(model_path)
+        self._tokenizer_model.LoadFromSerializedProto(model_proto)
+      else:
+        self._tokenizer_model.Load(model_path)
+    except Exception as e:
+      raise ValueError(f"Failed to load sentencepiece tokenizer from {model_path}: {e}") from e
     self.pad_id = self._tokenizer_model.pad_id()
     self.unk_id = self._tokenizer_model.unk_id()
     self.bos_id = self._tokenizer_model.bos_id()
@@ -255,7 +240,7 @@ class HFTokenizer:
     return self.tokenizer.decode(t)
 
 
-def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type):
+def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token):
   """Loads the tokenizer at `tokenizer_path`"""
   max_logging.log(f"Tokenizer path: {tokenizer_path}")
   if tokenizer_type == "tiktoken":
@@ -264,27 +249,6 @@ def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_
   elif tokenizer_type == "huggingface":
     return HFTokenizer(tokenizer_path, add_bos, add_eos, hf_access_token)
   elif tokenizer_type == "sentencepiece":
-    if dataset_type == "tfds":
-      return SentencePieceTokenizer(tokenizer_path, add_bos, add_eos)
-    else:
-      return SentencePieceTokenizerGrain(tokenizer_path, add_bos, add_eos)
+    return SentencePieceTokenizer(tokenizer_path, add_bos, add_eos)
   else:
     raise ValueError(f"Invalid tokenizer_type:{tokenizer_type} chosen in config")
-
-
-def TokenizeOp(tokenizer, features: Features, data_keys: Iterable[str] = ("inputs", "targets")) -> Features:
-  """Op for tokenization"""
-
-  def _process_string(string_tensor):
-    # Extract string value and decode it if necessary
-    string_value = string_tensor.numpy().decode("utf-8")
-    # encode and extract the tokenized integers
-    modified_string = tokenizer.encode(string_value)
-    return [modified_string]
-
-  for k in data_keys:
-    if isinstance(tokenizer, (TikTokenTokenizer, HFTokenizer)):
-      features[k] = tf.py_function(_process_string, [features[k]], Tout=[tf.int32])[0]
-    elif isinstance(tokenizer, SentencePieceTokenizer):
-      features[k] = tokenizer.encode(features[k])
-  return features

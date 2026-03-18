@@ -19,17 +19,17 @@ import os
 import jax
 import functools
 from flax.linen import partitioning as nn_partitioning
-from MaxText import sharding
-from MaxText import optimizers
-from MaxText.rampup_batch import create_rampup_manager
 from maxtext.common import checkpointing
 from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
+from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+from maxtext.utils import sharding
+from maxtext.utils.rampup_batch import create_rampup_manager
 from maxtext.trainers.diloco import diloco
 
 
@@ -61,7 +61,7 @@ def create_training_tools(config, model, mesh):
     # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
     use_ocdbt = config.checkpoint_storage_use_ocdbt
     use_zarr3 = config.checkpoint_storage_use_zarr3
-    if config.enable_single_controller:
+    if config.enable_single_controller and not config.colocated_python_checkpointing:
       use_ocdbt, use_zarr3 = False, False
 
     checkpoint_dir = ""
@@ -79,6 +79,9 @@ def create_training_tools(config, model, mesh):
         config.enable_continuous_checkpointing,
         config.max_num_checkpoints_to_keep,
         config.checkpoint_storage_concurrent_gb,
+        config.enable_single_controller,
+        config.colocated_python_checkpointing,
+        config.enable_single_replica_ckpt_restoring,
     )
 
   return init_rng, checkpoint_manager, learning_rate_schedule, tx

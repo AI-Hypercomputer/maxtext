@@ -19,7 +19,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.inference import kvcache
 
 

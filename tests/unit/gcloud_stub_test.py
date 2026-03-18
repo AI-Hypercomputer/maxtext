@@ -153,26 +153,26 @@ class GCloudStubTest(unittest.TestCase):
   def test_maxengine_config_create_exp_maxengine_signature_decoupled(self):
     # Import lazily under decoupled mode (safe even without JetStream installed).
     with mock.patch.dict(os.environ, {"DECOUPLE_GCLOUD": "TRUE"}):
-      maxengine_config = importlib.import_module("MaxText.maxengine_config")
+      maxengine_config = importlib.import_module("maxtext.inference.maxengine.maxengine_config")
       importlib.reload(maxengine_config)
 
       mock_devices = mock.MagicMock()
       mock_config = mock.MagicMock()
 
-      with mock.patch("MaxText.maxengine.MaxEngine") as mock_engine:
+      with mock.patch("maxtext.inference.maxengine.maxengine.MaxEngine") as mock_engine:
         maxengine_config.create_exp_maxengine(mock_devices, mock_config)
         mock_engine.assert_called_once_with(mock_config)
 
   def test_maxengine_config_create_exp_maxengine_signature_not_decoupled(self):
     # Import safely (under decoupled) then flip behavior only for the call.
     with mock.patch.dict(os.environ, {"DECOUPLE_GCLOUD": "TRUE"}):
-      maxengine_config = importlib.import_module("MaxText.maxengine_config")
+      maxengine_config = importlib.import_module("maxtext.inference.maxengine.maxengine_config")
       importlib.reload(maxengine_config)
 
     with mock.patch.object(maxengine_config, "is_decoupled", return_value=False):
       mock_devices = mock.MagicMock()
       mock_config = mock.MagicMock()
-      with mock.patch("MaxText.maxengine.MaxEngine") as mock_engine:
+      with mock.patch("maxtext.inference.maxengine.maxengine.MaxEngine") as mock_engine:
         maxengine_config.create_exp_maxengine(mock_devices, mock_config)
         mock_engine.assert_called_once_with(config=mock_config, devices=mock_devices)
 

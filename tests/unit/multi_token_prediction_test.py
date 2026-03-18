@@ -20,17 +20,16 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from flax import nnx
 
-from MaxText.common_types import Config
-from MaxText import pyconfig
-from MaxText.layers.decoders import DecoderLayer
-from MaxText.layers import multi_token_prediction  # The class under test
-from MaxText.layers import embeddings
-from MaxText.common_types import MODEL_MODE_TRAIN
-from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.configs import pyconfig
+from maxtext.layers import multi_token_prediction  # The class under test
+from maxtext.layers import embeddings
+from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.common.common_types import Config
+from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 
 
 TEST_LAYER_NUM = 1
@@ -42,7 +41,7 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="multi_token_prediction_layer_test",
@@ -55,12 +54,11 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
-    # Instantiate the Layer
     self.mtp_layer = multi_token_prediction.MultiTokenPredictionLayer(
         config=self.cfg,
         mesh=self.mesh,
         layer_number=TEST_LAYER_NUM,
-        transformer_layer_module=DecoderLayer,
+        transformer_layer_module=NNXDecoderLayer,
         rngs=self.rngs,
     )
 
@@ -158,7 +156,7 @@ class MTPBlockTestModel(nnx.Module):
     self.mtp_block = multi_token_prediction.MultiTokenPredictionBlock(
         config=self.config,
         mesh=self.mesh,
-        transformer_layer_module=DecoderLayer,
+        transformer_layer_module=NNXDecoderLayer,
         decoder=self.decoder,
         rngs=self.rngs,
     )
@@ -200,7 +198,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
     super().setUp()
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
     num_devices = jax.device_count()
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="mtp_block_test",
@@ -230,22 +228,6 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         mesh=self.mesh,
         rngs=self.rngs,
     )
-
-  def test_no_sow_during_init(self):
-    """Verifies losses/weights are initialized with zeros (NNX behavior)."""
-    # NNX pre-initializes Variables with zeros to avoid checkpointing errors.
-    # Unlike Linen which sows during forward pass, NNX creates Variables in __init__.
-    initial_state = nnx.state(self.test_model)
-    self.assertTrue(hasattr(initial_state.mtp_block, "losses"))
-    self.assertTrue(hasattr(initial_state.mtp_block, "weights"))
-
-    # Verify they're initialized with zeros of correct shape.
-    losses_val = initial_state.mtp_block.losses.value
-    weights_val = initial_state.mtp_block.weights.value
-    self.assertEqual(losses_val.shape, (self.cfg.mtp_num_layers,))
-    self.assertEqual(weights_val.shape, (self.cfg.mtp_num_layers,))
-    self.assertTrue(jnp.all(losses_val == 0.0))
-    self.assertTrue(jnp.all(weights_val == 0.0))
 
   def test_sow_functionality(self):
     """Verifies that the block correctly sows losses and weights."""

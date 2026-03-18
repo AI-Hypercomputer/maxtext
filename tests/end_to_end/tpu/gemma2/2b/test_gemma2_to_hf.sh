@@ -31,7 +31,7 @@ export CKPT_PATH=gs://maxtext-gemma/unified/gemma2/2b/unscanned/2025-08-05-18-06
 # export HF_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/hf/${idx}
 export LOCAL_PATH=./tmp/hf/${MODEL_NAME}/${idx}
 
-python3 -m MaxText.utils.ckpt_conversion.to_huggingface "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+python3 -m maxtext.checkpoint_conversion.to_huggingface "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
     hf_access_token=${HF_TOKEN} \
     load_parameters_path=${CKPT_PATH} \

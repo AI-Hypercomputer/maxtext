@@ -27,6 +27,7 @@ num_samplers_slices: -1
 # replicas in rollout. If not specified, rollout_tensor_parallelism will be auto-determined.
 rollout_data_parallelism: -1
 rollout_tensor_parallelism: -1
+rollout_expert_parallelism: 1
 
 # ====== Reproducibility ======
 data_shuffle_seed: 42
@@ -99,6 +100,7 @@ micro_batch_size: -1
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200
+test_batch_start_index: 0
 train_fraction: 1.0
 
 eval_interval: 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
@@ -149,6 +151,10 @@ enable_dp_attention: False
 # Performance tuning for samplers
 max_num_batched_tokens: null
 max_num_seqs: null
+# If True, enables asynchronous scheduling in vLLM for faster generation
+async_scheduling: True
+# stop generation when any of these strings is generated
+stop_strings: null
 
 # ====== Checkpoint Configuration ======
 enable_checkpointing: True

@@ -14,7 +14,6 @@
 
 """Test for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
-import os.path
 import unittest
 import pytest
 
@@ -25,13 +24,13 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 import numpy as np
 
-from MaxText import pyconfig
-from MaxText.common_types import HyperConnectionType
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.layers import attention_mla, linears, mhc, moe
-from MaxText.layers.initializers import nd_dense_init
-from MaxText.layers.normalizations import RMSNorm
+from maxtext.configs import pyconfig
+from maxtext.common.common_types import HyperConnectionType
+from maxtext.layers import attention_mla, linears, mhc, moe
+from maxtext.layers.initializers import nd_dense_init
+from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 
 
 class TestExpandReduce(unittest.TestCase):
@@ -92,8 +91,10 @@ class TestMHC(unittest.TestCase):
 
   def setUp(self):
     self.dim = 16
+    extra_args = get_decoupled_parallelism_overrides()
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [None, get_test_config_path()],
+        **extra_args,
         run_name="test_mhc",
         enable_checkpointing=False,
         model_name="deepseek-custom",
@@ -107,6 +108,7 @@ class TestMHC(unittest.TestCase):
         attention="dot_product",
         routed_bias_update_rate=0.01,
         load_balance_loss_weight=0.02,
+        engram_layers=[],
     )
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)

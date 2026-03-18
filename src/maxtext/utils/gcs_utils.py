@@ -18,6 +18,8 @@ import json
 import os
 import socket
 from pathlib import Path
+from etils import epath
+import uuid
 
 import yaml
 
@@ -177,6 +179,28 @@ def gcs_glob_pattern(pattern):
   return data_files
 
 
+def read_bytes_from_gcs(file_path):
+  """Read raw bytes from a GCS file.
+
+  Args:
+    file_path: The gcs path of the file (e.g. gs://bucket/path/to/file).
+
+  Returns:
+    The file contents as bytes, or None if unavailable.
+  """
+  if not _gcs_guard("read_bytes_from_gcs"):
+    return None
+  try:
+    storage_client = storage.Client()
+    bucket_name, file_prefix = parse_gcs_bucket_and_prefix(file_path)
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(file_prefix)
+    return blob.download_as_bytes()
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.log(f"Error reading bytes from GCS path {file_path}: {e}")
+    return None
+
+
 def read_json_from_gcs(file_path):
   """
   Read a json file from gcs bucket.
@@ -187,21 +211,13 @@ def read_json_from_gcs(file_path):
   Returns:
     A dictionary with content from json file.
   """
-  if not _gcs_guard("read_json_from_gcs"):
-    return None
   try:
-    storage_client = storage.Client()
-    bucket_name, file_prefix = parse_gcs_bucket_and_prefix(file_path)
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(file_prefix)
-
-    json_string = blob.download_as_string()
-
-    data = json.loads(json_string)
-
-    return data
+    raw = read_bytes_from_gcs(file_path)
+    if raw is None:
+      return None
+    return json.loads(raw)
   except (ValueError, TypeError, json.JSONDecodeError) as e:
-    print(f"Error reading JSON file from GCS: {str(e)}")
+    max_logging.log(f"Error reading JSON file from GCS: {str(e)}")
     return None
 
 
@@ -228,3 +244,47 @@ def write_dict_to_gcs_json(data_dict, file_path):
     blob.upload_from_string(json_string, content_type="application/json")
   except (ValueError, TypeError, RecursionError) as e:
     print(f"Failed to write json file at {file_path} with error: {str(e)}")
+
+
+def mkdir_and_check_permissions(path: str | epath.Path) -> epath.Path:
+  """Creates a directory if it doesn't exist and verifies write permissions.
+
+  This function prevents the program from hanging when an output directory is inaccessible. The standard
+  `epath.Path.mkdir` can hang or fail silently when pointed at a path in a non-existent or inaccessible GCS bucket.
+
+  For example, the following code can hang indefinitely:
+
+    from etils import epath
+    path = epath.Path("gs://no_such_bucket/path/to/output")
+    path.mkdir(exist_ok=True, parents=True)
+  """
+  if isinstance(path, str):
+    path = epath.Path(path)
+
+  if path.as_posix().startswith("gs://"):
+    if len(path.parts) < 3:
+      raise ValueError(f"Invalid GCS path (missing bucket name): '{path}'")
+    bucket_name = path.parts[2]
+    try:
+      storage_client = storage.Client()
+      storage_client.get_bucket(bucket_name)
+    except Exception as e:
+      raise FileNotFoundError(f"GCS bucket 'gs://{bucket_name}' not found or accessible.") from e
+  path.mkdir(exist_ok=True, parents=True)
+  if not path.exists():
+    raise PermissionError(f"Failed to create the directory '{path}'. Please check that you have write access.")
+
+  # Verify write permissions by creating and deleting a temporary file.
+  # This handles the case where the directory exists but is not writable.
+  temp_file_path = path / f".write_test_{uuid.uuid4()}"
+  try:
+    temp_file_path.write_text("test")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    raise PermissionError(f"Directory '{path}' exists, but is not writable. Please check permissions.") from e
+  finally:
+    try:
+      temp_file_path.unlink()  # Delete the temp file.
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass  # Suppress errors during cleanup to not hide the original error.
+
+  return path

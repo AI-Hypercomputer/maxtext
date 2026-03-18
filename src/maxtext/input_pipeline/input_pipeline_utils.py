@@ -17,21 +17,22 @@
 import dataclasses
 import warnings
 from threading import current_thread
-from typing import Any, TYPE_CHECKING
+from typing import Any, Iterable, TYPE_CHECKING
 
 if TYPE_CHECKING:
   import datasets
+  import tensorflow as tf
 
 import grain.python as grain
 import numpy as np
-import tensorflow as tf
+from maxtext.input_pipeline.protos import example_pb2
 from maxtext.input_pipeline import tokenizer
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging
 
-Features = dict[str, tf.Tensor]
-AUTOTUNE = tf.data.experimental.AUTOTUNE
+Features = dict[str, Any]
+INPUT_TOKENS_KEY = "input_ids"
 
 ########## Functions used by TFDS pipeline
 
@@ -40,11 +41,9 @@ def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, dataset_type="tfds"):
+def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None):
   # Load tokenizer
-  tokenizer_model = tokenizer.build_tokenizer(
-      tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type
-  )
+  tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
   return tokenizer_model
 
 
@@ -59,12 +58,30 @@ def shift_data_by_truncation(x):
 
 
 def add_segmentation_and_position(x, data_columns, padding_token=0):
+  import tensorflow as tf  # pylint: disable=import-outside-toplevel
+
   for data_column in data_columns:
     x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != padding_token, tf.int32)
     x[f"{data_column}_position"] = tf.broadcast_to(
         tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :], x[data_column].shape
     )
   return x
+
+
+def TokenizeOp(tokenizer_model, features: Features, data_keys: Iterable[str] = ("inputs", "targets")) -> Features:
+  """Op for tokenization"""
+  import tensorflow as tf  # pylint: disable=import-outside-toplevel
+
+  def _process_string(string_tensor):
+    # Extract string value and decode it if necessary
+    string_value = string_tensor.numpy().decode("utf-8")
+    # encode and extract the tokenized integers
+    modified_string = tokenizer_model.encode(string_value)
+    return [modified_string]
+
+  for k in data_keys:
+    features[k] = tf.py_function(_process_string, [features[k]], Tout=[tf.int32])[0]
+  return features
 
 
 ########## Functions used by HF pipeline
@@ -115,10 +132,10 @@ def pre_process_image_sft(example, image_column, model_name):
   return example
 
 
-def prepare_text_for_image_fusion(example, column_name, model_name):
+def prepare_text_for_image_fusion(example, column_name, config):
   """prepare text for image fusion for multimodal SFT"""
   example[column_name] = mm_processor.prepare_text_for_image_fusion(
-      example[column_name], model_name, processor_output=example["images"]
+      tokens=example[column_name], config=config, processor_output=example["images"]
   )
   return example
 
@@ -158,9 +175,45 @@ def is_conversational(features, data_columns):
   return False
 
 
+def _get_completion_in_chat_template(tokenizer_model, round_msgs):
+  """
+  Calculates the completion part of a conversation turn when formatted with a chat template.
+
+  This function handles both older and current Hugging Face tokenizers. Modern tokenizers
+  may return a `BatchEncoding` object instead of a simple list of token IDs.
+
+  Args:
+    tokenizer_model: The tokenizer instance.
+    round_msgs: A list of messages for the current conversational turn, including the assistant's response.
+
+  Returns:
+    A string representing the completion formatted by the chat template.
+  """
+  prompt_completion_tokens = tokenizer_model.apply_chat_template(round_msgs, add_generation_prompt=False, tokenize=True)
+  # include generation_prompt as part of the prompt tokens
+  prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True)
+
+  # attention masks in BatchEncoding are effectively ignored
+  if hasattr(prompt_completion_tokens, INPUT_TOKENS_KEY):
+    prompt_completion_ids = getattr(prompt_completion_tokens, INPUT_TOKENS_KEY)
+    prompt_ids = getattr(prompt_tokens, INPUT_TOKENS_KEY)
+  elif isinstance(prompt_completion_tokens, dict) and INPUT_TOKENS_KEY in prompt_completion_tokens:
+    prompt_completion_ids = prompt_completion_tokens[INPUT_TOKENS_KEY]
+    prompt_ids = prompt_tokens[INPUT_TOKENS_KEY]
+  elif isinstance(prompt_completion_tokens, list):
+    prompt_completion_ids = prompt_completion_tokens
+    prompt_ids = prompt_tokens
+  else:
+    raise ValueError(f"Can't handle the chat template output of type {type(prompt_completion_tokens)}")
+
+  completion_tokens = prompt_completion_ids[len(prompt_ids) :]
+  completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
+  return completion_in_chat_template
+
+
 def apply_chat_template(example, tokenizer_model, data_column_name):
   """Formats conversational data by applying the tokenizer's chat template
-  and identifying prompt/completion segments.
+  and identifying prompt/completion segments for SFT masking.
 
   Args:
     example: A dictionary containing conversational data. It is expected to have a key
@@ -174,9 +227,10 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
     The modified `example` dictionary.
       - The `data_column_name` column will be updated to a list of
         messages, each formatted according to the tokenizer's chat template.
-      - A new column named "is_prompt" will be added, where `True`
-        indicates a system message or a user message (prompt) and `False` indicates an assistant
-        message (completion).
+      - A new column "is_prompt" is added, where `True` indicates the
+        tokens contain the system message, user message, and generation
+        prompt (if applicable). `False` indicates the expected LLM
+        completion, excluding the assistant's start tokens.
   """
   messages = []
   is_prompt = []
@@ -190,19 +244,13 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
       elif message["role"] == "user":
         round_msgs.append(message)
         prompt_in_chat_template = tokenizer_model.apply_chat_template(
-            round_msgs, add_generation_prompt=False, tokenize=False
+            round_msgs, add_generation_prompt=True, tokenize=False
         )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
       elif message["role"] == "assistant":
         round_msgs.append(message)
-        prompt_completion_tokens = tokenizer_model.apply_chat_template(
-            round_msgs, add_generation_prompt=False, tokenize=True
-        )
-        prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=False, tokenize=True)
-        completion_tokens = prompt_completion_tokens[len(prompt_tokens) :]
-        completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
-        messages.append(completion_in_chat_template)
+        messages.append(_get_completion_in_chat_template(tokenizer_model, round_msgs))
         is_prompt.append(False)
         # Round ended, clearing the buffer.
         round_msgs.clear()
@@ -376,20 +424,23 @@ class ParseFeatures(grain.MapTransform):
 
   def __init__(self, data_columns, tokenize):
     self.data_columns = data_columns
-    if tokenize:
-      self.dtype = tf.string
-    else:
-      self.dtype = tf.int64
+    self.tokenize = tokenize
 
   def map(self, element):
-    def _parse(example):
-      parsed = tf.io.parse_example(
-          example,
-          {col: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True) for col in self.data_columns},
-      )
-      return parsed
+    """Parse a serialized tf.train.Example proto and extract features."""
+    example = example_pb2.Example()
+    example.ParseFromString(element)
+    features = example.features.feature
 
-    return _parse(element)
+    parsed = {}
+    for col in self.data_columns:
+      if col in features:
+        f = features[col]
+        if self.tokenize:
+          parsed[col] = np.array(f.bytes_list.value, dtype=object)
+        else:
+          parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
+    return parsed
 
 
 @dataclasses.dataclass
@@ -402,9 +453,9 @@ class NormalizeFeatures(grain.MapTransform):
 
   def map(self, element):
     if self.tokenize:
-      return {col: element[col].numpy()[0].decode() for col in self.column_names}
+      return {col: element[col][0].decode() for col in self.column_names}
     else:
-      return {col: element[col].numpy() for col in self.column_names}
+      return {col: element[col] for col in self.column_names}
 
 
 @dataclasses.dataclass

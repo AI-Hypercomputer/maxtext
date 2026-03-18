@@ -83,8 +83,8 @@ cd maxtext
 ```bash
 export LOCAL_IMAGE_NAME=<docker_image_name>
 sudo bash docker_build_dependency_image.sh DEVICE=gpu
-docker tag maxtext_base_image $LOCAL_IMAGE_NAME
-docker push $LOCAL_IMAGE_NAME
+docker tag maxtext_base_image ${LOCAL_IMAGE_NAME?}
+docker push ${LOCAL_IMAGE_NAME?}
 ```
 
 Note that when running `bash docker_build_dependency_image.sh DEVICE=gpu`, it
@@ -137,18 +137,18 @@ export NNODES=1
 Update script and run the command with synthetic data:
 
 ```
-base_output_directory: A GCS Bucket 
+base_output_directory: A GCS Bucket
 dataset_type: Synthetic or pass a real bucket
 attention:cudnn_flash_te (The default in maxtext is flash. Flash does not work on GPUs)
-scan_layers=False 
-use_iota_embed=True 
+scan_layers=False
+use_iota_embed=True
 hardware=gpu
 per_device_batch_size=12 [Update this to get a better MFU]
 Hardware: GPU
 ```
 
 ```bash
-python3 -m MaxText.train src/maxtext/configs/base.yml run_name=gpu01 base_output_directory=/deps/output  \
+python3 -m maxtext.trainers.pre_train.train run_name=gpu01 base_output_directory=/deps/output  \
   dataset_type=synthetic enable_checkpointing=True steps=10 attention=cudnn_flash_te scan_layers=False \
   use_iota_embed=True hardware=gpu per_device_batch_size=12
 ```
@@ -165,9 +165,9 @@ https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/configs/gpu/a3
 echo "Running 1vm.sh"
 
 # Example command to invoke this script via XPK
-# python3 xpk/xpk.py workload create --cluster ${CLUSTER_NAME} \
-# --workload ${WORKLOAD_NAME} --docker-image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME} \
-# --device-type ${DEVICE_TYPE} --num-slices 1 \
+# python3 xpk/xpk.py workload create --cluster ${CLUSTER_NAME?} \
+# --workload ${WORKLOAD_NAME?} --docker-image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME?} \
+# --device-type ${DEVICE_TYPE?} --num-slices 1 \
 # --command "bash src/maxtext/configs/gpu/a3/llama_2_7b/1vm.sh"
 
 # Stop execution if any command exits with error
@@ -182,7 +182,7 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
-export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$RUN_NAME/HLO_dumps/
+export XLA_FLAGS="--xla_dump_to=${OUTPUT_PATH?}/${RUN_NAME?}/HLO_dumps/
 --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false
  --xla_gpu_enable_command_buffer='' --xla_gpu_enable_highest_priority_async_stream=true
  --xla_gpu_all_reduce_combine_threshold_bytes=134217728 --xla_gpu_all_gather_combine_threshold_bytes=134217728
@@ -194,7 +194,7 @@ export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$RUN_NAME/HLO_dumps/
 
 
 # 1 node, DATA_DP=1, ICI_FSDP=8
-python3 -m MaxText.train src/maxtext/configs/gpu/models/llama2_7b.yml run_name=$RUN_NAME dcn_data_parallelism=1 \
-  ici_fsdp_parallelism=8 base_output_directory=$OUTPUT_PATH attention=cudnn_flash_te scan_layers=False \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/llama2_7b.yml run_name=${RUN_NAME?} dcn_data_parallelism=1 \
+  ici_fsdp_parallelism=8 base_output_directory=${OUTPUT_PATH?} attention=cudnn_flash_te scan_layers=False \
   use_iota_embed=True hardware=gpu
 ```

@@ -8,7 +8,7 @@ fi
 # Define the arguments in an array
 args=(
   "-m"
-  "maxtext.decode"
+  "maxtext.inference.decode"
   "${CONFIG_PATH}"
   "tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"/tokenizer.llama2"
   "model_name=llama2-7b"

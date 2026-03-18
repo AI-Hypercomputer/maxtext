@@ -27,7 +27,7 @@ jobs:
         run: uv venv --python 3.12 $GITHUB_WORKSPACE/venv
 
       - name: Install dependencies
-        run: . $GITHUB_WORKSPACE/venv/bin/activate && uv pip install -r dependencies/requirements/requirements_docs.txt
+        run: . $GITHUB_WORKSPACE/venv/bin/activate && uv pip install -r src/dependencies/requirements/requirements_docs.txt
 
       - name: Build documentation
         run: |

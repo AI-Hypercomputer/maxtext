@@ -24,7 +24,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec, NamedSharding
 
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 

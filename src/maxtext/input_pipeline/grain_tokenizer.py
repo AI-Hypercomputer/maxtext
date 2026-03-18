@@ -30,7 +30,7 @@ class TokenizerTransformBase:
   # pylint: disable=attribute-defined-outside-init
   feature_names: str | Sequence[str]
   sequence_length: int | Sequence[int]
-  tokenizer: tokenizer.SentencePieceTokenizerGrain | tokenizer.HFTokenizer
+  tokenizer: tokenizer.SentencePieceTokenizer | tokenizer.HFTokenizer
 
   def __post_init__(self):
     self._processor = None

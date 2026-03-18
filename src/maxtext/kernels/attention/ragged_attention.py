@@ -24,7 +24,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
-from MaxText.common_types import DEFAULT_MASK_VALUE
+from maxtext.common.common_types import DEFAULT_MASK_VALUE
 
 
 def get_mha_cost_estimate(shape_dtype):

@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from MaxText.layers import embeddings
+from maxtext.layers import embeddings
 
 
 """

@@ -28,22 +28,24 @@ from jax.sharding import AxisType, Mesh
 from maxtext.utils import maxtext_utils
 from maxtext.common.gcloud_stub import is_decoupled
 
-from MaxText import pyconfig
-from MaxText.common_types import (
+from maxtext.common.common_types import (
     AttentionType,
     DECODING_ACTIVE_SEQUENCE_INDICATOR,
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
+    DEFAULT_MASK_VALUE,
 )
-from MaxText.layers.attention_mla import MLA
-from MaxText.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
-from MaxText.layers.attentions import Attention
+from maxtext.layers.attention_mla import MLA
+from maxtext.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
+from maxtext.layers.attentions import Attention
+from maxtext.configs import pyconfig
+from maxtext.models.qwen3 import Qwen3NextGatedDeltaNet
 import numpy as np
 import pytest
 
 from tests.utils import attention_test_util
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -289,7 +291,7 @@ class AttentionTest(parameterized.TestCase):
     """Initializes the configuration for each test"""
     super().setUp()
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     if not is_decoupled():
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
     config = pyconfig.initialize(
@@ -473,7 +475,15 @@ class AttentionTest(parameterized.TestCase):
   def test_tpu_kernel_attention_mqa(self):
     self.tpu_kernel_attention_helper(1)
 
-  def tpu_kernel_attention_helper(self, num_kv_heads):
+  @pytest.mark.tpu_only
+  def test_tpu_kernel_attention_mha_share_kv(self):
+    self.tpu_kernel_attention_helper(self.num_kv_heads, share_kv_projections=True)
+
+  @pytest.mark.tpu_only
+  def test_tpu_kernel_attention_gqa_share_kv(self):
+    self.tpu_kernel_attention_helper(self.num_kv_heads // 2, share_kv_projections=True)
+
+  def tpu_kernel_attention_helper(self, num_kv_heads, share_kv_projections=False):
     """Test equivalence between dot_product and TPU accelerated"""
 
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
@@ -493,6 +503,7 @@ class AttentionTest(parameterized.TestCase):
         attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
+        share_kv_projections=share_kv_projections,
         rngs=self.nnx_rng,
     )
 
@@ -522,6 +533,7 @@ class AttentionTest(parameterized.TestCase):
         attention_kernel="flash",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
+        share_kv_projections=share_kv_projections,
         rngs=self.nnx_rng,
     )
     nnx.update(attention_as_mha_flash, generic_state)
@@ -538,6 +550,84 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
     )
+
+  def test_share_kv_projections(self):
+    """Test that kv projections are shared."""
+    dummy_inputs_q = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
+    attention_share_kv = Attention(
+        config=self.cfg,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        dropout_rate=self.cfg.dropout_rate,
+        share_kv_projections=True,
+        rngs=self.nnx_rng,
+    )
+
+    self.assertFalse(hasattr(attention_share_kv, "value"))
+    self.assertTrue(hasattr(attention_share_kv, "key"))
+
+    # 1. Check NNX state
+    state_shared = nnx.state(attention_share_kv)
+    self.assertNotIn("value", state_shared)
+    self.assertIn("key", state_shared)
+
+    # 2. Forward Pass Verification
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
+
+    output_shared, _ = attention_share_kv(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    self.assertEqual(output_shared.shape, (self.global_batch_size, self.max_target_length, self.embed_dim))
+
+    # 3. Equivalence Check with standard unshared Attention
+    attention_no_share = Attention(
+        config=self.cfg,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        dropout_rate=self.cfg.dropout_rate,
+        share_kv_projections=False,
+        rngs=self.nnx_rng,
+    )
+
+    # Force unshared layer to copy weights from shared layer, mapping 'key' to 'value'
+    attention_no_share.query.kernel.value = attention_share_kv.query.kernel.value
+    attention_no_share.key.kernel.value = attention_share_kv.key.kernel.value
+    attention_no_share.value.kernel.value = attention_share_kv.key.kernel.value
+    attention_no_share.out.kernel.value = attention_share_kv.out.kernel.value
+
+    output_no_share, _ = attention_no_share(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    self.assertTrue(jax.numpy.allclose(output_shared, output_no_share, rtol=1e-04, atol=1e-04, equal_nan=False))
 
   @parameterized.named_parameters(
       {
@@ -1246,7 +1336,7 @@ class MLATest(attention_test_util.MLATestBase):
     # Create a copy of the arguments and override the attention_type for the base model
     attention_config_args = self.config_arguments.copy()
     attention_config_args["attention_type"] = AttentionType.GLOBAL.value
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     attention_cfg = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **attention_config_args,
@@ -1282,10 +1372,9 @@ class MLATest(attention_test_util.MLATestBase):
 
     # 3. Initialize the MLA layer
     mla_config_args = self.config_arguments.copy()
-    mla_extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    mla_extra_args = get_decoupled_parallelism_overrides()
     mla_config_args.update(mla_extra_args)
     _, mla_layer = self.init_mla(mla_config_args, rope_type="default")
-    _, mla_layer = self.init_mla(self.config_arguments, rope_type="default")
 
     # 4. Assert that the MLA layer DOES NOT HAVE the base projections
     self.assertFalse(hasattr(mla_layer, "query"), "MLA should not have 'query' projection.")
@@ -1502,6 +1591,193 @@ class MLATest(attention_test_util.MLATestBase):
         f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
         f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
     )
+
+  def get_indexer_test_data(self, batch_size, q_len, kv_len, num_heads, head_dim):
+    """Helper to generate random data for indexer tests."""
+    key_q, key_k, key_is = jax.random.split(self.rng, 3)
+    query = jax.random.normal(key_q, (batch_size, q_len, num_heads, head_dim))
+    key = jax.random.normal(key_k, (batch_size, kv_len, num_heads, head_dim))
+    indexer_score = jax.random.normal(key_is, (batch_size, q_len, kv_len))
+    return query, key, indexer_score
+
+  def get_causal_mask_for_indexer(self, batch_size, q_len, kv_len):
+    """Helper to generate a causal mask with DEFAULT_MASK_VALUE."""
+    row_ids = jnp.arange(q_len)[:, None]
+    col_ids = jnp.arange(kv_len)[None, :]
+    attention_mask = jnp.where(col_ids <= row_ids, 0.0, DEFAULT_MASK_VALUE)
+    attention_mask = jnp.broadcast_to(attention_mask, (batch_size, q_len, kv_len))
+    return attention_mask
+
+  def test_indexer_loss(self):
+    """Test indexer loss computation."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_sparse_indexer"] = True
+    mla_config_args["attention"] = "dot_product"
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    batch_size = 2
+    q_len = 3
+    kv_len = 4
+    num_heads = 5
+    head_dim = 6
+    scaling_factor = 0.5
+
+    query, key, indexer_score = self.get_indexer_test_data(batch_size, q_len, kv_len, num_heads, head_dim)
+
+    # Causal mask
+    attention_mask = self.get_causal_mask_for_indexer(batch_size, q_len, kv_len)
+    indexer_score += attention_mask
+
+    topk_indices = jnp.array([[[0, 1], [0, 1], [0, 1]], [[0, 1], [0, 1], [0, 1]]])
+    indexer_mask = mla.indexer.generate_mask(topk_indices, kv_len) + attention_mask
+
+    loss_dense = mla.calculate_indexer_loss(
+        indexer_score=indexer_score,
+        query=query,
+        key=key,
+        attention_mask=attention_mask,
+        indexer_mask=indexer_mask,
+        sparse_loss=False,
+        scaling_factor=scaling_factor,
+    )
+
+    loss_sparse = mla.calculate_indexer_loss(
+        indexer_score=indexer_score,
+        query=query,
+        key=key,
+        attention_mask=attention_mask,
+        indexer_mask=indexer_mask,
+        sparse_loss=True,
+        scaling_factor=scaling_factor,
+    )
+
+    np.testing.assert_array_less(0.0, loss_dense)
+    np.testing.assert_array_less(0.0, loss_sparse)
+
+  def test_indexer_loss_kl_divergence_zero(self):
+    """Test that KL divergence is 0 when target and pred distributions match exactly."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_sparse_indexer"] = True
+    mla_config_args["attention"] = "dot_product"
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    batch_size = 2
+    q_len = 3
+    kv_len = 4
+    num_heads = 5
+    head_dim = 6
+
+    # Setup perfectly matching distributions
+    # Make query and key such that einsum yields zeros (so softmax gives uniform distribution over unmasked)
+    query = jnp.zeros((batch_size, q_len, num_heads, head_dim))
+    key = jnp.zeros((batch_size, kv_len, num_heads, head_dim))
+
+    # Causal mask
+    attention_mask = self.get_causal_mask_for_indexer(batch_size, q_len, kv_len)
+
+    # Indexer score matches the shape and is uniform
+    indexer_score = jnp.zeros((batch_size, q_len, kv_len)) + attention_mask
+
+    topk_indices = jnp.array([[[0, 1], [0, 1], [0, 1]], [[0, 1], [0, 1], [0, 1]]])
+    indexer_mask = mla.indexer.generate_mask(topk_indices, kv_len) + attention_mask
+
+    loss = mla.calculate_indexer_loss(
+        indexer_score=indexer_score,
+        query=query,
+        key=key,
+        attention_mask=attention_mask,
+        indexer_mask=indexer_mask,
+        sparse_loss=False,
+        scaling_factor=1.0,
+    )
+
+    np.testing.assert_allclose(loss, 0.0, atol=1e-5)
+
+
+class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
+  """Test for the Gated Delta Net in Qwen3-Next"""
+
+  def setUp(self):
+    super().setUp()
+    self.config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "max_prefill_predict_length": 16,
+        "max_target_length": 32,
+        "base_emb_dim": 128,  # changed to base_emb_dim so it properly overrides the default 2048
+        "gdn_num_value_heads": 4,
+        "gdn_num_key_heads": 4,
+        "gdn_key_head_dim": 32,
+        "gdn_value_head_dim": 32,
+        "gdn_conv_kernel_dim": 4,
+        "gdn_chunk_size": 16,
+        "dtype": "bfloat16",
+    }
+    self.cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **self.config_arguments,
+    )
+    self.rng = jax.random.PRNGKey(0)
+    self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
+
+  def get_structured_data(self, dtype):
+    """get structured data for GDN (only requires hidden states)"""
+    lnx = jax.random.normal(
+        self.rng,
+        shape=(self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length, self.cfg.emb_dim),
+        dtype=dtype,
+    )
+    return lnx
+
+  @pytest.mark.tpu_only
+  def test_autoregression(self):
+    cfg = self.cfg
+    prefill_length = cfg.max_prefill_predict_length
+    decode_total_length = cfg.max_target_length
+
+    # 1. Init Data
+    lnx = self.get_structured_data(cfg.dtype)
+
+    # 2. Init GDN Layer
+    gdn = Qwen3NextGatedDeltaNet(
+        config=cfg,
+        dtype=cfg.dtype,
+        model_mode=MODEL_MODE_PREFILL,
+        rngs=self.nnx_rng,
+    )
+
+    # 3. Full / Train mode
+    gdn_full = gdn(
+        lnx,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    # 4. Prefill mode
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+
+    gdn_prefill = gdn(
+        lnx_prefill,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(gdn_prefill, gdn_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
+    )
+
+    # 5. Autoregressive mode
+    for idx in range(prefill_length, decode_total_length):
+      lnx_idx = lnx[:, idx : idx + 1, :]
+
+      gdn_idx = gdn(
+          lnx_idx,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+
+      gdn_full_this_idx = gdn_full[:, idx : idx + 1, :]
+      self.assertEqual(gdn_full_this_idx.shape, gdn_idx.shape)
+
+      self.assertTrue(jax.numpy.allclose(gdn_full_this_idx, gdn_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
 
 
 if __name__ == "__main__":

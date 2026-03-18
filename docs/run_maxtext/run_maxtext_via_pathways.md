@@ -37,10 +37,12 @@ Before you can run a MaxText workload, you must complete the following setup ste
 
 3. **Build and upload a MaxText Docker image** to your project's Artifact Registry.
 
+   [Follow the steps to configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/) before running the commands below.
+
    Step 1: Build the Docker image for a TPU device. This image contains MaxText and its dependencies.
 
    ```shell
-   bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
+   bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
    ```
 
    Step 2: Configure Docker to authenticate with Google Cloud
@@ -52,7 +54,7 @@ Before you can run a MaxText workload, you must complete the following setup ste
    Step 3: Upload the image to your project's registry. Replace `$USER_runner` with your desired image name.
 
    ```shell
-   bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$USER_runner
+   bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$USER_runner
    ```
 
 ## 2. Environment configuration
@@ -74,7 +76,7 @@ export WORKLOAD_NODEPOOL_COUNT=1 # Number of TPU slices for your job
 export BUCKET_NAME="your-gcs-bucket-name"
 export RUN_NAME="maxtext-run-1"
 # The Docker image you pushed in the prerequisite step
-export DOCKER_IMAGE="gcr.io/${PROJECT}/${USER}_runner"
+export DOCKER_IMAGE="gcr.io/${PROJECT?}/${USER}_runner"
 ```
 
 ## 3. Running a batch workload
@@ -87,20 +89,20 @@ Use the `xpk workload create-pathways` command to start the job.
 
 ```bash
 xpk workload create-pathways \
-  --workload=$WORKLOAD_NAME \
-  --cluster=$CLUSTER \
-  --num-slices=$WORKLOAD_NODEPOOL_COUNT \
-  --tpu-type=$TPU_TYPE \
-  --project=$PROJECT \
-  --zone=$ZONE \
-  --docker-image=${DOCKER_IMAGE} \
-  --command="python3 -m MaxText.train src/maxtext/configs/base.yml \
-    base_output_directory=gs://${BUCKET_NAME} \
+  --workload=${WORKLOAD_NAME?} \
+  --cluster=${CLUSTER?} \
+  --num-slices=${WORKLOAD_NODEPOOL_COUNT?} \
+  --tpu-type=${TPU_TYPE?} \
+  --project=${PROJECT?} \
+  --zone=${ZONE?} \
+  --docker-image=${DOCKER_IMAGE?} \
+  --command="python3 -m maxtext.trainers.pre_train.train \
+    base_output_directory=gs://${BUCKET_NAME?} \
     per_device_batch_size=1 \
     enable_checkpointing=false \
     dataset_type=synthetic \
     enable_single_controller=True \
-    run_name=${RUN_NAME}-pathways-batch"
+    run_name=${RUN_NAME?}-pathways-batch"
 ```
 
 ### Verify the workload
@@ -108,7 +110,7 @@ xpk workload create-pathways \
 You can check the status of your running workloads with the `xpk workload list` command.
 
 ```bash
-xpk workload list --cluster=$CLUSTER --project=$PROJECT --zone=$ZONE
+xpk workload list --cluster=${CLUSTER?} --project=${PROJECT?} --zone=${ZONE?}
 ```
 
 ## 4. Running a headless (interactive) workload
@@ -122,12 +124,12 @@ This command reserves the TPUs and starts the Pathways head service on the clust
 ```bash
 xpk workload create-pathways \
   --headless \
-  --workload=${WORKLOAD_NAME} \
-  --num-slices=${WORKLOAD_NODEPOOL_COUNT} \
-  --tpu-type=${TPU_TYPE} \
-  --project=${PROJECT} \
-  --zone=${ZONE} \
-  --cluster=${CLUSTER}
+  --workload=${WORKLOAD_NAME?} \
+  --num-slices=${WORKLOAD_NODEPOOL_COUNT?} \
+  --tpu-type=${TPU_TYPE?} \
+  --project=${PROJECT?} \
+  --zone=${ZONE?} \
+  --cluster=${CLUSTER?}
 ```
 
 ### Step 2: Connect to the cluster via port forwarding
@@ -138,7 +140,7 @@ This command forwards local port 29000 to the controller pod in the cluster. It 
 
 ```bash
 kubectl port-forward \
-  "$(kubectl get pods -o name | grep ${WORKLOAD_NAME}-pathways-head)" \
+  "$(kubectl get pods -o name | grep ${WORKLOAD_NAME?}-pathways-head)" \
   29000:29000 &> /dev/null &
 ```
 
@@ -152,13 +154,13 @@ export JAX_PLATFORMS=proxy
 export JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 
 # Run the training script
-python3 -m MaxText.train src/maxtext/configs/base.yml \
-  base_output_directory=gs://${BUCKET_NAME} \
+python3 -m maxtext.trainers.pre_train.train \
+  base_output_directory=gs://${BUCKET_NAME?} \
   per_device_batch_size=1 \
   enable_checkpointing=false \
   dataset_type=synthetic \
   enable_single_controller=True \
-  run_name=${RUN_NAME}-pathways-headless
+  run_name=${RUN_NAME?}-pathways-headless
 ```
 
 The output streams directly to your terminal, just as if you were running on a local accelerator.
@@ -171,7 +173,7 @@ The output streams directly to your terminal, just as if you were running on a l
   - Ensure you have successfully pushed the image to your project's Artifact Registry.
   - Check that your GKE cluster has permissions to pull from the registry.
 - **`kubectl port-forward` fails**:
-  - Confirm that the pod from Step 1 is running (`kubectl get pods`). The name should match `${WORKLOAD_NAME}-pathways-head-0`.
+  - Confirm that the pod from Step 1 is running (`kubectl get pods`). The name should match `${WORKLOAD_NAME?}-pathways-head-0`.
   - Ensure you are authenticated with `kubectl` and have the correct context set for your GKE cluster.
 - Make sure you import `pathwaysutils` package and call `pathwaysutils.initialize()` in your script when running the workload.
 

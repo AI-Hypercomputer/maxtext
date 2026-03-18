@@ -213,7 +213,6 @@ def pretrain_preprocessing_pipeline(
       config.add_bos,
       config.add_eos,
       config.hf_access_token,
-      config.dataset_type,
   )
   if tokenizer_model.pad_id is not None:
     pad_id = tokenizer_model.pad_id
@@ -238,7 +237,7 @@ def pretrain_preprocessing_pipeline(
     # global_batch_size_to_load has been expanded in pyconfig.py when expansion_factor_real_data > 1.
     # But when using Grain, we want to keep the batch_size consistent with that in the checkpoint.
     # We revert the batch_size expansion here, but load multiple batches per step in multihost_dataloading.py.
-    batch_size = batch_size // config.expansion_factor_real_data
+    batch_size = int(batch_size // config.expansion_factor_real_data)
 
   if config.packing:
     length_struct = {col: config.max_target_length for col in data_columns}
@@ -321,7 +320,6 @@ def dpo_preprocessing_pipeline(
       config.add_bos,
       config.add_eos,
       config.hf_access_token,
-      config.dataset_type,
   )
   if tokenizer_model.pad_id is not None:
     pad_id = tokenizer_model.pad_id

@@ -25,7 +25,7 @@ import numpy as np
 
 import jax
 
-from MaxText.globals import EPS
+from maxtext.utils.globals import EPS
 from maxtext.common.gcloud_stub import mldiagnostics_modules
 from maxtext.common.gcloud_stub import workload_monitor
 from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics
@@ -338,6 +338,9 @@ class MetricLogger:
       self.cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(
           metrics["scalar"].get("evaluation/moe_lb_loss", 0.0)
       )
+      self.cumulative_eval_metrics["scalar"]["eval/indexer_loss"] += float(
+          metrics["scalar"].get("evaluation/indexer_loss", 0.0)
+      )
       self.cumulative_eval_metrics["scalar"]["eval/mtp_loss"] += float(metrics["scalar"].get("evaluation/mtp_loss", 0.0))
       self.cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] += float(
           metrics["scalar"].get("evaluation/mtp_acceptance_rate_percent", 0.0)
@@ -354,6 +357,9 @@ class MetricLogger:
       self.cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
       self.cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
           self.cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+      )
+      self.cumulative_eval_metrics["scalar"]["eval/avg_indexer_loss"] = (
+          self.cumulative_eval_metrics["scalar"]["eval/indexer_loss"] / eval_step_count
       )
       self.cumulative_eval_metrics["scalar"]["eval/avg_mtp_loss"] = (
           self.cumulative_eval_metrics["scalar"]["eval/mtp_loss"] / eval_step_count

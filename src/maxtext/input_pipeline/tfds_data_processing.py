@@ -25,7 +25,6 @@ import tensorflow_datasets as tfds
 import jax
 
 from maxtext.input_pipeline import multihost_dataloading
-from maxtext.input_pipeline import tokenizer
 from maxtext.input_pipeline.packing import sequence_packing
 from maxtext.input_pipeline import input_pipeline_utils
 
@@ -116,7 +115,9 @@ def preprocessing_pipeline(
 
   if tokenize:
     dataset = dataset.map(
-        lambda x: tokenizer.TokenizeOp(tokenizer=tokenizer_model, features=x, data_keys=data_column_names),
+        lambda x: input_pipeline_utils.TokenizeOp(
+            tokenizer_model=tokenizer_model, features=x, data_keys=data_column_names
+        ),
         num_parallel_calls=AUTOTUNE,
     )
 

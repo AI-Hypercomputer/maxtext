@@ -53,7 +53,7 @@ import numpy as np
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
-from MaxText.maxengine import MaxEngine
+from maxtext.inference.maxengine.maxengine import MaxEngine
 from maxtext.input_pipeline.packing.prefill_packing import PrefillProcessor
 from maxtext.input_pipeline.packing.prefill_packing import BatchedPrefillProcessor
 from maxtext.utils import max_logging

@@ -24,33 +24,36 @@ We use [Tunix](https://github.com/google/tunix), a JAX-based library designed fo
 
 In this tutorial we use a single host TPU VM such as `v6e-8/v5p-8`. Let's get started!
 
-## Install dependencies
+## Install MaxText and Post-Training dependencies
 
-```sh
-# 1. Clone the repository
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-cd maxtext
-
-# 2. Create virtual environment
+```bash
+# Create a virtual environment
 export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
 pip install uv
-uv venv --python 3.12 --seed $VENV_NAME
-source $VENV_NAME/bin/activate
+uv venv --python 3.12 --seed ${VENV_NAME?}
+source ${VENV_NAME?}/bin/activate
+```
 
-# 3. Install dependencies in editable mode
-uv pip install -e .[tpu] --resolution=lowest
-bash tools/setup/setup_post_training_requirements.sh
+Run the following commands to get all the necessary installations.
+
+```bash
+uv pip install "maxtext[tpu-post-train]>=0.2.0" --resolution=lowest
+install_maxtext_tpu_post_train_extra_deps
 ```
 
 ## Setup environment variables
+
+Follow the instructions [here](https://huggingface.co/docs/huggingface_hub/v0.21.2/guides/cli) to login to Hugging Face using your access token using
+
+```bash
+huggingface-cli login
+```
 
 Set the following environment variables before running SFT.
 
 ```sh
 # -- Model configuration --
-export PRE_TRAINED_MODEL=<model name> # e.g., 'llama3.1-8b'
-export PRE_TRAINED_MODEL_TOKENIZER=<tokenizer path> # e.g., 'meta-llama/Llama-3.1-8B-Instruct'
-export HF_TOKEN=<Hugging Face access token>
+export PRE_TRAINED_MODEL=<model name> # e.g., 'llama3.1-8b-Instruct'
 
 # -- MaxText configuration --
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
@@ -89,18 +92,16 @@ export PRE_TRAINED_MODEL_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs:
 Now you are ready to run SFT using the following command:
 
 ```sh
-python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml \
-    run_name=${RUN_NAME} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-    model_name=${PRE_TRAINED_MODEL} \
-    load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH} \
-    hf_access_token=${HF_TOKEN} \
-    tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \
-    per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
-    steps=${STEPS} \
-    hf_path=${DATASET_NAME} \
-    train_split=${TRAIN_SPLIT} \
-    train_data_columns=${TRAIN_DATA_COLUMNS} \
+python3 -m maxtext.trainers.post_train.sft.train_sft \
+    run_name=${RUN_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    model_name=${PRE_TRAINED_MODEL?} \
+    load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH?} \
+    per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
+    steps=${STEPS?} \
+    hf_path=${DATASET_NAME?} \
+    train_split=${TRAIN_SPLIT?} \
+    train_data_columns=${TRAIN_DATA_COLUMNS?} \
     profiler=xplane
 ```
 

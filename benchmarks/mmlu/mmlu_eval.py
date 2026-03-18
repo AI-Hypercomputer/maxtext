@@ -56,8 +56,8 @@ from benchmarks.mmlu.mmlu_categories import subcategories
 
 from tqdm import tqdm
 
-from MaxText import pyconfig
-from MaxText import maxengine
+from maxtext.configs import pyconfig
+from maxtext.inference.maxengine import maxengine
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 

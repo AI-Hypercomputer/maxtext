@@ -26,15 +26,14 @@ import jax
 from jax import lax
 from jax import numpy as jnp
 from jax.sharding import Mesh
-from MaxText import pyconfig
-from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
-from MaxText.globals import MAXTEXT_CONFIGS_DIR
-from MaxText.layers import nnx_wrappers, quantizations
+from maxtext.configs import pyconfig
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
+from maxtext.kernels.megablox import gmm
+from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
-from maxtext.common.gcloud_stub import is_decoupled
-from maxtext.kernels.megablox import gmm
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 import numpy as np
 import pytest
 
@@ -338,7 +337,7 @@ class QuantTest(unittest.TestCase):
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     init_kwargs = (
         {
             "run_name": "test",

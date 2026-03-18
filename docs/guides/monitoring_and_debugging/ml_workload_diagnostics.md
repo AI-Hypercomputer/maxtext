@@ -35,7 +35,7 @@ MaxText has integrated the ML Diagnostics [SDK](https://github.com/AI-Hypercompu
 1. Enable ML Diagnostics to just capture Maxtext metrics and configs
 
    ```
-      python3 -m MaxText.train src/maxtext/configs/base.yml \
+      python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
          run_name=${USER}-tpu-job \
          base_output_directory="gs://your-output-bucket/" \
          dataset_path="gs://your-dataset-bucket/" \
@@ -47,7 +47,7 @@ MaxText has integrated the ML Diagnostics [SDK](https://github.com/AI-Hypercompu
 2. Enable ML Diagnostics to capture Maxtext metrics, configs and singlehost profiles (on the first TPU device)
 
    ```
-      python3 -m MaxText.train src/maxtext/configs/base.yml \
+      python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
          run_name=${USER}-tpu-job \
          base_output_directory="gs://your-output-bucket/" \
          dataset_path="gs://your-dataset-bucket/" \
@@ -60,7 +60,7 @@ MaxText has integrated the ML Diagnostics [SDK](https://github.com/AI-Hypercompu
 3. Enable ML Diagnostics to capture Maxtext metrics, configs and multihost profiles (on all TPU devices)
 
    ```
-      python3 -m MaxText.train src/maxtext/configs/base.yml \
+      python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
          run_name=${USER}-tpu-job \
          base_output_directory="gs://your-output-bucket/" \
          dataset_path="gs://your-dataset-bucket/" \

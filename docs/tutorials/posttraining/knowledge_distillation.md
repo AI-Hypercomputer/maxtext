@@ -69,18 +69,18 @@ export TPU_VM_NAME=<your-tpu-vm-name>
 export DISK_NAME=<your-disk-name>  # e.g., my-hyperdisk
 export DISK_SIZE=<disk-size>  # e.g., 500GB
 
-gcloud compute disks create ${DISK_NAME} \
-  --size=${DISK_SIZE} \
+gcloud compute disks create ${DISK_NAME?} \
+  --size=${DISK_SIZE?} \
   --type=hyperdisk-balanced \
-  --zone=${ZONE}
+  --zone=${ZONE?}
 ```
 
 Then, attach the disk to your TPU VM:
 
 ```bash
-gcloud compute instances attach-disk ${TPU_VM_NAME} \
-  --disk=${DISK_NAME} \
-  --zone=${ZONE}
+gcloud compute instances attach-disk ${TPU_VM_NAME?} \
+  --disk=${DISK_NAME?} \
+  --zone=${ZONE?}
 ```
 
 Inside the TPU VM, format and mount the disk (if not already mounted):
@@ -96,8 +96,8 @@ Update the BASE_DIRECTORY to point to the mounted disk and create the directory:
 
 ```bash
 export BASE_NAME=<your-base-directory>  # e.g., knowledge-distillation
-export BASE_DIRECTORY=/mnt/hyperdisk/${BASE_NAME}
-mkdir -p ${BASE_DIRECTORY}
+export BASE_DIRECTORY=/mnt/hyperdisk/${BASE_NAME?}
+mkdir -p ${BASE_DIRECTORY?}
 ```
 
 > **Note:** This tutorial uses a mounted Hyperdisk for performance and reproducibility, because writing large model files and many small I/O operations directly to `gs://` can be significantly slower.
@@ -109,8 +109,8 @@ For the teacher model, we will use **vLLM** to run inference. vLLM can load Hugg
 You can simply download the model from Hugging Face to your local directory:
 
 ```bash
-huggingface-cli login --token $HF_TOKEN
-huggingface-cli download Qwen/Qwen3-32B --repo-type model --local-dir ${BASE_DIRECTORY}/qwen3-32b
+huggingface-cli login --token ${HF_TOKEN?}
+huggingface-cli download Qwen/Qwen3-32B --repo-type model --local-dir ${BASE_DIRECTORY?}/qwen3-32b
 ```
 
 ### Obtain and prepare the student model
@@ -129,13 +129,13 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 ```bash
 # Set the checkpoint directory
-export PRE_TRAINED_MODEL_CKPT_DIRECTORY=${BASE_DIRECTORY}/llama3.1-8b-ckpt
+export PRE_TRAINED_MODEL_CKPT_DIRECTORY=${BASE_DIRECTORY?}/llama3.1-8b-ckpt
 
 # Convert to MaxText format
-python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/maxtext/configs/base.yml \
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=llama3.1-8b \
-    hf_access_token=${HF_TOKEN} \
-    base_output_directory=${PRE_TRAINED_MODEL_CKPT_DIRECTORY} \
+    hf_access_token=${HF_TOKEN?} \
+    base_output_directory=${PRE_TRAINED_MODEL_CKPT_DIRECTORY?} \
     scan_layers=True skip_jax_distributed_system=True
 ```
 
@@ -146,18 +146,18 @@ Use the provided script `generate_distillation_data_vllm.py` to generate the dat
 Run the generation script:
 
 ```bash
-export OUTPUT_DATASET=${BASE_DIRECTORY}/datasets/distillation_data.parquet
+export OUTPUT_DATASET=${BASE_DIRECTORY?}/datasets/distillation_data.parquet
 
 python3 -m tools.data_generation.generate_distillation_data_vllm \
   --dataset-path HuggingFaceH4/ultrachat_200k \
   --data-split train_sft \
   --data-columns messages \
-  --hf-access-token $HF_TOKEN \
-  --teacher-model ${BASE_DIRECTORY}/qwen3-32b \
+  --hf-access-token ${HF_TOKEN?} \
+  --teacher-model ${BASE_DIRECTORY?}/qwen3-32b \
   --use-chat-template \
   --num-prompts 5120 \
   --num-generations 2 \
-  --output-file ${OUTPUT_DATASET}
+  --output-file ${OUTPUT_DATASET?}
 
 ```
 
@@ -170,22 +170,22 @@ You can now fine-tune your smaller student model using supervised fine-tuning te
 Example command to run fine-tuning on a TPU v6e-8:
 
 ```bash
-python3 -m MaxText.sft_trainer src/maxtext/configs/post_train/sft.yml \
-  run_name=${RUN_NAME} \
-  base_output_directory=${BASE_DIRECTORY}/distillation/qwen3-32b-distill-llama3.1-8b \
+python3 -m maxtext.trainers.post_train.sft.train_sft_deprecated \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_DIRECTORY?}/distillation/qwen3-32b-distill-llama3.1-8b \
   tokenizer_path=meta-llama/Llama-3.1-8B-Instruct tokenizer_type=huggingface \
   dataset_type=hf \
   hf_path=parquet \
-  hf_train_files=${OUTPUT_DATASET} \
+  hf_train_files=${OUTPUT_DATASET?} \
   train_split='train' \
   train_data_columns=['messages'] \
-  load_parameters_path=${PRE_TRAINED_MODEL_CKPT_DIRECTORY}/0/items \
+  load_parameters_path=${PRE_TRAINED_MODEL_CKPT_DIRECTORY?}/0/items \
   model_name=llama3.1-8b \
   per_device_batch_size=2 \
   steps=200 \
   ici_expert_parallelism=-1 ici_fsdp_parallelism=4 \
   max_target_length=2048 \
-  hf_access_token=$HF_TOKEN \
+  hf_access_token=${HF_TOKEN?} \
   profiler=xplane
 ```
 
@@ -195,8 +195,8 @@ The checkpoint from the student model's fine-tuning (on the teacher-generated da
 
 ```bash
 # Get the latest checkpoint for fine-tuned student model
-CHECKPOINTS_PATH=${BASE_DIRECTORY}/distillation/qwen3-32b-distill-llama3.1-8b/${RUN_NAME}/checkpoints
-checkpoints=$(ls $CHECKPOINTS_PATH)
+CHECKPOINTS_PATH=${BASE_DIRECTORY?}/distillation/qwen3-32b-distill-llama3.1-8b/${RUN_NAME?}/checkpoints
+checkpoints=$(ls ${CHECKPOINTS_PATH?})
 integer_dirs=()
 for dir in $checkpoints; do
   dir_name=$(basename "$dir")
@@ -206,23 +206,23 @@ for dir in $checkpoints; do
 done
 sorted_dirs=($(printf '%s\n' "${integer_dirs[@]}" | sort -n))
 largest_dir="${sorted_dirs[-1]}"
-FINE_TUNED_MODEL_CKPT_PATH=${CHECKPOINTS_PATH}/${largest_dir}/model_params
+FINE_TUNED_MODEL_CKPT_PATH=${CHECKPOINTS_PATH?}/${largest_dir}/model_params
 
 # Fine-tune student model on original dataset
-python3 -m MaxText.sft.sft_trainer src/maxtext/configs/post_train/sft.yml \
-  run_name=${RUN_NAME}_stage2 \
-  base_output_directory=${BASE_DIRECTORY}/distillation/qwen3-32b-distill-llama3.1-8b \
+python3 -m maxtext.trainers.post_train.sft.train_sft \
+  run_name=${RUN_NAME?}_stage2 \
+  base_output_directory=${BASE_DIRECTORY?}/distillation/qwen3-32b-distill-llama3.1-8b \
   tokenizer_path=meta-llama/Llama-3.1-8B-Instruct tokenizer_type=huggingface \
   dataset_type=hf \
   hf_path='HuggingFaceH4/ultrachat_200k' \
   train_split='train_sft' \
   train_data_columns=['messages'] \
-  load_parameters_path=${FINE_TUNED_MODEL_CKPT_PATH} \
+  load_parameters_path=${FINE_TUNED_MODEL_CKPT_PATH?} \
   model_name=llama3.1-8b \
   per_device_batch_size=2 \
   steps=200 \
   ici_expert_parallelism=-1 ici_fsdp_parallelism=4 \
   max_target_length=2048 \
-  hf_access_token=$HF_TOKEN \
+  hf_access_token=${HF_TOKEN?} \
   profiler=xplane
 ```

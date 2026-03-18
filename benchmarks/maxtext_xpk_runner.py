@@ -35,7 +35,7 @@ import time
 import omegaconf
 
 import benchmarks.maxtext_trillium_model_configs as model_configs
-from benchmarks.globals import MAXTEXT_CONFIGS_DIR
+from benchmarks.globals import MAXTEXT_PKG_DIR
 from benchmarks.command_utils import run_command_with_updates
 import benchmarks.xla_flags_library as xla_flags
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
@@ -107,7 +107,7 @@ class WorkloadConfig:
   generate_metrics_and_upload_to_big_query: bool = True
   hardware_id: str = "v6e"
   metrics_gcs_file: str = ""
-  base_config: str = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+  base_config: str = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
   topology: str = dataclasses.field(init=False)
   num_devices_per_slice: int = dataclasses.field(init=False)
   db_project: str = ""
@@ -354,7 +354,7 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
       "xla_flags": f"'{xla_flags_str}'",
       "dataset": dataset,
       "run_type": "maxtext-xpk",
-      "config_file": os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"),
+      "config_file": os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
       "topology": wl_config.topology,
       "tuning_params": f"'{tuning_params_str}'",
       "db_project": wl_config.db_project,
@@ -439,8 +439,8 @@ def build_user_command(
           "export ENABLE_PATHWAYS_PERSISTENCE=1 &&",
           f"export JAX_PLATFORMS={jax_platforms} &&",
           "export ENABLE_PJRT_COMPATIBILITY=true &&",
-          "export MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets MAXTEXT_PKG_DIR=/deps/src/MaxText MAXTEXT_REPO_ROOT=/deps &&"
-          f'{hlo_dump} python3 -m MaxText.train {os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")}',
+          "export MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets MAXTEXT_PKG_DIR=/deps/src/maxtext MAXTEXT_REPO_ROOT=/deps &&"
+          f'{hlo_dump} python3 -m maxtext.trainers.pre_train.train {os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")}',
           f"{config_tuning_params}",
           f"steps={wl_config.num_steps}",
           f"model_name={wl_config.model.model_type}",
@@ -586,12 +586,13 @@ def generate_xpk_workload_cmd(
     cluster_config: XpkClusterConfig,
     wl_config: WorkloadConfig,
     workload_name=None,
-    user=os.environ["USER"],
+    user=None,
     temp_key=None,
     exp_name=None,
 ):
   """Generates a command to run a maxtext model on XPK."""
 
+  user = user or os.environ.get("USER", "user")
   is_pathways_enabled = wl_config.pathways_config is not None
   is_pathways_headless_enabled = wl_config.pathways_config and wl_config.pathways_config.headless
 
@@ -719,7 +720,7 @@ def run_xpk_workload(
 def xpk_benchmark_runner(
     cluster_config: XpkClusterConfig,
     workload_configs: list[WorkloadConfig],
-    user=os.environ["USER"],
+    user=None,
     disruption_manager: DisruptionManager = DisruptionManager(),
     exp_name: str = None,
 ):
@@ -738,12 +739,14 @@ def xpk_benchmark_runner(
   Returns:
     The DisruptionManager instance, potentially updated with new workloads.
   """
+  user = user or os.environ.get("USER", "user")
   xpk_workload_names = []
   xpk_workload_cmds = []
   for wl_config in workload_configs:
     command, name = generate_xpk_workload_cmd(
         cluster_config=cluster_config,
         wl_config=wl_config,
+        workload_name=wl_config.run_name,
         user=user,
         exp_name=exp_name,
     )

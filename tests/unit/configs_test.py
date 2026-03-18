@@ -33,7 +33,7 @@ from pydantic import ValidationError
 from yaml import YAMLError
 
 from maxtext.configs import types as pydantic_types
-from MaxText.globals import MAXTEXT_REPO_ROOT
+from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 
 # Define the root directory where configuration files are located.
 CONFIGS_DIR = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs")

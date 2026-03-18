@@ -14,6 +14,10 @@
 
 # This sentinel is a reminder to choose a real run name.
 # If there is already a checkpoint under this run, that checkpoint will auto-resume.
+#
+# NOTE: Some unit/integration tests in MaxText do not always run this file directly.
+# When running in decoupled mode (DECOUPLE_GCLOUD=TRUE), tests may use
+# `decoupled_base_test.yml` instead of `base.yml` via `tests/utils/test_helpers.py`.
 run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
@@ -76,6 +80,9 @@ enable_orbax_v1: False
 checkpoint_conversion_fn: none
 # optional checkpoint context to use for loading. options: "orbax", "safetensors"
 source_checkpoint_layout: "orbax"
+
+# Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing 
+colocated_python_checkpointing: False
 ############################### end checkpointing ##################################
 
 
@@ -214,6 +221,8 @@ wo_tile_drhs_buffer_count: 2
 wi_combine_scopes: False
 wo_combine_scopes: False
 
+merge_gating_gmm: False
+
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
 # how the expert axis is used to shard attention weights and activations
@@ -266,7 +275,6 @@ pipeline_parallel_layers: -1 # Pipeline only this number of layers - for the rem
 # PP degree divides the number of layers.
 # By default (when set to -1) we pipeline all of the decoder layers.
 
-
 # num_pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
@@ -279,8 +287,9 @@ pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights
 # to only one stage's worth, however we only execute one all-gather and reduce across per repeat, as opposed
 # to every microbatch. This is similar to zero-1 sharding, since we also don't need to all gather the FSDP weights in the backward pass.
 # An alternative to setting this to true may be to replace any FSDP with DP and use optimizer offloading if necessary.
-# A more optimal behavior is to all-gather at the start of each repeat, which would ideally get the best of both worlds -
-# a small amount of memory and time, however this has proven hard to implement in SPMD, see b/364386697 for more.
+pipeline_fsdp_ag_per_repeat: False
+# Pipeline weight prefetching per repeat is an advanced SPMD pipeline parallelism improvement technique
+# When enabled, it prefetches necessary weight gathering ahead of microbatched computation, therefore reducing collectives
 
 # There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)
@@ -290,6 +299,7 @@ pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights
 # It may be useful to do the reverse when the layers_per_stage is very large.
 # The below settings only have effect when using pipeline parallelism.
 scan_pipeline_iterations: True
+scan_pipeline_repeats: True
 scan_layers_per_stage: False
 set_remat_policy_on_pipeline_iterations: True
 set_remat_policy_on_layers_per_stage: False
@@ -315,6 +325,7 @@ out_proj: 'remat'
 mla_q: 'remat'
 mla_kv: 'remat'
 attention_out: 'remat'
+engram: 'remat'
 
 optimizer_memory_host_offload: False
 parameter_memory_host_offload: False
@@ -325,12 +336,14 @@ param_scan_axis: 1
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
+share_kv_projections: False # Note: Not compatible with attention_type='mla'
 attention_bias: False # If True, adds a learnable bias to the query, key, and value projections
 attention_sink: False
 sliding_window_size: 0
 chunk_attn_window_size: 0
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
+z_loss_multiplier: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
 mla_naive_kvcache: True
@@ -347,6 +360,13 @@ use_sparse_indexer: False
 index_head_dim: 128
 index_n_heads: 64
 index_topk: 2048
+# Determines the token selection strategy for indexer loss: 
+# - False: Uses all tokens (Dense Warm-up).
+# - True: Uses only top-k tokens (Sparse Training).
+# Note: This is only active when `indexer_loss_scaling_factor` > 0.
+sparse_indexer_loss: False
+# Multiplier for the indexer KL divergence loss
+indexer_loss_scaling_factor: 0.0
 
 # MLA parameters
 q_lora_rank: 0
@@ -354,6 +374,10 @@ kv_lora_rank: 512
 qk_nope_head_dim: 128
 qk_rope_head_dim: 64
 v_head_dim: 128
+
+# QK-Clip (Muon Clip) Configuration
+use_qk_clip: False  # Enable QK-Clip (supported in MLA with DotProduct or Tokamax Splash)
+qk_clip_threshold: 100.0  # Threshold for clipping (tau in the paper)
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False
@@ -400,6 +424,10 @@ jax_cache_dir: "~/jax_cache"
 
 # Hardware
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
+
+# internal_compile allows bypassing open-source topology name mappings when using internal topologies directly via get_topology_desc.
+internal_compile: False
+internal_compile_num_devices: -1 # You must specify the number of devices when using internal_compile.
 
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
@@ -545,7 +573,7 @@ num_vocab_tiling: 1
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
-tokenizer_path: "src/maxtext/assets/tokenizers/tokenizer.llama2"
+tokenizer_path: ""
 # tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
 # grain pipeline supports tokenizer_type: sentencepiece, huggingface
 # hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
@@ -768,6 +796,7 @@ adam_b2: 0.95 # Exponential decay rate to track the second moment of past gradie
 adam_eps: 1.e-8 # A small constant applied to denominator outside of the square root.
 adam_eps_root: 0. # A small constant applied to denominator inside the square root.
 adam_weight_decay: 0.1 # AdamW Weight decay
+adamw_mask: [] # List of parameter names/patterns to exclude from weight decay in AdamW, like ['bias', '.*norm', '.*ln.*'].
 mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inherits from  weight_dtype if unset.
 # Setting nu_dtype is not yet supported by optax, instead nu_dtype is always inherited from weights.
 # See b/399961932 for more.
@@ -899,6 +928,7 @@ xprof_tpu_power_trace_level: 0
 xprof_e2e_enable_fw_throttle_event: False
 xprof_e2e_enable_fw_power_level_event: False
 xprof_e2e_enable_fw_thermal_event: False
+profile_power_events: False # Set to True to enable TPU-specific power/thermal profiling events. Defaults to False to avoid breaking GPU xplane tracing.
 
 log_config: True # Prints the config (after defaults have been set by pyconfig logic)
 debug_sharding: False # Prints model weights sharding info
@@ -992,9 +1022,11 @@ dtype_mm: "float32"  # Data type for multimodal model's vision encoder
 remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding, can be multiple paths separated by comma, exp "/path/image1.jpg,/path/image2.jpg"
-image_placeholder: "<|image|>"
 video_path: "" # Local video path used for decoding, can be multiple paths separated by comma, exp "/path/video1.mp4,/path/video2.mp4"
 audio_path: "" # Local audio path used for decoding, can be multiple paths separated by comma, exp "/path/audio1.wav,/path/audio2.wav"
+image_placeholder: "<|image|>"
+video_placeholder: "<|video|>"
+audio_placeholder: "<|audio|>"
 use_audio_in_video: False
 posemb_type_for_vit: "learn"
 # max_num_images_per_example only applies for training when your image column is a list of images.
@@ -1055,6 +1087,7 @@ subslice_shape: ""
 
 # NNX
 enable_nnx: false
+pure_nnx_decoder: false
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
@@ -1083,6 +1116,9 @@ use_jax_splash: false
 # vLLM Adapter Configurations
 # Path to the HuggingFace-style config directory for the adapter (e.g. src/MaxText/integration/vllm/maxtext_vllm_adapter)
 vllm_hf_config_path: ""
+# A JSON string of overrides to apply to the HuggingFace-style config for the vLLM adapter.
+# This can be used to override specific settings without modifying the original config file. 
+vllm_hf_overrides: {}
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
 # When use_jax_splash=True, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
@@ -1093,3 +1129,28 @@ force_q_layout: false
 mhc_expansion_rate: 1
 # The number of iterations for the Sinkhorn-Knopp algorithm.
 sinkhorn_iterations: 20
+
+################################## DeepSeek Engram ##################################
+# Indices of transformer layers where Engram are integrated; leave empty [] to disable.
+# Example: [1, 4] attaches to the 2nd and 5th layer. 
+engram_layers: []
+# The max 'n' in N-gram. Example: n=3 means it covers both 2-grams and 3-grams.
+engram_max_ngram_size: 3
+# Number of heads dedicated to the Engram.
+engram_num_heads: 8
+# Head dimension for heads.
+engram_head_dim: 1280
+# List of minimum head vocab sizes for each n-gram order.
+engram_vocab_bases: []
+# Temporal window size for Engram convolution.
+engram_kernel_size: 4
+# The seed for Engram hash mapping.
+engram_seed: 0
+
+##### Distillation parameters
+distill_alpha: 0.5
+distill_temperature: 1.0
+# distill_beta is used for cosine similarity loss between intermediate activataitions of out_proj in teacher/student models.
+# 0.0 value disables this feature.
+distill_beta: 0.0
+distill_layer_indices: None

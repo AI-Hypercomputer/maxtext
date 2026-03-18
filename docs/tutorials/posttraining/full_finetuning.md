@@ -32,8 +32,8 @@ cd maxtext
 # 2. Create virtual environment
 export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
 pip install uv
-uv venv --python 3.12 --seed $VENV_NAME
-source $VENV_NAME/bin/activate
+uv venv --python 3.12 --seed ${VENV_NAME?}
+source ${VENV_NAME?}/bin/activate
 
 # 3. Install dependencies in editable mode
 uv pip install -e .[tpu] --resolution=lowest
@@ -90,7 +90,7 @@ MaxText assumes these GCS buckets are created in the same project and that it ha
 export PROJECT=<Google Cloud Project ID>
 export DATASET_GCS_BUCKET=<GCS for dataset> # e.g., gs://my-bucket/my-dataset
 
-bash tools/data_generation/download_dataset.sh ${PROJECT} ${DATASET_GCS_BUCKET}
+bash tools/data_generation/download_dataset.sh ${PROJECT?} ${DATASET_GCS_BUCKET?}
 ```
 
 The above will download the c4 dataset to the GCS BUCKET.
@@ -100,16 +100,15 @@ The above will download the c4 dataset to the GCS BUCKET.
 Below is a sample training script.
 
 ```sh
-python3 -m MaxText.train \
-  src/maxtext/configs/base.yml \
-  run_name=${RUN_NAME} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  load_parameters_path=${MODEL_CKPT_PATH} \
-  model_name=${MODEL_NAME} \
-  dataset_path=${DATASET_GCS_BUCKET} \
+python3 -m maxtext.trainers.pre_train.train \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  load_parameters_path=${MODEL_CKPT_PATH?} \
+  model_name=${MODEL_NAME?} \
+  dataset_path=${DATASET_GCS_BUCKET?} \
   async_checkpointing=False  \
-  tokenizer_path=${MODEL_TOKENIZER} \
-  hf_access_token=${HF_TOKEN} \
+  tokenizer_path=${MODEL_TOKENIZER?} \
+  hf_access_token=${HF_TOKEN?} \
   steps=10 per_device_batch_size=1
 ```
 

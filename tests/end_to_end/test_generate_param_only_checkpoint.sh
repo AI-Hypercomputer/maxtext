@@ -58,7 +58,7 @@ model_params="base_emb_dim=384 base_num_query_heads=8 base_num_kv_heads=8 base_m
 echo
 echo "Create a test training checkpoint"
 echo
-$cmd python3 -m MaxText.train ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
+$cmd python3 -m maxtext.trainers.pre_train.train ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
 run_name=${training_ckpt_run_id} \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} attention=${attention} \
@@ -82,7 +82,7 @@ echo
 echo "Generate a decode checkpoint from the test training checkpoint"
 echo
 
-$cmd python3 -m MaxText.generate_param_only_checkpoint "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+$cmd python3 -m maxtext.utils.generate_param_only_checkpoint "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
 run_name=${decode_ckpt_run_id} attention=${attention} \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} async_checkpointing=false \
@@ -104,7 +104,7 @@ fi
 echo
 echo "Run decode using the generated checkpoint"
 echo
-$cmd python3 -m maxtext.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+$cmd python3 -m maxtext.inference.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
 run_name=${run_id}-decode-steps-50 \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} \
