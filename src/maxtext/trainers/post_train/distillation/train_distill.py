@@ -199,7 +199,11 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
   """
 
   def __init__(self, model, strategy, optimizer, training_config, **kwargs):
-    super().__init__(model=model, optimizer=optimizer, training_config=training_config, **kwargs)
+    # We pass a dummy optimizer to the base PeftTrainer temporarily to prevent PeftTrainer from eagerly
+    # allocating massive optimizer states for the entire ModelBundle (including the frozen teacher) before
+    # redefining the trainer optimizer here.
+    dummy_optimizer = optax.set_to_zero()
+    super().__init__(model=model, optimizer=dummy_optimizer, training_config=training_config, **kwargs)
 
     self.strategy = strategy
 
