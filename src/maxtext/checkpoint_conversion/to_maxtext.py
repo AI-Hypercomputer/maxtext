@@ -25,7 +25,7 @@ Key Parameters (to be set in the config file or as command-line overrides):
                          Defaults to "./mt_output/".
   scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
                This must match the training configuration of the checkpoint.
-  --lazy_load: (bool) If True, uses an on-demand loading strategy to minimize RAM
+  --lazy_load_tensors: (bool) If True, uses an on-demand loading strategy to minimize RAM
              usage during conversion. Recommended if, 2 * model_size (GB) >= system RAM
              Defaults to False.
   --hf_model_path: (Optional) Specifies a local or remote directory containing the model weights.
@@ -79,7 +79,7 @@ from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, apply_hook_fns, get_hf_dict_from_pretrained, print_peak_memory, print_ram_usage, validate_and_filter_param_map_keys
+from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, apply_hook_fns, load_hf_dict_from_transformers, print_peak_memory, print_ram_usage, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
 from maxtext.layers import quantizations
 from maxtext.models import models
@@ -93,7 +93,7 @@ from safetensors import safe_open
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
-def get_hf_dict_from_safetensor(local_path, framework="pt"):
+def load_hf_dict_from_safetensors(local_path, framework="pt"):
   """
   If the safetensor contains more HF keys than MaxText model,
   these HF keys will be loaded but ignored during conversion.
@@ -106,8 +106,6 @@ def get_hf_dict_from_safetensor(local_path, framework="pt"):
   for ckpt_path in tqdm(ckpt_paths, total=len(ckpt_paths)):
     with safe_open(ckpt_path, framework=framework, device="cpu") as f:
       for key in f.keys():
-        if key.endswith("_scale_inv"):
-          raise ValueError("fp8 checkpoint is not supported.")
         hf_state_dict[key] = f.get_tensor(key)
   return hf_state_dict
 
@@ -594,7 +592,8 @@ def _get_maxtext_weight(
 
 def main(
     args: Sequence[str],
-    test_args,
+    save_dtype,
+    eager_load_method,
     hf_model_path: str | None = None,
     revision: str | None = None,
     lazy_load_tensors: bool = False,
@@ -650,13 +649,15 @@ def main(
   else:
     max_logging.log(f"Lazy loading DISABLED. Loading full HuggingFace model: {model_id}...")
 
-    if test_args.use_from_pretrained_api:
-      max_logging.log(f"Loading with `from_pretrained` with auto dtype")
-      # auto uses the `dtype` specifed in config.json (or `torch_dtype` for older version)
-      hf_state_dict_numpy = get_hf_dict_from_pretrained(model_id, token=hf_token, dtype="auto")
+    if eager_load_method == "transformers":
+      max_logging.log("Eager load with Transformers backend, from_pretrained with auto dtype")
+      # auto uses the `dtype` specified in config.json (or `torch_dtype` for older version)
+      hf_state_dict_numpy = load_hf_dict_from_transformers(model_id, token=hf_token, dtype="auto")
+    elif eager_load_method == "safetensors":
+      max_logging.log("Eager load with Safetensors backend, safe_open with pt framework")
+      hf_state_dict_numpy = load_hf_dict_from_safetensors(model_id, framework="pt")
     else:
-      max_logging.log(f"Loading with `safe_open`, framework=pt")
-      hf_state_dict_numpy = get_hf_dict_from_safetensor(model_id, framework="pt")
+      raise NotImplementedError
 
     unique_dtypes = {tensor.dtype for tensor in hf_state_dict_numpy.values()}
     max_logging.log(f"HuggingFace model loaded. dtypes: {unique_dtypes}")
@@ -670,10 +671,10 @@ def main(
         raise ValueError(f"HuggingFace key {key} not found in state_dict.")
       v = hf_state_dict_numpy[key]
       # target dtype is float32
-      if test_args.save_dtype == "float32":
+      if save_dtype == "float32":
         return v.to(torch.float32).numpy()
       # target dtype is bfloat16
-      elif test_args.save_dtype == "bfloat16":
+      elif save_dtype == "bfloat16":
         # torch.bfloat16 -> torch.float32 -> np.float32 -> ml_dtypes.bfloat16
         # torch.float16 -> np.float16 -> ml_dtypes.bfloat16
         # torch.float32 -> np.float32 -> ml_dtypes.bfloat16
@@ -747,7 +748,7 @@ def main(
         mt_target_shape_or_shapes,
         mt_param_key_or_keys,
         final_mt_weights,
-        test_args.save_dtype,
+        save_dtype,
         lazy_load_tensors,
     )
 
@@ -796,6 +797,22 @@ if __name__ == "__main__":
       default=False,
       help="Whether to use lazy loading of HF tensors.",
   )
+  # eager load method (lazy load uses `safetensors.safe_open` with np)
+  parser.add_argument(
+      "--eager_load_method",
+      type=str,
+      required=False,
+      default="transformers",
+      choices=["transformers", "safetensors"],
+      help="Backend to use for eager loading: `transformers_class.from_pretrained` or `safetensors.safe_open` with pt",
+  )
+  parser.add_argument(
+      "--revision",
+      type=str,
+      required=False,
+      default=None,
+      help="Specific Hugging Face revision (branch/tag/commit)",
+  )
   # If not specified, default to maxtext.utils.globals.HF_IDS[model_name]
   parser.add_argument(
       "--hf_model_path",
@@ -803,6 +820,14 @@ if __name__ == "__main__":
       required=False,
       default="",
       help="local path to hf model, or custom remote hf repo",
+  )
+  parser.add_argument(
+      "--save_dtype",
+      type=str,
+      required=False,
+      default="bfloat16",
+      choices=["float32", "bfloat16"],
+      help="save maxtext weight in specified dtype",
   )
   # Determines the logical sharding of the output checkpoint by partitioning
   # weights across virtual XLA devices.
@@ -818,28 +843,6 @@ if __name__ == "__main__":
   #   sharding: None
   #   storage:  chunk_shape=(151936, 1024) <-- Full layer in one chunk
   parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
-  parser.add_argument(
-      "--use_from_pretrained_api",
-      type=str2bool,
-      required=False,
-      default=True,
-      help="load HF weights via `from_pretrained` or `safe_open`",
-  )
-  parser.add_argument(
-      "--revision",
-      type=str,
-      required=False,
-      default=None,
-      help="Specific Hugging Face revision (branch/tag/commit)",
-  )
-  parser.add_argument(
-      "--save_dtype",
-      type=str,
-      required=False,
-      default="bfloat16",
-      choices=["float32", "bfloat16"],
-      help="save maxtext weight in specified dtype",
-  )
 
   # Parse local arguments
   # Parse known args returns the namespace AND the list of remaining arguments

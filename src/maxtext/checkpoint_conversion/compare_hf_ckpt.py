@@ -48,7 +48,7 @@ from safetensors.torch import load as load_safetensors
 from safetensors import safe_open
 
 from maxtext.configs import pyconfig
-from maxtext.checkpoint_conversion.utils.utils import print_ram_usage, get_hf_dict_from_pretrained
+from maxtext.checkpoint_conversion.utils.utils import print_ram_usage, load_hf_dict_from_transformers
 from maxtext.utils import max_logging
 from maxtext.utils.globals import HF_IDS
 
@@ -135,7 +135,7 @@ def get_hf_model_state_dict(model_id: str, token: str) -> Dict[str, np.ndarray]:
   """Loads the HuggingFace model state dict and converts to numpy."""
   max_logging.log(f"Loading reference model from HuggingFace: {model_id}...")
 
-  state_dict = get_hf_dict_from_pretrained(model_id, token)
+  state_dict = load_hf_dict_from_transformers(model_id, token)
   numpy_state_dict = {k: v.numpy() for k, v in state_dict.items()}
 
   return numpy_state_dict

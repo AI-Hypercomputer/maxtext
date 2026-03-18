@@ -904,7 +904,7 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
     return extract_linen_weights(actual_weights_dict)
 
 
-def get_hf_dict_from_pretrained(model_id: str, token: str, revision: str = None, dtype: str = "auto"):
+def load_hf_dict_from_transformers(model_id: str, token: str, revision: str = None, dtype: str = "auto"):
   """Loads the HuggingFace model based on model_id (Eager mode only), used in to_maxtext"""
   if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
     from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
