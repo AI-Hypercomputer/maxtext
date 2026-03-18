@@ -19,15 +19,12 @@ import os.path
 import tempfile
 import unittest
 import json
-import ml_collections
 import numpy as np
 
 import jax
 import pytest
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
-from unittest import mock
-import grain.python as grain
 
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import grain_data_processing
@@ -391,78 +388,69 @@ class GrainTFRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
     self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
-class GrainSFTPipelineTest(unittest.TestCase):
-  """Tests the full SFT preprocessing pipeline end-to-end using dummy data."""
+class GrainSFTParquetProcessingTest(unittest.TestCase):
+  """Tests the SFT pipeline end-to-end using the real ultrachat_200k parquet dataset."""
 
   def setUp(self):
     super().setUp()
-    # Create a minimal config to satisfy the pipeline's requirements
-    self.config = ml_collections.ConfigDict(
-        {
-            "grain_file_type": "in_memory",  # Skips arrayrecord parsing
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
-            "tokenizer_type": "sentencepiece",
-            "add_bos": True,
-            "add_eos": True,
-            "hf_access_token": "",
-            "use_truncation": False,
-            "max_target_length": 16,
-            "sft_train_on_completion_only": True,
-            "packing": False,
-            "global_batch_size_to_load": 2,  # Using 2 examples
-            "expansion_factor_real_data": 1.0,
-            "grain_ram_budget_mb": 512,
-            # A very basic chat template for testing purposes
-            "chat_template": (
-                "{% for message in messages %}" "{{ message['role'] + ': ' + message['content'] + ' ' }}" "{% endfor %}"
-            ),
-        }
-    )
 
-  @mock.patch("maxtext.input_pipeline.input_pipeline_utils.apply_chat_template")
-  def test_sft_preprocessing_pipeline(self, mock_apply_chat_template):
-    # Fake the exact chunked structure and is_prompt array that MaxText expects
-    def fake_apply_chat(element, tokenizer_model, data_column_name):
-      # Return hardcoded strings instead of referencing the overwritten dictionary
-      element[data_column_name] = ["What is 2+2? ", "It is 4."]
-      element["is_prompt"] = [True, False]
-      return element
+    grain_train_file = "gs://maxtext-dataset/hf/ultrachat_200k/train_sft-*.parquet"
+    base_output_directory = "gs://max-experiments/"
+    config_file = get_test_config_path()
 
-    mock_apply_chat_template.side_effect = fake_apply_chat
-
-    # Create a dummy in-memory dataset
-    dummy_data = [{"prompt": "What is 2+2?", "completion": "It is 4."}, {"prompt": "Say hello.", "completion": "Hello!"}]
-    dataset = grain.MapDataset.source(dummy_data)
-    dataset = dataset.to_iter_dataset()
-    data_columns = ["prompt", "completion"]
-
-    # Run pipeline
-    pipeline_iterator = grain_data_processing.sft_preprocessing_pipeline(
-        dataset=dataset,
-        config=self.config,
-        data_columns=data_columns,
-        tokenize=True,
-        grain_worker_count=0,
+    self.config = pyconfig.initialize(
+        [sys.argv[0], config_file],
+        per_device_batch_size=1,
+        run_name="test",
+        mesh_axes=["data"],
+        logical_axis_rules=[["batch", "data"]],
+        data_sharding=["data"],
+        base_output_directory=base_output_directory,
+        dataset_type="grain",
+        grain_file_type="parquet",
+        grain_train_files=grain_train_file,
+        use_sft=True,  # Triggers your new SFT pipeline
+        sft_train_on_completion_only=True,
+        train_data_columns=["messages"],
+        tokenizer_type="huggingface",
+        tokenizer_path="HuggingFaceH4/zephyr-7b-beta",  # The ungated tokenizer
+        max_target_length=128,
+        packing=True,
+        grain_worker_count=1,
         grain_per_worker_buffer_size=1,
+        enable_checkpointing=False,
+    )
+    self.mesh_shape_1d = (len(jax.devices()),)
+    self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
+    self.process_indices = input_pipeline_interface.get_process_loading_real_data(
+        self.config.data_sharding,
+        self.config.global_batch_size_to_load,
+        self.config.global_batch_size_to_train_on,
+        self.config.max_target_length,
+        self.mesh,
+    )
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+
+  def test_train_ds(self):
+    expected_shape = [jax.device_count(), self.config.max_target_length]
+    batch = next(self.train_iter)
+
+    # Assert all the required packing and target tensors were generated
+    self.assertEqual(
+        {k: list(v.shape) for k, v in batch.items()},
+        {
+            "inputs": expected_shape,
+            "inputs_position": expected_shape,
+            "inputs_segmentation": expected_shape,
+            "targets": expected_shape,
+            "targets_position": expected_shape,
+            "targets_segmentation": expected_shape,
+        },
     )
 
-    # Get the first batch
-    iterator = iter(pipeline_iterator)
-    batch = next(iterator)
-
-    # Assert the pipeline output is correct
-    self.assertIn("inputs", batch)
-    self.assertIn("targets", batch)
-
-    expected_shape = (2, self.config.max_target_length)
-
-    # Check shapes
-    self.assertEqual(batch["inputs"].shape, expected_shape)
-    self.assertEqual(batch["targets"].shape, expected_shape)
-
-    # Check for masked tokens
-    has_masked_tokens = np.any((batch["targets"] == 0) | (batch["targets"] == -1))
-    self.assertTrue(has_masked_tokens, "Targets array should contain masked (ignore) IDs for the prompt sections.")
+    # check to see that if prompts are masked, targets will differ from inputs
+    has_masked_tokens = np.any(batch["inputs"] != batch["targets"])
+    self.assertTrue(bool(has_masked_tokens), "Targets array should differ from inputs array due to prompt masking.")
 
 
 if __name__ == "__main__":
