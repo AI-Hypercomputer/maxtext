@@ -29,7 +29,6 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-<<<<<<< HEAD:src/maxtext/models/qwen3.py
 from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED, MODEL_MODE_TRAIN
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
@@ -44,25 +43,8 @@ from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 
-=======
 from jax.sharding import PartitionSpec as P
 from jax.experimental.shard_map import shard_map
-
-from MaxText.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED, MODEL_MODE_TRAIN
-from MaxText.layers import attentions
-from MaxText.layers import initializers as max_initializers
-from MaxText.layers import moe
-from MaxText.layers import nnx_wrappers
-from MaxText.layers import quantizations
-from MaxText.layers.embeddings import Qwen3OmniMoeVisionPosEmbedInterpolate, PositionalEmbedding
-from MaxText.layers.normalizations import RMSNorm, l2norm, Qwen3NextRMSNorm, Qwen3NextRMSNormGated
-from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.attentions import Attention
-from MaxText.layers.linears import DenseGeneral, MlpBlock
-from MaxText.layers.moe import RoutedMoE
-from MaxText.layers.initializers import nd_dense_init, variable_to_logically_partitioned
-from maxtext.inference import page_manager
->>>>>>> 7461955dc (add shardmap to kernel):src/MaxText/layers/qwen3.py
 from maxtext.utils import max_utils
 from maxtext.inference import page_manager, kvcache
 
@@ -218,7 +200,7 @@ def pallas_chunk_gated_delta_rule(
   # =========================================================================
   initial_dtype = query.dtype
   if use_qk_norm_in_gdn:
-    from MaxText.layers.normalizations import l2norm 
+    from maxtext.layers.normalizations import l2norm 
     query = l2norm(query, dim=-1, eps=1e-6)
     key = l2norm(key, dim=-1, eps=1e-6)
 
@@ -546,11 +528,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
   2. output = Linear_out(y)
   """
 
-<<<<<<< HEAD:src/maxtext/models/qwen3.py
-  def __init__(self, config: Config, dtype: DType = jnp.float32, model_mode: str = MODEL_MODE_TRAIN, *, rngs: nnx.Rngs):
-=======
-  def __init__(self, config: Config, *, rngs: nnx.Rngs, mesh: Mesh=None):
->>>>>>> 7461955dc (add shardmap to kernel):src/MaxText/layers/qwen3.py
+  def __init__(self, config: Config, dtype: DType = jnp.float32, model_mode: str = MODEL_MODE_TRAIN, *, rngs: nnx.Rngs, mesh: Mesh=None):
     """
     Args:
       config: MaxText configuration object.
@@ -1148,11 +1126,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
           rngs=rngs,
       )
     else:
-<<<<<<< HEAD:src/maxtext/models/qwen3.py
       self.attention = Qwen3NextGatedDeltaNet(config=cfg, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs)
-=======
-      self.attention = Qwen3NextGatedDeltaNet(config=cfg, rngs=rngs, mesh=self.mesh)
->>>>>>> 7461955dc (add shardmap to kernel):src/MaxText/layers/qwen3.py
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
