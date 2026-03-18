@@ -49,7 +49,7 @@ def get_attention_type(layer_id):
 
 def get_query_pre_attn_scalar(config) -> float:
   """Returns the scalar to multiply the query by before attention."""
-  if config.model_name in ["brahmai-4b", "brahmai-9b". "gemma3-4b", "gemma3-12b"]:
+  if config.model_name in ["brahmai-4b", "brahmai-9b", "gemma3-4b", "gemma3-12b"]:
     return config.head_dim**-0.5
   elif config.model_name in ["brahmai-27b", "gemma3-27b"]:
     return (config.base_emb_dim // config.base_num_query_heads) ** -0.5
