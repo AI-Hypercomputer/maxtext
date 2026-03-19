@@ -41,6 +41,9 @@ ENV ENV_DEVICE=$DEVICE
 ARG PACKAGE_DIR
 ENV PACKAGE_DIR=$PACKAGE_DIR
 
+ARG TESTS_DIR
+ENV TESTS_DIR=$TESTS_DIR
+
 ENV MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets
 ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/tests/assets
 ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
@@ -63,6 +66,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Now copy the remaining code (source files that may change frequently)
 COPY ${PACKAGE_DIR}/maxtext/ src/MaxText/
+COPY ${TESTS_DIR}*/ tests/
 
 # Download test assets from GCS if building image with test assets
 ARG INCLUDE_TEST_ASSETS=false

@@ -22,6 +22,8 @@
 
 PACKAGE_DIR="${PACKAGE_DIR:-src}"
 echo "PACKAGE_DIR: $PACKAGE_DIR"
+TESTS_DIR="${TESTS_DIR:-tests}"
+echo "TESTS_DIR: $TESTS_DIR"
 
 # Enable "exit immediately if any command fails" option
 set -e
@@ -71,6 +73,7 @@ docker_build_args=(
   "MODE=${MODE}"
   "JAX_VERSION=${JAX_VERSION}"
   "PACKAGE_DIR=${PACKAGE_DIR}"
+  "TESTS_DIR=${TESTS_DIR}"
 )
 
 run_docker_build() {
