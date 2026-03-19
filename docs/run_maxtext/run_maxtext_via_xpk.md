@@ -99,53 +99,13 @@ These commands configure your local environment to connect to Google Cloud servi
 
 ______________________________________________________________________
 
-## 3. Install XPK
+## 3. Build the MaxText Docker image
 
-It is best practice to install XPK in a dedicated Python virtual environment.
-
-```
-# Create a virtual environment (only needs to be done once)
-python3 -m venv ~/xpk_venv
-
-# Activate the virtual environment (do this every time you open a new terminal)
-source ~/xpk_venv/bin/activate
-
-# Install XPK
-pip install xpk
-```
+For instructions on building the MaxText Docker image, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
 
 ______________________________________________________________________
 
-## 4. Build the MaxText Docker image
-
-```{note}
-Ensure Docker is configured for sudoless use before running the build script. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
-```
-
-1. **Clone the MaxText repository**
-
-   ```
-   git clone https://github.com/google/maxtext.git
-   cd maxtext
-   ```
-
-2. **Build the image for your target hardware (TPU or GPU)** This script creates a local Docker image named `maxtext_base_image`.
-
-   - **For TPUs:**
-
-     ```
-     bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
-     ```
-
-   - **For GPUs:**
-
-     ```
-     bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=stable
-     ```
-
-______________________________________________________________________
-
-## 5. Run your first MaxText job
+## 4. Run your first MaxText job
 
 This section assumes you have an existing GKE cluster with either TPU or GPU nodes.
 
@@ -204,7 +164,7 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
 
 ______________________________________________________________________
 
-## 6. Managing and monitoring your job
+## 5. Managing and monitoring your job
 
 - **View logs in real-time:** The easiest way to see the output of your training job is through the Google Cloud Console.
 

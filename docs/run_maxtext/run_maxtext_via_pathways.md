@@ -35,27 +35,7 @@ Before you can run a MaxText workload, you must complete the following setup ste
 
 2. **Create a GKE cluster** configured for Pathways.
 
-3. **Build and upload a MaxText Docker image** to your project's Artifact Registry.
-
-   [Follow the steps to configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/) before running the commands below.
-
-   Step 1: Build the Docker image for a TPU device. This image contains MaxText and its dependencies.
-
-   ```shell
-   bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
-   ```
-
-   Step 2: Configure Docker to authenticate with Google Cloud
-
-   ```shell
-   gcloud auth configure-docker
-   ```
-
-   Step 3: Upload the image to your project's registry. Replace `$USER_runner` with your desired image name.
-
-   ```shell
-   bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$USER_runner
-   ```
+3. **Build and upload a MaxText Docker image** to your project's Artifact Registry. For instructions on building and uploading the MaxText Docker image, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
 
 ## 2. Environment configuration
 
@@ -76,7 +56,7 @@ export WORKLOAD_NODEPOOL_COUNT=1 # Number of TPU slices for your job
 export BUCKET_NAME="your-gcs-bucket-name"
 export RUN_NAME="maxtext-run-1"
 # The Docker image you pushed in the prerequisite step
-export DOCKER_IMAGE="gcr.io/${PROJECT?}/${USER}_runner"
+export DOCKER_IMAGE="gcr.io/${PROJECT?}/${CLOUD_IMAGE_NAME}"
 ```
 
 ## 3. Running a batch workload

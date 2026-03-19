@@ -36,22 +36,7 @@ Local development on a single host TPU/GPU VM is a convenient way to run MaxText
 
 1. Create and SSH to the single host VM of your choice. You can use any available single host TPU, such as `v5litepod-8`, `v5p-8`, or `v4-8`. For GPUs, you can use `nvidia-h100-mega-80gb`, `nvidia-h200-141gb`, or `nvidia-b200`. For setting up a TPU VM, use the Cloud TPU documentation available at https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm. For a GPU setup, refer to the guide at https://cloud.google.com/compute/docs/gpus/create-vm-with-gpus.
 
-2. Clone MaxText onto that VM.
-
-   ```bash
-   git clone https://github.com/google/maxtext.git
-   cd maxtext
-   ```
-
-3. Once you have cloned the repository, you have two primary options for setting up the necessary dependencies on your VM: Installing in a Python Environment, or building a Docker container. For single host workloads, we recommend to install dependencies in a python environment, and for multihost workloads we recommend the containerized approach.
-
-Within the root directory of the cloned repo, create a virtual environment and install dependencies and the pre-commit hook by running:
-
-```bash
-python3.12 -m venv ~/venv-maxtext
-source ~/venv-maxtext/bin/activate
-bash tools/setup/setup.sh DEVICE={tpu|gpu}
-```
+2. For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html).
 
 #### Run a Test Training Job
 
