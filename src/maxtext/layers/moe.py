@@ -928,10 +928,11 @@ class RoutedMoE(nnx.Module):
       - lb_loss: Load balance loss (or None).
       - bias_updates: Bias updates (or None).
     """
-    use_te = getattr(self.config, "te_permutation_impl", False) and te_permutation.TE_PERMUTATION_AVAILABLE
+    use_te = getattr(self.config, "te_permutation_impl", False)
     perm_state = PermState(use_te)
 
     if use_te:
+      assert te_permutation.TE_PERMUTATION_AVAILABLE, "TE permutation implementation not available, please ensure triton is installed"
       # TE permutation path
       (
           x, perm_state.row_id_map, weights, group_sizes, top_k_indices,
@@ -1384,6 +1385,7 @@ class RoutedMoE(nnx.Module):
             # TODO(jberchtold): Adjust this based on TE GMM requirements per recipe
             TE_GMM_ALIGN_REQUIREMENT = 128
             assert self.config.te_permutation_impl and self.config.te_permutation_align_size % TE_GMM_ALIGN_REQUIREMENT == 0 and self.config.te_permutation_align_size > 0, f"TE GMM currently requires TE permutation with alignment (te_permutation_align_size > 0 and multiple of {TE_GMM_ALIGN_REQUIREMENT})."
+            return self.quant.gmm(inputs, kernel, tiling, group_sizes, expert_assignments)
 
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
@@ -1459,22 +1461,19 @@ class RoutedMoE(nnx.Module):
             # Use full contraction for QWIX quantization to allow quantization
             # fusion (max reduce over contracting dimension).
             tiling = (tiling[0], k, tiling[2])
-          if use_te_gmm:
-            return self.quant.gmm(inputs, rhs_inputs, tiling, group_sizes, expert_assignments)
-          else:
-            is_tpu = self.mesh.devices.flat[0] == "tpu"
-            # TPU needs random mosaic_fusion_group; GPU/CPU needs deterministic ID for autotuner sync
-            mosaic_group_id = f"{random.randint(0, 1000000000)}" if is_tpu else "0"
-            with set_xla_metadata(
-                ragged_dot_tiling=",".join([str(t) for t in tiling]),
-                mosaic_fusion_group=mosaic_group_id,
-            ):
-              output = jax.lax.ragged_dot(
-                  lhs=inputs,
-                  rhs=rhs_inputs,
-                  group_sizes=group_sizes,
-                  preferred_element_type=self.dtype,
-              )
+          is_tpu = self.mesh.devices.flat[0] == "tpu"
+          # TPU needs random mosaic_fusion_group; GPU/CPU needs deterministic ID for autotuner sync
+          mosaic_group_id = f"{random.randint(0, 1000000000)}" if is_tpu else "0"
+          with set_xla_metadata(
+              ragged_dot_tiling=",".join([str(t) for t in tiling]),
+              mosaic_fusion_group=mosaic_group_id,
+          ):
+            output = jax.lax.ragged_dot(
+                lhs=inputs,
+                rhs=rhs_inputs,
+                group_sizes=group_sizes,
+                preferred_element_type=self.dtype,
+            )
           if isinstance(kernel, aqt.QTensor):
             # Multiply outputs by the kernely scale
             scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
@@ -1638,7 +1637,7 @@ class RoutedMoE(nnx.Module):
           if is_batch_sharded_by_expert:
             # Compute per-expert token counts from all shards
             perm_state.all_shards_tokens_per_expert = jax.lax.all_gather(
-                group_sizes[None, :], axis_name=expert_axis_name, axis=0, tiled=True
+                group_sizes[None, :], axis_name=self._expert_parallelism_name, axis=0, tiled=True
             )
             input_offsets, send_sizes, output_offsets, recv_sizes = (
                 te_permutation.compute_ragged_all_to_all_params(
