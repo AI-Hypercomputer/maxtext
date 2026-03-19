@@ -1086,6 +1086,7 @@ class MLA(Attention):
                   query_tnh_sharding=P(('attn_dp', 'attn_dp_expert', 'model', 'expert'),None,None),
                   keyvalue_skh_sharding=P(('attn_dp', 'attn_dp_expert', 'model', 'expert'),None),
                   attn_o_tnh_sharding=P(('attn_dp', 'attn_dp_expert', 'model', 'expert'), None, None),
+                  sm_scale=1.0,
                   )
     output = jnp.einsum("TNA,ANH->TNH", output_tna, wv_b_kernel)
     return output, kv_cache
