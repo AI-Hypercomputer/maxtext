@@ -654,8 +654,44 @@ class MLA(Attention):
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
+    elif self.config.fused_mla_lora_proj:
+      # Fused Q+KV LoRA up-projection: single matmul (emb -> q_lora_rank + kv_lora_rank + rope_head_dim).
+      self.wq_kv_a = DenseGeneral(
+          in_features_shape=self.config.emb_dim,
+          out_features_shape=self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=("embed", "q_kv_lora_up_proj"),
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
+          rngs=self.rngs,
+      )
+      self.q_norm = RMSNorm(
+          num_features=self.q_lora_rank,
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          epsilon=self.config.normalization_layer_epsilon,
+          kernel_axes=("norm",),
+          rngs=self.rngs,
+      )
+      self.wq_b = DenseGeneral(
+          in_features_shape=self.q_lora_rank,
+          out_features_shape=(self.num_query_heads, self.qk_head_dim),
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=("q_lora", "q_heads", "kv"),
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
+          rngs=self.rngs,
+      )
     else:
-      # LoRA path for Q.
+      # Separate Q LoRA up-projection.
       self.wq_a = DenseGeneral(
           in_features_shape=self.config.emb_dim,
           out_features_shape=self.q_lora_rank,
@@ -691,20 +727,21 @@ class MLA(Attention):
           rngs=self.rngs,
       )
 
-    # KV LoRA path.
-    self.wkv_a = DenseGeneral(
-        in_features_shape=self.config.emb_dim,
-        out_features_shape=self.kv_lora_rank + self.qk_rope_head_dim,
-        axis=-1,
-        kernel_init=self.kernel_init,
-        kernel_axes=("embed", "kv_lora_up_proj"),
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
-        shard_mode=self.config.shard_mode,
-        rngs=self.rngs,
-    )
+    if not self.config.fused_mla_lora_proj:
+      # KV LoRA up-projection. When fused, wq_kv_a handles both Q and KV.
+      self.wkv_a = DenseGeneral(
+          in_features_shape=self.config.emb_dim,
+          out_features_shape=self.kv_lora_rank + self.qk_rope_head_dim,
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=("embed", "kv_lora_up_proj"),
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
+          rngs=self.rngs,
+      )
     self.kv_norm = RMSNorm(
         num_features=self.kv_lora_rank,
         dtype=self.config.dtype,
@@ -792,8 +829,11 @@ class MLA(Attention):
     if self.q_lora_rank == 0:
       q = self.query(inputs_q, out_sharding=query_sharding)
     else:
-      # LoRA path
-      low_rank_q = self.wq_a(inputs_q, out_sharding=wqa_out_sharding)  # [B, L, q_lora_rank]
+      # LoRA path: inputs_q is either raw embeddings (unfused) or the pre-split Q slice (fused).
+      if not self.config.fused_mla_lora_proj:
+        low_rank_q = self.wq_a(inputs_q, out_sharding=wqa_out_sharding)  # [B, L, q_lora_rank]
+      else:
+        low_rank_q = inputs_q  # already the q_lora_rank slice from wq_kv_a split in __call__
       low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
       low_rank_q = checkpoint_name(low_rank_q, "mla_q")
       q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads, qk_head_dim]
@@ -932,7 +972,10 @@ class MLA(Attention):
     else:
       wka_logical_name = (KV_BATCH, LENGTH_NO_EXP, KV_LORA_UP_PROJ)
     wkva_out_sharding = create_sharding(self.mesh, wka_logical_name)
-    low_rank = self.wkv_a(inputs, out_sharding=wkva_out_sharding)
+    if self.config.fused_mla_lora_proj:
+      low_rank = inputs  # already the kv_lora_rank+rope_head_dim slice from wq_kv_a split in __call__
+    else:
+      low_rank = self.wkv_a(inputs, out_sharding=wkva_out_sharding)
     low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
     low_rank_main = self.kv_norm(low_rank_main)
     low_rank_main = checkpoint_name(low_rank_main, "mla_kv")
@@ -1068,12 +1111,23 @@ class MLA(Attention):
       inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.input_axis_names)
       out_logical_name = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
 
-    query, low_rank_q = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
-    if self.config.force_q_layout:
-      query = layout.with_layout_constraint(query, DLL(major_to_minor=(0, 2, 3, 1)))
-    key, value, cached_values = self.mla_kv_projection(
-        inputs_kv, inputs_positions, decoder_segment_ids, model_mode, previous_chunk
-    )
+    if self.config.fused_mla_lora_proj:
+      # Single matmul for both Q and KV LoRA up-projections, then split.
+      fused_lora = self.wq_kv_a(inputs_q)
+      lora_q, lora_kv = jnp.split(fused_lora, [self.q_lora_rank], axis=-1)
+      query, low_rank_q = self.mla_query_projection(lora_q, inputs_positions, model_mode)
+      if self.config.force_q_layout:
+        query = layout.with_layout_constraint(query, DLL(major_to_minor=(0, 2, 3, 1)))
+      key, value, cached_values = self.mla_kv_projection(
+          lora_kv, inputs_positions, decoder_segment_ids, model_mode, previous_chunk
+      )
+    else:
+      query, low_rank_q = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
+      if self.config.force_q_layout:
+        query = layout.with_layout_constraint(query, DLL(major_to_minor=(0, 2, 3, 1)))
+      key, value, cached_values = self.mla_kv_projection(
+          inputs_kv, inputs_positions, decoder_segment_ids, model_mode, previous_chunk
+      )
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
