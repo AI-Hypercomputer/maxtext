@@ -897,8 +897,7 @@ class RoutedMoE(nnx.Module):
         inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes
     ):
       # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
-      if self.config.use_qwix_quantization or (self.config.using_pipeline_parallelism and
-                                               self.config.pipeline_fsdp_ag_per_repeat):
+      if self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat:
         tokamax_group_sizes = group_sizes
       else:
         tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
@@ -935,7 +934,7 @@ class RoutedMoE(nnx.Module):
           output = mblx.gmm(
               lhs=inputs,
               rhs=kernel,
-              group_sizes=tokamax_group_sizes,
+              group_sizes=group_sizes,
               preferred_element_type=self.dtype,
               tiling=tiling,
               lhs_quantize_dtype=lhs_quantize_dtype,
