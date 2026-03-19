@@ -47,7 +47,8 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 - [Optimized models tiering documentation](https://maxtext.readthedocs.io/en/latest/reference/models/tiering.html) has been refreshed.
 - Added Versioning. Check out our [first set of release notes](https://maxtext.readthedocs.io/en/latest/release_notes.html)!
 - Post-Training (SFT, RL) via [Tunix](https://github.com/google/tunix) is now available.
-- Vocabulary tiling ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/2242)) is now supported in MaxText! Adjust config `num_vocab_tiling` to unlock more efficient memory usage.
+- Batch-Sequence tiling ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/2242)) is now supported in MaxText! Adjust config `num_batch_seq_tiling` to unlock more efficient memory usage.
+- Vocabulary tiling Additionally vocabulary dimension can also be tiled by adjusting `num_vocab_tiling`.
 - The GPT-OSS family of models (20B, 120B) is now supported.
 
 # Deprecations
