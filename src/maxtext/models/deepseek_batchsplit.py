@@ -217,19 +217,23 @@ def gather_weights(weights, mesh):
     gate = jax.lax.all_gather(gate, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
     
     rounted_wi_0_shape = routed_wi_0.shape
-    routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name=("fsdp", "fsdp_transpose"), tiled=False, to="reduced")
-    routed_wi_0 = jnp.reshape(routed_wi_0, (256, -1, rounted_wi_0_shape[2]))
-    #routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
+    # routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name=("fsdp", "fsdp_transpose"), tiled=False, to="reduced")
+    # routed_wi_0 = jnp.reshape(routed_wi_0, (256, -1, rounted_wi_0_shape[2]))
+    routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name="fsdp", tiled=True, axis=0, to="reduced")
+    routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
     
     routed_wi_1_shape = routed_wi_1.shape
-    routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name=("fsdp", "fsdp_transpose"), tiled=False, to="reduced")
-    routed_wi_1 = jnp.reshape(routed_wi_1,(256, -1, routed_wi_1_shape[2]))
-    #routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
+
+    # routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name=("fsdp", "fsdp_transpose"), tiled=False, to="reduced")
+    # routed_wi_1 = jnp.reshape(routed_wi_1,(256, -1, routed_wi_1_shape[2]))
+    routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name="fsdp", tiled=True, axis=0, to="reduced")
+    routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
     
-    routed_wo_shape = routed_wo.shape
-    routed_wo = jax.lax.all_gather(routed_wo, axis_name=("fsdp", "fsdp_transpose"), tiled=False, to="reduced")
-    routed_wo = jnp.reshape(routed_wo,(256, -1, routed_wo_shape[2]))
-    #routed_wo = jax.lax.all_gather(routed_wo, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
+    #routed_wo_shape = routed_wo.shape
+    #routed_wo = jax.lax.all_gather(routed_wo, axis_name=("fsdp", "fsdp_transpose"), tiled=False, to="reduced")
+    #routed_wo = jnp.reshape(routed_wo,(256, -1, routed_wo_shape[2]))
+    routed_wo = jax.lax.all_gather(routed_wo, axis_name="fsdp", tiled=True, axis=0, to="reduced")
+    routed_wo = jax.lax.all_gather(routed_wo, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
     
     shared_wi_0 = jax.lax.all_gather(shared_wi_0, axis_name="fsdp", tiled=True, to="reduced")
     shared_wi_0 = jax.lax.all_gather(shared_wi_0, axis_name="fsdp_transpose", tiled=True, axis=1, to="reduced")
