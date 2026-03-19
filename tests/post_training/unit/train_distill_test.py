@@ -671,6 +671,7 @@ class TrainDistillTest(unittest.TestCase):
     # Verify weights HAVE changed
     with self.assertRaises(AssertionError, msg="Weights should have updated on the second pass."):
       np.testing.assert_allclose(student.linear.kernel.value, initial_weights)
+
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.distillation_utils.OfflineArrayRecordIterator")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.MaxTextDistillationTrainer")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.input_pipeline_interface.create_data_iterator")
