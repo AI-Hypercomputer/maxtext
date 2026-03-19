@@ -709,6 +709,8 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.checkpoint_period = 10
     mock_student_cfg.gradient_clipping_threshold = 0.0
     mock_student_cfg.eval_interval = -1
+    mock_student_cfg.gradient_accumulation_steps = 1
+    mock_student_cfg.global_batch_size = 8
 
     # Add dummy numbers for strategy math/logic
     mock_student_cfg.distill_temperature = 1.0
@@ -786,6 +788,8 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.checkpoint_period = 10
     mock_student_cfg.gradient_clipping_threshold = 0.0
     mock_student_cfg.eval_interval = -1
+    mock_student_cfg.gradient_accumulation_steps = 1
+    mock_student_cfg.global_batch_size = 8
 
     # Add dummy numbers for strategy math/logic
     mock_student_cfg.distill_temperature = 1.0
