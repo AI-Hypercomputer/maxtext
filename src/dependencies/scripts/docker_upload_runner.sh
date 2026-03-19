@@ -17,11 +17,10 @@
 # This scripts takes a docker image that already contains the MaxText dependencies, copies the local source code in and
 # uploads that image into GCR. Once in GCR the docker image can be used for development.
 
-# Each time you update the base image via a "bash docker_build_dependency_image.sh", there will be a slow upload process
-# (minutes). However, if you are simply changing local code and not updating dependencies, uploading just takes a few seconds.
+# For instructions on building and uploading the MaxText Docker image, please refer to the https://maxtext.readthedocs.io/en/latest/build_maxtext.html.
 
-# Example command:
-# bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${USER}_runner
+# Each time you update the `maxtext_base_image`` via `build_maxtext_docker_image`, there will be a slow upload process.
+# However, if you are simply changing local code and not updating dependencies, uploading just takes a few seconds.
 
 PACKAGE_DIR="${PACKAGE_DIR:-src}"
 echo "PACKAGE_DIR: $PACKAGE_DIR"
