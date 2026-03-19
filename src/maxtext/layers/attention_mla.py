@@ -818,7 +818,10 @@ class MLA(Attention):
 
   def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
     """get (key,value) pair from mla"""
-    if model_mode == MODEL_MODE_PREFILL:
+    if self.config.attention == "vllm_rpa":
+      key_logical_name = ()
+      value_logical_name = ()
+    elif model_mode == MODEL_MODE_PREFILL:
       key_logical_name = self.prefill_key_axis_names
       value_logical_name = self.prefill_value_axis_names
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
@@ -973,98 +976,120 @@ class MLA(Attention):
     try:
       # pylint: disable=import-outside-toplevel
       # pytype: disable=import-error
-      from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
-      from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import get_tuned_block_sizes
+      # from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
+      # from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import get_tuned_block_sizes
+      from tpu_inference.layers.common.attention_interface import mla_attention
     except ImportError as e:
       raise ImportError(
           "vLLM RPA attention ops require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
       ) from e
 
-    if mla_kv_cache is None or mla_metadata is None:
-      raise ValueError("kv_cache and attention_metadata must be provided when using vLLM.")
+    # if mla_kv_cache is None or mla_metadata is None:
+    #   raise ValueError("kv_cache and attention_metadata must be provided when using vLLM.")
 
+    # wkv_b_kernel = self.wkv_b.kernel.value
+    # wk_b_kernel = wkv_b_kernel[..., : self.qk_nope_head_dim]
+    # wv_b_kernel = wkv_b_kernel[..., self.qk_nope_head_dim :]
+    # q_absorbed = jnp.einsum("TNH,ANH->TNA", q_nope, wk_b_kernel)
+
+    # def _mla_ragged_paged_attention(q, q_rope, k, k_rope, kv_cache, *args):
+    #   seq_lens_local, block_tables_local = args[0], args[1]
+
+    #   def _initialize_block_sizes():
+    #     # Use local (per-shard) shapes inside shard_map to get correct block sizes.
+    #     max_num_tokens = q.shape[0]
+    #     max_num_seqs = seq_lens_local.shape[0]
+    #     num_page_indices = block_tables_local.shape[0]
+    #     assert num_page_indices % max_num_seqs == 0
+    #     pages_per_seq = num_page_indices // max_num_seqs
+    #     # num_kv_pages_per_block = min(pages_per_seq, 16)
+    #     bkv_p, bq_sz = get_tuned_block_sizes(
+    #         q_nope.dtype,
+    #         q_nope.dtype,  # changed to q_nope dtype from mla_kv_cache.dtype
+    #         self.num_query_heads,
+    #         1,  # num_kv_heads for MLA kernel
+    #         self.qk_nope_head_dim,
+    #         q_nope.shape[1],  # page size ?? kv_cache.shape[1]
+    #         max_num_tokens,
+    #         pages_per_seq,
+    #     )
+    #     num_kv_pages_per_block = min(pages_per_seq, bkv_p, 4)
+    #     num_queries_per_block = min(max_num_tokens, bq_sz, 4)  # OOMS at 8
+    #     return num_kv_pages_per_block, num_queries_per_block
+
+    #   num_kv_pages_per_block, num_queries_per_block = _initialize_block_sizes()
+    #   output, kv_cache = mla_ragged_paged_attention(
+    #       q,
+    #       q_rope,
+    #       k,
+    #       k_rope,
+    #       kv_cache,
+    #       *args,
+    #       sm_scale=1.0,
+    #       num_kv_pages_per_block=num_kv_pages_per_block,
+    #       num_queries_per_block=num_queries_per_block,
+    #   )
+    #   return kv_cache, output
+
+    # in_specs = (
+    #     P(("attn_dp", "model", "expert", "attn_dp_expert"), None, None),  # q 
+    #     P(("attn_dp", "model", "expert", "attn_dp_expert"), None, None),  # q_rope
+    #     P(("attn_dp", "model", "expert", "attn_dp_expert"), None),  # k
+    #     P(("attn_dp", "model", "expert", "attn_dp_expert"), None),  # k_rope
+    #     P(("attn_dp", "model", "expert", "attn_dp_expert")),  # kv_cache
+    #     P(("data", "attn_dp", "attn_dp_expert")),  # md.seq_lens: Replicated
+    #     P(("data", "attn_dp", "attn_dp_expert")),  # page_indices_flat: Replicated
+    #     P(("data", "attn_dp", "attn_dp_expert")),  # query_start_loc: Replicated
+    #     P(("data", "attn_dp", "attn_dp_expert")),  # distribution: Replicated
+    # )
+
+    # out_specs = (
+    #     P(("attn_dp", "model", "expert", "attn_dp_expert"), None, None),
+    #     P(("attn_dp", "model", "expert", "attn_dp_expert")),
+    # )
+
+    # kv_cache, output = jax.jit(
+    #     shard_map.shard_map(
+    #         _mla_ragged_paged_attention,
+    #         mesh=self.mesh,
+    #         in_specs=in_specs,
+    #         out_specs=out_specs,
+    #         check_rep=False,
+    #     ),
+    # )(
+    #     q_absorbed,
+    #     q_rope,
+    #     k_latent,
+    #     k_rope,
+    #     mla_kv_cache,
+    #     md.seq_lens,
+    #     md.block_tables,
+    #     md.query_start_loc,
+    #     md.request_distribution,
+    # )
+    # output = jnp.einsum("TNA,ANH->TNH", output, wv_b_kernel)
+    # return kv_cache, output
     wkv_b_kernel = self.wkv_b.kernel.value
     wk_b_kernel = wkv_b_kernel[..., : self.qk_nope_head_dim]
     wv_b_kernel = wkv_b_kernel[..., self.qk_nope_head_dim :]
     q_absorbed = jnp.einsum("TNH,ANH->TNA", q_nope, wk_b_kernel)
 
-    def _mla_ragged_paged_attention(q, q_rope, k, k_rope, kv_cache, *args):
-      seq_lens_local, block_tables_local = args[0], args[1]
+    kv_cache, output_tna = mla_attention(q_absorbed,
+                  q_rope,
+                  k_latent,
+                  k_rope,
+                  mla_kv_cache,
+                  md,
+                  self.mesh,
+                  self.num_query_heads,
+                  self.qk_nope_head_dim,
+                  query_tnh_sharding=P(('attn_dp', 'attn_dp_expert', 'model', 'expert'),None,None),
+                  keyvalue_skh_sharding=P(('attn_dp', 'attn_dp_expert', 'model', 'expert'),None),
+                  attn_o_tnh_sharding=P(('attn_dp', 'attn_dp_expert', 'model', 'expert'), None, None),
+                  )
+    output = jnp.einsum("TNA,ANH->TNH", output_tna, wv_b_kernel)
+    return output, kv_cache
 
-      def _initialize_block_sizes():
-        # Use local (per-shard) shapes inside shard_map to get correct block sizes.
-        max_num_tokens = q.shape[0]
-        max_num_seqs = seq_lens_local.shape[0]
-        num_page_indices = block_tables_local.shape[0]
-        assert num_page_indices % max_num_seqs == 0
-        pages_per_seq = num_page_indices // max_num_seqs
-        # num_kv_pages_per_block = min(pages_per_seq, 16)
-        bkv_p, bq_sz = get_tuned_block_sizes(
-            q_nope.dtype,
-            q_nope.dtype,  # changed to q_nope dtype from mla_kv_cache.dtype
-            self.num_query_heads,
-            1,  # num_kv_heads for MLA kernel
-            self.qk_nope_head_dim,
-            q_nope.shape[1],  # page size ?? kv_cache.shape[1]
-            max_num_tokens,
-            pages_per_seq,
-        )
-        num_kv_pages_per_block = min(pages_per_seq, bkv_p, 4)
-        num_queries_per_block = min(max_num_tokens, bq_sz, 4)  # OOMS at 8
-        return num_kv_pages_per_block, num_queries_per_block
-
-      num_kv_pages_per_block, num_queries_per_block = _initialize_block_sizes()
-      output, kv_cache = mla_ragged_paged_attention(
-          q,
-          q_rope,
-          k,
-          k_rope,
-          kv_cache,
-          *args,
-          sm_scale=1.0,
-          num_kv_pages_per_block=num_kv_pages_per_block,
-          num_queries_per_block=num_queries_per_block,
-      )
-      return kv_cache, output
-
-    in_specs = (
-        P(("attn_dp", "model", "expert", "attn_dp_expert"), None, None),  # q
-        P(("attn_dp", "model", "expert", "attn_dp_expert"), None, None),  # q_rope
-        P(("attn_dp", "model", "expert", "attn_dp_expert"), None),  # k
-        P(("attn_dp", "model", "expert", "attn_dp_expert"), None),  # k_rope
-        P(("attn_dp", "model", "expert", "attn_dp_expert")),  # kv_cache
-        P(("data", "attn_dp", "attn_dp_expert")),  # md.seq_lens: Replicated
-        P(("data", "attn_dp", "attn_dp_expert")),  # page_indices_flat: Replicated
-        P(("data", "attn_dp", "attn_dp_expert")),  # query_start_loc: Replicated
-        P(("data", "attn_dp", "attn_dp_expert")),  # distribution: Replicated
-    )
-
-    out_specs = (
-        P(("attn_dp", "model", "expert", "attn_dp_expert"), None, None),
-        P(("attn_dp", "model", "expert", "attn_dp_expert")),
-    )
-
-    kv_cache, output = jax.jit(
-        shard_map.shard_map(
-            _mla_ragged_paged_attention,
-            mesh=self.mesh,
-            in_specs=in_specs,
-            out_specs=out_specs,
-            check_rep=False,
-        ),
-    )(
-        q_absorbed,
-        q_rope,
-        k_latent,
-        k_rope,
-        mla_kv_cache,
-        md.seq_lens,
-        md.block_tables,
-        md.query_start_loc,
-        md.request_distribution,
-    )
-    output = jnp.einsum("TNA,ANH->TNH", output, wv_b_kernel)
-    return kv_cache, output
 
   def calculate_indexer_loss(
       self,

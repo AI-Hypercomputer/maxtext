@@ -16,7 +16,7 @@
 base_config: "vllm.yml"
 
 logical_axis_rules: [
-                      ['activation_batch', ['']],
+                      ['activation_batch', []],
                       ['activation_batch_no_exp', []],
                       ['activation_embed_and_logits_batch', ['expert']],
                       ['activation_embed_and_logits_batch_sequence', ['expert']],
@@ -32,7 +32,7 @@ logical_axis_rules: [
                       ['activation_mlp', ['model', 'attn_dp', 'expert']],
                       ['activation_kv', ['model']],
                       ['activation_prefill_kv_batch', ['expert']],
-                      ['activation_kv_batch', ['']],
+                      ['activation_kv_batch', []],
                       ['activation_kv_batch_no_exp', []],
                       ['activation_kv_head_dim', ['model', 'attn_dp', 'expert']],
                       ['activation_vocab', ['model', 'attn_dp']],
