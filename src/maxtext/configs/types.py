@@ -235,6 +235,7 @@ ModelName = Literal[
     "qwen2.5-7b",
     "qwen2.5-14b",
     "qwen3-0.6b",
+    "qwen3-1.7b",
     "qwen3-4b",
     "qwen3-4b-thinking-2507",
     "qwen3-8b",
