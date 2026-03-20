@@ -233,6 +233,7 @@ ModelName = Literal[
     "gemma3-4b",
     "gemma3-12b",
     "gemma3-27b",
+    "qwen2.5-1.5b",
     "qwen2.5-7b",
     "qwen2.5-14b",
     "qwen3-0.6b",

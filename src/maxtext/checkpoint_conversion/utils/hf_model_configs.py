@@ -1,16 +1,16 @@
-# Copyright 2023–2025 Google LLC
+#  Copyright 2023–2026 Google LLC
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
 #
-#    https://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 
 """
 This config defines the architectural configurations of the Hugging Face version of a model.
@@ -208,6 +208,22 @@ gemma2_27b_config = transformers.Gemma2Config(
     head_dim=128,
     sliding_window=4096,
     query_pre_attn_scalar=144,
+)
+
+qwen25_1_5b_config = transformers.Qwen2Config(
+    vocab_size=151936,
+    hidden_size=1536,
+    intermediate_size=8960,
+    num_hidden_layers=28,
+    num_attention_heads=12,
+    num_key_value_heads=2,
+    hidden_act="silu",
+    max_position_embeddings=32768,
+    rms_norm_eps=1e-06,
+    rope_theta=1000000.0,
+    tie_word_embeddings=True,
+    torch_dtype="bfloat16",
+    attention_bias=True,
 )
 
 qwen25_7b_config = transformers.Qwen2Config(
@@ -866,6 +882,7 @@ HF_MODEL_CONFIGS = {
     "gemma3-4b": gemma3_4b_config,
     "gemma3-12b": gemma3_12b_config,
     "gemma3-27b": gemma3_27b_config,
+    "qwen2.5-1.5b": qwen25_1_5b_config,
     "qwen2.5-7b": qwen25_7b_config,
     "qwen2.5-14b": qwen25_14b_config,
     "qwen3-0.6b": qwen3_0_6b_config,
