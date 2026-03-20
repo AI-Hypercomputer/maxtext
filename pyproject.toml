@@ -3,7 +3,7 @@ requires = ["hatchling", "hatch-requirements-txt"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
-path = "src/MaxText/__init__.py"
+path = "src/maxtext/__init__.py"
 
 [project]
 name = "maxtext"
@@ -23,7 +23,9 @@ classifiers = [
     "Environment :: GPU :: NVIDIA CUDA :: 12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = []
+dependencies = [
+    "jax>=0.9.2",
+]
 
 [tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
 tpu = ["src/dependencies/requirements/generated_requirements/tpu-requirements.txt"]
@@ -39,8 +41,16 @@ Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
 [tool.hatch.metadata]
 allow-direct-references = true
 
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cuda12" },
+        { extra = "tpu-post-train" },
+    ],
+]
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/MaxText", "src/maxtext", "src/dependencies/github_deps", "src/dependencies"]
+packages = ["src/maxtext", "src/dependencies/github_deps", "src/dependencies"]
 
 # TODO: Add this hook back when it handles device-type parsing
 # [tool.hatch.build.targets.wheel.hooks.custom]
