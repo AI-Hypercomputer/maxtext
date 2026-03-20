@@ -36,6 +36,12 @@ _LOGGED_ACTIVATION_SHARDINGS = set()
 _ACTIVATION_SHARDINGS_DUMP = []
 
 
+def clear_input_shardings_dump():
+  """Clear the input shardings dump"""
+  _LOGGED_ACTIVATION_SHARDINGS.clear()
+  _ACTIVATION_SHARDINGS_DUMP.clear()
+
+
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
   if config.enable_diloco:
