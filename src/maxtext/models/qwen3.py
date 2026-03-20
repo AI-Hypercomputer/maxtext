@@ -213,10 +213,10 @@ def pallas_chunk_gated_delta_rule(
   scale = jax.lax.rsqrt(jnp.array(query.shape[-1], dtype=jnp.float32)).astype(compute_dtype)
   query = query * scale
 
-  B, S, H, K_dim = key.shape
+  B, seq_len, H, K_dim = key.shape
   V_dim = value.shape[-1]
   
-  pad_len = (chunk_size - (S % chunk_size)) % chunk_size
+  pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
   if pad_len > 0:
     pad_fn = lambda x, val=0.0: jnp.pad(x, ((0,0), (0, pad_len)) + ((0,0),)*(x.ndim-2), constant_values=val)
     query = pad_fn(query)
@@ -244,7 +244,7 @@ def pallas_chunk_gated_delta_rule(
   g_cumsum = jnp.cumsum(g_c, axis=-1)
   k_beta = k_c * beta_c[..., None]
   
-  S = jnp.matmul(k_c, k_beta.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
+  S = jnp.matmul(k_beta, k_c.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
   S = S.astype(jnp.float32)
   g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
   mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
@@ -255,6 +255,18 @@ def pallas_chunk_gated_delta_rule(
   identity = jnp.eye(chunk_size, dtype=jnp.float32)
   identity_broadcasted = jnp.broadcast_to(identity, S.shape)
   A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
+  
+  # OPTIMIZED TPU INVERSION: (I+S)^-1 using logarithmic expansion
+  # Since S is strictly lower triangular, S^N = 0. We can invert it with pure matmuls.
+  # X = -S
+  # A = identity + X
+  # prec = jax.lax.Precision.HIGHEST
+  # X_pow = jnp.matmul(X, X, precision=prec)
+  
+  # num_iters = int(math.ceil(math.log2(chunk_size))) - 1
+  # for _ in range(num_iters):
+  #     A = A + jnp.matmul(A, X_pow, precision=prec)
+  #     X_pow = jnp.matmul(X_pow, X_pow, precision=prec)
 
   v_beta = v_c * beta_c[..., None]
   u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
@@ -282,7 +294,7 @@ def pallas_chunk_gated_delta_rule(
   else:
       h_init = initial_state.astype(compute_dtype)
 
-  kernel_to_use = gdn_pallas.gdn_pallas_layer
+  kernel_to_use = gdn_pallas3.gdn_pallas_layer
   # Invoke Kernel
   if mesh is not None:
       # Mesh Partitioning
@@ -311,7 +323,7 @@ def pallas_chunk_gated_delta_rule(
       # Single Device
       o_pallas, h_final = kernel_to_use(w_p, u_p, q_p, k_p, v_p, g_p, beta_p, h_init)
 
-  o_chunks = o_pallas.transpose(0, 2, 1, 3, 4)
+  o_chunks = o_pallas.transpose(0, 2, 3, 1, 4)
 
   # =========================================================================
   # STAGE 4: FINALIZATION
@@ -319,7 +331,7 @@ def pallas_chunk_gated_delta_rule(
   o = o_chunks.reshape(B, -1, H, V_dim)
   
   if pad_len > 0:
-    o = o[:, :S, :, :]
+    o = o[:, :seq_len, :, :]
   
   o = o.astype(initial_dtype)
     
