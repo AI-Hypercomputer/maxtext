@@ -19,6 +19,8 @@ data_sharding: [['fsdp']]
 logical_axis_rules: [
                       ['activation_batch', ['fsdp']],
                       ['activation_batch_no_exp', ['fsdp']],
+                      ['activation_batch_moe', ['fsdp']],
+                      ['activation_batch_no_exp_moe', ['fsdp']],
                       ['activation_embed_and_logits_batch', ['fsdp']],
                       ['activation_embed_and_logits_batch_sequence', ['fsdp']],
                       ['activation_prefill_kv_batch', ['fsdp']],
@@ -27,6 +29,8 @@ logical_axis_rules: [
                       ['decode_batch', ['fsdp']],
                       ['embed', ['fsdp']],
                       ['embed_no_exp', ['fsdp']],
+                      ['embed_moe', ['fsdp']],
+                      ['embed_no_exp_moe', ['fsdp']],
                       ['q_lora', ['fsdp']],
                       ['kv_lora', ['fsdp']],
                       ['exp_with_fsdp', 'fsdp'],
