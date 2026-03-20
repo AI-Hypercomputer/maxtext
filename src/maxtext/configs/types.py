@@ -1090,6 +1090,11 @@ class Distillation(BaseModel):
       description="Overrides specific to the Teacher model (e.g., {'num_query_heads': 64}).",
   )
 
+  # --- Offline Distillation Field ---
+  offline_data_dir: Optional[str] = Field(
+      None, description="GCS or local path to the pre-generated ArrayRecord teacher data."
+  )
+
   # --- Loss Params ---
   distill_alpha: float = Field(0.5, description="Weight for the distillation loss component.")
   distill_temperature: float = Field(1.0, description="Temperature for distillation softening.")

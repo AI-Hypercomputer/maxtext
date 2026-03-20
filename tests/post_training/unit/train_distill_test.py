@@ -672,6 +672,167 @@ class TrainDistillTest(unittest.TestCase):
     with self.assertRaises(AssertionError, msg="Weights should have updated on the second pass."):
       np.testing.assert_allclose(student.linear.kernel.value, initial_weights)
 
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.distillation_utils.OfflineArrayRecordIterator")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.MaxTextDistillationTrainer")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.input_pipeline_interface.create_data_iterator")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.get_maxtext_model")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.tokenizer.build_tokenizer")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.maxtext_utils.create_device_mesh")
+  @mock.patch("maxtext.configs.pyconfig.initialize")
+  def test_main_offline_mode_skips_teacher_loading(
+      self,
+      mock_pyconfig_init,
+      mock_create_mesh,
+      mock_build_tokenizer,
+      mock_get_model,
+      mock_create_iterator,
+      mock_trainer_cls,
+      mock_offline_iter_cls,
+  ):
+    """Verifies offline mode (offline_data_dir is set) skips teacher model loading."""
+    # 1. Configs
+    mock_global = mock.Mock()
+    mock_global.student_overrides = {}
+    mock_global.teacher_overrides = {}  # No checkpoint needed
+    mock_global.offline_data_dir = "gs://bucket/data"  # Triggers offline mode
+
+    mock_student_cfg = mock.Mock()
+    mock_student_cfg.vocab_size = 32000
+    mock_student_cfg.mesh_axes = ("data",)
+    mock_student_cfg.dataset_type = "grain"
+
+    # Add dummy numbers for optimizer math
+    mock_student_cfg.learning_rate = 1e-4
+    mock_student_cfg.warmup_steps_fraction = 0.1
+    mock_student_cfg.learning_rate_final_fraction = 0.1
+    mock_student_cfg.steps = 100
+    mock_student_cfg.checkpoint_period = 10
+    mock_student_cfg.gradient_clipping_threshold = 0.0
+    mock_student_cfg.eval_interval = -1
+    mock_student_cfg.gradient_accumulation_steps = 1
+    mock_student_cfg.global_batch_size = 8
+
+    # Add dummy numbers for strategy math/logic
+    mock_student_cfg.distill_temperature = 1.0
+    mock_student_cfg.distill_alpha = 0.5
+    mock_student_cfg.distill_beta = 0.0
+    mock_student_cfg.distill_layer_indices = None
+    mock_student_cfg.use_sft = False
+    mock_student_cfg.enable_dropout = False
+
+    # Add dummy variables for Checkpointer and Logger
+    mock_student_cfg.max_num_checkpoints_to_keep = 1
+    mock_student_cfg.async_checkpointing = False
+    mock_student_cfg.profiler = "none"
+    mock_student_cfg.tensorboard_dir = ""
+    mock_student_cfg.checkpoint_dir = ""
+    mock_student_cfg.log_period = 10
+    mock_student_cfg.save_checkpoint_on_completion = False
+    mock_student_cfg.logical_axis_rules = []
+
+    mock_teacher_cfg = mock.Mock()
+    mock_teacher_cfg.vocab_size = 32000
+    mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
+
+    # 2. Model Loading
+    mock_student_model = mock.Mock()
+    mock_get_model.return_value = mock_student_model
+
+    # 3. Tokenizer & Data Iterator
+    mock_build_tokenizer.return_value = mock.Mock(pad_id=0)
+    mock_create_iterator.return_value = (None, None)
+
+    train_distill.main(["train_distill.py", "config.yml"])
+
+    # 4. Assertions
+    # checking to ensure get_maxtext_model is only called once for student and not for teacher
+    mock_get_model.assert_called_once_with(mock_student_cfg, mock.ANY)
+
+    trainer_init_kwargs = mock_trainer_cls.call_args.kwargs
+    model_bundle = trainer_init_kwargs["model"]
+    # check that student model is set but teacher model is None since offline mode should skip loading teacher
+    self.assertIs(model_bundle.student_model, mock_student_model)
+    self.assertIsNone(model_bundle.teacher_model)
+
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.MaxTextDistillationTrainer")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.input_pipeline_interface.create_data_iterator")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.get_maxtext_model")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.tokenizer.build_tokenizer")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.maxtext_utils.create_device_mesh")
+  @mock.patch("maxtext.configs.pyconfig.initialize")
+  def test_main_online_mode_loads_teacher(
+      self,
+      mock_pyconfig_init,
+      mock_create_mesh,
+      mock_build_tokenizer,
+      mock_get_model,
+      mock_create_iterator,
+      mock_trainer_cls,
+  ):
+    """Verifies online mode (offline_data_dir is None) loads both student and teacher models."""
+    mock_global = mock.Mock()
+    mock_global.student_overrides = {}
+    mock_global.teacher_overrides = {"load_parameters_path": "gs://ckpt"}
+    mock_global.offline_data_dir = None  # Triggers online mode
+
+    mock_student_cfg = mock.Mock()
+    mock_student_cfg.vocab_size = 32000
+    mock_student_cfg.mesh_axes = ("data",)
+    mock_student_cfg.dataset_type = "grain"
+
+    # Add dummy numbers for optimizer math
+    mock_student_cfg.learning_rate = 1e-4
+    mock_student_cfg.warmup_steps_fraction = 0.1
+    mock_student_cfg.learning_rate_final_fraction = 0.1
+    mock_student_cfg.steps = 100
+    mock_student_cfg.checkpoint_period = 10
+    mock_student_cfg.gradient_clipping_threshold = 0.0
+    mock_student_cfg.eval_interval = -1
+    mock_student_cfg.gradient_accumulation_steps = 1
+    mock_student_cfg.global_batch_size = 8
+
+    # Add dummy numbers for strategy math/logic
+    mock_student_cfg.distill_temperature = 1.0
+    mock_student_cfg.distill_alpha = 0.5
+    mock_student_cfg.distill_beta = 0.0
+    mock_student_cfg.distill_layer_indices = None
+    mock_student_cfg.use_sft = False
+    mock_student_cfg.enable_dropout = False
+
+    # Add dummy variables for Checkpointer and Logger
+    mock_student_cfg.max_num_checkpoints_to_keep = 1
+    mock_student_cfg.async_checkpointing = False
+    mock_student_cfg.profiler = "none"
+    mock_student_cfg.tensorboard_dir = ""
+    mock_student_cfg.checkpoint_dir = ""
+    mock_student_cfg.log_period = 10
+    mock_student_cfg.save_checkpoint_on_completion = False
+    mock_student_cfg.logical_axis_rules = []
+
+    mock_teacher_cfg = mock.Mock()
+    mock_teacher_cfg.vocab_size = 32000
+    mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
+
+    mock_student_model = mock.Mock()
+    mock_teacher_model = mock.Mock()
+    mock_get_model.side_effect = [mock_student_model, mock_teacher_model]
+
+    mock_build_tokenizer.return_value = mock.Mock(pad_id=0)
+    mock_create_iterator.return_value = (mock.Mock(), mock.Mock())
+
+    train_distill.main(["train_distill.py", "config.yml"])
+
+    # checking to ensure get_maxtext_model is called for both student and teacher since online mode should load both
+    self.assertEqual(mock_get_model.call_count, 2)
+    mock_get_model.assert_any_call(mock_student_cfg, mock.ANY)
+    mock_get_model.assert_any_call(mock_teacher_cfg, mock.ANY)
+
+    trainer_init_kwargs = mock_trainer_cls.call_args.kwargs
+    model_bundle = trainer_init_kwargs["model"]
+    # check that both student and teacher models are set since online mode should load both
+    self.assertIs(model_bundle.student_model, mock_student_model)
+    self.assertIs(model_bundle.teacher_model, mock_teacher_model)
+
 
 if __name__ == "__main__":
   absltest.main()

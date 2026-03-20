@@ -32,7 +32,6 @@ Architecture Overview:
 3. **Tunix Integration**: We wrap the MaxText models in `TunixMaxTextAdapter` to expose
    a standard interface (call signature) that the Tunix `DistillationTrainer` expects.
 """
-
 from typing import Sequence, Callable
 from absl import app
 from flax import nnx
@@ -303,6 +302,8 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         targets=input_data.targets,
         targets_position=input_data.targets_position,
         targets_segmentation=input_data.targets_segmentation,
+        top_k_logits=input_data.top_k_logits,
+        top_k_indices=input_data.top_k_indices,
     )
 
   def _post_process_train_step(self, aux: dict[str, jax.Array]) -> None:
@@ -401,7 +402,12 @@ def get_maxtext_model(config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh)
 # -----------------------------------------------------------------------------
 
 
-def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyconfig.HyperParameters) -> None:
+def train_distill(
+    student_config: pyconfig.HyperParameters,
+    teacher_config: pyconfig.HyperParameters,
+    is_offline: bool = False,
+    offline_data_dir: str | None = None,
+) -> None:
   """Main distillation training loop.
 
   Orchestrates the loading of both student and teacher models, configures the
@@ -437,9 +443,15 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   _log_config_details(student_config, "Student")
   student_model = get_maxtext_model(student_config, mesh)
 
-  max_logging.log(f"Loading Teacher from {teacher_config.load_parameters_path}...")
-  _log_config_details(teacher_config, "Teacher")
-  teacher_model = get_maxtext_model(teacher_config, mesh)
+  # Skip teacher model loading if offline
+  if is_offline:
+    max_logging.log("Offline Distillation: Skipping Teacher Model loading.")
+    teacher_model = None
+  else:
+    max_logging.log(f"Loading Teacher from {teacher_config.load_parameters_path}...")
+    _log_config_details(teacher_config, "Teacher")
+    teacher_model = get_maxtext_model(teacher_config, mesh)
+    teacher_model.eval()
 
   # 3. Define Distillation Strategy
   def labels_fn(targets, targets_segmentation=None, **kwargs):
@@ -502,13 +514,15 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   )
 
   # 5. Data Iterators (Init BEFORE Trainer)
-  # We use MaxText's native create_data_iterator which creates both train and eval iterators
-  max_logging.log("Initializing Data Iterators via MaxText pipeline...")
-  raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
+  if is_offline:
+    max_logging.log(f"Loading Offline Dataset from {offline_data_dir}...")
+    raw_train_iter = distillation_utils.OfflineArrayRecordIterator(offline_data_dir)
+    raw_eval_iter = None
+  else:
+    max_logging.log("Initializing Data Iterators via MaxText pipeline...")
+    raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
 
-  teacher_model.eval()
   student_model.train()
-
   model_bundle = ModelBundle(teacher_model, student_model)
 
   # 6. Initialize Trainer
@@ -526,18 +540,35 @@ def train_distill(student_config: pyconfig.HyperParameters, teacher_config: pyco
   raw_train_iter = _setup_and_restore_input_pipeline(trainer, raw_train_iter, student_config, train_config)
 
   # 8. Configure Input Mapping
-  trainer = trainer.with_gen_model_input_fn(
-      lambda batch: {
-          "input_tokens": batch.input_tokens,
-          "positions": batch.positions,
-          "attention_mask": batch.input_mask,
-          "decoder_segment_ids": batch.decoder_segment_ids,
-          "targets": batch.targets,  # Passed to strategy (labels_fn)
-          "targets_position": batch.targets_position,  # Passed to strategy (labels_fn)
-          "targets_segmentation": batch.targets_segmentation,  # Passed to strategy (labels_fn)
-          "cache": None,
-      }
-  )
+  def custom_gen_model_input_fn(batch):
+    inputs_dict = {
+        "input_tokens": batch.input_tokens,
+        "positions": batch.positions,
+        "attention_mask": batch.input_mask,
+        "decoder_segment_ids": batch.decoder_segment_ids,
+        "targets": batch.targets,
+        "targets_position": batch.targets_position,
+        "targets_segmentation": batch.targets_segmentation,
+        "cache": None,
+    }
+
+    # If we are in online mode then we exit
+    if getattr(batch, "top_k_logits", None) is None:
+      return inputs_dict
+
+    # Scatter the offline arrays into a dense tensor of -10000s
+    dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
+    dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
+    dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
+
+    # Inject it as teacher_output so the trainer skips the teacher forward pass
+    inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
+        logits=dense_logits, out_projection_activations=None
+    )
+
+    return inputs_dict
+
+  trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
 
   # 9. Create Iterator Wrappers (Use Utils)
   train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
@@ -589,9 +620,6 @@ def main(argv: Sequence[str]) -> None:
 
   Parses configuration, isolates Student and Teacher overrides, and triggers the
   training loop.
-
-  Args:
-    argv: List of command-line arguments. Expects [script_name, config_file, ...].
   """
   # 1. Parse Global Config to extract Overrides
   global_config = pyconfig.initialize(argv)
@@ -601,12 +629,14 @@ def main(argv: Sequence[str]) -> None:
   student_overrides = global_config.student_overrides
   student_config = pyconfig.initialize(argv, **student_overrides)
 
+  is_offline = bool(global_config.offline_data_dir)
+
   # 3. Initialize TEACHER Config
   # We isolate the Teacher from Student CLI arguments (like pruning params).
   teacher_overrides = global_config.teacher_overrides
 
   # Ensure load_parameters_path is set in overrides
-  if not teacher_overrides.get("load_parameters_path"):
+  if not is_offline and not teacher_overrides.get("load_parameters_path"):
     raise ValueError(
         "Teacher model path is missing! You must provide 'teacher_overrides.load_parameters_path' "
         "in your config or arguments."
@@ -618,7 +648,7 @@ def main(argv: Sequence[str]) -> None:
   teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
 
   # 4. Run Training
-  train_distill(student_config, teacher_config)
+  train_distill(student_config, teacher_config, is_offline, global_config.offline_data_dir)
 
 
 if __name__ == "__main__":
