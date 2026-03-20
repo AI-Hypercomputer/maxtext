@@ -76,6 +76,7 @@ def get_datasets(
     data_file_type,
     shuffle,
     shuffle_seed,
+    shuffle_buffer_size,
     num_epoch,
     dataloading_host_index,
     dataloading_host_count,
@@ -167,6 +168,20 @@ def get_datasets(
           grain_prefetch_buffer_size,
       )
       return dataset
+  elif data_file_type == "tfrecord":
+    data_files = find_data_files(data_file_pattern)
+    dataset = grain.MapDataset.source(data_files)
+    if shuffle:
+      dataset = dataset.shuffle(seed=shuffle_seed)
+    dataset = dataset.repeat(num_epoch)
+    dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
+    dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)
+    files_per_host = max(len(data_files) // dataloading_host_count, 1)
+    cycle_length = min(files_per_host, grain_num_threads)
+    dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=cycle_length)
+    if shuffle:
+      dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=shuffle_buffer_size, seed=shuffle_seed)
+    return dataset
   elif data_file_type == "parquet":
     data_files = find_data_files(data_file_pattern)
     dataset = grain.MapDataset.source(data_files)
@@ -183,10 +198,12 @@ def get_datasets(
     cycle_length = min(len(dataset) // num_epoch, grain_num_threads)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=cycle_length)
     if shuffle:
-      dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=100, seed=shuffle_seed)
+      dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=shuffle_buffer_size, seed=shuffle_seed)
     return dataset
   else:
-    raise ValueError(f"grain pipeline supports (arrayrecord, parquet) as grain_file_type, but got {data_file_type}")
+    raise ValueError(
+        f"grain pipeline supports (arrayrecord, tfrecord, parquet) as grain_file_type, but got {data_file_type}"
+    )
 
 
 def pretrain_preprocessing_pipeline(
@@ -198,7 +215,7 @@ def pretrain_preprocessing_pipeline(
     grain_per_worker_buffer_size,
 ):
   """Use grain pipeline to pre-process the dataset and return iterators for pretrain"""
-  if config.grain_file_type == "arrayrecord":
+  if config.grain_file_type in ("arrayrecord", "tfrecord"):
     dataset = dataset.map(input_pipeline_utils.ParseFeatures(data_columns, tokenize))
     dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
   else:
@@ -311,7 +328,7 @@ def dpo_preprocessing_pipeline(
     grain_per_worker_buffer_size,
 ):
   """Use grain to pre-process the dataset and return iterators for dpo fine-tuning"""
-  if config.grain_file_type == "arrayrecord":
+  if config.grain_file_type in ("arrayrecord", "tfrecord"):
     dataset = dataset.map(input_pipeline_utils.ParseFeatures(data_columns, tokenize))
     dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
   tokenizer_model = tokenizer.build_tokenizer(
@@ -367,6 +384,7 @@ def make_grain_train_iterator(
         config.grain_file_type,
         shuffle=config.enable_data_shuffling,
         shuffle_seed=config.data_shuffle_seed,
+        shuffle_buffer_size=config.grain_shuffle_buffer_size,
         num_epoch=config.num_epoch,
         dataloading_host_index=process_indices.index(jax.process_index()),
         dataloading_host_count=len(process_indices),
@@ -407,6 +425,7 @@ def make_grain_train_iterator(
         config.grain_file_type,
         shuffle=config.enable_data_shuffling,
         shuffle_seed=config.data_shuffle_seed,
+        shuffle_buffer_size=config.grain_shuffle_buffer_size,
         num_epoch=config.num_epoch,
         grain_worker_count=config.grain_worker_count,
         grain_num_threads=config.grain_num_threads,
@@ -465,6 +484,7 @@ def make_grain_eval_iterator(
         config.grain_file_type,
         shuffle=False,
         shuffle_seed=config.data_shuffle_seed,
+        shuffle_buffer_size=config.grain_shuffle_buffer_size,
         num_epoch=1,
         dataloading_host_index=process_indices.index(jax.process_index()),
         dataloading_host_count=len(process_indices),
@@ -501,6 +521,7 @@ def make_grain_eval_iterator(
         config.grain_file_type,
         shuffle=False,  # No shuffle for eval
         shuffle_seed=config.data_shuffle_seed,
+        shuffle_buffer_size=config.grain_shuffle_buffer_size,
         num_epoch=1,
         grain_worker_count=config.grain_worker_count_eval,
         grain_num_threads=config.grain_num_threads_eval,
