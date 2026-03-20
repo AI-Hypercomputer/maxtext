@@ -15,7 +15,7 @@
 """Installs extra dependencies from a requirements file using uv.
 
 This script is designed to be run to install dependencies specified in
-'extra_post_train_deps_from_github.txt', which is expected to be in the same directory.
+'post_train_deps.txt', which is expected to be in the same directory.
 It first ensures 'uv' is installed and then uses it to install the packages
 listed in the requirements file.
 """
@@ -28,22 +28,22 @@ from pathlib import Path
 
 def main():
   """
-  Installs extra dependencies specified in extra_post_train_deps_from_github.txt using uv.
+  Installs extra dependencies specified in post_train_deps.txt using uv.
 
-  This script looks for 'extra_post_train_deps_from_github.txt' relative to its own location.
+  This script looks for 'post_train_deps.txt' relative to its own location.
   It executes 'uv pip install -r <path_to_extra_deps.txt> --resolution=lowest'.
   """
   script_dir = Path(__file__).resolve().parent
 
   os.environ["VLLM_TARGET_DEVICE"] = "tpu"
 
-  # Adjust this path if your extra_post_train_deps_from_github.txt is in a different location,
-  # e.g., script_dir / "data" / "extra_post_train_deps_from_github.txt"
-  extra_deps_file = script_dir / "extra_post_train_deps_from_github.txt"
+  # Adjust this path if your post_train_deps.txt is in a different location,
+  # e.g., script_dir / "data" / "post_train_deps.txt"
+  extra_deps_file = script_dir / "post_train_deps.txt"
 
   if not extra_deps_file.exists():
     print(f"Error: '{extra_deps_file}' not found.")
-    print("Please ensure 'extra_post_train_deps_from_github.txt' is in the correct location relative to the script.")
+    print("Please ensure 'post_train_deps.txt' is in the correct location relative to the script.")
     sys.exit(1)
   # Check if 'uv' is available in the environment
   try:

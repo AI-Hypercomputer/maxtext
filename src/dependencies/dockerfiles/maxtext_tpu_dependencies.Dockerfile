@@ -50,9 +50,9 @@ ENV MAXTEXT_REPO_ROOT=/deps
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
+COPY ${PACKAGE_DIR}/dependencies/github_deps/ src/dependencies/github_deps/
 COPY ${PACKAGE_DIR}/dependencies/requirements/ src/dependencies/requirements/
 COPY ${PACKAGE_DIR}/dependencies/scripts/ src/dependencies/scripts/
-COPY ${PACKAGE_DIR}/install_maxtext_extra_deps/ src/install_maxtext_extra_deps/
 COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 
 # Copy the custom libtpu.so file if it exists
