@@ -15,7 +15,7 @@
 """
 SFT training script that calls a trainer in Tunix to run SFT on a MaxText model
 using `HuggingFaceH4/ultrachat_200k` dataset. The configurations for the dataset
-are defined inside `src/maxtext/configs/post_train/sft.yml`.
+are defined inside `src/MaxText/configs/sft.yml`.
 
 Example command:
 Training & Evaluation:
@@ -38,8 +38,12 @@ Training:
 from typing import Sequence
 
 from absl import app
+import math
 import os
+import re
 import jax
+import jax.numpy as jnp
+from flax import nnx
 import optax
 import pathwaysutils
 
@@ -48,7 +52,10 @@ from flax.linen import partitioning as nn_partitioning
 from orbax import checkpoint as ocp
 
 from tunix.sft import metrics_logger, peft_trainer, profiler
+from tunix.sft import utils as tunix_sft_utils
+from tunix.rl import reshard
 
+from maxtext.optimizers import optimizers
 from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train import loss_fn
 from maxtext.common.goodput import (
@@ -60,8 +67,8 @@ from maxtext.common.goodput import (
     maybe_record_goodput,
     record_goodput,
 )
-from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.sft import hooks
+from maxtext.utils import lora_utils
 from maxtext.utils import max_utils
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
@@ -126,7 +133,15 @@ def use_maxtext_loss_function(trainer, mt_config):
     The trainer configured with the MaxText loss function.
   """
 
-  def loss_func(model, inputs, inputs_position, inputs_segmentation, targets, targets_position, targets_segmentation):
+  def loss_func(
+      model,
+      inputs,
+      inputs_position,
+      inputs_segmentation,
+      targets,
+      targets_position,
+      targets_segmentation,
+  ):
     data = {
         "inputs": inputs,
         "inputs_position": inputs_position,
@@ -147,6 +162,8 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.create_nnx_model(mt_config)
+    model = lora_utils.apply_lora_to_model(model, mesh, mt_config)
+    lora_restore_path = getattr(mt_config, "lora_restore_path", "")
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     # pass in model for muon
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
@@ -162,6 +179,8 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
     trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
+    trainer = lora_utils.restore_lora_from_path(trainer, lora_restore_path)
+
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
     trainer = use_maxtext_loss_function(trainer, mt_config)
@@ -172,7 +191,10 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
   with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-    trainer.train(trainer.data_hooks.train_data_iterator, trainer.data_hooks.eval_data_iterator)
+    trainer.train(
+        trainer.data_hooks.train_data_iterator,
+        trainer.data_hooks.eval_data_iterator,
+    )
   return trainer
 
 
