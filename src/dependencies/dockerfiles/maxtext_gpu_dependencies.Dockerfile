@@ -56,7 +56,7 @@ WORKDIR /deps
 COPY ${PACKAGE_DIR}/dependencies/github_deps/ src/dependencies/github_deps/
 COPY ${PACKAGE_DIR}/dependencies/requirements/ src/dependencies/requirements/
 COPY ${PACKAGE_DIR}/dependencies/scripts/ src/dependencies/scripts/
-COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/maxtext/integration/vllm/
+COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/MaxText/integration/vllm/
 
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"

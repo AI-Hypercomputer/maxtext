@@ -37,6 +37,14 @@ def main():
   if not os.path.exists(extra_deps_path):
     raise FileNotFoundError(f"Dependencies file not found at {extra_deps_path}")
 
+  # Adjust this path if your pre_train_deps.txt is in a different location,
+  # e.g., script_dir / "data" / "pre_train_deps.txt"
+  extra_deps_file = script_dir / "pre_train_deps.txt"
+
+  if not extra_deps_file.exists():
+    print(f"Error: '{extra_deps_file}' not found.")
+    print("Please ensure 'pre_train_deps.txt' is in the correct location relative to the script.")
+    sys.exit(1)
   # Check if 'uv' is available in the environment
   try:
     subprocess.run([sys.executable, "-m", "pip", "install", "uv"], check=True, capture_output=True)

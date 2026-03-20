@@ -40,7 +40,7 @@ Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/MaxText", "src/maxtext", "src/dependencies"]
+packages = ["src/MaxText", "src/maxtext", "src/dependencies/github_deps", "src/dependencies"]
 
 # TODO: Add this hook back when it handles device-type parsing
 # [tool.hatch.build.targets.wheel.hooks.custom]
