@@ -340,6 +340,7 @@ share_kv_projections: False # Note: Not compatible with attention_type='mla'
 attention_bias: False # If True, adds a learnable bias to the query, key, and value projections
 attention_sink: False
 sliding_window_size: 0
+num_sliding_layers: 0
 chunk_attn_window_size: 0
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0

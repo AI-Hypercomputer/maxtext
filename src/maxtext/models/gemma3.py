@@ -42,9 +42,25 @@ GEMMA3_ATTENTION_PATTERN = (
 )
 
 
-def get_attention_type(layer_id):
-  layer_id %= len(GEMMA3_ATTENTION_PATTERN)
-  return GEMMA3_ATTENTION_PATTERN[layer_id]
+def get_attention_pattern(config) -> tuple[AttentionType, ...]:
+  """Returns the Gemma3 repeating attention pattern for the configured model.
+
+  Pattern shape is: `num_sliding_layers` local sliding layers followed by one global layer.
+  """
+  num_sliding_layers = getattr(config, "num_sliding_layers", len(GEMMA3_ATTENTION_PATTERN) - 1)
+  if num_sliding_layers < 0:
+    raise ValueError(f"num_sliding_layers must be >= 0, got {num_sliding_layers}")
+  return (AttentionType.LOCAL_SLIDING,) * num_sliding_layers + (AttentionType.GLOBAL,)
+
+
+def get_attention_pattern_length(config) -> int:
+  return len(get_attention_pattern(config))
+
+
+def get_attention_type(config, layer_id):
+  pattern = get_attention_pattern(config)
+  layer_id %= len(pattern)
+  return pattern[layer_id]
 
 
 def get_query_pre_attn_scalar(config) -> float:
@@ -284,7 +300,7 @@ class Gemma3ScannableBlock(nnx.Module):
     self.num_of_layers = num_of_layers
 
     for layer_id in range(self.num_of_layers):
-      attention_type = get_attention_type(layer_id)
+      attention_type = get_attention_type(self.config, layer_id)
       layer_name = f"layers_{layer_id}"
       layer = Gemma3DecoderLayer(
           config=self.config,

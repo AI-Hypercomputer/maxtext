@@ -26,6 +26,7 @@ decoder_block: "gemma3"
 normalization_layer_epsilon: 1e-6
 logits_via_embedding: True
 sliding_window_size: 1024
+num_sliding_layers: 3
 use_post_attn_norm: true
 use_post_ffw_norm: true
 local_rope_max_timescale: 10_000

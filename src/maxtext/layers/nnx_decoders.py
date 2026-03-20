@@ -313,7 +313,7 @@ class NNXDecoder(nnx.Module):
 
         self.moe_layer = self._create_scanned_layers(moe_cls, length=num_moe, rngs=rngs)
       elif self.is_gemma3:
-        attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
+        attention_pattern_length = gemma3.get_attention_pattern_length(config)
         scan_length = config.num_decoder_layers // attention_pattern_length
         num_remaining_layers = config.num_decoder_layers % attention_pattern_length
         layer_kwargs = {"num_of_layers": attention_pattern_length}
@@ -353,7 +353,7 @@ class NNXDecoder(nnx.Module):
         for lyr in range(config.num_decoder_layers):
           layer_kwargs = {}
           if config.decoder_block == DecoderBlockType.GEMMA3:
-            layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
+            layer_kwargs = {"attention_type": gemma3.get_attention_type(config, layer_id=lyr)}
           elif config.decoder_block == DecoderBlockType.LLAMA4:
             layer_kwargs = {
                 "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
@@ -1085,7 +1085,7 @@ class NNXDecoder(nnx.Module):
     cfg = self.config
 
     # Define the repeating pattern length and calculate how many full blocks to scan
-    attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
+    attention_pattern_length = gemma3.get_attention_pattern_length(cfg)
     scan_length = cfg.num_decoder_layers // attention_pattern_length
 
     layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)

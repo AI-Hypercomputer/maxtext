@@ -494,6 +494,10 @@ class Attention(BaseModel):
       description="In dot-product attention, cast logits to fp32 before softmax.",
   )
   sliding_window_size: NonNegativeInt = Field(0, description="The size of the sliding window for local attention.")
+  num_sliding_layers: NonNegativeInt = Field(
+      3,
+      description="For Gemma3 attention pattern: number of local-sliding layers before one global layer.",
+  )
   chunk_attn_window_size: NonNegativeInt = Field(0, description="The window size for chunked attention.")
   attn_logits_soft_cap: None | NonNegativeFloat = Field(
       None, description="Soft-cap value for attention logits. None means no cap."
