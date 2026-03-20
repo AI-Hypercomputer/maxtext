@@ -515,6 +515,7 @@ logical_axis_rules: [
                       ['paged_kv_head_dim_size', []],
                       ['dense_layers', []],
                       ['moe_layers', []],
+                      ['num_activations', []],
                       ['engram_dim', ['tensor']],
                       ['mhc', []],
                       ['diloco', 'diloco'],
@@ -1087,8 +1088,9 @@ position_id_per_seconds: 25
 subslice_shape: ""
 
 # NNX
-enable_nnx: false
-pure_nnx_decoder: false
+enable_nnx: False
+pure_nnx_decoder: False
+pure_nnx: False
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
