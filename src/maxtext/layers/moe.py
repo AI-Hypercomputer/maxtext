@@ -1035,13 +1035,14 @@ class RoutedMoE(nnx.Module):
       batch_logical_axis = "activation_batch_no_exp_moe"
 
     if self.get_tensor_transpose_parallelism_size() > 1:
-      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))
+      input_partition_pspec = self._logical_to_mesh_axes(
+          (batch_logical_axis, "activation_norm_length_moe", "activation_embed_moe")
+      )
       w0_bias_pspec = self._logical_to_mesh_axes(("exp", None))
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", None))
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
     else:
-      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
-      # expert weights are sharded by exp
+      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_moe", None))
       w0_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
@@ -1437,8 +1438,10 @@ class RoutedMoE(nnx.Module):
     # output of updated weights: (batch_size, seq_len, num_experts)
     update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
     index_update = (
-        self._maybe_shard_with_logical(jnp.arange(weights.shape[0])[:, None, None], ("activation_batch_no_exp", None, None)),
-        self._maybe_shard_with_logical(jnp.arange(weights.shape[1])[:, None], ("activation_length_no_exp", None)),
+        self._maybe_shard_with_logical(
+            jnp.arange(weights.shape[0])[:, None, None], ("activation_batch_no_exp_moe", None, None)
+        ),
+        self._maybe_shard_with_logical(jnp.arange(weights.shape[1])[:, None], ("activation_length_no_exp_moe", None)),
         indices,
     )
     weight_sharding = (
@@ -1692,7 +1695,9 @@ class RoutedMoE(nnx.Module):
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_no_exp_moe", None))
     if self.config.model_name.startswith("deepseek3"):
       # pre_bias_logits is None for non-DeepSeek v3 models
-      pre_bias_logits = self._maybe_shard_with_logical(pre_bias_logits, ("activation_batch", "activation_norm_length", None))
+      pre_bias_logits = self._maybe_shard_with_logical(
+          pre_bias_logits, ("activation_batch_moe", "activation_length_no_exp_moe", None)
+      )
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs)
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
