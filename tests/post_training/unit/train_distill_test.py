@@ -399,6 +399,9 @@ class TrainDistillTest(unittest.TestCase):
         "distill/teacher_loss",
         "distill/out_proj_feature_loss",
         "distill/total_loss",
+        "distill/temperature",
+        "distill/alpha",
+        "distill/beta_feature",
     ]
     for key in expected_keys:
       self.assertIn(key, metrics)

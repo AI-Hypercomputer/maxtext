@@ -301,6 +301,9 @@ class CombinedDistillationStrategy:
         "distill/teacher_loss": teacher_hard_loss,
         "distill/out_proj_feature_loss": feature_loss,
         "distill/total_loss": total_loss,
+        "distill/temperature": self.temperature,
+        "distill/alpha": self.alpha,
+        "distill/beta_feature": self.beta_feature,
     }
     return total_loss, metrics
 
