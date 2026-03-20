@@ -20,7 +20,6 @@ pytestmark = [pytest.mark.post_training, pytest.mark.cpu_only]
 import subprocess
 import unittest
 import os.path
-import pytest
 import numpy as np
 import jax
 from jax.sharding import Mesh
