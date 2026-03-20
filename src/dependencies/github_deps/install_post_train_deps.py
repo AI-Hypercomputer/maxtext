@@ -23,7 +23,6 @@ listed in the requirements file.
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 
 def main():
@@ -33,18 +32,14 @@ def main():
   This script looks for 'post_train_deps.txt' relative to its own location.
   It executes 'uv pip install -r <path_to_extra_deps.txt> --resolution=lowest'.
   """
-  script_dir = Path(__file__).resolve().parent
-
   os.environ["VLLM_TARGET_DEVICE"] = "tpu"
 
-  # Adjust this path if your post_train_deps.txt is in a different location,
-  # e.g., script_dir / "data" / "post_train_deps.txt"
-  extra_deps_file = script_dir / "post_train_deps.txt"
+  current_dir = os.path.dirname(os.path.abspath(__file__))
+  repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+  extra_deps_path = os.path.join(current_dir, "post_train_deps.txt")
+  if not os.path.exists(extra_deps_path):
+    raise FileNotFoundError(f"Dependencies file not found at {extra_deps_path}")
 
-  if not extra_deps_file.exists():
-    print(f"Error: '{extra_deps_file}' not found.")
-    print("Please ensure 'post_train_deps.txt' is in the correct location relative to the script.")
-    sys.exit(1)
   # Check if 'uv' is available in the environment
   try:
     subprocess.run([sys.executable, "-m", "pip", "install", "uv"], check=True, capture_output=True)
@@ -61,7 +56,7 @@ def main():
       "pip",
       "install",
       "-r",
-      str(extra_deps_file),
+      str(extra_deps_path),
       "--no-deps",
   ]
 
@@ -71,31 +66,20 @@ def main():
       "uv",
       "pip",
       "install",
-      "src/maxtext/integration/vllm",  # MaxText on vllm installations
+      f"{repo_root}/maxtext/integration/vllm",  # MaxText on vllm installations
       "--no-deps",
   ]
 
-  print(f"Installing extra dependencies from '{extra_deps_file}' using uv...")
-  print(f"Running command: {' '.join(command)}")
-
   try:
     # Run the command to install Github dependencies
-    process = subprocess.run(command, check=True, capture_output=True, text=True)
+    print(f"Installing extra dependencies: {' '.join(command)}")
+    _ = subprocess.run(command, check=True, capture_output=True, text=True)
     print("Extra dependencies installed successfully!")
-    print("--- Output from uv ---")
-    print(process.stdout)
-    if process.stderr:
-      print("--- Errors/Warnings from uv (if any) ---")
-      print(process.stderr)
 
     # Run the command to install the MaxText vLLM directory
-    vllm_install_process = subprocess.run(local_vllm_install_command, check=True, capture_output=True, text=True)
+    print(f"Installing MaxText vLLM dependency: {' '.join(local_vllm_install_command)}")
+    _ = subprocess.run(local_vllm_install_command, check=True, capture_output=True, text=True)
     print("MaxText vLLM dependency installed successfully!")
-    print("--- Output from uv ---")
-    print(vllm_install_process.stdout)
-    if vllm_install_process.stderr:
-      print("--- Errors/Warnings from uv (if any) ---")
-      print(vllm_install_process.stderr)
   except subprocess.CalledProcessError as e:
     print("Failed to install extra dependencies.")
     print(f"Command '{' '.join(e.cmd)}' returned non-zero exit status {e.returncode}.")
