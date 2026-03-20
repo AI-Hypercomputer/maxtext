@@ -63,8 +63,10 @@ from jax.sharding import Mesh
 from orbax import checkpoint as ocp
 from pprint import pprint
 from transformers import AutoTokenizer
+import functools
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
+from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
 
@@ -482,12 +484,12 @@ def create_rl_components(
           rl_cluster_lib.Role.REFERENCE: reference_mesh,
           rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
       },
-      role_to_logical_axis_rule={
-          rl_cluster_lib.Role.ACTOR: trainer_config.logical_axis_rules,
-          rl_cluster_lib.Role.REFERENCE: trainer_config.logical_axis_rules,
-          rl_cluster_lib.Role.ROLLOUT: vllm_config.logical_axis_rules,
-      },
-      rollout_engine="vllm",
+      # role_to_logical_axis_rule={
+      #     rl_cluster_lib.Role.ACTOR: trainer_config.logical_axis_rules,
+      #     rl_cluster_lib.Role.REFERENCE: trainer_config.logical_axis_rules,
+      #     rl_cluster_lib.Role.ROLLOUT: vllm_config.logical_axis_rules,
+      # },
+      rollout_engine=functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config),
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
@@ -512,22 +514,22 @@ def create_rl_components(
           rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
           rollout_vllm_tpu_backend_type="jax",
           rollout_vllm_swap_space_size_gb=trainer_config.swap_space_vllm_gb,
-          rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
-          rollout_vllm_additional_config=rollout_additional_config,
+          # rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
+          # rollout_vllm_additional_config=rollout_additional_config,
           rollout_vllm_init_with_random_weights=True,
-          rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
-          rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
-          rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
+          # rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
+          # rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
+          # rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
           rollout_vllm_async_scheduling=trainer_config.async_scheduling,
-          rollout_vllm_kwargs={
-              "hf_overrides": trainer_config.vllm_hf_overrides,
-              "enable_expert_parallel": sampler_config.rollout_expert_parallelism > 1,
-          },
-          rollout_vllm_sampling_kwargs={
-              "stop": trainer_config.stop_strings,
-              "detokenize": trainer_config.stop_strings is not None,
-              "include_stop_str_in_output": trainer_config.stop_strings is not None,
-          },
+          # rollout_vllm_kwargs={
+          #     "hf_overrides": trainer_config.vllm_hf_overrides,
+          #     "enable_expert_parallel": sampler_config.rollout_expert_parallelism > 1,
+          # },
+          # rollout_vllm_sampling_kwargs={
+          #     "stop": trainer_config.stop_strings,
+          #     "detokenize": trainer_config.stop_strings is not None,
+          #     "include_stop_str_in_output": trainer_config.stop_strings is not None,
+          # },
           **get_rollout_kwargs_for_parallelism(sampler_config, len(sampler_devices)),
       ),
   )
