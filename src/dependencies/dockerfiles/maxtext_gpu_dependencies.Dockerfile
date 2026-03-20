@@ -56,7 +56,7 @@ WORKDIR /deps
 COPY ${PACKAGE_DIR}/dependencies/github_deps/ src/dependencies/github_deps/
 COPY ${PACKAGE_DIR}/dependencies/requirements/ src/dependencies/requirements/
 COPY ${PACKAGE_DIR}/dependencies/scripts/ src/dependencies/scripts/
-COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/MaxText/integration/vllm/
+COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
@@ -65,7 +65,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     bash /deps/src/dependencies/scripts/setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
 
 # Now copy the remaining code (source files that may change frequently)
-COPY ${PACKAGE_DIR}/maxtext/ src/MaxText/
+COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/
 COPY ${TESTS_DIR}*/ tests/
 
 # Download test assets from GCS if building image with test assets
