@@ -1611,6 +1611,7 @@ class MLATest(attention_test_util.MLATestBase):
   def test_indexer_loss(self):
     """Test indexer loss computation."""
     mla_config_args = self.config_arguments.copy()
+    mla_config_args.update(get_decoupled_parallelism_overrides())
     mla_config_args["use_sparse_indexer"] = True
     mla_config_args["attention"] = "dot_product"
     _, mla = self.init_mla(mla_config_args, rope_type="default")
@@ -1657,6 +1658,7 @@ class MLATest(attention_test_util.MLATestBase):
   def test_indexer_loss_kl_divergence_zero(self):
     """Test that KL divergence is 0 when target and pred distributions match exactly."""
     mla_config_args = self.config_arguments.copy()
+    mla_config_args.update(get_decoupled_parallelism_overrides())
     mla_config_args["use_sparse_indexer"] = True
     mla_config_args["attention"] = "dot_product"
     _, mla = self.init_mla(mla_config_args, rope_type="default")

@@ -12,7 +12,7 @@
 
 set -euox pipefail
 
-bash preflight.sh PLATFORM=gke
+bash src/dependencies/scripts/preflight.sh PLATFORM=gke
 
 # flags set as default
 

@@ -25,6 +25,7 @@ import math
 from math import prod
 import os
 from tempfile import gettempdir
+import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
@@ -235,13 +236,19 @@ ModelName = Literal[
     "qwen2.5-7b",
     "qwen2.5-14b",
     "qwen3-0.6b",
+    "qwen3-1.7b",
+    "qwen3-1.7b-base",
     "qwen3-4b",
+    "qwen3-4b-base",
     "qwen3-4b-thinking-2507",
     "qwen3-8b",
+    "qwen3-8b-base",
     "qwen3-14b",
+    "qwen3-14b-base",
     "qwen3-32b",
     "qwen3-235b-a22b",
     "qwen3-30b-a3b",
+    "qwen3-30b-a3b-base",
     "qwen3-480b-a35b",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
@@ -781,6 +788,7 @@ class HardwareAndMesh(BaseModel):
       description="Strategy for context parallelism ('all_gather' or 'ring').",
   )
   custom_mesh: str = Field("", description="Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']")
+  custom_mesh_and_rule: str = Field("", description="Customized mesh and logical rules for granularity.")
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   enable_nnx: bool = Field(False, description="Whether to use NNX for model definition.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
@@ -1080,6 +1088,11 @@ class Distillation(BaseModel):
   teacher_overrides: dict[str, Any] = Field(
       default_factory=dict,
       description="Overrides specific to the Teacher model (e.g., {'num_query_heads': 64}).",
+  )
+
+  # --- Offline Distillation Field ---
+  offline_data_dir: Optional[str] = Field(
+      None, description="GCS or local path to the pre-generated ArrayRecord teacher data."
   )
 
   # --- Loss Params ---
@@ -1962,6 +1975,24 @@ class MaxTextConfig(
     Computes all derived values and runs all cross-field validations after initial parsing.
     This logic is ported from the legacy pyconfig_deprecated.py system and adapted for Pydantic.
     """
+    if self.custom_mesh_and_rule:
+      custom_mesh_path = os.path.join(
+          os.path.dirname(os.path.abspath(__file__)),
+          "custom_mesh_and_rule",
+          f"{self.custom_mesh_and_rule}.yml",
+      )
+      if os.path.exists(custom_mesh_path):
+        with open(custom_mesh_path, "r") as f:  # pylint: disable=unspecified-encoding
+          custom_mesh_config = yaml.safe_load(f)
+          if "mesh_axes" in custom_mesh_config:
+            self.mesh_axes = custom_mesh_config["mesh_axes"]
+          if "logical_axis_rules" in custom_mesh_config:
+            self.logical_axis_rules = custom_mesh_config["logical_axis_rules"]
+          if "data_sharding" in custom_mesh_config:
+            self.data_sharding = custom_mesh_config["data_sharding"]
+      else:
+        raise NotImplementedError(f"Custom mesh config file not found at {custom_mesh_path}")
+
     # A. SET RUN NAME AND PATHS
     # If run_name is not set, generate one from the JOBSET_NAME environment variable (if available)
     # or create one from the model name and a timestamp.

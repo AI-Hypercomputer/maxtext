@@ -122,6 +122,8 @@ jobs:
             DEVICE=${{ inputs.device }}
             MODE=${{ inputs.build_mode }}
             WORKFLOW=${{ inputs.workflow }}
+            PACKAGE_DIR=./src
+            TESTS_DIR=./tests
             JAX_VERSION=NONE
             LIBTPU_VERSION=NONE
             INCLUDE_TEST_ASSETS=true
