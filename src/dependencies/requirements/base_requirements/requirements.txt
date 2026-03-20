@@ -1,10 +1,12 @@
 absl-py
+aiohttp
 aqtp
 array-record
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
 drjax
+evaluate
 flax
 gcsfs
 google-api-python-client
@@ -20,10 +22,12 @@ jsonlines
 math-verify
 ml-collections
 ml-goodput-measurement
+nltk
 numpy
 omegaconf
 optax
 orbax-checkpoint
+pandas
 pathwaysutils
 pillow
 pre-commit

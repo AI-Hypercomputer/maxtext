@@ -1,0 +1,5 @@
+# MLPerf OpenOrca summarisation evaluation config.
+
+benchmark: "mlperf_openorca"
+max_tokens: 1024
+num_samples: 5000

@@ -1,0 +1,6 @@
+# MMLU evaluation config.
+# 57 subjects, 14042 test questions.
+
+benchmark: "mmlu"
+max_tokens: 16
+concurrency: 128
