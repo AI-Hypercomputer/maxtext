@@ -22,7 +22,7 @@ from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.utils import model_creation_utils
-from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR
 
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -421,7 +421,8 @@ def main():
   print("Loading MaxText model...")
   print("="*80)
   # path1 = "/home/wyzhang_google_com/mnt/rl/maxtext/src/maxtext/configs/base.yml"
-  path1 = "/home/mazumdera_google_com/maxtext/src/maxtext/configs/base.yml"
+  path1 = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+  # path2 = $HOME/maxtext/src/maxtext/configs/base.yml"
   path2 = os.path.join(os.path.expanduser("~"), "mnt/rl/maxtext/src/maxtext/configs/base.yml")
   if os.path.exists(path1):
     base_yaml_path = path1
