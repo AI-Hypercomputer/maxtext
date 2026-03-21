@@ -359,8 +359,8 @@ class RoutedMoE(nnx.Module):
     elif self.config.use_batch_split_schedule:
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
     else:
-      self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
-      self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
+      self.wi_kernel_axes = ("exp", "embed_moe", "mlp")
+      self.wo_kernel_axes = ("exp", "mlp", "embed_moe")
 
     if self.config.attention == "vllm_rpa":
       # vLLM uses 'model' as the tensor parallelism axis name
@@ -1055,6 +1055,7 @@ class RoutedMoE(nnx.Module):
     # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
     # mlp_no_fsdp axis
     weight_gather = False
+    #breakpoint()
     if self.config.shard_exp_on_fsdp:
       quantization_rule = qpl.get_current_rule("gmm")
       if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
@@ -1076,6 +1077,8 @@ class RoutedMoE(nnx.Module):
       w0_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       w1_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+      #breakpoint()
+
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
