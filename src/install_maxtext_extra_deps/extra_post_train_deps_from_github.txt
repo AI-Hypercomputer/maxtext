@@ -1,5 +1,5 @@
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
 google-tunix @ https://github.com/google/tunix/archive/615934aa47b3c7bd15b27c858d753274550cf0ad.zip
 mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
-tpu-inference @ https://github.com/vllm-project/tpu-inference/archive/eb2bd54c70f443775d8870caf56b78ab0b671269.zip
-vllm @ git+https://github.com/vllm-project/vllm@3bbb2046ff320395c80c139e55e7c1947c3fb5e1
+tpu-inference @ https://github.com/vllm-project/tpu-inference/archive/4c560d7438b86dee2181d52b711cef2be9adfcda.zip
+vllm @ git+https://github.com/vllm-project/vllm@8d983d7cd661aae1ac8781f67fbbff017db4d0af

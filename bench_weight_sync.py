@@ -81,7 +81,7 @@ def _get_maxtext_model(config):
     tunix_model = TunixMaxTextAdapter(base_model=model)
     # Use the appropriate model config based on the model name
     if config.model_name == "qwen3-30b-a3b":
-      model_config = qwen3_lib.ModelConfig.qwen3_30b()
+      model_config = qwen3_lib.ModelConfig.qwen3_30b_a3b()
     elif config.model_name == "qwen3-0.6b":
       model_config = qwen3_lib.ModelConfig.qwen3_0_6b()
     elif config.model_name == "qwen3-235b-a22b":
