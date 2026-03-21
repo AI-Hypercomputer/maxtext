@@ -128,16 +128,21 @@ jobs:
           if [ "${INPUTS_MAXTEXT_INSTALLED}" == "true" ]; then
             # Move to the directory where code is baked into the image. See the Dockerfile.
             cd /deps
+            REPO_ROOT="/deps"
+
             PYTHON_EXE="python3"
             # Disable coverage flags when testing against a pre-installed package
             PYTEST_COV_ARGS=""
           else
+            REPO_ROOT="${{ github.workspace }}"
+
             # Use the local virtual environment created in Step 3
             PYTHON_EXE=".venv/bin/python3"
             # Ensure pytest-cov is available and enable coverage flags
             $PYTHON_EXE -m pip install --quiet pytest-cov
-            PYTEST_COV_ARGS="--cov=src/MaxText --cov=maxtext --cov-report=xml --cov-report=term"
+            PYTEST_COV_ARGS="--cov=src/MaxText --cov=src/maxtext --cov-report=xml --cov-report=term"
           fi
+          export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
@@ -165,16 +170,16 @@ jobs:
             --durations=0 \
             $PYTEST_COV_ARGS \
             $SPLIT_ARGS \
-            ${INPUTS_PYTEST_EXTRA_ARGS}
+            ${INPUTS_PYTEST_EXTRA_ARGS} \
+            ./tests ./src
 
         env:
-          PYTHONPATH: "${{ github.workspace }}/src"
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
           INPUTS_PYTEST_ADDOPTS: ${{ inputs.pytest_addopts }}
           INPUTS_TOTAL_WORKERS: ${{ inputs.total_workers }}
-          INPUTS_WORKER_GROUP: ${{ inputs.total_workers }}
+          INPUTS_WORKER_GROUP: ${{ inputs.worker_group }}
           INPUTS_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
           INPUTS_MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
       - name: Upload results to Codecov
