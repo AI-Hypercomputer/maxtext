@@ -421,7 +421,7 @@ def main():
   print("Loading MaxText model...")
   print("="*80)
   # path1 = "/home/wyzhang_google_com/mnt/rl/maxtext/src/maxtext/configs/base.yml"
-  path1 = "/home/hengtaoguo_google_com/projects/maxtext/src/maxtext/configs/base.yml"
+  path1 = "/home/mazumdera_google_com/maxtext/src/maxtext/configs/base.yml"
   path2 = os.path.join(os.path.expanduser("~"), "mnt/rl/maxtext/src/maxtext/configs/base.yml")
   if os.path.exists(path1):
     base_yaml_path = path1
