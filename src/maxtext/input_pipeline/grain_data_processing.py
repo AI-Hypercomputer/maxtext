@@ -215,9 +215,7 @@ def pretrain_preprocessing_pipeline(
   dataset = dataset.map(input_pipeline_utils.Rekey(rekey_dict))
 
   batch_size = data_processing_utils.get_local_batch_size(config)
-  dataset = data_processing_utils.pack_or_pad_and_batch_dataset(
-      dataset, config, batch_size, pad_id, data_columns, tokenizer_model
-  )
+  dataset = data_processing_utils.format_and_batch(dataset, config, batch_size, pad_id, data_columns, tokenizer_model)
 
   dataset = data_processing_utils.shift_dataset(dataset, pad_id)
   dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
@@ -263,6 +261,10 @@ def _format_chat_template_grain(element, data_columns, tokenizer_model):
   else:
     # Fallback if it's already a single string
     messages = element[data_columns[0]]
+
+  assert all(
+      hasattr(m, "__contains__") and "role" in m and "content" in m for m in messages
+  ), f"SFT requires a conversational format. Expected dicts with 'role' and 'content', but got: {messages}"
 
   # Assign the standardized messages back to the primary column
   element[data_columns[0]] = messages
@@ -323,7 +325,7 @@ def sft_preprocessing_pipeline(
   data_columns = ("inputs", "targets")
 
   batch_size = data_processing_utils.get_local_batch_size(config)
-  dataset = data_processing_utils.pack_or_pad_and_batch_dataset(
+  dataset = data_processing_utils.format_and_batch(
       dataset, config, batch_size, pad_id, data_columns, base_tokenizer_model
   )
 
