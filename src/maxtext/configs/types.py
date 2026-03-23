@@ -2279,6 +2279,21 @@ class MaxTextConfig(
     if self.expert_shard_attention_option == "context":
       cp_size *= self.ici_expert_parallelism * self.dcn_expert_parallelism
     self.context_parallel_size = cp_size
+
+    # Modify embed - this is a VERY hacky (non-mergeable) implementation, to be replaced with some cool new way to share logical axis rules soon
+    for rule in self.logical_axis_rules:
+      if rule and rule[0] == "embed":
+        if self.embed_shard == "expert_only":
+          rule[1] = ["expert"]
+        elif self.embed_shard == "fsdp_only":
+          rule[1] = ["fsdp"]
+        elif self.embed_shard == "both":
+          rule[1] = ["fsdp", "expert"]
+        else:
+          # throw value error
+          raise ValueError(f"Invalid embed_shard: {self.embed_shard}. Must be 'expert_only', 'fsdp_only', or 'both'.")
+        break
+    
     if self.pipeline_parallel_layers == -1:
       if self.decoder_block == DecoderBlockType.DEEPSEEK:
         moe_layers = self.num_decoder_layers - self.first_num_dense_layers
@@ -2347,19 +2362,7 @@ class MaxTextConfig(
           rule[1] = ["stage", "data", "fsdp", "fsdp_transpose", "expert"]
           break
 
-      # Modify embed - this is a VERY hacky (non-mergeable) implementation, to be replaced with some cool new way to share logical axis rules soon
-      for rule in self.logical_axis_rules:
-        if rule and rule[0] == "embed":
-          if self.embed_shard == "expert_only":
-            rule[1] = ["expert"]
-          elif self.embed_shard == "fsdp_only":
-            rule[1] = ["fsdp"]
-          elif self.embed_shard == "both":
-            rule[1] = ["fsdp", "expert"]
-          else:
-            # throw value error
-            raise ValueError(f"Invalid embed_shard: {self.embed_shard}. Must be 'expert_only', 'fsdp_only', or 'both'.")
-          break
+
 
 
       if "stage" in self.mesh_axes:
