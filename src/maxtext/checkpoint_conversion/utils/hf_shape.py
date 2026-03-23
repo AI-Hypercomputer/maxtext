@@ -231,8 +231,11 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
   kv_lora_rank = config["kv_lora_rank"]
   num_attention_heads = config["num_attention_heads"]
 
+  # qk_head_dim is present in DeepseekV3Config, but missing from DeepseekV2Config
+  qk_head_dim = config.get("qk_head_dim", config["qk_nope_head_dim"] + config["qk_rope_head_dim"])
   # Q projection dim
-  q_dim = num_attention_heads * config["qk_head_dim"]
+  q_dim = num_attention_heads * qk_head_dim
+
   # kv_b_proj output dim
   kv_b_dim = num_attention_heads * (config["qk_nope_head_dim"] + config["v_head_dim"])
   # Output projection dim (input)

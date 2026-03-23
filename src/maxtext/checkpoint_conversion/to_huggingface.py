@@ -139,12 +139,24 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
   attributes_to_check = [
       ("num_attention_heads", "num_query_heads"),
       ("num_key_value_heads", "num_kv_heads"),
-      ("head_dim", "head_dim"),
       ("hidden_size", "emb_dim"),
       ("intermediate_size", "mlp_dim"),
       ("num_hidden_layers", "num_decoder_layers"),
       ("vocab_size", "vocab_size"),
   ]
+
+  if max_config.attention_type == "mla":
+    attributes_to_check.extend(
+        [
+            ("qk_nope_head_dim", "qk_nope_head_dim"),
+            ("qk_rope_head_dim", "qk_rope_head_dim"),
+            ("v_head_dim", "v_head_dim"),
+            ("kv_lora_rank", "kv_lora_rank"),
+            ("q_lora_rank", "q_lora_rank"),
+        ]
+    )
+  else:
+    attributes_to_check.append(("head_dim", "head_dim"))
 
   mismatches = []
 
