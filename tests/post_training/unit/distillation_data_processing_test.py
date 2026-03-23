@@ -22,7 +22,6 @@ import argparse
 import os
 import subprocess
 import unittest
-import pytest
 
 import transformers
 
