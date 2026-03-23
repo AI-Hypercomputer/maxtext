@@ -236,12 +236,12 @@ class TestCheckNumbers(unittest.TestCase):
 
   @pytest.mark.cpu_only
   def test_extraction_fails_answer_tags_only(self):
-    """<answer> tag alone (no <reasoning> block) is not matched by the regex, score 0."""
+    """<answer> tag alone (no <reasoning> block) is matched by the regex as a fallback, score 1.5."""
     scores = self._check(
         completions=["<answer>42</answer>"],
         answer=["42"],
     )
-    self.assertEqual(scores[0], 0)
+    self.assertEqual(scores[0], 1.5)
 
   @pytest.mark.cpu_only
   def test_extraction_fails_reasoning_tags_only(self):

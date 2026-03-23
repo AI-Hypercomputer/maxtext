@@ -229,7 +229,16 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
   value.
   """
   match_format = get_match_format_regex(tmvp_config)
-  extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
+  answer_fallback = get_answer_fallback_regex(tmvp_config)
+
+  extracted_responses = []
+  for c in completions:
+    full_match = match_format.search(c)
+    if full_match is not None:
+      extracted_responses.append(full_match.group(1))
+    else:
+      fallback_matches = answer_fallback.findall(c)
+      extracted_responses.append(fallback_matches[-1].strip() if fallback_matches else None)
 
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
@@ -408,7 +417,16 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
 
   # Extract full answer content from solution tags (not just first number)
   match_format = get_match_format_regex(tmvp_config)
-  extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
+  answer_fallback = get_answer_fallback_regex(tmvp_config)
+
+  extracted_responses = []
+  for c in completions:
+    full_match = match_format.search(c)
+    if full_match is not None:
+      extracted_responses.append(full_match.group(1))
+    else:
+      fallback_matches = answer_fallback.findall(c)
+      extracted_responses.append(fallback_matches[-1].strip() if fallback_matches else None)
 
   scores = []
   if tmvp_config.debug.rl:
