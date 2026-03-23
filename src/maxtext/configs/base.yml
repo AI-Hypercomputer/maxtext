@@ -1005,6 +1005,8 @@ pagedattn_max_pages_per_group: -1  # defaults to number of pages needed to reach
 # Alignment of head_dim to the nearest multiple of this value, set to 0 to disable alignment. On
 # TPUs, the head_dim is padded to the nearest multiple of 128.
 pagedattn_head_dim_alignment: 128
+pagedattn_num_kv_pages_per_block: -1  # -1 = auto-tune via tpu_inference; set explicitly to override for specific TPU types
+pagedattn_num_queries_per_block: -1  # -1 = auto-tune via tpu_inference; set explicitly to override for specific TPU types
 
 
 # Chunked Prefill Parameters

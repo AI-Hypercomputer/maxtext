@@ -612,6 +612,8 @@ class PagedAttention(BaseModel):
   # Alignment of head_dim to the nearest multiple of this value, set to 0 to disable alignment. On
   # TPUs, the head_dim is padded to the nearest multiple of 128.
   pagedattn_head_dim_alignment: int = Field(128, description="Alignment of head_dim to the nearest multiple.")
+  pagedattn_num_kv_pages_per_block: int = Field(-1, description="Number of KV pages per compute block; -1 = auto-tune via tpu_inference.")
+  pagedattn_num_queries_per_block: int = Field(-1, description="Number of queries per compute block; -1 = auto-tune via tpu_inference.")
 
 
 class MoEGeneral(BaseModel):
