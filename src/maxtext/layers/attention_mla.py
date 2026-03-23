@@ -111,15 +111,27 @@ def _apply_rope(x, cos, sin, interleave=True):
     return jnp.concatenate([y1, y2], axis=-1)
 
 
+def _compute_rope(head_dim, positions, theta, dtype):
+  """Computes RoPE frequencies on the fly for given positions."""
+  freqs = 1.0 / (
+      theta ** (jnp.arange(0, head_dim, 2, dtype=jnp.float32) / head_dim)
+  )
+  # positions shape [B, S], freqs shape [D/2] -> angles shape [B, S, D/2]
+  angles = positions[..., None] * freqs
+  return jnp.cos(angles).astype(dtype), jnp.sin(angles).astype(dtype)
+
+
 def _get_cos_sin(rotary_embedding, positions, dtype):
   """Computes cos and sin embeddings from the rotary_embedding module."""
-  # Get frequencies
-  freqs = rotary_embedding.freqs_cis.at[positions].get(
-      out_sharding=getattr(rotary_embedding, "freqs_sharding", None)
-  )  # [B, S, half_dim]
-  freqs = freqs[:, :, jnp.newaxis, :]  # [B, S, 1, half_dim]
-  cos = jnp.real(freqs).astype(dtype)
-  sin = jnp.imag(freqs).astype(dtype)
+  # Use optimized on-the-fly computation instead of table lookup
+  head_dim = rotary_embedding.embedding_dims
+  theta = rotary_embedding.rope_theta
+
+  cos, sin = _compute_rope(head_dim, positions, theta, dtype)
+
+  # Add heads dimension for broadcasting: [B, S, D/2] -> [B, S, 1, D/2]
+  cos = cos[:, :, jnp.newaxis, :]
+  sin = sin[:, :, jnp.newaxis, :]
 
   if getattr(rotary_embedding, "attention_scaling", False):
     rope_factor = getattr(rotary_embedding, "rope_factor", 1.0)
