@@ -119,7 +119,7 @@ def format_and_batch(dataset, config, batch_size, pad_id, data_columns, tokenize
 
 
 def shift_dataset(dataset, pad_id):
-  """Shifts inputs right by padding for teacher-forced training."""
+  """Shift tokens to create inputs and targets for standard next-token prediction."""
   return dataset.map(
       input_pipeline_utils.ShiftData(
           ignored_ids=[pad_id],
