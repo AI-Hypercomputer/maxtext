@@ -281,6 +281,8 @@ def main(argv: Sequence[str]) -> None:
     processed_params = process_maxtext_param(key, weight, param_map, hook_fn_map, shape_map, config)
     processed_params_list.extend(processed_params)
 
+  max_logging.log(f"Weight dtype after transform: {type(processed_params[0][1].dtype)}")
+
   transformed_hf_weights = dict(processed_params_list)
   max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
 

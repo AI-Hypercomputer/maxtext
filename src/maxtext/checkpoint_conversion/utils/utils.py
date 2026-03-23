@@ -166,7 +166,7 @@ def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = Non
   return np_array.reshape(expected_shape)  # Reshape for safety, though usually preserved.
 
 
-def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map):
+def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map, save_dtype):
   """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list, used in to_huggingface"""
   if hf_path not in hf_shape_map:
     raise ValueError(f"HF path '{hf_path}' not found in hf_shape_map.")
@@ -174,7 +174,7 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shap
   # If hook is unsepecified, use identity
   if current_hook_fns:
     processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
-  numpy_slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
+  numpy_slice = convert_jax_weight_to_numpy(processed_slice, save_dtype).squeeze()
   if numpy_slice.shape != tuple(target_hf_shape):
     raise ValueError(f"Shape mismatch for {hf_path}: Expect {target_hf_shape}, got {numpy_slice.shape}")
   output_weights.append((hf_path, numpy_slice))
@@ -237,7 +237,14 @@ def process_maxtext_param(
   if not isinstance(hf_target_paths, list):
     max_logging.log("\tunscan")
     hf_path = hf_target_paths
-    _process(hf_path, maxtext_param_weight, output_weights, current_hook_fns, hf_shape_map)
+    _process(
+        hf_path,
+        maxtext_param_weight,
+        output_weights,
+        current_hook_fns,
+        hf_shape_map,
+        save_dtype=maxtext_config.weight_dtype,
+    )
     return output_weights
 
   # Stacked MaxText weight
@@ -271,7 +278,14 @@ def process_maxtext_param(
       else:
         # For `atomic_mt_key` mappings, slice the single MaxText tensor.
         weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
-      _process(hf_path, weight_slice, output_weights, current_hook_fns, hf_shape_map)
+      _process(
+          hf_path,
+          weight_slice,
+          output_weights,
+          current_hook_fns,
+          hf_shape_map,
+          save_dtype=maxtext_config.weight_dtype,
+      )
 
     return output_weights
 
@@ -293,7 +307,14 @@ def process_maxtext_param(
       # Slice the expert tensor along the layer axis to get the final individual weight.
       # axis is 0 on the new sliced tensor
       layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
-      _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, hf_shape_map)
+      _process(
+          hf_path,
+          layer_tensor_slice,
+          output_weights,
+          current_hook_fns,
+          hf_shape_map,
+          save_dtype=maxtext_config.weight_dtype,
+      )
 
   return output_weights
 
