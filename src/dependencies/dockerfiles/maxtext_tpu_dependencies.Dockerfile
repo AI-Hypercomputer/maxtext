@@ -47,9 +47,9 @@ ENV MAXTEXT_REPO_ROOT=/deps
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
+COPY ${PACKAGE_DIR}/dependencies/github_deps/ src/dependencies/github_deps/
 COPY ${PACKAGE_DIR}/dependencies/requirements/ src/dependencies/requirements/
 COPY ${PACKAGE_DIR}/dependencies/scripts/ src/dependencies/scripts/
-COPY ${PACKAGE_DIR}/install_maxtext_extra_deps/ src/install_maxtext_extra_deps/
 COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 
 # Copy the custom libtpu.so file if it exists
@@ -63,6 +63,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Now copy the remaining code (source files that may change frequently)
 COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/
+COPY ${PACKAGE_DIR}/MaxText/ src/MaxText/
+COPY tests*/ tests/
+COPY benchmarks*/ benchmarks/
 
 # Download test assets from GCS if building image with test assets
 ARG INCLUDE_TEST_ASSETS=false

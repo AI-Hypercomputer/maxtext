@@ -136,7 +136,12 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_mask=data["targets_segmentation"],
     )
 
-    if config.num_vocab_tiling > 1:
+    if (config.use_indexer and not config.indexer_sparse_training) and is_train:
+      # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
+      # The main model parameters are frozen and only the indexer is trained via KL divergence.
+      total_loss = 0.0
+      total_z_loss = 0.0
+    elif config.num_vocab_tiling > 1:
       hidden_state_key = ("intermediates", "decoder", "hidden_states")
       hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
       total_loss, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
@@ -178,18 +183,25 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_mask=data["targets_segmentation"],
     )
     intermediate_outputs = {}
-    one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-    xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
-    xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
-    z_loss = nn.with_logical_constraint(z_loss, ("activation_embed_and_logits_batch", "activation_length"))
+    if (config.use_indexer and not config.indexer_sparse_training) and is_train:
+      # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
+      # The main model parameters are frozen and only the indexer is trained via KL divergence.
+      total_loss = 0.0
+      total_z_loss = 0.0
+    else:
+      one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+      xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
-    # Mask out paddings at the end of each example.
-    xent = xent * (data["targets_segmentation"] != 0)
-    z_loss = z_loss * (data["targets_segmentation"] != 0)
+      xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+      z_loss = nn.with_logical_constraint(z_loss, ("activation_embed_and_logits_batch", "activation_length"))
 
-    total_loss = jnp.sum(xent)
-    total_z_loss = jnp.sum(z_loss)
+      # Mask out paddings at the end of each example.
+      xent = xent * (data["targets_segmentation"] != 0)
+      z_loss = z_loss * (data["targets_segmentation"] != 0)
+
+      total_loss = jnp.sum(xent)
+      total_z_loss = jnp.sum(z_loss)
 
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide total_loss
@@ -220,7 +232,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
 
   # get indexer loss
   indexer_loss = 0.0
-  if config.use_sparse_indexer and config.indexer_loss_scaling_factor > 0.0:
+  if config.use_indexer and config.indexer_loss_scaling_factor > 0.0:
     indexer_losses = []
     # Extract 'indexer_loss' from model intermediates.
     # We check for paths ending in ('self_attention', 'indexer_loss').

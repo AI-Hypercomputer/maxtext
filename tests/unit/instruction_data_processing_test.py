@@ -21,6 +21,22 @@ from maxtext.input_pipeline import instruction_data_processing
 
 class InstructionDataProcessingTest(unittest.TestCase):
 
+  def test_load_template_from_file(self):
+    template_config = instruction_data_processing.load_template_from_file("maxtext/examples/chat_templates/gsm8k_rl.json")
+    self.assertEqual(
+        template_config,
+        {
+            "SYSTEM_PROMPT": (
+                "You are given a problem. Think about the problem and provide"
+                " your reasoning. Place it between {reasoning_start_token} and"
+                " {reasoning_end_token}. Then, provide the final answer (i.e.,"
+                " just one numerical value) between {solution_start_token} and"
+                " {solution_end_token}."
+            ),
+            "TEMPLATE": ("<start_of_turn>user\n{system_prompt}\n\n{question}<end_of_turn>\n<start_of_turn>model"),
+        },
+    )
+
   def test_map_qa_data_to_conversation_with_prompt_completion_template(self):
     template_config = {
         "PROMPT_TEMPLATE": "This is a question: {question}",

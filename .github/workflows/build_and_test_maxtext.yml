@@ -262,7 +262,7 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
-      extra_pip_deps_file: 'src/install_maxtext_extra_deps/extra_post_train_base_deps_from_github.txt'
+      extra_pip_deps_file: 'src/dependencies/github_deps/post_train_base_deps.txt'
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_post_training_tpu_unit_tests:
@@ -284,7 +284,7 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
-      extra_pip_deps_file: 'src/install_maxtext_extra_deps/extra_post_train_base_deps_from_github.txt'
+      extra_pip_deps_file: 'src/dependencies/github_deps/post_train_base_deps.txt'
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_gpu_integration_tests:

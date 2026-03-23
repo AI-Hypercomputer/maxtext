@@ -35,7 +35,7 @@ fi
 
 # Set up network optimizations
 if [ "$RUN_PREFLIGHT" = "true" ]; then
-    bash preflight.sh
+    bash src/dependencies/scripts/preflight.sh
 fi
 
 # Train

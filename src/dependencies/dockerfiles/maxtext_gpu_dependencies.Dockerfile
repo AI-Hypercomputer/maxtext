@@ -43,17 +43,17 @@ ENV PACKAGE_DIR=$PACKAGE_DIR
 
 ENV MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets
 ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/tests/assets
-ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
+ENV MAXTEXT_PKG_DIR=/deps/src/maxtext
 ENV MAXTEXT_REPO_ROOT=/deps
 
 # Set the working directory in the container
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
+COPY ${PACKAGE_DIR}/dependencies/github_deps/ src/dependencies/github_deps/
 COPY ${PACKAGE_DIR}/dependencies/requirements/ src/dependencies/requirements/
 COPY ${PACKAGE_DIR}/dependencies/scripts/ src/dependencies/scripts/
-COPY ${PACKAGE_DIR}/install_maxtext_extra_deps/ src/install_maxtext_extra_deps/
-COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/MaxText/integration/vllm/
+COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
@@ -62,7 +62,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     bash /deps/src/dependencies/scripts/setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
 
 # Now copy the remaining code (source files that may change frequently)
-COPY ${PACKAGE_DIR}/maxtext/ src/MaxText/
+COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/
+COPY ${PACKAGE_DIR}/MaxText/ src/MaxText/
+COPY tests*/ tests/
+COPY benchmarks*/ benchmarks/
 
 # Download test assets from GCS if building image with test assets
 ARG INCLUDE_TEST_ASSETS=false

@@ -801,6 +801,55 @@ class TrainCompile(unittest.TestCase):
     )
 
   @pytest.mark.cpu_only
+  def test_indexer_dense_warmup(self):
+    # test deepseek3.2 with sparse attention
+    compiled_trainstep_file = "/tmp/test_indexer_dense_warmup.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek-custom",
+            "per_device_batch_size=4",
+            "scan_layers=True",
+            "max_target_length=1024",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "engram_layers=[]",
+            # dense warmup
+            "indexer_sparse_training=False",
+            "indexer_loss_scaling_factor=0.1",
+            "trainable_parameters_mask=['.*indexer.*']",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_indexer_sparse_training(self):
+    # test deepseek3.2 with sparse attention
+    compiled_trainstep_file = "/tmp/test_indexer_sparse_training.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek-custom",
+            "per_device_batch_size=4",
+            "scan_layers=True",
+            "max_target_length=1024",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "engram_layers=[]",
+            # sparse training
+            "indexer_sparse_training=True",
+            "indexer_loss_scaling_factor=0.1",
+        )
+    )
+
+  @pytest.mark.cpu_only
   def test_olmo3_7b(self):
     """AOT test for Olmo3 7B implementation"""
     compiled_trainstep_file = "/tmp/test_olmo3_7b"

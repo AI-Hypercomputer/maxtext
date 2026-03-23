@@ -17,7 +17,7 @@
 # Install MaxText
 
 This document discusses how to install MaxText. We recommend installing MaxText inside a Python virtual environment.
-MaxText offers three installation modes:
+MaxText offers following installation modes:
 
 1. maxtext[tpu]. Used for pre-training and decode on TPUs.
 2. maxtext[cuda12]. Used for pre-training and decode on GPUs.
@@ -37,18 +37,18 @@ uv venv --python 3.12 --seed maxtext_venv
 source maxtext_venv/bin/activate
 
 # 3. Install MaxText and its dependencies. Choose a single
-#      installation option from this list to fit your use case.
+# installation option from this list to fit your use case.
 
 # Option 1: Installing maxtext[tpu]
-uv pip install "maxtext[tpu]>=0.2.0" --resolution=lowest
+uv pip install maxtext[tpu] --resolution=lowest
 install_maxtext_tpu_github_deps
 
 # Option 2: Installing maxtext[cuda12]
-uv pip install "maxtext[cuda12]>=0.2.0" --resolution=lowest
+uv pip install maxtext[cuda12] --resolution=lowest
 install_maxtext_cuda12_github_dep
 
 # Option 3: Installing maxtext[tpu-post-train]
-uv pip install "maxtext[tpu-post-train]>=0.2.0" --resolution=lowest
+uv pip install maxtext[tpu-post-train] --resolution=lowest
 install_maxtext_tpu_post_train_extra_deps
 
 # Option 4: Installing maxtext[runner]
@@ -91,7 +91,7 @@ uv pip install -e .[tpu-post-train] --resolution=lowest
 install_maxtext_tpu_post_train_extra_deps
 
 # Option 4: Installing maxtext[runner]
-uv pip install .[runner] --resolution=lowest
+uv pip install -e .[runner] --resolution=lowest
 ```
 
 After installation, you can verify the package is available with `python3 -c "import maxtext"` and run training jobs with `python3 -m maxtext.trainers.pre_train.train ...`.
@@ -111,7 +111,7 @@ To update dependencies, you will follow these general steps:
 1. **Modify Base Requirements**: Update the desired dependencies in `base_requirements/requirements.txt` or the hardware-specific files (`base_requirements/tpu-base-requirements.txt`, `base_requirements/gpu-base-requirements.txt`).
 2. **Generate New Files**: Run the `seed-env` CLI tool to generate new, fully-pinned requirements files based on your changes.
 3. **Update Project Files**: Copy the newly generated files into the `generated_requirements/` directory.
-4. **Handle GitHub Dependencies**: Move any dependencies that are installed directly from GitHub from the generated files to `src/install_maxtext_extra_deps/extra_deps_from_github.txt`.
+4. **Handle GitHub Dependencies**: Move any dependencies that are installed directly from GitHub from the generated files to `src/dependencies/github_deps/pre_train_deps.txt`.
 5. **Verify**: Test the new dependencies to ensure the project installs and runs correctly.
 
 The following sections provide detailed instructions for each step.
@@ -169,29 +169,13 @@ After generating the new requirements, you need to update the files in the MaxTe
    - Move `generated_tpu_artifacts/tpu-requirements.txt` to `generated_requirements/tpu-requirements.txt`.
    - Move `generated_gpu_artifacts/cuda12-requirements.txt` to `generated_requirements/cuda12-requirements.txt`.
 
-2. **Update `extra_deps_from_github.txt` (if necessary):**
+2. **Update `pre_train_deps.txt` (if necessary):**
    Currently, MaxText uses a few dependencies, such as `mlperf-logging` and `google-jetstream`, that are installed directly from GitHub source. These are defined in `base_requirements/requirements.txt`, and the `seed-env` tool will carry them over to the generated requirements files.
 
 ## Step 5: Verify the New Dependencies
 
 Finally, test that the new dependencies install correctly and that MaxText runs as expected.
 
-1. **Create a clean environment:** It's best to start with a fresh Python virtual environment.
+1. **Install MaxText and dependencies**: For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/maxtext-v0.2.0/install_maxtext.html#from-source).
 
-```bash
-uv venv --python 3.12 --seed maxtext_venv
-source maxtext_venv/bin/activate
-```
-
-2. **Run the setup script:** Execute `bash setup.sh` to install the new dependencies.
-
-```bash
-pip install uv
-# install the tpu package
-uv pip install -e .[tpu] --resolution=lowest
-# or install the gpu package by running the following line:
-# uv pip install -e .[cuda12] --resolution=lowest
-install_maxtext_github_deps
-```
-
-3. **Run tests:** Run MaxText tests to ensure there are no regressions.
+2. **Verify the installation**: Run MaxText tests to ensure everything is working as expected with the newly installed dependencies and there are no regressions.
