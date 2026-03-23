@@ -91,6 +91,7 @@ def _convert_checkpoint(
     checkpoint_path: str,
     model_name: str,
     hf_path: str,
+    hf_token: str | None = None,
 ) -> str:
   """Convert a MaxText checkpoint to HuggingFace format if needed."""
   # pylint: disable=import-outside-toplevel
@@ -113,12 +114,15 @@ def _convert_checkpoint(
       f"HuggingFaceOutputDir={hf_path}",
       f"model_name={model_name}",
   ]
-  subprocess.run(cmd, check=True)
+  proc_env = os.environ.copy()
+  if hf_token:
+    proc_env["HF_TOKEN"] = hf_token
+  subprocess.run(cmd, check=True, env=proc_env)
   logger.info("Checkpoint conversion for eval complete.")
   return hf_path
 
 
-def run_eval(cfg: dict) -> dict:
+def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
   """Execute all the evaluation steps.
 
   Args:
@@ -161,15 +165,16 @@ def run_eval(cfg: dict) -> dict:
     max_num_seqs = int(max_num_seqs)
   skip_conversion = cfg.get("skip_conversion", False)
   gcs_results_path = cfg.get("gcs_results_path")
+  token = hf_token or os.environ.get("HF_TOKEN") or None
 
   # Convert Checkpoint.
   checkpoint_path = cfg.get("checkpoint_path")
   if checkpoint_path and not skip_conversion:
-    hf_path = _convert_checkpoint(checkpoint_path, model_name, hf_path)
+    hf_path = _convert_checkpoint(checkpoint_path, model_name, hf_path, hf_token=token)
 
   # Load tokenizer for chat templating.
   logger.info("Loading tokenizer from %s.", hf_path)
-  tokenizer = AutoTokenizer.from_pretrained(hf_path)
+  tokenizer = AutoTokenizer.from_pretrained(hf_path, token=token)
 
   # Prepare dataset.
   logger.info("Loading benchmark dataset: %s", benchmark)
@@ -186,6 +191,7 @@ def run_eval(cfg: dict) -> dict:
   if isinstance(extra_args, str):
     extra_args = extra_args.split()
 
+  server_env = {"HF_TOKEN": token} if token else None
   with VllmServerManager(
       hf_model_path=hf_path,
       host=server_host,
@@ -195,6 +201,7 @@ def run_eval(cfg: dict) -> dict:
       max_num_batched_tokens=max_num_batched_tokens,
       max_num_seqs=max_num_seqs,
       extra_vllm_args=extra_args,
+      env=server_env,
   ) as server:
     base_url = server.base_url
 
@@ -279,6 +286,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--server_host", help="vLLM server host.")
   parser.add_argument("--server_port", type=int, help="vLLM server port.")
   parser.add_argument("--skip_conversion", action="store_true", help="Skip checkpoint conversion.")
+  parser.add_argument("--hf_token", help="HuggingFace token for gated models. Falls back to HF_TOKEN env var.")
   parser.add_argument(
       "--log_level",
       default="INFO",
@@ -307,7 +315,7 @@ def main() -> None:
 
   cli_overrides = {
       k: v for k, v in vars(args).items()
-      if k not in ("config", "base_config", "log_level")
+      if k not in ("config", "base_config", "log_level", "hf_token")
   }
   cfg = _merge_config(base_cfg, cli_overrides)
 
@@ -324,7 +332,7 @@ def main() -> None:
   if missing:
     parser.error(f"Missing required config field(s): {missing}")
 
-  run_eval(cfg)
+  run_eval(cfg, hf_token=args.hf_token)
 
 
 if __name__ == "__main__":
