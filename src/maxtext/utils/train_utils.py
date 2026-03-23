@@ -204,7 +204,7 @@ def setup_train_loop(config, recorder, devices=None):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
     data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
-    context_parallel_size = mesh.shape["context"]
+    context_parallel_size = mesh.shape.get("context", 1)
     # Check if context parallelism is being used with sequence packing
     if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
       raise ValueError(

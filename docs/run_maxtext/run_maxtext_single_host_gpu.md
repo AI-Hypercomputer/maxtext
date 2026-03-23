@@ -60,39 +60,9 @@ If you get the NVML Error: Please follow these instructions.
 
 https://stackoverflow.com/questions/72932940/failed-to-initialize-nvml-unknown-error-in-docker-after-few-hours
 
-## Install MaxText
-
-Clone MaxText:
-
-```bash
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-```
-
 ## Build MaxText Docker image
 
-This builds a docker image called `maxtext_base_image`. You can retag to a different name.
-
-1. Check out the code changes:
-
-```bash
-cd maxtext
-```
-
-2. Run the following commands to build and push the docker image:
-
-```bash
-export LOCAL_IMAGE_NAME=<docker_image_name>
-sudo bash docker_build_dependency_image.sh DEVICE=gpu
-docker tag maxtext_base_image ${LOCAL_IMAGE_NAME?}
-docker push ${LOCAL_IMAGE_NAME?}
-```
-
-Note that when running `bash docker_build_dependency_image.sh DEVICE=gpu`, it
-uses `MODE=stable` by default. If you want to use other modes, you need to
-specify it explicitly:
-
-- using nightly mode: `bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly`
-- using pinned mode: `bash docker_build_dependency_image.sh DEVICE=gpu MODE=pinned`
+For instructions on building the MaxText Docker image, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
 
 ## Test
 

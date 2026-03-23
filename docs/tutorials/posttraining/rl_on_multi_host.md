@@ -44,9 +44,9 @@ rely on the vLLM library.
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
+- [Build and Upload MaxText Docker Image](#build-and-upload-maxtext-docker-image)
 - [Setup Environment Variables](#setup-environment-variables)
 - [Get Your Model Checkpoint](#get-your-model-checkpoint)
-- [Build and Upload MaxText Docker Image](#build-and-upload-maxtext-docker-image-with-post-training-dependencies)
 - [Submit your RL workload via Pathways](#submit-your-rl-workload-via-pathways)
 - [Managing Workloads](#managing-workloads)
 - [Troubleshooting](#troubleshooting)
@@ -58,9 +58,13 @@ Before starting, ensure you have:
 - Access to a Google Cloud Project with TPU quotas.
 - A Hugging Face account with an access token for downloading models.
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
-- XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md)).
+- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
+
+## Build and upload MaxText Docker image
+
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
 
 ## Setup Environment Variables
 
@@ -82,7 +86,6 @@ export TPU_TYPE=<TPU Type> # e.g., 'v5p-128'
 export TPU_CLUSTER=<cluster name>
 export PROJECT_ID=<GCP project ID>
 export ZONE=<GCP zone>
-export CLOUD_IMAGE_NAME=<your artifact registry image> # Name for the Docker image to be built
 ```
 
 ## Get Your Model Checkpoint
@@ -102,77 +105,6 @@ Refer the steps in [Hugging Face to MaxText](../../guides/checkpointing_solution
 
 ```bash
 export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
-```
-
-## Build and upload MaxText Docker image with post-training dependencies
-
-Before building the Docker image, follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
-
-Then, authenticate to
-[Google Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/docker/authentication#gcloud-helper)
-for permission to push your images and other access.
-
-```bash
-# Authenticate your user account for gcloud CLI access
-gcloud auth login
-
-# Configure application default credentials for Docker and other tools
-gcloud auth application-default login
-
-# Configure Docker credentials and test your access
-gcloud auth configure-docker
-docker run hello-world
-```
-
-### Option 1: From PyPI releases (Recommended)
-
-Get the latest stable release of MaxText from PyPI. This will automatically pull
-compatible versions of post-training dependencies, such as [Tunix](https://github.com/google/tunix),
-[vLLM](https://github.com/vllm-project/vllm), and
-[tpu-inference](https://github.com/vllm-project/tpu-inference).
-
-```bash
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-cd maxtext
-
-# checkout the latest stable release here: https://pypi.org/project/maxtext/
-export MAXTEXT_VERSION=0.2.0
-git checkout maxtext-v${MAXTEXT_VERSION?}
-```
-
-Run the following script to create a Docker image with stable releases of
-MaxText, and its post-training dependencies. The build process takes approximately 10-15 minutes.
-
-```bash
-bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
-```
-
-For experimental features (such as improved pathwaysutils resharding API), use:
-
-```bash
-bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training-experimental
-```
-
-### Option 2: From Github
-
-For using a version newer than the latest PyPI release, you could also build the Docker image with the latest vetted versions of post-training dependencies and MaxText in the following way:
-
-```bash
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-cd maxtext
-
-bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
-```
-
-### Upload the Docker Image
-
-> **Note:** You will need the
-> [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions)
-> role to push Docker images to your project's Artifact Registry. Contact your
-> project administrator if you don't have this permission.
-
-```bash
-bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
 ```
 
 ## Submit your RL workload via Pathways

@@ -16,7 +16,7 @@
 import pytest
 
 pytest.importorskip("tunix")
-pytestmark = [pytest.mark.tpu_only, pytest.mark.external_training]
+pytestmark = [pytest.mark.tpu_only, pytest.mark.external_training, pytest.mark.post_training]
 
 import jax
 

@@ -19,7 +19,12 @@ import sys
 
 
 def main():
-  script_path = os.path.join(os.path.dirname(__file__), "docker_upload_runner.sh")
+  current_dir = os.path.dirname(os.path.abspath(__file__))
+  repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+  # Use relative path for Docker
+  os.environ["PACKAGE_DIR"] = os.path.relpath(repo_root, os.getcwd())
+
+  script_path = os.path.join(current_dir, "docker_upload_runner.sh")
   if not os.path.exists(script_path):
     raise FileNotFoundError(f"Script not found at {script_path}")
 

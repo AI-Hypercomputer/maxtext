@@ -25,10 +25,13 @@ if TYPE_CHECKING:
 
 import grain.python as grain
 import numpy as np
+from grain._src.python.dataset.sources.tfrecord_dataset import _TFRecordReader, _TFRecordDatasetIterator  # pylint: disable=protected-access
+from grain.experimental import TFRecordIterDataset
 from maxtext.input_pipeline.protos import example_pb2
 from maxtext.input_pipeline import tokenizer
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
+from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
 Features = dict[str, Any]
@@ -416,6 +419,38 @@ class HFDataSource(grain.RandomAccessDataSource):
 
 
 ########## Functions used by Grain pipeline
+
+
+class _GCSTFRecordReader(_TFRecordReader):
+  """Extends Grain's _TFRecordReader to open TFRecord files from GCS via streaming BlobReader."""
+
+  def __init__(self, path: str):
+    # Skip parent __init__ (which calls open(path, "rb")) and open via GCS BlobReader instead.
+    bucket_name, blob_name = gcs_utils.parse_gcs_bucket_and_prefix(path)
+    self._reader = gcs_utils.storage.Client().bucket(bucket_name).blob(blob_name).open("rb")
+
+
+class _GCSTFRecordDatasetIterator(_TFRecordDatasetIterator):
+  """Extends Grain's _TFRecordDatasetIterator to use _GCSTFRecordReader for GCS paths."""
+
+  def __init__(self, path: str):
+    # Skip parent __init__ (which creates _TFRecordReader); use GCS-aware reader instead.
+    grain.DatasetIterator.__init__(self)
+    self._reader = _GCSTFRecordReader(path)
+
+
+class GCSTFRecordIterDataset(TFRecordIterDataset):
+  """Extends Grain's TFRecordIterDataset to support GCS paths."""
+
+  def __iter__(self) -> grain.DatasetIterator:  # pylint: disable=non-iterator-returned
+    return _GCSTFRecordDatasetIterator(self._path)
+
+
+def make_tfrecord_iter_dataset(path: str):
+  """Returns the appropriate TFRecordIterDataset for local or GCS paths."""
+  if path.startswith("gs://"):
+    return GCSTFRecordIterDataset(path)
+  return TFRecordIterDataset(path)
 
 
 @dataclasses.dataclass

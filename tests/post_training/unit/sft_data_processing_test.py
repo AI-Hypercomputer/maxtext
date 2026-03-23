@@ -13,6 +13,10 @@
 # limitations under the License.
 
 """Data processing tests for SFT."""
+import pytest
+
+pytestmark = [pytest.mark.post_training, pytest.mark.cpu_only]
+
 import subprocess
 import unittest
 import os.path

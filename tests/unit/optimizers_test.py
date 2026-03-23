@@ -362,5 +362,71 @@ class AdamWMaskTest(parameterized.TestCase):
       self.assertIsNone(kwargs["mask"])
 
 
+class TrainableParametersMaskTest(parameterized.TestCase):
+  """Tests for the trainable parameters mask functionality via get_optimizer"""
+
+  def test_get_optimizer_with_trainable_mask(self):
+    """Test get_optimizer with a valid trainable_parameters_mask."""
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test_with_trainable_mask",
+        "trainable_parameters_mask=['.*indexer.*', 'layer_norm']",
+    ]
+    config = pyconfig.initialize(argv)
+
+    # Use a constant learning rate > 0 to ensure non-zero updates
+    def learning_rate_schedule(step):
+      return 1.0
+
+    opt = optimizers.get_optimizer(config, learning_rate_schedule)
+
+    # We can test the optimizer by creating some dummy params and gradients
+    # and checking if the updates are zeroed out for non-trainable parameters.
+    params = {
+        "layer1": {"kernel": jax.numpy.ones((2, 2)), "indexer": jax.numpy.ones((2, 2))},
+        "layer2": {"layer_norm": {"scale": jax.numpy.ones((2, 2))}},
+        "layer3": {"ln": {"scale": jax.numpy.ones((2, 2))}},
+    }
+
+    # Give some non-zero gradients
+    grads = jax.tree_util.tree_map(lambda x: jax.numpy.ones_like(x) * 0.5, params)
+
+    # Initialize optimizer state
+    opt_state = opt.init(params)
+
+    # Compute updates
+    updates, _ = opt.update(grads, opt_state, params)
+
+    # 'layer1/kernel' doesn't match the trainable mask, so it should be frozen (update == 0)
+    self.assertTrue(jax.numpy.all(updates["layer1"]["kernel"] == 0))
+    # 'layer3/ln/scale' doesn't match the trainable mask, so it should be frozen (update == 0)
+    self.assertTrue(jax.numpy.all(updates["layer3"]["ln"]["scale"] == 0))
+    # 'layer1/indexer' matches, so it should be trained (update != 0)
+    self.assertFalse(jax.numpy.all(updates["layer1"]["indexer"] == 0))
+    # 'layer2/layer_norm/scale' matches, so it should be trained (update != 0)
+    self.assertFalse(jax.numpy.all(updates["layer2"]["layer_norm"]["scale"] == 0))
+
+  def test_get_optimizer_without_trainable_mask(self):
+    """Test get_optimizer when trainable_parameters_mask is empty."""
+    argv = ["", get_test_config_path(), "run_name=test", "trainable_parameters_mask=[]"]
+    config = pyconfig.initialize(argv)
+
+    # Use a constant learning rate > 0 to ensure non-zero updates
+    def learning_rate_schedule(step):
+      return 1.0
+
+    opt = optimizers.get_optimizer(config, learning_rate_schedule)
+
+    params = {"layer1": {"kernel": jax.numpy.ones((2, 2))}}
+    grads = {"layer1": {"kernel": jax.numpy.ones((2, 2)) * 0.5}}
+
+    opt_state = opt.init(params)
+    updates, _ = opt.update(grads, opt_state, params)
+
+    # When no trainable mask is provided, nothing is frozen by this mechanism
+    self.assertFalse(jax.numpy.all(updates["layer1"]["kernel"] == 0))
+
+
 if __name__ == "__main__":
   unittest.main()

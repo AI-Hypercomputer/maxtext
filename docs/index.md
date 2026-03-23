@@ -17,7 +17,9 @@
 # MaxText
 
 ```{raw} html
-:file: index.html
+---
+file: index.html
+---
 ```
 
 :link: reference/api
@@ -26,18 +28,22 @@
 <section class="latest-news">
 
 ```{include} ../README.md
-:start-after: <!-- NEWS START -->
-:end-before: <!-- NEWS END -->
+---
+start-after: <!-- NEWS START -->
+end-before: <!-- NEWS END -->
+---
 ```
 
 </section>
 </div>
 
 ```{toctree}
-:maxdepth: 2
-:hidden:
-
+---
+maxdepth: 2
+hidden:
+---
 install_maxtext
+build_maxtext
 tutorials
 run_maxtext
 guides

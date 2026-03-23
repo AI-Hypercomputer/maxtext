@@ -934,7 +934,7 @@ class RoutedMoE(nnx.Module):
           output = mblx.gmm(
               lhs=inputs,
               rhs=kernel,
-              group_sizes=tokamax_group_sizes,
+              group_sizes=group_sizes,
               preferred_element_type=self.dtype,
               tiling=tiling,
               lhs_quantize_dtype=lhs_quantize_dtype,

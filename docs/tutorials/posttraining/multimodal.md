@@ -73,7 +73,6 @@ To run a forward pass and verify the model's output, use the following command:
 ```shell
 # Gemma3 decode
 python -m maxtext.inference.decode \
-    maxtext/configs/base.yml \
     model_name=gemma3-4b \
     hf_access_token=${HF_ACCESS_TOKEN?} \
     tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma3 \
@@ -109,7 +108,6 @@ export TARGET_LENGTH=...  # Adjust to fit expected output length
 export PREDICT_LENGTH=...  # Adjust to fit image tokens + text prompt
 
 python -m maxtext.inference.decode \
-    maxtext/configs/base.yml \
     model_name=gemma3-4b \
     ... \
     max_prefill_predict_length=${PREDICT_LENGTH?}  # Adjust to fit image tokens + text prompt \

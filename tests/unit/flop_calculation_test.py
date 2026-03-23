@@ -467,12 +467,12 @@ class FlopCalculation(unittest.TestCase):
         "v_head_dim": 128,
         "skip_jax_distributed_system": True,
         # Indexer for DeepSeek Sparse Attention
-        "use_sparse_indexer": True,
-        "index_n_heads": 64,
-        "index_head_dim": 128,
-        "index_topk": 2048,
-        # TODO(ranran): remove after flash attention is supported
-        "attention": "dot_product",
+        "use_indexer": True,
+        "indexer_n_heads": 64,
+        "indexer_head_dim": 128,
+        "indexer_topk": 2048,
+        "attention": "flash",
+        "use_tokamax_splash": True,
     }
     B = kwargs["per_device_batch_size"]
     S = kwargs["max_target_length"]

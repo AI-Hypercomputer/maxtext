@@ -388,15 +388,8 @@ def partition_specs_to_json(logical_tree, shape_tree) -> dict[str, Any]:
 def input_sharding_to_json() -> dict[str, Any]:
   input_sharding = {}
   input_sharding["Activation Sharding Dump"] = _ACTIVATION_SHARDINGS_DUMP
+  print(f"Got {len(_ACTIVATION_SHARDINGS_DUMP)} Input entries.")
   return input_sharding
-
-
-def save_activation_shading_dict(output_path: str | Path, sharding_dict: dict) -> None:
-  """Save the activation sharding dict directly to a JSON file."""
-  output_path = Path(output_path)
-  output_path.parent.mkdir(parents=True, exist_ok=True)
-  with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(sharding_dict, f, indent=2)
 
 
 def save_json(output_path: str | Path, sharding_dict: dict) -> None:
@@ -408,7 +401,7 @@ def save_json(output_path: str | Path, sharding_dict: dict) -> None:
 
 
 def load_json(json_path: str | Path) -> dict:
-  """Loads the named_shardings.json file into a plain Python dict."""
+  """Loads json file into a plain Python dict."""
   json_path = Path(json_path)
   with open(json_path, "r", encoding="utf-8") as f:
     return json.load(f)
