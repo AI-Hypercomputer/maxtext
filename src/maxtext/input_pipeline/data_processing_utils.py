@@ -48,7 +48,7 @@ def get_tokenizer_and_pad_id(config):
   elif tokenizer_model.unk_id is not None:
     pad_id = tokenizer_model.unk_id
   else:
-    pad_id = -1
+    pad_id = 0
   return tokenizer_model, pad_id
 
 
@@ -74,7 +74,7 @@ def get_local_batch_size(config):
   return batch_size
 
 
-def pack_or_pad_and_batch_dataset(dataset, config, batch_size, pad_id, data_columns, tokenizer_model):
+def format_and_batch(dataset, config, batch_size, pad_id, data_columns, tokenizer_model):
   """Packs or pads the dataset according to config and batches it."""
   if config.packing:
     length_struct = {col: config.max_target_length for col in data_columns}
