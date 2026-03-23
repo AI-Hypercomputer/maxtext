@@ -1096,9 +1096,7 @@ class LoRA(BaseModel):
   )
   lora_restore_path: PathStr = Field(
       "",
-      description=(
-        "Optional path to LoRA weights to load before training. Ignored if the current run is resumed."
-      ),
+      description=("Optional path to LoRA weights to load before training. Ignored if the current run is resumed."),
   )
 
 

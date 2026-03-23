@@ -14,7 +14,9 @@
 
 """ Common LoRA utils needed to support LoRA adapters."""
 
+import inspect
 import json
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -23,6 +25,7 @@ from flax.training import train_state
 from flax.linen import partitioning as nn_partitioning
 
 from maxtext.common import checkpointing
+from maxtext.configs import pyconfig
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -33,8 +36,6 @@ import re
 
 from flax import nnx
 from orbax import checkpoint as ocp
-from tunix.sft import utils as tunix_sft_utils
-from tunix.rl import reshard
 
 import qwix
 import qwix._src.flax_util as qwix_flax_util
@@ -357,17 +358,11 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
 
   return unboxed_abstract_lora_state, lora_state_mesh_annotations
 
+
 # --- Qwix LoRA Utils ---
 
-def _validate_lora_config(mt_config):
-  """Validates required LoRA configuration fields."""
-  if mt_config.lora_rank <= 0:
-    raise ValueError("enable_lora is True but lora_rank is not set to a positive value.")
-  if not mt_config.lora_module_path:
-    raise ValueError("enable_lora is True but lora_module_path is empty.")
 
-
-def _build_lora_provider(mt_config):
+def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvider:
   """Builds a Qwix LoRA provider from MaxText LoRA settings."""
   lora_kwargs = {
       "module_path": mt_config.lora_module_path,
@@ -394,7 +389,7 @@ def _build_lora_provider(mt_config):
   return qwix.LoraProvider(**lora_kwargs)
 
 
-def _patch_qwix_dot_general_with_3d():
+def _patch_qwix_dot_general_with_3d() -> None:
   """Patches Qwix LoRA dot_general to support selected 3D-kernel paths."""
 
   original_dot_general = qwix_lora.LoraProvider.dot_general
@@ -423,6 +418,7 @@ def _patch_qwix_dot_general_with_3d():
         out_sharding=out_sharding,
     )
 
+    # pylint: disable=protected-access
     rule, _ = self._get_current_rule_and_op_id("dot_general", repeated_call=True)
     if not isinstance(rule, qwix_lora.LoraRule):
       return res
@@ -502,7 +498,7 @@ def _patch_qwix_dot_general_with_3d():
   qwix_lora.LoraProvider.dot_general = _dot_general_with_3d
 
 
-def _patch_qwix_update_boxed():
+def _patch_qwix_update_boxed() -> None:
   """Patches Qwix flax_util.update_boxed to handle PartitionSpec."""
   original_update_boxed = qwix_flax_util.update_boxed
 
@@ -522,9 +518,7 @@ def _patch_qwix_update_boxed():
       sharding_key = "out_sharding" if "out_sharding" in metadata else "sharding_names"
       axes = metadata.get(sharding_key, None)
       if isinstance(axes, (list, tuple, jax.sharding.PartitionSpec)):
-        updated_axes = qwix_flax_util.update_sharding(
-            axes, shape=shape, split=split, merge=merge, transpose=transpose
-        )
+        updated_axes = qwix_flax_util.update_sharding(axes, shape=shape, split=split, merge=merge, transpose=transpose)
         if not isinstance(updated_axes, jax.sharding.PartitionSpec):
           updated_axes = jax.sharding.PartitionSpec(*updated_axes)
 
@@ -533,39 +527,28 @@ def _patch_qwix_update_boxed():
         if current_axes != updated_axes:
           boxed.set_metadata(sharding_key, updated_axes)
       return boxed
-    return original_update_boxed(
-        boxed, value=value, split=split, merge=merge, transpose=transpose
-    )
+    return original_update_boxed(boxed, value=value, split=split, merge=merge, transpose=transpose)
 
   qwix_flax_util.update_boxed = patched_update_boxed
 
 
-def _patch_qwix_lora_param_sharding():
+def _patch_qwix_lora_param_sharding() -> None:
   """Patches Qwix LoRA param init to inherit sharding from the target weight."""
   original_get_or_create_lora_params = qwix_lora._get_or_create_lora_params  # pylint: disable=protected-access
 
-  def _get_canonical_named_sharding(maybe_boxed):
+  def _get_canonical_partition_spec(maybe_boxed):
     value = qwix_flax_util.unbox(maybe_boxed)
     sharding = getattr(value, "sharding", None)
     if not isinstance(sharding, jax.sharding.NamedSharding):
       return None
-    padded_pspec = sharding.spec + (None,) * (value.ndim - len(sharding.spec))
-    return sharding.update(spec=padded_pspec)
+    return sharding.spec + (None,) * (value.ndim - len(sharding.spec))
 
-  def _copy_sharding_to_lora_param(module, param_name, named_sharding):
+  def _set_lora_sharding_metadata(module, param_name, pspec):
     lora_param = getattr(module, param_name, None)
-    if not isinstance(lora_param, nnx.Variable):
-      return None
-
-    lora_value = qwix_flax_util.unbox(lora_param)
-    lora_value = jax.device_put(lora_value, named_sharding)
-    lora_param = lora_param.replace(lora_value)
-
-    metadata = lora_param.get_metadata()
-    sharding_key = "out_sharding" if "out_sharding" in metadata else "sharding_names"
-    lora_param.set_metadata(sharding_key, named_sharding.spec)
-    setattr(module, param_name, lora_param)
-    return qwix_flax_util.unbox(lora_param)
+    if isinstance(lora_param, nnx.Variable):
+      metadata = lora_param.get_metadata()
+      sharding_key = "out_sharding" if "out_sharding" in metadata else "sharding_names"
+      lora_param.set_metadata(sharding_key, pspec)
 
   def patched_get_or_create_lora_params(
       *,
@@ -605,30 +588,20 @@ def _patch_qwix_lora_param_sharding():
       if not isinstance(module, nnx.Module):
         return lora_a, lora_b
 
-      if isinstance(qwix_flax_util.unbox(lora_a), jax.core.Tracer) or isinstance(qwix_flax_util.unbox(lora_b), jax.core.Tracer):
-        return lora_a, lora_b
-
       target_param = getattr(module, name, None)
       if target_param is None:
         return lora_a, lora_b
 
       base_boxed = target_param.array.qvalue if isinstance(target_param, qwix_ptq.WithAux) else target_param
-      base_sharding = _get_canonical_named_sharding(base_boxed)
-      if base_sharding is None:
+      base_pspec = _get_canonical_partition_spec(base_boxed)
+      if base_pspec is None:
         return lora_a, lora_b
 
-      lora_a_spec = qwix_flax_util.update_sharding(base_sharding.spec, transpose=a_sharding_transpose)
-      lora_b_spec = qwix_flax_util.update_sharding(base_sharding.spec, transpose=b_sharding_transpose)
+      lora_a_spec = qwix_flax_util.update_sharding(base_pspec, transpose=a_sharding_transpose)
+      lora_b_spec = qwix_flax_util.update_sharding(base_pspec, transpose=b_sharding_transpose)
 
-      lora_a_sharding = base_sharding.update(spec=lora_a_spec)
-      lora_b_sharding = base_sharding.update(spec=lora_b_spec)
-
-      updated_lora_a = _copy_sharding_to_lora_param(module, name + "_lora_a", lora_a_sharding)
-      updated_lora_b = _copy_sharding_to_lora_param(module, name + "_lora_b", lora_b_sharding)
-      if updated_lora_a is not None:
-        lora_a = updated_lora_a
-      if updated_lora_b is not None:
-        lora_b = updated_lora_b
+      _set_lora_sharding_metadata(module, name + "_lora_a", lora_a_spec)
+      _set_lora_sharding_metadata(module, name + "_lora_b", lora_b_spec)
     except Exception as exc:  # pylint: disable=broad-exception-caught
       max_logging.log(f"LoRA sharding patch failed for '{name}': {exc}")
 
@@ -637,7 +610,7 @@ def _patch_qwix_lora_param_sharding():
   qwix_lora._get_or_create_lora_params = patched_get_or_create_lora_params  # pylint: disable=protected-access
 
 
-def _prepare_dummy_inputs():
+def _prepare_dummy_inputs() -> tuple[jnp.ndarray, jnp.ndarray]:
   """Builds dummy decoder inputs used to materialize LoRA parameters."""
   # Keep LoRA warmup as small as possible to minimize compile/memory overhead.
   dummy_bs = 1
@@ -647,7 +620,7 @@ def _prepare_dummy_inputs():
   return decoder_input_tokens, decoder_positions
 
 
-def _verify_lora_parameters(lora_model, mt_config):
+def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperParameters) -> None:
   """Validates that LoRA is active or that target modules were matched."""
   compiled_module_path = re.compile(mt_config.lora_module_path)
   matched_module_paths = []
@@ -660,9 +633,11 @@ def _verify_lora_parameters(lora_model, mt_config):
     if compiled_module_path.search(module_path):
       matched_module_paths.append(module_path)
 
+  from tunix.sft import utils as tunix_sft_utils  # pylint: disable=import-outside-toplevel
   is_lora_enabled = tunix_sft_utils.is_lora_enabled(lora_model)
+  
   if is_lora_enabled:
-    max_logging.log("LoRA verification: tunix_sft_utils.is_lora_enabled=True")
+    max_logging.log("LoRA verification: is_lora_enabled=True")
     return
 
   if not matched_module_paths:
@@ -679,10 +654,9 @@ def _verify_lora_parameters(lora_model, mt_config):
       f"Sample matches: {matched_module_paths[:10]}"
   )
 
-def _patch_nnx_decoder_apply_layers_sequentially(model):
+
+def _patch_nnx_decoder_apply_layers_sequentially(model: nnx.Module) -> None:
   """Patches the NNX decoder's _apply_layers_sequentially to include Qwix specific logic."""
-  import inspect
-  import types
 
   def _apply_layers_sequentially_with_qwix(self, layers, x_in, *args, length: int, **kwargs):
     """Runs the layer stack using nnx.scan with Qwix specific graph init and VJP downcasting."""
@@ -700,20 +674,29 @@ def _patch_nnx_decoder_apply_layers_sequentially(model):
     layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
-    
+    # During Qwix init (disable_quant_stats_update=True), params may be lazily
+    # created and the layer graphdef can grow. Allow graphdef refresh in that
+    # phase only. Keep scanned training path static for remat purity.
     dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
     updated_graphdef = [graphdef]
 
     def layer_fn(carry, scanned_vars):
+      # Unpack the sliced variables for THIS layer
       current_params, current_state = scanned_vars
 
       if self.config.parameter_memory_host_offload:
         current_params = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), current_params)
 
+      # Merge using the SLICED state
       layer = nnx.merge(graphdef, current_params, current_state)
+
+      # Run the layer (Filter kwargs if using the solution from previous turn)
       layer_out = layer(carry, *args, **valid_kwargs)
+
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
+      # Qwix init: return updated params so graphdef can grow.
+      # In normal training, keep params unchanged to avoid extra memory use.
       new_graphdef, updated_params, updated_state = nnx.split(layer, nnx.Param, ...)
       if dynamic_graph_init:
         updated_graphdef[0] = new_graphdef
@@ -722,6 +705,7 @@ def _patch_nnx_decoder_apply_layers_sequentially(model):
         returned_params = current_params
       return new_carry, (returned_params, updated_state)
 
+    # Downcast gradient to activation dtype to save TPU memory.
     @jax.custom_vjp
     def layer_fn_wrapper(carry, params_state):
       return layer_fn(carry, params_state)
@@ -731,40 +715,27 @@ def _patch_nnx_decoder_apply_layers_sequentially(model):
       return out, ()
 
     def layer_fn_wrapper_bwd(_unused_res, g):
+      # g is the cotangent tuple (g_carry, g_params_state)
       g_carry, g_params_state = g
       g_carry = jnp.asarray(g_carry, dtype=x_in.dtype)
       return (g_carry, g_params_state)
 
     layer_fn_wrapper.defvjp(layer_fn_wrapper_fwd, layer_fn_wrapper_bwd)
 
-    if dynamic_graph_init:
-      # Bypass remat and custom_vjp during graph initialization so concrete parameters can be captured.
-      layer_fn_wrapped = layer_fn
-    else:
-      layer_fn_wrapped = jax.checkpoint(layer_fn_wrapper, policy=policy, prevent_cse=prevent_cse)
+    layer_fn_wrapped = jax.checkpoint(layer_fn_wrapper, policy=policy, prevent_cse=prevent_cse)
 
     def _ensure_scan_leading_axis(x):
-      if not hasattr(x, "shape"): return x
-      if len(x.shape) == 0: return jnp.broadcast_to(x, (length,))
+      # Promote scalars for scan axis compatibility.
+      if not hasattr(x, "shape"):
+        return x
+      if len(x.shape) == 0:
+        return jnp.broadcast_to(x, (length,))
       return x
 
     params = jax.tree.map(_ensure_scan_leading_axis, params)
     state = jax.tree.map(_ensure_scan_leading_axis, state)
 
-    if not isinstance(x_in, jax.core.Tracer):
-      final_carry = x_in
-      scanned_params_list = []
-      scanned_other_list = []
-      for i in range(length):
-        current_params = jax.tree.map(lambda x: x[i], params)
-        current_state = jax.tree.map(lambda x: x[i], state)
-        final_carry, (updated_params, updated_state) = layer_fn_wrapped(final_carry, (current_params, current_state))
-        scanned_params_list.append(updated_params)
-        scanned_other_list.append(updated_state)
-      scanned_params = jax.tree.map(lambda *args: jnp.stack(args), *scanned_params_list)
-      scanned_other = jax.tree.map(lambda *args: jnp.stack(args), *scanned_other_list)
-    else:
-      final_carry, (scanned_params, scanned_other) = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
+    final_carry, (scanned_params, scanned_other) = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
 
     if scan_axis != 0:
       scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
@@ -772,9 +743,13 @@ def _patch_nnx_decoder_apply_layers_sequentially(model):
     graphdef_to_merge = updated_graphdef[0] if dynamic_graph_init else graphdef
     return final_carry, nnx.merge(graphdef_to_merge, scanned_params, scanned_other)
 
-  model.decoder._apply_layers_sequentially = types.MethodType(_apply_layers_sequentially_with_qwix, model.decoder)
+  # IMPORTANT: Patch the class so nnx.merge doesn't lose the patch
+  model.decoder.__class__._apply_layers_sequentially = _apply_layers_sequentially_with_qwix  # pylint: disable=protected-access
 
-def apply_lora_to_model(model, mesh, mt_config):
+
+def apply_lora_to_model(
+    model: nnx.Module, mesh: Optional[jax.sharding.Mesh], mt_config: pyconfig.HyperParameters
+) -> nnx.Module:
   """Optionally applies LoRA/QLoRA to a MaxText model using Qwix."""
   # Skip Qwix LoRA if MaxText LoRA adapters are loaded
   if hasattr(mt_config, "lora_input_adapters_path") and mt_config.lora_input_adapters_path:
@@ -784,13 +759,12 @@ def apply_lora_to_model(model, mesh, mt_config):
   if not getattr(mt_config, "enable_lora", False):
     return model
 
-  _validate_lora_config(mt_config)
   lora_provider = _build_lora_provider(mt_config)
 
   _patch_qwix_dot_general_with_3d()
   _patch_qwix_update_boxed()
   _patch_qwix_lora_param_sharding()
-  
+
   _patch_nnx_decoder_apply_layers_sequentially(model)
 
   model_rngs = getattr(model.decoder, "rngs", None)
@@ -811,7 +785,9 @@ def apply_lora_to_model(model, mesh, mt_config):
           lambda x: jax.sharding.NamedSharding(mesh, x, memory_kind=default_memory_kind) if x is not None else None,
           nnx.get_partition_spec(state),
       )
-      lora_model = nnx.merge(graph_def, reshard.reshard_pytree(state, dst_shardings))
+      from tunix.rl import reshard  # pylint: disable=import-outside-toplevel
+      state = reshard.reshard_pytree(state, dst_shardings)
+      lora_model = nnx.merge(graph_def, state)
 
   # Warm up once outside jax.jit so any remaining lazy LoRA params are
   # materialized before train_step tracing.
@@ -829,18 +805,20 @@ def apply_lora_to_model(model, mesh, mt_config):
   return lora_model
 
 
-def restore_lora_from_path(trainer, lora_restore_path):
+def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) -> Any:
   """Optionally restores LoRA params from an external checkpoint item path."""
+  lora_restore_path = getattr(mt_config, "lora_restore_path", "")
   if not lora_restore_path:
     return trainer
 
-  if getattr(trainer, "_train_steps", 0) > 0:
+  train_steps = getattr(trainer, "train_steps", 0)
+  if train_steps > 0:
     max_logging.log(
-        f"PeftTrainer restored current run at step {trainer._train_steps}; "
-        f"ignoring lora_restore_path '{lora_restore_path}'."
+        f"PeftTrainer restored current run at step {train_steps}; " f"ignoring lora_restore_path '{lora_restore_path}'."
     )
     return trainer
 
+  from tunix.sft import utils as tunix_sft_utils  # pylint: disable=import-outside-toplevel
   if not tunix_sft_utils.is_lora_enabled(trainer.model):
     raise ValueError(
         "lora_restore_path is set but LoRA is not enabled on the model. "
@@ -853,8 +831,5 @@ def restore_lora_from_path(trainer, lora_restore_path):
       target=abstract_lora_params,
   )
   nnx.update(trainer.model, restored_lora_params)
-  max_logging.log(
-      f"LoRA restore complete from '{lora_restore_path}'. "
-      "Trainer step remains at 0 for this run."
-  )
+  max_logging.log(f"LoRA restore complete from '{lora_restore_path}'. " "Trainer step remains at 0 for this run.")
   return trainer

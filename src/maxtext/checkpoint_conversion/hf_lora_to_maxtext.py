@@ -53,7 +53,7 @@ from transformers import AutoConfig
 
 from orbax import checkpoint as ocp
 from maxtext.checkpoint_conversion.utils.param_mapping import PARAM_MAPPING
-from maxtext.checkpoint_conversion.utils.utils import HF_IDS
+from maxtext.utils.globals import HF_IDS
 from maxtext.configs import pyconfig
 from maxtext.utils import max_logging
 from absl import logging
