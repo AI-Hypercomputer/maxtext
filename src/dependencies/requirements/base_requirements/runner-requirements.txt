@@ -1,4 +1,5 @@
 google-cloud-filestore
 kubernetes
 omegaconf
-xpk
+packaging==24.2
+xpk>=1.8.0
