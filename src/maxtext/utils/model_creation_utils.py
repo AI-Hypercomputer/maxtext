@@ -252,7 +252,7 @@ def from_pretrained(config, original_mesh=None, devices=None, model_mode=MODEL_M
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
   mesh = original_mesh
   if config.convert_checkpoint_if_possible:
-    if not not (epath.Path(config.base_output_directory) / "0" / "items").exists():
+    if not (epath.Path(config.base_output_directory) / "0" / "items").exists():
       # Try to convert checkpoint on the fly
       if not config.hf_access_token:
         raise ValueError("hf_access_token must be provided when not providing a pre-existing checkpoint")

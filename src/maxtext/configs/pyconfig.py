@@ -81,6 +81,11 @@ def _resolve_or_infer_config(argv: list[str] | None = None, **kwargs) -> tuple[s
   """Resolves or infers config file path from module."""
   if argv is None:
     argv = [""]
+
+  if kwargs.get("base_config"):
+    logger.info(f"Using config : {kwargs['base_config']}")
+    return resolve_config_path(kwargs["base_config"]), argv[1:] if len(argv) > 1 else []
+
   if len(argv) >= 2 and argv[1].endswith(".yml"):
     return resolve_config_path(argv[1]), argv[2:]
   module = _module_from_path(argv[0]) if len(argv) > 0 else None
