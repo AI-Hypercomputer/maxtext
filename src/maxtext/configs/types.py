@@ -2362,9 +2362,6 @@ class MaxTextConfig(
           rule[1] = ["stage", "data", "fsdp", "fsdp_transpose", "expert"]
           break
 
-
-
-
       if "stage" in self.mesh_axes:
         stage_idx = self.mesh_axes.index("stage")
         data_idx = self.mesh_axes.index("data")
