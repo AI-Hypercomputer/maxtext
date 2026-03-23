@@ -45,6 +45,25 @@ class TrainRLTest(unittest.TestCase):
   """Tests for train_rl.py."""
 
   @pytest.mark.cpu_only
+  def test_make_reward_fn_preserves_name_and_injects_config(self):
+    """_make_reward_fn should preserve __name__ and pass through tmvp_config."""
+    trainer_config = SimpleNamespace(name="cfg")
+
+    def sample_reward_fn(tmvp_config, prompts, completions, answer, **kwargs):
+      self.assertIs(tmvp_config, trainer_config)
+      self.assertEqual(prompts, ["p"])
+      self.assertEqual(completions, ["c"])
+      self.assertEqual(answer, ["a"])
+      self.assertEqual(kwargs.get("question"), ["q"])
+      return [1.5]
+
+    wrapped_reward_fn = train_rl.utils_rl.make_reward_fn(trainer_config, sample_reward_fn)
+
+    self.assertEqual(wrapped_reward_fn.__name__, "sample_reward_fn")
+    result = wrapped_reward_fn(prompts=["p"], completions=["c"], answer=["a"], question=["q"])
+    self.assertEqual(result, [1.5])
+
+  @pytest.mark.cpu_only
   def test_setup_configs_and_devices_pathways_split(self):
     """Test setup_configs_and_devices with multiple VMs and Pathways."""
     mock_devices = _get_mock_devices(8)

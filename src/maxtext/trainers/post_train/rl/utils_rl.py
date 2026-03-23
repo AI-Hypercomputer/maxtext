@@ -15,6 +15,7 @@
 # pylint: disable=bare-except, consider-using-generator, chained-comparison, broad-exception-caught
 """RL Utils Module."""
 import re
+from functools import wraps
 import optax
 from maxtext.utils import max_logging
 
@@ -32,6 +33,16 @@ math_verify_func = math_metric(
         LatexExtractionConfig(),
     ),
 )
+
+
+def make_reward_fn(trainer_config, reward_fn):
+  """Wrap reward_fn with trainer config while preserving function metadata."""
+
+  @wraps(reward_fn)
+  def _reward_fn(**kwargs):
+    return reward_fn(tmvp_config=trainer_config, **kwargs)
+
+  return _reward_fn
 
 
 def boxed(x):
@@ -257,15 +268,15 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
     except (TimeoutException, Exception):
       pass
 
-    # Correct answer gets tmvp_config.reward_exact_format_match points!
+    # Correct answer gets tmvp_config.reward_exact_answer
     if guess == true_answer:
-      score += tmvp_config.reward_exact_format_match
+      score += tmvp_config.reward_exact_answer
     # Give credit if spaces are seen but otherwise the answers match (useful for simple datasets like gsm8k)
     elif guess.strip() == true_answer.strip():
       score += tmvp_config.reward_white_space_format_match
     # Answers match upon robust comparison with math_verify
     elif verified_correct:
-      score += tmvp_config.reward_exact_format_match
+      score += tmvp_config.reward_exact_answer
     else:
       # We also reward it if the answer is close via ratios!
       # Ie if the answer is within some range, reward it!
@@ -437,14 +448,14 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
 
       # Use math_verify to compare answers (handles both numeric and expression comparison)
       score, _ = math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)])
-      # Return scaled score: 1.5 for exact/correct, 0 otherwise
-      scores.append(1.5 if score > 0.1 else 0.0)
+      # Return binary score for exact/correct, 0 otherwise
+      scores.append(tmvp_config.reward_exact_answer if score > 0.1 else 0.0)
     except (TimeoutException, Exception):
       # Fallback to simple numeric comparison if math_verify fails
       try:
         guess_val = float(normalize_final_answer(guess).strip())
         true_val = float(normalize_final_answer(true_answer).strip())
-        scores.append(1.5 if guess_val == true_val else 0.0)
+        scores.append(tmvp_config.reward_exact_answer if guess_val == true_val else 0.0)
       except:
         scores.append(0)
 

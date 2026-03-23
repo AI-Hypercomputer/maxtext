@@ -564,16 +564,18 @@ def create_rl_components(
       **rl_cluster_kwargs,
   )
 
+  reward_fns = [
+      utils_rl.make_reward_fn(trainer_config, utils_rl.match_format_exactly),
+      utils_rl.make_reward_fn(trainer_config, utils_rl.match_format_approximately),
+      utils_rl.make_reward_fn(trainer_config, utils_rl.check_answer),
+      utils_rl.make_reward_fn(trainer_config, utils_rl.check_numbers),
+  ]
+
   # Create RL trainer
   max_logging.log("Setting up RL trainer...")
   rl_trainer = GrpoLearner(
       rl_cluster=rl_cluster,
-      reward_fns=[  # type: ignore
-          lambda **kwargs: utils_rl.match_format_exactly(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.match_format_approximately(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.check_answer(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.check_numbers(tmvp_config=trainer_config, **kwargs),
-      ],
+      reward_fns=reward_fns,  # type: ignore
       algo_config=grpo_config,
   )
 
